@@ -66,3 +66,53 @@ test('ULG runtime worker static table coverage ignores particle count but reject
     }
   }
 });
+
+test('ULG runtime worker static optical coverage includes resident transition phases', async () => {
+  const previousSelf = globalThis.self;
+  globalThis.self = {
+    addEventListener() {},
+    postMessage() {},
+    close() {}
+  };
+  try {
+    const { staticTableBundleCoversViewState } = await import('../src/services/ulgRuntime.worker.js');
+    const viewState = {
+      materialProperties: {
+        h2o: { phases: [{ name: 'solid' }, { name: 'liquid' }, { name: 'gas' }] }
+      },
+      materials: [{ material: 'h2o', phase: 'liquid', renderKey: 'h2o' }],
+      reactions: [],
+      reactionContactRadiusM: 0.25
+    };
+    const bundle = {
+      schema: 'peercompute.ulg.sph-static-table-cache-bundle.v0',
+      hitCount: 5,
+      restoredFamilies: [
+        'thermalMaterialTable',
+        'thermalClosureGraphSet',
+        'thermalPhaseResponseTable',
+        'opticalGpuTable',
+        'reactionTable'
+      ],
+      thermalMaterialTable: { metadata: [{ material: 'h2o' }] },
+      opticalGpuTable: {
+        recordMetadata: [
+          { material: 'h2o', phase: 'solid', opticalStateKey: 'default' },
+          { material: 'h2o', phase: 'liquid', opticalStateKey: 'default' },
+          { material: 'h2o', phase: 'gas', opticalStateKey: 'default' }
+        ]
+      },
+      reactionTable: { reactionCount: 0, metadata: [], reactionHeaders: new Float32Array() }
+    };
+
+    assert.equal(staticTableBundleCoversViewState(bundle, viewState), true);
+    bundle.opticalGpuTable.recordMetadata.pop();
+    assert.equal(staticTableBundleCoversViewState(bundle, viewState), false);
+  } finally {
+    if (previousSelf === undefined) {
+      delete globalThis.self;
+    } else {
+      globalThis.self = previousSelf;
+    }
+  }
+});

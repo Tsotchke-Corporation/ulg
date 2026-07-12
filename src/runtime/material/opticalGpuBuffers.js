@@ -42,6 +42,11 @@ export const OPTICAL_GPU_LOOKUP_OUTPUT_LAYOUT = OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LA
 export { opticalLookupWgsl };
 export const ULG_OPTICAL_MATERIAL_BANK_PBR_WARM_INPUT_CONSUMER_SCHEMA =
   'peercompute.ulg.optical-material-bank-pbr-warm-input-consumer.v0';
+export const OPTICAL_GPU_RECORD_STATUS = Object.freeze({
+  ready: 1,
+  refractiveAuthority: 2,
+  blocked: 255
+});
 const EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS = new Float32Array(OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS);
 
 export const OPTICAL_GPU_WGSL_STRUCTS = `
@@ -109,9 +114,12 @@ const VERTEX_COLOR_POLICY_IDS = Object.freeze({
 const RENDER_MODEL_IDS = Object.freeze({
   'conductor-drude-lorentz-relativistic-interband': 1,
   'molecular-transparent-beer-lambert-pbr': 2,
+  'molecular-dielectric-beer-lambert-pbr': 2,
   'molecular-vapor-transparent-spectrum': 3,
+  'molecular-vapor-volume-spectrum': 3,
   'molecular-gap-pbr': 4,
   'rayleigh-gas-transparent-spectrum': 5,
+  'gas-rayleigh-scattering-pbr': 5,
   'conductor-drude-free-electron': 6,
   'molecular-condensed-droplet-scattering-pbr': 7,
   'blocked-missing-optical-closure': 255
@@ -326,6 +334,56 @@ function pbrNumber(value, fallback = 0) {
   return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : fallback;
 }
 
+export function quantumSpectralRefractionAdmission(params = {}) {
+  const status = String(params.refractiveStatus || '').trim();
+  const provenanceSource = typeof params.refractiveProvenance?.source === 'string'
+    ? params.refractiveProvenance.source.trim()
+    : '';
+  const samples = Array.isArray(params.spectralSamples) ? params.spectralSamples : [];
+  const validSamples = samples.filter((sample) => (
+    Number.isFinite(Number(sample?.wavelengthNm))
+      && Number(sample.wavelengthNm) >= 380
+      && Number(sample.wavelengthNm) <= 780
+      && Number.isFinite(Number(sample?.n))
+      && Number(sample.n) >= 1
+      && Number(sample.n) < 10
+      && Number.isFinite(Number(sample?.k))
+      && Number(sample.k) >= 0
+  ));
+  const wavelengths = new Set(validSamples.map((sample) => Number(sample.wavelengthNm)));
+  const spectralBands = {
+    blue: validSamples.some((sample) => Number(sample.wavelengthNm) < 500),
+    green: validSamples.some((sample) => (
+      Number(sample.wavelengthNm) >= 500 && Number(sample.wavelengthNm) < 600
+    )),
+    red: validSamples.some((sample) => Number(sample.wavelengthNm) >= 600)
+  };
+  let reason = null;
+  if (params.blocked === true || params.provenance?.status === 'blocked') {
+    reason = 'optical-closure-blocked';
+  } else if (params.refractiveAuthority !== true) {
+    reason = 'closure-did-not-grant-refractive-authority';
+  } else if (!status || /blocked|pending|missing|unsupported|failed|rejected/i.test(status)) {
+    reason = 'refractive-status-not-admitted';
+  } else if (!provenanceSource) {
+    reason = 'refractive-provenance-source-missing';
+  } else if (wavelengths.size < 3) {
+    reason = 'distinct-refractive-spectral-samples-missing';
+  } else if (!spectralBands.blue || !spectralBands.green || !spectralBands.red) {
+    reason = 'rgb-refractive-spectral-coverage-missing';
+  }
+  return {
+    schema: 'peercompute.ulg.quantum-spectral-refraction-admission.v0',
+    status: reason ? 'blocked' : 'admitted',
+    accepted: reason == null,
+    reason,
+    provenanceSource: provenanceSource || null,
+    validSpectralSampleCount: validSamples.length,
+    distinctWavelengthCount: wavelengths.size,
+    spectralBands
+  };
+}
+
 function resolveDisplayPbrForOpticalRecord(params, materialPropertyBankPbrWarmInput = null) {
   const bankColor = srgbTriplet(materialPropertyBankPbrWarmInput?.baseColorSrgb);
   const closureColor = srgbTriplet(params.baseColorSrgb) || [1, 1, 1];
@@ -339,10 +397,11 @@ function resolveDisplayPbrForOpticalRecord(params, materialPropertyBankPbrWarmIn
   const closureBlocked = Boolean(params.blocked) || params.provenance?.status === 'blocked';
   const conductorEstimate = String(params.renderModel || '').startsWith('conductor-');
   const usesBankPbr = Boolean(bankColor) && (closureBlocked || conductorEstimate);
-  const bankIor = Number(materialPropertyBankPbrWarmInput?.ior);
-  const ior = Number.isFinite(bankIor) && bankIor > 0
-    ? bankIor
-    : (params.ior == null ? 1 : finiteNumber(params.ior, 1));
+  // Display warm inputs may affect conductor color/roughness, but refractive
+  // authority belongs exclusively to the optical closure and its spectral
+  // quantum-response provenance.
+  const ior = params.ior == null ? 1 : finiteNumber(params.ior, 1);
+  const refractiveAdmission = quantumSpectralRefractionAdmission(params);
   return {
     source: usesBankPbr ? 'material-bank-pbr-warm-input' : 'closure-derived-optical-pbr',
     baseColorSrgb: usesBankPbr ? bankColor : closureColor,
@@ -356,7 +415,12 @@ function resolveDisplayPbrForOpticalRecord(params, materialPropertyBankPbrWarmIn
     closureBaseColorSrgb: closureColor,
     closureMetalness: finiteNumber(params.metalness),
     closureRoughness: finiteNumber(params.roughness, 0.5),
-    closureIor: params.ior == null ? 1 : finiteNumber(params.ior, 1)
+    closureIor: ior,
+    refractiveAuthority: refractiveAdmission.accepted,
+    refractiveStatus: refractiveAdmission.accepted
+      ? params.refractiveStatus ?? null
+      : `blocked-${refractiveAdmission.reason}`,
+    refractiveAdmission
   };
 }
 
@@ -495,7 +559,11 @@ export function buildOpticalGpuTable(descriptors, {
       stableEnumId(VERTEX_COLOR_POLICY_IDS, params.vertexColorPolicy),
       finiteNumber(params.opticalDepth),
       params.blocked ? 1 : 0,
-      params.provenance?.status === 'blocked' ? 255 : 1,
+      params.blocked === true || params.provenance?.status === 'blocked'
+        ? OPTICAL_GPU_RECORD_STATUS.blocked
+        : (displayPbr.refractiveAuthority
+            ? OPTICAL_GPU_RECORD_STATUS.refractiveAuthority
+            : OPTICAL_GPU_RECORD_STATUS.ready),
       opticalStateId
     ]);
     records.push({
@@ -531,6 +599,16 @@ export function buildOpticalGpuTable(descriptors, {
         roughness: displayPbr.closureRoughness,
         ior: displayPbr.closureIor
       },
+      refractiveAuthority: displayPbr.refractiveAuthority,
+      refractiveStatus: displayPbr.refractiveStatus,
+      refractiveAdmission: displayPbr.refractiveAdmission,
+      refractiveProvenance: params.refractiveProvenance || null,
+      refractiveSpectralSampleCount: (params.spectralSamples || []).filter((sample) => (
+        Number.isFinite(Number(sample?.n))
+          && Number(sample.n) >= 1
+          && Number.isFinite(Number(sample?.k))
+          && Number(sample.k) >= 0
+      )).length,
       materialPropertyBankPbrWarmInput,
       materialPropertyBankPbrWarmInputStatus: materialPropertyBankPbrWarmInput
         ? 'material-bank-pbr-warm-input-attached'
@@ -811,7 +889,12 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
   if (!adapter) {
     return { status: 'blocked-webgpu-unavailable', reason: 'requestAdapter returned null', device: null };
   }
-  const { requiredLimits, adapterLimits } = residentSphWebGpuLimitsForAdapter(adapter);
+  const {
+    requiredLimits,
+    adapterLimits,
+    residentSphStorageBuffersPerStageRequired,
+    residentSphStorageBuffersPerStageSupported
+  } = residentSphWebGpuLimitsForAdapter(adapter);
   const {
     requiredFeatures,
     adapterFeatures,
@@ -840,7 +923,9 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
     timestampQueryStatus,
     adapterLimits: {
       ...adapterLimits
-    }
+    },
+    residentSphStorageBuffersPerStageRequired,
+    residentSphStorageBuffersPerStageSupported
   };
 }
 

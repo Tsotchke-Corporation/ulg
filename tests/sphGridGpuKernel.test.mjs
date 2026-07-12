@@ -11,6 +11,7 @@ import {
   MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL,
   MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   MLS_MPM_GPU_GRID_NODE_FLOATS,
+  mlsMpmP2gParticleCountResidencyWgsl,
   ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA,
@@ -215,12 +216,14 @@ function fakeP2gDevice() {
   const createdBuffers = [];
   const bindGroups = [];
   const dispatches = [];
+  const writes = [];
   const device = {
     createdBuffers,
     bindGroups,
     dispatches,
+    writes,
     queue: {
-      writeBuffer() {},
+      writeBuffer(buffer, offset, data) { writes.push({ buffer, offset, data }); },
       submit() {},
       async onSubmittedWorkDone() {}
     },
@@ -267,6 +270,9 @@ function fakeP2gDevice() {
             dispatchWorkgroups(x, y = 1, z = 1) {
               dispatches.push([x, y, z]);
             },
+            dispatchWorkgroupsIndirect(buffer, offset) {
+              dispatches.push({ indirect: true, buffer, offset });
+            },
             end() {}
           };
         },
@@ -292,6 +298,7 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> product_events/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_level_assignments/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(8\) var<storage, read> schroeder_active_nodes/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(9\) var<storage, read> product_event_arena_metadata/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_filter_enabled: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_active_node_filter_enabled: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn p2g_particle_enabled/);
@@ -306,9 +313,30 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   assert.match(mlsMpmP2gGridProjectionWgsl, /return max\(pressure, -0\.05 \* stiffness\);/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn scatter_product_events/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /arena_magic != 0x554c4750u/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /arena_overflow_flags != 0u/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /event_index >= arena_active_count/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn finalize_grid/);
   assert.doesNotMatch(mlsMpmP2gGridProjectionWgsl, /for \(var particle_index = 0u; particle_index < params\.particle_count/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('resident-count P2G WGSL guards tail lanes with metadata word 4', () => {
+  assert.match(mlsMpmP2gParticleCountResidencyWgsl, /p2g_resident_particle_count/);
+  assert.match(mlsMpmP2gParticleCountResidencyWgsl, /header1\.x/);
+  assert.match(mlsMpmP2gParticleCountResidencyWgsl, /header1\.z == params\.particle_count/);
+  assert.doesNotMatch(
+    mlsMpmP2gParticleCountResidencyWgsl,
+    /@compute @workgroup_size\(64\)\s*fn p2g_resident_particle_count/
+  );
+  assert.match(
+    mlsMpmP2gParticleCountResidencyWgsl,
+    /@compute @workgroup_size\(64\)\s*fn main/
+  );
+  assert.match(
+    mlsMpmP2gParticleCountResidencyWgsl,
+    /particle_index >= p2g_resident_particle_count\(\)/
+  );
 });
 
 test('MLS-MPM P2G backend policy keeps Ocean-tiled replacement explicit and fail-closed', () => {
@@ -436,6 +464,76 @@ test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', as
     productEventBuffer.size,
     SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
+  const compactProductBindGroup = device.bindGroups.find((group) => (
+    group.entries.some((entry) => entry.binding === 9)
+  ));
+  assert.deepEqual(
+    compactProductBindGroup.entries.map((entry) => entry.binding),
+    [3, 4, 5, 8, 9]
+  );
+});
+
+test('WebGPU MLS-MPM P2G consumes GPU-authored active count without substituting capacity', async () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+  const device = fakeP2gDevice();
+  const metadataBuffer = { label: 'particle-count-metadata' };
+  const dispatchIndirectBuffer = { label: 'particle-count-dispatch' };
+  const common = {
+    status: 'webgpu-uploaded',
+    particleCount: 1,
+    particleCapacity: 4,
+    authoritativeParticleCount: null,
+    particleCountAuthority: 'gpu-authored-residency-metadata',
+    particleCountMetadataWord: 4,
+    particleCountResidencyGenerationId: 3,
+    particleCountResidencyMetadataBuffer: metadataBuffer,
+    particleCountDispatchIndirectBuffer: dispatchIndirectBuffer,
+    particleCountDispatchIndirectByteOffset: 0,
+    particleCountSelectionIndirectByteOffset: 12,
+    normalHotLoopReadbackFree: true
+  };
+  const sphParticleUpload = {
+    ...common,
+    stateBuffer: { label: 'resident-state' },
+    thermoBuffer: { label: 'resident-thermo' }
+  };
+  const mlsMpmParticleUpload = {
+    ...common,
+    mechanicsBuffer: { label: 'resident-mechanics' }
+  };
+
+  const projection = await runMlsMpmP2gGridProjectionWebGpu({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(projection.particleCount, 1);
+  assert.equal(projection.particleRowCapacity, 4);
+  assert.equal(projection.authoritativeParticleCount, null);
+  assert.equal(projection.particleCountDispatchMode, 'gpu-authored-active-count-indirect');
+  assert.deepEqual(device.dispatches[0], {
+    indirect: true,
+    buffer: dispatchIndirectBuffer,
+    offset: 0
+  });
+  const p2gBindGroup = device.bindGroups.find((group) => (
+    group.entries.some((entry) => entry.binding === 0)
+    && group.entries.some((entry) => entry.binding === 6)
+  ));
+  assert.equal(
+    p2gBindGroup.entries.find((entry) => entry.binding === 5).resource.buffer,
+    metadataBuffer
+  );
+  const paramsWrite = device.writes.find(
+    (write) => write.buffer.label === 'ulg-mls-mpm-p2g-params'
+  );
+  assert.equal(new DataView(paramsWrite.data).getUint32(0, true), 4);
 });
 
 test('WebGPU MLS-MPM P2G can filter particles by retained Schroeder level assignment', async () => {

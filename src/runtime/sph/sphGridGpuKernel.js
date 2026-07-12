@@ -22,6 +22,17 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceMismatchInfo
 } from './sphGpuDeviceIdentity.js';
+import {
+  SCHROEDER_SPARSE_GRID_HASH_MAX_PROBES,
+  createSchroederSparseGridViewGpu,
+  createSchroederSparseGridViewPlan
+} from './schroederSparseHierarchyGpu.js';
+import {
+  dispatchSchroederParticleWorkgroups,
+  resolveSchroederParticleCountResidency,
+  schroederParticleCountResidencyPublicFields,
+  schroederParticleIterationCapacity
+} from './schroederParticleCountResidencyGpu.js';
 
 export {
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
@@ -64,6 +75,179 @@ const EOS_MODEL_IDS = Object.freeze({
   taitCondensed: 1,
   gasLinearized: 2
 });
+
+function requiredWgslReplacement(source, search, replacement, label) {
+  if (!source.includes(search)) {
+    throw new Error(`Unable to build Schroeder sparse P2G shader; missing ${label}`);
+  }
+  return source.replace(search, replacement);
+}
+
+export const mlsMpmP2gSchroederSparseGridWgsl = (() => {
+  let source = mlsMpmP2gGridProjectionWgsl;
+  source = requiredWgslReplacement(
+    source,
+    '@group(0) @binding(8) var<storage, read> schroeder_active_nodes: array<f32>;',
+    '@group(0) @binding(8) var<storage, read> schroeder_active_nodes: array<u32>;',
+    'binding 8 lookup declaration'
+  );
+  source = requiredWgslReplacement(
+    source,
+    `fn p2g_finalize_node_index(global_index: u32) -> u32 {
+  if (global_index >= params.grid_node_count) {
+    return params.grid_node_count;
+  }
+  return global_index;
+}`,
+    `fn p2g_sparse_grid_enabled() -> bool {
+  return params.p2g_params_pad1 != 0u;
+}
+
+fn p2g_sparse_grid_admitted() -> bool {
+  return !p2g_sparse_grid_enabled() || schroeder_active_nodes[3] != 0u;
+}
+
+fn p2g_sparse_hash(value: u32) -> u32 {
+  var hash = value;
+  hash = hash ^ (hash >> 16u);
+  hash = hash * 0x7feb352du;
+  hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu;
+  return hash ^ (hash >> 16u);
+}
+
+fn p2g_sparse_lookup(full_index: u32) -> u32 {
+  let hash_capacity = schroeder_active_nodes[13];
+  if (hash_capacity == 0u) {
+    return 0xffffffffu;
+  }
+  let start_slot = p2g_sparse_hash(full_index) & (hash_capacity - 1u);
+  for (var probe = 0u; probe < ${SCHROEDER_SPARSE_GRID_HASH_MAX_PROBES}u; probe = probe + 1u) {
+    let slot = (start_slot + probe) & (hash_capacity - 1u);
+    let key = schroeder_active_nodes[schroeder_active_nodes[10] + slot];
+    if (key == full_index) {
+      return schroeder_active_nodes[schroeder_active_nodes[11] + slot];
+    }
+    if (key == 0xffffffffu) {
+      return 0xffffffffu;
+    }
+  }
+  return 0xffffffffu;
+}
+
+fn p2g_finalize_node_index(global_index: u32) -> u32 {
+  if (!p2g_sparse_grid_admitted()) {
+    return params.grid_node_count;
+  }
+  let count = select(params.grid_node_count, schroeder_active_nodes[1], p2g_sparse_grid_enabled());
+  if (global_index >= count) {
+    return params.grid_node_count;
+  }
+  return global_index;
+}`,
+    'finalize compact index gate'
+  );
+  source = requiredWgslReplacement(
+    source,
+    `fn p2g_try_storage_index(node_i: i32, node_j: i32, node_k: i32) -> u32 {
+  let i = node_i + i32(params.shift);
+  let j = node_j + i32(params.shift);
+  let k = node_k + i32(params.shift);
+  if (
+    i < 0 || j < 0 || k < 0
+    || i >= i32(params.grid_nx)
+    || j >= i32(params.grid_ny)
+    || k >= i32(params.grid_nz)
+  ) {
+    return params.grid_node_count;
+  }
+  let storage_i = u32(i);
+  let storage_j = u32(j);
+  let storage_k = u32(k);
+  if (!p2g_node_enabled(storage_i, storage_j, storage_k)) {
+    return params.grid_node_count;
+  }
+  return p2g_storage_index(storage_i, storage_j, storage_k);
+}`,
+    `fn p2g_try_storage_index(node_i: i32, node_j: i32, node_k: i32) -> u32 {
+  let i = node_i + i32(params.shift);
+  let j = node_j + i32(params.shift);
+  let k = node_k + i32(params.shift);
+  if (
+    i < 0 || j < 0 || k < 0
+    || i >= i32(params.grid_nx)
+    || j >= i32(params.grid_ny)
+    || k >= i32(params.grid_nz)
+    || !p2g_sparse_grid_admitted()
+  ) {
+    return params.grid_node_count;
+  }
+  let storage_i = u32(i);
+  let storage_j = u32(j);
+  let storage_k = u32(k);
+  if (!p2g_node_enabled(storage_i, storage_j, storage_k)) {
+    return params.grid_node_count;
+  }
+  let full_index = p2g_storage_index(storage_i, storage_j, storage_k);
+  if (!p2g_sparse_grid_enabled()) {
+    return full_index;
+  }
+  let compact_index = p2g_sparse_lookup(full_index);
+  return select(params.grid_node_count, compact_index, compact_index < params.grid_node_count);
+}`,
+    'global-to-compact lookup'
+  );
+  source = requiredWgslReplacement(
+    source,
+    `  let plane = params.grid_ny * params.grid_nz;
+  let i = node_index / plane;
+  let rem = node_index - i * plane;`,
+    `  var dense_node_index = node_index;
+  if (p2g_sparse_grid_enabled()) {
+    dense_node_index = schroeder_active_nodes[schroeder_active_nodes[12] + node_index];
+    if (dense_node_index == 0xffffffffu) {
+      return;
+    }
+  }
+  let plane = params.grid_ny * params.grid_nz;
+  let i = dense_node_index / plane;
+  let rem = dense_node_index - i * plane;`,
+    'compact-to-global finalize lookup'
+  );
+  return source;
+})();
+
+export function withSchroederParticleCountResidencyGuard(source) {
+  return requiredWgslReplacement(
+    source,
+    `@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {`,
+    `fn p2g_resident_particle_count() -> u32 {
+  let header0 = bitcast<vec4<u32>>(product_events[0]);
+  let header1 = bitcast<vec4<u32>>(product_events[1]);
+  let header2 = bitcast<vec4<u32>>(product_events[2]);
+  let valid = header0.x == 0x53535052u
+    && header0.y == 1u
+    && header0.z == 1u
+    && header0.w == 2u
+    && header2.y == 0u
+    && header1.z == params.particle_count
+    && header1.x <= header1.z;
+  return select(0u, header1.x, valid);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= p2g_resident_particle_count()) {`,
+    'GPU-authored particle-count guard'
+  );
+}
+
+export const mlsMpmP2gParticleCountResidencyWgsl =
+  withSchroederParticleCountResidencyGuard(mlsMpmP2gGridProjectionWgsl);
 
 export function resolveMlsMpmP2gBackendPolicy({
   requestedBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
@@ -855,12 +1039,13 @@ function createProjectionParamsArray(
   productEventCount = 0,
   internalPressureScale = 1,
   schroederLevelFilter = null,
-  ambientPressurePa = 0
+  ambientPressurePa = 0,
+  schroederSparseGrid = null
 ) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
-  view.setUint32(4, gridSpec.gridNodeCount, true);
+  view.setUint32(4, schroederSparseGrid?.gridNodeCapacity ?? gridSpec.gridNodeCount, true);
   view.setUint32(8, gridSpec.gridDims[0], true);
   view.setUint32(12, gridSpec.gridDims[1], true);
   view.setUint32(16, gridSpec.gridDims[2], true);
@@ -886,6 +1071,7 @@ function createProjectionParamsArray(
   // pressure. 0 = vacuum box (default); a uniform atmosphere would exert no
   // net force on immersed bodies, so gas stress is measured relative to it.
   view.setFloat32(68, finiteNumber(ambientPressurePa, 0), true);
+  view.setUint32(72, schroederSparseGrid ? 1 : 0, true);
   return buffer;
 }
 
@@ -897,6 +1083,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   mlsMpmParticleUpload = null,
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
+  schroederSparseHierarchy = null,
+  schroederSparseGridArenaByteBudget = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -904,25 +1092,89 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   internalPressureScale = 1,
   retainGridBuffer = false,
   readbackMode = FULL_READBACK_MODE,
-  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+  commandEncoder = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmP2gGridProjectionWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   const gridSpec = createMlsMpmGridSpec({ boxDimsM, gridSpacingM });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const particleIterationCapacity = schroederParticleIterationCapacity({
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  if (particleCountResidency && readbackMode !== NO_FULL_READBACK_MODE && !callerOwnsEncoder) {
+    throw new RangeError('GPU-authored P2G particle count requires no-full-readback execution');
+  }
+  if (schroederSparseHierarchy && readbackMode !== NO_FULL_READBACK_MODE) {
+    throw new RangeError('Schroeder sparse P2G requires no-full-readback mode');
+  }
+  const sparseGridPlan = !schroederSparseHierarchy
+    ? null
+    : createSchroederSparseGridViewPlan({
+      gridDims: gridSpec.gridDims,
+      gridShift: gridSpec.shift,
+      selectedLevel: schroederSelectedLevel,
+      chartId: 0,
+      tileCellCount: schroederSparseHierarchy.activeNodeSourceTileCellCount ?? 8,
+      activeTileCapacity: schroederSparseHierarchy.maxUniqueNodeCount
+        ?? schroederSparseHierarchy.routeCapacity,
+      activeNodeCapacityHeadroom:
+        schroederSparseHierarchy.sparseGridActiveNodeCapacityHeadroom ?? 1.125,
+      arenaByteBudget: schroederSparseGridArenaByteBudget
+        ?? schroederSparseHierarchy.sparseGridArenaByteBudget
+        ?? (32 * 1024 * 1024),
+      maxBufferSize: device.limits?.maxBufferSize ?? Number.POSITIVE_INFINITY,
+      maxStorageBufferBindingSize:
+        device.limits?.maxStorageBufferBindingSize ?? Number.POSITIVE_INFINITY,
+      minUniformBufferOffsetAlignment:
+        device.limits?.minUniformBufferOffsetAlignment ?? 256,
+      maxComputeWorkgroupsPerDimension:
+        device.limits?.maxComputeWorkgroupsPerDimension ?? 65535
+    });
+  if (sparseGridPlan && !sparseGridPlan.admitted) {
+    throw new RangeError('Schroeder sparse P2G grid arena plan failed closed');
+  }
+  const sparseGridRuntime = !sparseGridPlan
+    ? null
+    : createSchroederSparseGridViewGpu(device, {
+      hierarchy: schroederSparseHierarchy,
+      plan: sparseGridPlan,
+      label: `ulg-schroeder-sparse-grid-level-${Math.round(Number(schroederSelectedLevel))}`
+    });
+  let sparseGridExecution = null;
+  let sparseGridRuntimeTransferred = false;
+  const outputGridNodeCount = sparseGridPlan?.gridNodeCapacity ?? gridSpec.gridNodeCount;
   const p2gBackendPolicy = resolveMlsMpmP2gBackendPolicy({
     requestedBackend: p2gBackend,
     supportsOceanTiledKernel: false
   });
-  const outputByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const accumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
+  const outputByteLength = outputGridNodeCount
+    * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const accumulatorElementCount = Math.max(1, outputGridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
   const accumulatorByteLength = accumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
   const borrowedStateBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.stateBuffer : null;
   const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null;
   const borrowedMechanicsBuffer = mlsMpmParticleUpload?.status === 'webgpu-uploaded'
     ? mlsMpmParticleUpload.mechanicsBuffer
     : null;
+  if (
+    particleCountResidency
+    && (!borrowedStateBuffer || !borrowedThermoBuffer || !borrowedMechanicsBuffer)
+  ) {
+    throw new TypeError('GPU-authored P2G particle count requires complete retained particle buffers');
+  }
   const productEventRows = productEventRowsFromResidentProductMass(residentProductMass);
   const schroederFilter = normalizeSchroederLevelFilter({ schroederLevelAssignment, schroederSelectedLevel });
   const schroederAssignmentRows = schroederLevelAssignment?.assignments instanceof Float32Array
@@ -960,6 +1212,29 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         ? productEventRows
         : EMPTY_PRODUCT_EVENT_STORAGE_ROWS
     ), device);
+  const borrowedProductEventMetadataBuffer = residentProductMass?.productEventMetadataBuffer
+    && webGpuBufferMatchesDevice(residentProductMass.productEventMetadataBuffer, device)
+    ? residentProductMass.productEventMetadataBuffer
+    : null;
+  const standaloneProductEventMetadata = new Uint32Array(16);
+  standaloneProductEventMetadata[0] = 0x554c4750;
+  standaloneProductEventMetadata[1] = 1;
+  standaloneProductEventMetadata[2] = productEventCount;
+  standaloneProductEventMetadata[3] = productEventCount;
+  standaloneProductEventMetadata[4] = productEventCount;
+  standaloneProductEventMetadata[5] = productEventCount;
+  standaloneProductEventMetadata[8] = SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS;
+  standaloneProductEventMetadata[15] = 1;
+  const productEventMetadataBuffer = borrowedProductEventMetadataBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-mls-mpm-p2g-standalone-product-event-metadata',
+      standaloneProductEventMetadata
+    );
+  const productEventDispatchIndirectBuffer = residentProductMass?.productEventDispatchIndirectBuffer
+    && webGpuBufferMatchesDevice(residentProductMass.productEventDispatchIndirectBuffer, device)
+    ? residentProductMass.productEventDispatchIndirectBuffer
+    : null;
   const schroederAssignmentBuffer = borrowedSchroederAssignmentBuffer
     || writeStorageBuffer(
       device,
@@ -968,11 +1243,13 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         : 'ulg-mls-mpm-p2g-schroeder-level-assignments-dummy',
       schroederFilter.enabled ? schroederAssignmentRows : new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
     );
-  const schroederActiveNodeBuffer = writeStorageBuffer(
-    device,
-    'ulg-mls-mpm-p2g-schroeder-active-nodes-dummy',
-    new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
-  );
+  const schroederActiveNodeBuffer = sparseGridRuntime
+    ? sparseGridRuntime.viewBuffer
+    : writeStorageBuffer(
+      device,
+      'ulg-mls-mpm-p2g-schroeder-active-nodes-dummy',
+      new Uint32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
+    );
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-grid-out',
     size: Math.max(4, outputByteLength),
@@ -988,7 +1265,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     size: 80,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
-  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE || callerOwnsEncoder;
   const readBuffer = noFullReadback
     ? null
     : device.createBuffer({
@@ -997,16 +1274,25 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
     });
   let returnedRetainedGridBuffer = false;
+  let callerOwnedProjection = null;
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createProjectionParamsArray(
       gridSpec,
-      sphParticleState.particleCount,
+      particleIterationCapacity,
       dt,
       productEventCount,
       internalPressureScale,
-      schroederFilter
+      schroederFilter,
+      mlsMpmParticleState.ambientPressurePa ?? 0,
+      sparseGridPlan
     ));
+    const projectionBaseWgsl = sparseGridPlan
+      ? mlsMpmP2gSchroederSparseGridWgsl
+      : mlsMpmP2gGridProjectionWgsl;
+    const projectionWgsl = particleCountResidency
+      ? withSchroederParticleCountResidencyGuard(projectionBaseWgsl)
+      : projectionBaseWgsl;
     const p2gBindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
@@ -1018,24 +1304,37 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       computeBufferBinding(7, 'read-only-storage'),
       computeBufferBinding(8, 'read-only-storage')
     ];
+    const productEventP2gBindings = [
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform'),
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(8, 'read-only-storage'),
+      computeBufferBinding(9, 'read-only-storage')
+    ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v5',
+      cacheKey: sparseGridPlan
+        ? `ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.scatter.${particleCountResidency ? 'resident-count.v1' : 'v0'}`
+        : `ulg-mls-mpm-p2g-grid-projection.scatter.${particleCountResidency ? 'resident-count.v1' : 'v5'}`,
       label: 'ulg-mls-mpm-p2g-grid-projection',
-      code: mlsMpmP2gGridProjectionWgsl,
+      code: projectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: productPipeline, bindGroupLayout: productBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v5',
+      cacheKey: sparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.product.v0'
+        : 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v5',
       label: 'ulg-mls-mpm-p2g-product-event-scatter',
-      code: mlsMpmP2gGridProjectionWgsl,
+      code: projectionWgsl,
       entryPoint: 'scatter_product_events',
-      bindings: p2gBindings
+      bindings: productEventP2gBindings
     });
     const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v5',
+      cacheKey: sparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.finalize.v0'
+        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v5',
       label: 'ulg-mls-mpm-p2g-grid-finalize',
-      code: mlsMpmP2gGridProjectionWgsl,
+      code: projectionWgsl,
       entryPoint: 'finalize_grid',
       bindings: p2gBindings
     });
@@ -1045,15 +1344,34 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         { binding: 2, resource: { buffer: mechanicsBuffer } },
         { binding: 3, resource: { buffer: accumulatorBuffer } },
         { binding: 4, resource: { buffer: paramsBuffer } },
-        { binding: 5, resource: { buffer: productEventBuffer } },
+        {
+          binding: 5,
+          resource: {
+            buffer: particleCountResidency?.metadataBuffer ?? productEventBuffer
+          }
+        },
         { binding: 6, resource: { buffer: gridBuffer } },
         { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
         { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
       ];
     const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: p2gEntries });
-    const productBindGroup = device.createBindGroup({ layout: productBindGroupLayout, entries: p2gEntries });
+    const productBindGroup = device.createBindGroup({
+      layout: productBindGroupLayout,
+      entries: [
+        { binding: 3, resource: { buffer: accumulatorBuffer } },
+        { binding: 4, resource: { buffer: paramsBuffer } },
+        { binding: 5, resource: { buffer: productEventBuffer } },
+        { binding: 8, resource: { buffer: schroederActiveNodeBuffer } },
+        { binding: 9, resource: { buffer: productEventMetadataBuffer } }
+      ]
+    });
     const finalizeBindGroup = device.createBindGroup({ layout: finalizeBindGroupLayout, entries: p2gEntries });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
+    if (sparseGridRuntime) {
+      sparseGridExecution = sparseGridRuntime.encode(encoder, {
+        generationId: schroederSparseHierarchy.generationId
+      });
+    }
     if (typeof encoder.clearBuffer === 'function') {
       encoder.clearBuffer(accumulatorBuffer, 0, Math.max(4, accumulatorByteLength));
     } else {
@@ -1062,28 +1380,49 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: sphParticleState.particleCount,
+      workgroupSize: 64
+    });
     pass.end();
     if (productEventCount > 0) {
       const productPass = encoder.beginComputePass();
       productPass.setPipeline(productPipeline);
       productPass.setBindGroup(0, productBindGroup);
-      productPass.dispatchWorkgroups(Math.max(1, Math.ceil(productEventCount / 64)));
+      if (
+        productEventDispatchIndirectBuffer
+        && typeof productPass.dispatchWorkgroupsIndirect === 'function'
+      ) {
+        productPass.dispatchWorkgroupsIndirect(productEventDispatchIndirectBuffer, 0);
+      } else {
+        productPass.dispatchWorkgroups(Math.max(1, Math.ceil(productEventCount / 64)));
+      }
       productPass.end();
     }
     const finalizePass = encoder.beginComputePass();
     finalizePass.setPipeline(finalizePipeline);
     finalizePass.setBindGroup(0, finalizeBindGroup);
-    finalizePass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+    if (sparseGridExecution) {
+      finalizePass.dispatchWorkgroupsIndirect(
+        sparseGridExecution.dispatchIndirectBuffer,
+        sparseGridExecution.dispatchIndirectByteOffset ?? 0
+      );
+    } else {
+      finalizePass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+    }
     finalizePass.end();
-    if (!noFullReadback) {
+    if (!noFullReadback && !callerOwnsEncoder) {
       encoder.copyBufferToBuffer(gridBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
     }
-    device.queue.submit([encoder.finish()]);
+    if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
     let gridNodes = new Float32Array();
-    if (!noFullReadback) {
+    if (!noFullReadback && !callerOwnsEncoder) {
       await readBuffer.mapAsync(GPU_MAP_MODE.READ);
-      gridNodes = new Float32Array(readBuffer.getMappedRange()).slice(0, gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS);
+      gridNodes = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        outputGridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS
+      );
       readBuffer.unmap();
     }
     const projection = outputEnvelope({
@@ -1107,14 +1446,56 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       residentProductMassProductEventBufferDeviceMismatch: productEventBufferMismatch.mismatch,
       residentProductMassProductEventBufferSourceDeviceId: productEventBufferMismatch.sourceDeviceId,
       residentProductMassProductEventBufferConsumerDeviceId: productEventBufferMismatch.consumerDeviceId,
+      residentProductMassProductEventCountAuthority: productEventDispatchIndirectBuffer
+        ? 'gpu-authored-arena-active-count-indirect'
+        : 'standalone-host-row-count-metadata',
       schroederLevelFilter: schroederFilter
     });
+    Object.assign(
+      projection,
+      schroederParticleCountResidencyPublicFields(particleCountResidency)
+    );
+    if (particleCountResidency) {
+      projection.particleCount = sphParticleState.particleCount;
+      projection.particleCountAuthority = 'gpu-authored-residency-metadata';
+      projection.particleCountCpuDecoded = false;
+      projection.particleIterationCapacity = particleIterationCapacity;
+      projection.particleCountResidencyMetadataBuffer = particleCountResidency.metadataBuffer;
+      projection.particleCountDispatchIndirectBuffer =
+        particleCountResidency.dispatchIndirectBuffer;
+    }
+    if (sparseGridExecution) {
+      projection.fullGridNodeCount = gridSpec.gridNodeCount;
+      projection.gridNodeCount = sparseGridExecution.gridNodeCapacity;
+      projection.gridStorageMode = 'schroeder-byte-bounded-compact-grid';
+      projection.schroederSparseGrid = sparseGridExecution;
+      projection.schroederSparseGridPlan = sparseGridExecution.plan;
+      projection.schroederSparseHierarchyGenerationId = schroederSparseHierarchy.generationId;
+      projection.gridArenaPeakAllocatedByteLength = sparseGridExecution.peakAllocatedByteLength;
+    }
+    projection.commandEncoderOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    projection.submissionOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    projection.queueSubmitPerformed = !callerOwnsEncoder;
+    projection.mapPerformed = !noFullReadback && !callerOwnsEncoder;
+    projection.readbackPerformed = !noFullReadback && !callerOwnsEncoder;
+    projection.queueCompletionStatus = callerOwnsEncoder
+      ? 'encoded-awaiting-caller-submit'
+      : (noFullReadback ? 'queue-submitted-cleanup-deferred' : 'readback-map-completed');
+    projection.queueCompletionMethod = callerOwnsEncoder
+      ? 'caller-owned-command-encoder'
+      : (noFullReadback ? 'deferred queue.onSubmittedWorkDone cleanup' : 'mapAsync(readback-buffer)');
     if (retainGridBuffer) {
       projection.gridBuffer = gridBuffer;
       projection.gridBufferByteLength = outputByteLength;
-      projection.destroyGridBuffer = () => gridBuffer.destroy?.();
+      projection.destroyGridBuffer = () => {
+        gridBuffer.destroy?.();
+        sparseGridRuntime?.destroy();
+      };
+      projection.destroySchroederSparseGridView = () => sparseGridRuntime?.destroy();
+      sparseGridRuntimeTransferred = Boolean(sparseGridRuntime);
       returnedRetainedGridBuffer = true;
     }
+    if (callerOwnsEncoder) callerOwnedProjection = projection;
     return projection;
   } finally {
     const cleanup = () => {
@@ -1122,14 +1503,19 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
       if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
       if (!borrowedProductEventBuffer) productEventBuffer.destroy?.();
+      if (!borrowedProductEventMetadataBuffer) productEventMetadataBuffer.destroy?.();
       if (!borrowedSchroederAssignmentBuffer) schroederAssignmentBuffer.destroy?.();
-      schroederActiveNodeBuffer.destroy?.();
+      if (!sparseGridRuntime) schroederActiveNodeBuffer.destroy?.();
       if (!retainGridBuffer || !returnedRetainedGridBuffer) gridBuffer.destroy?.();
       accumulatorBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
+      sparseGridExecution?.releaseTransientBuffers?.();
+      if (!sparseGridRuntimeTransferred) sparseGridRuntime?.destroy();
     };
-    if (noFullReadback) {
+    if (callerOwnsEncoder) {
+      if (callerOwnedProjection) callerOwnedProjection.cleanupSubmittedWork = cleanup;
+    } else if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);
     } else {
       cleanup();
@@ -1237,6 +1623,15 @@ function executionFromProjection(projection, {
     readbackMode: projection?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: projection?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: projection?.normalHotLoopReadbackFree ?? false,
+    authoritativeParticleCount: projection?.authoritativeParticleCount ?? null,
+    authoritativeParticleCountAuthority:
+      projection?.authoritativeParticleCountAuthority ?? null,
+    authoritativeParticleCountMetadataWord:
+      projection?.authoritativeParticleCountMetadataWord ?? null,
+    particleRowCapacity: projection?.particleRowCapacity ?? projection?.particleCount ?? 0,
+    particleCountDispatchMode: projection?.particleCountDispatchMode ?? null,
+    particleCountDispatchIndirectByteOffset:
+      projection?.particleCountDispatchIndirectByteOffset ?? null,
     p2gBackendPolicy: projection?.p2gBackendPolicy ?? null,
     p2gBackendPolicyStatus: projection?.p2gBackendPolicyStatus ?? null,
     p2gBackendRequested: projection?.p2gBackendRequested ?? null,
@@ -1281,6 +1676,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   mlsMpmParticleUpload = null,
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
+  schroederSparseHierarchy = null,
+  schroederSparseGridArenaByteBudget = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -1298,8 +1695,15 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 } = {}) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
   let cpuReference = null;
   const getCpuReference = () => {
+    if (particleCountResidency) {
+      throw new Error('GPU-authored P2G particle count cannot fall back to a CPU-owned particle loop');
+    }
     if (!cpuReference) {
       cpuReference = projectMlsMpmP2gGridCpu({
         sphParticleState,
@@ -1373,6 +1777,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       mlsMpmParticleUpload,
       schroederLevelAssignment,
       schroederSelectedLevel,
+      schroederSparseHierarchy,
+      schroederSparseGridArenaByteBudget,
       gridSpacingM,
       boxDimsM,
       dt,
@@ -1435,6 +1841,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       webgpuParity
     });
   } catch (error) {
+    if (particleCountResidency) throw error;
     const reference = getCpuReference();
     return executionFromProjection(reference, {
       cpuReference: reference,

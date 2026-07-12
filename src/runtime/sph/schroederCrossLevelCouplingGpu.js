@@ -24,6 +24,13 @@ import {
   runMlsMpmResidentSummaryWebGpu
 } from './sphMlsMpmGpuSummary.js';
 import { DEFAULT_CFL_FACTOR } from './sphGridUpdateGpuKernel.js';
+import {
+  ULG_SCHROEDER_SPARSE_HIERARCHY_EXECUTION_SCHEMA
+} from '../../../ulg-gpu-abi/src/schroederSparseHierarchy.js';
+import {
+  SCHROEDER_SPARSE_GRID_HASH_MAX_PROBES,
+  assertSchroederSparseGridView
+} from './schroederSparseHierarchyGpu.js';
 
 export {
   ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -64,6 +71,250 @@ const GPU_BUFFER_USAGE = {
 const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
+
+function requiredSparseCouplingReplacement(source, search, replacement, label) {
+  if (!source.includes(search)) {
+    throw new Error(`Unable to build Schroeder sparse coupling shader; missing ${label}`);
+  }
+  return source.replace(search, replacement);
+}
+
+const sparseCouplingLookupWgsl = `
+fn schroeder_sparse_hash(value: u32) -> u32 {
+  var hash = value;
+  hash = hash ^ (hash >> 16u);
+  hash = hash * 0x7feb352du;
+  hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu;
+  return hash ^ (hash >> 16u);
+}
+
+fn fine_sparse_lookup(full_index: u32) -> u32 {
+  let hash_capacity = fine_sparse_view[13];
+  if (hash_capacity == 0u) { return 0xffffffffu; }
+  let start_slot = schroeder_sparse_hash(full_index) & (hash_capacity - 1u);
+  for (var probe = 0u; probe < ${SCHROEDER_SPARSE_GRID_HASH_MAX_PROBES}u; probe = probe + 1u) {
+    let slot = (start_slot + probe) & (hash_capacity - 1u);
+    let key = fine_sparse_view[fine_sparse_view[10] + slot];
+    if (key == full_index) { return fine_sparse_view[fine_sparse_view[11] + slot]; }
+    if (key == 0xffffffffu) { return 0xffffffffu; }
+  }
+  return 0xffffffffu;
+}
+
+fn coarse_sparse_lookup(full_index: u32) -> u32 {
+  let hash_capacity = coarse_sparse_view[13];
+  if (hash_capacity == 0u) { return 0xffffffffu; }
+  let start_slot = schroeder_sparse_hash(full_index) & (hash_capacity - 1u);
+  for (var probe = 0u; probe < ${SCHROEDER_SPARSE_GRID_HASH_MAX_PROBES}u; probe = probe + 1u) {
+    let slot = (start_slot + probe) & (hash_capacity - 1u);
+    let key = coarse_sparse_view[coarse_sparse_view[10] + slot];
+    if (key == full_index) { return coarse_sparse_view[coarse_sparse_view[11] + slot]; }
+    if (key == 0xffffffffu) { return 0xffffffffu; }
+  }
+  return 0xffffffffu;
+}
+`;
+
+function createSparseRestrictionWgsl() {
+  let source = schroederCrossLevelGridRestrictionWgsl;
+  source = requiredSparseCouplingReplacement(
+    source,
+    '@group(0) @binding(2) var<uniform> params: SchroederCrossLevelGridCouplingParams;',
+    `@group(0) @binding(2) var<uniform> params: SchroederCrossLevelGridCouplingParams;
+@group(0) @binding(3) var<storage, read> fine_sparse_view: array<u32>;
+@group(0) @binding(4) var<storage, read> coarse_sparse_view: array<u32>;
+${sparseCouplingLookupWgsl}`,
+    'restriction sparse view bindings'
+  );
+  source = requiredSparseCouplingReplacement(
+    source,
+    `  let coarse_index = global_id.x;
+  let coarse_dims = vec3<u32>(params.coarse_nx, params.coarse_ny, params.coarse_nz);
+  let fine_dims = vec3<u32>(params.fine_nx, params.fine_ny, params.fine_nz);
+  let coarse_count = coarse_dims.x * coarse_dims.y * coarse_dims.z;
+  if (coarse_index >= coarse_count) {
+    return;
+  }
+  let stride = max(params.grid_stride, 8u);
+  let accumulate = (params.flags & SCHROEDER_GRID_COUPLING_FLAG_ACCUMULATE) != 0u;
+  let coarse_coords = schroeder_grid_axis_coords(coarse_index, coarse_dims, params.flags);`,
+    `  let coarse_index = global_id.x;
+  let coarse_dims = vec3<u32>(params.coarse_nx, params.coarse_ny, params.coarse_nz);
+  let fine_dims = vec3<u32>(params.fine_nx, params.fine_ny, params.fine_nz);
+  if (fine_sparse_view[3] == 0u || coarse_sparse_view[3] == 0u
+    || coarse_index >= coarse_sparse_view[1]) {
+    return;
+  }
+  let dense_coarse_index = coarse_sparse_view[coarse_sparse_view[12] + coarse_index];
+  if (dense_coarse_index == 0xffffffffu) {
+    return;
+  }
+  let stride = max(params.grid_stride, 8u);
+  let accumulate = (params.flags & SCHROEDER_GRID_COUPLING_FLAG_ACCUMULATE) != 0u;
+  let coarse_coords = schroeder_grid_axis_coords(dense_coarse_index, coarse_dims, params.flags);`,
+    'restriction compact invocation mapping'
+  );
+  source = requiredSparseCouplingReplacement(
+    source,
+    `        let fine_index = schroeder_grid_axis_index(
+          vec3<u32>(u32(fx), u32(fy), u32(fz)),
+          fine_dims,
+          params.flags
+        );
+        let fine_offset = fine_index * stride;`,
+    `        let dense_fine_index = schroeder_grid_axis_index(
+          vec3<u32>(u32(fx), u32(fy), u32(fz)),
+          fine_dims,
+          params.flags
+        );
+        let fine_index = fine_sparse_lookup(dense_fine_index);
+        if (fine_index >= fine_sparse_view[1]) {
+          continue;
+        }
+        let fine_offset = fine_index * stride;`,
+    'restriction child lookup'
+  );
+  return source;
+}
+
+function createSparseProlongationWgsl(baseSource) {
+  let source = baseSource;
+  const deltaForm = source.includes('coarse_pre_grid');
+  if (deltaForm) {
+    source = requiredSparseCouplingReplacement(
+      source,
+      '@group(0) @binding(3) var<uniform> params: SchroederCrossLevelGridCouplingParams;',
+      `@group(0) @binding(3) var<uniform> params: SchroederCrossLevelGridCouplingParams;
+@group(0) @binding(4) var<storage, read> fine_sparse_view: array<u32>;
+@group(0) @binding(5) var<storage, read> coarse_sparse_view: array<u32>;
+${sparseCouplingLookupWgsl}`,
+      'delta prolongation sparse bindings'
+    );
+  } else {
+    source = requiredSparseCouplingReplacement(
+      source,
+      '@group(0) @binding(2) var<uniform> params: SchroederCrossLevelGridCouplingParams;',
+      `@group(0) @binding(2) var<uniform> params: SchroederCrossLevelGridCouplingParams;
+@group(0) @binding(3) var<storage, read> fine_sparse_view: array<u32>;
+@group(0) @binding(4) var<storage, read> coarse_sparse_view: array<u32>;
+${sparseCouplingLookupWgsl}`,
+      'prolongation sparse bindings'
+    );
+  }
+  if (deltaForm) {
+    source = requiredSparseCouplingReplacement(
+      source,
+      `  let fine_index = global_id.x;
+  let fine_dims = vec3<u32>(params.fine_nx, params.fine_ny, params.fine_nz);
+  let coarse_dims = vec3<u32>(params.coarse_nx, params.coarse_ny, params.coarse_nz);
+  let fine_count = fine_dims.x * fine_dims.y * fine_dims.z;
+  if (fine_index >= fine_count) {
+    return;
+  }
+  let stride = max(params.grid_stride, 8u);
+  let fine_offset = fine_index * stride;`,
+      `  let fine_index = global_id.x;
+  let fine_dims = vec3<u32>(params.fine_nx, params.fine_ny, params.fine_nz);
+  let coarse_dims = vec3<u32>(params.coarse_nx, params.coarse_ny, params.coarse_nz);
+  if (fine_sparse_view[3] == 0u || coarse_sparse_view[3] == 0u
+    || fine_index >= fine_sparse_view[1]) {
+    return;
+  }
+  let dense_fine_index = fine_sparse_view[fine_sparse_view[12] + fine_index];
+  if (dense_fine_index == 0xffffffffu) {
+    return;
+  }
+  let stride = max(params.grid_stride, 8u);
+  let fine_offset = fine_index * stride;`,
+      'delta prolongation compact invocation mapping'
+    );
+    source = requiredSparseCouplingReplacement(
+      source,
+      '  let fine_coords = schroeder_grid_axis_coords(fine_index, fine_dims, params.flags);',
+      '  let fine_coords = schroeder_grid_axis_coords(dense_fine_index, fine_dims, params.flags);',
+      'delta prolongation fine coordinates'
+    );
+    source = requiredSparseCouplingReplacement(
+      source,
+      '  let coarse_offset = schroeder_grid_axis_index(coarse_coords, coarse_dims, params.flags) * stride;',
+      `  let dense_coarse_index = schroeder_grid_axis_index(coarse_coords, coarse_dims, params.flags);
+  let coarse_index = coarse_sparse_lookup(dense_coarse_index);
+  if (coarse_index >= coarse_sparse_view[1]) {
+    return;
+  }
+  let coarse_offset = coarse_index * stride;`,
+      'delta prolongation parent lookup'
+    );
+  } else {
+    source = requiredSparseCouplingReplacement(
+      source,
+      `  let fine_index = global_id.x;
+  let fine_dims = vec3<u32>(params.fine_nx, params.fine_ny, params.fine_nz);
+  let coarse_dims = vec3<u32>(params.coarse_nx, params.coarse_ny, params.coarse_nz);
+  let fine_count = fine_dims.x * fine_dims.y * fine_dims.z;
+  if (fine_index >= fine_count) {
+    return;
+  }
+  let stride = max(params.grid_stride, 8u);
+  let fine_coords = schroeder_grid_axis_coords(fine_index, fine_dims, params.flags);`,
+      `  let fine_index = global_id.x;
+  let fine_dims = vec3<u32>(params.fine_nx, params.fine_ny, params.fine_nz);
+  let coarse_dims = vec3<u32>(params.coarse_nx, params.coarse_ny, params.coarse_nz);
+  if (fine_sparse_view[3] == 0u || coarse_sparse_view[3] == 0u
+    || fine_index >= fine_sparse_view[1]) {
+    return;
+  }
+  let dense_fine_index = fine_sparse_view[fine_sparse_view[12] + fine_index];
+  if (dense_fine_index == 0xffffffffu) {
+    return;
+  }
+  let stride = max(params.grid_stride, 8u);
+  let fine_coords = schroeder_grid_axis_coords(dense_fine_index, fine_dims, params.flags);`,
+      'prolongation compact invocation mapping'
+    );
+    source = requiredSparseCouplingReplacement(
+      source,
+      `  let coarse_index = schroeder_grid_axis_index(coarse_coords, coarse_dims, params.flags);
+  let coarse_offset = coarse_index * stride;`,
+      `  let dense_coarse_index = schroeder_grid_axis_index(coarse_coords, coarse_dims, params.flags);
+  let coarse_index = coarse_sparse_lookup(dense_coarse_index);
+  if (coarse_index >= coarse_sparse_view[1]) {
+    return;
+  }
+  let coarse_offset = coarse_index * stride;`,
+      'prolongation parent lookup'
+    );
+  }
+  return source;
+}
+
+export const schroederSparseCrossLevelGridRestrictionWgsl = createSparseRestrictionWgsl();
+export const schroederSparseCrossLevelGridProlongationWgsl =
+  createSparseProlongationWgsl(schroederCrossLevelGridProlongationWgsl);
+export const schroederSparseCrossLevelGridVelocityDeltaProlongationWgsl =
+  createSparseProlongationWgsl(schroederCrossLevelGridVelocityDeltaProlongationWgsl);
+
+export const schroederSparseCrossLevelGridConservationSummaryWgsl = (() => {
+  let source = schroederCrossLevelGridConservationSummaryWgsl;
+  source = requiredSparseCouplingReplacement(
+    source,
+    '@group(0) @binding(3) var<uniform> params: SchroederCrossLevelGridCouplingParams;',
+    `@group(0) @binding(3) var<uniform> params: SchroederCrossLevelGridCouplingParams;
+@group(0) @binding(4) var<storage, read> fine_sparse_view: array<u32>;
+@group(0) @binding(5) var<storage, read> coarse_sparse_view: array<u32>;`,
+    'conservation sparse bindings'
+  );
+  source = requiredSparseCouplingReplacement(
+    source,
+    `  let fine_count = params.fine_nx * params.fine_ny * params.fine_nz;
+  let coarse_count = params.coarse_nx * params.coarse_ny * params.coarse_nz;`,
+    `  let fine_count = select(0u, fine_sparse_view[1], fine_sparse_view[3] != 0u);
+  let coarse_count = select(0u, coarse_sparse_view[1], coarse_sparse_view[3] != 0u);`,
+    'conservation compact counts'
+  );
+  return source;
+})();
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -251,12 +502,27 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
   plan = null,
   fineGridBuffer = null,
   fineGridRows = null,
+  fineSparseGrid = null,
   coarseGridBuffer = null,
+  coarseSparseGrid = null,
   retainCoarseGridBuffer = true,
+  commandEncoder = null,
   ...planOptions
 } = {}) {
   assertWebGpuDevice(device, 'runSchroederCrossLevelGridRestrictionWebGpu');
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   const resolvedPlan = plan || createSchroederCrossLevelGridCouplingPlan(planOptions);
+  const sparseCoupling = Boolean(fineSparseGrid || coarseSparseGrid);
+  if (sparseCoupling && !(fineSparseGrid && coarseSparseGrid)) {
+    throw new TypeError('Sparse restriction requires both fine and coarse grid views');
+  }
+  if (sparseCoupling) {
+    assertSchroederSparseGridView(fineSparseGrid, { device });
+    assertSchroederSparseGridView(coarseSparseGrid, { device });
+  }
   const fine = resolveGridInput(device, 'ulg-schroeder-grid-restriction-fine-in', {
     buffer: fineGridBuffer,
     rows: fineGridRows
@@ -277,17 +543,26 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   let returnedRetainedCoarseBuffer = false;
+  let callerOwnedResult = null;
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelGridCouplingParamsArray(resolvedPlan));
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-cross-level-grid-restriction.v0',
+      cacheKey: sparseCoupling
+        ? 'ulg-schroeder-cross-level-grid-restriction.sparse.v0'
+        : 'ulg-schroeder-cross-level-grid-restriction.v0',
       label: 'ulg-schroeder-cross-level-grid-restriction',
-      code: schroederCrossLevelGridRestrictionWgsl,
+      code: sparseCoupling
+        ? schroederSparseCrossLevelGridRestrictionWgsl
+        : schroederCrossLevelGridRestrictionWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'storage'),
-        computeBufferBinding(2, 'uniform')
+        computeBufferBinding(2, 'uniform'),
+        ...(sparseCoupling ? [
+          computeBufferBinding(3, 'read-only-storage'),
+          computeBufferBinding(4, 'read-only-storage')
+        ] : [])
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -295,16 +570,29 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
       entries: [
         { binding: 0, resource: { buffer: fine.gridBuffer } },
         { binding: 1, resource: { buffer: coarse.gridBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        ...(sparseCoupling ? [
+          { binding: 3, resource: { buffer: fineSparseGrid.viewBuffer } },
+          { binding: 4, resource: { buffer: coarseSparseGrid.viewBuffer } }
+        ] : [])
       ]
     });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.ceil(resolvedPlan.coarseNodeCount / SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE));
+    if (sparseCoupling) {
+      pass.dispatchWorkgroupsIndirect(
+        coarseSparseGrid.dispatchIndirectBuffer,
+        coarseSparseGrid.dispatchIndirectByteOffset ?? 0
+      );
+    } else {
+      pass.dispatchWorkgroups(Math.ceil(
+        resolvedPlan.coarseNodeCount / SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE
+      ));
+    }
     pass.end();
-    device.queue.submit([encoder.finish()]);
+    if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
 
     const result = {
       ...resolvedPlan,
@@ -317,11 +605,20 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
       fullReadbackPerformed: false,
       fullParticleReadbackPerformed: false,
       normalHotLoopReadbackFree: true,
+      gridStorageMode: sparseCoupling
+        ? 'schroeder-byte-bounded-compact-grid'
+        : 'dense-grid',
+      sparseParentChildLookup: sparseCoupling,
       retainedCoarseGridBuffer: Boolean(retainCoarseGridBuffer || coarse.borrowed),
       conservativeTransferStatus: 'grid-restriction-submitted-mass-momentum-agglomeration',
       scientificValidation: false,
       fullPhysicsValidation: false
     };
+    result.commandEncoderOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.submissionOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.queueSubmitPerformed = !callerOwnsEncoder;
+    result.mapPerformed = false;
+    result.readbackPerformed = false;
     if (retainCoarseGridBuffer || coarse.borrowed) {
       result.coarseGridBuffer = coarse.gridBuffer;
       if (!coarse.borrowed) {
@@ -329,6 +626,7 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
       }
       returnedRetainedCoarseBuffer = true;
     }
+    if (callerOwnsEncoder) callerOwnedResult = result;
     return result;
   } finally {
     const cleanup = () => {
@@ -336,7 +634,11 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
       if (!coarse.borrowed && !returnedRetainedCoarseBuffer) coarse.gridBuffer.destroy?.();
       paramsBuffer.destroy?.();
     };
-    deferSubmittedWorkCleanup(device, cleanup);
+    if (callerOwnsEncoder) {
+      if (callerOwnedResult) callerOwnedResult.cleanupSubmittedWork = cleanup;
+    } else {
+      deferSubmittedWorkCleanup(device, cleanup);
+    }
   }
 }
 
@@ -350,13 +652,28 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
   plan = null,
   coarseGridBuffer = null,
   coarseGridRows = null,
+  coarseSparseGrid = null,
   fineGridBuffer = null,
   fineGridRows = null,
+  fineSparseGrid = null,
   retainFineGridBuffer = true,
+  commandEncoder = null,
   ...planOptions
 } = {}) {
   assertWebGpuDevice(device, 'runSchroederCrossLevelGridProlongationWebGpu');
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   const resolvedPlan = plan || createSchroederCrossLevelGridCouplingPlan(planOptions);
+  const sparseCoupling = Boolean(fineSparseGrid || coarseSparseGrid);
+  if (sparseCoupling && !(fineSparseGrid && coarseSparseGrid)) {
+    throw new TypeError('Sparse prolongation requires both fine and coarse grid views');
+  }
+  if (sparseCoupling) {
+    assertSchroederSparseGridView(fineSparseGrid, { device });
+    assertSchroederSparseGridView(coarseSparseGrid, { device });
+  }
   const coarse = resolveGridInput(device, 'ulg-schroeder-grid-prolongation-coarse-in', {
     buffer: coarseGridBuffer,
     rows: coarseGridRows
@@ -371,17 +688,26 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   let returnedRetainedFineBuffer = false;
+  let callerOwnedResult = null;
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelGridCouplingParamsArray(resolvedPlan));
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-cross-level-grid-prolongation.v0',
+      cacheKey: sparseCoupling
+        ? 'ulg-schroeder-cross-level-grid-prolongation.sparse.v0'
+        : 'ulg-schroeder-cross-level-grid-prolongation.v0',
       label: 'ulg-schroeder-cross-level-grid-prolongation',
-      code: schroederCrossLevelGridProlongationWgsl,
+      code: sparseCoupling
+        ? schroederSparseCrossLevelGridProlongationWgsl
+        : schroederCrossLevelGridProlongationWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'storage'),
-        computeBufferBinding(2, 'uniform')
+        computeBufferBinding(2, 'uniform'),
+        ...(sparseCoupling ? [
+          computeBufferBinding(3, 'read-only-storage'),
+          computeBufferBinding(4, 'read-only-storage')
+        ] : [])
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -389,16 +715,29 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
       entries: [
         { binding: 0, resource: { buffer: coarse.gridBuffer } },
         { binding: 1, resource: { buffer: fine.gridBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        ...(sparseCoupling ? [
+          { binding: 3, resource: { buffer: fineSparseGrid.viewBuffer } },
+          { binding: 4, resource: { buffer: coarseSparseGrid.viewBuffer } }
+        ] : [])
       ]
     });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.ceil(resolvedPlan.fineNodeCount / SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE));
+    if (sparseCoupling) {
+      pass.dispatchWorkgroupsIndirect(
+        fineSparseGrid.dispatchIndirectBuffer,
+        fineSparseGrid.dispatchIndirectByteOffset ?? 0
+      );
+    } else {
+      pass.dispatchWorkgroups(Math.ceil(
+        resolvedPlan.fineNodeCount / SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE
+      ));
+    }
     pass.end();
-    device.queue.submit([encoder.finish()]);
+    if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
 
     const result = {
       ...resolvedPlan,
@@ -411,12 +750,21 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
       fullReadbackPerformed: false,
       fullParticleReadbackPerformed: false,
       normalHotLoopReadbackFree: true,
+      gridStorageMode: sparseCoupling
+        ? 'schroeder-byte-bounded-compact-grid'
+        : 'dense-grid',
+      sparseParentChildLookup: sparseCoupling,
       retainedFineGridBuffer: Boolean(retainFineGridBuffer || fine.borrowed),
       conservativeTransferStatus:
         'grid-prolongation-submitted-mass-weighted-parent-velocity',
       scientificValidation: false,
       fullPhysicsValidation: false
     };
+    result.commandEncoderOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.submissionOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.queueSubmitPerformed = !callerOwnsEncoder;
+    result.mapPerformed = false;
+    result.readbackPerformed = false;
     if (retainFineGridBuffer || fine.borrowed) {
       result.fineGridBuffer = fine.gridBuffer;
       if (!fine.borrowed) {
@@ -424,6 +772,7 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
       }
       returnedRetainedFineBuffer = true;
     }
+    if (callerOwnsEncoder) callerOwnedResult = result;
     return result;
   } finally {
     const cleanup = () => {
@@ -431,7 +780,11 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
       if (!fine.borrowed && !returnedRetainedFineBuffer) fine.gridBuffer.destroy?.();
       paramsBuffer.destroy?.();
     };
-    deferSubmittedWorkCleanup(device, cleanup);
+    if (callerOwnsEncoder) {
+      if (callerOwnedResult) callerOwnedResult.cleanupSubmittedWork = cleanup;
+    } else {
+      deferSubmittedWorkCleanup(device, cleanup);
+    }
   }
 }
 
@@ -457,13 +810,28 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
   coarsePreGridRows = null,
   coarsePostGridBuffer = null,
   coarsePostGridRows = null,
+  coarseSparseGrid = null,
   fineGridBuffer = null,
   fineGridRows = null,
+  fineSparseGrid = null,
   retainFineGridBuffer = true,
+  commandEncoder = null,
   ...planOptions
 } = {}) {
   assertWebGpuDevice(device, 'runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu');
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   const resolvedPlan = plan || createSchroederCrossLevelGridCouplingPlan(planOptions);
+  const sparseCoupling = Boolean(fineSparseGrid || coarseSparseGrid);
+  if (sparseCoupling && !(fineSparseGrid && coarseSparseGrid)) {
+    throw new TypeError('Sparse velocity-delta prolongation requires both grid views');
+  }
+  if (sparseCoupling) {
+    assertSchroederSparseGridView(fineSparseGrid, { device });
+    assertSchroederSparseGridView(coarseSparseGrid, { device });
+  }
   const coarsePre = resolveGridInput(device, 'ulg-schroeder-grid-delta-prolongation-coarse-pre-in', {
     buffer: coarsePreGridBuffer,
     rows: coarsePreGridRows
@@ -482,18 +850,27 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   let returnedRetainedFineBuffer = false;
+  let callerOwnedResult = null;
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelGridCouplingParamsArray(resolvedPlan));
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.v0',
+      cacheKey: sparseCoupling
+        ? 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.sparse.v0'
+        : 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.v0',
       label: 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation',
-      code: schroederCrossLevelGridVelocityDeltaProlongationWgsl,
+      code: sparseCoupling
+        ? schroederSparseCrossLevelGridVelocityDeltaProlongationWgsl
+        : schroederCrossLevelGridVelocityDeltaProlongationWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'read-only-storage'),
         computeBufferBinding(2, 'storage'),
-        computeBufferBinding(3, 'uniform')
+        computeBufferBinding(3, 'uniform'),
+        ...(sparseCoupling ? [
+          computeBufferBinding(4, 'read-only-storage'),
+          computeBufferBinding(5, 'read-only-storage')
+        ] : [])
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -502,16 +879,29 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
         { binding: 0, resource: { buffer: coarsePre.gridBuffer } },
         { binding: 1, resource: { buffer: coarsePost.gridBuffer } },
         { binding: 2, resource: { buffer: fine.gridBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
+        { binding: 3, resource: { buffer: paramsBuffer } },
+        ...(sparseCoupling ? [
+          { binding: 4, resource: { buffer: fineSparseGrid.viewBuffer } },
+          { binding: 5, resource: { buffer: coarseSparseGrid.viewBuffer } }
+        ] : [])
       ]
     });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.ceil(resolvedPlan.fineNodeCount / SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE));
+    if (sparseCoupling) {
+      pass.dispatchWorkgroupsIndirect(
+        fineSparseGrid.dispatchIndirectBuffer,
+        fineSparseGrid.dispatchIndirectByteOffset ?? 0
+      );
+    } else {
+      pass.dispatchWorkgroups(Math.ceil(
+        resolvedPlan.fineNodeCount / SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE
+      ));
+    }
     pass.end();
-    device.queue.submit([encoder.finish()]);
+    if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
 
     const result = {
       ...resolvedPlan,
@@ -525,12 +915,21 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
       fullReadbackPerformed: false,
       fullParticleReadbackPerformed: false,
       normalHotLoopReadbackFree: true,
+      gridStorageMode: sparseCoupling
+        ? 'schroeder-byte-bounded-compact-grid'
+        : 'dense-grid',
+      sparseParentChildLookup: sparseCoupling,
       retainedFineGridBuffer: Boolean(retainFineGridBuffer || fine.borrowed),
       conservativeTransferStatus:
         'grid-velocity-delta-prolongation-submitted-parent-update-correction',
       scientificValidation: false,
       fullPhysicsValidation: false
     };
+    result.commandEncoderOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.submissionOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.queueSubmitPerformed = !callerOwnsEncoder;
+    result.mapPerformed = false;
+    result.readbackPerformed = false;
     if (retainFineGridBuffer || fine.borrowed) {
       result.fineGridBuffer = fine.gridBuffer;
       if (!fine.borrowed) {
@@ -538,6 +937,7 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
       }
       returnedRetainedFineBuffer = true;
     }
+    if (callerOwnsEncoder) callerOwnedResult = result;
     return result;
   } finally {
     const cleanup = () => {
@@ -546,7 +946,11 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
       if (!fine.borrowed && !returnedRetainedFineBuffer) fine.gridBuffer.destroy?.();
       paramsBuffer.destroy?.();
     };
-    deferSubmittedWorkCleanup(device, cleanup);
+    if (callerOwnsEncoder) {
+      if (callerOwnedResult) callerOwnedResult.cleanupSubmittedWork = cleanup;
+    } else {
+      deferSubmittedWorkCleanup(device, cleanup);
+    }
   }
 }
 
@@ -555,14 +959,31 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
   plan = null,
   fineGridBuffer = null,
   fineGridRows = null,
+  fineSparseGrid = null,
   coarseGridBuffer = null,
   coarseGridRows = null,
+  coarseSparseGrid = null,
   readbackMode = SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE,
+  retainSummaryBuffer = false,
+  commandEncoder = null,
   ...planOptions
 } = {}) {
   assertWebGpuDevice(device, 'runSchroederCrossLevelGridConservationSummaryWebGpu');
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   const resolvedPlan = plan || createSchroederCrossLevelGridCouplingPlan(planOptions);
-  const compactReadback = readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE;
+  const compactReadback = !callerOwnsEncoder
+    && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE;
+  const sparseCoupling = Boolean(fineSparseGrid || coarseSparseGrid);
+  if (sparseCoupling && !(fineSparseGrid && coarseSparseGrid)) {
+    throw new TypeError('Sparse conservation summary requires both grid views');
+  }
+  if (sparseCoupling) {
+    assertSchroederSparseGridView(fineSparseGrid, { device });
+    assertSchroederSparseGridView(coarseSparseGrid, { device });
+  }
   const fine = resolveGridInput(device, 'ulg-schroeder-grid-conservation-fine-in', {
     buffer: fineGridBuffer,
     rows: fineGridRows
@@ -588,18 +1009,27 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
       usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
     })
     : null;
+  let callerOwnedResult = null;
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelGridCouplingParamsArray(resolvedPlan));
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-cross-level-grid-conservation-summary.v0',
+      cacheKey: sparseCoupling
+        ? 'ulg-schroeder-cross-level-grid-conservation-summary.sparse.v0'
+        : 'ulg-schroeder-cross-level-grid-conservation-summary.v0',
       label: 'ulg-schroeder-cross-level-grid-conservation-summary',
-      code: schroederCrossLevelGridConservationSummaryWgsl,
+      code: sparseCoupling
+        ? schroederSparseCrossLevelGridConservationSummaryWgsl
+        : schroederCrossLevelGridConservationSummaryWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'read-only-storage'),
         computeBufferBinding(2, 'storage'),
-        computeBufferBinding(3, 'uniform')
+        computeBufferBinding(3, 'uniform'),
+        ...(sparseCoupling ? [
+          computeBufferBinding(4, 'read-only-storage'),
+          computeBufferBinding(5, 'read-only-storage')
+        ] : [])
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -608,10 +1038,14 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
         { binding: 0, resource: { buffer: fine.gridBuffer } },
         { binding: 1, resource: { buffer: coarse.gridBuffer } },
         { binding: 2, resource: { buffer: summaryBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
+        { binding: 3, resource: { buffer: paramsBuffer } },
+        ...(sparseCoupling ? [
+          { binding: 4, resource: { buffer: fineSparseGrid.viewBuffer } },
+          { binding: 5, resource: { buffer: coarseSparseGrid.viewBuffer } }
+        ] : [])
       ]
     });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
@@ -620,7 +1054,7 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
     if (compactReadback) {
       encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, resolvedPlan.summaryByteLength);
     }
-    device.queue.submit([encoder.finish()]);
+    if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
 
     let summaryRow = new Float32Array();
     if (compactReadback) {
@@ -632,7 +1066,7 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
       readBuffer.unmap();
     }
 
-    return {
+    const result = {
       ...resolvedPlan,
       schema: ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
       couplingPlanSchema: ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_SCHEMA,
@@ -646,6 +1080,11 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
       fullParticleReadbackPerformed: false,
       normalHotLoopReadbackFree: !compactReadback,
       compactSummaryReadbackPerformed: compactReadback,
+      retainedSummaryBuffer: Boolean(retainSummaryBuffer),
+      summaryBufferByteLength: resolvedPlan.summaryByteLength,
+      gridStorageMode: sparseCoupling
+        ? 'schroeder-byte-bounded-compact-grid'
+        : 'dense-grid',
       summaryRow,
       conservation: compactReadback
         ? decodeSchroederCrossLevelGridConservationSummaryRow(summaryRow)
@@ -654,15 +1093,30 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
       scientificValidation: false,
       fullPhysicsValidation: false
     };
+    result.commandEncoderOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.submissionOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    result.queueSubmitPerformed = !callerOwnsEncoder;
+    result.mapPerformed = compactReadback;
+    result.readbackPerformed = compactReadback;
+    if (retainSummaryBuffer) {
+      result.summaryBuffer = summaryBuffer;
+      result.destroySummaryBuffer = () => summaryBuffer.destroy?.();
+    }
+    if (callerOwnsEncoder) callerOwnedResult = result;
+    return result;
   } finally {
     const cleanup = () => {
       if (!fine.borrowed) fine.gridBuffer.destroy?.();
       if (!coarse.borrowed) coarse.gridBuffer.destroy?.();
-      summaryBuffer.destroy?.();
+      if (!retainSummaryBuffer) summaryBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
     };
-    deferSubmittedWorkCleanup(device, cleanup);
+    if (callerOwnsEncoder) {
+      if (callerOwnedResult) callerOwnedResult.cleanupSubmittedWork = cleanup;
+    } else {
+      deferSubmittedWorkCleanup(device, cleanup);
+    }
   }
 }
 
@@ -846,8 +1300,8 @@ export const ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_EXECUTION_SCHEMA =
  *
  * Both G2P passes are level-filtered with copy-through, chained so the
  * second pass preserves the first pass's outputs. All intermediate buffers
- * stay GPU-resident; the optional conservation summary row is the only
- * readback on the default path.
+ * stay GPU-resident. Compact conservation readback is an explicit diagnostic
+ * option and is disabled on the production path.
  */
 export async function runSchroederTwoLevelMechanicsStepWebGpu({
   device,
@@ -858,6 +1312,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   levelAssignment,
   fineActiveNodeList,
   coarseActiveNodeList,
+  sparseHierarchy = null,
   fineLevel = 0,
   baseGridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = [4, 4, 4],
@@ -870,8 +1325,10 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   gridUpdateRunner,
   g2pRunner,
   retainOutputParticleBuffers = true,
-  conservationSummaryReadback = true,
-  compactSummaryReadback = false
+  conservationSummaryReadback = false,
+  compactSummaryReadback = false,
+  commandEncoder = null,
+  authoritySequenceStagePrefix = []
 } = {}) {
   assertWebGpuDevice(device, 'runSchroederTwoLevelMechanicsStepWebGpu');
   if (typeof gridSpecFactory !== 'function'
@@ -885,8 +1342,39 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   if (!levelAssignment) {
     throw new TypeError('runSchroederTwoLevelMechanicsStepWebGpu requires a Schroeder level assignment');
   }
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
+  if (callerOwnsEncoder && (conservationSummaryReadback || compactSummaryReadback)) {
+    throw new RangeError(
+      'Schroeder two-level authority sequence forbids host readback; consume retained GPU evidence'
+    );
+  }
+  const encoder = commandEncoder || device.createCommandEncoder({
+    label: 'ulg-schroeder-two-level-authority-sequence'
+  });
+  const authoritySequenceStageList = [...authoritySequenceStagePrefix];
   const resolvedFineLevel = Math.round(finiteNumber(fineLevel, 0));
   const coarseLevel = resolvedFineLevel + 1;
+  if (sparseHierarchy) {
+    if (sparseHierarchy.schema !== ULG_SCHROEDER_SPARSE_HIERARCHY_EXECUTION_SCHEMA) {
+      throw new TypeError('Schroeder two-level mechanics requires a sparse hierarchy execution descriptor');
+    }
+    if (sparseHierarchy.fineLevel !== resolvedFineLevel
+      || sparseHierarchy.coarseLevel !== coarseLevel
+      || sparseHierarchy.levelCount !== 2
+      || sparseHierarchy.thirdLevelHold !== true) {
+      throw new RangeError('Schroeder sparse hierarchy levels must match the adjacent two-level mechanics step');
+    }
+    if (!sparseHierarchy.compactNodeBuffer
+      || !sparseHierarchy.routeSourceIndexBuffer
+      || !sparseHierarchy.sortedRouteIndexBuffer
+      || !sparseHierarchy.sourceMembershipOffsetBuffer
+      || !sparseHierarchy.evidenceBuffer) {
+      throw new TypeError('Schroeder two-level mechanics requires retained sparse hierarchy buffers');
+    }
+  }
   const baseDx = Math.max(1e-9, finiteNumber(baseGridSpacingM, 0));
   const fineDx = baseDx * (2 ** resolvedFineLevel);
   const coarseDx = fineDx * 2;
@@ -905,13 +1393,16 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     mlsMpmParticleUpload,
     schroederLevelAssignment: levelAssignment,
     schroederSelectedLevel: resolvedFineLevel,
+    schroederSparseHierarchy: sparseHierarchy,
     gridSpacingM: fineDx,
     boxDimsM,
     dt: dtFine,
     internalPressureScale,
     retainGridBuffer: true,
-    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+    commandEncoder: encoder
   });
+  authoritySequenceStageList.push('fine-sparse-grid-view-build', 'fine-compact-p2g');
   const coarseProjection = await p2gRunner({
     device,
     sphParticleState,
@@ -920,13 +1411,16 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     mlsMpmParticleUpload,
     schroederLevelAssignment: levelAssignment,
     schroederSelectedLevel: coarseLevel,
+    schroederSparseHierarchy: sparseHierarchy,
     gridSpacingM: coarseDx,
     boxDimsM,
     dt: dtSeconds,
     internalPressureScale,
     retainGridBuffer: true,
-    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+    commandEncoder: encoder
   });
+  authoritySequenceStageList.push('coarse-sparse-grid-view-build', 'coarse-compact-p2g');
   const fineSpec = gridSpecFactory({ boxDimsM, gridSpacingM: fineDx });
   const coarseSpec = gridSpecFactory({ boxDimsM, gridSpacingM: coarseDx });
   const couplingPlan = createSchroederCrossLevelGridCouplingPlan({
@@ -940,7 +1434,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
 
   // Snapshot the combined pre-update coarse momentum grid for the
   // delta-form prolongation.
-  const coarseGridByteLength = coarseSpec.gridNodeCount
+  const coarseGridByteLength = coarseProjection.gridNodeCount
     * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const coarsePreGridBuffer = device.createBuffer({
     label: 'ulg-schroeder-two-level-coarse-pre-update',
@@ -948,23 +1442,24 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
   });
 
-  await runSchroederCrossLevelGridRestrictionWebGpu({
+  const crossLevelRestriction = await runSchroederCrossLevelGridRestrictionWebGpu({
     device,
     plan: couplingPlan,
     fineGridBuffer: fineProjection.gridBuffer,
-    coarseGridBuffer: coarseProjection.gridBuffer
+    fineSparseGrid: fineProjection.schroederSparseGrid,
+    coarseGridBuffer: coarseProjection.gridBuffer,
+    coarseSparseGrid: coarseProjection.schroederSparseGrid,
+    commandEncoder: encoder
   });
-  {
-    const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(
-      coarseProjection.gridBuffer,
-      0,
-      coarsePreGridBuffer,
-      0,
-      Math.max(16, coarseGridByteLength)
-    );
-    device.queue.submit([encoder.finish()]);
-  }
+  authoritySequenceStageList.push('cross-level-grid-restriction');
+  encoder.copyBufferToBuffer(
+    coarseProjection.gridBuffer,
+    0,
+    coarsePreGridBuffer,
+    0,
+    Math.max(16, coarseGridByteLength)
+  );
+  authoritySequenceStageList.push('coarse-pre-update-grid-copy');
 
   const coarseGridUpdate = await gridUpdateRunner({
     device,
@@ -974,8 +1469,10 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     gravityMPerS2,
     boxDimsM,
     retainUpdatedGridBuffer: true,
-    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+    commandEncoder: encoder
   });
+  authoritySequenceStageList.push('coarse-compact-grid-update');
 
   // Shared thermo buffer for chained passes.
   let ownsThermoBuffer = false;
@@ -998,6 +1495,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   // copy-through preserves coarse particles throughout.
   const intermediateBuffers = [];
   const fineGridUpdates = [];
+  const fineProjections = [fineProjection];
+  const fineG2pPasses = [];
+  const crossLevelTransfers = [];
   let currentSphUpload = sphParticleUpload;
   let currentMlsUpload = mlsMpmParticleUpload;
   let lastFineG2p = null;
@@ -1012,13 +1512,22 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         mlsMpmParticleUpload: currentMlsUpload,
         schroederLevelAssignment: levelAssignment,
         schroederSelectedLevel: resolvedFineLevel,
+        schroederSparseHierarchy: sparseHierarchy,
         gridSpacingM: fineDx,
         boxDimsM,
         dt: dtFine,
         internalPressureScale,
         retainGridBuffer: true,
-        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+        commandEncoder: encoder
       });
+    if (substep > 0) {
+      fineProjections.push(substepProjection);
+      authoritySequenceStageList.push(
+        `fine-sparse-grid-view-rebuild-${substep}`,
+        `fine-compact-p2g-${substep}`
+      );
+    }
     if (substep > 0) {
       intermediateBuffers.push(() => substepProjection.destroyGridBuffer?.());
     }
@@ -1030,10 +1539,12 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       gravityMPerS2,
       boxDimsM,
       retainUpdatedGridBuffer: true,
-      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+      commandEncoder: encoder
     });
+    authoritySequenceStageList.push(`fine-compact-grid-update-${substep}`);
     fineGridUpdates.push(substepGridUpdate);
-    await runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu({
+    const crossLevelTransfer = await runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu({
       device,
       fineGridDims: fineSpec.gridDims,
       coarseGridDims: coarseSpec.gridDims,
@@ -1054,8 +1565,13 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       ],
       coarsePreGridBuffer,
       coarsePostGridBuffer: coarseGridUpdate.updatedGridBuffer,
-      fineGridBuffer: substepGridUpdate.updatedGridBuffer
+      coarseSparseGrid: coarseProjection.schroederSparseGrid,
+      fineGridBuffer: substepGridUpdate.updatedGridBuffer,
+      fineSparseGrid: substepProjection.schroederSparseGrid,
+      commandEncoder: encoder
     });
+    crossLevelTransfers.push(crossLevelTransfer);
+    authoritySequenceStageList.push(`cross-level-velocity-delta-transfer-${substep}`);
     const substepG2p = await g2pRunner({
       device,
       sphParticleState,
@@ -1070,8 +1586,11 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       schroederLevelAssignment: levelAssignment,
       schroederSelectedLevel: resolvedFineLevel,
       retainOutputParticleBuffers: true,
-      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+      commandEncoder: encoder
     });
+    fineG2pPasses.push(substepG2p);
+    authoritySequenceStageList.push(`fine-compact-g2p-${substep}`);
     if (lastFineG2p) {
       const previous = lastFineG2p;
       intermediateBuffers.push(() => {
@@ -1108,17 +1627,25 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     schroederLevelAssignment: levelAssignment,
     schroederSelectedLevel: coarseLevel,
     retainOutputParticleBuffers: true,
-    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+    commandEncoder: encoder
   });
+  authoritySequenceStageList.push('coarse-compact-g2p');
 
-  const conservation = conservationSummaryReadback
-    ? await runSchroederCrossLevelGridConservationSummaryWebGpu({
-      device,
-      plan: couplingPlan,
-      fineGridBuffer: fineProjection.gridBuffer,
-      coarseGridBuffer: coarseProjection.gridBuffer
-    })
-    : null;
+  const conservationEvidence = await runSchroederCrossLevelGridConservationSummaryWebGpu({
+    device,
+    plan: couplingPlan,
+    fineGridBuffer: fineProjection.gridBuffer,
+    fineSparseGrid: fineProjection.schroederSparseGrid,
+    coarseGridBuffer: coarseProjection.gridBuffer,
+    coarseSparseGrid: coarseProjection.schroederSparseGrid,
+    readbackMode: conservationSummaryReadback
+      ? SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE
+      : SCHROEDER_NO_FULL_READBACK_MODE,
+    retainSummaryBuffer: true,
+    commandEncoder: encoder
+  });
+  authoritySequenceStageList.push('cross-level-retained-conservation-evidence');
 
   // Optional compact particle summary (fixed-size readback, allowed on the
   // hot path): displacement/speed of the coupled step measured against the
@@ -1126,24 +1653,41 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   // banner consumes when the two-level step is the state authority. It must
   // run before the deferred cleanup below queues destruction of the
   // coarse-grid and G2P buffers it binds.
-  const compactSummary = compactSummaryReadback
-    ? await runMlsMpmResidentSummaryWebGpu({
-      device,
-      sphParticleState,
-      mlsMpmParticleState,
-      sphParticleUpload,
-      mlsMpmParticleUpload,
-      gridUpdate: coarseGridUpdate,
-      g2pReconstruction: coarseG2p,
-      summaryScope: MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL,
-      readCompactSummary: true
-    })
-    : null;
+  const compactSummary = null;
+
+  let authorityQueueCompletionStatus = callerOwnsEncoder
+    ? 'encoded-awaiting-caller-submit'
+    : 'queue-submitted';
+  let authorityQueueCompletionMethod = callerOwnsEncoder
+    ? 'caller-owned-command-encoder'
+    : 'queue.submit';
+  let authorityQueueFenceCompleted = false;
+  if (!callerOwnsEncoder) {
+    device.queue.submit([encoder.finish()]);
+    if (typeof device.queue?.onSubmittedWorkDone === 'function') {
+      await device.queue.onSubmittedWorkDone();
+      authorityQueueCompletionStatus = 'queue-work-completed';
+      authorityQueueCompletionMethod = 'queue.onSubmittedWorkDone';
+      authorityQueueFenceCompleted = true;
+    }
+  }
 
   // Intermediates are released behind the queue; the caller owns the final
   // G2P outputs (and destroys pass-1 outputs once consumed).
   const transferThermoOwnership = retainOutputParticleBuffers && ownsThermoBuffer;
+  let authoritySequenceCleaned = false;
   const cleanup = () => {
+    if (authoritySequenceCleaned) return;
+    authoritySequenceCleaned = true;
+    crossLevelRestriction.cleanupSubmittedWork?.();
+    for (const projection of fineProjections) projection.cleanupSubmittedWork?.();
+    coarseProjection.cleanupSubmittedWork?.();
+    for (const update of fineGridUpdates) update.cleanupSubmittedWork?.();
+    coarseGridUpdate.cleanupSubmittedWork?.();
+    for (const transfer of crossLevelTransfers) transfer.cleanupSubmittedWork?.();
+    for (const g2p of fineG2pPasses) g2p.cleanupSubmittedWork?.();
+    coarseG2p.cleanupSubmittedWork?.();
+    conservationEvidence.cleanupSubmittedWork?.();
     fineProjection.destroyGridBuffer?.();
     coarseProjection.destroyGridBuffer?.();
     coarsePreGridBuffer.destroy?.();
@@ -1154,7 +1698,6 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     fineG2p.mechanicsBuffer?.destroy?.();
     if (ownsThermoBuffer && !transferThermoOwnership) thermoBuffer?.destroy?.();
   };
-  deferSubmittedWorkCleanup(device, cleanup);
 
   const result = {
     schema: ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_EXECUTION_SCHEMA,
@@ -1181,13 +1724,82 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       : SCHROEDER_NO_FULL_READBACK_MODE,
     fullParticleReadbackPerformed: false,
     normalHotLoopReadbackFree: !conservationSummaryReadback,
-    conservation: conservation?.conservation ?? null,
+    sparseHierarchyStatus: sparseHierarchy?.status
+      ?? 'legacy-two-level-call-without-sparse-hierarchy-descriptor',
+    sparseHierarchyCompaction: sparseHierarchy?.compaction ?? 'not-provided',
+    sparseHierarchyRetained: Boolean(sparseHierarchy?.compactNodeBuffer),
+    sparseHierarchyEvidenceReadbackPerformed: false,
+    sparseHierarchyThirdLevelHold: sparseHierarchy?.thirdLevelHold === true,
+    conservation: conservationEvidence.conservation ?? null,
+    conservationEvidenceStatus: conservationEvidence.status,
+    conservationEvidenceBuffer: conservationEvidence.summaryBuffer ?? null,
+    conservationEvidenceBufferByteLength: conservationEvidence.summaryBufferByteLength,
+    conservationEvidenceReadbackPerformed:
+      conservationEvidence.compactSummaryReadbackPerformed === true,
     compactSummary,
+    authoritySequence: {
+      schema: 'peercompute.ulg.schroeder-two-level-authority-sequence.v0',
+      status: callerOwnsEncoder
+        ? 'schroeder-two-level-authority-sequence-encoded-awaiting-caller-submit'
+        : (authorityQueueFenceCompleted
+            ? 'schroeder-two-level-authority-sequence-completed'
+            : 'schroeder-two-level-authority-sequence-submitted'),
+      commandEncoderOwnership: callerOwnsEncoder ? 'caller' : 'sequence',
+      sharedCommandEncoder: true,
+      commandSubmissionCount: callerOwnsEncoder ? 0 : 1,
+      stageList: [...authoritySequenceStageList],
+      stageCount: authoritySequenceStageList.length,
+      sparseHierarchyStatus: sparseHierarchy?.status ?? null,
+      sparseHierarchyCompaction: sparseHierarchy?.compaction ?? null,
+      sparseHierarchyThirdLevelHold: sparseHierarchy?.thirdLevelHold === true,
+      sparseFineGridStatus: fineProjection.schroederSparseGrid?.status ?? null,
+      sparseCoarseGridStatus: coarseProjection.schroederSparseGrid?.status ?? null,
+      compactP2gStatus: 'fine-and-coarse-compact-p2g-encoded',
+      compactGridUpdateStatus: 'fine-and-coarse-compact-grid-update-encoded',
+      compactG2pStatus: 'fine-and-coarse-compact-g2p-encoded',
+      crossLevelTransferStatus:
+        'restriction-and-velocity-delta-prolongation-encoded',
+      conservationEvidenceStatus: conservationEvidence.status,
+      conservationEvidenceRetained: Boolean(conservationEvidence.summaryBuffer),
+      conservationEvidenceBufferByteLength:
+        conservationEvidence.summaryBufferByteLength,
+      normalPathMapCount: 0,
+      normalPathReadbackBytes: 0,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      queueCompletionStatus: authorityQueueCompletionStatus,
+      queueCompletionMethod: authorityQueueCompletionMethod,
+      queueFenceCompleted: authorityQueueFenceCompleted
+    },
     conservativeTransferStatus:
       'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation',
     scientificValidation: false,
     fullPhysicsValidation: false
   };
+  if (conservationEvidence.summaryBuffer) {
+    result.destroyConservationEvidenceBuffer = () => conservationEvidence.destroySummaryBuffer?.();
+  }
+  result.markAuthoritySequenceSubmitted = ({
+    queueCompletionStatus = 'queue-work-completed',
+    queueCompletionMethod = 'queue.onSubmittedWorkDone'
+  } = {}) => {
+    result.authoritySequence.status = queueCompletionStatus === 'queue-work-completed'
+      ? 'schroeder-two-level-authority-sequence-completed'
+      : 'schroeder-two-level-authority-sequence-submitted';
+    result.authoritySequence.commandSubmissionCount = 1;
+    result.authoritySequence.queueCompletionStatus = queueCompletionStatus;
+    result.authoritySequence.queueCompletionMethod = queueCompletionMethod;
+    result.authoritySequence.queueFenceCompleted =
+      queueCompletionStatus === 'queue-work-completed';
+    return result.authoritySequence;
+  };
+  if (callerOwnsEncoder) {
+    result.cleanupSubmittedWork = cleanup;
+  } else if (authorityQueueFenceCompleted) {
+    cleanup();
+  } else {
+    deferSubmittedWorkCleanup(device, cleanup);
+  }
   if (retainOutputParticleBuffers) {
     result.stateBuffer = coarseG2p.stateBuffer;
     result.mechanicsBuffer = coarseG2p.mechanicsBuffer;

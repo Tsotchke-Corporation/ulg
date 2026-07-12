@@ -2,6 +2,60 @@
 
 Date: 2026-06-11 AKDT
 
+## Superseding WebGPU Surface Directive - 2026-07-11
+
+The production WebGPU surface renderer no longer uses alpha transparency or
+weighted OIT. All admitted surface fragments output alpha `1`, use an
+unblended target, and write depth. Dielectric transmission/refraction is an
+opaque PBR light-transport term over a scene-color copy; it is not framebuffer
+transparency.
+
+Refraction is admitted only when the optical closure supplies provenance-
+bearing quantum-derived spectral `n(lambda),k(lambda)`. The existing fixed
+water/ice/vapor IOR values are historical reduced display inputs and must not
+authorize ray bending. Missing or out-of-domain response fails closed to
+opaque non-refractive PBR with an explicit blocker.
+
+For gas and steam this changes presentation, not the microphysics law:
+
+- optically negligible pure vapor produces no visible surface draw;
+- a condensed-droplet cloud remains visible only from derived extinction and
+  scattering;
+- until a resident participating-media transport/composite pass exists, a
+  visible cloud may use an alpha-one scattering surface approximation or be
+  withheld, but it may not use a translucent surface mesh;
+- future volume transport must composite physical radiance/transmittance into
+  the final opaque frame without restoring material alpha/OIT.
+
+The older transparency/opacity language below records the historical design
+and implementation. Where it conflicts with this section, this section is
+authoritative.
+
+### Current implementation and open validation
+
+The native path now enforces the directive. It requires an exact optical-state
+match, nonblocked ready status, provenance, and distinct blue/green/red
+spectral samples; display fallback rows cannot authorize ray bending. A
+front-culled `depth32float` rear-surface pass runs in the same encoder and
+supplies geometric path length for spectral refraction and Beer-Lambert
+attenuation. Missing/open/invalid rear geometry fails closed. The stable-camera
+cache avoids repeat depth draws without adding a queue submission.
+
+The molecular refractive producer is deliberately qualified: it is a reduced,
+scientifically unvalidated STO-3G RHF independent-particle occupied/virtual
+dipole response with phase density applied through a Lorentz-Lorenz local-field
+law. It is not coupled-perturbed TDHF, periodic/condensed-phase dielectric
+response, anisotropic microstructure, or scientific validation. Its zero-loss
+refractive samples do not replace the separate absorption/scattering closures.
+
+Accepted presentation artifacts are
+`/tmp/ulg-background-native-after2.png` and
+`/tmp/ulg-thickness-refraction-live2.png`. Full acceptance remains open for
+GPU manufactured slab thickness and translation invariance, the `n=1` limit,
+monotonic `k` attenuation, spectral-dispersion ordering, rear-depth fail-close,
+projection/unprojection residuals, resize/fenced retirement, and the fresh
+close-spaced standard named/random visual matrix.
+
 ## Purpose
 
 Make water, ice, water vapor, and visible steam render from phase-resolved
@@ -119,6 +173,10 @@ For H2O:
   - cache hit/miss/stale counts.
 
 ## Acceptance Tests
+
+The tests below are phase/microphysics requirements in addition to the current
+opaque native PBR/thickness gate in `plan/tests.md`; they do not authorize a
+return to material alpha or weighted OIT.
 
 - Liquid H2O and H2O gas produce distinct optical cache keys and distinct optical
   GPU records.

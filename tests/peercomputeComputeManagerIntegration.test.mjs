@@ -2543,10 +2543,7 @@ test('ULG resident pass-DAG commit delta is admitted into real PeerCompute State
   });
   delete task.module;
   task.fn = (data) => {
-    const retainedBufferRefs = [
-      ...data.gpuFenceRequirement.retainedBufferRefs,
-      'state-admission-output-buffer'
-    ];
+    const retainedBufferRefs = [...data.gpuFenceRequirement.retainedBufferRefs];
     const gpuFence = {
       schema: 'peercompute.compute.gpu-fence-report.v0',
       status: 'queue-work-completed',
@@ -2592,6 +2589,7 @@ test('ULG resident pass-DAG commit delta is admitted into real PeerCompute State
           gpuFence,
           retainedBufferRefs,
           gpuResidentLaneRequirement: data.gpuResidentLane,
+          residentSequenceLaneContract: data.residentSequenceLaneContract,
           finalStep: {
             schema: 'peercompute.ulg.mls-mpm-resident-step-sequence-summary.v0',
             stepIndex: data.stepCount - 1,
@@ -2599,16 +2597,47 @@ test('ULG resident pass-DAG commit delta is admitted into real PeerCompute State
             status: 'resident-step-webgpu-executed',
             readbackMode: 'no-full-readback',
             normalHotLoopReadbackFree: true,
-            gpuAuthoritativeState: true,
+            gpuResidentAuthoritativeContinuationCandidate: true,
+            gpuAuthorityAdmissionRequired: true,
+            gpuAuthorityAdmissionSatisfied: false,
+            gpuAuthorityStatus:
+              'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+            gpuAuthorityCandidateBlockers: [],
+            gpuAuthoritativeState: false,
             renderStateReadbackAvailable: false,
             diagnostics: {
               particleCount: 1,
               gpuResidentLaneFenceSatisfied: false
             }
           },
-          stepSummaries: [],
+          stepSummaries: Array.from({ length: data.stepCount }, (_, stepIndex) => ({
+            schema: 'peercompute.ulg.mls-mpm-resident-step-sequence-summary.v0',
+            stepIndex,
+            backend: 'webgpu',
+            status: 'resident-step-webgpu-executed',
+            readbackMode: 'no-full-readback',
+            normalHotLoopReadbackFree: true,
+            gpuResidentAuthoritativeContinuationCandidate: true,
+            gpuAuthorityAdmissionRequired: true,
+            gpuAuthorityAdmissionSatisfied: false,
+            gpuAuthorityStatus:
+              'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+            gpuAuthorityCandidateBlockers: [],
+            gpuAuthoritativeState: false,
+            renderStateReadbackAvailable: false,
+            diagnostics: {
+              particleCount: 1,
+              gpuResidentLaneFenceSatisfied: false
+            }
+          })),
           normalHotLoopReadbackFree: true,
-          gpuAuthoritativeState: true,
+          gpuResidentAuthoritativeContinuationCandidate: true,
+          gpuAuthorityAdmissionRequired: true,
+          gpuAuthorityAdmissionSatisfied: false,
+          gpuAuthorityStatus:
+            'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+          gpuAuthorityCandidateBlockers: [],
+          gpuAuthoritativeState: false,
           scientificValidation: false,
           sphValidation: false,
           phaseChangeValidation: false,
@@ -2645,13 +2674,17 @@ test('ULG resident pass-DAG commit delta is admitted into real PeerCompute State
   assert.deepEqual(entry.payload.retainedBufferRefs, [
     'sph-state-buffer',
     'sph-thermo-buffer',
-    'mls-mpm-mechanics-buffer',
-    'state-admission-output-buffer'
+    'mls-mpm-mechanics-buffer'
   ]);
   assert.equal(entry.payload.normalHotLoopReadbackFree, true);
+  assert.equal(result.commitDelta.payload.gpuAuthoritativeState, false);
+  assert.equal(entry.payload.gpuResidentAuthoritativeContinuationCandidate, true);
+  assert.equal(entry.payload.gpuAuthorityAdmissionSatisfied, true);
   assert.equal(entry.payload.gpuAuthoritativeState, true);
   assert.equal(readAdmission.accepted, true);
   assert.equal(readAdmission.status, 'committed');
+  assert.equal(readAdmission.gpuAuthorityAdmissionSatisfied, true);
+  assert.equal(readAdmission.gpuAuthoritativeState, true);
   assert.equal(readAdmission.warmEntryFound, true);
   assert.equal(readAdmission.warmEntry.payload.stateKey, 'ulg:test:peercompute-resident-state-admitted');
 });
@@ -2824,8 +2857,7 @@ test('ULG resident pass-DAG can commit after redundant NodeKernel remote placeme
   assert.deepEqual(entry.payload.retainedBufferRefs, [
     'sph-state-buffer',
     'sph-thermo-buffer',
-    'mls-mpm-mechanics-buffer',
-    'remote-placement-output-buffer'
+    'mls-mpm-mechanics-buffer'
   ]);
   const readAdmission = readResidentStepsCommittedWarmDelta(stateManager, {
     delta: {
@@ -2833,7 +2865,27 @@ test('ULG resident pass-DAG can commit after redundant NodeKernel remote placeme
       taskId: task.id,
       scope: 'ulg-sph-resident-pass-dag',
       version: entry.version,
-      payload: entry.payload
+      payload: {
+        ...entry.payload,
+        gpuAuthorityAdmissionSatisfied: false,
+        gpuAuthorityStatus:
+          'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+        gpuAuthoritativeState: false,
+        finalStep: {
+          ...entry.payload.finalStep,
+          gpuAuthorityAdmissionSatisfied: false,
+          gpuAuthorityStatus:
+            'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+          gpuAuthoritativeState: false
+        },
+        stepSummaries: (entry.payload.stepSummaries || []).map((summary) => ({
+          ...summary,
+          gpuAuthorityAdmissionSatisfied: false,
+          gpuAuthorityStatus:
+            'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+          gpuAuthoritativeState: false
+        }))
+      }
     },
     taskId: task.id,
     scope: 'ulg-sph-resident-pass-dag'
@@ -2853,7 +2905,27 @@ test('ULG resident pass-DAG can commit after redundant NodeKernel remote placeme
       taskId: task.id,
       scope: 'ulg-sph-resident-pass-dag',
       version: replicaEntry.version,
-      payload: replicaEntry.payload
+      payload: {
+        ...replicaEntry.payload,
+        gpuAuthorityAdmissionSatisfied: false,
+        gpuAuthorityStatus:
+          'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+        gpuAuthoritativeState: false,
+        finalStep: {
+          ...replicaEntry.payload.finalStep,
+          gpuAuthorityAdmissionSatisfied: false,
+          gpuAuthorityStatus:
+            'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+          gpuAuthoritativeState: false
+        },
+        stepSummaries: (replicaEntry.payload.stepSummaries || []).map((summary) => ({
+          ...summary,
+          gpuAuthorityAdmissionSatisfied: false,
+          gpuAuthorityStatus:
+            'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+          gpuAuthoritativeState: false
+        }))
+      }
     },
     taskId: task.id,
     scope: 'ulg-sph-resident-pass-dag'
@@ -2916,7 +2988,7 @@ test('PeerComputeProvider transports ULG resident StateManager warm deltas betwe
       },
       retainedBufferRefs: ['sph-state-buffer', 'mls-mpm-mechanics-buffer'],
       normalHotLoopReadbackFree: true,
-      gpuAuthoritativeState: true
+      gpuAuthoritativeState: false
     }
   };
 
@@ -3026,7 +3098,7 @@ test('ULG resident StateManager bridge rejects deltas without satisfied payload 
     const payloadFence = {
       ...gpuFence,
       fenceSatisfied: false,
-      status: 'payload-fence-unsatisfied'
+      status: 'queue-work-completed'
     };
     return {
       schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
@@ -3051,7 +3123,7 @@ test('ULG resident StateManager bridge rejects deltas without satisfied payload 
           retainedBufferRefs: [...payloadFence.retainedBufferRefs],
           gpuResidentLaneRequirement: data.gpuResidentLane,
           normalHotLoopReadbackFree: true,
-          gpuAuthoritativeState: true
+          gpuAuthoritativeState: false
         }
       }
     };

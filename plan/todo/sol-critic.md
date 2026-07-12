@@ -1,9 +1,133 @@
 # SOL Critique: Schroeder Simulation And Coherent Solids
 
-Date: 2026-07-10 AKDT
+Date: 2026-07-11 AKDT
 Status: active architecture correction and implementation todo
-Branch reviewed: `gpu-resident-physics-refactor` at `23f4d9f` plus the current
-native-surface lifecycle worktree
+Branch reviewed: `gpu-resident-physics-refactor` at `b4d1a38` plus the current
+GPU-resident physics refactor worktree
+
+## 2026-07-11 Live Refactor Re-Audit
+
+The branch has moved beyond the pre-refactor findings below, but it is not yet
+an accepted endpoint. Keep the distinction between implemented algorithms,
+production integration, and timestamp-proven performance:
+
+### Surface and optical implementation checkpoint
+
+The evidence reset found real flat-shading, alpha/OIT, fixed-IOR authority,
+and background regressions. The shared implementation now corrects those
+paths without a material or scenario branch:
+
+- native extraction owns one packed octahedral normal u32 per emitted vertex
+  for the exact marching-cubes generation, about 5.6 MB at 1,398,099 vertices,
+  and adds zero queue submissions;
+- every native surface and proxy draw is alpha-one, unblended, and depth
+  writing; the old transparency/OIT route no longer owns dielectric display;
+- the selected background is uploaded and drawn by the native opaque pass
+  before surfaces, so it remains visible and is present in the scene-color
+  copy sampled by refraction;
+- quantum spectral admission requires an exact state match, nonblocked ready
+  status, provenance, and distinct blue/green/red samples. Display fallback
+  rows retain opaque PBR appearance but cannot bend rays;
+- a front-culled `depth32float` backface pass in the same command encoder
+  supplies geometric thickness. The shader reconstructs rear world position,
+  traces separate spectral rays, and applies Beer-Lambert attenuation from the
+  resulting path lengths. Invalid rear geometry disables transmission;
+- stable-camera depth is cached and the presentation loop admits at most two
+  in-flight submissions rather than waiting on the whole queue every frame.
+
+The accepted 960x640 checkpoint is
+`/tmp/ulg-thickness-refraction-live2.png`: 60.296 FPS, one refractive draw,
+zero transparent draws, 2,457,600 backface-depth bytes, peak two in-flight
+submissions, and no browser/WebGPU issue. The restored background is separately
+visible in `/tmp/ulg-background-native-after2.png`.
+
+This is an implementation checkpoint, not full optical acceptance. The
+current molecular response is a reduced, scientifically unvalidated STO-3G
+RHF independent-particle occupied/virtual dipole response followed by a
+Lorentz-Lorenz local-field conversion. It is not coupled-perturbed TDHF,
+periodic dielectric response, condensed-phase validation, or a complete
+first-principles optical solution. `SURF-4`, `OPTICS-0`, and `OPTICS-1` remain
+open until GPU manufactured thickness/translation/index/absorption/dispersion
+metamorphic gates and a fresh full native visual matrix pass.
+
+- `FIELD-0` is algorithmically complete and accepted. Production native
+  extraction consumes a wildcard-correct source-local sparse atlas with exact
+  byte admission and GPU overflow fail-close. Its remaining up-to-eight
+  predecessor/direct activation atomics are measured optimization debt, not a
+  correctness blocker.
+- `NEIGH-0` now has a persistent per-device pooled lane, exact arena accounting,
+  actual ComputeManager lease identity, external chart/level/support rows, and
+  packed GPU guards. Integration still generates the five-word structure up
+  to 13 times per four-step batch, including a post-separation rebuild when
+  separation is disabled. Each build performs 40 stable radix passes.
+- `LANE-0` remains open until the production scene stops mapping compact
+  interface candidates, rebuilding equivalent element/force rows on the host,
+  and uploading them. The accepted route retains candidate rows, source keys,
+  metadata, force rows, and compact grid accumulators through one
+  ComputeManager-owned encoder and publishes descriptor-only admitted deltas.
+- `SS-0` has exact five-word unique-node compaction and a byte-bounded sparse
+  hash view. It remains open until capacity is proportionate to admitted
+  activity, tile-cell expansion is measured, compact P2G/update/G2P and
+  cross-level transfer share one caller-owned submission, and conservation is
+  decided by a retained GPU evidence record rather than a host summary.
+- `SOL-0`/`SOL-1` now have real schemas, objective `SE(3)` kernels,
+  contact/member adapters, exact ComputeManager-result and lane authority,
+  StateManager admission, persistent pipelines/two-slot arenas, global
+  fail-close, bounded publication retirement, and native indirect shape
+  rendering. The live 120-step close-spaced production sequence passes. Full
+  slice acceptance remains open for contact-proxy permutation,
+  workgroup/dispatch-partition variation, and admitted SS-level/chart
+  transition continuity.
+
+### Current measured performance and priority order
+
+The renderer regression was a whole-queue pacing fence: refractive H2O and
+opaque Fe both ran near 29.5 FPS while browser RAF stayed near 60 Hz. The
+bounded two-in-flight policy now measures about 60 FPS. Sparse marching-cubes
+cache hits are 1.4-1.7 ms. Remaining warm reactive physics is still about
+193.8-206.6 ms per four substeps, or 48.45-51.65 ms/substep, so it must be
+treated separately from presentation.
+
+The first P0 traffic repair is complete. A 300k reaction substep previously
+created and uploaded 192,000,000 zero bytes for source, proposal, output,
+state, thermo, and mechanics rows. Ordered GPU shaders now initialize live
+rows, only compact counts/metadata use encoder clears, and telemetry reports
+`hostZeroInitializationByteLength=0`.
+
+The required performance order is now:
+
+1. **P0 product allocation and placement.** Capacity is
+   `particleCount * productTerms`; 300k particles with two terms reserve 600k
+   event rows (76.8 MB). Carrier selection scans all particles for each event
+   and placement is one workgroup with one active thread, giving a worst-case
+   180 billion comparisons/substep. In the small timestamp profile placement
+   was 24.70% and carrier search 6.03% of GPU time. Replace both with parallel
+   indexed selection, scan/free-list admission, and bounded work.
+2. **P0 neighborhood generation.** One five-word stable sort is 40 radix
+   passes; the current four-step batch can build it 13 times. A standalone
+   300k build measured about 40.9 ms, so the redundant schedule can project to
+   roughly 532 ms/batch before consumer work. Reuse one valid generation and
+   skip disabled-stage rebuilds. Active implementation does not count as done
+   until timestamps and identity/epoch guards pass.
+3. **P1 exact live-prefix work.** Product arena exact count is currently null,
+   so full planned prefixes are sorted/processed and retained rows can grow
+   1,368 -> 2,736 -> 4,104. Use compact GPU count plus indirect dispatch with
+   overflow fail-close.
+4. **P1 thermal indexing.** Thermal consumed 36.94% of the isolated timestamped
+   sidecar time and repeatedly scans material, phase, graph, and emissivity
+   rows. Build retained indexed lookup/cache structures keyed by admitted
+   closure generations.
+5. **P1 persistent workspaces.** The small four-step profile created 38
+   transient buffers totaling about 1.08 MB; production scaling is worse.
+   Retain bounded per-device/per-lane ping-pong arenas and report only genuine
+   topology/capacity replacements.
+6. Keep pressure scatter, sparse hierarchy sizing, and coherent-solid
+   topology-static reductions in the timestamp ledger, but do not displace the
+   measured P0s above without evidence.
+
+The third Schroeder level remains held. None of these performance findings
+justifies a CPU mirror, full-state readback, named-scenario shortcut, reduced
+particle count, or scene-local scheduler.
 
 ## 2026-07-10 Native-Surface Refactor Checkpoint
 
@@ -975,10 +1099,18 @@ solid and validation correction; implementation history should remain in
 - **PROF-0 - complete:** same-device GPU timestamps plus separate
   submit/map/fence/allocation/generation/pixel-liveness evidence; unsupported
   profiling is explicitly inconclusive.
-- **FIELD-0:** source-local/tiled sparse render-field rewrite and corrected
-  32-byte/cell peak budget after SURF-1 is green.
-- **LANE-0:** retained interface candidates consumed by a GPU pressure/force
-  stage on the ComputeManager/GPUHub lane.
+- **FIELD-0 - complete:** wildcard-correct source-local sparse atlas, exact
+  direct/shared primitive peak admission, GPU overflow fail-close, and native
+  indirect extraction without a normal-path map.
+- **NEIGH-0:** persistent packed multiresolution neighborhood shared across all
+  law consumers, with absolute mutation epochs and timestamped rebuild policy.
+- **LANE-0:** retained interface candidates consumed by a GPU pressure/scatter
+  stage and compact grid update on one ComputeManager/GPUHub encoder.
+- **SS-0:** activity-sized hash-backed compact mechanics, one submission, and
+  retained conservation evidence; keep the third level rejected.
+- **SOL-0/SOL-1:** production authority/lifecycle/direct-render remediation is
+  complete; add proxy-order, workgroup/dispatch-partition, and admitted
+  SS-level/chart-transition metamorphic gates before checking full acceptance.
 - **MATRIX-0:** publish separate physics-evidence and presentation statuses for
   every named/random checkpoint, including an authoritative time-zero record.
 

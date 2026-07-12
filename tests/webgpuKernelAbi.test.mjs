@@ -52,11 +52,11 @@ function extractFunctionBody(source, functionName) {
   assert.fail(`unterminated ${functionName} body`);
 }
 
-function paramsArrayByteLength(source, functionName) {
+function paramsArrayByteLength(source, functionName, constantSource = source) {
   const body = extractFunctionBody(source, functionName);
   const direct = body.match(/new\s+ArrayBuffer\(\s*([^)]+?)\s*\)/);
   assert.ok(direct, `${functionName} must create or delegate to a fixed ArrayBuffer`);
-  return resolveNumericExpression(source, direct[1]);
+  return resolveNumericExpression(`${source}\n${constantSource}`, direct[1]);
 }
 
 function uniformBufferByteLength(source, label) {
@@ -72,8 +72,14 @@ function uniformBufferByteLength(source, label) {
 function writeUsesFactory(source, label, factoryName) {
   const labelIndex = source.indexOf(`label: '${label}'`);
   assert.notEqual(labelIndex, -1, `${label} label is missing`);
-  const writeIndex = source.indexOf(`device.queue.writeBuffer(paramsBuffer, 0, ${factoryName}(`, labelIndex);
-  assert.notEqual(writeIndex, -1, `${label} must be written with ${factoryName}()`);
+  const writePattern = new RegExp(
+    `device\\.queue\\.writeBuffer\\(\\s*paramsBuffer\\s*,\\s*[^,]+,\\s*${escapeRegExp(factoryName)}\\(`
+  );
+  assert.match(
+    source.slice(labelIndex),
+    writePattern,
+    `${label} must be written with ${factoryName}()`
+  );
 }
 
 function wgslScalarParamStructByteLengths(wgslSource, structName) {
@@ -120,7 +126,10 @@ const CONTRACTS = [
     label: 'ulg-sph-pressure-interface-force-params',
     factory: 'createPressureInterfaceParamsArray',
     wgslStruct: 'PressureInterfaceParams',
-    bytes: 32
+    // 32 -> 80: compact-candidate and resident-neighborhood guards.
+    // 80 -> 144: same-device gas-cell metadata/lookup identity, capacity,
+    // generation, source epoch, lane hash, and grid-dimension guards.
+    bytes: 144
   },
   {
     file: 'src/runtime/sph/sphG2pGpuKernel.js',
@@ -131,6 +140,9 @@ const CONTRACTS = [
   },
   {
     file: 'src/runtime/sph/sphThermalGpuKernel.js',
+    constantFile: 'src/runtime/sph/sphThermalWorkspaceGpu.js',
+    uniformConstant: 'SPH_THERMAL_PARAMS_BYTE_LENGTH',
+    workspaceWriter: 'resolvedThermalWorkspace.writeParamsSlot',
     label: 'ulg-sph-thermal-params',
     factory: 'createParamsArray',
     wgslStruct: 'ThermalParams',
@@ -138,10 +150,16 @@ const CONTRACTS = [
     // cell size) for binned pair conduction.
     // 96 -> 112: max_pair_support_m (+16B pad) so the neighbor scan covers
     // rest-volume contact radii of coarse low-density particles.
-    bytes: 112
+    // 112 -> 144: packed resident-neighborhood generation, lease, position
+    // epoch, source-count, consumer-mask, and fail-closed guard fields.
+    bytes: 144
   },
   {
     file: 'src/runtime/sph/sphReactionGpuKernel.js',
+    constantFile: 'src/runtime/sph/sphReactionCoreWorkspaceGpu.js',
+    uniformConstant: 'SPH_REACTION_MAIN_PARAMS_BYTE_LENGTH',
+    workspaceWriter: 'resolvedReactionCoreWorkspace.writeParamsSlot',
+    workspaceFactoryKey: 'main',
     label: 'ulg-sph-reaction-params',
     factory: 'createParamsArray',
     wgslStruct: 'ReactionParams',
@@ -233,8 +251,18 @@ test('SPH WebGPU params structs match JS packing and uniform buffer sizes', () =
   for (const contract of CONTRACTS) {
     const source = sourceCache.get(contract.file) ?? readRepoText(contract.file);
     sourceCache.set(contract.file, source);
-    const arrayBytes = paramsArrayByteLength(source, contract.arrayFactory ?? contract.factory);
-    const uniformBytes = uniformBufferByteLength(source, contract.label);
+    const constantSource = contract.constantFile
+      ? (sourceCache.get(contract.constantFile) ?? readRepoText(contract.constantFile))
+      : source;
+    if (contract.constantFile) sourceCache.set(contract.constantFile, constantSource);
+    const arrayBytes = paramsArrayByteLength(
+      source,
+      contract.arrayFactory ?? contract.factory,
+      constantSource
+    );
+    const uniformBytes = contract.uniformConstant
+      ? resolveNumericExpression(constantSource, contract.uniformConstant)
+      : uniformBufferByteLength(source, contract.label);
     const wgslBytes = wgslScalarParamStructByteLengths(wgslSource, contract.wgslStruct);
 
     assert.equal(arrayBytes, contract.bytes, `${contract.factory} ArrayBuffer byte length drifted`);
@@ -244,7 +272,21 @@ test('SPH WebGPU params structs match JS packing and uniform buffer sizes', () =
       [contract.bytes],
       `${contract.wgslStruct} WGSL byte length drifted`
     );
-    writeUsesFactory(source, contract.label, contract.factory);
+    if (contract.workspaceWriter) {
+      const factoryPrefix = contract.workspaceFactoryKey
+        ? `[\\s\\S]*?${escapeRegExp(contract.workspaceFactoryKey)}\\s*:\\s*`
+        : '\\s*[^,]+,\\s*';
+      const workspaceWritePattern = new RegExp(
+        `${escapeRegExp(contract.workspaceWriter)}\\(${factoryPrefix}${escapeRegExp(contract.factory)}\\(`
+      );
+      assert.match(
+        source,
+        workspaceWritePattern,
+        `${contract.label} workspace must be written with ${contract.factory}()`
+      );
+    } else {
+      writeUsesFactory(source, contract.label, contract.factory);
+    }
   }
 });
 

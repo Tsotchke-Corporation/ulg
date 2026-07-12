@@ -524,6 +524,14 @@ struct ThermalParams {
   ambient_temperature_k: f32,
   _pad_b: f32,
   _pad_c: f32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_guard_enabled: u32,
+  _pad_d: u32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -535,14 +543,37 @@ struct ThermalParams {
 @group(0) @binding(6) var<storage, read_write> out_sph_state: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(8) var<uniform> params: ThermalParams;
-@group(0) @binding(9) var<storage, read> material_bank_warm_input_rows: array<vec4<f32>>;
-// Shared per-substep neighbor bins (built by the separation bin-fill pass):
-// counts prefix [0, cell_count) then entry slots. When bins_enabled == 0
-// (standalone/legacy paths) the kernel falls back to the exhaustive pair
-// scan and a tiny placeholder buffer is bound.
+// Per-particle closure properties are prepared once on the GPU before the
+// pair pass. Static material-bank warm inputs are consumed while compiling
+// the closure tables; the hot loop does not bind a zero-valued shadow input.
+@group(0) @binding(9) var<storage, read_write> thermal_particle_properties: array<vec4<f32>>;
+// Mode 2 is the authoritative packed resident-neighborhood CSR. Mode 1 keeps
+// the fixed-bin compatibility path; mode 0 is the diagnostic exhaustive scan.
 @group(0) @binding(10) var<storage, read> thermal_bins: array<u32>;
 
 const PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;
+const RESIDENT_NEIGHBORHOOD_HEADER_WORDS: u32 = 40u;
+const RESIDENT_NEIGHBORHOOD_THERMAL: u32 = 4u;
+const RESIDENT_NEIGHBORHOOD_RADIATION: u32 = 8u;
+
+fn resident_thermal_neighborhood_valid() -> bool {
+  if (params.resident_guard_enabled != 1u
+    || arrayLength(&thermal_bins) < RESIDENT_NEIGHBORHOOD_HEADER_WORDS) {
+    return false;
+  }
+  return thermal_bins[0] == 0u
+    && thermal_bins[1] == params.resident_generation
+    && thermal_bins[2] == params.resident_lease_token_low
+    && thermal_bins[3] == params.resident_lease_token_high
+    && thermal_bins[4] == params.resident_position_epoch
+    && thermal_bins[5] == params.resident_source_count
+    && thermal_bins[5] == params.particle_count
+    && thermal_bins[10] >= params.particle_count + 1u
+    && thermal_bins[21] >= 2u
+    && (thermal_bins[22] & params.resident_consumer_mask) == params.resident_consumer_mask
+    && thermal_bins[31] == 1u
+    && thermal_bins[33] == 0u;
+}
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
   return sph_state[index * 2u];
@@ -678,15 +709,6 @@ fn thermal_temperature_slope(material_id: f32, specific_internal_energy: f32) ->
   return temperature_slope_from_graph(u32(response0.z), specific_internal_energy);
 }
 
-fn material_bank_warm_input_anchor() -> f32 {
-  if (params.material_bank_warm_input_row_count == 0u) {
-    return 0.0;
-  }
-  // Non-authoritative warm-input presence probe. The value is intentionally
-  // zeroed so closure-derived thermal graphs remain the only thermal source.
-  return material_bank_warm_input_rows[0u].x * 0.0;
-}
-
 const STEFAN_BOLTZMANN_W_PER_M2_K4: f32 = 5.670374419e-8;
 // Pair radiation is truncated where the disc-to-disc view factor falls below
 // ~0.4% (d > 4*(r_i+r_j)); beyond that range the ambient term is the
@@ -752,6 +774,23 @@ fn particle_nominal_radius_m(mass_kg: f32, rest_density_kg_per_m3: f32) -> f32 {
     return 0.0;
   }
   return pow(0.238732414637843 * mass_kg / rest_density_kg_per_m3, 1.0 / 3.0);
+}
+
+@compute @workgroup_size(64)
+fn prepare_particle_thermal_properties(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  let pos_mass = state_pos_mass(particle_index);
+  let vel_u = state_vel_u(particle_index);
+  let row0 = thermo_row0(particle_index);
+  thermal_particle_properties[particle_index] = vec4<f32>(
+    thermal_temperature_slope(row0.x, vel_u.w),
+    thermal_emissivity(row0.x),
+    particle_nominal_radius_m(pos_mass.w, row0.w),
+    1.0
+  );
 }
 
 fn clamp_pair_conduction_energy(
@@ -909,11 +948,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let position = vec3<f32>(pos_mass.x, pos_mass.y, pos_mass.z);
   let mass = max(pos_mass.w, 1.0e-30);
   let temperature = row0.z;
-	  let temperature_slope = thermal_temperature_slope(row0.x, vel_u.w);
+	  let self_thermal_properties = thermal_particle_properties[particle_index];
+	  let temperature_slope = self_thermal_properties.x;
 	  let support = 2.0 * params.smoothing_length_m;
-	  let self_nominal_radius_m = particle_nominal_radius_m(mass, row0.w);
-	  let self_emissivity = thermal_emissivity(row0.x);
-	  var du = material_bank_warm_input_anchor();
+	  let self_nominal_radius_m = self_thermal_properties.z;
+	  let self_emissivity = self_thermal_properties.y;
+	  var du = 0.0;
 	  var conduction_du = 0.0;
 	  var neighbor_min_temperature = temperature;
 	  var neighbor_max_temperature = temperature;
@@ -924,7 +964,85 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  // nominal radius is metres); those scenes are also small-n, so the
 	  // exhaustive pair scan is the right structure for them. Self-select.
 	  let bins_cover_support = scan_support <= 5.0 * max(params.bin_cell_size_m, 1.0e-9);
-	  if (params.bins_enabled == 1u && params.bin_capacity > 0u && bins_cover_support) {
+	  if (params.bins_enabled == 2u) {
+	    if (!resident_thermal_neighborhood_valid()) {
+	      out_sph_state[particle_index * 2u] = pos_mass;
+	      out_sph_state[particle_index * 2u + 1u] = vel_u;
+	      out_sph_thermo[particle_index * 3u] = row0;
+	      out_sph_thermo[particle_index * 3u + 1u] = row1;
+	      out_sph_thermo[particle_index * 3u + 2u] = row2;
+	      return;
+	    }
+	    let offset_base = thermal_bins[8];
+	    let candidate_base = thermal_bins[17];
+	    let candidate_stride = thermal_bins[21];
+	    let admitted_candidates = thermal_bins[19];
+	    let begin = min(thermal_bins[offset_base + particle_index], admitted_candidates);
+	    let end = min(thermal_bins[offset_base + particle_index + 1u], admitted_candidates);
+	    for (var candidate_index = begin; candidate_index < end; candidate_index = candidate_index + 1u) {
+	      let candidate_row = candidate_base + candidate_index * candidate_stride;
+	      let other = thermal_bins[candidate_row];
+	      let matched_consumer_mask = thermal_bins[candidate_row + 1u];
+	      if (other >= params.particle_count || other == particle_index
+	        || (matched_consumer_mask & params.resident_consumer_mask) == 0u) {
+	        continue;
+	      }
+	      let other_pos_mass = state_pos_mass(other);
+	      let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
+	      let distance = length(delta);
+	      let other_row0 = thermo_row0(other);
+	      let other_thermal_properties = thermal_particle_properties[other];
+	      let other_nominal_radius_m = other_thermal_properties.z;
+	      let pair_radii_m = self_nominal_radius_m + other_nominal_radius_m;
+	      let pair_support = max(support, pair_radii_m);
+	      let radiation_support = RADIATION_PAIR_RANGE_RADII * pair_radii_m;
+	      if (distance < max(pair_support, radiation_support)) {
+	        let other_temperature = other_row0.z;
+	        neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
+	        neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
+	        let other_temperature_slope = other_thermal_properties.x;
+	        if ((matched_consumer_mask & RESIDENT_NEIGHBORHOOD_THERMAL) != 0u
+	          && distance < pair_support) {
+	          let weight = 1.0 - distance / pair_support;
+	          let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
+	          let dE = clamp_pair_conduction_energy(
+	            raw_dE,
+	            temperature,
+	            other_temperature,
+	            temperature_slope,
+	            other_temperature_slope,
+	            mass,
+	            other_pos_mass.w
+	          );
+	          conduction_du = conduction_du + dE / mass;
+	        }
+	        if ((matched_consumer_mask & RESIDENT_NEIGHBORHOOD_RADIATION) != 0u
+	          && self_emissivity > 0.0 && distance < radiation_support) {
+	          let other_emissivity = other_thermal_properties.y;
+	          if (other_emissivity > 0.0) {
+	            let view_area_m2 = radiative_view_area_m2(
+	              self_nominal_radius_m,
+	              other_nominal_radius_m,
+	              distance
+	            );
+	            let raw_rad_dE = self_emissivity * other_emissivity
+	              * STEFAN_BOLTZMANN_W_PER_M2_K4
+	              * (pow4(other_temperature) - pow4(temperature)) * view_area_m2 * params.dt;
+	            let rad_dE = clamp_pair_conduction_energy(
+	              raw_rad_dE,
+	              temperature,
+	              other_temperature,
+	              temperature_slope,
+	              other_temperature_slope,
+	              mass,
+	              other_pos_mass.w
+	            );
+	            conduction_du = conduction_du + rad_dE / mass;
+	          }
+	        }
+	      }
+	    }
+	  } else if (params.bins_enabled == 1u && params.bin_capacity > 0u && bins_cover_support) {
 	    // Neighbor-bin scan: the shared per-substep bins hold every massive
 	    // particle; the scan radius covers the conduction support even when
 	    // the cell size was chosen for the (smaller) separation rest distance.
@@ -952,16 +1070,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	            let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	            let distance = length(delta);
 	            let other_row0 = thermo_row0(other);
-	            let other_nominal_radius_m = particle_nominal_radius_m(other_pos_mass.w, other_row0.w);
+	            let other_thermal_properties = thermal_particle_properties[other];
+	            let other_nominal_radius_m = other_thermal_properties.z;
 	            let pair_radii_m = self_nominal_radius_m + other_nominal_radius_m;
 	            let pair_support = max(support, pair_radii_m);
 	            let radiation_support = RADIATION_PAIR_RANGE_RADII * pair_radii_m;
 	            if (distance < max(pair_support, radiation_support)) {
-	              let other_vel_u = state_vel_u(other);
 	              let other_temperature = other_row0.z;
 	              neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	              neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
-	              let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
+	              let other_temperature_slope = other_thermal_properties.x;
 	              if (distance < pair_support) {
 	                let weight = 1.0 - distance / pair_support;
 	                let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
@@ -981,7 +1099,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	              // the pair equilibrium, and the aggregate neighbor-range clamp
 	              // below bounds the total like conduction.
 	              if (self_emissivity > 0.0 && distance < radiation_support) {
-	                let other_emissivity = thermal_emissivity(other_row0.x);
+	                let other_emissivity = other_thermal_properties.y;
 	                if (other_emissivity > 0.0) {
 	                  let view_area_m2 = radiative_view_area_m2(self_nominal_radius_m, other_nominal_radius_m, distance);
 	                  let raw_rad_dE = self_emissivity * other_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4
@@ -1012,16 +1130,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	    let distance = length(delta);
 	    let other_row0 = thermo_row0(other);
-	    let other_nominal_radius_m = particle_nominal_radius_m(other_pos_mass.w, other_row0.w);
+	    let other_thermal_properties = thermal_particle_properties[other];
+	    let other_nominal_radius_m = other_thermal_properties.z;
 	    let pair_radii_m = self_nominal_radius_m + other_nominal_radius_m;
 	    let pair_support = max(support, pair_radii_m);
 	    let radiation_support = RADIATION_PAIR_RANGE_RADII * pair_radii_m;
 	    if (distance < max(pair_support, radiation_support)) {
-	      let other_vel_u = state_vel_u(other);
 	      let other_temperature = other_row0.z;
 	      neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	      neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
-	      let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
+	      let other_temperature_slope = other_thermal_properties.x;
 	      if (distance < pair_support) {
 	        let weight = 1.0 - distance / pair_support;
 	        let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
@@ -1041,7 +1159,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	      // the pair equilibrium, and the aggregate neighbor-range clamp
 	      // below bounds the total like conduction.
 	      if (self_emissivity > 0.0 && distance < radiation_support) {
-	        let other_emissivity = thermal_emissivity(other_row0.x);
+	        let other_emissivity = other_thermal_properties.y;
 	        if (other_emissivity > 0.0) {
 	          let view_area_m2 = radiative_view_area_m2(self_nominal_radius_m, other_nominal_radius_m, distance);
 	          let raw_rad_dE = self_emissivity * other_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4
@@ -1115,7 +1233,7 @@ struct ReactionParams {
   // Substep duration for the interface-flux extent law; 0 disables the cap
   // (legacy whole-particle consumption) so stale packers stay well-defined.
   dt_s: f32,
-  _pad1: u32,
+  product_event_admission_required: u32,
   _pad2: u32,
 };
 
@@ -1154,6 +1272,14 @@ struct SchroederReactionLawNeighborParams {
   source_span_count: u32,
   source_span_stride: u32,
   source_span_enabled: u32,
+  resident_mode: u32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_guard_enabled: u32,
 };
 
 struct ThermalRows {
@@ -1193,21 +1319,18 @@ struct ProductTerm {
   status: f32,
 };
 
-@group(0) @binding(0) var<storage, read> particle_records: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> source_sph_state: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> unpack_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> reaction_records: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> source_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> phase_response_records: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> phase_responses: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> proposals: array<vec4<f32>>;
-@group(0) @binding(8) var<storage, read_write> out_particle_records: array<vec4<f32>>;
-@group(0) @binding(9) var<storage, read_write> unpack_sph_state: array<vec4<f32>>;
-@group(0) @binding(10) var<storage, read_write> unpack_sph_thermo: array<vec4<f32>>;
+@group(0) @binding(9) var<storage, read_write> out_sph_state: array<vec4<f32>>;
+@group(0) @binding(10) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(11) var<uniform> params: ReactionParams;
 @group(0) @binding(12) var<storage, read> thermal_graph_nodes: array<vec4<f32>>;
 @group(0) @binding(13) var<storage, read> thermal_graph_samples: array<vec4<f32>>;
-@group(0) @binding(14) var<storage, read_write> pack_particle_records: array<vec4<f32>>;
 @group(0) @binding(15) var<storage, read> source_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(16) var<storage, read_write> reaction_particle_bin_counts: array<atomic<u32>>;
 @group(0) @binding(17) var<storage, read_write> reaction_particle_bin_indices: array<u32>;
@@ -1218,8 +1341,9 @@ struct ProductTerm {
 @group(0) @binding(22) var<storage, read> schroeder_reaction_neighbor_candidate_rows: array<f32>;
 @group(0) @binding(23) var<uniform> schroeder_reaction_neighbor_candidate_params: SchroederReactionLawNeighborParams;
 @group(0) @binding(24) var<storage, read> schroeder_reaction_source_span_rows: array<f32>;
+@group(0) @binding(25) var<storage, read_write> reaction_product_event_prefix_metadata: array<u32>;
+@group(0) @binding(26) var<storage, read_write> reaction_admitted_outcomes: array<vec4<u32>>;
 
-const REACTION_PARTICLE_RECORD_VEC4S: u32 = 13u;
 const SCHROEDER_REACTION_LAW_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_REACTION_LAW_QUEUE_STATUS_OFFSET: u32 = 3u;
 const SCHROEDER_REACTION_LAW_QUEUE_LAW_MASK_OFFSET: u32 = 12u;
@@ -1235,25 +1359,58 @@ const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_SOURCE_OFFSET: u32 = 0u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_START_OFFSET: u32 = 1u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_COUNT_OFFSET: u32 = 2u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_STATUS_OFFSET: u32 = 3u;
+const RESIDENT_REACTION_NEIGHBORHOOD_HEADER_WORDS: u32 = 40u;
+
+fn resident_reaction_neighborhood_word(index: u32) -> u32 {
+  return bitcast<u32>(schroeder_reaction_neighbor_candidate_rows[index]);
+}
+
+fn resident_reaction_neighborhood_valid() -> bool {
+  if (schroeder_reaction_neighbor_candidate_params.resident_mode != 2u
+    || schroeder_reaction_neighbor_candidate_params.resident_guard_enabled != 1u
+    || arrayLength(&schroeder_reaction_neighbor_candidate_rows)
+      < RESIDENT_REACTION_NEIGHBORHOOD_HEADER_WORDS) {
+    return false;
+  }
+  return resident_reaction_neighborhood_word(0u) == 0u
+    && resident_reaction_neighborhood_word(1u)
+      == schroeder_reaction_neighbor_candidate_params.resident_generation
+    && resident_reaction_neighborhood_word(2u)
+      == schroeder_reaction_neighbor_candidate_params.resident_lease_token_low
+    && resident_reaction_neighborhood_word(3u)
+      == schroeder_reaction_neighbor_candidate_params.resident_lease_token_high
+    && resident_reaction_neighborhood_word(4u)
+      == schroeder_reaction_neighbor_candidate_params.resident_position_epoch
+    && resident_reaction_neighborhood_word(5u)
+      == schroeder_reaction_neighbor_candidate_params.resident_source_count
+    && resident_reaction_neighborhood_word(5u) == params.particle_count
+    && resident_reaction_neighborhood_word(10u) >= params.particle_count + 1u
+    && resident_reaction_neighborhood_word(21u) >= 2u
+    && (resident_reaction_neighborhood_word(22u)
+      & schroeder_reaction_neighbor_candidate_params.resident_consumer_mask)
+      == schroeder_reaction_neighbor_candidate_params.resident_consumer_mask
+    && resident_reaction_neighborhood_word(31u) == 1u
+    && resident_reaction_neighborhood_word(33u) == 0u;
+}
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
-  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S];
+  return source_sph_state[index * 2u];
 }
 
 fn state_vel_u(index: u32) -> vec4<f32> {
-  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 1u];
+  return source_sph_state[index * 2u + 1u];
 }
 
 fn thermo_row0(index: u32) -> vec4<f32> {
-  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 2u];
+  return source_sph_thermo[index * 3u];
 }
 
 fn thermo_row1(index: u32) -> vec4<f32> {
-  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 3u];
+  return source_sph_thermo[index * 3u + 1u];
 }
 
 fn thermo_row2(index: u32) -> vec4<f32> {
-  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 4u];
+  return source_sph_thermo[index * 3u + 2u];
 }
 
 fn reaction_row0(reaction_index: u32) -> vec4<f32> {
@@ -1476,23 +1633,79 @@ fn find_product_mechanics(material_id: f32, phase_id: f32) -> ProductMechanics {
 }
 
 fn copy_particle(index: u32) {
-  let base = index * REACTION_PARTICLE_RECORD_VEC4S;
-  for (var row = 0u; row < REACTION_PARTICLE_RECORD_VEC4S; row = row + 1u) {
-    out_particle_records[base + row] = particle_records[base + row];
+  let state_base = index * 2u;
+  let thermo_base = index * 3u;
+  let mechanics_base = index * 8u;
+  out_sph_state[state_base] = source_sph_state[state_base];
+  out_sph_state[state_base + 1u] = source_sph_state[state_base + 1u];
+  out_sph_thermo[thermo_base] = source_sph_thermo[thermo_base];
+  out_sph_thermo[thermo_base + 1u] = source_sph_thermo[thermo_base + 1u];
+  out_sph_thermo[thermo_base + 2u] = source_sph_thermo[thermo_base + 2u];
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    out_mls_mechanics[mechanics_base + row] = source_mls_mechanics[mechanics_base + row];
   }
 }
 
 fn copy_particle_with_mass(index: u32, mass_kg: f32) {
   copy_particle(index);
-  let base = index * REACTION_PARTICLE_RECORD_VEC4S;
-  let pos_mass = particle_records[base];
-  out_particle_records[base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
-  let rest_density = particle_records[base + 2u].w;
+  let state_base = index * 2u;
+  let pos_mass = source_sph_state[state_base];
+  out_sph_state[state_base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
+  let rest_density = source_sph_thermo[index * 3u].w;
   if (rest_density > 0.0) {
-    let mechanics_base = base + 5u;
-    let volume_row = out_particle_records[mechanics_base + 4u];
-    out_particle_records[mechanics_base + 4u] = vec4<f32>(volume_row.x, volume_row.y, volume_row.z, max(mass_kg, 0.0) / rest_density);
+    let mechanics_base = index * 8u;
+    let volume_row = out_mls_mechanics[mechanics_base + 4u];
+    out_mls_mechanics[mechanics_base + 4u] = vec4<f32>(volume_row.x, volume_row.y, volume_row.z, max(mass_kg, 0.0) / rest_density);
   }
+}
+
+fn reaction_product_event_mutation_admitted() -> bool {
+  if (params.product_event_admission_required == 0u) {
+    return true;
+  }
+  return arrayLength(&reaction_product_event_prefix_metadata) >= 20u
+    && reaction_product_event_prefix_metadata[0] == 0x554c4752u
+    && reaction_product_event_prefix_metadata[1] == 0u
+    && reaction_product_event_prefix_metadata[3] == params.particle_count
+    && reaction_product_event_prefix_metadata[5]
+      <= reaction_product_event_prefix_metadata[4]
+    && reaction_product_event_prefix_metadata[7] == 0u
+    && reaction_product_event_prefix_metadata[8] == 1u
+    && reaction_product_event_prefix_metadata[9] == 0u
+    && reaction_product_event_prefix_metadata[11] == 32u
+    && reaction_product_event_prefix_metadata[17] == 1u;
+}
+
+fn invalidate_reaction_admitted_outcome(particle_index: u32) {
+  let base = particle_index * 2u;
+  reaction_admitted_outcomes[base] = vec4<u32>(0xffffffffu, 0u, 0u, 0u);
+  reaction_admitted_outcomes[base + 1u] = vec4<u32>(0u);
+}
+
+fn publish_reaction_admitted_outcome(
+  particle_index: u32,
+  partner_index: u32,
+  reaction_index: u32,
+  product_term_offset: u32,
+  product_term_count: u32,
+  extent_mol: f32,
+  product_mass_scale: f32,
+  source_consumed_mass_kg: f32,
+  partner_consumed_mass_kg: f32
+) {
+  let base = particle_index * 2u;
+  reaction_admitted_outcomes[base] = vec4<u32>(
+    partner_index,
+    reaction_index,
+    product_term_offset,
+    product_term_count
+  );
+  reaction_admitted_outcomes[base + 1u] = vec4<u32>(
+    bitcast<u32>(extent_mol),
+    bitcast<u32>(product_mass_scale),
+    bitcast<u32>(source_consumed_mass_kg),
+    bitcast<u32>(partner_consumed_mass_kg)
+  );
 }
 
 fn write_reacted_mechanics(index: u32, mass_kg: f32, resolved: ThermalRows) {
@@ -1505,33 +1718,34 @@ fn write_reacted_mechanics(index: u32, mass_kg: f32, resolved: ThermalRows) {
   if (rest_density > 0.0) {
     rest_volume = mass_kg / rest_density;
   }
-  let out_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
-  out_particle_records[out_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_particle_records[out_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_particle_records[out_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_particle_records[out_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  out_particle_records[out_base + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
-  out_particle_records[out_base + 5u] = vec4<f32>(mechanics.solid, mechanics.status, mechanics.bulk, mechanics.shear);
-  out_particle_records[out_base + 6u] = vec4<f32>(mechanics.lambda, mechanics.sound_speed, mechanics.eos_model, mechanics.status);
-  out_particle_records[out_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  let out_base = index * 8u;
+  out_mls_mechanics[out_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[out_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[out_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[out_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[out_base + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+  out_mls_mechanics[out_base + 5u] = vec4<f32>(mechanics.solid, mechanics.status, mechanics.bulk, mechanics.shear);
+  out_mls_mechanics[out_base + 6u] = vec4<f32>(mechanics.lambda, mechanics.sound_speed, mechanics.eos_model, mechanics.status);
+  out_mls_mechanics[out_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
 fn write_product_particle(index: u32, material_id: f32, mass_kg: f32, next_u: f32, velocity: vec3<f32>) {
   let pos_mass = state_pos_mass(index);
   let source_row2 = thermo_row2(index);
   let resolved = resolve_thermal_rows(material_id, next_u, source_row2);
-  let out_base = index * REACTION_PARTICLE_RECORD_VEC4S;
-  out_particle_records[out_base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
-  out_particle_records[out_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, next_u);
-  out_particle_records[out_base + 2u] = resolved.row0;
-  out_particle_records[out_base + 3u] = resolved.row1;
-  out_particle_records[out_base + 4u] = resolved.row2;
+  let state_base = index * 2u;
+  let thermo_base = index * 3u;
+  out_sph_state[state_base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
+  out_sph_state[state_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, next_u);
+  out_sph_thermo[thermo_base] = resolved.row0;
+  out_sph_thermo[thermo_base + 1u] = resolved.row1;
+  out_sph_thermo[thermo_base + 2u] = resolved.row2;
   if (params.reset_mechanics != 0u) {
     write_reacted_mechanics(index, max(mass_kg, 0.0), resolved);
   } else {
-    let mechanics_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
+    let mechanics_base = index * 8u;
     for (var row = 0u; row < 8u; row = row + 1u) {
-      out_particle_records[mechanics_base + row] = particle_records[mechanics_base + row];
+      out_mls_mechanics[mechanics_base + row] = source_mls_mechanics[mechanics_base + row];
     }
   }
 }
@@ -1733,26 +1947,6 @@ fn product_raw_mass_sum(reaction_index: u32, extent_mol: f32) -> f32 {
   return sum;
 }
 
-@compute @workgroup_size(64)
-fn pack_source(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let particle_index = global_id.x;
-  if (particle_index >= params.particle_count) {
-    return;
-  }
-  let source_state_base = particle_index * 2u;
-  let source_thermo_base = particle_index * 3u;
-  let source_mechanics_base = particle_index * 8u;
-  let out_base = particle_index * REACTION_PARTICLE_RECORD_VEC4S;
-  pack_particle_records[out_base] = source_sph_state[source_state_base];
-  pack_particle_records[out_base + 1u] = source_sph_state[source_state_base + 1u];
-  pack_particle_records[out_base + 2u] = source_sph_thermo[source_thermo_base];
-  pack_particle_records[out_base + 3u] = source_sph_thermo[source_thermo_base + 1u];
-  pack_particle_records[out_base + 4u] = source_sph_thermo[source_thermo_base + 2u];
-  for (var row = 0u; row < 8u; row = row + 1u) {
-    pack_particle_records[out_base + 5u + row] = source_mls_mechanics[source_mechanics_base + row];
-  }
-}
-
 fn reaction_particle_bin_ready() -> bool {
   return reaction_particle_bin_params.bins_enabled != 0u
     && reaction_particle_bin_params.cell_count > 0u
@@ -1798,6 +1992,9 @@ fn schroeder_reaction_law_queue_allows_particle(particle_index: u32) -> bool {
 }
 
 fn schroeder_reaction_neighbor_candidates_enabled() -> bool {
+  if (schroeder_reaction_neighbor_candidate_params.resident_mode == 2u) {
+    return resident_reaction_neighborhood_valid();
+  }
   return schroeder_reaction_neighbor_candidate_params.enabled != 0u
     && schroeder_reaction_neighbor_candidate_params.candidate_count > 0u
     && schroeder_reaction_neighbor_candidate_params.candidate_stride > 0u
@@ -1812,6 +2009,22 @@ fn schroeder_reaction_source_spans_enabled() -> bool {
 }
 
 fn schroeder_reaction_neighbor_candidate_span(particle_index: u32) -> vec4<u32> {
+  if (schroeder_reaction_neighbor_candidate_params.resident_mode == 2u) {
+    if (!resident_reaction_neighborhood_valid() || particle_index >= params.particle_count) {
+      return vec4<u32>(0u, 0u, 0u, 0u);
+    }
+    let source_offset_base = resident_reaction_neighborhood_word(8u);
+    let admitted_candidate_count = resident_reaction_neighborhood_word(19u);
+    let start = min(
+      resident_reaction_neighborhood_word(source_offset_base + particle_index),
+      admitted_candidate_count
+    );
+    let end = min(
+      resident_reaction_neighborhood_word(source_offset_base + particle_index + 1u),
+      admitted_candidate_count
+    );
+    return vec4<u32>(start, end - start, 1u, 0u);
+  }
   if (!schroeder_reaction_source_spans_enabled()
       || particle_index >= schroeder_reaction_neighbor_candidate_params.source_span_count) {
     return vec4<u32>(0u, 0u, 0u, 0u);
@@ -1843,6 +2056,20 @@ fn schroeder_reaction_neighbor_candidate_span(particle_index: u32) -> vec4<u32> 
 }
 
 fn schroeder_reaction_neighbor_candidate_partner(particle_index: u32, candidate_index: u32) -> u32 {
+  if (schroeder_reaction_neighbor_candidate_params.resident_mode == 2u) {
+    if (!resident_reaction_neighborhood_valid()
+      || candidate_index >= resident_reaction_neighborhood_word(19u)) {
+      return 4294967295u;
+    }
+    let candidate_offset = resident_reaction_neighborhood_word(17u)
+      + candidate_index * resident_reaction_neighborhood_word(21u);
+    let matched_consumer_mask = resident_reaction_neighborhood_word(candidate_offset + 1u);
+    if ((matched_consumer_mask
+      & schroeder_reaction_neighbor_candidate_params.resident_consumer_mask) == 0u) {
+      return 4294967295u;
+    }
+    return resident_reaction_neighborhood_word(candidate_offset);
+  }
   if (!schroeder_reaction_neighbor_candidates_enabled()
       || candidate_index >= schroeder_reaction_neighbor_candidate_params.candidate_count) {
     return 4294967295u;
@@ -1970,6 +2197,11 @@ fn reaction_partner_candidate(
 fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
   if (particle_index >= params.particle_count) {
+    return;
+  }
+  if (schroeder_reaction_neighbor_candidate_params.resident_mode == 2u
+    && !resident_reaction_neighborhood_valid()) {
+    proposals[particle_index] = vec4<f32>(-1.0, -1.0, 0.0, 0.0);
     return;
   }
   let using_schroeder_candidate_rows = schroeder_reaction_neighbor_candidates_enabled();
@@ -2128,6 +2360,18 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (particle_index >= params.particle_count) {
     return;
   }
+  if (!reaction_product_event_mutation_admitted()) {
+    copy_particle(particle_index);
+    return;
+  }
+  if (params.product_event_admission_required != 0u) {
+    invalidate_reaction_admitted_outcome(particle_index);
+    if (particle_index == 0u) {
+      reaction_product_event_prefix_metadata[18] =
+        reaction_product_event_prefix_metadata[2];
+      reaction_product_event_prefix_metadata[19] = 0x4f555443u;
+    }
+  }
 
   let proposal = proposals[particle_index];
   if (proposal.x < 0.0 || proposal.y < 0.0) {
@@ -2157,6 +2401,10 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let self_thermo = thermo_row0(particle_index);
   let partner_thermo = thermo_row0(partner_index);
   let product_term_count = u32(max(header1.x, 0.0));
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_range_valid = product_term_offset < params.product_term_count
+    && product_term_count > 0u
+    && product_term_count <= params.product_term_count - product_term_offset;
   let self_term = reactant_term_for_material(reaction_index, self_thermo.x);
   let partner_term = reactant_term_for_material(reaction_index, partner_thermo.x);
   let has_stoichiometry = self_term.status == 1.0
@@ -2165,14 +2413,17 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     && partner_term.coefficient > 0.0
     && self_term.molar_mass > 0.0
     && partner_term.molar_mass > 0.0
-    && product_term_count > 0u;
+    && product_term_range_valid;
 
   if (!has_stoichiometry) {
+    if (params.product_event_admission_required != 0u) {
+      copy_particle(particle_index);
+      return;
+    }
     var legacy_product_material_id = rx0.z;
     var legacy_next_mass = pos_mass.w;
     let legacy_next_u = vel_u.w - rx1.x;
     if (product_term_count > 0u) {
-      let product_term_offset = u32(max(header0.w, 0.0));
       let slot_index = select(1u, 0u, particle_index < partner_index);
       let local_term = min(slot_index, product_term_count - 1u);
       let term_index = product_term_offset + local_term;
@@ -2224,6 +2475,19 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let source1_free = source1_remaining <= max(source1_pos_mass.w, 1.0) * 1.0e-7;
   let product_u = ((self_consumed * vel_u.w) + (partner_consumed * partner_vel_u.w) - rx1.x * consumed_mass) / consumed_mass;
   let product_mass_scale = consumed_mass / raw_product_mass;
+  if (params.product_event_admission_required != 0u && particle_index == source0_index) {
+    publish_reaction_admitted_outcome(
+      particle_index,
+      source1_index,
+      reaction_index,
+      product_term_offset,
+      product_term_count,
+      extent_mol,
+      product_mass_scale,
+      source0_consumed,
+      source1_consumed
+    );
+  }
 
   // Products are born at the consumed pair's mass-weighted COM velocity.
   // Momentum accounting: unconsumed remainders keep their own velocities, so
@@ -2247,7 +2511,10 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     if (particle_index == source1_index && source1_free) {
       emits_product = true;
-      local_product_slot = select(0u, 1u, source0_free);
+      // A lone product term may occupy both freed parent slots. Each slot
+      // carries its own consumed-mass share when both parents are freed, so
+      // the shared term index must remain zero for both carriers.
+      local_product_slot = 0u;
       emitted_product_mass = select(consumed_mass, source1_consumed, source0_free);
     }
   } else {
@@ -2280,23 +2547,6 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   copy_particle_with_mass(particle_index, self_remaining);
 }
 
-@compute @workgroup_size(64)
-fn unpack(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let particle_index = global_id.x;
-  if (particle_index >= params.particle_count) {
-    return;
-  }
-  let base = particle_index * REACTION_PARTICLE_RECORD_VEC4S;
-  unpack_sph_state[particle_index * 2u] = out_particle_records[base];
-  unpack_sph_state[particle_index * 2u + 1u] = out_particle_records[base + 1u];
-  unpack_sph_thermo[particle_index * 3u] = out_particle_records[base + 2u];
-  unpack_sph_thermo[particle_index * 3u + 1u] = out_particle_records[base + 3u];
-  unpack_sph_thermo[particle_index * 3u + 2u] = out_particle_records[base + 4u];
-  let mechanics_base = particle_index * 8u;
-  for (var row = 0u; row < 8u; row = row + 1u) {
-    unpack_mls_mechanics[mechanics_base + row] = out_particle_records[base + 5u + row];
-  }
-}
 `;
 
 export const sphReactionProductEventCompactWgsl = `
@@ -2338,15 +2588,12 @@ fn compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-// Places unplaced product-event mass into spare (zero-mass) particle slots so
-// gas products become real mechanics citizens instead of immovable event
-// sources. Single-invocation deterministic loop (same policy as the event
-// compactor): event order and slot-claim order are stable across runs.
-// Conservation: the event carries the products' mass share, COM velocity,
-// specific internal energy (parent energies + enthalpy share), temperature,
-// rest density, and mechanics; placing it moves those amounts verbatim from
-// the event ledger onto one particle and zeroes the event, so the event
-// splat and the particle P2G never both see the same mass.
+// Places unplaced product-event mass without a serial event loop or a global
+// particle scan. Production carrier lookup consumes the admitted resident
+// neighborhood CSR. A bounded deterministic probe covers spare carriers and
+// the compatibility path. Events atomically claim targets with their event
+// index, so the lowest event wins every collision and each particle has one
+// writer. Losing events stay live in the product ledger as overflow evidence.
 export const sphReactionProductEventPlacementWgsl = `
 struct ProductEventPlacementParams {
   particle_count: u32,
@@ -2357,6 +2604,14 @@ struct ProductEventPlacementParams {
   mechanics_stride_vec4: u32,
   min_placed_mass_kg: f32,
   _pad0: u32,
+  resident_mode: u32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_guard_enabled: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> product_events: array<vec4<f32>>;
@@ -2364,83 +2619,375 @@ struct ProductEventPlacementParams {
 @group(0) @binding(2) var<storage, read_write> next_thermo: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> next_mechanics: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> params: ProductEventPlacementParams;
+// [0, event_row_count) is one encoded target per event-capacity row. The
+// following particle_count words are inverted atomic owner keys. The caller
+// clears the reusable workspace to zero before each exact-prefix generation.
+@group(0) @binding(5) var<storage, read_write> placement_workspace: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read> resident_neighborhood: array<u32>;
+@group(0) @binding(7) var<storage, read> product_event_prefix_metadata: array<u32>;
 
-@compute @workgroup_size(1)
-fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  if (global_id.x != 0u) {
+const PRODUCT_EVENT_NO_CARRIER: u32 = 0xffffffffu;
+const PRODUCT_EVENT_SPARE_PROBE_LIMIT: u32 = 64u;
+const RESIDENT_PRODUCT_PLACEMENT_HEADER_WORDS: u32 = 40u;
+
+struct ProductCarrierSearch {
+  merge_slot: u32,
+  nearest_slot: u32,
+  merge_distance: f32,
+  nearest_distance: f32,
+};
+
+fn product_event_target_word(event: u32) -> u32 {
+  return event;
+}
+
+fn product_event_claim_word(particle: u32) -> u32 {
+  return params.event_row_count + particle;
+}
+
+fn product_event_prefix_valid() -> bool {
+  return arrayLength(&product_event_prefix_metadata) >= 20u
+    && product_event_prefix_metadata[0] == 0x554c4752u
+    && product_event_prefix_metadata[4] == params.event_row_count
+    && product_event_prefix_metadata[6] <= params.event_row_count
+    && product_event_prefix_metadata[7] == 0u
+    && product_event_prefix_metadata[8] == 1u
+    && product_event_prefix_metadata[9] == 1u
+    && product_event_prefix_metadata[10] == product_event_prefix_metadata[6]
+    && product_event_prefix_metadata[11] == 32u
+    && product_event_prefix_metadata[17] == 4u;
+}
+
+fn product_event_invocation_index(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>
+) -> u32 {
+  let dispatch_x = max(product_event_prefix_metadata[12], 1u);
+  let linear_group = workgroup_id.x + workgroup_id.y * dispatch_x;
+  return linear_group * 64u + local_id.x;
+}
+
+fn product_event_live(event: u32) -> bool {
+  if (!product_event_prefix_valid()
+    || event >= product_event_prefix_metadata[6]) {
+    return false;
+  }
+  let stride = max(params.event_stride_vec4, 8u);
+  let base = event * stride;
+  return product_events[base + 4u].z == 1.0
+    && product_events[base + 3u].y > params.min_placed_mass_kg;
+}
+
+fn product_event_particle_index(encoded: f32) -> u32 {
+  if (encoded < 0.0 || encoded >= f32(params.particle_count)) {
+    return PRODUCT_EVENT_NO_CARRIER;
+  }
+  return u32(encoded + 0.5);
+}
+
+fn product_event_hash(value: u32) -> u32 {
+  var hashed = value + 0x9e3779b9u;
+  hashed = (hashed ^ (hashed >> 16u)) * 0x85ebca6bu;
+  hashed = (hashed ^ (hashed >> 13u)) * 0xc2b2ae35u;
+  return hashed ^ (hashed >> 16u);
+}
+
+fn resident_product_placement_valid() -> bool {
+  if (params.resident_mode != 1u || params.resident_guard_enabled != 1u
+    || arrayLength(&resident_neighborhood) < RESIDENT_PRODUCT_PLACEMENT_HEADER_WORDS) {
+    return false;
+  }
+  return resident_neighborhood[0] == 0u
+    && resident_neighborhood[1] == params.resident_generation
+    && resident_neighborhood[2] == params.resident_lease_token_low
+    && resident_neighborhood[3] == params.resident_lease_token_high
+    && resident_neighborhood[4] == params.resident_position_epoch
+    && resident_neighborhood[5] == params.resident_source_count
+    && resident_neighborhood[5] == params.particle_count
+    && resident_neighborhood[10] >= params.particle_count + 1u
+    && resident_neighborhood[21] >= 2u
+    && (resident_neighborhood[22] & params.resident_consumer_mask)
+      == params.resident_consumer_mask
+    && resident_neighborhood[31] == 1u
+    && resident_neighborhood[33] == 0u;
+}
+
+fn consider_product_carrier(
+  candidate: u32,
+  event_position: vec3<f32>,
+  event_material_id: f32,
+  event_phase_id: f32,
+  event_support_radius_m: f32,
+  search: ProductCarrierSearch
+) -> ProductCarrierSearch {
+  var result = search;
+  if (candidate >= params.particle_count) {
+    return result;
+  }
+  let candidate_state = next_state[candidate * params.state_stride_vec4];
+  if (candidate_state.w <= 0.0) {
+    return result;
+  }
+  let candidate_row0 = next_thermo[candidate * params.thermo_stride_vec4];
+  if (candidate_row0.x != event_material_id) {
+    return result;
+  }
+  let candidate_rest_density = max(candidate_row0.w, 1.0e-6);
+  let candidate_radius = pow(
+    max(3.0 * candidate_state.w / (12.5663706 * candidate_rest_density), 1.0e-30),
+    1.0 / 3.0
+  );
+  let capture_radius = 4.0 * (event_support_radius_m + candidate_radius);
+  let distance = length(event_position - candidate_state.xyz);
+  if (candidate_row0.y == event_phase_id
+    && distance <= capture_radius
+    && (distance < result.merge_distance
+      || (distance == result.merge_distance && candidate < result.merge_slot))) {
+    result.merge_distance = distance;
+    result.merge_slot = candidate;
+  }
+  if (distance < result.nearest_distance
+    || (distance == result.nearest_distance && candidate < result.nearest_slot)) {
+    result.nearest_distance = distance;
+    result.nearest_slot = candidate;
+  }
+  return result;
+}
+
+fn search_resident_product_carriers(
+  source: u32,
+  event_position: vec3<f32>,
+  event_material_id: f32,
+  event_phase_id: f32,
+  event_support_radius_m: f32,
+  search: ProductCarrierSearch
+) -> ProductCarrierSearch {
+  var result = search;
+  if (source >= params.particle_count || !resident_product_placement_valid()) {
+    return result;
+  }
+  let offset_base = resident_neighborhood[8];
+  let candidate_base = resident_neighborhood[17];
+  let candidate_count = resident_neighborhood[19];
+  let candidate_stride = resident_neighborhood[21];
+  if (offset_base + source + 1u >= arrayLength(&resident_neighborhood)) {
+    return result;
+  }
+  let begin = min(resident_neighborhood[offset_base + source], candidate_count);
+  let end = min(resident_neighborhood[offset_base + source + 1u], candidate_count);
+  for (var index = begin; index < end; index = index + 1u) {
+    let row = candidate_base + index * candidate_stride;
+    if (row + 1u >= arrayLength(&resident_neighborhood)) {
+      break;
+    }
+    if ((resident_neighborhood[row + 1u] & params.resident_consumer_mask) == 0u) {
+      continue;
+    }
+    result = consider_product_carrier(
+      resident_neighborhood[row],
+      event_position,
+      event_material_id,
+      event_phase_id,
+      event_support_radius_m,
+      result
+    );
+  }
+  return result;
+}
+
+fn bounded_spare_slot(event: u32) -> u32 {
+  if (params.particle_count == 0u) {
+    return PRODUCT_EVENT_NO_CARRIER;
+  }
+  let start = product_event_hash(event) % params.particle_count;
+  let limit = min(params.particle_count, PRODUCT_EVENT_SPARE_PROBE_LIMIT);
+  for (var probe = 0u; probe < limit; probe = probe + 1u) {
+    let candidate = (start + probe) % params.particle_count;
+    if (next_state[candidate * params.state_stride_vec4].w <= 0.0) {
+      return candidate;
+    }
+  }
+  return PRODUCT_EVENT_NO_CARRIER;
+}
+
+@compute @workgroup_size(64)
+fn initialize_product_event_carrier_claims(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let index = global_id.x;
+  if (index < params.event_row_count
+    && product_event_target_word(index) < arrayLength(&placement_workspace)) {
+    atomicStore(&placement_workspace[product_event_target_word(index)], 0u);
+  }
+  let claim_word = product_event_claim_word(index);
+  if (index < params.particle_count && claim_word < arrayLength(&placement_workspace)) {
+    atomicStore(&placement_workspace[claim_word], 0u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn find_product_event_carriers(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let event = product_event_invocation_index(local_id, workgroup_id);
+  if (event >= params.event_row_count
+    || product_event_target_word(event) >= arrayLength(&placement_workspace)) {
+    return;
+  }
+  if (params.resident_mode == 1u && !resident_product_placement_valid()) {
     return;
   }
   let stride = max(params.event_stride_vec4, 8u);
-  var cursor = 0u;
-  for (var event = 0u; event < params.event_row_count; event = event + 1u) {
+  let base = event * stride;
+  let row3 = product_events[base + 3u];
+  let row4 = product_events[base + 4u];
+  let unplaced_mass_kg = row3.y;
+  if (row4.z != 1.0 || unplaced_mass_kg <= params.min_placed_mass_kg) {
+    return;
+  }
+  let event_position = product_events[base].xyz;
+  let event_material_id = product_events[base + 1u].x;
+  let event_phase_id = product_events[base + 2u].w;
+  let support_volume_m3 = product_events[base + 5u].w;
+  var event_support_radius_m = 0.05;
+  if (support_volume_m3 > 0.0) {
+    event_support_radius_m = pow(support_volume_m3 * 0.238732414637843, 1.0 / 3.0);
+  }
+  var search = ProductCarrierSearch(
+    PRODUCT_EVENT_NO_CARRIER,
+    PRODUCT_EVENT_NO_CARRIER,
+    3.0e38,
+    3.0e38
+  );
+  let source = product_event_particle_index(product_events[base + 1u].w);
+  let partner = product_event_particle_index(product_events[base + 2u].x);
+  search = consider_product_carrier(
+    source,
+    event_position,
+    event_material_id,
+    event_phase_id,
+    event_support_radius_m,
+    search
+  );
+  search = consider_product_carrier(
+    partner,
+    event_position,
+    event_material_id,
+    event_phase_id,
+    event_support_radius_m,
+    search
+  );
+  if (params.resident_mode == 1u) {
+    search = search_resident_product_carriers(
+      source,
+      event_position,
+      event_material_id,
+      event_phase_id,
+      event_support_radius_m,
+      search
+    );
+    if (partner != source) {
+      search = search_resident_product_carriers(
+        partner,
+        event_position,
+        event_material_id,
+        event_phase_id,
+        event_support_radius_m,
+        search
+      );
+    }
+  } else if (params.particle_count > 0u) {
+    let start = product_event_hash(event) % params.particle_count;
+    let limit = min(params.particle_count, PRODUCT_EVENT_SPARE_PROBE_LIMIT);
+    for (var probe = 0u; probe < limit; probe = probe + 1u) {
+      search = consider_product_carrier(
+        (start + probe) % params.particle_count,
+        event_position,
+        event_material_id,
+        event_phase_id,
+        event_support_radius_m,
+        search
+      );
+    }
+  }
+  let spare_slot = bounded_spare_slot(event);
+  let fallback_target = select(
+    search.nearest_slot,
+    spare_slot,
+    spare_slot < params.particle_count
+  );
+  let carrier_slot = select(
+    fallback_target,
+    search.merge_slot,
+    search.merge_slot < params.particle_count
+  );
+  atomicStore(
+    &placement_workspace[product_event_target_word(event)],
+    select(0u, carrier_slot + 1u, carrier_slot < params.particle_count)
+  );
+}
+
+@compute @workgroup_size(64)
+fn claim_product_event_carriers(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let event = product_event_invocation_index(local_id, workgroup_id);
+  if (!product_event_live(event)
+    || (params.resident_mode == 1u && !resident_product_placement_valid())) {
+    return;
+  }
+  let target_word = product_event_target_word(event);
+  if (target_word >= arrayLength(&placement_workspace)) {
+    return;
+  }
+  let encoded_slot = atomicLoad(&placement_workspace[target_word]);
+  if (encoded_slot == 0u) { return; }
+  let carrier_slot = encoded_slot - 1u;
+  let claim_word = product_event_claim_word(carrier_slot);
+  if (carrier_slot >= params.particle_count || claim_word >= arrayLength(&placement_workspace)) {
+    return;
+  }
+  atomicMax(&placement_workspace[claim_word], PRODUCT_EVENT_NO_CARRIER - event);
+}
+
+@compute @workgroup_size(64)
+fn place_product_events(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let event = product_event_invocation_index(local_id, workgroup_id);
+  if (!product_event_live(event)
+    || (params.resident_mode == 1u && !resident_product_placement_valid())) {
+    return;
+  }
+  let target_word = product_event_target_word(event);
+  if (target_word >= arrayLength(&placement_workspace)) {
+    return;
+  }
+  let encoded_slot = atomicLoad(&placement_workspace[target_word]);
+  if (encoded_slot == 0u) { return; }
+  let slot = encoded_slot - 1u;
+  let claim_word = product_event_claim_word(slot);
+  if (slot >= params.particle_count || claim_word >= arrayLength(&placement_workspace)
+    || atomicLoad(&placement_workspace[claim_word]) != PRODUCT_EVENT_NO_CARRIER - event) {
+    // No target or a lower event won it. The untouched live row is the
+    // conservation/overflow record consumed by the resident event arena.
+    return;
+  }
+  let stride = max(params.event_stride_vec4, 8u);
     let base = event * stride;
     let row3 = product_events[base + 3u];
     let row4 = product_events[base + 4u];
     let unplaced_mass_kg = row3.y;
-    let status = row4.z;
-    if (status != 1.0 || unplaced_mass_kg <= params.min_placed_mass_kg) {
-      continue;
-    }
     let event_row0 = product_events[base];
-    let event_row1 = product_events[base + 1u];
-    let event_row2 = product_events[base + 2u];
     let event_row4b = product_events[base + 4u];
     let event_row5 = product_events[base + 5u];
     let event_position = event_row0.xyz;
-    let event_material_id = event_row1.x;
-    let event_phase_id = event_row2.w;
-    var event_support_radius_m = 0.05;
-    if (event_row5.w > 0.0) {
-      event_support_radius_m = pow(event_row5.w * 0.238732414637843, 1.0 / 3.0);
-    }
-    // Merge-first: with the interface-flux extent law, burning pairs emit a
-    // small product event EVERY substep; minting a spare particle for each
-    // would exhaust the spare pool within milliseconds. Physically the new
-    // product joins the molten crown / gas bubble already at the interface,
-    // so fold the event into the nearest same-material same-phase particle
-    // within a capture radius (4x combined rest radii). Mass, momentum, and
-    // energy move verbatim (mass-weighted merges), so conservation is exact.
-    var merge_slot = params.particle_count;
-    var merge_distance = 3.0e38;
-    var nearest_slot = params.particle_count;
-    var nearest_distance = 3.0e38;
-    for (var candidate = 0u; candidate < params.particle_count; candidate = candidate + 1u) {
-      let candidate_state = next_state[candidate * params.state_stride_vec4];
-      if (candidate_state.w <= 0.0) {
-        continue;
-      }
-      let candidate_row0 = next_thermo[candidate * params.thermo_stride_vec4];
-      if (candidate_row0.x != event_material_id) {
-        continue;
-      }
-      let candidate_rest_density = max(candidate_row0.w, 1.0e-6);
-      let candidate_radius = pow(
-        max(3.0 * candidate_state.w / (12.5663706 * candidate_rest_density), 1.0e-30),
-        1.0 / 3.0
-      );
-      let capture_radius = 4.0 * (event_support_radius_m + candidate_radius);
-      let delta = event_position - candidate_state.xyz;
-      let distance = length(delta);
-      // Radius-limited merge requires the phase to match too (a gas puff must
-      // not fold into a solid crust at range).
-      if (candidate_row0.y == event_phase_id && distance <= capture_radius && distance < merge_distance) {
-        merge_distance = distance;
-        merge_slot = candidate;
-      }
-      // Track the nearest same-MATERIAL particle regardless of phase: when
-      // the radius merge misses AND no spare slot is available, folding the
-      // (tiny per-substep) event mass into the nearest carrier is the
-      // bounded, conserving terminal fallback -- the merged temperature and
-      // energy are exact, and the thermal solver re-derives the phase. The
-      // alternative is an unbounded live-event flood re-splatting the grid
-      // every substep (the frozen-event disease at high rate).
-      if (distance < nearest_distance) {
-        nearest_distance = distance;
-        nearest_slot = candidate;
-      }
-    }
-    if (merge_slot < params.particle_count) {
-      let state_base = merge_slot * params.state_stride_vec4;
+    let target_state = next_state[slot * params.state_stride_vec4];
+    if (target_state.w > 0.0) {
+      let state_base = slot * params.state_stride_vec4;
       let particle_pos_mass = next_state[state_base];
       let particle_vel_u = next_state[state_base + 1u];
       let merged_mass = particle_pos_mass.w + unplaced_mass_kg;
@@ -2450,12 +2997,12 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let merged_u = (particle_vel_u.w * particle_pos_mass.w + event_row4b.w * unplaced_mass_kg) * inv_merged;
       next_state[state_base] = vec4<f32>(merged_position, merged_mass);
       next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
-      let thermo_base = merge_slot * params.thermo_stride_vec4;
+      let thermo_base = slot * params.thermo_stride_vec4;
       let particle_thermo0 = next_thermo[thermo_base];
       let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
       next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
       // Rest volume grows by the event's share so density stays consistent.
-      let mechanics_base = merge_slot * params.mechanics_stride_vec4;
+      let mechanics_base = slot * params.mechanics_stride_vec4;
       let mechanics_row4 = next_mechanics[mechanics_base + 4u];
       var merged_rest_volume = mechanics_row4.w;
       if (event_row4b.y > 0.0) {
@@ -2468,54 +3015,8 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // mass and particle mass never double-count.
       product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
       product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
-      continue;
+      return;
     }
-    // Claim the first spare slot at or after the cursor. Spare slots are
-    // zero-mass particles reserved at demo build; every kernel in the
-    // pipeline skips mass <= 0, so claiming one only ever adds matter.
-    var slot = params.particle_count;
-    for (var candidate = cursor; candidate < params.particle_count; candidate = candidate + 1u) {
-      if (next_state[candidate * params.state_stride_vec4].w <= 0.0) {
-        slot = candidate;
-        break;
-      }
-    }
-    if (slot >= params.particle_count) {
-      if (nearest_slot < params.particle_count) {
-        // No spare capacity but a same-material carrier exists somewhere:
-        // terminal fallback merge (see nearest_slot rationale above).
-        merge_slot = nearest_slot;
-        let state_base = merge_slot * params.state_stride_vec4;
-        let particle_pos_mass = next_state[state_base];
-        let particle_vel_u = next_state[state_base + 1u];
-        let merged_mass = particle_pos_mass.w + unplaced_mass_kg;
-        let inv_merged = 1.0 / max(merged_mass, 1.0e-20);
-        let merged_position = (particle_pos_mass.xyz * particle_pos_mass.w + event_position * unplaced_mass_kg) * inv_merged;
-        let merged_velocity = (particle_vel_u.xyz * particle_pos_mass.w + event_row5.xyz * unplaced_mass_kg) * inv_merged;
-        let merged_u = (particle_vel_u.w * particle_pos_mass.w + event_row4b.w * unplaced_mass_kg) * inv_merged;
-        next_state[state_base] = vec4<f32>(merged_position, merged_mass);
-        next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
-        let thermo_base = merge_slot * params.thermo_stride_vec4;
-        let particle_thermo0 = next_thermo[thermo_base];
-        let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
-        next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
-        let mechanics_base = merge_slot * params.mechanics_stride_vec4;
-        let mechanics_row4 = next_mechanics[mechanics_base + 4u];
-        var merged_rest_volume = mechanics_row4.w;
-        if (event_row4b.y > 0.0) {
-          merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
-        }
-        next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
-        product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
-        product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
-        continue;
-      }
-      // No spare capacity and no same-material carrier anywhere: the event
-      // stays live and keeps feeding the grid splat ledger, so no mass is
-      // lost either way.
-      continue;
-    }
-    cursor = slot + 1u;
     let row0 = product_events[base];
     let row1 = product_events[base + 1u];
     let row2 = product_events[base + 2u];
@@ -2567,7 +3068,6 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // and the grid splat drop it this substep.
     product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
     product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
-  }
 }
 `;
 
@@ -5164,6 +5664,46 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphMaterialInterfaceCompactCandidatesFinalizeWgsl = `
+struct CompactCandidateFinalizeParams {
+  expected_capacity: u32,
+  expected_dense_count: u32,
+  workgroup_size: u32,
+  max_dispatch_workgroups_x: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> compact_metadata: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read_write> candidate_dispatch_indirect: array<u32>;
+@group(0) @binding(2) var<uniform> params: CompactCandidateFinalizeParams;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x != 0u || arrayLength(&candidate_dispatch_indirect) < 3u) {
+    return;
+  }
+  candidate_dispatch_indirect[0] = 0u;
+  candidate_dispatch_indirect[1] = 1u;
+  candidate_dispatch_indirect[2] = 1u;
+  if (arrayLength(&compact_metadata) < 4u || params.workgroup_size == 0u) {
+    return;
+  }
+  let active_count = atomicLoad(&compact_metadata[0]);
+  let overflow_count = atomicLoad(&compact_metadata[1]);
+  let capacity = atomicLoad(&compact_metadata[2]);
+  let dense_count = atomicLoad(&compact_metadata[3]);
+  let dispatch_x = (active_count + params.workgroup_size - 1u) / params.workgroup_size;
+  let metadata_valid = overflow_count == 0u
+    && active_count <= capacity
+    && capacity == params.expected_capacity
+    && dense_count == params.expected_dense_count
+    && dispatch_x <= params.max_dispatch_workgroups_x;
+  if (!metadata_valid || active_count == 0u) {
+    return;
+  }
+  candidate_dispatch_indirect[0] = dispatch_x;
+}
+`;
+
 export const sphRenderMarchingCubeCellsWgsl = `
 struct MarchingCubesCandidateParams {
   surface_count: u32,
@@ -6157,11 +6697,11 @@ struct StressRows {
 @group(0) @binding(6) var<storage, read_write> grid_nodes: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;
 @group(0) @binding(8) var<storage, read> schroeder_active_nodes: array<f32>;
-// NOTE: P2G must stay at <= 8 storage buffers so it runs on DEFAULT WebGPU
-// device limits (maxStorageBuffersPerShaderStage = 8). A binding 9 for the
-// (disabled, superseded-by-separation-pass) spatial-density EOS previously
-// invalidated every P2G pipeline on default-limit devices, silently zeroing
-// grids for standalone/test consumers.
+@group(0) @binding(9) var<storage, read> product_event_arena_metadata: array<u32>;
+// Main/finalize P2G stay at <= 8 storage buffers for default WebGPU limits.
+// Product-event scatter uses a separate compact explicit layout containing
+// only accumulators, events, active-node routing, and arena metadata; binding
+// 9 therefore does not increase the main/finalize entry-point storage count.
 
 const P2G_ATOMIC_SCALE: f32 = 65536.0;
 const P2G_ATOMIC_INV_SCALE: f32 = 1.0 / P2G_ATOMIC_SCALE;
@@ -6516,7 +7056,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @compute @workgroup_size(64)
 fn scatter_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let event_index = global_id.x;
-  if (event_index >= params.resident_product_event_count) {
+  let arena_magic = product_event_arena_metadata[0];
+  let arena_version = product_event_arena_metadata[1];
+  let arena_active_count = product_event_arena_metadata[3];
+  let arena_capacity = product_event_arena_metadata[4];
+  let arena_overflow_flags = product_event_arena_metadata[6];
+  let arena_append_admitted = product_event_arena_metadata[15];
+  if (
+    arena_magic != 0x554c4750u
+    || arena_version != 1u
+    || arena_overflow_flags != 0u
+    || arena_append_admitted != 1u
+    || arena_active_count > arena_capacity
+    || arena_active_count > params.resident_product_event_count
+    || event_index >= arena_active_count
+  ) {
     return;
   }
 
@@ -6808,6 +7362,34 @@ struct PressureInterfaceParams {
   contact_response_scale: f32,
   contact_max_pressure_pa: f32,
   contact_pair_response_enabled: f32,
+  resident_candidate_mode: u32,
+  resident_candidate_capacity: u32,
+  resident_candidate_dense_count: u32,
+  resident_candidate_guard_enabled: u32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_neighborhood_guard_enabled: u32,
+  _pad0: u32,
+  gas_cell_metadata_guard_enabled: u32,
+  gas_cell_row_capacity: u32,
+  gas_cell_generation: u32,
+  gas_cell_lane_hash_low: u32,
+  gas_cell_lane_hash_high: u32,
+  gas_cell_source_epoch: u32,
+  gas_cell_source_generation: u32,
+  gas_cell_grid_x: u32,
+  gas_cell_grid_y: u32,
+  gas_cell_grid_z: u32,
+  gas_cell_grid_cell_count: u32,
+  _pad1: u32,
+  gas_cell_box_x: f32,
+  gas_cell_box_y: f32,
+  gas_cell_box_z: f32,
+  _pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
@@ -6816,9 +7398,143 @@ struct PressureInterfaceParams {
 @group(0) @binding(3) var<storage, read> gas_pressure_cells: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> contact_policy_rows: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> contact_kinematics_rows: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> compact_candidate_metadata: array<u32>;
+@group(0) @binding(7) var<storage, read> resident_neighborhood: array<u32>;
+@group(0) @binding(8) var<storage, read_write> gas_pressure_cell_metadata: array<atomic<u32>>;
+@group(0) @binding(9) var<storage, read> gas_pressure_cell_lookup: array<u32>;
+
+const PRESSURE_RESIDENT_NEIGHBORHOOD_HEADER_WORDS: u32 = 40u;
+
+fn pressure_zero_force_row(element_index: u32) {
+  pressure_force_rows[element_index * 4u] = vec4<f32>(0.0);
+  pressure_force_rows[element_index * 4u + 1u] = vec4<f32>(0.0);
+  pressure_force_rows[element_index * 4u + 2u] = vec4<f32>(0.0);
+  pressure_force_rows[element_index * 4u + 3u] = vec4<f32>(0.0);
+}
+
+fn pressure_candidate_metadata_valid() -> bool {
+  if (params.resident_candidate_mode == 0u) {
+    return true;
+  }
+  if (params.resident_candidate_guard_enabled != 1u
+    || arrayLength(&compact_candidate_metadata) < 4u) {
+    return false;
+  }
+  let active_count = compact_candidate_metadata[0];
+  let overflow_count = compact_candidate_metadata[1];
+  let capacity = compact_candidate_metadata[2];
+  let dense_count = compact_candidate_metadata[3];
+  return overflow_count == 0u
+    && active_count <= capacity
+    && capacity == params.resident_candidate_capacity
+    && capacity == params.element_count
+    && dense_count == params.resident_candidate_dense_count;
+}
+
+fn pressure_resident_neighborhood_valid() -> bool {
+  if (params.resident_neighborhood_guard_enabled == 0u) {
+    return true;
+  }
+  if (arrayLength(&resident_neighborhood) < PRESSURE_RESIDENT_NEIGHBORHOOD_HEADER_WORDS) {
+    return false;
+  }
+  return resident_neighborhood[0] == 0u
+    && resident_neighborhood[1] == params.resident_generation
+    && resident_neighborhood[2] == params.resident_lease_token_low
+    && resident_neighborhood[3] == params.resident_lease_token_high
+    && resident_neighborhood[4] == params.resident_position_epoch
+    && resident_neighborhood[5] == params.resident_source_count
+    && (resident_neighborhood[22] & params.resident_consumer_mask)
+      == params.resident_consumer_mask
+    && resident_neighborhood[31] == 1u
+    && resident_neighborhood[33] == 0u;
+}
+
+fn pressure_contact_kinematics(element_index: u32) -> vec4<f32> {
+  if (element_index >= arrayLength(&contact_kinematics_rows)) {
+    return vec4<f32>(0.0);
+  }
+  return contact_kinematics_rows[element_index];
+}
+
+fn pressure_gas_cell_metadata_valid() -> bool {
+  if (params.gas_cell_metadata_guard_enabled == 0u) { return true; }
+  if (arrayLength(&gas_pressure_cell_metadata) < 24u) { return false; }
+  let admitted_count = atomicLoad(&gas_pressure_cell_metadata[9]);
+  return atomicLoad(&gas_pressure_cell_metadata[0]) == 1431062343u
+    && atomicLoad(&gas_pressure_cell_metadata[1]) == 1u
+    && atomicLoad(&gas_pressure_cell_metadata[2]) == params.gas_cell_generation
+    && atomicLoad(&gas_pressure_cell_metadata[6]) == params.gas_cell_row_capacity
+    && atomicLoad(&gas_pressure_cell_metadata[11]) == 0u
+    && atomicLoad(&gas_pressure_cell_metadata[12]) == 1u
+    && atomicLoad(&gas_pressure_cell_metadata[13]) == params.gas_cell_grid_x
+    && atomicLoad(&gas_pressure_cell_metadata[14]) == params.gas_cell_grid_y
+    && atomicLoad(&gas_pressure_cell_metadata[15]) == params.gas_cell_grid_z
+    && atomicLoad(&gas_pressure_cell_metadata[16]) == params.gas_cell_grid_cell_count
+    && atomicLoad(&gas_pressure_cell_metadata[17]) == params.gas_cell_lane_hash_low
+    && atomicLoad(&gas_pressure_cell_metadata[18]) == params.gas_cell_lane_hash_high
+    && atomicLoad(&gas_pressure_cell_metadata[19]) == params.gas_cell_source_epoch
+    && atomicLoad(&gas_pressure_cell_metadata[20]) == params.gas_cell_source_generation
+    && admitted_count > 0u
+    && admitted_count <= params.gas_cell_row_capacity;
+}
+
+fn pressure_from_gpu_gas_cell_lookup(centroid: vec3<f32>) -> f32 {
+  if (!pressure_gas_cell_metadata_valid()
+    || params.gas_cell_grid_x == 0u || params.gas_cell_grid_y == 0u || params.gas_cell_grid_z == 0u
+    || params.gas_cell_box_x <= 0.0 || params.gas_cell_box_y <= 0.0 || params.gas_cell_box_z <= 0.0) {
+    return 0.0;
+  }
+  let admitted_count = atomicLoad(&gas_pressure_cell_metadata[9]);
+  let normalized = clamp(
+    centroid / vec3<f32>(params.gas_cell_box_x, params.gas_cell_box_y, params.gas_cell_box_z),
+    vec3<f32>(0.0),
+    vec3<f32>(0.99999994)
+  );
+  let base_cell = vec3<i32>(floor(normalized * vec3<f32>(
+    f32(params.gas_cell_grid_x), f32(params.gas_cell_grid_y), f32(params.gas_cell_grid_z)
+  )));
+  var best_pressure = 0.0;
+  var best_distance2 = 1.0e30;
+  for (var dz = -1; dz <= 1; dz = dz + 1) {
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+      for (var dx = -1; dx <= 1; dx = dx + 1) {
+        let cell = base_cell + vec3<i32>(dx, dy, dz);
+        if (cell.x < 0 || cell.y < 0 || cell.z < 0
+          || cell.x >= i32(params.gas_cell_grid_x)
+          || cell.y >= i32(params.gas_cell_grid_y)
+          || cell.z >= i32(params.gas_cell_grid_z)) {
+          continue;
+        }
+        let key = u32(cell.x) + u32(cell.y) * params.gas_cell_grid_x
+          + u32(cell.z) * params.gas_cell_grid_x * params.gas_cell_grid_y;
+        if (key >= params.gas_cell_grid_cell_count || key >= arrayLength(&gas_pressure_cell_lookup)) {
+          continue;
+        }
+        let encoded_row = gas_pressure_cell_lookup[key];
+        if (encoded_row == 0u || encoded_row - 1u >= admitted_count) { continue; }
+        let cell_index = encoded_row - 1u;
+        let row0 = gas_pressure_cells[cell_index * 3u];
+        let row1 = gas_pressure_cells[cell_index * 3u + 1u];
+        let row2 = gas_pressure_cells[cell_index * 3u + 2u];
+        if (row0.w <= 0.0 || row1.w < 0.0) { continue; }
+        let delta = centroid - row1.xyz;
+        let distance2 = dot(delta, delta);
+        if (distance2 < best_distance2) {
+          best_distance2 = distance2;
+          best_pressure = max(0.0, row1.w + dot(row2.xyz, delta));
+        }
+      }
+    }
+  }
+  return best_pressure;
+}
 
 fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
   if (params.pressure_model_id != 1u || params.gas_pressure_cell_count == 0u) {
+    if (params.pressure_model_id == 1u && params.gas_cell_metadata_guard_enabled == 1u) {
+      return pressure_from_gpu_gas_cell_lookup(centroid);
+    }
     return params.pressure_pa;
   }
   var best_pressure = params.pressure_pa;
@@ -6895,6 +7611,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (element_index >= params.element_count) {
     return;
   }
+  pressure_zero_force_row(element_index);
+  if (!pressure_candidate_metadata_valid() || !pressure_resident_neighborhood_valid()) {
+    return;
+  }
+  if (params.resident_candidate_mode == 1u
+    && element_index >= compact_candidate_metadata[0]) {
+    return;
+  }
 
   let row0 = interface_elements[element_index * 4u];
   let row1 = interface_elements[element_index * 4u + 1u];
@@ -6904,7 +7628,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let area = row1.w;
   let status = row3.w;
   let gas_pressure_pa = pressure_for_centroid(centroid);
-  let contact_pressure_pa = contact_pressure_for_element(row0.y, row0.z, area, contact_kinematics_rows[element_index]);
+  let contact_pressure_pa = contact_pressure_for_element(
+    row0.y,
+    row0.z,
+    area,
+    pressure_contact_kinematics(element_index)
+  );
   let pressure_pa = gas_pressure_pa + contact_pressure_pa;
   var normal_area = vec3<f32>(row2.w, row3.x, row3.y);
   if (dot(normal_area, normal_area) <= 1.0e-24) {
@@ -7031,10 +7760,14 @@ struct SchroederContactLawNeighborParams {
   candidate_count: u32,
   candidate_stride: u32,
   law_mask: u32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
-  _pad3: u32,
+  resident_mode: u32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_guard_enabled: u32,
 };
 
 struct SchroederContactSourceSpanParams {
@@ -7088,6 +7821,39 @@ const INTERFACE_SOURCE_KEY_STRIDE: u32 = 4u;
 const INTERFACE_SOURCE_KEY_ELEMENT_OFFSET: u32 = 0u;
 const INTERFACE_SOURCE_KEY_SOURCE_OFFSET: u32 = 1u;
 const INTERFACE_SOURCE_KEY_STATUS_OFFSET: u32 = 2u;
+const RESIDENT_CONTACT_NEIGHBORHOOD_HEADER_WORDS: u32 = 40u;
+
+fn resident_contact_neighborhood_word(index: u32) -> u32 {
+  return bitcast<u32>(schroeder_contact_neighbor_candidate_rows[index]);
+}
+
+fn resident_contact_neighborhood_valid() -> bool {
+  if (schroeder_contact_neighbor_candidate_params.resident_mode != 2u
+    || schroeder_contact_neighbor_candidate_params.resident_guard_enabled != 1u
+    || arrayLength(&schroeder_contact_neighbor_candidate_rows)
+      < RESIDENT_CONTACT_NEIGHBORHOOD_HEADER_WORDS) {
+    return false;
+  }
+  return resident_contact_neighborhood_word(0u) == 0u
+    && resident_contact_neighborhood_word(1u)
+      == schroeder_contact_neighbor_candidate_params.resident_generation
+    && resident_contact_neighborhood_word(2u)
+      == schroeder_contact_neighbor_candidate_params.resident_lease_token_low
+    && resident_contact_neighborhood_word(3u)
+      == schroeder_contact_neighbor_candidate_params.resident_lease_token_high
+    && resident_contact_neighborhood_word(4u)
+      == schroeder_contact_neighbor_candidate_params.resident_position_epoch
+    && resident_contact_neighborhood_word(5u)
+      == schroeder_contact_neighbor_candidate_params.resident_source_count
+    && resident_contact_neighborhood_word(5u) == params.particle_count
+    && resident_contact_neighborhood_word(10u) >= params.particle_count + 1u
+    && resident_contact_neighborhood_word(21u) >= 2u
+    && (resident_contact_neighborhood_word(22u)
+      & schroeder_contact_neighbor_candidate_params.resident_consumer_mask)
+      == schroeder_contact_neighbor_candidate_params.resident_consumer_mask
+    && resident_contact_neighborhood_word(31u) == 1u
+    && resident_contact_neighborhood_word(33u) == 0u;
+}
 
 struct CkParticleCandidate {
   source_match: u32,
@@ -7156,6 +7922,9 @@ fn ck_schroeder_law_queue_allows_particle(particle_index: u32) -> bool {
 }
 
 fn ck_schroeder_neighbor_candidates_enabled() -> bool {
+  if (schroeder_contact_neighbor_candidate_params.resident_mode == 2u) {
+    return resident_contact_neighborhood_valid();
+  }
   return schroeder_contact_neighbor_candidate_params.enabled != 0u
     && schroeder_contact_neighbor_candidate_params.candidate_count > 0u
     && schroeder_contact_neighbor_candidate_params.candidate_stride > 0u
@@ -7170,6 +7939,22 @@ fn ck_schroeder_source_spans_enabled() -> bool {
 }
 
 fn ck_schroeder_candidate_span(source_particle_index: u32) -> vec4<u32> {
+  if (schroeder_contact_neighbor_candidate_params.resident_mode == 2u) {
+    if (!resident_contact_neighborhood_valid() || source_particle_index >= params.particle_count) {
+      return vec4<u32>(0u, 0u, 0u, 0u);
+    }
+    let source_offset_base = resident_contact_neighborhood_word(8u);
+    let admitted_candidate_count = resident_contact_neighborhood_word(19u);
+    let start = min(
+      resident_contact_neighborhood_word(source_offset_base + source_particle_index),
+      admitted_candidate_count
+    );
+    let end = min(
+      resident_contact_neighborhood_word(source_offset_base + source_particle_index + 1u),
+      admitted_candidate_count
+    );
+    return vec4<u32>(start, end - start, 1u, 0u);
+  }
   if (!ck_schroeder_source_spans_enabled()
       || source_particle_index >= schroeder_contact_source_span_params.source_span_count) {
     return vec4<u32>(0u, 0u, 0u, 0u);
@@ -7203,7 +7988,29 @@ fn ck_schroeder_candidate_span(source_particle_index: u32) -> vec4<u32> {
   return vec4<u32>(span_start, span_count, 1u, 0u);
 }
 
-fn ck_schroeder_candidate_particle(candidate_index: u32, endpoint: u32) -> u32 {
+fn ck_schroeder_candidate_particle(
+  source_particle_index: u32,
+  candidate_index: u32,
+  endpoint: u32
+) -> u32 {
+  if (schroeder_contact_neighbor_candidate_params.resident_mode == 2u) {
+    if (!resident_contact_neighborhood_valid()
+      || candidate_index >= resident_contact_neighborhood_word(19u)) {
+      return 4294967295u;
+    }
+    let candidate_offset = resident_contact_neighborhood_word(17u)
+      + candidate_index * resident_contact_neighborhood_word(21u);
+    let matched_consumer_mask = resident_contact_neighborhood_word(candidate_offset + 1u);
+    if ((matched_consumer_mask
+      & schroeder_contact_neighbor_candidate_params.resident_consumer_mask) == 0u) {
+      return 4294967295u;
+    }
+    return select(
+      source_particle_index,
+      resident_contact_neighborhood_word(candidate_offset),
+      endpoint != 0u
+    );
+  }
   if (!ck_schroeder_neighbor_candidates_enabled() || candidate_index >= schroeder_contact_neighbor_candidate_params.candidate_count) {
     return 4294967295u;
   }
@@ -7363,6 +8170,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (params.derivation_enabled == 0u || params.particle_count == 0u || params.contact_policy_row_count == 0u) {
     return;
   }
+  if (schroeder_contact_neighbor_candidate_params.resident_mode == 2u
+    && !resident_contact_neighborhood_valid()) {
+    return;
+  }
 
   let element_row0 = interface_elements[element_index * 4u];
   let element_row1 = interface_elements[element_index * 4u + 1u];
@@ -7429,7 +8240,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
     for (var candidate_index = candidate_start; candidate_index < candidate_end; candidate_index = candidate_index + 1u) {
       for (var endpoint = 0u; endpoint < 2u; endpoint = endpoint + 1u) {
-        let candidate_particle_index = ck_schroeder_candidate_particle(candidate_index, endpoint);
+        let candidate_particle_index = ck_schroeder_candidate_particle(
+          element_source_particle_index,
+          candidate_index,
+          endpoint
+        );
         if (candidate_particle_index >= params.particle_count) {
           continue;
         }
@@ -7608,6 +8423,53 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   );
 }
 `;
+
+function pressureInterfaceResidentContactKinematicsWgsl(source) {
+  const sourceSpanBinding = '@group(0) @binding(12) var<storage, read> schroeder_contact_source_span_rows: array<f32>;\n';
+  if (!source.includes(sourceSpanBinding)) {
+    throw new Error('pressure contact WGSL resident variant could not find the legacy source-span binding');
+  }
+  const withoutLegacyBinding = source.replace(sourceSpanBinding, '');
+  const functionStart = withoutLegacyBinding.indexOf(
+    'fn ck_schroeder_candidate_span(source_particle_index: u32) -> vec4<u32> {'
+  );
+  const functionEnd = withoutLegacyBinding.indexOf(
+    '\nfn ck_schroeder_candidate_particle(',
+    functionStart
+  );
+  if (functionStart < 0 || functionEnd < 0) {
+    throw new Error('pressure contact WGSL resident variant could not isolate candidate-span lookup');
+  }
+  const residentCandidateSpan = `fn ck_schroeder_candidate_span(source_particle_index: u32) -> vec4<u32> {
+  if (!resident_contact_neighborhood_valid() || source_particle_index >= params.particle_count) {
+    return vec4<u32>(0u, 0u, 0u, 0u);
+  }
+  let source_offset_base = resident_contact_neighborhood_word(8u);
+  let admitted_candidate_count = resident_contact_neighborhood_word(19u);
+  let start = min(
+    resident_contact_neighborhood_word(source_offset_base + source_particle_index),
+    admitted_candidate_count
+  );
+  let end = min(
+    resident_contact_neighborhood_word(source_offset_base + source_particle_index + 1u),
+    admitted_candidate_count
+  );
+  return vec4<u32>(start, end - start, 1u, 0u);
+}
+`;
+  return withoutLegacyBinding.slice(0, functionStart)
+    + residentCandidateSpan
+    + withoutLegacyBinding.slice(functionEnd);
+}
+
+// Resident pressure contact derives candidate spans directly from the packed
+// neighborhood CSR. Its legacy source-span storage binding is therefore both
+// unreachable and omitted, keeping this production pipeline at the declared
+// 10-storage-buffer device limit without weakening the general Schroeder path.
+export const sphPressureInterfaceResidentContactKinematicsWgsl =
+  pressureInterfaceResidentContactKinematicsWgsl(
+    sphPressureInterfaceContactKinematicsWgsl
+  );
 
 export const mlsMpmG2pReconstructWgsl = `
 struct G2pParams {
@@ -7974,6 +8836,14 @@ struct SeparationParams {
   bin_capacity: u32,
   bin_cell_size_m: f32,
   grid_spacing_m: f32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_guard_enabled: u32,
+  _pad0: u32,
 };
 
 @group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
@@ -7998,7 +8868,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (particle_index >= params.particle_count) {
     return;
   }
-  if (params.enabled == 0u || params.relaxation <= 0.0) {
+  if (params.enabled != 1u || params.relaxation <= 0.0) {
     return;
   }
   let pos_mass = in_state[particle_index * 2u];
@@ -8031,6 +8901,14 @@ struct SeparationParams {
   bin_capacity: u32,
   bin_cell_size_m: f32,
   grid_spacing_m: f32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_guard_enabled: u32,
+  _pad0: u32,
 };
 
 @group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
@@ -8039,6 +8917,27 @@ struct SeparationParams {
 @group(0) @binding(3) var<uniform> params: SeparationParams;
 // Combined bins layout: counts prefix then entry slots (see bin-fill).
 @group(0) @binding(4) var<storage, read> bins: array<u32>;
+
+const SEPARATION_RESIDENT_HEADER_WORDS: u32 = 40u;
+
+fn separation_resident_neighborhood_valid() -> bool {
+  if (params.resident_guard_enabled != 1u
+    || arrayLength(&bins) < SEPARATION_RESIDENT_HEADER_WORDS) {
+    return false;
+  }
+  return bins[0] == 0u
+    && bins[1] == params.resident_generation
+    && bins[2] == params.resident_lease_token_low
+    && bins[3] == params.resident_lease_token_high
+    && bins[4] == params.resident_position_epoch
+    && bins[5] == params.resident_source_count
+    && bins[5] == params.particle_count
+    && bins[10] >= params.particle_count + 1u
+    && bins[21] >= 2u
+    && (bins[22] & params.resident_consumer_mask) == params.resident_consumer_mask
+    && bins[31] == 1u
+    && bins[33] == 0u;
+}
 
 fn separation_cbrt(volume_m3: f32) -> f32 {
   return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
@@ -8085,6 +8984,73 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let w_self = 1.0 / max(pos_mass.w, 1.0e-30);
   var dx = vec3<f32>(0.0, 0.0, 0.0);
   var dv = vec3<f32>(0.0, 0.0, 0.0);
+  if (params.enabled == 2u) {
+    if (!separation_resident_neighborhood_valid()) {
+      return;
+    }
+    let offset_base = bins[8];
+    let candidate_base = bins[17];
+    let candidate_stride = bins[21];
+    let admitted_candidates = bins[19];
+    let begin = min(bins[offset_base + particle_index], admitted_candidates);
+    let end = min(bins[offset_base + particle_index + 1u], admitted_candidates);
+    for (var candidate_index = begin; candidate_index < end; candidate_index = candidate_index + 1u) {
+      let candidate_row = candidate_base + candidate_index * candidate_stride;
+      let other = bins[candidate_row];
+      let matched_consumer_mask = bins[candidate_row + 1u];
+      if (other >= params.particle_count || other == particle_index
+        || (matched_consumer_mask & params.resident_consumer_mask) == 0u) {
+        continue;
+      }
+      let other_pos_mass = in_state[other * 2u];
+      if (other_pos_mass.w <= 0.0) {
+        continue;
+      }
+      let other_class = separation_phase_class(other);
+      if (other_class == 0u || (phase_class == 2u && other_class == 2u)) {
+        continue;
+      }
+      let other_rest_volume = max(in_mechanics[other * 8u + 4u].w, 0.0);
+      if (other_rest_volume <= 0.0) {
+        continue;
+      }
+      let pair_rest_distance = 0.5 * (d_self + separation_cbrt(other_rest_volume));
+      let delta = pos_mass.xyz - other_pos_mass.xyz;
+      var dist = length(delta);
+      if (dist >= pair_rest_distance) {
+        continue;
+      }
+      var normal = vec3<f32>(0.0, 1.0, 0.0);
+      if (dist > 1.0e-9) {
+        normal = delta / dist;
+      } else {
+        let low_index = min(particle_index, other);
+        var h = low_index * 2654435761u + 0x9e3779b9u;
+        h = (h ^ (h >> 16u)) * 2246822519u;
+        h = h ^ (h >> 13u);
+        let raw = vec3<f32>(
+          f32(h & 1023u) / 511.5 - 1.0,
+          f32((h >> 10u) & 1023u) / 511.5 - 1.0,
+          f32((h >> 20u) & 1023u) / 511.5 - 1.0
+        );
+        let raw_len = length(raw);
+        let hashed = select(
+          vec3<f32>(0.0, 1.0, 0.0),
+          raw / max(raw_len, 1.0e-6),
+          raw_len > 1.0e-4
+        );
+        normal = hashed * select(-1.0, 1.0, particle_index > other);
+        dist = 0.0;
+      }
+      let w_other = 1.0 / max(other_pos_mass.w, 1.0e-30);
+      let share = w_self / (w_self + w_other);
+      dx = dx + params.relaxation * share * (pair_rest_distance - dist) * normal;
+      let approach = dot(velocity - in_state[other * 2u + 1u].xyz, normal);
+      if (approach < 0.0) {
+        dv = dv - share * approach * normal;
+      }
+    }
+  } else {
   // The bin cell size is >= every pair rest distance, so scanning the
   // 3x3x3 cell neighborhood covers all interacting pairs.
   let inv_cell = 1.0 / max(params.bin_cell_size_m, 1.0e-9);
@@ -8170,6 +9136,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
     }
   }
+  }
   // Bound the aggregate correction so deeply overlapped states relax over
   // several substeps instead of teleporting.
   let max_step = 0.5 * d_self;
@@ -8196,6 +9163,14 @@ struct SeparationParams {
   bin_capacity: u32,
   bin_cell_size_m: f32,
   grid_spacing_m: f32,
+  resident_generation: u32,
+  resident_lease_token_low: u32,
+  resident_lease_token_high: u32,
+  resident_position_epoch: u32,
+  resident_source_count: u32,
+  resident_consumer_mask: u32,
+  resident_guard_enabled: u32,
+  _pad0: u32,
 };
 
 @group(0) @binding(0) var<storage, read> corrections: array<vec4<f32>>;

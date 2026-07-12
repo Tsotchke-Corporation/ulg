@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { ELEMENT_MATERIAL_OPTIONS } from '../src/visualization/sphMaterialOptions.js';
 import {
@@ -280,19 +281,29 @@ function countBy(values, keyOf = (value) => value) {
   return counts;
 }
 
-function selectedScenarios() {
-  const filter = String(process.env.ULG_VISUAL_MATRIX_SCENARIOS || '').trim();
-  if (!filter && envFlagEnabled(process.env.ULG_VISUAL_MATRIX_STANDARD, false)) {
-    return [...STANDARD_SCENARIOS, ...deterministicRandomPairScenarios()];
+export function selectedScenarios({
+  filter = process.env.ULG_VISUAL_MATRIX_SCENARIOS,
+  standard = envFlagEnabled(process.env.ULG_VISUAL_MATRIX_STANDARD, false),
+  randomPairCount = positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_COUNT, 3),
+  randomSeed = Number(process.env.ULG_VISUAL_MATRIX_RANDOM_SEED ?? 0x7a11d2026)
+} = {}) {
+  const normalizedFilter = String(filter || '').trim();
+  const randomScenarios = deterministicRandomPairScenarios({
+    count: randomPairCount,
+    rawSeed: randomSeed
+  });
+  if (!normalizedFilter && standard) {
+    return [...STANDARD_SCENARIOS, ...randomScenarios];
   }
-  if (!filter) return SCENARIOS.filter((scenario) => scenario.defaultEnabled !== false);
-  const wanted = new Set(filter.split(',').map((entry) => entry.trim()).filter(Boolean));
-  return SCENARIOS.filter((scenario) => wanted.has(scenario.label));
+  if (!normalizedFilter) return SCENARIOS.filter((scenario) => scenario.defaultEnabled !== false);
+  const wanted = new Set(normalizedFilter.split(',').map((entry) => entry.trim()).filter(Boolean));
+  return [...SCENARIOS, ...randomScenarios].filter((scenario) => wanted.has(scenario.label));
 }
 
-function deterministicRandomPairScenarios() {
-  const count = positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_COUNT, 3);
-  const rawSeed = Number(process.env.ULG_VISUAL_MATRIX_RANDOM_SEED ?? 0x7a11d2026);
+export function deterministicRandomPairScenarios({
+  count = positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_COUNT, 3),
+  rawSeed = Number(process.env.ULG_VISUAL_MATRIX_RANDOM_SEED ?? 0x7a11d2026)
+} = {}) {
   let state = Number.isFinite(rawSeed) ? (Math.trunc(rawSeed) >>> 0) : 0x7a11d2026;
   const nextIndex = (length) => {
     state ^= state << 13;
@@ -463,6 +474,80 @@ function checkpointYCenter(checkpoint, material = null, phase = null) {
   ), 0) / totalMass;
 }
 
+function randomPairReactionEvidence(scenario, probe, checkpoints) {
+  const reactantKeys = new Set([
+    scenario?.randomPair?.drop,
+    scenario?.randomPair?.base
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+  const reactionEventCounts = arrayOf(probe?.timeline?.metrics)
+    .flatMap((metric) => [
+      metric?.residentStep?.reactionEventsTotal,
+      metric?.residentStep?.reactionLedger?.eventCount,
+      metric?.residentStep?.diagnostics?.reactionProductEventActiveEventCount,
+      metric?.plainSphStepResult?.reactionEventsTotal,
+      metric?.plainSphStepResult?.reactionLedger?.eventCount
+    ])
+    .map(finiteOrNull)
+    .filter(Number.isFinite);
+  const productMassByMaterial = {};
+  for (const checkpoint of checkpoints) {
+    for (const row of checkpointRows(checkpoint)) {
+      const material = String(row?.material || '').trim().toLowerCase();
+      const massKg = finiteOrNull(row?.massKg);
+      if (!material || reactantKeys.has(material) || !(massKg > 0)) continue;
+      productMassByMaterial[material] = Math.max(productMassByMaterial[material] || 0, massKg);
+    }
+  }
+  const reactionReported = reactionEventCounts.some((count) => count > 0)
+    || Object.keys(productMassByMaterial).length > 0;
+  const residualEvidence = checkpoints.map((checkpoint) => {
+    const totalMassKg = finiteOrNull(checkpoint?.totals?.massKg);
+    const phaseFractionResidualAbsKg = finiteOrNull(checkpoint?.phaseFractionResidualAbsKg);
+    const unclassifiedMassKg = finiteOrNull(checkpoint?.unclassifiedMassKg);
+    const overflowMassKg = finiteOrNull(checkpoint?.overflowMassKg);
+    const residualAbsKg = [phaseFractionResidualAbsKg, unclassifiedMassKg, overflowMassKg]
+      .every(Number.isFinite)
+      ? Math.abs(phaseFractionResidualAbsKg)
+        + Math.abs(unclassifiedMassKg)
+        + Math.abs(overflowMassKg)
+      : null;
+    const residualToleranceKg = Number.isFinite(totalMassKg)
+      ? Math.max(1e-9, Math.abs(totalMassKg) * 1e-3)
+      : null;
+    const admitted = checkpoint?.status === 'captured'
+      && checkpoint?.materialPhaseCapacityStatus === 'within-capacity'
+      && checkpoint?.materialMappingStatus === 'complete';
+    return {
+      batchIndex: checkpoint?.batchIndex ?? null,
+      admitted,
+      totalMassKg,
+      phaseFractionResidualAbsKg,
+      unclassifiedMassKg,
+      overflowMassKg,
+      residualAbsKg,
+      residualToleranceKg,
+      finite: Number.isFinite(totalMassKg)
+        && Number.isFinite(residualAbsKg)
+        && Number.isFinite(residualToleranceKg),
+      withinTolerance: Number.isFinite(residualAbsKg)
+        && Number.isFinite(residualToleranceKg)
+        && residualAbsKg <= residualToleranceKg
+    };
+  });
+  const evidencePassed = !reactionReported || (
+    Object.values(productMassByMaterial).some((massKg) => Number.isFinite(massKg) && massKg > 0)
+    && residualEvidence.length >= 2
+    && residualEvidence.every((entry) => entry.admitted && entry.finite && entry.withinTolerance)
+  );
+  return {
+    reactionReported,
+    reactionEventCounts,
+    productMassByMaterial,
+    residualEvidence,
+    evidencePassed
+  };
+}
+
 function behaviorCheck(id, expectation, passed, observed, { inconclusive = false } = {}) {
   return {
     id,
@@ -472,7 +557,7 @@ function behaviorCheck(id, expectation, passed, observed, { inconclusive = false
   };
 }
 
-function evaluateStandardScenarioBehavior(scenario, probe) {
+export function evaluateStandardScenarioBehavior(scenario, probe) {
   if (!scenario.standardEnabled) return null;
   const checkpoints = authoritativeCheckpointSeries(probe);
   if (checkpoints.length < 2) {
@@ -637,6 +722,7 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
       ), { csfMaxTemperaturesK: csfTemperatures })
     );
   } else if (scenario.randomPair) {
+    const reactionEvidence = randomPairReactionEvidence(scenario, probe, checkpoints);
     checks.push(behaviorCheck(
       'random-pair-advances',
       'the seeded pair advances through at least two finite checkpoints',
@@ -649,6 +735,12 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
         liveParticleCounts: checkpoints.map((checkpoint) => checkpoint.liveParticleCount),
         invalidMassParticleCounts: checkpoints.map((checkpoint) => checkpoint.invalidMassParticleCount)
       }
+    ));
+    checks.push(behaviorCheck(
+      'random-reaction-product-residual-evidence',
+      'a reported random-pair reaction has admitted finite product and residual evidence',
+      reactionEvidence.evidencePassed,
+      reactionEvidence
     ));
   }
 
@@ -663,6 +755,72 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
     checkpointCount: checkpoints.length,
     checkpoints,
     checks
+  };
+}
+
+export function standardGpuTimestampEvidence(probe, { requested = false } = {}) {
+  if (!requested) {
+    return {
+      schema: 'peercompute.ulg.sph-standard-gpu-timestamp-evidence.v0',
+      status: 'not-requested',
+      requested: false,
+      profileCount: 0,
+      validSpanCount: 0,
+      statuses: []
+    };
+  }
+  const profiles = [];
+  const statuses = [];
+  const requestedFlags = [];
+  const addProfile = (profile) => {
+    if (!profile || typeof profile !== 'object') return;
+    profiles.push(profile);
+    if (profile.status) statuses.push(String(profile.status));
+  };
+  const addTiming = (timing) => {
+    if (!timing || typeof timing !== 'object') return;
+    addProfile(timing.gpuTimestampProfile);
+    for (const profile of Object.values(timing.gpuTimestampProfiles || {})) addProfile(profile);
+    if (timing.gpuTimestampStatus) statuses.push(String(timing.gpuTimestampStatus));
+    if (timing.gpuTimestampRequested != null) requestedFlags.push(timing.gpuTimestampRequested === true);
+  };
+  for (const metric of arrayOf(probe?.timeline?.metrics)) {
+    addTiming(metric?.residentStep?.stageTiming);
+    addTiming(metric?.residentSteps?.finalStepStageTiming);
+    addProfile(metric?.renderState?.renderFieldGpuTimestampProfile);
+    addProfile(metric?.renderState?.surfaceDrawNativeMarchingCubesGpuTimestampProfile);
+    addProfile(metric?.renderState?.surfaceDrawSurfaceTranslationGpuTimestampProfile);
+    for (const status of [
+      metric?.renderState?.renderFieldGpuTimestampStatus,
+      metric?.renderState?.surfaceDrawNativeMarchingCubesGpuTimestampStatus,
+      metric?.renderState?.surfaceDrawSurfaceTranslationGpuTimestampStatus
+    ]) {
+      if (status) statuses.push(String(status));
+    }
+  }
+  const validSpanCount = profiles.reduce((sum, profile) => (
+    sum + Math.max(0, Math.round(finiteOrNull(profile?.validSpanCount) || 0))
+  ), 0);
+  const normalizedStatuses = uniqueStrings(statuses);
+  const unsupported = normalizedStatuses.some((status) => /unsupported/i.test(status));
+  const pending = normalizedStatuses.some((status) => /pending|awaiting|in-flight/i.test(status));
+  const status = validSpanCount > 0
+    ? 'pass'
+    : unsupported
+      ? 'inconclusive-unsupported'
+      : pending
+        ? 'inconclusive-pending'
+        : 'inconclusive-missing';
+  return {
+    schema: 'peercompute.ulg.sph-standard-gpu-timestamp-evidence.v0',
+    status,
+    requested: true,
+    requestedObserved: requestedFlags.some(Boolean),
+    profileCount: profiles.length,
+    validSpanCount,
+    unsupported,
+    pending,
+    statuses: normalizedStatuses
   };
 }
 
@@ -909,6 +1067,10 @@ async function main() {
     }
     const analysis = probe?.analysis || {};
     const expectedBehavior = evaluateStandardScenarioBehavior(scenario, probe);
+    const gpuTimestampEvidence = standardGpuTimestampEvidence(probe, {
+      requested: scenario.standardEnabled
+        && envFlagEnabled(env.ULG_PROBE_GPU_PROFILE ?? env.ULG_PROBE_MEASURE_GPU_TIMESTAMPS, false)
+    });
     const mechanicsIntegrator = inferMechanicsIntegrator(probe);
     const effectiveRendererModes = effectiveVisualRendererModes(probe);
     const mechanicsMismatchIssues = scenario.expectedMechanics
@@ -928,12 +1090,17 @@ async function main() {
       : expectedBehavior?.checks
         ?.filter((check) => check.status !== 'pass')
         .map((check) => `expected-behavior:${check.id}`) || [];
+    const gpuTimestampIssues = gpuTimestampEvidence.status === 'not-requested'
+      || gpuTimestampEvidence.status === 'pass'
+      ? []
+      : [`gpu-timestamp-evidence:${gpuTimestampEvidence.status}`];
     const issues = uniqueStrings(
       probe?.issues,
       probe?.analysis?.issues,
       mechanicsMismatchIssues,
       rendererMismatchIssues,
-      expectedBehaviorIssues
+      expectedBehaviorIssues,
+      gpuTimestampIssues
     );
     const visualSurfaceIssues = uniqueVisualSurfaceIssues(
       probe?.visualSurfaceIssues,
@@ -1001,6 +1168,7 @@ async function main() {
       compactSummaryMeanBatchShare: finiteOrNull(analysis.compactSummaryMeanBatchShare),
       expectedCheckpoints: scenario.expectedCheckpoints || [],
       expectedBehavior,
+      gpuTimestampEvidence,
       evolutionTimeline: compactEvolutionTimeline(probe),
       outputPath,
       logPath,
@@ -1037,6 +1205,9 @@ async function main() {
       results.flatMap((result) => result.visualSurfaceIssues),
       (issue) => issue.issue
     ),
+    gpuTimestampStatusCounts: countBy(
+      results.map((result) => result.gpuTimestampEvidence?.status)
+    ),
     results
   };
   const summaryPath = path.join(outputRoot, 'summary.json');
@@ -1047,7 +1218,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message || String(error));
-  process.exitCode = 1;
-});
+const invokedAsScript = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (invokedAsScript) {
+  main().catch((error) => {
+    console.error(error.stack || error.message || String(error));
+    process.exitCode = 1;
+  });
+}

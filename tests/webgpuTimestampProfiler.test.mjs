@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  WEBGPU_TIMESTAMP_PROFILE_MAX_SPANS,
+  WEBGPU_TIMESTAMP_QUERY_SET_MAX_QUERIES,
   createWebGpuTimestampProfiler,
   summarizeWebGpuBufferAllocations,
   webGpuTimestampQueryCapability
@@ -9,16 +11,20 @@ import {
 
 function fakeTimestampDevice() {
   const destroyed = [];
+  const querySets = [];
   const device = {
     features: new Set(['timestamp-query']),
     createQuerySet({ label, count }) {
-      return {
+      const querySet = {
         label,
+        count,
         values: new BigUint64Array(count),
         destroy() {
           destroyed.push(label);
         }
       };
+      querySets.push(querySet);
+      return querySet;
     },
     createBuffer({ label, size }) {
       return {
@@ -36,7 +42,7 @@ function fakeTimestampDevice() {
       };
     }
   };
-  return { device, destroyed };
+  return { device, destroyed, querySets };
 }
 
 test('timestamp profiler reports explicit unsupported evidence without CPU substitution', async () => {
@@ -151,16 +157,55 @@ test('timestamp profiler accepts quantized zero-duration spans but rejects reset
   assert.equal(reset.label, 'reset');
 });
 
+test('timestamp profiler caps two-query spans at the WebGPU query-set maximum', async () => {
+  const { device, querySets } = fakeTimestampDevice();
+  const profiler = createWebGpuTimestampProfiler(device, {
+    requested: true,
+    label: 'spec-query-limit',
+    maxSpans: WEBGPU_TIMESTAMP_QUERY_SET_MAX_QUERIES
+  });
+
+  assert.equal(WEBGPU_TIMESTAMP_PROFILE_MAX_SPANS, 2048);
+  assert.equal(querySets.length, 1);
+  assert.equal(querySets[0].count, WEBGPU_TIMESTAMP_QUERY_SET_MAX_QUERIES);
+  for (let index = 0; index < WEBGPU_TIMESTAMP_PROFILE_MAX_SPANS; index += 1) {
+    assert.ok(profiler.beginComputePassDescriptor(`span-${index}`).timestampWrites);
+  }
+  assert.deepEqual(
+    profiler.beginComputePassDescriptor('overflow'),
+    { label: 'overflow' }
+  );
+  profiler.destroy();
+});
+
 test('allocation evidence separates owned allocations from borrowed resident buffers', () => {
   const evidence = summarizeWebGpuBufferAllocations([
-    { role: 'output', buffer: { label: 'output', size: 128 }, owned: true },
+    {
+      role: 'output',
+      buffer: { label: 'output', size: 128 },
+      owned: true,
+      lifetime: 'transient-submission'
+    },
+    {
+      role: 'workspace',
+      buffer: { label: 'workspace', size: 512 },
+      owned: true,
+      lifetime: 'persistent-workspace',
+      createdThisSubmission: false
+    },
     { role: 'source', buffer: { label: 'source', size: 256 }, owned: false },
     { role: 'unknown', buffer: { label: 'unknown' }, owned: true }
   ], { scope: 'test-pass' });
 
   assert.equal(evidence.scope, 'test-pass');
-  assert.equal(evidence.bufferCount, 3);
-  assert.equal(evidence.allocatedByteLength, 128);
+  assert.equal(evidence.bufferCount, 4);
+  assert.equal(evidence.allocatedByteLength, 640);
+  assert.equal(evidence.createdThisSubmissionBufferCount, 2);
+  assert.equal(evidence.createdThisSubmissionByteLength, 128);
+  assert.equal(evidence.persistentWorkspaceBufferCount, 1);
+  assert.equal(evidence.persistentWorkspaceByteLength, 512);
+  assert.equal(evidence.transientSubmissionBufferCount, 2);
+  assert.equal(evidence.transientSubmissionByteLength, 128);
   assert.equal(evidence.borrowedByteLength, 256);
   assert.equal(evidence.unknownByteLengthBufferCount, 1);
 });

@@ -1,5 +1,5 @@
 const DEFAULT_STORAGE_BUFFERS_PER_STAGE = 8;
-const RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE = 10;
+export const RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE = 14;
 const DEFAULT_WEBGPU_MAX_BUFFER_SIZE = 256 * 1024 * 1024;
 const DEFAULT_WEBGPU_MAX_STORAGE_BUFFER_BINDING_SIZE = 128 * 1024 * 1024;
 const WEBGPU_MAX_BUFFER_SIZE_CEILING = (4 * 1024 * 1024 * 1024) - 4;
@@ -16,9 +16,9 @@ export function residentSphWebGpuLimitsForAdapter(adapterOrLimits = null) {
   const adapterMaxBufferSize = finitePositiveLimit(limits.maxBufferSize);
   const adapterMaxStorageBufferBindingSize = finitePositiveLimit(limits.maxStorageBufferBindingSize);
   const requiredLimits = {};
-  if (adapterStorageLimit >= RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE) {
-    requiredLimits.maxStorageBuffersPerShaderStage = Math.max(
-      DEFAULT_STORAGE_BUFFERS_PER_STAGE,
+  if (adapterStorageLimit > DEFAULT_STORAGE_BUFFERS_PER_STAGE) {
+    requiredLimits.maxStorageBuffersPerShaderStage = Math.min(
+      adapterStorageLimit,
       RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE
     );
   }
@@ -37,7 +37,10 @@ export function residentSphWebGpuLimitsForAdapter(adapterOrLimits = null) {
       maxStorageBuffersPerShaderStage: adapterStorageLimit || null,
       maxBufferSize: adapterMaxBufferSize || null,
       maxStorageBufferBindingSize: adapterMaxStorageBufferBindingSize || null
-    }
+    },
+    residentSphStorageBuffersPerStageRequired: RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE,
+    residentSphStorageBuffersPerStageSupported:
+      adapterStorageLimit >= RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE
   };
 }
 

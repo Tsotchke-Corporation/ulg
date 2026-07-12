@@ -37,6 +37,7 @@ function fakeSummaryDevice(
   const copies = [];
   const submissions = [];
   const writes = [];
+  const maps = [];
   return {
     createdBuffers,
     bindGroups,
@@ -45,6 +46,7 @@ function fakeSummaryDevice(
     copies,
     submissions,
     writes,
+    maps,
     queue: {
       writeBuffer(buffer, offset, data) {
         writes.push({ label: buffer.label, offset, byteLength: data.byteLength });
@@ -59,7 +61,9 @@ function fakeSummaryDevice(
         size,
         usage,
         destroyed: false,
-        async mapAsync() {},
+        async mapAsync() {
+          maps.push(label);
+        },
         getMappedRange() {
           const source = label.includes('product-event')
             ? productEventValues
@@ -545,6 +549,16 @@ test('SPH reaction compact summary runs a two-pass WebGPU reduction without part
   });
 
   assert.equal(summary.status, 'reaction-compact-summary-ready');
+  assert.equal(summary.mapPerformed, true);
+  assert.equal(summary.readbackPerformed, true);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.deepEqual(summary.mappedReadbackKinds, [
+    'compact-reaction-summary',
+    'gas-species-summary',
+    'product-inventory',
+    'product-events',
+    'atom-residual'
+  ]);
   assert.equal(summary.reductionStrategy, 'two-pass-workgroup-reduction');
   assert.equal(summary.fullParticleReadbackPerformed, false);
   assert.equal(summary.compactReadbackByteLength, 128);
@@ -650,6 +664,8 @@ test('SPH reaction product events can remain GPU-resident without product-event 
   assert.equal(summary.productEventBufferByteLength, 65 * 2 * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(summary.productEventWorkgroupCount, 3);
   assert.equal(summary.productEventBufferRetained, true);
+  assert.equal(summary.mapPerformed, true);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
   assert.equal(summary.productEventBuffer.label, 'ulg-sph-reaction-product-event-out');
   assert.equal(typeof summary.destroyProductEventBuffer, 'function');
   assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [2, 1, 2, 3, 4, 1]);
@@ -689,6 +705,10 @@ test('SPH reaction resident product-event mode skips compact summary readbacks',
   assert.equal(summary.readbackMode, 'resident-product-event-buffer-no-readback');
   assert.equal(summary.reactionSummaryAvailable, false);
   assert.equal(summary.compactSummaryReadbackSkipped, true);
+  assert.equal(summary.mapPerformed, false);
+  assert.equal(summary.readbackPerformed, false);
+  assert.equal(summary.normalHotLoopReadbackFree, true);
+  assert.deepEqual(summary.mappedReadbackKinds, []);
   assert.equal(summary.compactReadbackByteLength, 0);
   assert.equal(summary.gasSpeciesReadbackByteLength, 0);
   assert.equal(summary.productInventoryReadbackByteLength, 0);
@@ -700,8 +720,45 @@ test('SPH reaction resident product-event mode skips compact summary readbacks',
   assert.equal(device.shaderModules.length, 1);
   assert.equal(device.createdBuffers.some((created) => created.label.includes('summary-readback')), false);
   assert.equal(device.createdBuffers.some((created) => created.label.includes('product-inventory-readback')), false);
+  assert.deepEqual(device.maps, []);
   const retained = device.createdBuffers.find((created) => created.label === 'ulg-sph-reaction-product-event-out');
   assert.equal(retained.destroyed, false);
   summary.destroyProductEventBuffer();
   assert.equal(retained.destroyed, true);
+});
+
+test('SPH reaction gas-species readback remains an explicit resident diagnostic', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS),
+    new Float32Array([400, 0.375, 93.75, 0, 0.375, 1, 0, 1])
+  );
+  const buffer = (label) => ({ label });
+  const summary = await runSphReactionSummaryWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 65
+    },
+    reactionTable: reactionTable(),
+    sourceStateBuffer: buffer('source-state'),
+    sourceThermoBuffer: buffer('source-thermo'),
+    nextStateBuffer: buffer('next-state'),
+    nextThermoBuffer: buffer('next-thermo'),
+    proposalBuffer: buffer('reaction-proposals'),
+    retainProductEventBuffer: true,
+    readCompactSummary: false,
+    readGasSpeciesSummary: true,
+    readProductInventory: false,
+    readAtomResidual: false
+  });
+
+  assert.equal(summary.productEventBufferRetained, true);
+  assert.equal(summary.gasSpeciesLedger.bySpecies.c2.moles, 93.75);
+  assert.equal(summary.gasSpeciesReadbackByteLength, 32);
+  assert.equal(summary.mapPerformed, true);
+  assert.equal(summary.readbackPerformed, true);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.deepEqual(summary.mappedReadbackKinds, ['gas-species-summary']);
+  assert.deepEqual(device.maps, ['ulg-sph-reaction-gas-species-summary-readback']);
+  summary.destroyProductEventBuffer();
 });

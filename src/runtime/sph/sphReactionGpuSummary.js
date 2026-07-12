@@ -1308,13 +1308,19 @@ export async function runSphReactionSummaryWebGpu({
       chemistryValidation: false,
       fullPhysicsValidation: false
     };
+    const mappedReadbackKinds = [
+      shouldReadCompactSummary ? 'compact-reaction-summary' : null,
+      shouldRunGasSpecies ? 'gas-species-summary' : null,
+      shouldRunProductInventory ? 'product-inventory' : null,
+      productEventReadBuffer ? 'product-events' : null,
+      shouldRunAtomResidual ? 'atom-residual' : null
+    ].filter(Boolean);
+    const mapPerformed = mappedReadbackKinds.length > 0;
     if (!shouldReadCompactSummary) {
       deferLocalBufferCleanup = true;
-      // The gas-species ledger is a fixed-size readback (same budget class
-      // as the compact particle summary) and the ONLY carrier of sealed-box
-      // gas moles for products without particle slots; the resident no-full
-      // shortcut must still surface it. Its dispatch and copy were already
-      // submitted above, so this maps a tiny buffer that is ready.
+      // Diagnostic summaries may still be requested explicitly. The normal
+      // resident path retains product events for same-device gas/EOS consumers
+      // and leaves every summary readback disabled.
       let residentGasSpeciesLedger = emptyGasSpeciesLedger;
       let residentGasSpeciesFloatCount = 0;
       if (shouldRunGasSpecies && gasSpeciesReadBuffer && gasSpeciesByteLength > 0) {
@@ -1370,6 +1376,10 @@ export async function runSphReactionSummaryWebGpu({
         unplacedProductInventoryIncluded: false,
         readbackMode: 'resident-product-event-buffer-no-readback',
         fullParticleReadbackPerformed: false,
+        mapPerformed,
+        readbackPerformed: mapPerformed,
+        normalHotLoopReadbackFree: !mapPerformed,
+        mappedReadbackKinds,
         compactSummaryReadbackSkipped: true,
         compactSummaryReadbackSkipReason: 'resident no-full hot loop retains GPU product-event sidecar without CPU mapAsync',
         localBufferCleanupStatus: typeof device.queue?.onSubmittedWorkDone === 'function'
@@ -1470,6 +1480,10 @@ export async function runSphReactionSummaryWebGpu({
     });
     return {
       ...compactSummary,
+      mapPerformed,
+      readbackPerformed: mapPerformed,
+      normalHotLoopReadbackFree: !mapPerformed,
+      mappedReadbackKinds,
       gasSpeciesLedger,
       gasSpeciesLedgerSchema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
       gasSpeciesLedgerCount: gasSpeciesLedger.recordCount,

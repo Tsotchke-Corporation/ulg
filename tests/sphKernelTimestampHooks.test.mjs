@@ -6,19 +6,19 @@ const kernelCases = [
   {
     file: '../src/runtime/sph/sphThermalGpuKernel.js',
     functionName: 'createSphThermalStepWebGpuEncoderStage',
-    label: 'thermalStep',
+    labels: ['thermalStep'],
     profilerName: 'timestampProfiler'
   },
   {
     file: '../src/runtime/sph/sphReactionGpuKernel.js',
     functionName: 'runSphReactionStepWebGpu',
-    label: 'reactionStep',
+    labels: ['reactionStepPropose', 'reactionStepResolve'],
     profilerName: 'resolvedTimestampProfiler'
   },
   {
     file: '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js',
     functionName: 'createMlsMpmMechanicsRefreshWebGpuEncoderStage',
-    label: 'mechanicsRefresh',
+    labels: ['mechanicsRefresh'],
     profilerName: 'timestampProfiler'
   }
 ];
@@ -36,16 +36,18 @@ function exportedFunctionSource(source, functionName) {
   return source.slice(start, nextExport >= 0 ? nextExport : source.length);
 }
 
-for (const { file, functionName, label, profilerName } of kernelCases) {
-  test(`${functionName} exposes a timestamp-profiled ${label} pass descriptor`, () => {
+for (const { file, functionName, labels, profilerName } of kernelCases) {
+  test(`${functionName} exposes its timestamp-profiled pass descriptors`, () => {
     const source = sourceFor(file);
     const functionSource = exportedFunctionSource(source, functionName);
 
     assert.match(functionSource, /timestampProfiler = null,/);
     assert.match(functionSource, /timestampMetadata = null/);
-    assert.match(functionSource, new RegExp(
-      `encoder\\.beginComputePass\\(\\s*profiledComputePassDescriptor\\(${profilerName}, '${label}', timestampMetadata\\)\\s*\\)`
-    ));
+    for (const label of labels) {
+      assert.match(functionSource, new RegExp(
+        `encoder\\.beginComputePass\\(\\s*profiledComputePassDescriptor\\(${profilerName}, '${label}', timestampMetadata\\)\\s*\\)`
+      ));
+    }
     assert.ok(source.includes(
       'timestampProfiler.beginComputePassDescriptor(label, timestampMetadata || {})'
     ));

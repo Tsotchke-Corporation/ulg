@@ -1,5 +1,45 @@
 # Implementation Status
 
+## Current GPU-Resident Checkpoint - 2026-07-11
+
+The active branch is `gpu-resident-physics-refactor` at committed HEAD
+`b4d1a38` plus the current worktree. This section supersedes older renderer,
+optical-authority, and current-priority claims below; historical entries remain
+as implementation history.
+
+- **Native presentation implemented:** one main-thread native triangle surface,
+  packed octahedral normals owned by the exact marching-cubes generation,
+  alpha-one/no-blend/depth-write PBR, and a native opaque background pass that
+  is included in the refraction scene-color copy.
+- **Pacing implemented:** at most two presentation submissions in flight. The
+  accepted route measures 60.296 FPS instead of the previous approximately
+  29.5 FPS whole-queue-fenced cadence.
+- **Spectral/thickness implementation present, acceptance open:** refraction
+  requires exact nonblocked provenance plus distinct blue/green/red samples.
+  A same-encoder `depth32float` backface pass reconstructs geometric thickness,
+  adds no submit, caches stable camera state, and fails closed on invalid rear
+  geometry. Accepted images are `/tmp/ulg-background-native-after2.png` and
+  `/tmp/ulg-thickness-refraction-live2.png`.
+- **Scientific qualification:** `molecularOpticalResponse.js` is a reduced,
+  scientifically unvalidated STO-3G RHF independent-particle occupied/virtual
+  dipole response with Lorentz-Lorenz local-field conversion. It is not full
+  TDHF, periodic dielectric response, or validated condensed-phase optics.
+- **Reaction traffic P0 implemented:** the 300k manufactured substep accounts
+  for 192,000,000 live bytes initialized by ordered GPU shaders and reports
+  zero host zero-initialization/upload bytes.
+- **Performance remains open:** warm reactive physics is about 48-52
+  ms/substep. Serial product carrier search/placement and redundant 40-pass
+  neighborhood builds are the active P0s; exact live-prefix dispatch, thermal
+  indexing, and persistent workspaces are P1.
+- **Validation remains open:** manufactured thickness/index/absorption/
+  dispersion/rear-depth metamorphic gates and a fresh close-spaced standard
+  named/random native matrix must pass before SURF-4/OPTICS or the full branch
+  can be marked complete.
+
+No new Schroeder WebGPU acceptance work may use a CPU mirror solver or CPU
+parity threshold. Use manufactured GPU states, mathematical invariants,
+same-device A/B/metamorphic paths, and fixed-size GPU reductions.
+
 Updated: 2026-06-20 native marching-cubes vertex-row budget, GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
 Latest added scope, 2026-06-20 AKDT: native marching-cubes surface

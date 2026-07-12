@@ -17,6 +17,9 @@ import {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
   createMlsMpmG2pParityReport,
+  encodeMlsMpmParticleSeparationPasses,
+  mlsMpmG2pParticleCountResidencyWgsl,
+  mlsMpmParticleSeparationCountResidencyWgsl,
   reconstructMlsMpmG2pCpu,
   runMlsMpmG2pWebGpu,
   runMlsMpmG2pWithOptionalWebGpu
@@ -117,18 +120,21 @@ function fakeG2pDevice() {
   const writes = [];
   const submissions = [];
   const dispatches = [];
+  const bindGroups = [];
   return {
+    limits: {},
     createdBuffers,
     writes,
     submissions,
     dispatches,
+    bindGroups,
     queue: {
       writeBuffer(buffer, offset, data) {
         const byteLength = data?.byteLength ?? 0;
         if (offset + byteLength > buffer.size) {
           throw new RangeError(`writeBuffer overflow for ${buffer.label}: ${offset + byteLength} > ${buffer.size}`);
         }
-        writes.push({ label: buffer.label, offset, byteLength });
+        writes.push({ label: buffer.label, offset, byteLength, data });
       },
       submit(commands) {
         submissions.push(commands);
@@ -160,7 +166,9 @@ function fakeG2pDevice() {
       };
     },
     createBindGroup({ layout, entries }) {
-      return { layout, entries };
+      const bindGroup = { layout, entries };
+      bindGroups.push(bindGroup);
+      return bindGroup;
     },
     createCommandEncoder() {
       return {
@@ -175,11 +183,21 @@ function fakeG2pDevice() {
             dispatchWorkgroups(count) {
               dispatches.push({ count, pipeline: this.pipeline, bindGroup: this.bindGroup?.bindGroup });
             },
+            dispatchWorkgroupsIndirect(buffer, offset) {
+              dispatches.push({
+                indirect: true,
+                buffer,
+                offset,
+                pipeline: this.pipeline,
+                bindGroup: this.bindGroup?.bindGroup
+              });
+            },
             end() {
               this.ended = true;
             }
           };
         },
+        clearBuffer() {},
         copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
           this.copy = { source, sourceOffset, destination, destinationOffset, size };
         },
@@ -187,6 +205,49 @@ function fakeG2pDevice() {
           return { dispatches: [...dispatches], copy: this.copy || null };
         }
       };
+    }
+  };
+}
+
+function residentCountUploads({ capacity = 4, generationId = 3 } = {}) {
+  const metadataBuffer = { label: 'particle-count-metadata' };
+  const dispatchIndirectBuffer = { label: 'particle-count-dispatch' };
+  const common = {
+    status: 'webgpu-uploaded',
+    particleCount: 1,
+    particleCapacity: capacity,
+    authoritativeParticleCount: null,
+    particleCountAuthority: 'gpu-authored-residency-metadata',
+    particleCountMetadataWord: 4,
+    particleCountResidencyGenerationId: generationId,
+    particleCountResidencyMetadataBuffer: metadataBuffer,
+    particleCountDispatchIndirectBuffer: dispatchIndirectBuffer,
+    particleCountDispatchIndirectByteOffset: 0,
+    particleCountSelectionIndirectByteOffset: 12,
+    normalHotLoopReadbackFree: true
+  };
+  return {
+    metadataBuffer,
+    dispatchIndirectBuffer,
+    residency: {
+      ready: true,
+      outputParticleCapacity: capacity,
+      generationId,
+      metadataBuffer,
+      dispatchIndirectBuffer,
+      activeDispatchIndirectByteOffset: 0,
+      selectionDispatchIndirectByteOffset: 12,
+      authoritativeParticleCountMetadataWord: 4,
+      authoritativeParticleCountAuthority: 'gpu-authored-residency-metadata'
+    },
+    sphParticleUpload: {
+      ...common,
+      stateBuffer: { label: 'resident-state' },
+      thermoBuffer: { label: 'resident-thermo' }
+    },
+    mlsMpmParticleUpload: {
+      ...common,
+      mechanicsBuffer: { label: 'resident-mechanics' }
     }
   };
 }
@@ -220,6 +281,30 @@ test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /next_j = max_volume_ratio_j/);
   assert.doesNotMatch(mlsMpmG2pReconstructWgsl, /c00 = c00 \* 0\.25/);
   assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('resident-count G2P and separation shaders fail closed on invalid or overflowing metadata', () => {
+  for (const source of [
+    mlsMpmG2pParticleCountResidencyWgsl,
+    ...Object.values(mlsMpmParticleSeparationCountResidencyWgsl)
+  ]) {
+    assert.match(source, /\[9\] == 0u/);
+    assert.match(source, /active_count <= capacity/);
+    assert.match(source, /capacity == params\.particle_count/);
+    assert.match(source, /return select\(0u, active_count, valid\)/);
+  }
+  assert.match(
+    mlsMpmG2pParticleCountResidencyWgsl,
+    /particle_index >= g2p_resident_particle_count\(\)/
+  );
+  assert.doesNotMatch(
+    mlsMpmG2pParticleCountResidencyWgsl,
+    /sph_thermo\[particle_index/
+  );
+  assert.match(
+    mlsMpmParticleSeparationCountResidencyWgsl.compute,
+    /bins\[5\] == separation_resident_particle_count\(\)/
+  );
 });
 
 test('CPU MLS-MPM G2P reconstructs velocity and advects without affine strain in constant grid flow', () => {
@@ -261,6 +346,83 @@ test('WebGPU MLS-MPM G2P params buffer fits the full uniform payload', async () 
   assert.equal(paramsBuffer.size, 80);
   assert.equal(paramsWrite.byteLength, 80);
   assert.equal(device.submissions.length, 1);
+});
+
+test('WebGPU MLS-MPM G2P uses capacity only for storage and dispatches from GPU active count', async () => {
+  const device = fakeG2pDevice();
+  const resident = residentCountUploads({ capacity: 4 });
+  const result = await runMlsMpmG2pWebGpu({
+    ...fixture(),
+    device,
+    sphParticleUpload: resident.sphParticleUpload,
+    mlsMpmParticleUpload: resident.mlsMpmParticleUpload,
+    boxDimsM: [3, 3, 3],
+    particleSeparationRelaxation: 0,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(result.particleCount, 1);
+  assert.equal(result.particleRowCapacity, 4);
+  assert.equal(result.authoritativeParticleCount, null);
+  assert.equal(result.particleCountDispatchMode, 'gpu-authored-active-count-indirect');
+  assert.deepEqual(
+    device.dispatches.map(({ indirect, buffer, offset }) => ({ indirect, buffer, offset })),
+    [{ indirect: true, buffer: resident.dispatchIndirectBuffer, offset: 0 }]
+  );
+  assert.equal(
+    device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-g2p-state-out').size,
+    4 * 8 * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-g2p-mechanics-out').size,
+    4 * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT
+  );
+  const paramsWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-g2p-params');
+  assert.equal(new DataView(paramsWrite.data).getUint32(0, true), 4);
+  const reconstructionBindGroup = device.bindGroups.find((group) => (
+    group.entries.some((entry) => entry.binding === 7)
+    && group.entries.some((entry) => entry.binding === 5)
+  ));
+  assert.equal(
+    reconstructionBindGroup.entries.find((entry) => entry.binding === 1).resource.buffer,
+    resident.metadataBuffer
+  );
+});
+
+test('particle separation uses metadata-guarded indirect dispatch for every enabled pass', () => {
+  const device = fakeG2pDevice();
+  const resident = residentCountUploads({ capacity: 4 });
+  const encoder = device.createCommandEncoder();
+  const result = encodeMlsMpmParticleSeparationPasses(device, encoder, {
+    stateBuffer: { label: 'state' },
+    mechanicsBuffer: { label: 'mechanics' },
+    particleCount: 1,
+    particleCountResidency: resident.residency,
+    boxDimsM: [3, 3, 3],
+    relaxation: 0.5,
+    maxPairRestDistanceM: 1,
+    gridSpacingM: 1
+  });
+
+  assert.equal(result.enabled, true);
+  assert.equal(result.authoritativeParticleCount, null);
+  assert.equal(result.particleRowCapacity, 4);
+  assert.equal(result.particleCountDispatchMode, 'gpu-authored-active-count-indirect');
+  assert.equal(device.dispatches.length, 3);
+  assert.equal(device.dispatches.every((dispatch) => (
+    dispatch.indirect === true
+    && dispatch.buffer === resident.dispatchIndirectBuffer
+    && dispatch.offset === 0
+  )), true);
+  assert.equal(device.bindGroups.filter((group) => (
+    group.entries.some((entry) => entry.resource.buffer === resident.metadataBuffer)
+  )).length, 3);
+  const paramsWrite = device.writes.find(
+    (write) => write.label === 'ulg-mls-mpm-separation-params'
+  );
+  const params = new DataView(paramsWrite.data);
+  assert.equal(params.getUint32(0, true), 4);
+  assert.equal(params.getUint32(76, true), 3);
 });
 
 test('CPU MLS-MPM G2P renormalizes clipped active grid support for constant flow', () => {
@@ -481,6 +643,20 @@ test('optional MLS-MPM G2P returns CPU reference when WebGPU is not requested', 
   assert.equal(execution.schema, ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA);
   assert.equal(execution.backend, 'cpu-reference');
   assert.equal(execution.webgpuStatus.status, 'not-requested');
+});
+
+test('optional MLS-MPM G2P refuses capacity-as-count CPU fallback', async () => {
+  const resident = residentCountUploads({ capacity: 4 });
+  await assert.rejects(
+    runMlsMpmG2pWithOptionalWebGpu({
+      ...fixture(),
+      sphParticleUpload: resident.sphParticleUpload,
+      mlsMpmParticleUpload: resident.mlsMpmParticleUpload,
+      preferWebGpu: false,
+      readbackMode: 'no-full-readback'
+    }),
+    /cannot fall back to a CPU-owned particle loop/
+  );
 });
 
 test('optional MLS-MPM G2P falls back when WebGPU is unavailable', async () => {

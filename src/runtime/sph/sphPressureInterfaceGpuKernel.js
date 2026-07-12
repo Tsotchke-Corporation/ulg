@@ -13,18 +13,36 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   sphPressureInterfaceContactKinematicsWgsl,
+  sphPressureInterfaceResidentContactKinematicsWgsl,
   sphPressureInterfaceParticleBinsWgsl,
   sphPressureInterfaceForceRowsWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuDeviceMismatchInfo } from './sphGpuDeviceIdentity.js';
+import { resolveResidentNeighborhoodConsumer } from './residentNeighborhoodConsumer.js';
+import {
+  SPH_GAS_CELL_EOS_MAGIC,
+  SPH_GAS_CELL_EOS_METADATA,
+  SPH_GAS_CELL_EOS_METADATA_BYTES,
+  SPH_GAS_CELL_EOS_METADATA_WORDS,
+  SPH_GAS_CELL_EOS_GPU_STATUS,
+  SPH_GAS_CELL_EOS_VERSION,
+  ULG_PRESSURE_INTERFACE_GPU_GAS_CELL_FIELD_SOURCE_SCHEMA
+} from './sphSpatialGasCellEosGpu.js';
 
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
 export const SPH_GAS_PRESSURE_CELL_FLOATS = 12;
 export const SPH_ALGORITHM_CONTACT_POLICY_FLOATS = 16;
 export const SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS = 4;
+export const SPH_PRESSURE_INTERFACE_FORCE_PARAMS_BYTE_LENGTH = 144;
+export const SPH_PRESSURE_INTERFACE_CONTACT_KINEMATICS_PARAMS_BYTE_LENGTH = 64;
+export const SPH_PRESSURE_INTERFACE_LAW_QUEUE_PARAMS_BYTE_LENGTH = 16;
+export const SPH_PRESSURE_INTERFACE_LAW_NEIGHBOR_PARAMS_BYTE_LENGTH = 64;
+export const SPH_PRESSURE_INTERFACE_SOURCE_SPAN_PARAMS_BYTE_LENGTH = 16;
+export const SPH_PRESSURE_INTERFACE_SOURCE_KEY_PARAMS_BYTE_LENGTH = 16;
+export const SPH_PRESSURE_INTERFACE_SCATTER_PARAMS_BYTE_LENGTH = 80;
 export const ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA =
   'peercompute.ulg.algorithm-material-contact-pair-response.v0';
 export const ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA =
@@ -55,7 +73,10 @@ const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK =
 const SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS =
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
 const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
+export const SPH_PRESSURE_INTERFACE_DISABLED_LAW_QUEUE_BYTE_LENGTH =
+  SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
 const SPH_INTERFACE_SOURCE_KEY_FLOATS = SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT.length;
+const RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_BYTES = 40 * Uint32Array.BYTES_PER_ELEMENT;
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -65,6 +86,7 @@ const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  INDIRECT: globalThis.GPUBufferUsage?.INDIRECT ?? 256,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
@@ -73,9 +95,38 @@ const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
 
+const PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH = 4 * Float32Array.BYTES_PER_ELEMENT;
+
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function exactPressureBindingResource(buffer, offset = 0, size = null) {
+  const byteOffset = Math.max(0, Math.trunc(finiteNumber(offset, 0)));
+  const available = Math.max(0, Math.trunc(finiteNumber(buffer?.size, 0)) - byteOffset);
+  const byteLength = size == null
+    ? available
+    : Math.max(0, Math.trunc(finiteNumber(size, available)));
+  if (byteLength < Uint32Array.BYTES_PER_ELEMENT || byteLength > available) {
+    throw new RangeError(
+      `WebGPU pressure binding range [${byteOffset}, ${byteOffset + byteLength}) exceeds `
+        + `the available ${available} bytes or the four-byte ABI minimum`
+    );
+  }
+  return { buffer, offset: byteOffset, size: byteLength };
+}
+
+function exactPressureBindGroupSignature(layout, entries) {
+  return [
+    layout,
+    ...entries.flatMap(({ binding, resource }) => [
+      binding,
+      resource.buffer,
+      resource.offset ?? 0,
+      resource.size ?? null
+    ])
+  ];
 }
 
 function clampPositive(value, fallback = 0) {
@@ -678,9 +729,15 @@ export function createPressureInterfaceParamsArray({
   contactPolicyRowCount = 0,
   algorithmContactPairResponseScale = DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE,
   algorithmContactMaxPressurePa = DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA,
-  algorithmContactPairResponseEnabled = false
+  algorithmContactPairResponseEnabled = false,
+  residentCandidateMode = false,
+  residentCandidateCapacity = 0,
+  residentCandidateDenseCount = 0,
+  residentCandidateGuardEnabled = false,
+  residentNeighborhoodAdmission = null,
+  retainedGasPressureCellMetadata = null
 } = {}) {
-  const buffer = new ArrayBuffer(32);
+  const buffer = new ArrayBuffer(SPH_PRESSURE_INTERFACE_FORCE_PARAMS_BYTE_LENGTH);
   const view = new DataView(buffer);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(elementCount, 0))), true);
   view.setFloat32(4, finiteNumber(pressurePa, 0), true);
@@ -690,7 +747,400 @@ export function createPressureInterfaceParamsArray({
   view.setFloat32(20, clampPositive(algorithmContactPairResponseScale, DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE), true);
   view.setFloat32(24, contactPressureCap({ algorithmContactMaxPressurePa }), true);
   view.setFloat32(28, algorithmContactPairResponseEnabled ? 1 : 0, true);
+  view.setUint32(32, residentCandidateMode ? 1 : 0, true);
+  view.setUint32(36, Math.max(0, Math.round(finiteNumber(residentCandidateCapacity, 0))), true);
+  view.setUint32(40, Math.max(0, Math.round(finiteNumber(residentCandidateDenseCount, 0))), true);
+  view.setUint32(44, residentCandidateGuardEnabled ? 1 : 0, true);
+  const identity = residentNeighborhoodAdmission?.admitted === true
+    ? residentNeighborhoodAdmission.expectedIdentity
+    : null;
+  view.setUint32(48, identity?.generation ?? 0, true);
+  view.setUint32(52, identity?.leaseTokenLow ?? 0, true);
+  view.setUint32(56, identity?.leaseTokenHigh ?? 0, true);
+  view.setUint32(60, identity?.positionEpoch ?? 0, true);
+  view.setUint32(64, identity?.sourceCount ?? 0, true);
+  view.setUint32(68, identity?.consumerBit ?? 0, true);
+  view.setUint32(72, identity ? 1 : 0, true);
+  view.setUint32(76, 0, true);
+  const gasMetadata = retainedGasPressureCellMetadata?.ready === true
+    ? retainedGasPressureCellMetadata
+    : null;
+  view.setUint32(80, gasMetadata ? 1 : 0, true);
+  view.setUint32(84, gasMetadata?.rowCapacity ?? 0, true);
+  view.setUint32(88, gasMetadata?.generation ?? 0, true);
+  view.setUint32(92, gasMetadata?.laneHashLow ?? 0, true);
+  view.setUint32(96, gasMetadata?.laneHashHigh ?? 0, true);
+  view.setUint32(100, gasMetadata?.sourceEpoch ?? 0, true);
+  view.setUint32(104, gasMetadata?.sourceGeneration ?? 0, true);
+  view.setUint32(108, gasMetadata?.gridDims?.[0] ?? 0, true);
+  view.setUint32(112, gasMetadata?.gridDims?.[1] ?? 0, true);
+  view.setUint32(116, gasMetadata?.gridDims?.[2] ?? 0, true);
+  view.setUint32(120, gasMetadata?.gridCellCount ?? 0, true);
+  view.setUint32(124, 0, true);
+  view.setFloat32(128, gasMetadata?.boxDimsM?.[0] ?? 0, true);
+  view.setFloat32(132, gasMetadata?.boxDimsM?.[1] ?? 0, true);
+  view.setFloat32(136, gasMetadata?.boxDimsM?.[2] ?? 0, true);
+  view.setFloat32(140, 0, true);
   return buffer;
+}
+
+function gasCellEosFieldSource(importValue = null) {
+  if (!importValue || typeof importValue !== 'object') return null;
+  return importValue.retainedGasCellFieldSource
+    || importValue.pressureInterfaceGasCellFieldImport?.retainedGasCellFieldSource
+    || importValue;
+}
+
+function resolveGpuGuardedGasCellField({
+  device,
+  gpuResidentLaneLeaseIdentity = null,
+  expectedGasPressureCellSourceEpoch = null,
+  expectedGasPressureCellSourceGeneration = null,
+  requireGpuGasCellTaskProvenance = true,
+  retainedGasPressureCellImport = null,
+  retainedGasPressureCellsBuffer = null,
+  retainedGasPressureCellMetadataBuffer = null,
+  retainedGasPressureCellLookupBuffer = null,
+  retainedGasPressureCellRowCapacity = 0,
+  retainedGasPressureCellRowStrideFloats = SPH_GAS_PRESSURE_CELL_FLOATS,
+  retainedGasPressureCellGeneration = null,
+  retainedGasPressureCellLaneHashLow = null,
+  retainedGasPressureCellLaneHashHigh = null,
+  retainedGasPressureCellSourceEpoch = null,
+  retainedGasPressureCellSourceGeneration = null,
+  retainedGasPressureCellGridDims = null,
+  retainedGasPressureCellGridCellCount = null,
+  retainedGasPressureCellBoxDimsM = null
+} = {}) {
+  const source = gasCellEosFieldSource(retainedGasPressureCellImport);
+  const rowsBuffer = retainedGasPressureCellsBuffer
+    || source?.gasPressureCellsBuffer
+    || retainedGasPressureCellImport?.gasPressureCellsBuffer
+    || null;
+  const metadataBuffer = retainedGasPressureCellMetadataBuffer
+    || source?.gasPressureCellMetadataBuffer
+    || retainedGasPressureCellImport?.gasPressureCellMetadataBuffer
+    || null;
+  const lookupBuffer = retainedGasPressureCellLookupBuffer
+    || source?.gasPressureCellLookupBuffer
+    || retainedGasPressureCellImport?.gasPressureCellLookupBuffer
+    || null;
+  const advertisesGpuGuard = Boolean(
+    metadataBuffer
+      || lookupBuffer
+      || source?.schema === ULG_PRESSURE_INTERFACE_GPU_GAS_CELL_FIELD_SOURCE_SCHEMA
+      || retainedGasPressureCellImport?.gpuEvidence?.schema === 'peercompute.ulg.sph-spatial-gas-cell-eos-gpu-evidence.v0'
+  );
+  if (!advertisesGpuGuard) return { advertised: false, ready: false, source };
+  const rowCapacity = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellRowCapacity
+      || source?.gasPressureCellRowCapacity
+      || retainedGasPressureCellImport?.pressureInterfaceGasPressureCellRowCapacity,
+    0
+  )));
+  const rowStrideFloats = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellRowStrideFloats
+      || source?.gasPressureCellRowStrideFloats
+      || retainedGasPressureCellImport?.pressureInterfaceGasPressureCellRowStrideFloats,
+    SPH_GAS_PRESSURE_CELL_FLOATS
+  )));
+  const generation = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellGeneration
+      ?? source?.generation
+      ?? retainedGasPressureCellImport?.generation,
+    0
+  )));
+  const laneHashLow = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellLaneHashLow
+      ?? retainedGasPressureCellImport?.laneIdentityHashLow
+      ?? retainedGasPressureCellImport?.gpuEvidence?.expectedLaneHashLow,
+    0
+  ))) >>> 0;
+  const laneHashHigh = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellLaneHashHigh
+      ?? retainedGasPressureCellImport?.laneIdentityHashHigh
+      ?? retainedGasPressureCellImport?.gpuEvidence?.expectedLaneHashHigh,
+    0
+  ))) >>> 0;
+  const sourceEpoch = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellSourceEpoch
+      ?? source?.sourceEpoch
+      ?? retainedGasPressureCellImport?.sourceEpoch,
+    0
+  ))) >>> 0;
+  const sourceGeneration = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellSourceGeneration
+      ?? source?.sourceGeneration
+      ?? retainedGasPressureCellImport?.sourceGeneration,
+    0
+  ))) >>> 0;
+  const gridDimsValue = retainedGasPressureCellGridDims
+    || source?.gridDims
+    || retainedGasPressureCellImport?.gridDims;
+  const gridDims = Array.isArray(gridDimsValue) || ArrayBuffer.isView(gridDimsValue)
+    ? [0, 1, 2].map((axis) => Math.max(0, Math.trunc(finiteNumber(gridDimsValue[axis], 0))))
+    : [0, 0, 0];
+  const gridCellCount = Math.max(0, Math.trunc(finiteNumber(
+    retainedGasPressureCellGridCellCount
+      ?? source?.gridCellCount
+      ?? retainedGasPressureCellImport?.gridCellCount,
+    0
+  )));
+  const boxValue = retainedGasPressureCellBoxDimsM
+    || source?.boxDimsM
+    || retainedGasPressureCellImport?.boxDimsM;
+  const boxDims = Array.isArray(boxValue) || ArrayBuffer.isView(boxValue)
+    ? [0, 1, 2].map((axis) => finiteNumber(boxValue[axis], 0))
+    : [0, 0, 0];
+  const failures = [];
+  const sourceLaneIdentity = retainedGasPressureCellImport?.gpuResidentLaneLeaseIdentity
+    || source?.gpuResidentLaneLeaseIdentity
+    || null;
+  if (!rowsBuffer) failures.push('gas-pressure-cell-rows-buffer-required');
+  if (!metadataBuffer) failures.push('gas-pressure-cell-metadata-buffer-required');
+  if (!lookupBuffer) failures.push('gas-pressure-cell-lookup-buffer-required');
+  if (rowCapacity < 1) failures.push('gas-pressure-cell-row-capacity-required');
+  if (rowStrideFloats !== SPH_GAS_PRESSURE_CELL_FLOATS) failures.push('gas-pressure-cell-row-stride-mismatch');
+  if (generation < 1) failures.push('gas-pressure-cell-generation-required');
+  if (gridDims.some((value) => value < 1)) failures.push('gas-pressure-cell-grid-dims-required');
+  if (gridDims.reduce((product, value) => product * value, 1) !== gridCellCount) {
+    failures.push('gas-pressure-cell-grid-count-mismatch');
+  }
+  if (boxDims.some((value) => !(value > 0))) failures.push('gas-pressure-cell-box-dims-required');
+  if (Number(metadataBuffer?.size ?? SPH_GAS_CELL_EOS_METADATA_BYTES) < SPH_GAS_CELL_EOS_METADATA_BYTES) {
+    failures.push('gas-pressure-cell-metadata-buffer-too-small');
+  }
+  if (Number(lookupBuffer?.size ?? gridCellCount * Uint32Array.BYTES_PER_ELEMENT)
+    < gridCellCount * Uint32Array.BYTES_PER_ELEMENT) {
+    failures.push('gas-pressure-cell-lookup-buffer-too-small');
+  }
+  if (Number(rowsBuffer?.size ?? rowCapacity * SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+    < rowCapacity * SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT) {
+    failures.push('gas-pressure-cell-rows-buffer-too-small');
+  }
+  for (const [name, buffer] of [['rows', rowsBuffer], ['metadata', metadataBuffer], ['lookup', lookupBuffer]]) {
+    const mismatch = webGpuDeviceMismatchInfo({ buffer, device });
+    if (mismatch.mismatch) failures.push(`gas-pressure-cell-${name}-buffer-device-mismatch`);
+  }
+  if (requireGpuGasCellTaskProvenance) {
+    if (
+      sourceLaneIdentity?.schema !== 'peercompute.compute.gpu-resident-lane-lease-identity.v0'
+      || sourceLaneIdentity?.authoritative !== true
+    ) {
+      failures.push('gas-pressure-cell-source-lane-lease-identity-required');
+    }
+    if (
+      gpuResidentLaneLeaseIdentity?.schema !== 'peercompute.compute.gpu-resident-lane-lease-identity.v0'
+      || gpuResidentLaneLeaseIdentity?.authoritative !== true
+    ) {
+      failures.push('pressure-consumer-lane-lease-identity-required');
+    }
+    for (const field of ['leaseId', 'laneId', 'stateKey', 'sourceFamily']) {
+      if (sourceLaneIdentity?.[field] !== gpuResidentLaneLeaseIdentity?.[field]) {
+        failures.push(`gas-pressure-cell-${field}-mismatch`);
+      }
+    }
+    if (expectedGasPressureCellSourceEpoch == null) {
+      failures.push('expected-gas-pressure-cell-source-epoch-required');
+    } else if (sourceEpoch !== (Math.max(0, Math.trunc(finiteNumber(expectedGasPressureCellSourceEpoch, 0))) >>> 0)) {
+      failures.push('gas-pressure-cell-source-epoch-mismatch');
+    }
+    if (expectedGasPressureCellSourceGeneration == null) {
+      failures.push('expected-gas-pressure-cell-source-generation-required');
+    } else if (
+      sourceGeneration
+      !== (Math.max(0, Math.trunc(finiteNumber(expectedGasPressureCellSourceGeneration, 0))) >>> 0)
+    ) {
+      failures.push('gas-pressure-cell-source-generation-mismatch');
+    }
+  }
+  return {
+    advertised: true,
+    ready: failures.length === 0,
+    status: failures.length === 0
+      ? 'gpu-guarded-gas-pressure-cell-field-ready'
+      : 'gpu-guarded-gas-pressure-cell-field-blocked',
+    failures,
+    source,
+    sourceLaneIdentity,
+    consumerLaneIdentity: gpuResidentLaneLeaseIdentity,
+    rowsBuffer,
+    metadataBuffer,
+    lookupBuffer,
+    rowCapacity,
+    rowStrideFloats,
+    generation,
+    laneHashLow,
+    laneHashHigh,
+    sourceEpoch,
+    sourceGeneration,
+    gridDims,
+    gridCellCount,
+    boxDimsM: boxDims,
+    metadataLayout: { ...SPH_GAS_CELL_EOS_METADATA },
+    metadataWordCount: SPH_GAS_CELL_EOS_METADATA_WORDS,
+    expectedMagic: SPH_GAS_CELL_EOS_MAGIC,
+    expectedVersion: SPH_GAS_CELL_EOS_VERSION,
+    expectedReadyStatus: SPH_GAS_CELL_EOS_GPU_STATUS.ready,
+    consumerAccessProtocol: 'same-device-gpu-metadata-guarded-cell-lookup'
+  };
+}
+
+function authorityValue(authority, directKey, nestedKey, descriptorPath = null) {
+  if (!authority || typeof authority !== 'object') return null;
+  if (authority[directKey] != null) return authority[directKey];
+  if (authority.expectedIdentity?.[nestedKey] != null) return authority.expectedIdentity[nestedKey];
+  if (authority.identity?.[nestedKey] != null) return authority.identity[nestedKey];
+  if (!descriptorPath) return null;
+  let value = authority.descriptor;
+  for (const key of descriptorPath) value = value?.[key];
+  return value ?? null;
+}
+
+function resolveGpuResidentMaterialInterfaceRows({
+  device,
+  materialInterfaceField,
+  commandEncoder,
+  residentNeighborhoodAdmission
+} = {}) {
+  const candidateRowsBuffer = materialInterfaceField?.candidateRowsBuffer || null;
+  const compactMetadataBuffer = materialInterfaceField?.compactMetadataBuffer || null;
+  const candidateDispatchIndirectBuffer =
+    materialInterfaceField?.candidateDispatchIndirectBuffer || null;
+  const advertisesResidentCandidates = materialInterfaceField?.gpuResidentInterfaceCandidates === true
+    || materialInterfaceField?.candidateRowsBufferRetained === true
+    || candidateRowsBuffer != null;
+  if (!advertisesResidentCandidates) return null;
+  const failures = [];
+  if (!commandEncoder) failures.push('caller-owned-command-encoder-required');
+  if (!candidateRowsBuffer) failures.push('candidate-rows-buffer-missing');
+  if (!compactMetadataBuffer) failures.push('compact-metadata-buffer-missing');
+  if (!candidateDispatchIndirectBuffer) failures.push('candidate-dispatch-indirect-buffer-missing');
+  if (materialInterfaceField?.candidateRowsBufferRetained === false) failures.push('candidate-rows-buffer-released');
+  if (materialInterfaceField?.compactMetadataBufferRetained === false) failures.push('compact-metadata-buffer-released');
+  if (materialInterfaceField?.candidateDispatchIndirectBufferRetained === false) {
+    failures.push('candidate-dispatch-indirect-buffer-released');
+  }
+  const rowStrideFloats = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.elementStrideFloats
+      ?? materialInterfaceField?.rowStrideFloats,
+    0
+  )));
+  if (rowStrideFloats !== SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS) {
+    failures.push('candidate-row-stride-mismatch');
+  }
+  const rowCapacity = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.candidateCompactCapacity
+      ?? materialInterfaceField?.compactCandidateCapacity
+      ?? materialInterfaceField?.elementCount,
+    0
+  )));
+  if (rowCapacity <= 0) failures.push('candidate-row-capacity-missing');
+  const requiredCandidateBytes = rowCapacity
+    * SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const declaredCandidateBytes = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.candidateRowsBufferByteLength
+      ?? candidateRowsBuffer?.size,
+    0
+  )));
+  if (declaredCandidateBytes < requiredCandidateBytes) failures.push('candidate-rows-buffer-too-small');
+  const declaredMetadataBytes = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.compactMetadataBufferByteLength
+      ?? compactMetadataBuffer?.size,
+    0
+  )));
+  if (declaredMetadataBytes < 16) failures.push('compact-metadata-buffer-too-small');
+  const declaredDispatchBytes = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.candidateDispatchIndirectBufferByteLength
+      ?? candidateDispatchIndirectBuffer?.size,
+    0
+  )));
+  if (declaredDispatchBytes < 12) failures.push('candidate-dispatch-indirect-buffer-too-small');
+  const candidateDispatchIndirectOffsetBytes = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.candidateDispatchIndirectOffsetBytes,
+    0
+  )));
+  if (candidateDispatchIndirectOffsetBytes % 4 !== 0) {
+    failures.push('candidate-dispatch-indirect-offset-misaligned');
+  }
+  if (candidateDispatchIndirectOffsetBytes + 12 > declaredDispatchBytes) {
+    failures.push('candidate-dispatch-indirect-range-out-of-bounds');
+  }
+  const dispatchUsage = Number(candidateDispatchIndirectBuffer?.usage);
+  if (
+    candidateDispatchIndirectBuffer
+    && Number.isFinite(dispatchUsage)
+    && (dispatchUsage & (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT))
+      !== (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT)
+  ) {
+    failures.push('candidate-dispatch-indirect-buffer-usage-invalid');
+  }
+  const candidateMismatch = webGpuDeviceMismatchInfo({ buffer: candidateRowsBuffer, device });
+  const metadataMismatch = webGpuDeviceMismatchInfo({ buffer: compactMetadataBuffer, device });
+  const dispatchMismatch = webGpuDeviceMismatchInfo({
+    buffer: candidateDispatchIndirectBuffer,
+    device
+  });
+  if (candidateRowsBuffer && candidateMismatch.sourceDeviceId === null) {
+    failures.push('candidate-buffer-device-identity-unavailable');
+  }
+  if (compactMetadataBuffer && metadataMismatch.sourceDeviceId === null) {
+    failures.push('metadata-buffer-device-identity-unavailable');
+  }
+  if (candidateDispatchIndirectBuffer && dispatchMismatch.sourceDeviceId === null) {
+    failures.push('candidate-dispatch-buffer-device-identity-unavailable');
+  }
+  if (candidateMismatch.mismatch) failures.push('candidate-buffer-device-mismatch');
+  if (metadataMismatch.mismatch) failures.push('metadata-buffer-device-mismatch');
+  if (dispatchMismatch.mismatch) failures.push('candidate-dispatch-buffer-device-mismatch');
+  if (!residentNeighborhoodAdmission?.admitted) {
+    failures.push('resident-neighborhood-admission-required');
+  }
+  const expected = residentNeighborhoodAdmission?.expectedIdentity || null;
+  const authority = materialInterfaceField?.residentAuthority || null;
+  const authorityIdentity = {
+    generation: authorityValue(authority, 'generation', 'generation', ['generation']),
+    leaseTokenLow: authorityValue(authority, 'leaseTokenLow', 'leaseTokenLow', ['lease', 'tokenLow']),
+    leaseTokenHigh: authorityValue(authority, 'leaseTokenHigh', 'leaseTokenHigh', ['lease', 'tokenHigh']),
+    positionEpoch: authorityValue(authority, 'positionEpoch', 'positionEpoch', ['positionValidity', 'positionEpoch']),
+    sourceCount: authorityValue(authority, 'sourceCount', 'sourceCount', ['capacityEvidence', 'sourceCount']),
+    sourceFamily: authorityValue(authority, 'sourceFamily', 'sourceFamily', ['lease', 'sourceFamily'])
+  };
+  if (!authority) failures.push('candidate-resident-authority-missing');
+  if (expected) {
+    for (const key of ['generation', 'leaseTokenLow', 'leaseTokenHigh', 'positionEpoch', 'sourceCount', 'sourceFamily']) {
+      if (authorityIdentity[key] !== expected[key]) failures.push(`candidate-${key}-mismatch`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`GPU-resident material-interface candidates rejected: ${failures.join(', ')}`);
+  }
+  return {
+    mode: 'gpu-resident-compact-candidate-buffer',
+    rows: new Float32Array(),
+    elements: [],
+    rowCount: rowCapacity,
+    rowCapacity,
+    rowStrideFloats,
+    rowByteLength: requiredCandidateBytes,
+    denseCandidateCount: Math.max(0, Math.round(finiteNumber(
+      materialInterfaceField?.candidateCount,
+      0
+    ))),
+    candidateRowsBuffer,
+    compactMetadataBuffer,
+    candidateDispatchIndirectBuffer,
+    candidateDispatchIndirectOffsetBytes,
+    candidateDispatchIndirectByteLength: declaredDispatchBytes,
+    candidateDispatchAuthority: materialInterfaceField?.candidateDispatchAuthority
+      ?? 'gpu-finalized-active-count-fail-closed-indirect',
+    sourceDeviceId: candidateMismatch.sourceDeviceId,
+    consumerDeviceId: candidateMismatch.consumerDeviceId,
+    residentAuthority: authorityIdentity,
+    metadataGuard: 'active-count-capacity-overflow-gpu-fail-closed',
+    activeRowCountPending: true
+  };
 }
 
 function writeStorageBuffer(device, label, data) {
@@ -702,6 +1152,27 @@ function writeStorageBuffer(device, label, data) {
   }), device);
   if (data?.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
+}
+
+function assertPressureTargetBuffer({
+  device,
+  buffer,
+  name,
+  minimumByteLength,
+  requiredUsage
+}) {
+  if (!buffer) return;
+  if (Math.max(0, Number(buffer.size) || 0) < minimumByteLength) {
+    throw new RangeError(`${name} must provide at least ${minimumByteLength} bytes`);
+  }
+  const usage = Number(buffer.usage);
+  if (Number.isFinite(usage) && (usage & requiredUsage) !== requiredUsage) {
+    throw new TypeError(`${name} requires usage mask ${requiredUsage}`);
+  }
+  const mismatch = webGpuDeviceMismatchInfo({ buffer, device });
+  if (mismatch.mismatch) {
+    throw new TypeError(`${name} was created on a different WebGPU device`);
+  }
 }
 
 function resolveSchroederPressureInterfaceLawQueue(schroederLawQueue = null, {
@@ -843,26 +1314,43 @@ function createSchroederPressureInterfaceLawQueueParamsArray(schroederLawQueue) 
   return buffer;
 }
 
-function createSchroederPressureInterfaceLawNeighborCandidateParamsArray(schroederLawNeighborCandidates) {
-  const buffer = new ArrayBuffer(32);
+function createSchroederPressureInterfaceLawNeighborCandidateParamsArray(
+  schroederLawNeighborCandidates,
+  residentNeighborhoodAdmission = null
+) {
+  const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
-  view.setUint32(0, schroederLawNeighborCandidates?.neighborCandidateBufferConsumed ? 1 : 0, true);
+  const residentEnabled = residentNeighborhoodAdmission?.admitted === true;
+  view.setUint32(
+    0,
+    residentEnabled ? 2 : (schroederLawNeighborCandidates?.neighborCandidateBufferConsumed ? 1 : 0),
+    true
+  );
   view.setUint32(4, Math.max(0, Math.round(finiteNumber(
-    schroederLawNeighborCandidates?.neighborCandidateCount,
+    residentEnabled
+      ? residentNeighborhoodAdmission.descriptor.capacityEvidence.capacity.candidateCount
+      : schroederLawNeighborCandidates?.neighborCandidateCount,
     0
   ))), true);
   view.setUint32(8, Math.max(1, Math.round(finiteNumber(
-    schroederLawNeighborCandidates?.neighborCandidateStrideFloats,
+    residentEnabled ? 2 : schroederLawNeighborCandidates?.neighborCandidateStrideFloats,
     SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS
   ))), true);
   view.setUint32(12, Math.max(0, Math.round(finiteNumber(
-    schroederLawNeighborCandidates?.contactInterfaceMask,
+    residentEnabled
+      ? residentNeighborhoodAdmission.expectedIdentity.consumerBit
+      : schroederLawNeighborCandidates?.contactInterfaceMask,
     SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK
   ))), true);
-  view.setUint32(16, 0, true);
-  view.setUint32(20, 0, true);
-  view.setUint32(24, 0, true);
-  view.setUint32(28, 0, true);
+  const identity = residentNeighborhoodAdmission?.expectedIdentity;
+  view.setUint32(16, residentEnabled ? 2 : 0, true);
+  view.setUint32(20, identity?.generation ?? 0, true);
+  view.setUint32(24, identity?.leaseTokenLow ?? 0, true);
+  view.setUint32(28, identity?.leaseTokenHigh ?? 0, true);
+  view.setUint32(32, identity?.positionEpoch ?? 0, true);
+  view.setUint32(36, identity?.sourceCount ?? 0, true);
+  view.setUint32(40, identity?.consumerBit ?? 0, true);
+  view.setUint32(44, residentEnabled ? 1 : 0, true);
   return buffer;
 }
 
@@ -1232,8 +1720,9 @@ function resolvePressureInterfaceSourceKeys(interfaceSourceKeys = null, {
       status: 'interface-source-key-rejected',
       consumerStatus: 'blocked-cross-device-interface-source-key-buffer',
       reason: 'Interface source-key buffer was created on a different WebGPU device',
-      sourceKeyBuffer: resolvedBuffer,
+      sourceKeyBuffer: null,
       sourceKeyBufferObserved: true,
+      sourceKeyBufferConsumed: false,
       rowCount,
       readyCount,
       rowStrideFloats,
@@ -1599,6 +2088,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   packedInterfaceElements,
   packedContactPolicy,
   interfaceElementsBuffer,
+  candidateDispatchIndirectBuffer = null,
+  candidateDispatchIndirectOffsetBytes = 0,
   contactPolicyBuffer,
   particleSource,
   particleBinGrid = null,
@@ -1607,29 +2098,78 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
-  interfaceSourceKeys = null
+  interfaceSourceKeys = null,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
+  targetOutputBuffer = null,
+  workspaceResources = null,
+  commandEncoder = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceContactKinematicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   if (!packedInterfaceElements?.rows || !packedContactPolicy?.rows || !interfaceElementsBuffer || !contactPolicyBuffer || particleSource?.ready !== true) {
     throw new TypeError('runSphPressureInterfaceContactKinematicsWebGpu requires packed interface rows, contact rows, source buffers, and particle buffers');
+  }
+  const residentNeighborhoodAdmission = residentNeighborhood
+    ? resolveResidentNeighborhoodConsumer({
+        residentNeighborhood,
+        device,
+        consumer: 'pressureInterface',
+        sourceCount: particleSource.particleCount,
+        ...(residentNeighborhoodValidation || {})
+      })
+    : null;
+  if (residentNeighborhood && !residentNeighborhoodAdmission.admitted) {
+    throw new Error(
+      `pressure/interface resident neighborhood rejected: ${residentNeighborhoodAdmission.reasonCodes.join(', ')}`
+    );
   }
   const outputByteLength = Math.max(
     4,
     packedInterfaceElements.rowCount * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
-  const outputBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-pressure-interface-contact-kinematics-derived',
-    size: outputByteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  }), device);
-  const paramsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-pressure-interface-contact-kinematics-params',
-    size: 64,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  }), device);
-  const resolvedParticleBins = particleBins || createDisabledContactParticleBinBuffers(device, particleBinGrid);
+  assertPressureTargetBuffer({
+    device,
+    buffer: targetOutputBuffer,
+    name: 'targetOutputBuffer',
+    minimumByteLength: outputByteLength,
+    requiredUsage: GPU_BUFFER_USAGE.STORAGE
+  });
+  const ownsOutputBuffer = !targetOutputBuffer;
+  const outputBuffer = targetOutputBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-pressure-interface-contact-kinematics-derived',
+      size: outputByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const paramsBuffer = workspaceResources?.contactKinematicsParamsBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-pressure-interface-contact-kinematics-params',
+      size: SPH_PRESSURE_INTERFACE_CONTACT_KINEMATICS_PARAMS_BYTE_LENGTH,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsParamsBuffer = !workspaceResources?.contactKinematicsParamsBuffer;
+  const paramsByteOffset = workspaceResources?.contactKinematicsParamsByteOffset ?? 0;
+  const resolvedParticleBins = residentNeighborhoodAdmission
+    ? (workspaceResources?.disabledParticleBins
+        ? {
+            schema: 'peercompute.ulg.sph-pressure-interface-particle-bin-grid.v0',
+            status: 'interface-contact-particle-bin-grid-disabled-workspace',
+            reason: 'resident neighborhood path uses workspace-owned disabled bin bindings',
+            enabled: false,
+            particleBinGrid: null,
+            countsBuffer: workspaceResources.disabledParticleBins.countsBuffer,
+            indicesBuffer: workspaceResources.disabledParticleBins.indicesBuffer,
+            cleanupBuffers: []
+          }
+        : createDisabledContactParticleBinBuffers(device, null))
+    : (particleBins || createDisabledContactParticleBinBuffers(device, particleBinGrid));
+  const residentContactKinematicsPath = Boolean(residentNeighborhoodAdmission);
   const resolvedSchroederLawQueue = resolveSchroederPressureInterfaceLawQueue(schroederLawQueue, {
     device,
     particleCount: particleSource.particleCount
@@ -1644,30 +2184,42 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   const borrowedSchroederLawQueueBuffer = consumedSchroederLawQueue.enabled
     ? consumedSchroederLawQueue.lawQueueBuffer
     : null;
+  const workspaceSchroederLawQueueBuffer = borrowedSchroederLawQueueBuffer
+    ? null
+    : workspaceResources?.disabledLawQueueBuffer;
   const localSchroederLawQueueBuffer = borrowedSchroederLawQueueBuffer
+    || workspaceSchroederLawQueueBuffer
     ? null
     : writeStorageBuffer(
       device,
       'ulg-sph-pressure-interface-schroeder-law-queue-disabled',
       new Float32Array(SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS)
     );
-  const schroederLawQueueBuffer = borrowedSchroederLawQueueBuffer || localSchroederLawQueueBuffer;
-  const schroederLawQueueParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-pressure-interface-schroeder-law-queue-params',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  }), device);
+  const schroederLawQueueBuffer = borrowedSchroederLawQueueBuffer
+    || workspaceSchroederLawQueueBuffer
+    || localSchroederLawQueueBuffer;
+  const schroederLawQueueParamsBuffer = workspaceResources?.lawQueueParamsBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-pressure-interface-schroeder-law-queue-params',
+      size: SPH_PRESSURE_INTERFACE_LAW_QUEUE_PARAMS_BYTE_LENGTH,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsSchroederLawQueueParamsBuffer = !workspaceResources?.lawQueueParamsBuffer;
+  const schroederLawQueueParamsByteOffset =
+    workspaceResources?.lawQueueParamsByteOffset ?? 0;
   device.queue.writeBuffer(
     schroederLawQueueParamsBuffer,
-    0,
+    schroederLawQueueParamsByteOffset,
     createSchroederPressureInterfaceLawQueueParamsArray(consumedSchroederLawQueue)
   );
   const consumedSchroederLawNeighborCandidates = schroederLawNeighborCandidates?.neighborCandidateBufferConsumed
     ? schroederLawNeighborCandidates
     : (schroederLawNeighborCandidates || null);
-  const borrowedSchroederLawNeighborCandidateBuffer = consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed
-    ? consumedSchroederLawNeighborCandidates.neighborCandidateBuffer
-    : null;
+  const borrowedSchroederLawNeighborCandidateBuffer = residentNeighborhoodAdmission
+    ? residentNeighborhoodAdmission.packedCandidateCsrBuffer
+    : (consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed
+      ? consumedSchroederLawNeighborCandidates.neighborCandidateBuffer
+      : null);
   const localSchroederLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
     ? null
     : writeStorageBuffer(
@@ -1677,20 +2229,30 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     );
   const schroederLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
     || localSchroederLawNeighborCandidateBuffer;
-  const schroederLawNeighborCandidateParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-pressure-interface-schroeder-law-neighbor-candidates-params',
-    size: 32,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  }), device);
+  const schroederLawNeighborCandidateParamsBuffer = workspaceResources?.lawNeighborParamsBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-pressure-interface-schroeder-law-neighbor-candidates-params',
+      size: SPH_PRESSURE_INTERFACE_LAW_NEIGHBOR_PARAMS_BYTE_LENGTH,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsSchroederLawNeighborCandidateParamsBuffer =
+    !workspaceResources?.lawNeighborParamsBuffer;
+  const schroederLawNeighborCandidateParamsByteOffset =
+    workspaceResources?.lawNeighborParamsByteOffset ?? 0;
   device.queue.writeBuffer(
     schroederLawNeighborCandidateParamsBuffer,
-    0,
-    createSchroederPressureInterfaceLawNeighborCandidateParamsArray(consumedSchroederLawNeighborCandidates)
+    schroederLawNeighborCandidateParamsByteOffset,
+    createSchroederPressureInterfaceLawNeighborCandidateParamsArray(
+      consumedSchroederLawNeighborCandidates,
+      residentNeighborhoodAdmission
+    )
   );
-  const borrowedSchroederSourceSpanBuffer = consumedSchroederLawNeighborCandidates?.sourceCandidateSpanBufferConsumed
+  const borrowedSchroederSourceSpanBuffer = !residentNeighborhoodAdmission
+    && consumedSchroederLawNeighborCandidates?.sourceCandidateSpanBufferConsumed
     ? consumedSchroederLawNeighborCandidates.sourceCandidateSpanBuffer
     : null;
   const localSchroederSourceSpanBuffer = borrowedSchroederSourceSpanBuffer
+    || residentContactKinematicsPath
     ? null
     : writeStorageBuffer(
       device,
@@ -1698,14 +2260,18 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       new Float32Array(4)
     );
   const schroederSourceSpanBuffer = borrowedSchroederSourceSpanBuffer || localSchroederSourceSpanBuffer;
-  const schroederSourceSpanParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-pressure-interface-schroeder-source-spans-params',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  }), device);
+  const schroederSourceSpanParamsBuffer = workspaceResources?.sourceSpanParamsBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-pressure-interface-schroeder-source-spans-params',
+      size: SPH_PRESSURE_INTERFACE_SOURCE_SPAN_PARAMS_BYTE_LENGTH,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsSchroederSourceSpanParamsBuffer = !workspaceResources?.sourceSpanParamsBuffer;
+  const schroederSourceSpanParamsByteOffset =
+    workspaceResources?.sourceSpanParamsByteOffset ?? 0;
   device.queue.writeBuffer(
     schroederSourceSpanParamsBuffer,
-    0,
+    schroederSourceSpanParamsByteOffset,
     createSchroederPressureInterfaceSourceSpanParamsArray(consumedSchroederLawNeighborCandidates)
   );
   const resolvedInterfaceSourceKeys = resolvePressureInterfaceSourceKeys(interfaceSourceKeys, {
@@ -1719,18 +2285,24 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       'ulg-sph-pressure-interface-source-key-disabled',
       new Float32Array(SPH_INTERFACE_SOURCE_KEY_FLOATS)
     );
-  const interfaceSourceKeyBuffer = resolvedInterfaceSourceKeys.sourceKeyBuffer || localInterfaceSourceKeyBuffer;
-  const interfaceSourceKeyParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-pressure-interface-source-key-params',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  }), device);
+  const interfaceSourceKeyBuffer = resolvedInterfaceSourceKeys.sourceKeyBufferConsumed
+    ? resolvedInterfaceSourceKeys.sourceKeyBuffer
+    : localInterfaceSourceKeyBuffer;
+  const interfaceSourceKeyParamsBuffer = workspaceResources?.sourceKeyParamsBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-pressure-interface-source-key-params',
+      size: SPH_PRESSURE_INTERFACE_SOURCE_KEY_PARAMS_BYTE_LENGTH,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsInterfaceSourceKeyParamsBuffer = !workspaceResources?.sourceKeyParamsBuffer;
+  const interfaceSourceKeyParamsByteOffset =
+    workspaceResources?.sourceKeyParamsByteOffset ?? 0;
   device.queue.writeBuffer(
     interfaceSourceKeyParamsBuffer,
-    0,
+    interfaceSourceKeyParamsByteOffset,
     createPressureInterfaceSourceKeyParamsArray(resolvedInterfaceSourceKeys)
   );
-  device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceContactKinematicsParamsArray({
+  device.queue.writeBuffer(paramsBuffer, paramsByteOffset, createPressureInterfaceContactKinematicsParamsArray({
     elementCount: packedInterfaceElements.rowCount,
     particleCount: particleSource.particleCount,
     contactPolicyRowCount: packedContactPolicy.rowCount,
@@ -1739,65 +2311,135 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     gapFloorM,
     particleBinGrid: resolvedParticleBins.enabled ? resolvedParticleBins.particleBinGrid : null
   }));
+  const contactKinematicsBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'uniform'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(7, 'read-only-storage'),
+    computeBufferBinding(8, 'read-only-storage'),
+    computeBufferBinding(9, 'uniform'),
+    computeBufferBinding(10, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    ...(residentContactKinematicsPath
+      ? []
+      : [computeBufferBinding(12, 'read-only-storage')]),
+    computeBufferBinding(13, 'uniform'),
+    computeBufferBinding(14, 'read-only-storage'),
+    computeBufferBinding(15, 'uniform')
+  ];
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v3',
-    label: 'ulg-sph-pressure-interface-contact-kinematics',
-    code: sphPressureInterfaceContactKinematicsWgsl,
+    cacheKey: residentContactKinematicsPath
+      ? 'ulg-sph-pressure-interface-contact-kinematics.resident.v5'
+      : 'ulg-sph-pressure-interface-contact-kinematics.v4',
+    label: residentContactKinematicsPath
+      ? 'ulg-sph-pressure-interface-contact-kinematics-resident'
+      : 'ulg-sph-pressure-interface-contact-kinematics',
+    code: residentContactKinematicsPath
+      ? sphPressureInterfaceResidentContactKinematicsWgsl
+      : sphPressureInterfaceContactKinematicsWgsl,
     entryPoint: 'main',
-    bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
-      computeBufferBinding(2, 'read-only-storage'),
-      computeBufferBinding(3, 'read-only-storage'),
-      computeBufferBinding(4, 'storage'),
-      computeBufferBinding(5, 'uniform'),
-      computeBufferBinding(6, 'read-only-storage'),
-      computeBufferBinding(7, 'read-only-storage'),
-      computeBufferBinding(8, 'read-only-storage'),
-      computeBufferBinding(9, 'uniform'),
-      computeBufferBinding(10, 'read-only-storage'),
-      computeBufferBinding(11, 'uniform'),
-      computeBufferBinding(12, 'read-only-storage'),
-      computeBufferBinding(13, 'uniform'),
-      computeBufferBinding(14, 'read-only-storage'),
-      computeBufferBinding(15, 'uniform')
-    ]
+    bindings: contactKinematicsBindings
   });
-  const bindGroup = device.createBindGroup({
+  const contactPolicyByteOffset = workspaceResources?.contactPolicyByteOffset ?? 0;
+  const contactPolicyBindingByteLength = workspaceResources?.contactPolicyByteLength
+    ?? Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, packedContactPolicy.rows.byteLength);
+  const contactBindGroupEntries = [
+    { binding: 0, resource: exactPressureBindingResource(interfaceElementsBuffer) },
+    { binding: 1, resource: exactPressureBindingResource(particleSource.stateBuffer) },
+    { binding: 2, resource: exactPressureBindingResource(particleSource.thermoBuffer) },
+    { binding: 3, resource: exactPressureBindingResource(
+      contactPolicyBuffer,
+      contactPolicyByteOffset,
+      contactPolicyBindingByteLength
+    ) },
+    { binding: 4, resource: exactPressureBindingResource(outputBuffer, 0, outputByteLength) },
+    { binding: 5, resource: exactPressureBindingResource(
+      paramsBuffer,
+      paramsByteOffset,
+      SPH_PRESSURE_INTERFACE_CONTACT_KINEMATICS_PARAMS_BYTE_LENGTH
+    ) },
+    { binding: 6, resource: exactPressureBindingResource(resolvedParticleBins.countsBuffer) },
+    { binding: 7, resource: exactPressureBindingResource(resolvedParticleBins.indicesBuffer) },
+    { binding: 8, resource: exactPressureBindingResource(schroederLawQueueBuffer) },
+    { binding: 9, resource: exactPressureBindingResource(
+      schroederLawQueueParamsBuffer,
+      schroederLawQueueParamsByteOffset,
+      SPH_PRESSURE_INTERFACE_LAW_QUEUE_PARAMS_BYTE_LENGTH
+    ) },
+    { binding: 10, resource: exactPressureBindingResource(schroederLawNeighborCandidateBuffer) },
+    { binding: 11, resource: exactPressureBindingResource(
+      schroederLawNeighborCandidateParamsBuffer,
+      schroederLawNeighborCandidateParamsByteOffset,
+      SPH_PRESSURE_INTERFACE_LAW_NEIGHBOR_PARAMS_BYTE_LENGTH
+    ) },
+    ...(residentContactKinematicsPath
+      ? []
+      : [{ binding: 12, resource: exactPressureBindingResource(schroederSourceSpanBuffer) }]),
+    { binding: 13, resource: exactPressureBindingResource(
+      schroederSourceSpanParamsBuffer,
+      schroederSourceSpanParamsByteOffset,
+      SPH_PRESSURE_INTERFACE_SOURCE_SPAN_PARAMS_BYTE_LENGTH
+    ) },
+    { binding: 14, resource: exactPressureBindingResource(interfaceSourceKeyBuffer) },
+    { binding: 15, resource: exactPressureBindingResource(
+      interfaceSourceKeyParamsBuffer,
+      interfaceSourceKeyParamsByteOffset,
+      SPH_PRESSURE_INTERFACE_SOURCE_KEY_PARAMS_BYTE_LENGTH
+    ) }
+  ];
+  const contactBindGroupCache = workspaceResources?.bindGroupForKind?.(
+    'contactKinematics',
+    exactPressureBindGroupSignature(bindGroupLayout, contactBindGroupEntries),
+    () => device.createBindGroup({ layout: bindGroupLayout, entries: contactBindGroupEntries })
+  ) ?? null;
+  const bindGroup = contactBindGroupCache?.bindGroup || device.createBindGroup({
     layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: interfaceElementsBuffer } },
-      { binding: 1, resource: { buffer: particleSource.stateBuffer } },
-      { binding: 2, resource: { buffer: particleSource.thermoBuffer } },
-      { binding: 3, resource: { buffer: contactPolicyBuffer } },
-      { binding: 4, resource: { buffer: outputBuffer } },
-      { binding: 5, resource: { buffer: paramsBuffer } },
-      { binding: 6, resource: { buffer: resolvedParticleBins.countsBuffer } },
-      { binding: 7, resource: { buffer: resolvedParticleBins.indicesBuffer } },
-      { binding: 8, resource: { buffer: schroederLawQueueBuffer } },
-      { binding: 9, resource: { buffer: schroederLawQueueParamsBuffer } },
-      { binding: 10, resource: { buffer: schroederLawNeighborCandidateBuffer } },
-      { binding: 11, resource: { buffer: schroederLawNeighborCandidateParamsBuffer } },
-      { binding: 12, resource: { buffer: schroederSourceSpanBuffer } },
-      { binding: 13, resource: { buffer: schroederSourceSpanParamsBuffer } },
-      { binding: 14, resource: { buffer: interfaceSourceKeyBuffer } },
-      { binding: 15, resource: { buffer: interfaceSourceKeyParamsBuffer } }
-    ]
+    entries: contactBindGroupEntries
   });
-  const encoder = device.createCommandEncoder();
+  const encoder = commandEncoder || device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.max(1, Math.ceil(packedInterfaceElements.rowCount / 64)));
+  if (candidateDispatchIndirectBuffer) {
+    if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+      throw new TypeError('pressure/interface contact kinematics requires dispatchWorkgroupsIndirect support');
+    }
+    pass.dispatchWorkgroupsIndirect(
+      candidateDispatchIndirectBuffer,
+      candidateDispatchIndirectOffsetBytes
+    );
+  } else {
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(packedInterfaceElements.rowCount / 64)));
+  }
   pass.end();
-  device.queue.submit([encoder.finish()]);
+  if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
   return {
     schema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
-    status: 'interface-contact-kinematics-gpu-derivation-submitted',
+    status: callerOwnsEncoder
+      ? 'interface-contact-kinematics-gpu-derivation-encoded'
+      : 'interface-contact-kinematics-gpu-derivation-submitted',
     buffer: outputBuffer,
+    bufferOwned: ownsOutputBuffer,
     bufferByteLength: outputByteLength,
     rowCount: packedInterfaceElements.rowCount,
     rowStrideFloats: SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
+    dispatchMode: candidateDispatchIndirectBuffer
+      ? 'gpu-authored-candidate-count-indirect'
+      : 'host-capacity-direct',
+    candidateDispatchIndirectBufferConsumed: Boolean(candidateDispatchIndirectBuffer),
+    candidateDispatchIndirectOffsetBytes: candidateDispatchIndirectBuffer
+      ? candidateDispatchIndirectOffsetBytes
+      : null,
+    pipelineVariant: residentContactKinematicsPath
+      ? 'resident-neighborhood-source-span-free'
+      : 'general-schroeder-source-span',
+    storageBufferBindingCount: residentContactKinematicsPath ? 10 : 11,
+    maxStorageBuffersPerShaderStage:
+      device.limits?.maxStorageBuffersPerShaderStage ?? null,
     particleCount: particleSource.particleCount,
     contactPolicyRowCount: packedContactPolicy.rowCount,
     particleBinGridStatus: resolvedParticleBins.status,
@@ -1874,27 +2516,42 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     interfaceSourceKeyConsumerDeviceId: resolvedInterfaceSourceKeys.consumerDeviceId,
     schroederLawNeighborCandidateSourceDeviceId: consumedSchroederLawNeighborCandidates?.sourceDeviceId ?? null,
     schroederLawNeighborCandidateConsumerDeviceId: consumedSchroederLawNeighborCandidates?.consumerDeviceId ?? null,
-    queueCompletionStatus: 'queue-submitted',
-    queueCompletionMethod: 'queue.submit',
-    derivation: consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed
+    queueCompletionStatus: callerOwnsEncoder ? 'encoded-awaiting-caller-submit' : 'queue-submitted',
+    queueCompletionMethod: callerOwnsEncoder ? 'caller-owned-command-encoder' : 'queue.submit',
+    commandEncoderOwnership: callerOwnsEncoder ? 'caller' : 'local',
+    queueSubmitPerformed: !callerOwnsEncoder,
+    mapPerformed: false,
+    readbackPerformed: false,
+    controlWorkspaceBound: Boolean(workspaceResources),
+    controlSlotIndex: workspaceResources?.slotIndex ?? null,
+    contactBindGroupCacheHit: contactBindGroupCache?.cacheHit === true,
+    residentNeighborhoodAdmission,
+    neighborhoodMode: residentNeighborhoodAdmission
+      ? 'resident-neighborhood-packed-csr'
+      : (resolvedParticleBins.enabled ? 'fixed-bin-compatibility' : 'all-particle-diagnostic-fallback'),
+    derivation: residentNeighborhoodAdmission
+      ? 'resident-neighborhood-packed-csr-gpu-interface-element-candidate-contact-kinematics'
+      : (consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed
       ? 'schroeder-law-neighbor-candidates-authoritative-gpu-interface-element-candidate-contact-kinematics'
       : (resolvedParticleBins.enabled
           ? `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-neighbor-bin-contact-kinematics`
-          : `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-nearest-particle-contact-kinematics`),
+          : `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-nearest-particle-contact-kinematics`)),
     source: 'resident-sph-particle-state-and-thermo-buffers',
     cleanupBuffers: [
-      paramsBuffer,
+      ownsParamsBuffer ? paramsBuffer : null,
       localSchroederLawQueueBuffer,
-      schroederLawQueueParamsBuffer,
+      ownsSchroederLawQueueParamsBuffer ? schroederLawQueueParamsBuffer : null,
       localSchroederLawNeighborCandidateBuffer,
-      schroederLawNeighborCandidateParamsBuffer,
+      ownsSchroederLawNeighborCandidateParamsBuffer
+        ? schroederLawNeighborCandidateParamsBuffer
+        : null,
       localSchroederSourceSpanBuffer,
-      schroederSourceSpanParamsBuffer,
+      ownsSchroederSourceSpanParamsBuffer ? schroederSourceSpanParamsBuffer : null,
       localInterfaceSourceKeyBuffer,
-      interfaceSourceKeyParamsBuffer,
+      ownsInterfaceSourceKeyParamsBuffer ? interfaceSourceKeyParamsBuffer : null,
       ...(resolvedInterfaceSourceKeys.cleanupBuffers || []),
       ...(resolvedParticleBins.cleanupBuffers || [])
-    ],
+    ].filter(Boolean),
     destroyContactKinematicsBuffer() {
       outputBuffer.destroy?.();
     }
@@ -2047,10 +2704,33 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   readbackMode = FULL_READBACK_MODE,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
+  targetContactKinematicsBuffer = null,
+  targetForceRowsBuffer = null,
+  pressureInterfaceWorkspace = null,
+  pressureInterfaceWorkspaceSubstepIndex = 0,
+  commandEncoder = null,
+  diagnosticCpuMaterialInterfaceInput = false,
+  gpuResidentLaneLeaseIdentity = null,
+  expectedGasPressureCellSourceEpoch = null,
+  expectedGasPressureCellSourceGeneration = null,
+  requireGpuGasCellTaskProvenance = true,
   retainedGasPressureCellsBuffer = null,
   retainedGasPressureCellRowCount = 0,
+  retainedGasPressureCellRowCapacity = 0,
   retainedGasPressureCellRowStrideFloats = SPH_GAS_PRESSURE_CELL_FLOATS,
   retainedGasPressureCellRowByteLength = 0,
+  retainedGasPressureCellMetadataBuffer = null,
+  retainedGasPressureCellLookupBuffer = null,
+  retainedGasPressureCellGeneration = null,
+  retainedGasPressureCellLaneHashLow = null,
+  retainedGasPressureCellLaneHashHigh = null,
+  retainedGasPressureCellSourceEpoch = null,
+  retainedGasPressureCellSourceGeneration = null,
+  retainedGasPressureCellGridDims = null,
+  retainedGasPressureCellGridCellCount = null,
+  retainedGasPressureCellBoxDimsM = null,
   retainedPressureFieldMode = LOCAL_GAS_CELL_PRESSURE_FIELD_MODE,
   retainedPressureFieldResolution = LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
   retainedLocalPressureGradientStatus = 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
@@ -2059,7 +2739,37 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceForceRowsWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
-  const retainedGasPressureRowsReady = Boolean(
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
+  const gpuGuardedGasCellField = resolveGpuGuardedGasCellField({
+    device,
+    gpuResidentLaneLeaseIdentity,
+    expectedGasPressureCellSourceEpoch,
+    expectedGasPressureCellSourceGeneration,
+    requireGpuGasCellTaskProvenance,
+    retainedGasPressureCellImport,
+    retainedGasPressureCellsBuffer,
+    retainedGasPressureCellMetadataBuffer,
+    retainedGasPressureCellLookupBuffer,
+    retainedGasPressureCellRowCapacity,
+    retainedGasPressureCellRowStrideFloats,
+    retainedGasPressureCellGeneration,
+    retainedGasPressureCellLaneHashLow,
+    retainedGasPressureCellLaneHashHigh,
+    retainedGasPressureCellSourceEpoch,
+    retainedGasPressureCellSourceGeneration,
+    retainedGasPressureCellGridDims,
+    retainedGasPressureCellGridCellCount,
+    retainedGasPressureCellBoxDimsM
+  });
+  if (gpuGuardedGasCellField.advertised && !gpuGuardedGasCellField.ready) {
+    throw new Error(
+      `pressure/interface GPU gas-cell field rejected: ${gpuGuardedGasCellField.failures.join(', ')}`
+    );
+  }
+  const legacyRetainedGasPressureRowsReady = Boolean(
     retainedGasPressureCellsBuffer
       && Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))) > 0
       && Math.max(1, Math.trunc(finiteNumber(
@@ -2067,6 +2777,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         SPH_GAS_PRESSURE_CELL_FLOATS
       ))) === SPH_GAS_PRESSURE_CELL_FLOATS
   );
+  const gpuGuardedGasPressureRowsReady = gpuGuardedGasCellField.ready === true;
+  const retainedGasPressureRowsReady = gpuGuardedGasPressureRowsReady || legacyRetainedGasPressureRowsReady;
   const pressurePa = finiteNumber(
     pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa,
     retainedGasPressureRowsReady ? 0 : Number.NaN
@@ -2084,8 +2796,74 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         localPressureGradientValidation: false
       }
     : gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
-  const packed = packMaterialInterfaceElementRows(materialInterfaceField);
+  const cpuPackedInterfaceElements = packMaterialInterfaceElementRows(materialInterfaceField);
   const packedContactKinematics = packMaterialInterfaceContactKinematicsRows(materialInterfaceField);
+  const cpuPackedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
+  const packedGasPressureCells = retainedGasPressureRowsReady
+    ? {
+        rows: new Float32Array(0),
+        rowCount: gpuGuardedGasPressureRowsReady
+          ? 0
+          : Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))),
+        rowCapacity: gpuGuardedGasPressureRowsReady
+          ? gpuGuardedGasCellField.rowCapacity
+          : Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))),
+        rowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+        rowByteLength: Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowByteLength, 0)))
+          || (gpuGuardedGasPressureRowsReady
+            ? gpuGuardedGasCellField.rowCapacity
+            : Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))))
+            * SPH_GAS_PRESSURE_CELL_FLOATS
+            * Float32Array.BYTES_PER_ELEMENT
+      }
+    : cpuPackedGasPressureCells;
+  const contactPolicy = normalizeAlgorithmContactPairResponsePolicy({
+    algorithmMaterialContactRows,
+    algorithmContactPairResponseScale,
+    algorithmContactMaxPressurePa
+  });
+  const packedContactPolicy = packAlgorithmContactPolicyRows(contactPolicy);
+  const pressureWorkspaceResources = pressureInterfaceWorkspace?.substepResources
+    ? pressureInterfaceWorkspace.substepResources(
+        pressureInterfaceWorkspaceSubstepIndex,
+        { contactPolicyByteLength: packedContactPolicy.rows.byteLength }
+      )
+    : null;
+  const particleSource = resolveParticleKinematicsSource({
+    device,
+    sphParticleState,
+    sphParticleUpload,
+    particleStateBuffer,
+    particleThermoBuffer,
+    particleCount
+  });
+  const residentNeighborhoodAdmission = residentNeighborhood
+    ? resolveResidentNeighborhoodConsumer({
+        residentNeighborhood,
+        device,
+        consumer: 'pressureInterface',
+        sourceCount: particleSource.particleCount,
+        ...(residentNeighborhoodValidation || {})
+      })
+    : null;
+  if (residentNeighborhood && !residentNeighborhoodAdmission.admitted) {
+    throw new Error(
+      `pressure/interface resident neighborhood rejected: ${residentNeighborhoodAdmission.reasonCodes.join(', ')}`
+    );
+  }
+  const residentMaterialInterfaceRows = resolveGpuResidentMaterialInterfaceRows({
+    device,
+    materialInterfaceField,
+    commandEncoder,
+    residentNeighborhoodAdmission
+  });
+  if (callerOwnsEncoder && !residentMaterialInterfaceRows && diagnosticCpuMaterialInterfaceInput !== true) {
+    throw new Error(
+      'caller-owned pressure/interface stages require GPU-resident candidate rows; '
+      + 'CPU-packed interface rows are available only with diagnosticCpuMaterialInterfaceInput=true'
+    );
+  }
+  const packed = residentMaterialInterfaceRows || cpuPackedInterfaceElements;
   const packedInterfaceSourceKeys = materialInterfaceField?.interfaceSourceKeyBuffer
     || materialInterfaceField?.sourceKeyBuffer
     ? {
@@ -2098,37 +2876,6 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         surfaceIndexFallbackEnabled: materialInterfaceField.interfaceSourceKeySurfaceIndexFallbackEnabled !== false
       }
     : packMaterialInterfaceSourceKeyRows(materialInterfaceField);
-  const cpuPackedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
-  const packedGasPressureCells = retainedGasPressureRowsReady
-    ? {
-        rows: new Float32Array(0),
-        rowCount: Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))),
-        rowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
-        rowByteLength: Math.max(
-          0,
-          Math.trunc(finiteNumber(
-            retainedGasPressureCellRowByteLength,
-            Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0)))
-              * SPH_GAS_PRESSURE_CELL_FLOATS
-              * Float32Array.BYTES_PER_ELEMENT
-          ))
-        )
-      }
-    : cpuPackedGasPressureCells;
-  const contactPolicy = normalizeAlgorithmContactPairResponsePolicy({
-    algorithmMaterialContactRows,
-    algorithmContactPairResponseScale,
-    algorithmContactMaxPressurePa
-  });
-  const packedContactPolicy = packAlgorithmContactPolicyRows(contactPolicy);
-  const particleSource = resolveParticleKinematicsSource({
-    device,
-    sphParticleState,
-    sphParticleUpload,
-    particleStateBuffer,
-    particleThermoBuffer,
-    particleCount
-  });
   const schroederPressureInterfaceLawQueue = resolveSchroederPressureInterfaceLawQueue(schroederLawQueue, {
     device,
     particleCount: particleSource.particleCount
@@ -2144,6 +2891,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     particleSource
   });
   const contactKinematicsParticleBinGrid = contactKinematicsGpuDerivationEligible
+    && !residentNeighborhoodAdmission
     ? resolvePressureInterfaceParticleBinGrid({
         boxDimsM,
         packedContactPolicy,
@@ -2152,7 +2900,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         particleCount: particleSource.particleCount
       })
     : null;
-  const pressureModelId = packedGasPressureCells.rowCount > 0 && pressureFieldResolution.localPressureGradientReady
+  const pressureModelId = (gpuGuardedGasPressureRowsReady || packedGasPressureCells.rowCount > 0)
+    && pressureFieldResolution.localPressureGradientReady
     ? 1
     : 0;
   const canSolve = pressureInterfaceCoupling?.status === 'pressure-interface-coupling-ready-for-solver'
@@ -2290,13 +3039,86 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     };
   }
 
-  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE || callerOwnsEncoder;
   const outputByteLength = packed.rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const inputBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-elements-in', packed.rows);
+  assertPressureTargetBuffer({
+    device,
+    buffer: targetContactKinematicsBuffer,
+    name: 'targetContactKinematicsBuffer',
+    minimumByteLength: Math.max(
+      PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH,
+      packed.rowCount
+        * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    ),
+    requiredUsage: GPU_BUFFER_USAGE.STORAGE
+      | (contactKinematicsGpuDerivationEligible ? 0 : GPU_BUFFER_USAGE.COPY_DST)
+  });
+  assertPressureTargetBuffer({
+    device,
+    buffer: targetForceRowsBuffer,
+    name: 'targetForceRowsBuffer',
+    minimumByteLength: Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, outputByteLength),
+    requiredUsage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const borrowedInterfaceElementsBuffer = residentMaterialInterfaceRows?.candidateRowsBuffer || null;
+  const localInterfaceElementsBuffer = borrowedInterfaceElementsBuffer
+    ? null
+    : writeStorageBuffer(device, 'ulg-sph-pressure-interface-elements-in', packed.rows);
+  const inputBuffer = borrowedInterfaceElementsBuffer || localInterfaceElementsBuffer;
+  const borrowedCandidateMetadataBuffer = residentMaterialInterfaceRows?.compactMetadataBuffer || null;
+  const localCandidateMetadataBuffer = borrowedCandidateMetadataBuffer
+    ? null
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-pressure-interface-compact-metadata-disabled',
+        new Uint32Array(4)
+      );
+  const candidateMetadataBuffer = borrowedCandidateMetadataBuffer || localCandidateMetadataBuffer;
+  const borrowedResidentNeighborhoodBuffer = residentNeighborhoodAdmission?.packedCandidateCsrBuffer || null;
+  const localResidentNeighborhoodBuffer = borrowedResidentNeighborhoodBuffer
+    ? null
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-pressure-interface-resident-neighborhood-disabled',
+        new Uint32Array(RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_BYTES / Uint32Array.BYTES_PER_ELEMENT)
+      );
+  const residentNeighborhoodBuffer = borrowedResidentNeighborhoodBuffer || localResidentNeighborhoodBuffer;
   const gasPressureCellsBuffer = retainedGasPressureRowsReady
-    ? retainedGasPressureCellsBuffer
+    ? (gpuGuardedGasCellField.rowsBuffer || retainedGasPressureCellsBuffer)
     : writeStorageBuffer(device, 'ulg-sph-pressure-interface-gas-cells-in', packedGasPressureCells.rows);
-  const contactPolicyBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-contact-policy-rows', packedContactPolicy.rows);
+  const localGasPressureCellMetadataBuffer = gpuGuardedGasPressureRowsReady
+    ? null
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-pressure-interface-gas-cell-metadata-disabled',
+        new Uint32Array(SPH_GAS_CELL_EOS_METADATA_WORDS)
+      );
+  const gasPressureCellMetadataBuffer = gpuGuardedGasCellField.metadataBuffer
+    || localGasPressureCellMetadataBuffer;
+  const localGasPressureCellLookupBuffer = gpuGuardedGasPressureRowsReady
+    ? null
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-pressure-interface-gas-cell-lookup-disabled',
+        new Uint32Array(1)
+      );
+  const gasPressureCellLookupBuffer = gpuGuardedGasCellField.lookupBuffer
+    || localGasPressureCellLookupBuffer;
+  const contactPolicyBuffer = pressureWorkspaceResources?.contactPolicyBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-sph-pressure-interface-contact-policy-rows',
+      packedContactPolicy.rows
+    );
+  const ownsContactPolicyBuffer = !pressureWorkspaceResources?.contactPolicyBuffer;
+  if (!ownsContactPolicyBuffer) {
+    device.queue.writeBuffer(
+      contactPolicyBuffer,
+      pressureWorkspaceResources?.contactPolicyByteOffset ?? 0,
+      packedContactPolicy.rows
+    );
+  }
   let contactKinematicsBuffer = null;
   let contactKinematicsGpuDerivation = null;
   let contactKinematicsGpuDerived = false;
@@ -2305,17 +3127,23 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   let particleBinOverflowCount = null;
   const contactKinematicsCleanupBuffers = [];
   if (contactKinematicsGpuDerivationEligible) {
-    contactKinematicsParticleBins = runSphPressureInterfaceParticleBinsWebGpu({
-      device,
-      particleSource,
-      particleBinGrid: contactKinematicsParticleBinGrid,
-      readbackMetadata: contactKinematicsParticleBinMetadataReadback
-    });
+    contactKinematicsParticleBins = residentNeighborhoodAdmission
+      ? null
+      : runSphPressureInterfaceParticleBinsWebGpu({
+          device,
+          particleSource,
+          particleBinGrid: contactKinematicsParticleBinGrid,
+          readbackMetadata: callerOwnsEncoder ? false : contactKinematicsParticleBinMetadataReadback
+        });
     contactKinematicsGpuDerivation = runSphPressureInterfaceContactKinematicsWebGpu({
       device,
       packedInterfaceElements: packed,
       packedContactPolicy,
       interfaceElementsBuffer: inputBuffer,
+      candidateDispatchIndirectBuffer:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectBuffer ?? null,
+      candidateDispatchIndirectOffsetBytes:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectOffsetBytes ?? 0,
       contactPolicyBuffer,
       particleSource,
       particleBinGrid: contactKinematicsParticleBinGrid,
@@ -2324,42 +3152,150 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gapFloorM: contactKinematicsGapFloorM,
       schroederLawQueue: schroederPressureInterfaceLawQueue,
       schroederLawNeighborCandidates: schroederPressureInterfaceLawNeighborCandidates,
-      interfaceSourceKeys: packedInterfaceSourceKeys
+      interfaceSourceKeys: packedInterfaceSourceKeys,
+      residentNeighborhood,
+      residentNeighborhoodValidation,
+      targetOutputBuffer: targetContactKinematicsBuffer,
+      workspaceResources: pressureWorkspaceResources,
+      commandEncoder
     });
     contactKinematicsBuffer = contactKinematicsGpuDerivation.buffer;
     contactKinematicsGpuDerived = true;
     contactKinematicsCleanupBuffers.push(...(contactKinematicsGpuDerivation.cleanupBuffers || []));
   } else {
-    contactKinematicsBuffer = writeStorageBuffer(
+    const contactKinematicsByteLength = Math.max(16, packedContactKinematics.rows.byteLength);
+    assertPressureTargetBuffer({
+      device,
+      buffer: targetContactKinematicsBuffer,
+      name: 'targetContactKinematicsBuffer',
+      minimumByteLength: contactKinematicsByteLength,
+      requiredUsage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    });
+    contactKinematicsBuffer = targetContactKinematicsBuffer || writeStorageBuffer(
       device,
       'ulg-sph-pressure-interface-contact-kinematics-rows',
       packedContactKinematics.rows
     );
+    if (targetContactKinematicsBuffer && packedContactKinematics.rows.byteLength > 0) {
+      device.queue.writeBuffer(
+        targetContactKinematicsBuffer,
+        0,
+        packedContactKinematics.rows
+      );
+    }
   }
-  const forceRowsBuffer = device.createBuffer({
-    label: 'ulg-sph-pressure-interface-force-rows-out',
-    size: Math.max(4, outputByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  const ownsContactKinematicsBuffer = contactKinematicsGpuDerivation
+    ? contactKinematicsGpuDerivation.bufferOwned !== false
+    : !targetContactKinematicsBuffer;
+  assertPressureTargetBuffer({
+    device,
+    buffer: targetForceRowsBuffer,
+    name: 'targetForceRowsBuffer',
+    minimumByteLength: Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, outputByteLength),
+    requiredUsage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   });
-  const paramsBuffer = device.createBuffer({
+  const ownsForceRowsBuffer = !targetForceRowsBuffer;
+  const forceRowsBuffer = targetForceRowsBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-pressure-interface-force-rows-out',
+      size: Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, outputByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    }), device);
+  const paramsBuffer = pressureWorkspaceResources?.forceParamsBuffer || device.createBuffer({
     label: 'ulg-sph-pressure-interface-force-params',
-    size: 32,
+    size: SPH_PRESSURE_INTERFACE_FORCE_PARAMS_BYTE_LENGTH,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
+  const ownsParamsBuffer = !pressureWorkspaceResources?.forceParamsBuffer;
+  const forceParamsByteOffset = pressureWorkspaceResources?.forceParamsByteOffset ?? 0;
   const readBuffer = noFullReadback
     ? null
     : device.createBuffer({
         label: 'ulg-sph-pressure-interface-force-rows-readback',
-        size: Math.max(4, outputByteLength),
+        size: Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, outputByteLength),
         usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
       });
   let returnedRetainedForceRowsBuffer = false;
   let returnedRetainedGasPressureCellsBuffer = false;
+  let callerOwnedResult = null;
+  let cleanupPerformed = false;
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
+  const gasCellLeaseOwner = gpuGuardedGasPressureRowsReady
+    && typeof retainedGasPressureCellImport?.addConsumerLease === 'function'
+    && typeof retainedGasPressureCellImport?.releaseConsumerLease === 'function'
+    ? retainedGasPressureCellImport
+    : null;
+  let gasCellConsumerLeaseId = null;
+  let gasCellConsumerLeaseReleased = false;
+  let gasCellConsumerLeaseReleaseAttempts = 0;
+  let gasCellConsumerLeaseEvidenceResult = null;
+  const releaseGasCellConsumerLease = () => {
+    if (gasCellConsumerLeaseReleased || !gasCellLeaseOwner || gasCellConsumerLeaseId == null) return false;
+    gasCellConsumerLeaseReleaseAttempts += 1;
+    let acknowledgement = false;
+    let releaseError = null;
+    try {
+      const releaseResult = gasCellLeaseOwner.releaseConsumerLease(gasCellConsumerLeaseId, {
+        reason: 'pressure-interface-gas-cell-consumer-submit-settled'
+      });
+      acknowledgement = releaseResult === true
+        || releaseResult?.released === true
+        || releaseResult?.accepted === true;
+    } catch (error) {
+      releaseError = error instanceof Error ? error.message : String(error);
+    }
+    if (acknowledgement) gasCellConsumerLeaseReleased = true;
+    if (gasCellConsumerLeaseEvidenceResult) {
+      gasCellConsumerLeaseEvidenceResult.gasPressureCellConsumerLeaseReleaseAcknowledged =
+        acknowledgement;
+      gasCellConsumerLeaseEvidenceResult.gasPressureCellConsumerLeaseReleaseAttempts =
+        gasCellConsumerLeaseReleaseAttempts;
+      gasCellConsumerLeaseEvidenceResult.gasPressureCellConsumerLeaseReleaseError =
+        releaseError;
+      gasCellConsumerLeaseEvidenceResult.gasPressureCellConsumerLeaseReleaseStatus =
+        acknowledgement
+          ? 'consumer-lease-release-acknowledged'
+          : (gasCellConsumerLeaseReleaseAttempts >= 3
+              ? 'consumer-lease-release-retry-exhausted'
+              : 'consumer-lease-release-not-acknowledged');
+    }
+    return acknowledgement;
+  };
+  const retryGasCellConsumerLeaseRelease = () => {
+    if (
+      gasCellConsumerLeaseReleased
+      || !gasCellLeaseOwner
+      || gasCellConsumerLeaseId == null
+      || gasCellConsumerLeaseReleaseAttempts >= 3
+    ) return;
+    const retry = () => {
+      if (!releaseGasCellConsumerLease()) retryGasCellConsumerLeaseRelease();
+    };
+    if (typeof queueMicrotask === 'function') queueMicrotask(retry);
+    else Promise.resolve().then(retry);
+  };
 
   try {
-    device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceParamsArray({
+    if (gpuGuardedGasPressureRowsReady && !gasCellLeaseOwner) {
+      throw new Error('pressure/interface GPU gas-cell consumer lease protocol required');
+    }
+    const gasCellConsumerLease = gasCellLeaseOwner?.addConsumerLease({
+      consumerStage: 'pressureInterface',
+      reason: 'same-device-gpu-gas-cell-pressure-consumption'
+    });
+    gasCellConsumerLeaseId = gasCellConsumerLease?.leaseId ?? gasCellConsumerLease ?? null;
+    if (
+      gasCellLeaseOwner
+      && (gasCellConsumerLeaseId == null
+        || gasCellConsumerLease?.accepted === false
+        || String(gasCellConsumerLease?.status || '').includes('rejected'))
+    ) {
+      throw new Error(
+        gasCellConsumerLease?.reason || 'pressure/interface GPU gas-cell consumer lease rejected'
+      );
+    }
+    device.queue.writeBuffer(paramsBuffer, forceParamsByteOffset, createPressureInterfaceParamsArray({
       elementCount: packed.rowCount,
       pressurePa,
       gasPressureCellCount: packedGasPressureCells.rowCount,
@@ -2367,10 +3303,16 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       contactPolicyRowCount: packedContactPolicy.rowCount,
       algorithmContactPairResponseScale: contactPolicy.responseScale,
       algorithmContactMaxPressurePa: contactPolicy.maxContactPressurePa,
-      algorithmContactPairResponseEnabled: packedContactPolicy.rowCount > 0
+      algorithmContactPairResponseEnabled: packedContactPolicy.rowCount > 0,
+      residentCandidateMode: Boolean(residentMaterialInterfaceRows),
+      residentCandidateCapacity: residentMaterialInterfaceRows?.rowCapacity ?? 0,
+      residentCandidateDenseCount: residentMaterialInterfaceRows?.denseCandidateCount ?? 0,
+      residentCandidateGuardEnabled: Boolean(residentMaterialInterfaceRows),
+      residentNeighborhoodAdmission,
+      retainedGasPressureCellMetadata: gpuGuardedGasCellField
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-pressure-interface-force-rows.v3',
+      cacheKey: 'ulg-sph-pressure-interface-force-rows.v5-gpu-gas-cell-metadata',
       label: 'ulg-sph-pressure-interface-force-rows',
       code: sphPressureInterfaceForceRowsWgsl,
       entryPoint: 'main',
@@ -2380,41 +3322,90 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         computeBufferBinding(2, 'uniform'),
         computeBufferBinding(3, 'read-only-storage'),
         computeBufferBinding(4, 'read-only-storage'),
-        computeBufferBinding(5, 'read-only-storage')
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(6, 'read-only-storage'),
+        computeBufferBinding(7, 'read-only-storage'),
+        computeBufferBinding(8, 'storage'),
+        computeBufferBinding(9, 'read-only-storage')
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const forceBindGroupEntries = [
+      { binding: 0, resource: exactPressureBindingResource(inputBuffer) },
+      { binding: 1, resource: exactPressureBindingResource(
+        forceRowsBuffer,
+        0,
+        Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, outputByteLength)
+      ) },
+      { binding: 2, resource: exactPressureBindingResource(
+        paramsBuffer,
+        forceParamsByteOffset,
+        SPH_PRESSURE_INTERFACE_FORCE_PARAMS_BYTE_LENGTH
+      ) },
+      { binding: 3, resource: exactPressureBindingResource(gasPressureCellsBuffer) },
+      { binding: 4, resource: exactPressureBindingResource(
+        contactPolicyBuffer,
+        pressureWorkspaceResources?.contactPolicyByteOffset ?? 0,
+        pressureWorkspaceResources?.contactPolicyByteLength
+          ?? Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, packedContactPolicy.rows.byteLength)
+      ) },
+      { binding: 5, resource: exactPressureBindingResource(contactKinematicsBuffer) },
+      { binding: 6, resource: exactPressureBindingResource(candidateMetadataBuffer, 0, 16) },
+      { binding: 7, resource: exactPressureBindingResource(residentNeighborhoodBuffer) },
+      { binding: 8, resource: exactPressureBindingResource(gasPressureCellMetadataBuffer) },
+      { binding: 9, resource: exactPressureBindingResource(gasPressureCellLookupBuffer) }
+    ];
+    const forceBindGroupCache = pressureWorkspaceResources?.bindGroupForKind?.(
+      'force',
+      exactPressureBindGroupSignature(bindGroupLayout, forceBindGroupEntries),
+      () => device.createBindGroup({ layout: bindGroupLayout, entries: forceBindGroupEntries })
+    ) ?? null;
+    const bindGroup = forceBindGroupCache?.bindGroup || device.createBindGroup({
       layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: inputBuffer } },
-        { binding: 1, resource: { buffer: forceRowsBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } },
-        { binding: 3, resource: { buffer: gasPressureCellsBuffer } },
-        { binding: 4, resource: { buffer: contactPolicyBuffer } },
-        { binding: 5, resource: { buffer: contactKinematicsBuffer } }
-      ]
+      entries: forceBindGroupEntries
     });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(packed.rowCount / 64)));
-    pass.end();
-    if (!noFullReadback) {
-      encoder.copyBufferToBuffer(forceRowsBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
+    if (residentMaterialInterfaceRows?.candidateDispatchIndirectBuffer) {
+      if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+        throw new TypeError('pressure/interface force rows require dispatchWorkgroupsIndirect support');
+      }
+      pass.dispatchWorkgroupsIndirect(
+        residentMaterialInterfaceRows.candidateDispatchIndirectBuffer,
+        residentMaterialInterfaceRows.candidateDispatchIndirectOffsetBytes
+      );
+    } else {
+      pass.dispatchWorkgroups(Math.max(1, Math.ceil(packed.rowCount / 64)));
     }
-    device.queue.submit([encoder.finish()]);
-    queueCompletionStatus = 'queue-submitted';
-    queueCompletionMethod = 'queue.submit';
+    pass.end();
+    if (!noFullReadback && !callerOwnsEncoder) {
+      encoder.copyBufferToBuffer(
+        forceRowsBuffer,
+        0,
+        readBuffer,
+        0,
+        Math.max(PRESSURE_RUNTIME_ARRAY_MIN_BYTE_LENGTH, outputByteLength)
+      );
+    }
+    if (!callerOwnsEncoder) {
+      device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted';
+      queueCompletionMethod = 'queue.submit';
+      releaseGasCellConsumerLease();
+    } else {
+      queueCompletionStatus = 'encoded-awaiting-caller-submit';
+      queueCompletionMethod = 'caller-owned-command-encoder';
+    }
 
     let forceRowValues = new Float32Array(0);
-    if (!noFullReadback) {
+    if (!noFullReadback && !callerOwnsEncoder) {
       await readBuffer.mapAsync(GPU_MAP_MODE.READ);
       queueCompletionStatus = 'readback-map-completed';
       queueCompletionMethod = 'mapAsync(readback-buffer)';
       forceRowValues = new Float32Array(readBuffer.getMappedRange()).slice(0, packed.rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS);
       readBuffer.unmap();
-    } else {
+    } else if (!callerOwnsEncoder) {
       queueCompletionStatus = device.queue?.onSubmittedWorkDone
       ? 'queue-submitted-cleanup-deferred'
       : 'queue-submitted-no-explicit-completion';
@@ -2422,7 +3413,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         ? 'deferred queue.onSubmittedWorkDone cleanup'
         : null;
     }
-    if (contactKinematicsParticleBins?.metadataReadbackBuffer) {
+    if (!callerOwnsEncoder && contactKinematicsParticleBins?.metadataReadbackBuffer) {
       await contactKinematicsParticleBins.metadataReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
       const metadata = new Uint32Array(contactKinematicsParticleBins.metadataReadbackBuffer.getMappedRange()).slice(0, 4);
       particleBinOverflowCount = metadata[0] || 0;
@@ -2433,6 +3424,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     }
 
     const summary = summarizeForceRowsFromElements(packed.elements, pressurePa, pressureFeedback?.gasCellField || null, contactPolicy);
+    const gpuResidentForceEvidencePending = Boolean(residentMaterialInterfaceRows);
     const forceDerivationSuffix = summary.algorithmContactPairResponseApplied
       ? '-plus-algorithm-contact-pair-response'
       : '';
@@ -2443,7 +3435,42 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
       status: 'pressure-interface-force-solver-ready',
       backend: 'webgpu',
+      materialInterfaceInputMode: residentMaterialInterfaceRows
+        ? 'gpu-resident-compact-candidate-buffer'
+        : 'cpu-packed-diagnostic-elements',
+      materialInterfaceInputAuthoritative: Boolean(residentMaterialInterfaceRows),
+      gpuResidentCandidateMetadataGuard: residentMaterialInterfaceRows?.metadataGuard ?? null,
+      gpuResidentCandidateAuthority: residentMaterialInterfaceRows?.residentAuthority ?? null,
+      gpuResidentCandidateSourceDeviceId: residentMaterialInterfaceRows?.sourceDeviceId ?? null,
+      gpuResidentCandidateConsumerDeviceId: residentMaterialInterfaceRows?.consumerDeviceId ?? null,
+      gpuResidentCandidateMetadataBufferRetained: Boolean(residentMaterialInterfaceRows),
+      gpuResidentCandidateMetadataBufferByteLength: residentMaterialInterfaceRows ? 16 : 0,
+      gpuResidentCandidateMetadataLayout: residentMaterialInterfaceRows
+        ? ['activeCandidateCount:u32', 'overflowCount:u32', 'capacity:u32', 'denseCandidateCount:u32']
+        : [],
+      candidateDispatchIndirectBuffer:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectBuffer ?? null,
+      candidateDispatchIndirectBufferRetained: Boolean(residentMaterialInterfaceRows),
+      candidateDispatchIndirectBufferByteLength:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectByteLength ?? 0,
+      candidateDispatchIndirectOffsetBytes:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectOffsetBytes ?? null,
+      candidateDispatchAuthority:
+        residentMaterialInterfaceRows?.candidateDispatchAuthority ?? null,
+      candidateDispatchMode: residentMaterialInterfaceRows
+        ? 'dispatchWorkgroupsIndirect'
+        : 'dispatchWorkgroups',
+      forceRowCapacity: packed.rowCount,
+      forceRowActiveCountPending: gpuResidentForceEvidencePending,
+      forceRowStatusGate: residentMaterialInterfaceRows
+        ? 'row3.w-positive-after-gpu-candidate-metadata-and-resident-neighborhood-header-guard'
+        : 'row3.w-positive',
       forceApplicationStatus: 'solver-ready-not-applied',
+      controlWorkspaceBound: Boolean(pressureWorkspaceResources),
+      controlSlotIndex: pressureWorkspaceResources?.slotIndex ?? null,
+      contactBindGroupCacheHit:
+        contactKinematicsGpuDerivation?.contactBindGroupCacheHit === true,
+      forceBindGroupCacheHit: forceBindGroupCache?.cacheHit === true,
       pressureInterfaceCouplingStatus: pressureInterfaceCoupling?.status || null,
       forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
       gasInterfacePressurePa: pressurePa,
@@ -2457,10 +3484,23 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       localPressureGradientBlockers: pressureFieldResolution.localPressureGradientBlockers,
       localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
       gasPressureCellRowCount: packedGasPressureCells.rowCount,
+      gasPressureCellRowCountSource: gpuGuardedGasPressureRowsReady
+        ? `gpu-metadata-word-${SPH_GAS_CELL_EOS_METADATA.admittedActiveCellCount}`
+        : 'host-row-count',
+      gasPressureCellRowCapacity: packedGasPressureCells.rowCapacity ?? packedGasPressureCells.rowCount,
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowsBufferRetained:
-        (retainForceRowsBuffer === true || retainedGasPressureRowsReady) && packedGasPressureCells.rowCount > 0,
+        (retainForceRowsBuffer === true || retainedGasPressureRowsReady)
+          && (gpuGuardedGasPressureRowsReady || packedGasPressureCells.rowCount > 0),
       gasPressureCellRowsBufferBorrowed: retainedGasPressureRowsReady,
+      gasPressureCellGpuMetadataGuarded: gpuGuardedGasPressureRowsReady,
+      gasPressureCellGpuMetadataStatus: gpuGuardedGasCellField.status || null,
+      gasPressureCellGpuMetadataGeneration: gpuGuardedGasCellField.generation || 0,
+      gasPressureCellGpuMetadataBufferRetained: gpuGuardedGasPressureRowsReady,
+      gasPressureCellGpuLookupBufferRetained: gpuGuardedGasPressureRowsReady,
+      gasPressureCellGpuConsumerAccessProtocol: gpuGuardedGasCellField.consumerAccessProtocol || null,
+      gasPressureCellGpuFailCloseStatus:
+        'metadata-magic-version-generation-lane-source-overflow-status-and-admitted-count-guarded',
       retainedGasPressureCellImportSchema: retainedGasPressureCellImport?.schema || null,
       retainedGasPressureCellImportStatus: retainedGasPressureCellImport?.status || null,
       pressureModelId,
@@ -2481,6 +3521,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsReadyCount: summary.interfaceContactKinematicsReadyCount,
       interfaceContactKinematicsGpuDerivationEligible: contactKinematicsGpuDerivationEligible,
       interfaceContactKinematicsGpuDerived: contactKinematicsGpuDerived,
+      interfaceContactKinematicsDispatchMode:
+        contactKinematicsGpuDerivation?.dispatchMode ?? null,
+      interfaceContactKinematicsCandidateDispatchIndirectConsumed:
+        contactKinematicsGpuDerivation?.candidateDispatchIndirectBufferConsumed === true,
       interfaceContactKinematicsDerivationStatus: contactKinematicsGpuDerivation?.status
         || (contactKinematicsGpuDerivationEligible
             ? 'interface-contact-kinematics-gpu-derivation-not-run'
@@ -2591,7 +3635,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
       forceRows: noFullReadback ? [] : summary.forceRows,
       forceRowValues,
-      forceRowsBufferRetained: retainForceRowsBuffer === true,
+      forceRowsBufferRetained: retainForceRowsBuffer === true || callerOwnsEncoder,
+      forceRowsBufferOwned: ownsForceRowsBuffer,
       surfaceForceCount: summary.surfaceForceCount,
       surfaceForces: summary.surfaceForces,
       totalInterfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? summary.totalInterfaceAreaM2,
@@ -2601,16 +3646,20 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       conservationResidualN: summary.conservationResidualN,
       conservationResidualMagnitudeN: summary.conservationResidualMagnitudeN,
       maxPairResidualN: summary.maxPairResidualN,
-      conservationStatus: summary.maxPairResidualN <= 1e-9
-        ? 'pairwise-equal-opposite-force-conservative'
-        : 'pairwise-force-residual-nonzero',
+      conservationStatus: gpuResidentForceEvidencePending
+        ? 'gpu-resident-pairwise-conservation-evidence-not-read'
+        : (summary.maxPairResidualN <= 1e-9
+            ? 'pairwise-equal-opposite-force-conservative'
+            : 'pairwise-force-residual-nonzero'),
       forceDerivation: pressureModelId === 1
         ? `webgpu-local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction${forceDerivationSuffix}`
         : `webgpu-uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction${forceDerivationSuffix}`,
       forceResolution: pressureModelId === 1
         ? `local-gradient-interface-traction${forceResolutionSuffix}`
         : `uniform-interface-traction${forceResolutionSuffix}`,
-      forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
+      forceApplicationTarget: residentMaterialInterfaceRows
+        ? 'same-encoder-status-gated-sparse-grid-force-scatter'
+        : 'pending-mls-mpm-grid-force-consumer',
       localPressureGradientValidation: pressureModelId === 1,
       forceCouplingValidation: false,
       scientificValidation: false,
@@ -2620,24 +3669,95 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     };
     const result = {
       backend: 'webgpu',
-      status: 'pressure-interface-stage-solver-ready',
+      status: callerOwnsEncoder
+        ? 'pressure-interface-stage-encoded-awaiting-caller-submit'
+        : 'pressure-interface-stage-solver-ready',
       executionSource: 'sphPressureInterfaceForceRowsWebGpu',
-      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
-      fullReadbackPerformed: !noFullReadback,
-      normalHotLoopReadbackFree: noFullReadback,
+      readbackMode: (noFullReadback || callerOwnsEncoder) ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback && !callerOwnsEncoder,
+      normalHotLoopReadbackFree: noFullReadback || callerOwnsEncoder,
       queueCompletionStatus,
       queueCompletionMethod,
+      commandEncoderOwnership: callerOwnsEncoder ? 'caller' : 'local',
+      submissionOwnership: callerOwnsEncoder ? 'caller' : 'local',
+      queueSubmitPerformed: !callerOwnsEncoder,
+      mapPerformed: !noFullReadback && !callerOwnsEncoder,
+      readbackPerformed: !noFullReadback && !callerOwnsEncoder,
+      controlWorkspaceBound: Boolean(pressureWorkspaceResources),
+      controlSlotIndex: pressureWorkspaceResources?.slotIndex ?? null,
+      contactBindGroupCacheHit:
+        contactKinematicsGpuDerivation?.contactBindGroupCacheHit === true,
+      forceBindGroupCacheHit: forceBindGroupCache?.cacheHit === true,
+      residentNeighborhoodAdmission,
+      neighborhoodMode: residentNeighborhoodAdmission
+        ? 'resident-neighborhood-packed-csr'
+        : (contactKinematicsParticleBins?.enabled
+          ? 'fixed-bin-compatibility'
+          : 'all-particle-diagnostic-fallback'),
       pressureInterfaceForcePreview,
       pressureInterfaceForceSolver: solver,
+      materialInterfaceInputMode: solver.materialInterfaceInputMode,
+      materialInterfaceInputAuthoritative: solver.materialInterfaceInputAuthoritative,
+      candidateMetadataBuffer: residentMaterialInterfaceRows?.compactMetadataBuffer ?? null,
+      candidateMetadataBufferBorrowed: Boolean(residentMaterialInterfaceRows),
+      candidateMetadataBufferByteLength: residentMaterialInterfaceRows ? 16 : 0,
+      candidateMetadataLayout: solver.gpuResidentCandidateMetadataLayout,
+      candidateMetadataGuard: solver.gpuResidentCandidateMetadataGuard,
+      candidateDispatchIndirectBuffer:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectBuffer ?? null,
+      candidateDispatchIndirectBufferBorrowed: Boolean(residentMaterialInterfaceRows),
+      candidateDispatchIndirectBufferByteLength:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectByteLength ?? 0,
+      candidateDispatchIndirectOffsetBytes:
+        residentMaterialInterfaceRows?.candidateDispatchIndirectOffsetBytes ?? null,
+      candidateDispatchAuthority:
+        residentMaterialInterfaceRows?.candidateDispatchAuthority ?? null,
+      candidateDispatchMode: residentMaterialInterfaceRows
+        ? 'dispatchWorkgroupsIndirect'
+        : 'dispatchWorkgroups',
+      gpuFailCloseStatusSource: residentMaterialInterfaceRows
+        ? 'candidate-metadata-plus-resident-neighborhood-header-written-to-force-row-status'
+        : null,
       forceRowCount: packed.rowCount,
+      forceRowCapacity: packed.rowCount,
+      forceRowActiveCountPending: gpuResidentForceEvidencePending,
       forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
       forceRowByteLength: outputByteLength,
+      forceRowStatusGate: solver.forceRowStatusGate,
       gasPressureCellRowCount: packedGasPressureCells.rowCount,
+      gasPressureCellRowCountSource: gpuGuardedGasPressureRowsReady
+        ? `gpu-metadata-word-${SPH_GAS_CELL_EOS_METADATA.admittedActiveCellCount}`
+        : 'host-row-count',
+      gasPressureCellRowCapacity: packedGasPressureCells.rowCapacity ?? packedGasPressureCells.rowCount,
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowByteLength: packedGasPressureCells.rowByteLength,
       gasPressureCellRowsBufferRetained:
-        (retainForceRowsBuffer === true || retainedGasPressureRowsReady) && packedGasPressureCells.rowCount > 0,
+        (retainForceRowsBuffer === true || retainedGasPressureRowsReady)
+          && (gpuGuardedGasPressureRowsReady || packedGasPressureCells.rowCount > 0),
       gasPressureCellRowsBufferBorrowed: retainedGasPressureRowsReady,
+      gasPressureCellGpuMetadataGuarded: gpuGuardedGasPressureRowsReady,
+      gasPressureCellMetadataBuffer: gpuGuardedGasPressureRowsReady ? gasPressureCellMetadataBuffer : null,
+      gasPressureCellLookupBuffer: gpuGuardedGasPressureRowsReady ? gasPressureCellLookupBuffer : null,
+      gasPressureCellMetadataLayout: gpuGuardedGasPressureRowsReady
+        ? { ...SPH_GAS_CELL_EOS_METADATA }
+        : null,
+      gasPressureCellMetadataWordCount: gpuGuardedGasPressureRowsReady
+        ? SPH_GAS_CELL_EOS_METADATA_WORDS
+        : 0,
+      gasPressureCellGeneration: gpuGuardedGasCellField.generation || 0,
+      gasPressureCellLaneHashLow: gpuGuardedGasCellField.laneHashLow || 0,
+      gasPressureCellLaneHashHigh: gpuGuardedGasCellField.laneHashHigh || 0,
+      gasPressureCellSourceEpoch: gpuGuardedGasCellField.sourceEpoch || 0,
+      gasPressureCellSourceGeneration: gpuGuardedGasCellField.sourceGeneration || 0,
+      gasPressureCellGridDims: gpuGuardedGasPressureRowsReady ? [...gpuGuardedGasCellField.gridDims] : null,
+      gasPressureCellGridCellCount: gpuGuardedGasCellField.gridCellCount || 0,
+      gasPressureCellConsumerLeaseHeldUntilSubmit: gasCellConsumerLeaseId != null,
+      gasPressureCellConsumerLeaseReleaseStatus: gasCellConsumerLeaseId != null
+        ? 'consumer-lease-release-pending-submit-settlement'
+        : 'consumer-lease-release-not-required',
+      gasPressureCellConsumerLeaseReleaseAcknowledged: gasCellConsumerLeaseId == null,
+      gasPressureCellConsumerLeaseReleaseAttempts: 0,
+      gasPressureCellConsumerLeaseReleaseError: null,
       retainedGasPressureCellImportSchema: retainedGasPressureCellImport?.schema || null,
       retainedGasPressureCellImportStatus: retainedGasPressureCellImport?.status || null,
       algorithmContactPolicyRowCount: packedContactPolicy.rowCount,
@@ -2647,6 +3767,11 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsRowByteLength: packedContactKinematics.rowByteLength,
       interfaceContactKinematicsGpuDerivationEligible: contactKinematicsGpuDerivationEligible,
       interfaceContactKinematicsGpuDerived: contactKinematicsGpuDerived,
+      interfaceContactKinematicsBufferOwned: ownsContactKinematicsBuffer,
+      interfaceContactKinematicsDispatchMode:
+        contactKinematicsGpuDerivation?.dispatchMode ?? null,
+      interfaceContactKinematicsCandidateDispatchIndirectConsumed:
+        contactKinematicsGpuDerivation?.candidateDispatchIndirectBufferConsumed === true,
       interfaceContactKinematicsDerivationStatus: contactKinematicsGpuDerivation?.status
         || (contactKinematicsGpuDerivationEligible
             ? 'interface-contact-kinematics-gpu-derivation-not-run'
@@ -2701,13 +3826,102 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };
-    if (retainForceRowsBuffer) {
+    result.gpuAllocationEntries = [
+      {
+        role: 'pressure-interface-elements',
+        buffer: inputBuffer,
+        owned: Boolean(localInterfaceElementsBuffer),
+        lifetime: localInterfaceElementsBuffer ? 'transient-submission' : 'borrowed'
+      },
+      {
+        role: 'pressure-interface-candidate-metadata',
+        buffer: candidateMetadataBuffer,
+        owned: Boolean(localCandidateMetadataBuffer),
+        lifetime: localCandidateMetadataBuffer ? 'transient-submission' : 'borrowed'
+      },
+      residentMaterialInterfaceRows ? {
+        role: 'pressure-interface-candidate-dispatch-indirect',
+        buffer: residentMaterialInterfaceRows.candidateDispatchIndirectBuffer,
+        owned: false,
+        lifetime: 'borrowed'
+      } : null,
+      {
+        role: 'pressure-interface-resident-neighborhood',
+        buffer: residentNeighborhoodBuffer,
+        owned: Boolean(localResidentNeighborhoodBuffer),
+        lifetime: localResidentNeighborhoodBuffer ? 'transient-submission' : 'borrowed'
+      },
+      {
+        role: 'pressure-interface-gas-pressure-cells',
+        buffer: gasPressureCellsBuffer,
+        owned: !retainedGasPressureRowsReady,
+        lifetime: retainedGasPressureRowsReady ? 'borrowed' : 'transient-submission'
+      },
+      {
+        role: 'pressure-interface-gas-cell-metadata',
+        buffer: gasPressureCellMetadataBuffer,
+        owned: Boolean(localGasPressureCellMetadataBuffer),
+        lifetime: localGasPressureCellMetadataBuffer ? 'transient-submission' : 'borrowed'
+      },
+      {
+        role: 'pressure-interface-gas-cell-lookup',
+        buffer: gasPressureCellLookupBuffer,
+        owned: Boolean(localGasPressureCellLookupBuffer),
+        lifetime: localGasPressureCellLookupBuffer ? 'transient-submission' : 'borrowed'
+      },
+      {
+        role: 'pressure-interface-contact-policy',
+        buffer: contactPolicyBuffer,
+        owned: ownsContactPolicyBuffer,
+        lifetime: ownsContactPolicyBuffer ? 'transient-submission' : 'persistent-workspace'
+      },
+      {
+        role: 'pressure-interface-contact-kinematics',
+        buffer: contactKinematicsBuffer,
+        owned: ownsContactKinematicsBuffer,
+        lifetime: ownsContactKinematicsBuffer ? 'transient-submission' : 'borrowed'
+      },
+      ...contactKinematicsCleanupBuffers.map((buffer, index) => ({
+        role: `pressure-interface-contact-kinematics-cleanup-${index}`,
+        buffer,
+        owned: true,
+        lifetime: 'transient-submission'
+      })),
+      {
+        role: 'pressure-interface-force-rows',
+        buffer: forceRowsBuffer,
+        owned: ownsForceRowsBuffer,
+        lifetime: ownsForceRowsBuffer ? 'transient-submission' : 'borrowed'
+      },
+      {
+        role: 'pressure-interface-force-params',
+        buffer: paramsBuffer,
+        owned: ownsParamsBuffer,
+        lifetime: ownsParamsBuffer ? 'transient-submission' : 'persistent-workspace'
+      },
+      readBuffer ? {
+        role: 'pressure-interface-force-readback',
+        buffer: readBuffer,
+        owned: true,
+        lifetime: 'transient-submission'
+      } : null
+    ].filter((entry) => entry?.buffer);
+    gasCellConsumerLeaseEvidenceResult = result;
+    if (retainForceRowsBuffer || callerOwnsEncoder) {
       result.forceRowsBuffer = forceRowsBuffer;
       result.forceRowsBufferByteLength = outputByteLength;
-      result.destroyForceRowsBuffer = () => forceRowsBuffer.destroy?.();
+      result.forceRowsBufferOwned = ownsForceRowsBuffer;
+      result.destroyForceRowsBuffer = () => {
+        if (!ownsForceRowsBuffer) return false;
+        forceRowsBuffer.destroy?.();
+        return true;
+      };
       returnedRetainedForceRowsBuffer = true;
     }
-    if ((retainForceRowsBuffer || retainedGasPressureRowsReady) && packedGasPressureCells.rowCount > 0) {
+    if (
+      (retainForceRowsBuffer || retainedGasPressureRowsReady)
+      && (gpuGuardedGasPressureRowsReady || packedGasPressureCells.rowCount > 0)
+    ) {
       result.gasPressureCellsBuffer = gasPressureCellsBuffer;
       result.gasPressureCellRowsBufferByteLength = packedGasPressureCells.rowByteLength;
       result.destroyGasPressureCellsBuffer = retainedGasPressureRowsReady
@@ -2715,24 +3929,52 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         : () => gasPressureCellsBuffer.destroy?.();
       returnedRetainedGasPressureCellsBuffer = true;
     }
+    if (callerOwnsEncoder) callerOwnedResult = result;
     return result;
   } finally {
     const cleanup = () => {
-      inputBuffer.destroy?.();
+      if (cleanupPerformed) return;
+      cleanupPerformed = true;
+      localInterfaceElementsBuffer?.destroy?.();
+      localCandidateMetadataBuffer?.destroy?.();
+      localResidentNeighborhoodBuffer?.destroy?.();
+      localGasPressureCellMetadataBuffer?.destroy?.();
+      localGasPressureCellLookupBuffer?.destroy?.();
       if (!retainedGasPressureRowsReady && !returnedRetainedGasPressureCellsBuffer) {
         gasPressureCellsBuffer.destroy?.();
       }
-      contactPolicyBuffer.destroy?.();
-      contactKinematicsBuffer.destroy?.();
+      if (ownsContactPolicyBuffer) contactPolicyBuffer.destroy?.();
+      if (ownsContactKinematicsBuffer) contactKinematicsBuffer.destroy?.();
       for (const buffer of contactKinematicsCleanupBuffers) buffer?.destroy?.();
-      paramsBuffer.destroy?.();
+      if (ownsParamsBuffer) paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
-      if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) forceRowsBuffer.destroy?.();
+      if (
+        ownsForceRowsBuffer
+        && (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer)
+      ) {
+        forceRowsBuffer.destroy?.();
+      }
+      if (!releaseGasCellConsumerLease()) retryGasCellConsumerLeaseRelease();
     };
-    if (noFullReadback) {
+    if (callerOwnsEncoder) {
+      if (callerOwnedResult) callerOwnedResult.cleanupSubmittedWork = cleanup;
+      else cleanup();
+    } else if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);
     } else {
       cleanup();
     }
   }
+}
+
+export function createSphPressureInterfaceForceRowsWebGpuEncoderStage(args = {}) {
+  if (!args.commandEncoder) {
+    throw new TypeError('pressure/interface encoder stage requires a caller-owned commandEncoder');
+  }
+  return runSphPressureInterfaceForceRowsWebGpu({
+    ...args,
+    retainForceRowsBuffer: true,
+    readbackMode: NO_FULL_READBACK_MODE,
+    contactKinematicsParticleBinMetadataReadback: false
+  });
 }

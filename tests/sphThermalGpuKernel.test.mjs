@@ -5,7 +5,6 @@ import { sphThermalStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../src/runtime/closureLawGraph.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { stableOpticalMaterialId, GPU_PHASE_IDS } from '../src/runtime/material/opticalGpuBuffers.js';
-import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../src/runtime/material/materialPropertyBank.js';
 import { equilibriumFromSpecificEnergy } from '../src/runtime/material/phaseEquilibrium.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import { createSphState } from '../src/runtime/sph/sphState.js';
@@ -34,11 +33,13 @@ import {
   resolveThermalStateFromTable,
   SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4,
   thermalEmissivityFromTable,
+  createSphThermalStepWebGpuEncoderStage,
   runSphThermalStepCpu,
   runSphThermalStepWebGpu,
   runSphThermalStepWithOptionalWebGpu,
   uploadSphThermalResponseGraphBuffers
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
+import { createSphThermalWorkspaceGpu } from '../src/runtime/sph/sphThermalWorkspaceGpu.js';
 
 const closures = createReferenceMaterialClosures();
 const materialProperties = {
@@ -98,11 +99,15 @@ function fakeThermalDeviceWithFence() {
   const buffers = [];
   const bindGroups = [];
   const queueWrites = [];
+  const pipelines = [];
+  const dispatches = [];
   const device = {
     destroyed,
     buffers,
     bindGroups,
     queueWrites,
+    pipelines,
+    dispatches,
     fenceRequestedCount: 0,
     resolveFence,
     queue: {
@@ -133,12 +138,15 @@ function fakeThermalDeviceWithFence() {
     createShaderModule({ label, code }) {
       return { label, code };
     },
-    createComputePipeline() {
-      return {
+    createComputePipeline(descriptor) {
+      const pipeline = {
+        ...descriptor,
         getBindGroupLayout(index) {
           return { index };
         }
       };
+      pipelines.push(pipeline);
+      return pipeline;
     },
     createBindGroupLayout({ label, entries }) {
       return { label, entries };
@@ -154,10 +162,18 @@ function fakeThermalDeviceWithFence() {
     createCommandEncoder() {
       return {
         beginComputePass() {
+          let pipeline = null;
           return {
-            setPipeline() {},
+            setPipeline(nextPipeline) {
+              pipeline = nextPipeline;
+            },
             setBindGroup() {},
-            dispatchWorkgroups() {},
+            dispatchWorkgroups(count) {
+              dispatches.push({
+                count,
+                entryPoint: pipeline?.compute?.entryPoint ?? null
+              });
+            },
             end() {}
           };
         },
@@ -469,6 +485,24 @@ test('SPH thermal WGSL preserves visual particle radius while refreshing thermo 
   assert.match(sphThermalStepWgsl, /vec4<f32>\(source_row2\.x,\s*source_row2\.y,\s*1\.0,\s*source_row2\.w\)/);
 });
 
+test('SPH thermal WGSL prepares closure properties once per particle before pair scans', () => {
+  assert.match(sphThermalStepWgsl, /@binding\(9\).*thermal_particle_properties/);
+  assert.match(sphThermalStepWgsl, /fn prepare_particle_thermal_properties/);
+  assert.match(sphThermalStepWgsl, /thermal_temperature_slope\(row0\.x, vel_u\.w\)/);
+  assert.match(sphThermalStepWgsl, /thermal_emissivity\(row0\.x\)/);
+  assert.match(sphThermalStepWgsl, /particle_nominal_radius_m\(pos_mass\.w, row0\.w\)/);
+  const pairPass = sphThermalStepWgsl.slice(sphThermalStepWgsl.indexOf('fn main('));
+  assert.doesNotMatch(pairPass, /thermal_temperature_slope\(/);
+  assert.doesNotMatch(pairPass, /thermal_emissivity\(/);
+  assert.doesNotMatch(pairPass, /particle_nominal_radius_m\(/);
+  assert.equal(
+    pairPass.match(/other_nominal_radius_m = other_thermal_properties\.z/g)?.length,
+    3
+  );
+  assert.doesNotMatch(sphThermalStepWgsl, /material_bank_warm_input_anchor/);
+  assert.doesNotMatch(sphThermalStepWgsl, /material_bank_warm_input_rows/);
+});
+
 test('SPH thermal CPU pair conduction does not overshoot pair equilibrium', () => {
   const packed = packedTwoWaterParticles(320, 300);
   const table = buildSphThermalMaterialTable(materialProperties);
@@ -661,19 +695,46 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   );
   assert.equal(
     result.materialPropertyBankWarmInputConsumer.status,
-    'thermal-material-bank-warm-inputs-bound-in-shader'
+    'thermal-material-table-annotated-with-material-bank-warm-inputs'
   );
-  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderBound, true);
-  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderBinding, 9);
-  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderRowCount, 1);
-  assert.equal(result.materialPropertyBankWarmInputConsumer.bufferSource, 'sph-particle-upload');
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderBound, false);
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderBinding, null);
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderRowCount, 0);
+  assert.equal(result.materialPropertyBankWarmInputConsumer.bufferSource, null);
   assert.equal(result.materialPropertyBankWarmInputRowCount, 1);
   assert.equal(result.materialPropertyBankWarmInputMatchedMaterialCount, 1);
   assert.ok(device.bindGroups.at(-1).entries.some((entry) => (
-    entry.binding === 9 && entry.resource.buffer.label === 'material-bank-warm-inputs'
+    entry.binding === 9 && entry.resource.buffer.label === 'ulg-sph-thermal-particle-properties'
   )));
+  assert.equal(
+    device.bindGroups.at(-1).layout.entries.filter((entry) => (
+      entry.buffer.type === 'storage' || entry.buffer.type === 'read-only-storage'
+    )).length,
+    10
+  );
+  assert.equal(
+    device.bindGroups.at(-1).layout.entries.find((entry) => entry.binding === 8)?.buffer.type,
+    'uniform'
+  );
+  assert.equal(result.thermalParticlePropertiesBufferByteLength, 32);
+  assert.equal(
+    result.thermalParticlePropertiesInitializationMode,
+    'gpu-prepass-writes-all-live-particle-rows'
+  );
+  assert.equal(result.thermalParticlePropertiesHostUploadByteLength, 0);
+  assert.equal(result.thermalPropertyPrepassDispatchCount, 1);
+  assert.equal(
+    result.thermalPairPassMaterialGraphLookupMode,
+    'gpu-precomputed-per-particle-properties'
+  );
+  assert.deepEqual(device.dispatches.map((dispatch) => dispatch.entryPoint), [
+    'prepare_particle_thermal_properties',
+    'main'
+  ]);
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-state'), false);
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-thermo'), false);
+  assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-particle-properties'), false);
+  assert.equal(device.queueWrites.some((write) => write.label === 'material-bank-warm-inputs'), false);
   assert.equal(typeof result.destroyOutputParticleBuffers, 'function');
   result.destroyOutputParticleBuffers();
   result.destroyOutputParticleBuffers();
@@ -686,10 +747,11 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
 
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-state').length, 1);
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-thermo').length, 1);
+  assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-particle-properties').length, 1);
   assert.equal(device.fenceRequestedCount, 2);
 });
 
-test('SPH thermal WebGPU binds full-row empty material-bank warm input sentinel', async () => {
+test('SPH thermal WebGPU omits zero-valued material-bank shadow binding', async () => {
   const packed = packedTwoWaterParticles();
   const table = buildSphThermalMaterialTable(materialProperties);
   const graphSet = buildSphThermalClosureGraphBuffers(table);
@@ -722,19 +784,226 @@ test('SPH thermal WebGPU binds full-row empty material-bank warm input sentinel'
     readbackMode: 'no-full-readback'
   });
 
-  assert.deepEqual(
-    device.queueWrites.find((write) => write.label === 'ulg-sph-thermal-material-bank-warm-input-rows-empty'),
-    {
-      label: 'ulg-sph-thermal-material-bank-warm-input-rows-empty',
-      offset: 0,
-      byteLength: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT
-    }
+  assert.equal(
+    device.queueWrites.some((write) => write.label.includes('material-bank-warm-input')),
+    false
   );
+  assert.ok(device.bindGroups.at(-1).entries.some((entry) => (
+    entry.binding === 9 && entry.resource.buffer.label === 'ulg-sph-thermal-particle-properties'
+  )));
   assert.equal(result.materialPropertyBankWarmInputConsumer.shaderRowCount, 0);
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderBound, false);
+  assert.equal(result.thermalParticlePropertiesHostUploadByteLength, 0);
   result.destroyOutputParticleBuffers();
   device.resolveFence();
   await Promise.resolve();
   await Promise.resolve();
+});
+
+test('SPH thermal encoder stages reuse aligned params slots and cached bind groups', () => {
+  const packed = packedTwoWaterParticles();
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const device = fakeThermalDeviceWithFence();
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseRecordBuffer: { label: 'response-records' },
+    responseBuffer: { label: 'responses' },
+    graphNodeBuffer: { label: 'graph-nodes' },
+    graphSampleBuffer: { label: 'graph-samples' },
+    responseBufferByteLength: responseTable.responses.byteLength,
+    graphSampleBufferByteLength: graphSet.graphBank.sampleRows.byteLength
+  };
+  const workspace = createSphThermalWorkspaceGpu({
+    device,
+    particleCapacity: packed.particleCount,
+    sequenceStepCapacity: 2,
+    label: 'shared-thermal'
+  });
+  const outputStateBuffer = device.createBuffer({
+    label: 'shared-thermal-output-state',
+    size: packed.state.byteLength,
+    usage: 128
+  });
+  const outputThermoBuffer = device.createBuffer({
+    label: 'shared-thermal-output-thermo',
+    size: packed.thermo.byteLength,
+    usage: 128
+  });
+  const neighborBinsBuffer = device.createBuffer({
+    label: 'shared-thermal-neighbor-bins',
+    size: 64,
+    usage: 128
+  });
+  const stageOptions = {
+    device,
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    thermalClosureGraphSet: graphSet,
+    thermalClosureGraphBank: graphSet.graphBank,
+    thermalPhaseResponseTable: responseTable,
+    thermalResponseGraphUpload,
+    sourceStateBuffer: { label: 'source-state' },
+    sourceThermoBuffer: { label: 'source-thermo' },
+    outputStateBuffer,
+    outputThermoBuffer,
+    neighborBins: {
+      binsBuffer: neighborBinsBuffer,
+      capacity: 2,
+      nx: 1,
+      ny: 1,
+      nz: 1,
+      cellSizeM: 0.2
+    },
+    thermalWorkspace: workspace,
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  };
+
+  const first = createSphThermalStepWebGpuEncoderStage({
+    ...stageOptions,
+    thermalParamsSlotIndex: 0
+  });
+  const second = createSphThermalStepWebGpuEncoderStage({
+    ...stageOptions,
+    thermalParamsSlotIndex: 1
+  });
+  const third = createSphThermalStepWebGpuEncoderStage({
+    ...stageOptions,
+    thermalParamsSlotIndex: 1
+  });
+  const thermalBindGroups = device.bindGroups.slice(-2);
+
+  assert.equal(first.thermalWorkspace, workspace);
+  assert.equal(second.thermalWorkspace, workspace);
+  assert.equal(third.thermalWorkspace, workspace);
+  assert.equal(first.thermalWorkspaceBorrowed, true);
+  assert.equal(second.thermalWorkspaceBorrowed, true);
+  assert.equal(first.result.thermalWorkspaceOwned, false);
+  assert.equal(first.result.thermalWorkspaceBorrowed, true);
+  assert.equal(first.result.thermalParamsSlotIndex, 0);
+  assert.equal(second.result.thermalParamsSlotIndex, 1);
+  assert.equal(first.result.thermalParamsByteOffset, 0);
+  assert.equal(second.result.thermalParamsByteOffset, workspace.paramsSlotStrideBytes);
+  assert.equal(first.thermalBindGroupCacheHit, false);
+  assert.equal(second.thermalBindGroupCacheHit, false);
+  assert.equal(third.thermalBindGroupCacheHit, true);
+  assert.equal(device.buffers.filter((buffer) => buffer.label === 'shared-thermal-particle-properties').length, 1);
+  assert.equal(device.buffers.filter((buffer) => buffer.label === 'shared-thermal-params-arena').length, 1);
+  assert.equal(device.buffers.filter((buffer) => buffer.label === 'ulg-sph-thermal-params').length, 0);
+  assert.equal(device.bindGroups.length, 2);
+  assert.ok(thermalBindGroups.every((bindGroup) => (
+    bindGroup.entries.find((entry) => entry.binding === 9)?.resource?.buffer
+      === workspace.propertyBuffer
+  )));
+  assert.equal(device.queueWrites.some(
+    (write) => write.label === 'shared-thermal-particle-properties'
+  ), false);
+  assert.deepEqual(
+    device.queueWrites
+      .filter((write) => write.label === 'shared-thermal-params-arena')
+      .map((write) => write.offset),
+    [0, workspace.paramsSlotStrideBytes, workspace.paramsSlotStrideBytes]
+  );
+  assert.deepEqual(
+    thermalBindGroups.map((bindGroup) => (
+      bindGroup.entries.find((entry) => entry.binding === 8)?.resource?.offset
+    )),
+    [0, workspace.paramsSlotStrideBytes]
+  );
+  assert.deepEqual(workspace.bindGroupCacheEvidence(), {
+    slotCapacity: 2,
+    populatedSlotCount: 2,
+    hitCount: 1,
+    missCount: 2
+  });
+
+  first.cleanupSubmittedWork();
+  second.cleanupSubmittedWork();
+  third.cleanupSubmittedWork();
+  assert.equal(workspace.destroyed, false);
+  assert.equal(workspace.propertyBuffer.destroyed, false);
+  workspace.destroy();
+  assert.equal(workspace.propertyBuffer.destroyed, true);
+});
+
+test('SPH thermal encoder stage borrows caller-owned ping outputs without destroying them', () => {
+  const packed = packedTwoWaterParticles();
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const device = fakeThermalDeviceWithFence();
+  const sourceStateBuffer = { label: 'thermal-ping-source-state' };
+  const sourceThermoBuffer = { label: 'thermal-ping-source-thermo' };
+  const outputStateBuffer = device.createBuffer({
+    label: 'thermal-ping-output-state',
+    size: packed.state.byteLength,
+    usage: 128
+  });
+  const outputThermoBuffer = device.createBuffer({
+    label: 'thermal-ping-output-thermo',
+    size: packed.thermo.byteLength,
+    usage: 128
+  });
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseRecordBuffer: { label: 'response-records' },
+    responseBuffer: { label: 'responses' },
+    graphNodeBuffer: { label: 'graph-nodes' },
+    graphSampleBuffer: { label: 'graph-samples' },
+    responseBufferByteLength: responseTable.responses.byteLength,
+    graphSampleBufferByteLength: graphSet.graphBank.sampleRows.byteLength
+  };
+
+  const stage = createSphThermalStepWebGpuEncoderStage({
+    device,
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    thermalClosureGraphSet: graphSet,
+    thermalClosureGraphBank: graphSet.graphBank,
+    thermalPhaseResponseTable: responseTable,
+    thermalResponseGraphUpload,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    outputStateBuffer,
+    outputThermoBuffer,
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(stage.stateBuffer, outputStateBuffer);
+  assert.equal(stage.thermoBuffer, outputThermoBuffer);
+  assert.equal(stage.outputStateBufferOwned, false);
+  assert.equal(stage.outputThermoBufferOwned, false);
+  assert.equal(stage.result.outputParticleBuffersBorrowed, true);
+  const bindGroup = device.bindGroups.at(-1);
+  assert.equal(bindGroup.entries.find((entry) => entry.binding === 6).resource.buffer, outputStateBuffer);
+  assert.equal(bindGroup.entries.find((entry) => entry.binding === 7).resource.buffer, outputThermoBuffer);
+
+  stage.cleanupSubmittedWork();
+  stage.result.destroyOutputParticleBuffers();
+  assert.equal(outputStateBuffer.destroyed, false);
+  assert.equal(outputThermoBuffer.destroyed, false);
+
+  assert.throws(
+    () => createSphThermalStepWebGpuEncoderStage({
+      device,
+      sphParticleState: packed,
+      thermalMaterialTable: table,
+      thermalClosureGraphSet: graphSet,
+      thermalClosureGraphBank: graphSet.graphBank,
+      thermalPhaseResponseTable: responseTable,
+      thermalResponseGraphUpload,
+      sourceStateBuffer,
+      sourceThermoBuffer,
+      outputStateBuffer: sourceStateBuffer,
+      outputThermoBuffer
+    }),
+    /distinct from every source/
+  );
 });
 
 test('SPH thermal parity rejects state or thermo drift', () => {

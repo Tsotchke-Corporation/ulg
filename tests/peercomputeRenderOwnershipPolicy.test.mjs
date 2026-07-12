@@ -5,6 +5,7 @@ import {
   ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES,
   ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA,
   ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS,
+  constrainPeerComputeRenderOwnershipToMainThreadPresenter,
   resolvePeerComputeRenderOwnershipPolicy
 } from '../src/runtime/peercomputeRenderOwnershipPolicy.js';
 import {
@@ -164,6 +165,37 @@ test('render ownership policy lets same-device use case prefer retained presenta
     'render-ownership-presentation-worker-retained-output-presentation-only-ready'
   );
   assert.equal(readyPolicy.residentInterfaceRefreshMode, 'pipelined');
+});
+
+test('main-thread presenter constraint removes competing worker presentation without changing physics authority', () => {
+  const workerPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    useCase: 'same-device-interactive',
+    workerOwnedResidentProducerReady: true
+  });
+  const constrained = constrainPeerComputeRenderOwnershipToMainThreadPresenter(workerPolicy, {
+    reason: 'native surface owns the main canvas',
+    source: 'test-native-surface'
+  });
+
+  assert.equal(
+    workerPolicy.effectiveMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+  );
+  assert.equal(
+    constrained.effectiveMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER
+  );
+  assert.equal(constrained.workerOffscreenPresentationRequested, false);
+  assert.equal(constrained.presentationWorkerResidentStagesRequested, false);
+  assert.equal(constrained.presentationWorkerRetainedOutputPresentationOnlyRequested, false);
+  assert.equal(
+    constrained.displayTransport,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.MAIN_THREAD_DOM_CANVAS
+  );
+  assert.equal(constrained.residentComputeManagerMode, 'compute-manager');
+  assert.equal(constrained.presenterConstraint, 'main-thread-dom-canvas-required');
+  assert.equal(constrained.workerPresentationSuppressed, true);
+  assert.equal(constrained.reason, 'native surface owns the main canvas');
 });
 
 test('render ownership policy upgrades implicit local worker presentation when the producer is ready', () => {

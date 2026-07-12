@@ -17,6 +17,7 @@ import { createMaterialClosureArtifact } from '../../../ulg-gpu-abi/src/index.js
 import { _uhf } from '../electronicStructure/molecularHartreeFock.js';
 import { solveAtom } from '../electronicStructure/radialKohnSham.js';
 import { electronConfiguration, zForSymbol } from '../electronicStructure/periodicTable.js';
+import { deriveMolecularQuantumRefractiveResponse } from './molecularOpticalResponse.js';
 
 const C = 2.99792458e8;
 const BOHR_M = 5.29177210903e-11;
@@ -39,7 +40,6 @@ const WATER_VAPORIZATION_LATENT_HEAT_J_PER_KG = 2.5e6;
 const LIQUID_WATER_DENSITY_KG_PER_M3 = 997;
 const STANDARD_AIR_DENSITY_KG_PER_M3 = 1.225;
 const STANDARD_AIR_RAYLEIGH_SCATTERING_550NM_PER_M = 1.1e-5;
-const AIR_REFRACTIVE_INDEX_VISIBLE = 1.000293;
 export const WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL = 'clausius-clapeyron-droplet-scattering-v0';
 
 function gauss(x, mu, s1, s2) {
@@ -158,6 +158,8 @@ function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, 
     stableNumber(properties?.gasElectronicExcitationEv),
     stableNumber(properties?.gasElectronicBandFwhmEv),
     stableNumber(properties?.gasElectronicOscillatorStrength),
+    properties?.formula ?? 'no-formula',
+    stableObjectKey(properties?.quantumGeometry),
     oscillatorCacheKey(properties?.opticalInterbandOscillators),
     Array.isArray(properties?.intrinsicColorSrgb) ? properties.intrinsicColorSrgb.map(stableNumber).join(',') : 'no-intrinsic'
   ].join('::');
@@ -175,6 +177,14 @@ function cloneOpticalRenderParams(params) {
       ? params.spectralSamples.map((sample) => ({ ...sample }))
       : params.spectralSamples,
     dropletMicrophysics: params.dropletMicrophysics ? { ...params.dropletMicrophysics } : params.dropletMicrophysics,
+    refractiveProvenance: params.refractiveProvenance
+      ? {
+          ...params.refractiveProvenance,
+          inputs: params.refractiveProvenance.inputs
+            ? { ...params.refractiveProvenance.inputs }
+            : params.refractiveProvenance.inputs
+        }
+      : params.refractiveProvenance,
     pbr: params.pbr
       ? {
           ...params.pbr,
@@ -202,6 +212,8 @@ function withPbrMetadata(params, { baseColorSrgb, renderModel, vertexColorPolicy
       opacity: params.opacity,
       transmission: params.transmission,
       ior: params.ior ?? null,
+      refractiveAuthority: params.refractiveAuthority === true,
+      refractiveStatus: params.refractiveStatus ?? null,
       renderModel,
       vertexColorPolicy
     }
@@ -353,6 +365,35 @@ function absorptionSpectralSample(nm, { absorptionCoefficientPerM, pathLengthM, 
   };
 }
 
+function extinctionCoefficientFromAbsorption(nm, absorptionCoefficientPerM) {
+  const wavelengthM = Math.max(0, Number(nm) || 0) * 1e-9;
+  return Math.max(0, Number(absorptionCoefficientPerM) || 0) * wavelengthM / (4 * Math.PI);
+}
+
+function fresnelNormalReflectance(n, k = 0) {
+  const real = Math.max(1, Number(n) || 1);
+  const extinction = Math.max(0, Number(k) || 0);
+  return clamp01(
+    ((real - 1) ** 2 + extinction ** 2)
+      / ((real + 1) ** 2 + extinction ** 2)
+  );
+}
+
+function molecularQuantumRefractiveResponse({ material, phase, properties, opticalState } = {}) {
+  return deriveMolecularQuantumRefractiveResponse({
+    formula: properties?.formula ?? material,
+    phase,
+    properties,
+    opticalState,
+    wavelengthsNm: OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM
+  });
+}
+
+function quantumIndexSample(response, wavelengthNm) {
+  if (response?.refractiveAuthority !== true || !Array.isArray(response.spectralSamples)) return null;
+  return response.spectralSamples.find((sample) => sample.wavelengthNm === wavelengthNm) ?? null;
+}
+
 function airRayleighScatteringCoefficientPerM(nm, densityScale = 1) {
   const wavelengthScale = (550 / Math.max(1, Number(nm) || 550)) ** 4;
   return STANDARD_AIR_RAYLEIGH_SCATTERING_550NM_PER_M
@@ -375,14 +416,14 @@ function airRayleighOpticalRenderParams({ phase = 'gas', pathLengthM = 0.3, prop
     pathLengthM,
     reflectance: 0,
     scatteringCoefficientPerM: airRayleighScatteringCoefficientPerM(nm, densityScale),
-    n: AIR_REFRACTIVE_INDEX_VISIBLE,
-    k: 0
+    n: null,
+    k: null
   }));
   return withPbrMetadata({
     metalness: 0,
     roughness: 0.92,
-    transmission,
-    ior: AIR_REFRACTIVE_INDEX_VISIBLE,
+    transmission: 0,
+    ior: 1,
     opacity,
     attenuationColor: [1, 1, 1],
     attenuationDistanceM: Infinity,
@@ -391,16 +432,18 @@ function airRayleighOpticalRenderParams({ phase = 'gas', pathLengthM = 0.3, prop
     scatteringCoefficientPerM,
     opticalDepth,
     absorptionCoefficientPerM: 0,
+    refractiveAuthority: false,
+    refractiveStatus: 'blocked-missing-quantum-optical-response',
     provenance: {
-      status: 'derived',
+      status: 'partial-derived-refractive-blocked',
       source: 'dry-air-rayleigh-scattering-reference-composition',
-      method: 'standard dry-air density + Rayleigh 1/lambda^4 molecular scattering -> optically thin transparent PBR row',
-      inputs: { phase, pathLengthM, densityKgPerM3: density, densityScale },
+      method: 'standard dry-air density + Rayleigh 1/lambda^4 molecular scattering -> optically thin participating-medium PBR row',
+      inputs: { phase, pathLengthM, densityKgPerM3: density, densityScale, ballisticTransmission: transmission },
       validation: false
     }
   }, {
     baseColorSrgb: [baseColor.r, baseColor.g, baseColor.b],
-    renderModel: 'gas-rayleigh-transparent-pbr',
+    renderModel: 'gas-rayleigh-scattering-pbr',
     spectralSamples
   });
 }
@@ -777,17 +820,6 @@ export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3,
   return { r: 0.7, g: 0.7, b: 0.7 };
 }
 
-// Refractive indices (real part, visible) of the transparent phases. These set the Fresnel
-// surface reflection — the reason a clear medium is visible at all — and the render IOR. Iron is
-// a metal (opaque, complex index handled by the Drude reflectance above), so it has no transmissive
-// index. Water/ice values are model constants (closureBacked) pending an ab-initio polarizability
-// closure; vapour's index is ~1 (≈air), which is why pure water vapour is nearly invisible.
-const REFRACTIVE_INDEX = Object.freeze({
-  waterLiquid: 1.333,
-  waterIce: 1.309,
-  waterVapor: 1.00025
-});
-
 // Luminous-weighted Beer–Lambert attenuation of water. The characteristic 1/e distance is set by
 // the luminous-weighted mean absorption; the attenuation colour is the tint that light takes on
 // over *that* distance (three.js's attenuationColor semantics) — long enough for the O–H red
@@ -821,27 +853,48 @@ function bandGapAbsorptionCoefficientPerM(nm, { properties, phase = 'solid' }) {
   return numberDensity * geometricCrossSectionM2 * oscillatorFraction;
 }
 
-function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.3 }) {
+function compoundGapRenderParams({
+  material = null,
+  properties,
+  phase = 'solid',
+  pathLengthM = 0.3,
+  opticalState = null
+}) {
   const sample = bandGapAbsorptionCoefficientPerM(500, { properties, phase });
   if (sample == null) return null;
+  const quantumResponse = molecularQuantumRefractiveResponse({
+    material,
+    phase,
+    properties,
+    opticalState
+  });
+  const refractiveAuthority = quantumResponse?.refractiveAuthority === true;
   const absorptionAt = (nm) => bandGapAbsorptionCoefficientPerM(nm, { properties, phase }) ?? 0;
   const absorptionCoefficientPerM = visibleLuminousMean(absorptionAt);
   const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
   const opacity = opticalDepthToOpacity(opticalDepth);
   const responseColor = spectralResponseToSrgb((nm) => Math.exp(-absorptionAt(nm) * Math.max(0, pathLengthM)));
   const baseColor = properties?.intrinsicColorSrgb ?? [responseColor.r, responseColor.g, responseColor.b];
-  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
-    absorptionCoefficientPerM: absorptionAt(nm),
-    pathLengthM,
-    reflectance: 0.04,
-    n: 1.4,
-    k: 0
-  }));
+  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => {
+    const absorptionCoefficientPerM = absorptionAt(nm);
+    const quantumIndex = quantumIndexSample(quantumResponse, nm);
+    const n = quantumIndex?.n ?? null;
+    const k = n == null
+      ? null
+      : extinctionCoefficientFromAbsorption(nm, absorptionCoefficientPerM);
+    return absorptionSpectralSample(nm, {
+      absorptionCoefficientPerM,
+      pathLengthM,
+      reflectance: n == null ? 0 : fresnelNormalReflectance(n, k),
+      n,
+      k
+    });
+  });
   return withPbrMetadata({
     metalness: 0,
     roughness: 0.4,
-    transmission: Math.exp(-Math.min(80, opticalDepth)),
-    ior: 1.4,
+    transmission: refractiveAuthority ? 1 : 0,
+    ior: refractiveAuthority ? quantumResponse.referenceIor : 1,
     opacity,
     attenuationColor: properties?.intrinsicColorSrgb ?? null,
     attenuationDistanceM: absorptionCoefficientPerM > 0 ? 1 / absorptionCoefficientPerM : Infinity,
@@ -849,11 +902,21 @@ function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.
     internalScatter: 0,
     opticalDepth,
     absorptionCoefficientPerM,
+    refractiveAuthority,
+    refractiveStatus: refractiveAuthority
+      ? quantumResponse.status
+      : quantumResponse?.status ?? 'blocked-missing-quantum-optical-response',
+    refractiveProvenance: quantumResponse?.provenance ?? null,
     provenance: {
-      status: 'derived',
+      status: refractiveAuthority ? 'derived-reduced' : 'partial-derived-refractive-blocked',
       source: 'molecular-gap-geometric-absorption',
       method: 'electronic gap + formula density -> geometric oscillator absorption -> Beer-Lambert opacity',
-      inputs: { electronicGapEv: properties?.electronicGapEv, pathLengthM, phase },
+      inputs: {
+        electronicGapEv: properties?.electronicGapEv,
+        pathLengthM,
+        phase,
+        refractiveResponseStatus: quantumResponse?.status ?? null
+      },
       validation: false
     }
   }, {
@@ -894,7 +957,12 @@ function gasElectronicBandAbsorptionPerM(nm, { excitationEv, numberDensityPerM3,
 
 const GAUSSIAN_FWHM_TO_SIGMA = 1 / (2 * Math.sqrt(2 * Math.LN2));
 
-function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
+function molecularGasBandRenderParams({
+  material = null,
+  properties,
+  pathLengthM = 0.3,
+  opticalState = null
+}) {
   const excitationEv = properties?.gasElectronicExcitationEv;
   if (!(excitationEv > 0)) return null;
   const density = phaseDensityKgPerM3(properties, 'gas');
@@ -914,23 +982,37 @@ function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
   const absorptionCoefficientPerM = visibleLuminousMean(absorptionAt);
   const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
   const opacity = opticalDepthToOpacity(opticalDepth);
-  const transmission = Math.exp(-Math.min(80, opticalDepth));
-  const n = 1.0005; // gas refractive index ≈ air; surface Fresnel is negligible
+  const ballisticTransmission = Math.exp(-Math.min(80, opticalDepth));
+  const quantumResponse = molecularQuantumRefractiveResponse({
+    material,
+    phase: 'gas',
+    properties,
+    opticalState
+  });
+  const refractiveAuthority = quantumResponse?.refractiveAuthority === true;
   const responseColor = spectralResponseToSrgb(
     (nm) => Math.exp(-absorptionAt(nm) * Math.max(0.01, pathLengthM))
   );
-  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
-    absorptionCoefficientPerM: absorptionAt(nm),
-    pathLengthM,
-    reflectance: ((n - 1) / (n + 1)) ** 2,
-    n,
-    k: 0
-  }));
+  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => {
+    const absorptionCoefficientPerMAtNm = absorptionAt(nm);
+    const quantumIndex = quantumIndexSample(quantumResponse, nm);
+    const n = quantumIndex?.n ?? null;
+    const k = n == null
+      ? null
+      : extinctionCoefficientFromAbsorption(nm, absorptionCoefficientPerMAtNm);
+    return absorptionSpectralSample(nm, {
+      absorptionCoefficientPerM: absorptionCoefficientPerMAtNm,
+      pathLengthM,
+      reflectance: n == null ? 0 : fresnelNormalReflectance(n, k),
+      n,
+      k
+    });
+  });
   return withPbrMetadata({
     metalness: 0,
     roughness: 1,
-    transmission,
-    ior: n,
+    transmission: refractiveAuthority ? 1 : 0,
+    ior: refractiveAuthority ? quantumResponse.referenceIor : 1,
     opacity,
     attenuationColor: [responseColor.r, responseColor.g, responseColor.b],
     attenuationDistanceM: absorptionCoefficientPerM > 0 ? 1 / absorptionCoefficientPerM : Infinity,
@@ -938,11 +1020,24 @@ function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
     internalScatter: 0,
     opticalDepth,
     absorptionCoefficientPerM,
+    refractiveAuthority,
+    refractiveStatus: refractiveAuthority
+      ? quantumResponse.status
+      : quantumResponse?.status ?? 'blocked-missing-quantum-optical-response',
+    refractiveProvenance: quantumResponse?.provenance ?? null,
     provenance: {
-      status: 'derived',
+      status: refractiveAuthority ? 'derived-reduced' : 'partial-derived-refractive-blocked',
       source: 'delta-scf-electronic-band-gas-absorption',
       method: 'electronic band centre (banked spectroscopic or ΔSCF) -> Gaussian Franck-Condon continuum (banked FWHM or E0/6) -> Thomas-Reiche-Kuhn cross-section (banked f or 1e-3 weak-continuum estimate) -> Beer-Lambert',
-      inputs: { gasElectronicExcitationEv: excitationEv, bandSigmaEv, oscillatorStrength, pathLengthM, numberDensityPerM3 },
+      inputs: {
+        gasElectronicExcitationEv: excitationEv,
+        bandSigmaEv,
+        oscillatorStrength,
+        pathLengthM,
+        numberDensityPerM3,
+        ballisticTransmission,
+        refractiveResponseStatus: quantumResponse?.status ?? null
+      },
       validation: false
     }
   }, {
@@ -978,8 +1073,15 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
   if (material === 'h2o' || material === 'steam' || material === 'ice') {
     const isVapor = material === 'steam' || phase === 'gas';
     const isSolid = material === 'ice' || phase === 'solid';
-    const n = isVapor ? REFRACTIVE_INDEX.waterVapor : (isSolid ? REFRACTIVE_INDEX.waterIce : REFRACTIVE_INDEX.waterLiquid);
-    const fresnelR0 = ((n - 1) / (n + 1)) ** 2; // normal-incidence surface reflectance
+    const waterPhase = isVapor ? 'gas' : (isSolid ? 'solid' : 'liquid');
+    const quantumResponse = molecularQuantumRefractiveResponse({
+      material: material === 'h2o' ? material : 'h2o',
+      phase: waterPhase,
+      properties,
+      opticalState
+    });
+    const refractiveAuthority = quantumResponse?.refractiveAuthority === true;
+    const referenceIor = refractiveAuthority ? quantumResponse.referenceIor : 1;
     const atten = waterBeerLambertAttenuation();
     // Vapour is optically thin: push the attenuation distance far out so it carries almost no tint.
     const attenuationColor = isVapor ? [1, 1, 1] : atten.attenuationColor;
@@ -993,10 +1095,12 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
     const scatteringOpticalDepth = dropletMicrophysics?.opticalDepth || 0;
     const opticalDepth = absorptionOpticalDepth + scatteringOpticalDepth;
     const ballisticTransmission = Math.exp(-Math.min(80, opticalDepth));
-    const transmission = Math.min(1, Math.max(0, (1 - fresnelR0) * ballisticTransmission));
+    // Transmission is a material lobe weight. Fresnel and Beer-Lambert
+    // attenuation are evaluated by the PBR shader from spectral n/k; folding
+    // either into this scalar would apply them twice.
+    const transmission = refractiveAuthority ? 1 : 0;
     const opacity = opticalDepthToOpacity(opticalDepth);
     const roughness = isVapor ? (scatteringCoefficientPerM > 0 ? 1 : 0.9) : (isSolid ? 0.5 : 0.08);
-    const waterPhase = isVapor ? 'gas' : (isSolid ? 'solid' : 'liquid');
     const scatteringColor = scatteringCoefficientPerM > 0
       ? spectralResponseToSrgb((nm) => {
           const s = waterDropletScatteringCoefficientAtNm(nm, {
@@ -1009,24 +1113,34 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
     const baseColor = isVapor
       ? (scatteringColor ? [scatteringColor.r, scatteringColor.g, scatteringColor.b] : [1, 1, 1])
       : attenuationColor;
-    const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
-      absorptionCoefficientPerM: isVapor ? waterAbsorption(nm) / 50 : waterAbsorption(nm),
-      pathLengthM,
-      reflectance: fresnelR0,
-      scatteringCoefficientPerM: isVapor
-        ? waterDropletScatteringCoefficientAtNm(nm, {
-          scatteringCoefficientPerM,
-          dropletRadiusM: dropletMicrophysics?.dropletRadiusM
-        })
-        : 0,
-      n,
-      k: 0
-    }));
+    const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => {
+      const absorptionCoefficientPerMAtNm = isVapor
+        ? waterAbsorption(nm) / 50
+        : waterAbsorption(nm);
+      const quantumIndex = quantumIndexSample(quantumResponse, nm);
+      const n = quantumIndex?.n ?? null;
+      const k = n == null
+        ? null
+        : extinctionCoefficientFromAbsorption(nm, absorptionCoefficientPerMAtNm);
+      return absorptionSpectralSample(nm, {
+        absorptionCoefficientPerM: absorptionCoefficientPerMAtNm,
+        pathLengthM,
+        reflectance: n == null ? 0 : fresnelNormalReflectance(n, k),
+        scatteringCoefficientPerM: isVapor
+          ? waterDropletScatteringCoefficientAtNm(nm, {
+            scatteringCoefficientPerM,
+            dropletRadiusM: dropletMicrophysics?.dropletRadiusM
+          })
+          : 0,
+        n,
+        k
+      });
+    });
     return withPbrMetadata({
       metalness: 0,
       roughness,
       transmission,
-      ior: n,
+      ior: referenceIor,
       opacity,
       attenuationColor,
       attenuationDistanceM,
@@ -1036,36 +1150,47 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
       dropletMicrophysics,
       opticalDepth,
       absorptionCoefficientPerM,
+      refractiveAuthority,
+      refractiveStatus: refractiveAuthority
+        ? quantumResponse.status
+        : quantumResponse?.status ?? 'blocked-missing-quantum-optical-response',
+      refractiveProvenance: quantumResponse?.provenance ?? null,
       provenance: {
-        status: 'derived',
+        status: refractiveAuthority ? 'derived-reduced' : 'partial-derived-refractive-blocked',
         source: scatteringCoefficientPerM > 0
           ? 'clausius-clapeyron-condensed-droplet-mie-rayleigh-scattering'
           : 'beer-lambert-oh-overtone-optical-depth',
         method: scatteringCoefficientPerM > 0
           ? 'saturation vapor pressure -> excess vapor condensed fraction -> droplet number density -> Mie/Rayleigh extinction + O-H absorption'
           : 'O-H overtone absorption -> luminous attenuation distance -> Beer-Lambert opacity/transmission',
-        inputs: { pathLengthM, phase: waterPhase, opticalState: opticalState || null },
+        inputs: {
+          pathLengthM,
+          phase: waterPhase,
+          opticalState: opticalState || null,
+          refractiveResponseStatus: quantumResponse?.status ?? null,
+          refractiveResponseSource: quantumResponse?.provenance?.source ?? null
+        },
         validation: false
       }
     }, {
       baseColorSrgb: baseColor,
       renderModel: isVapor
-        ? (scatteringCoefficientPerM > 0 ? 'molecular-condensed-droplet-scattering-pbr' : 'molecular-vapor-transparent-spectrum')
-        : 'molecular-transparent-beer-lambert-pbr',
+        ? (scatteringCoefficientPerM > 0 ? 'molecular-condensed-droplet-scattering-pbr' : 'molecular-vapor-volume-spectrum')
+        : 'molecular-dielectric-beer-lambert-pbr',
       spectralSamples
     });
   }
   if (phase === 'gas') {
-    const gasBand = molecularGasBandRenderParams({ properties, pathLengthM });
+    const gasBand = molecularGasBandRenderParams({ material, properties, pathLengthM, opticalState });
     if (gasBand) return gasBand;
   }
-  const compound = compoundGapRenderParams({ properties, phase, pathLengthM });
+  const compound = compoundGapRenderParams({ material, properties, phase, pathLengthM, opticalState });
   if (compound) return compound;
   return withPbrMetadata({
     metalness: 0,
     roughness: 0.4,
     transmission: 0,
-    ior: 1.4,
+    ior: 1,
     opacity: 0,
     attenuationColor: null,
     attenuationDistanceM: Infinity,
@@ -1073,6 +1198,8 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
     internalScatter: 0,
     opticalDepth: null,
     absorptionCoefficientPerM: null,
+    refractiveAuthority: false,
+    refractiveStatus: 'blocked-missing-quantum-optical-response',
     blocked: true,
     provenance: {
       status: 'blocked',

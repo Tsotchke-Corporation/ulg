@@ -768,3 +768,52 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     fullPhysicsValidation: false
   };
 }
+
+export function constrainPeerComputeRenderOwnershipToMainThreadPresenter(
+  peercomputePolicy = null,
+  {
+    reason = 'selected presenter requires the main-thread DOM canvas',
+    source = 'main-thread-presenter-constraint'
+  } = {}
+) {
+  const prior = policyObject(peercomputePolicy);
+  const constrained = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy: {
+      ...prior,
+      source,
+      requestedMode: ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER,
+      mode: ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER,
+      renderOwnershipMode: ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER,
+      presentationOwnershipMode: ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER,
+      workerOffscreenPresentationRequested: false,
+      workerOffscreenPresentation: false,
+      presentationWorkerRetainedOutputPresentationOnly: false,
+      presentationWorkerRetainedOutputPresentationOnlyRequested: false,
+      presentationWorkerPresentationOnly: false,
+      presentationOnly: false,
+      presentationWorkerResidentStagesRequested: false,
+      workerOffscreenResidentStagesRequested: false,
+      workerOwnedResidentStageChainRequested: false,
+      residentStageChainOnPresentationWorker: false
+    },
+    requestedMode: ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER,
+    workerOffscreenPresentationRequested: false,
+    workerOffscreenPresentationExplicitlyDisabled: true,
+    presentationWorkerResidentStagesRequested: false,
+    useCase: prior.useCase ?? null,
+    source
+  });
+  return {
+    ...constrained,
+    status: 'render-ownership-main-thread-presenter-required',
+    reason,
+    presenterConstraint: 'main-thread-dom-canvas-required',
+    unconstrainedRequestedMode: prior.requestedMode ?? prior.mode ?? null,
+    unconstrainedEffectiveMode: prior.effectiveMode ?? null,
+    workerPresentationSuppressed: Boolean(
+      prior.workerOffscreenPresentationRequested
+      || prior.presentationWorkerResidentStagesRequested
+      || prior.presentationWorkerRetainedOutputPresentationOnlyRequested
+    )
+  };
+}

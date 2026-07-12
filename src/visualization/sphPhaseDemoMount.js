@@ -5,6 +5,7 @@
 import {
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
   SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+  SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   createSphPhaseScene,
   normalizeSphSceneBackgroundColorHex,
@@ -32,6 +33,7 @@ import {
   summarizePeerComputeResidentAuthorityHost
 } from '../runtime/peercomputeBrowserResidentHost.js';
 import {
+  constrainPeerComputeRenderOwnershipToMainThreadPresenter,
   resolvePeerComputeRenderOwnershipPolicy
 } from '../runtime/peercomputeRenderOwnershipPolicy.js';
 import {
@@ -70,6 +72,15 @@ import {
 } from '../runtime/material/materialDerivation.js';
 import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
 import { materialDerivationSummary } from '../runtime/material/propertyProvenance.js';
+import {
+  acquireResidentExecutionConsumerLease,
+  createResidentRenderSourceSubmissionGate,
+  createLatestWinsAsyncLane
+} from '../runtime/residentAsyncRenderLane.js';
+import {
+  MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY,
+  MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+} from '../runtime/sph/sphMlsMpmGpuStep.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const PHYSICAL_LAW_GROUPS = Object.freeze([
@@ -622,6 +633,293 @@ export function summarizeResidentStageOrderExecution(execution = null) {
     residentProductMassProductEventRowCount: finalStep?.residentProductMassProductEventRowCount
       ?? lastStepSummary?.residentProductMassProductEventRowCount
       ?? 0
+  };
+}
+
+export function residentHotLoopReadbackWarningRequired(
+  residentSteps = null,
+  residentStep = null
+) {
+  if (!residentSteps && !residentStep) return false;
+  return (
+    residentSteps?.normalHotLoopReadbackFree
+    ?? residentStep?.normalHotLoopReadbackFree
+    ?? null
+  ) === false;
+}
+
+export function residentStaleExecutionRetryDecision({
+  executionStale = false,
+  requestedGeneration = 0,
+  currentGeneration = 0
+} = {}) {
+  const generationAdvanced = requestedGeneration !== currentGeneration;
+  return {
+    scheduleLatestGeneration: generationAdvanced,
+    haltCurrentGeneration: executionStale === true && !generationAdvanced,
+    reason: generationAdvanced
+      ? 'particle-generation-advanced'
+      : (executionStale === true
+          ? 'stale-result-for-current-generation-fails-closed'
+          : 'no-stale-retry-required')
+  };
+}
+
+export function residentPressureSingleStepCadenceReasonForCapability({
+  pressureEnabled = false,
+  reactionCount = 0,
+  residentProductMass = null,
+  fusedPerSubstepSourceRegeneration = false
+} = {}) {
+  if (!pressureEnabled) return null;
+  const reactive = Math.max(0, Math.round(Number(reactionCount) || 0)) > 0;
+  const carriedProducts = Boolean(residentProductMass);
+  if (!reactive && !carriedProducts) return null;
+  if (fusedPerSubstepSourceRegeneration) return null;
+  return reactive
+    ? 'reactive-product-carrier-chain-requires-fused-per-substep'
+    : 'resident-product-gas-eos-chain-requires-fused-per-substep';
+}
+
+export function residentSequenceAuthorityEpochForSchedule(
+  currentEpoch,
+  { continueFromResidentState = false } = {}
+) {
+  const current = Number(currentEpoch);
+  if (!Number.isSafeInteger(current) || current < 0) {
+    throw new RangeError('current resident sequence authority epoch must be non-negative');
+  }
+  if (continueFromResidentState && current > 0) return current;
+  if (current >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError('resident sequence authority epoch exhausted');
+  }
+  return current + 1;
+}
+
+export function residentPressureSourceParticleState({
+  residentExecution = null,
+  fallbackParticleState = null
+} = {}) {
+  return residentExecution?.nextSphParticleState
+    ?? residentExecution?.finalStep?.nextSphParticleState
+    ?? fallbackParticleState
+    ?? null;
+}
+
+export function residentPressureSourceFieldReadyForParticleState(
+  materialInterfaceState = null,
+  particleState = null
+) {
+  const sourceField = materialInterfaceState?.materialInterfaceSourceField || null;
+  const sourceStep = Number(sourceField?.sourceStep);
+  const particleStep = Number(particleState?.step);
+  const directStateThermoTopologyReady = Boolean(
+    sourceField?.sourceFieldGenerationMode === 'same-encoder-state-thermo-direct'
+    && sourceField?.surfaceTable?.schema
+    && sourceField.surfaceTable.records instanceof Float32Array
+  );
+  return Boolean(
+    [
+      'material-interface-gpu-resident-source-field-ready',
+      'material-interface-gpu-resident-source-topology-ready'
+    ].includes(materialInterfaceState?.status)
+    && sourceField?.schema === 'peercompute.ulg.sph-material-interface-source-field.v0'
+    && sourceField?.status === 'material-interface-source-field-ready'
+    && sourceField?.normalHotLoopReadbackFree === true
+    && (directStateThermoTopologyReady || (
+      sourceField?.fieldRowsBufferRetained === true
+      && sourceField?.surfaceBufferRetained === true
+      && sourceField?.sourceIndexFieldBufferRetained === true
+    ))
+    && Number.isInteger(sourceStep)
+    && Number.isInteger(particleStep)
+    && sourceStep === particleStep
+  );
+}
+
+export function residentCompactMotionProofWarningRequired({
+  motionStatus = null,
+  residentSteps = null,
+  residentStep = null,
+  particleBridgeLiveReadback = false
+} = {}) {
+  if (!residentSteps && !residentStep) return false;
+  if (particleBridgeLiveReadback) return false;
+  if (!['motion-unknown-no-compact-summary', 'motion-unknown'].includes(motionStatus)) {
+    return false;
+  }
+  const compactSummaryMode = residentSteps?.compactSummaryMode
+    ?? residentStep?.compactSummaryMode
+    ?? null;
+  return !['none', 'plan-only'].includes(compactSummaryMode);
+}
+
+export function residentRenderSourceAuthorityAdmission({
+  connected = true,
+  requestGeneration = null,
+  currentGeneration = null,
+  requestedMode = null,
+  currentMode = null,
+  requestStillCurrent = true,
+  sceneIdentityMatches = true,
+  presentedSourceSnapshot = null,
+  sourceSnapshot = null
+} = {}) {
+  const issues = [];
+  const finiteNumberOrNull = (value) => {
+    if (value == null) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  const expectedExecutionGeneration = finiteNumberOrNull(
+    sourceSnapshot?.residentExecutionGeneration
+  );
+  const expectedNextStep = finiteNumberOrNull(sourceSnapshot?.nextStep);
+  const presentedExecutionGeneration = finiteNumberOrNull(
+    presentedSourceSnapshot?.residentExecutionGeneration
+  );
+  const presentedNextStep = finiteNumberOrNull(presentedSourceSnapshot?.nextStep);
+  const expectedStepsSignature = sourceSnapshot?.stepsSignature ?? null;
+  const hasExpectedExecutionGeneration = Number.isFinite(expectedExecutionGeneration);
+  const hasExpectedNextStep = Number.isFinite(expectedNextStep);
+
+  if (!connected) issues.push('render-overlay-disconnected');
+  if (!sceneIdentityMatches) issues.push('render-scene-identity-stale');
+  if (Number(requestGeneration) !== Number(currentGeneration)) {
+    issues.push('particle-generation-stale');
+  }
+  if (requestedMode && requestedMode !== currentMode) issues.push('render-mode-stale');
+  if (requestStillCurrent === false) issues.push('request-token-stale');
+  if (
+    hasExpectedExecutionGeneration
+    && Number.isFinite(presentedExecutionGeneration)
+    && expectedExecutionGeneration < presentedExecutionGeneration
+  ) {
+    issues.push('resident-visible-execution-generation-regression');
+  }
+  if (
+    hasExpectedNextStep
+    && Number.isFinite(presentedNextStep)
+    && (
+      !Number.isFinite(presentedExecutionGeneration)
+      || !hasExpectedExecutionGeneration
+      || expectedExecutionGeneration === presentedExecutionGeneration
+    )
+    && expectedNextStep < presentedNextStep
+  ) {
+    issues.push('resident-visible-source-step-regression');
+  }
+
+  return {
+    schema: 'peercompute.ulg.sph-demo-resident-render-source-authority-admission.v0',
+    status: issues.length
+      ? 'resident-render-source-authority-rejected'
+      : 'resident-render-source-authority-admitted',
+    accepted: issues.length === 0,
+    issues,
+    requestGeneration: Number.isFinite(Number(requestGeneration)) ? Number(requestGeneration) : null,
+    currentGeneration: Number.isFinite(Number(currentGeneration)) ? Number(currentGeneration) : null,
+    requestedMode: requestedMode || null,
+    currentMode: currentMode || null,
+    expectedExecutionGeneration: hasExpectedExecutionGeneration
+      ? expectedExecutionGeneration
+      : null,
+    presentedExecutionGeneration,
+    expectedNextStep: hasExpectedNextStep ? expectedNextStep : null,
+    presentedNextStep,
+    expectedStepsSignature,
+    sourceAheadOfPresentedState: Boolean(
+      hasExpectedNextStep
+      && Number.isFinite(presentedNextStep)
+      && expectedNextStep > presentedNextStep
+    )
+  };
+}
+
+export function residentRenderPublicationAdmission(options = {}) {
+  const authorityAdmission = residentRenderSourceAuthorityAdmission(options);
+  const issues = [...authorityAdmission.issues];
+  const finiteNumberOrNull = (value) => {
+    if (value == null) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  const renderState = options.renderState || null;
+  const renderStatus = String(renderState?.status || '');
+  const expectedExecutionGeneration = authorityAdmission.expectedExecutionGeneration;
+  const expectedNextStep = authorityAdmission.expectedNextStep;
+  const actualExecutionGeneration = finiteNumberOrNull(
+    renderState?.sourceResidentExecutionGeneration
+  );
+  const actualNextStep = finiteNumberOrNull(renderState?.sourceResidentNextStep);
+  if (!renderState || renderStatus.endsWith('-error') || renderStatus.includes('render-rows-error')) {
+    issues.push('render-refresh-error-state-returned');
+  }
+  if (
+    Number.isFinite(expectedExecutionGeneration)
+    && actualExecutionGeneration !== expectedExecutionGeneration
+  ) {
+    issues.push('resident-execution-generation-mismatch');
+  }
+  if (Number.isFinite(expectedNextStep) && actualNextStep !== expectedNextStep) {
+    issues.push('resident-render-source-step-mismatch');
+  }
+  return {
+    ...authorityAdmission,
+    schema: 'peercompute.ulg.sph-demo-resident-render-publication-admission.v0',
+    status: issues.length
+      ? 'resident-render-publication-rejected'
+      : 'resident-render-publication-admitted',
+    accepted: issues.length === 0,
+    issues,
+    actualExecutionGeneration,
+    actualNextStep,
+    renderStatus: renderStatus || null
+  };
+}
+
+export function residentRenderEnqueueAdmission({
+  resetRebuildPending = false,
+  sceneMutationBarrierPending = false,
+  sceneMutationCount = 0
+} = {}) {
+  const issues = [];
+  if (resetRebuildPending) issues.push('resident-reset-rebuild-pending');
+  if (sceneMutationBarrierPending) issues.push('resident-render-scene-mutation-barrier-active');
+  if (Number(sceneMutationCount) > 0) issues.push('resident-render-scene-mutation-active');
+  return {
+    schema: 'peercompute.ulg.sph-demo-resident-render-enqueue-admission.v0',
+    status: issues.length
+      ? 'resident-render-enqueue-rejected-scene-mutation'
+      : 'resident-render-enqueue-admitted',
+    accepted: issues.length === 0,
+    issues
+  };
+}
+
+export function residentNativePresentationBackpressureDecision({
+  nativeSurfaceConsumer = false,
+  cadenceDue = false,
+  requiredVisible = false,
+  renderRefreshScheduled = false
+} = {}) {
+  const required = Boolean(
+    nativeSurfaceConsumer
+    && renderRefreshScheduled
+    && (cadenceDue || requiredVisible)
+  );
+  return {
+    schema: 'peercompute.ulg.sph-demo-native-presentation-backpressure.v0',
+    status: required
+      ? 'native-presentation-backpressure-required'
+      : 'native-presentation-backpressure-not-required',
+    required,
+    nativeSurfaceConsumer: Boolean(nativeSurfaceConsumer),
+    cadenceDue: Boolean(cadenceDue),
+    requiredVisible: Boolean(requiredVisible),
+    renderRefreshScheduled: Boolean(renderRefreshScheduled),
+    maxComputeSubmissionsAheadOfPresentation: required ? 1 : null,
+    readbackRequired: false
   };
 }
 
@@ -2101,6 +2399,22 @@ export async function mountSphPhaseDemoOverlay({
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number : null;
   }
+  function compactSummaryModeUrlParam(value, fallback = 'none') {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (['none', 'plan-only', 'final-only', 'every-step'].includes(normalized)) {
+      return normalized;
+    }
+    return fallback;
+  }
+  const initialResidentCompactSummaryMode = compactSummaryModeUrlParam(
+    initialHash.get('residentCompactSummaryMode')
+      ?? initialQuery.get('residentCompactSummaryMode')
+      ?? initialHash.get('residentCompactSummary')
+      ?? initialQuery.get('residentCompactSummary')
+      ?? initialHash.get('compactSummaryMode')
+      ?? initialQuery.get('compactSummaryMode'),
+    'none'
+  );
   const initialResidentWorkersEnabled = booleanUrlParam(
     initialHash.get('residentWorkers') ?? initialQuery.get('residentWorkers'),
     true
@@ -2721,7 +3035,7 @@ export async function mountSphPhaseDemoOverlay({
         ?? null
     }
     : null;
-  const initialPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
+  const unconstrainedPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy:
       currentResidentAuthorityHostForScene()?.renderOwnershipPolicy
       || runtime?.peercomputeRenderOwnershipPolicy
@@ -2743,6 +3057,15 @@ export async function mountSphPhaseDemoOverlay({
       ? 'sph-phase-demo-url'
       : 'sph-phase-demo'
   });
+  const initialPeerComputeRenderOwnershipPolicy = nativeSurfaceDrawRequested
+    ? constrainPeerComputeRenderOwnershipToMainThreadPresenter(
+        unconstrainedPeerComputeRenderOwnershipPolicy,
+        {
+          reason: 'native WebGPU surface presentation owns the main canvas; a worker point canvas would be a competing visible renderer',
+          source: 'sph-phase-demo-native-webgpu-surface-presenter'
+        }
+      )
+    : unconstrainedPeerComputeRenderOwnershipPolicy;
   const workerOffscreenPresentationEnabled = Boolean(
     initialPeerComputeRenderOwnershipPolicy.workerOffscreenPresentationRequested
   );
@@ -4065,6 +4388,8 @@ export async function mountSphPhaseDemoOverlay({
   let pendingMlsMpmGridUpdateSignature = null;
   let pendingMlsMpmG2pReconstructionSignature = null;
   let pendingMlsMpmResidentStepsSignature = null;
+  let residentExecutionInFlight = false;
+  let residentExecutionFailureGeneration = null;
   let pendingInitialResidentVisualRefreshSignature = null;
   let pendingMlsMpmResidentStepsToken = 0;
   let pendingResidentInterfaceRefreshPromise = null;
@@ -4074,12 +4399,17 @@ export async function mountSphPhaseDemoOverlay({
   let mountedMechanicsStageWorkerRunnerHost = null;
   let mountedMechanicsStageWorkerLaneSequence = 0;
   let particleSyncGeneration = 0;
+  let mountedResidentSequenceAuthorityEpoch = 0;
   let resetRebuildPending = false;
   let residentRenderReadbackSequence = 0;
   let residentRenderReadbackCount = 0;
   let residentRenderReadbackSkippedCount = 0;
   let residentAccumulatedSubvisibleMotionM = 0;
   let residentSubvisibleMotionBurstCount = 0;
+  let residentRenderRefreshLane = null;
+  let residentRenderSceneMutationBarrier = null;
+  let residentRenderSceneMutationCount = 0;
+  let residentPresentationBackpressurePending = false;
   let residentStageOrderTrace = appendResidentStageOrderTrace(null, {
     status: 'resident-stage-order-trace-initialized',
     generation: particleSyncGeneration,
@@ -4097,6 +4427,13 @@ export async function mountSphPhaseDemoOverlay({
     residentInterfaceRefreshes: 0,
     skippedResidentInterfaceRefreshes: 0,
     deferredResidentInterfaceRefreshes: 0,
+    residentPresentationBackpressurePending: false,
+    residentPresentationBackpressureStatus:
+      'native-presentation-backpressure-not-required',
+    residentPresentationBackpressureWaitCount: 0,
+    residentPresentationBackpressureDeferredScheduleCount: 0,
+    lastResidentPresentationBackpressureMs: null,
+    residentPresentationMaxComputeSubmissionsAhead: 1,
     residentInterfaceRefreshMode: initialPeerComputeRenderOwnershipPolicy?.residentInterfaceRefreshMode ?? null,
     residentInterfaceRefreshWarmupFrames:
       initialPeerComputeRenderOwnershipPolicy?.residentInterfaceRefreshWarmupFrames ?? 0,
@@ -4367,6 +4704,7 @@ export async function mountSphPhaseDemoOverlay({
     residentRenderReadbackSkippedCount = 0;
     residentAccumulatedSubvisibleMotionM = 0;
     residentSubvisibleMotionBurstCount = 0;
+    residentPresentationBackpressurePending = false;
     updateResidentPerf({
       resetReason: reason,
       residentSubmissions: 0,
@@ -4375,6 +4713,13 @@ export async function mountSphPhaseDemoOverlay({
       skippedRenderReadbacks: 0,
       residentInterfaceRefreshes: 0,
       skippedResidentInterfaceRefreshes: 0,
+      residentPresentationBackpressurePending: false,
+      residentPresentationBackpressureStatus:
+        'native-presentation-backpressure-not-required',
+      residentPresentationBackpressureWaitCount: 0,
+      residentPresentationBackpressureDeferredScheduleCount: 0,
+      lastResidentPresentationBackpressureMs: null,
+      residentPresentationMaxComputeSubmissionsAhead: 1,
       residentInterfaceRefreshMode: currentResidentInterfaceRefreshMode(),
       residentInterfaceRefreshPending: false,
       accumulatedSubvisibleMotionM: 0,
@@ -4451,10 +4796,7 @@ export async function mountSphPhaseDemoOverlay({
     if (fallbackStatuses.some(statusIndicatesCpuFallback)) {
       messages.push('WebGPU fallback detected: at least one closure/runtime/render stage is CPU-backed.');
     }
-    const normalHotLoopReadbackFree = residentSteps?.normalHotLoopReadbackFree
-      ?? residentStep?.normalHotLoopReadbackFree
-      ?? false;
-    if (!normalHotLoopReadbackFree) {
+    if (residentHotLoopReadbackWarningRequired(residentSteps, residentStep)) {
       messages.push('Hot loop is not fully GPU-resident yet.');
     }
     if (renderState?.renderFieldReadback) {
@@ -4466,10 +4808,12 @@ export async function mountSphPhaseDemoOverlay({
     if (overlay.__mlsMpmResidentStepsSlow?.status) {
       messages.push('Resident physics is still deriving a GPU-resident step; waiting for the current batch.');
     }
-    if (
-      (motion.status === 'motion-unknown-no-compact-summary' || motion.status === 'motion-unknown')
-      && !particleBridgeLiveReadback
-    ) {
+    if (residentCompactMotionProofWarningRequired({
+      motionStatus: motion.status,
+      residentSteps,
+      residentStep,
+      particleBridgeLiveReadback
+    })) {
       messages.push('Resident physics is stepping, but compact motion proof is unavailable.');
     } else if (motion.status === 'motion-below-visible-threshold') {
       messages.push('Resident physics is stepping, but displacement is below the visible threshold.');
@@ -4534,6 +4878,319 @@ export async function mountSphPhaseDemoOverlay({
       scene.scene.userData.sphResidentRenderState = state;
     }
     return state;
+  }
+
+  function residentRenderExecutionSourceSnapshot(execution = null) {
+    const finalStep = execution?.finalStep || null;
+    const pingPong = finalStep?.particlePingPong || {};
+    const nextSphParticleState = execution?.nextSphParticleState
+      || finalStep?.nextSphParticleState
+      || null;
+    const nextMlsMpmParticleState = execution?.nextMlsMpmParticleState
+      || finalStep?.nextMlsMpmParticleState
+      || null;
+    const finiteOrNull = (value) => {
+      if (value == null) return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    return {
+      residentExecutionGeneration: finiteOrNull(
+        execution?.residentExecutionGeneration ?? finalStep?.residentExecutionGeneration
+      ),
+      nextStep: finiteOrNull(
+        pingPong.nextStep
+          ?? nextSphParticleState?.step
+          ?? nextMlsMpmParticleState?.step
+      ),
+      nextTimeS: finiteOrNull(
+        pingPong.nextTime
+          ?? nextSphParticleState?.time
+          ?? nextMlsMpmParticleState?.time
+      ),
+      stepsSignature: execution?.signature ?? null,
+      particleCount: finiteOrNull(
+        nextSphParticleState?.particleCount
+          ?? nextMlsMpmParticleState?.particleCount
+          ?? finalStep?.particleCount
+      )
+    };
+  }
+
+  function residentPresentedRenderSourceSnapshot(renderState = null) {
+    const finiteOrNull = (value) => {
+      if (value == null) return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    return {
+      residentExecutionGeneration: finiteOrNull(
+        renderState?.sourceResidentExecutionGeneration
+      ),
+      nextStep: finiteOrNull(renderState?.sourceResidentNextStep),
+      nextTimeS: finiteOrNull(renderState?.sourceResidentNextTimeS),
+      stepsSignature: renderState?.sourceResidentStepsSignature ?? null
+    };
+  }
+
+  function residentRenderRequestCurrent(request, renderState = null, {
+    publication = false
+  } = {}) {
+    if (request.execution && (
+      !request.execution.schema
+      || request.execution.backend !== 'webgpu'
+    )) {
+      return false;
+    }
+    const sceneIdentityMatches = request.sceneIdentity === scene;
+    const presentedRenderState = sceneIdentityMatches
+      ? request.sceneIdentity?.getSphResidentRenderState?.()
+      : null;
+    const authorityOptions = {
+      connected: overlay.isConnected,
+      requestGeneration: request.generation,
+      currentGeneration: particleSyncGeneration,
+      requestedMode: request.surfaceDrawDiagnosticMode,
+      currentMode: currentResidentSurfaceDrawDiagnosticMode(),
+      requestStillCurrent:
+        request.laneSuperseded !== true
+        && request.isCurrent?.() !== false,
+      sceneIdentityMatches,
+      presentedSourceSnapshot: residentPresentedRenderSourceSnapshot(
+        presentedRenderState
+      ),
+      sourceSnapshot: request.sourceSnapshot,
+    };
+    const admission = publication
+      ? residentRenderPublicationAdmission({ ...authorityOptions, renderState })
+      : residentRenderSourceAuthorityAdmission(authorityOptions);
+    request.sourceAuthorityAdmission = admission;
+    if (!publication) return admission.accepted;
+    request.publicationAdmission = admission;
+    return admission.accepted;
+  }
+
+  function beginResidentRenderLaneDrain(reason = 'scene-mutation') {
+    const lane = residentRenderRefreshLane;
+    if (!lane) return residentRenderSceneMutationBarrier;
+    residentRenderRefreshLane = null;
+    const stateBeforeClose = lane.getState?.() || null;
+    lane.close?.(`${reason}-render-lane-drain`);
+    if (!stateBeforeClose?.active && !stateBeforeClose?.pending) {
+      return residentRenderSceneMutationBarrier;
+    }
+    const laneDrain = lane.whenIdle();
+    const previousBarrier = residentRenderSceneMutationBarrier;
+    const barrier = previousBarrier
+      ? Promise.all([previousBarrier, laneDrain]).then(() => null)
+      : laneDrain.then(() => null);
+    residentRenderSceneMutationBarrier = barrier;
+    void barrier.finally(() => {
+      if (residentRenderSceneMutationBarrier === barrier) {
+        residentRenderSceneMutationBarrier = null;
+      }
+    });
+    return barrier;
+  }
+
+  function runAfterResidentRenderLaneDrain(reason, mutation) {
+    residentRenderSceneMutationCount += 1;
+    const barrier = beginResidentRenderLaneDrain(reason);
+    if (!barrier) {
+      try {
+        return mutation();
+      } finally {
+        residentRenderSceneMutationCount = Math.max(0, residentRenderSceneMutationCount - 1);
+      }
+    }
+    return barrier.then(mutation).finally(() => {
+      residentRenderSceneMutationCount = Math.max(0, residentRenderSceneMutationCount - 1);
+    });
+  }
+
+  function ensureResidentRenderRefreshLane() {
+    if (residentRenderRefreshLane) return residentRenderRefreshLane;
+    residentRenderRefreshLane = createLatestWinsAsyncLane({
+      shouldStart(request) {
+        return residentRenderRequestCurrent(request);
+      },
+      execute(request) {
+        const refreshOptions = { ...(request.refreshOptions || {}) };
+        if (request.execution) refreshOptions.residentSteps = request.execution;
+        const callerSourceSubmission = refreshOptions.onSourceBuffersSubmitted;
+        refreshOptions.onSourceBuffersSubmitted = (evidence) => {
+          request.publishSourceSubmission?.(evidence);
+          return callerSourceSubmission?.(evidence);
+        };
+        refreshOptions.renderCommitGuard = () => {
+          const accepted = residentRenderRequestCurrent(request);
+          return {
+            ...request.sourceAuthorityAdmission,
+            schema: 'peercompute.ulg.sph-demo-resident-render-commit-guard.v0',
+            accepted,
+            reason: accepted
+              ? null
+              : (request.sourceAuthorityAdmission?.issues?.[0]
+                || 'resident-render-source-authority-rejected'),
+            requiredVisible: request.requiredVisible === true
+          };
+        };
+        return request.sceneIdentity?.refreshSphResidentRenderState?.(refreshOptions);
+      },
+      shouldPublish(request, renderState, laneState) {
+        return residentRenderRequestCurrent(request, renderState, {
+          publication: true
+        });
+      },
+      onSuccess(renderState, request, laneState) {
+        return request.publish?.(renderState, laneState);
+      },
+      onError(error, request, laneState) {
+        if (error?.code === SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE) {
+          return request.onDiscarded?.(null, {
+            ...laneState,
+            reason: 'scene-render-commit-guard-rejected-stale-request'
+          });
+        }
+        if (request.onError) return request.onError(error, laneState);
+        if (residentRenderRequestCurrent(request)) {
+          overlay.__sphResidentRenderStateError = error instanceof Error ? error.message : String(error);
+        }
+        return null;
+      },
+      onDiscardedResult(renderState, request, laneState) {
+        request.discardedRenderSource = {
+          sourceResidentExecutionGeneration:
+            renderState?.sourceResidentExecutionGeneration ?? null,
+          sourceResidentNextStep: renderState?.sourceResidentNextStep ?? null,
+          status: renderState?.status ?? null
+        };
+        if (request.publicationAdmission?.issues?.includes('render-refresh-error-state-returned')) {
+          return request.onError?.(
+            new Error(renderState?.reason || 'resident render refresh returned an error state'),
+            laneState
+          );
+        }
+        return request.onDiscarded?.(renderState, laneState);
+      },
+      onEvent(event, request) {
+        if (event.status === 'resident-async-render-started' && request) {
+          request.residentSubmissionCountAtStart = residentPerf.residentSubmissions;
+          request.physicsScheduleTokenAtStart = pendingMlsMpmResidentStepsToken;
+        }
+        const residentSubmissionCountAtStart = request?.residentSubmissionCountAtStart ?? null;
+        const physicsSubmissionsAdvancedDuringRefresh = residentSubmissionCountAtStart == null
+          ? null
+          : Math.max(0, residentPerf.residentSubmissions - residentSubmissionCountAtStart);
+        const telemetry = {
+          ...event,
+          schema: 'peercompute.ulg.sph-demo-resident-render-refresh-lane.v0',
+          requestSource: request?.source ?? null,
+          requestReason: request?.reason ?? null,
+          requestGeneration: request?.generation ?? null,
+          requiredVisible: request?.requiredVisible === true,
+          inheritedRequiredVisible: request?.inheritedRequiredVisible === true,
+          sourceResidentExecutionGeneration:
+            request?.sourceSnapshot?.residentExecutionGeneration ?? null,
+          sourceResidentNextStep: request?.sourceSnapshot?.nextStep ?? null,
+          sourceResidentNextTimeS: request?.sourceSnapshot?.nextTimeS ?? null,
+          sourceAuthorityAdmissionStatus: request?.sourceAuthorityAdmission?.status ?? null,
+          sourceAuthorityAdmissionIssues: [
+            ...(request?.sourceAuthorityAdmission?.issues || [])
+          ],
+          presentedResidentExecutionGeneration:
+            request?.sourceAuthorityAdmission?.presentedExecutionGeneration ?? null,
+          presentedResidentNextStep:
+            request?.sourceAuthorityAdmission?.presentedNextStep ?? null,
+          publicationAdmissionStatus: request?.publicationAdmission?.status ?? null,
+          publicationAdmissionIssues: [...(request?.publicationAdmission?.issues || [])],
+          publicationActualResidentExecutionGeneration:
+            request?.publicationAdmission?.actualExecutionGeneration ?? null,
+          publicationActualResidentNextStep:
+            request?.publicationAdmission?.actualNextStep ?? null,
+          publicationSourceAheadOfPresentedState:
+            request?.publicationAdmission?.sourceAheadOfPresentedState === true,
+          residentExecutionInFlight,
+          residentSubmissionCount: residentPerf.residentSubmissions,
+          residentSubmissionCountAtStart,
+          physicsSubmissionsAdvancedDuringRefresh,
+          physicsScheduleToken: pendingMlsMpmResidentStepsToken,
+          physicsScheduleTokenAtStart: request?.physicsScheduleTokenAtStart ?? null,
+          updatedAtMs: performance.now()
+        };
+        overlay.__sphResidentRenderRefreshLane = telemetry;
+        const trace = overlay.__sphResidentRenderRefreshTrace
+          || (overlay.__sphResidentRenderRefreshTrace = []);
+        trace.push(telemetry);
+        if (trace.length > 128) trace.splice(0, trace.length - 128);
+      }
+    });
+    return residentRenderRefreshLane;
+  }
+
+  function enqueueResidentRenderRefresh({
+    execution = null,
+    generation = particleSyncGeneration,
+    surfaceDrawDiagnosticMode = currentResidentSurfaceDrawDiagnosticMode(),
+    source = 'resident-render-refresh',
+    reason = 'resident-render-refresh',
+    requiredVisible = false,
+    requiredReason = null,
+    refreshOptions = {},
+    isCurrent = null,
+    publish = null,
+    onError = null,
+    onDiscarded = null
+  } = {}) {
+    const sourceLease = acquireResidentExecutionConsumerLease(execution, {
+      consumer: `resident-render:${source}`
+    });
+    const sourceSubmissionGate = createResidentRenderSourceSubmissionGate();
+    const request = {
+      execution,
+      sceneIdentity: scene,
+      generation,
+      surfaceDrawDiagnosticMode,
+      source,
+      reason,
+      requiredVisible: requiredVisible === true,
+      requiredReason,
+      sourceSnapshot: residentRenderExecutionSourceSnapshot(execution),
+      refreshOptions,
+      isCurrent,
+      publish,
+      onError,
+      onDiscarded,
+      publishSourceSubmission: sourceSubmissionGate.publish,
+      release(releaseReason) {
+        sourceSubmissionGate.publish({
+          schema: 'peercompute.ulg.sph-resident-render-source-submission.v0',
+          status: 'resident-render-source-consumer-not-submitted',
+          reason: releaseReason,
+          submittedBeforePhysicsContinuation: false,
+          updatedAtMs: performance.now()
+        });
+        return sourceLease.release(releaseReason);
+      }
+    };
+    const enqueueAdmission = residentRenderEnqueueAdmission({
+      resetRebuildPending,
+      sceneMutationBarrierPending: Boolean(residentRenderSceneMutationBarrier),
+      sceneMutationCount: residentRenderSceneMutationCount
+    });
+    if (!enqueueAdmission.accepted) {
+      request.release('scene-mutation-barrier-active');
+      return Promise.resolve({
+        schema: 'peercompute.ulg.resident-async-render-lane.v0',
+        status: 'resident-async-render-skipped-scene-mutation',
+        published: false,
+        reason: enqueueAdmission.issues[0],
+        admission: enqueueAdmission
+      });
+    }
+    const completion = ensureResidentRenderRefreshLane().enqueue(request);
+    completion.sourceSubmission = sourceSubmissionGate.promise;
+    return completion;
   }
 
   function disabledStandaloneMechanicsPrediction(sphGpuParticleState, mlsMpmGpuParticleState) {
@@ -4644,8 +5301,10 @@ export async function mountSphPhaseDemoOverlay({
   } = {}) {
     const mode = currentResidentSurfaceDrawDiagnosticMode();
     const particleRenderMode = residentSurfaceDrawParticleRenderMode(mode);
-    if (!particleRenderMode) return false;
-    const signature = `${generation}|${mode}|${particleRenderMode}`;
+    const bridgeRenderMode = particleRenderMode
+      || (residentSurfaceDrawModeUsesNativeSurfaceConsumer(mode) ? mode : null);
+    if (!bridgeRenderMode) return false;
+    const signature = `${generation}|${mode}|${bridgeRenderMode}`;
     if (pendingInitialResidentVisualRefreshSignature === signature) return true;
     pendingInitialResidentVisualRefreshSignature = signature;
     overlay.__mlsMpmResidentAutoSchedule = {
@@ -4657,13 +5316,15 @@ export async function mountSphPhaseDemoOverlay({
       generation,
       surfaceDrawDiagnosticMode: mode,
       particleRenderMode,
+      bridgeRenderMode,
       updatedAtMs: performance.now()
     };
     publishRenderModeSelection('resident-initial-visual-refresh-scheduled', {
-      reason: 'residentAuto disabled; particle bridge still needs an initial visible render state',
+      reason: 'residentAuto disabled; selected resident bridge still needs an initial visible render state',
       generation,
       surfaceDrawDiagnosticMode: mode,
-      particleRenderMode
+      particleRenderMode,
+      bridgeRenderMode
     });
     updateResidentPerf({
       residentStepsPerSchedule: currentResidentStepsPerSchedule(),
@@ -4682,10 +5343,11 @@ export async function mountSphPhaseDemoOverlay({
         updatedAtMs: performance.now()
       };
       publishRenderModeSelection('resident-initial-visual-refresh-pending', {
-        reason: 'residentAuto disabled; refreshing particle bridge from uploaded initial buffers',
+        reason: 'residentAuto disabled; refreshing selected resident bridge from uploaded initial buffers',
         generation,
         surfaceDrawDiagnosticMode: mode,
-        particleRenderMode
+        particleRenderMode,
+        bridgeRenderMode
       });
       const nativeSurfaceConsumerRefresh = residentSurfaceDrawModeUsesNativeSurfaceConsumer(mode);
       const renderStartMs = performance.now();
@@ -4694,7 +5356,14 @@ export async function mountSphPhaseDemoOverlay({
         forceReason: 'resident-auto-disabled-initial-visual-refresh'
       });
       try {
-        const renderState = await scene.refreshSphResidentRenderState?.({
+        const completion = await enqueueResidentRenderRefresh({
+          generation,
+          surfaceDrawDiagnosticMode: mode,
+          source: 'resident-auto-disabled-initial-visual-refresh',
+          reason: 'resident-auto-disabled-initial-visual-refresh',
+          requiredVisible: true,
+          requiredReason: 'initial resident bridge must become visible',
+          refreshOptions: {
           preferWebGpu: true,
           materialProperties: activeMaterialProperties(),
           gasPressureSummary: currentGasPressureSummary(
@@ -4715,75 +5384,78 @@ export async function mountSphPhaseDemoOverlay({
           surfaceDrawDiagnosticMode: mode,
           surfaceDrawDiagnosticModeExplicit: residentSurfaceDrawDiagnosticModeExplicit,
           allowNativeSurfaceExtraction: nativeSurfaceConsumerRefresh ? true : undefined
+          },
+          publish(renderState) {
+            residentRenderReadbackCount += 1;
+            overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(renderState, {
+              ...cadence,
+              skipped: false,
+              renderReadbackCount: residentRenderReadbackCount,
+              skippedCount: residentRenderReadbackSkippedCount
+            });
+            overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+            overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+            overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
+            overlay.__sphResidentRenderStateError = null;
+            overlay.__mlsMpmResidentAutoSchedule = {
+              ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+              status: 'resident-initial-visual-refresh-complete',
+              visibleRendererBridge:
+                overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
+                || renderState?.surfaceDrawVisibleRendererBridge
+                || null,
+              renderStateStatus: renderState?.status || null,
+              completedAtMs: performance.now(),
+              updatedAtMs: performance.now()
+            };
+            updateResidentPerf({
+              renderReadbacks: residentRenderReadbackCount,
+              skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+              effectiveRenderReadbackCadence: 1,
+              playbackVisualRefreshForced: true,
+              lastRenderReadbackMs: performance.now() - renderStartMs,
+              lastRenderReadbackSkipped: false,
+              residentAutoScheduleStatus: 'resident-initial-visual-refresh-complete'
+            });
+            publishRenderModeSelection('resident-initial-visual-refresh-complete', {
+              reason: 'residentAuto disabled; selected resident bridge refreshed from uploaded initial buffers',
+              generation,
+              surfaceDrawDiagnosticMode: mode,
+              particleRenderMode,
+              bridgeRenderMode,
+              visibleRendererBridge:
+                overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
+                || renderState?.surfaceDrawVisibleRendererBridge
+                || null,
+              renderStateStatus: renderState?.status || null
+            });
+            renderStatus();
+            updateWarningBanner();
+          },
+          onError(error) {
+            const message = error instanceof Error ? error.message : String(error);
+            overlay.__mlsMpmResidentAutoSchedule = {
+              ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+              status: 'resident-initial-visual-refresh-error',
+              error: message,
+              updatedAtMs: performance.now()
+            };
+            updateResidentPerf({
+              residentAutoScheduleStatus: 'resident-initial-visual-refresh-error'
+            });
+            publishRenderModeSelection('resident-initial-visual-refresh-error', {
+              reason: 'residentAuto disabled initial resident bridge refresh failed',
+              generation,
+              surfaceDrawDiagnosticMode: mode,
+              particleRenderMode,
+              bridgeRenderMode,
+              error: message
+            });
+            renderStatus();
+            updateWarningBanner();
+          }
         });
-        if (!overlay.isConnected || generation !== particleSyncGeneration) return renderState;
-        residentRenderReadbackCount += 1;
-        overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(renderState, {
-          ...cadence,
-          skipped: false,
-          renderReadbackCount: residentRenderReadbackCount,
-          skippedCount: residentRenderReadbackSkippedCount
-        });
-        overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
-        overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
-        overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
-        overlay.__sphResidentRenderStateError = null;
-        overlay.__mlsMpmResidentAutoSchedule = {
-          ...(overlay.__mlsMpmResidentAutoSchedule || {}),
-          status: 'resident-initial-visual-refresh-complete',
-          visibleRendererBridge:
-            overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
-            || renderState?.surfaceDrawVisibleRendererBridge
-            || null,
-          renderStateStatus: renderState?.status || null,
-          completedAtMs: performance.now(),
-          updatedAtMs: performance.now()
-        };
-        updateResidentPerf({
-          renderReadbacks: residentRenderReadbackCount,
-          skippedRenderReadbacks: residentRenderReadbackSkippedCount,
-          effectiveRenderReadbackCadence: 1,
-          playbackVisualRefreshForced: true,
-          lastRenderReadbackMs: performance.now() - renderStartMs,
-          lastRenderReadbackSkipped: false,
-          residentAutoScheduleStatus: 'resident-initial-visual-refresh-complete'
-        });
-        publishRenderModeSelection('resident-initial-visual-refresh-complete', {
-          reason: 'residentAuto disabled; particle bridge refreshed from uploaded initial buffers',
-          generation,
-          surfaceDrawDiagnosticMode: mode,
-          particleRenderMode,
-          visibleRendererBridge:
-            overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
-            || renderState?.surfaceDrawVisibleRendererBridge
-            || null,
-          renderStateStatus: renderState?.status || null
-        });
-        renderStatus();
-        updateWarningBanner();
-        return renderState;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        overlay.__sphResidentRenderStateError = message;
-        overlay.__mlsMpmResidentAutoSchedule = {
-          ...(overlay.__mlsMpmResidentAutoSchedule || {}),
-          status: 'resident-initial-visual-refresh-error',
-          error: message,
-          updatedAtMs: performance.now()
-        };
-        updateResidentPerf({
-          residentAutoScheduleStatus: 'resident-initial-visual-refresh-error'
-        });
-        publishRenderModeSelection('resident-initial-visual-refresh-error', {
-          reason: 'residentAuto disabled initial particle bridge refresh failed',
-          generation,
-          surfaceDrawDiagnosticMode: mode,
-          particleRenderMode,
-          error: message
-        });
-        renderStatus();
-        updateWarningBanner();
-        return null;
+        return completion?.value ?? null;
       } finally {
         if (pendingInitialResidentVisualRefreshSignature === signature) {
           pendingInitialResidentVisualRefreshSignature = null;
@@ -5050,6 +5722,7 @@ export async function mountSphPhaseDemoOverlay({
 
   function currentResidentInterfaceRefreshMode() {
     const policy = currentPeerComputeRenderOwnershipPolicy();
+    if (policy?.residentInterfaceRefreshModeExplicit !== true) return 'pipelined';
     const rawMode = String(
       policy?.residentInterfaceRefreshMode
       ?? policy?.residentPlaybackCadencePolicy?.interfaceRefreshMode
@@ -5058,9 +5731,7 @@ export async function mountSphPhaseDemoOverlay({
     if (rawMode === 'pipeline' || rawMode === 'pipelined' || rawMode === 'async') return 'pipelined';
     if (rawMode === 'blocking' || rawMode === 'sync' || rawMode === 'synchronous') return 'blocking';
     if (rawMode === 'disabled' || rawMode === 'off' || rawMode === 'none') return 'disabled';
-    return policy?.effectiveMode === 'worker-owned-resident-render-producer'
-      ? 'pipelined'
-      : 'blocking';
+    return 'pipelined';
   }
 
   function currentResidentComputeManagerMode() {
@@ -5095,7 +5766,47 @@ export async function mountSphPhaseDemoOverlay({
     return 'compute-manager';
   }
 
+  function currentResidentComputeTaskQueueFencePolicy({
+    residentComputeManagerMode = currentResidentComputeManagerMode(),
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+    residentExecutionPolicy = residentExecutionPolicyFromUrl()
+  } = {}) {
+    const normalInlineNoReadbackPlayback = Boolean(
+      residentComputeManagerMode === 'compute-manager'
+      && readbackMode === 'no-full-readback'
+      && initialResidentCompactSummaryMode === 'none'
+      && residentExecutionPolicy.measureFusedSequenceQueueFence !== true
+      && residentExecutionPolicy.measureGpuTimestamps !== true
+      && residentExecutionPolicy.contactKinematicsParticleBinMetadataReadback !== true
+      && residentExecutionPolicy.reactionParticleBinMetadataReadback !== true
+      && enableRemoteResidentTaskGraphRefresh !== true
+    );
+    return normalInlineNoReadbackPlayback
+      ? MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+      : MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY;
+  }
+
+  function residentPressureSingleStepCadenceReason() {
+    const lawGroups = physicalLawGroupsFromControls();
+    const reactionCount = lawGroups.reactions
+      ? Math.max(0, Math.round(Number(scene.getSphReactionTable?.()?.reactionCount) || 0))
+      : 0;
+    const execution = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || null;
+    const residentProductMass = execution?.nextParticleUploads?.residentProductMass
+      || execution?.nextResidentProductMass
+      || execution?.finalStep?.residentProductMass
+      || null;
+    return residentPressureSingleStepCadenceReasonForCapability({
+      pressureEnabled: lawGroups.pressure,
+      reactionCount,
+      residentProductMass,
+      fusedPerSubstepSourceRegeneration:
+        residentExecutionPolicyFromUrl().fuseNoFullResidentMechanicsSequence === true
+    });
+  }
+
   function currentResidentStepsPerSchedule() {
+    if (residentPressureSingleStepCadenceReason()) return 1;
     let baseCount = RESIDENT_STEPS_PER_SCHEDULE_FALLBACK;
     const candidates = [
       scene.getMlsMpmGpuParticleState?.()?.mechanicalSubsteps,
@@ -5211,6 +5922,25 @@ export async function mountSphPhaseDemoOverlay({
     sourceCadence = 'resident-step-completed'
   }) {
     const refreshStartMs = performance.now();
+    const renderCommitGuard = ({ stage = 'resident-interface-refresh' } = {}) => {
+      const accepted = Boolean(
+        generation === particleSyncGeneration
+        && scheduleToken === pendingMlsMpmResidentStepsToken
+        && overlay.isConnected
+      );
+      return {
+        schema: 'peercompute.ulg.sph-resident-render-commit-admission.v0',
+        status: accepted
+          ? 'resident-interface-refresh-commit-current'
+          : 'resident-interface-refresh-commit-stale',
+        accepted,
+        stage,
+        generation,
+        currentGeneration: particleSyncGeneration,
+        scheduleToken,
+        currentScheduleToken: pendingMlsMpmResidentStepsToken
+      };
+    };
     const reportBase = {
       schema: 'peercompute.ulg.sph-demo-resident-interface-refresh.v0',
       status: 'resident-interface-refresh-pending',
@@ -5240,7 +5970,9 @@ export async function mountSphPhaseDemoOverlay({
         materialProperties: activeMaterialProperties(),
         gasPressureSummary: residentGasPressureForRefresh,
         source: 'resident-physics-loop-material-interface-refresh',
-        sourceCadence
+        sourceCadence,
+        candidateReadbackMode: 'gpu-resident-source-field',
+        renderCommitGuard
       });
       const materialMs = performance.now() - materialStartMs;
       const pressureStartMs = performance.now();
@@ -5258,11 +5990,17 @@ export async function mountSphPhaseDemoOverlay({
           || execution?.commitDelta?.taskId
           || null,
         source: 'resident-physics-loop-pressure-interface-refresh',
-        sourceCadence
+        sourceCadence,
+        renderCommitGuard,
+        allowLegacyGasProducers: false
       });
       const pressureMs = performance.now() - pressureStartMs;
       const totalMs = performance.now() - refreshStartMs;
-      if (generation === particleSyncGeneration && overlay.isConnected) {
+      if (
+        generation === particleSyncGeneration
+        && scheduleToken === pendingMlsMpmResidentStepsToken
+        && overlay.isConnected
+      ) {
         overlay.__sphResidentMaterialInterfaceState = materialInterfaceState;
         overlay.__sphResidentPressureInterfaceState = pressureInterfaceState;
         updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
@@ -5272,6 +6010,7 @@ export async function mountSphPhaseDemoOverlay({
       const report = {
         ...reportBase,
         status: generation === particleSyncGeneration
+          && scheduleToken === pendingMlsMpmResidentStepsToken
           ? 'resident-interface-refresh-complete'
           : 'resident-interface-refresh-stale',
         materialInterfaceStatus: materialInterfaceState?.status ?? null,
@@ -5305,6 +6044,34 @@ export async function mountSphPhaseDemoOverlay({
       return report;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (error?.code === SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE) {
+        const report = {
+          ...reportBase,
+          status: 'resident-interface-refresh-stale-discarded',
+          error: null,
+          staleStage: error.stage || null,
+          totalMs: performance.now() - refreshStartMs,
+          completedAtMs: performance.now()
+        };
+        overlay.__sphResidentInterfaceRefresh = report;
+        updateResidentPerf({
+          discardedResidentInterfaceRefreshes:
+            (residentPerf.discardedResidentInterfaceRefreshes || 0) + 1,
+          residentInterfaceRefreshMode: mode,
+          residentInterfaceRefreshPending: mode === 'pipelined'
+            && pendingResidentInterfaceRefreshPromise != null,
+          lastResidentInterfaceRefreshMs: report.totalMs
+        });
+        publishResidentStageOrderTrace({
+          status: report.status,
+          mode,
+          scheduleToken,
+          generation,
+          staleStage: report.staleStage,
+          totalMs: report.totalMs
+        });
+        return report;
+      }
       overlay.__sphResidentMaterialInterfaceStateError = message;
       overlay.__sphResidentPressureInterfaceStateError = message;
       const report = {
@@ -5331,6 +6098,113 @@ export async function mountSphPhaseDemoOverlay({
       });
       return report;
     }
+  }
+
+  function residentPressureSourceFieldReadyForCurrentStep(
+    materialInterfaceState = null,
+    residentExecution = null
+  ) {
+    const particleState = residentPressureSourceParticleState({
+      residentExecution,
+      fallbackParticleState: scene.getSphGpuParticleState?.() || null
+    });
+    return residentPressureSourceFieldReadyForParticleState(materialInterfaceState, particleState);
+  }
+
+  async function ensureResidentPressureSourceFieldForSchedule({
+    gasPressureSummary: gasPressureForSchedule,
+    residentAuthorityHost: residentAuthorityHostForSchedule,
+    residentExecution = null,
+    generation,
+    scheduleToken
+  } = {}) {
+    if (!physicalLawGroupsFromControls().pressure) {
+      return {
+        schema: 'peercompute.ulg.sph-demo-resident-pressure-source-prelude.v0',
+        status: 'resident-pressure-source-prelude-not-required',
+        generation,
+        scheduleToken
+      };
+    }
+    const staleInterfaceRefreshBypassed = Boolean(pendingResidentInterfaceRefreshPromise);
+    const currentScheduleCommitGuard = ({ stage = 'resident-pressure-source-prelude' } = {}) => ({
+      schema: 'peercompute.ulg.sph-resident-render-commit-admission.v0',
+      status: generation === particleSyncGeneration
+        && scheduleToken === pendingMlsMpmResidentStepsToken
+        && overlay.isConnected
+        ? 'resident-pressure-source-prelude-current'
+        : 'resident-pressure-source-prelude-stale',
+      accepted: generation === particleSyncGeneration
+        && scheduleToken === pendingMlsMpmResidentStepsToken
+        && overlay.isConnected,
+      stage,
+      generation,
+      scheduleToken
+    });
+    let materialInterfaceState = scene.getSphResidentMaterialInterfaceState?.() || null;
+    if (
+      residentPressureSourceFieldReadyForCurrentStep(materialInterfaceState, residentExecution)
+      && materialInterfaceState.materialInterfaceSourceField?.sourceFieldGenerationMode
+        === 'same-encoder-state-thermo-direct'
+    ) {
+      return {
+        schema: 'peercompute.ulg.sph-demo-resident-pressure-source-prelude.v0',
+        status: 'resident-pressure-source-field-current-generation-reused',
+        generation,
+        scheduleToken,
+        staleInterfaceRefreshBypassed,
+        sourceStep: materialInterfaceState.materialInterfaceSourceField.sourceStep,
+        sourcePositionEpoch:
+          materialInterfaceState.materialInterfaceSourceField.sourcePositionEpoch ?? null
+      };
+    }
+    if (!residentExecution) {
+      await Promise.all([
+        scene.refreshSphGpuParticleBuffers?.({ preferWebGpu: true }),
+        scene.refreshMlsMpmGpuParticleBuffers?.({ preferWebGpu: true })
+      ]);
+    }
+    materialInterfaceState = await scene.refreshSphResidentMaterialInterfaceState?.({
+      preferWebGpu: true,
+      residentSteps: residentExecution,
+      materialProperties: activeMaterialProperties(),
+      gasPressureSummary: gasPressureForSchedule,
+      source: 'resident-physics-loop-time-zero-material-interface-prewarm',
+      sourceCadence: 'before-resident-pressure-step',
+      candidateReadbackMode: 'gpu-resident-source-field',
+      renderCommitGuard: currentScheduleCommitGuard
+    });
+    if (!residentPressureSourceFieldReadyForCurrentStep(materialInterfaceState, residentExecution)) {
+      const error = new Error(
+        `Resident pressure source prelude failed: ${materialInterfaceState?.status || 'material-interface-source-field-missing'}`
+      );
+      error.code = 'ULG_RESIDENT_PRESSURE_SOURCE_PRELUDE_FAILED';
+      throw error;
+    }
+    if (
+      materialInterfaceState.materialInterfaceSourceField?.sourceFieldGenerationMode
+        === 'same-encoder-state-thermo-direct'
+    ) {
+      overlay.__sphResidentMaterialInterfaceState = materialInterfaceState;
+      return {
+        schema: 'peercompute.ulg.sph-demo-resident-pressure-source-prelude.v0',
+        status: 'resident-pressure-source-topology-ready-without-prelude-submit',
+        generation,
+        scheduleToken,
+        staleInterfaceRefreshBypassed,
+        sourceStep: materialInterfaceState.materialInterfaceSourceField.sourceStep,
+        sourcePositionEpoch:
+          materialInterfaceState.materialInterfaceSourceField.sourcePositionEpoch ?? null,
+        sourceFieldGenerationMode: 'same-encoder-state-thermo-direct',
+        preludeQueueSubmissionCount: 0,
+        renderRowsExtractionPerformed: false
+      };
+    }
+    const error = new Error(
+      'Resident pressure source prelude requires same-encoder state/thermo topology'
+    );
+    error.code = 'ULG_RESIDENT_PRESSURE_SOURCE_NOT_SAME_ENCODER';
+    throw error;
   }
 
   function startResidentInterfaceRefresh(context) {
@@ -6267,19 +7141,77 @@ export async function mountSphPhaseDemoOverlay({
     // mixed-source overlay the no-overlay architecture forbids. Explicit
     // scene.refreshMlsMpmResidentSteps calls (diagnostic proofs) bypass this.
     if (mechanicsModeFromControls() === 'sph') return;
-    const normalizedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
+    if (residentPresentationBackpressurePending) {
+      const trace = overlay.__sphResidentScheduleTrace
+        || (overlay.__sphResidentScheduleTrace = []);
+      trace.push({
+        scheduleToken: null,
+        stage: 'physics-schedule-deferred-native-presentation-backpressure',
+        atMs: performance.now(),
+        requestedStepCount: Math.max(1, Math.round(Number(stepCount) || 1)),
+        continueFromResidentState: Boolean(continueFromResidentState),
+        generation,
+        requiredVisible: true,
+        maxComputeSubmissionsAheadOfPresentation: 1,
+        readbackRequired: false
+      });
+      if (trace.length > 64) trace.splice(0, trace.length - 64);
+      updateResidentPerf({
+        residentPresentationBackpressurePending: true,
+        residentPresentationBackpressureStatus:
+          'native-presentation-backpressure-deferring-physics-schedule',
+        residentPresentationBackpressureDeferredScheduleCount:
+          Math.max(
+            0,
+            Number(residentPerf.residentPresentationBackpressureDeferredScheduleCount) || 0
+          ) + 1,
+        residentPresentationMaxComputeSubmissionsAhead: 1
+      });
+      return;
+    }
+    // A timeout does not prove that ComputeManager or the device stopped using
+    // the lane. Keep one unresolved task authoritative until its promise
+    // settles instead of allowing a force retry to overlap it.
+    if (residentExecutionInFlight) return;
+    if (!force && residentExecutionFailureGeneration === generation) return;
+    if (force) {
+      residentExecutionFailureGeneration = null;
+      overlay.__mlsMpmResidentStepsError = null;
+    }
+    const requestedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
+    const pressureSourceCadenceReason = residentPressureSingleStepCadenceReason();
+    const pressureSourceCadenceRequired = Boolean(pressureSourceCadenceReason);
+    const normalizedStepCount = pressureSourceCadenceRequired ? 1 : requestedStepCount;
+    const pressureSourceCadenceStatus = pressureSourceCadenceRequired
+      ? `one-resident-step-required:${pressureSourceCadenceReason}`
+      : (physicalLawGroupsFromControls().pressure
+          ? 'same-encoder-source-field-regenerated-per-substep'
+          : 'resident-pressure-source-cadence-not-required');
     const residentExecutionPolicy = residentExecutionPolicyFromUrl();
     const schroederExecutionOptions = schroederResidentExecutionOptionsFromConfig();
     const baseSignature = mlsMpmResidentStepsSignature({
       stepCount: normalizedStepCount,
+      requestedStepCount,
+      pressureSourceCadenceRequired,
+      pressureSourceCadenceStatus,
       readbackMode,
       ...residentExecutionPolicy,
       ...schroederExecutionOptions
     });
-    const signature = baseSignature
-      ? `${baseSignature}|sync=${generation}|continue=${Boolean(continueFromResidentState)}`
-      : null;
-    if (!signature || (pendingMlsMpmResidentStepsSignature && !force)) return;
+    if (!baseSignature || pendingMlsMpmResidentStepsSignature) return;
+    const residentSequenceAuthorityEpoch = residentSequenceAuthorityEpochForSchedule(
+      mountedResidentSequenceAuthorityEpoch,
+      { continueFromResidentState }
+    );
+    mountedResidentSequenceAuthorityEpoch = residentSequenceAuthorityEpoch;
+    const signature = [
+      baseSignature,
+      `requestedSteps=${requestedStepCount}`,
+      `pressureSourceCadence=${pressureSourceCadenceStatus}`,
+      `sync=${generation}`,
+      `authorityEpoch=${residentSequenceAuthorityEpoch}`,
+      `continue=${Boolean(continueFromResidentState)}`
+    ].join('|');
     overlay.__mlsMpmResidentRequestedReadbackMode = readbackMode;
     overlay.__mlsMpmResidentExecutionPolicy = residentExecutionPolicy;
     overlay.__sphSchroederSimulationConfig = initialSchroederSimulationConfig;
@@ -6287,6 +7219,7 @@ export async function mountSphPhaseDemoOverlay({
     const scheduleToken = pendingMlsMpmResidentStepsToken + 1;
     pendingMlsMpmResidentStepsToken = scheduleToken;
     pendingMlsMpmResidentStepsSignature = signature;
+    residentExecutionInFlight = true;
     // Durable schedule trace: each stage of this schedule's lifecycle lands
     // here so a wedged refresh is diagnosable from the page (the pending
     // record alone cannot say WHERE a schedule stalled).
@@ -6297,7 +7230,10 @@ export async function mountSphPhaseDemoOverlay({
     };
     traceResidentSchedule('scheduled', {
       continueFromResidentState: Boolean(continueFromResidentState),
-      execPresent: Boolean(overlay.__mlsMpmResidentSteps)
+      execPresent: Boolean(overlay.__mlsMpmResidentSteps),
+      requestedStepCount,
+      pressureSourceCadenceRequired,
+      residentSequenceAuthorityEpoch
     });
     overlay.__mlsMpmResidentStepsPending = {
       schema: 'peercompute.ulg.sph-demo-resident-pending.v0',
@@ -6305,12 +7241,16 @@ export async function mountSphPhaseDemoOverlay({
       signature,
       scheduleToken,
       stepCount: normalizedStepCount,
+      requestedStepCount,
+      pressureSourceCadenceRequired,
+      pressureSourceCadenceStatus,
       readbackMode,
       continueFromResidentState: Boolean(continueFromResidentState),
       residentExecutionPolicy,
       schroederSimulationConfig: initialSchroederSimulationConfig,
       schroederExecutionOptions,
       generation,
+      residentSequenceAuthorityEpoch,
       startedAtMs: performance.now()
     };
     publishResidentStageOrderTrace({
@@ -6323,12 +7263,16 @@ export async function mountSphPhaseDemoOverlay({
       residentExecutionPolicy,
       schroederSimulationConfig: initialSchroederSimulationConfig,
       schroederExecutionOptions,
-      generation
+      generation,
+      residentSequenceAuthorityEpoch
     });
     overlay.__mlsMpmResidentStepsSlow = null;
+    overlay.__mlsMpmResidentStepsAdmissionError = null;
     let scheduleContinuation = false;
     let scheduleLatestGeneration = false;
     let restartPlaybackContinuation = false;
+    const residentRenderSourceSubmissionBarriers = [];
+    const residentPresentationBackpressureBarriers = [];
     const residentStartMs = performance.now();
     const slowNoticeTimer = window.setTimeout(() => {
       if (
@@ -6374,18 +7318,34 @@ export async function mountSphPhaseDemoOverlay({
         return;
       }
       const elapsedMs = performance.now() - residentStartMs;
-      pendingMlsMpmResidentStepsSignature = null;
+      residentExecutionFailureGeneration = generation;
+      playing = false;
+      const playButton = overlay.querySelector('#sph-play');
+      if (playButton) playButton.textContent = 'Play';
       overlay.__mlsMpmResidentStepsPending = {
         ...(overlay.__mlsMpmResidentStepsPending || {}),
-        status: 'resident-execution-watchdog-rescheduled',
+        status: 'resident-execution-watchdog-waiting-for-active-task',
         elapsedMs,
-        rescheduledAtMs: performance.now()
+        detectedAtMs: performance.now(),
+        retryPolicy: 'wait-for-active-task-settlement-then-explicit-retry'
       };
       overlay.__mlsMpmResidentStepsSlow = null;
-      overlay.__mlsMpmResidentStepsError = 'resident execution exceeded the stall watchdog; forced a fresh resident submission';
+      overlay.__mlsMpmResidentStepsError =
+        'resident execution exceeded the stall watchdog; the active task remains authoritative until it settles';
+      overlay.__mlsMpmResidentAutoSchedule = {
+        ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+        schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
+        status: 'resident-auto-schedule-halted-with-active-task',
+        residentAuto: initialResidentAutoEnabled,
+        generation,
+        scheduleToken,
+        error: overlay.__mlsMpmResidentStepsError,
+        retryPolicy: 'wait-for-active-task-settlement-then-explicit-retry',
+        updatedAtMs: performance.now()
+      };
       publishResidentStageOrderTrace({
-        status: 'resident-execution-watchdog-rescheduled',
-        reason: 'resident execution exceeded the stall watchdog; forced a fresh resident submission',
+        status: 'resident-execution-watchdog-waiting-for-active-task',
+        reason: overlay.__mlsMpmResidentStepsError,
         signature,
         scheduleToken,
         stepCount: normalizedStepCount,
@@ -6400,16 +7360,16 @@ export async function mountSphPhaseDemoOverlay({
         residentStepsPerSchedule: currentResidentStepsPerSchedule(),
         lastResidentWatchdogMs: elapsedMs
       });
-      scheduleMlsMpmResidentSteps({
-        stepCount: currentResidentStepsPerSchedule(),
-        readbackMode,
-        continueFromResidentState: false,
-        continuationBudget,
-        generation,
-        force: true
-      });
+      renderStatus();
+      updateWarningBanner();
     }, RESIDENT_PENDING_WATCHDOG_MS);
     const residentComputeManagerModeForSchedule = currentResidentComputeManagerMode();
+    const computeTaskQueueFencePolicyForSchedule =
+      currentResidentComputeTaskQueueFencePolicy({
+        residentComputeManagerMode: residentComputeManagerModeForSchedule,
+        readbackMode,
+        residentExecutionPolicy
+      });
     const residentComputeManagerForSchedule = residentComputeManagerModeForSchedule === 'direct'
       ? null
       : resolveResidentComputeManager();
@@ -6448,6 +7408,22 @@ export async function mountSphPhaseDemoOverlay({
         || activeViewStateGasPressure
         || (driver?.demo ? gasPressureSummary(driver.demo) : null)
     );
+    const residentExecutionForPressureSource = continueFromResidentState
+      ? (overlay.__mlsMpmResidentSteps || scene.getMlsMpmResidentSteps?.() || null)
+      : null;
+    let materialInterfaceSourceFieldForSchedule = null;
+    const pressureSourcePreludePromise = ensureResidentPressureSourceFieldForSchedule({
+      gasPressureSummary: gasPressureForSchedule,
+      residentAuthorityHost: residentAuthorityHostForSchedule,
+      residentExecution: residentExecutionForPressureSource,
+      generation,
+      scheduleToken
+    }).then((report) => {
+      materialInterfaceSourceFieldForSchedule =
+        scene.getSphResidentMaterialInterfaceState?.()?.materialInterfaceSourceField || null;
+      overlay.__sphResidentPressureSourcePrelude = report;
+      return report;
+    });
     let remoteRefreshPreludePromise = Promise.resolve(null);
     if (enableRemoteResidentTaskGraphRefresh) {
       overlay.__sphRemoteResidentTaskGraphRefresh = remoteResidentTaskGraphRefreshTelemetry('pending', {
@@ -6501,33 +7477,58 @@ export async function mountSphPhaseDemoOverlay({
         return report;
       });
     }
-    remoteRefreshPreludePromise.then(() => {
+    Promise.all([remoteRefreshPreludePromise, pressureSourcePreludePromise]).then(() => {
+      if (
+        !overlay.isConnected
+        || generation !== particleSyncGeneration
+        || scheduleToken !== pendingMlsMpmResidentStepsToken
+      ) {
+        return {
+          schema: 'peercompute.ulg.sph-demo-resident-execution-skipped.v0',
+          status: 'resident-execution-skipped-stale-before-refresh',
+          backend: 'not-run',
+          readbackMode,
+          stale: true,
+          staleReason: !overlay.isConnected
+            ? 'overlay-disconnected'
+            : generation !== particleSyncGeneration
+              ? 'particle-sync-generation-advanced-before-refresh'
+              : 'schedule-token-superseded-before-refresh',
+          requestedGeneration: generation,
+          currentGeneration: particleSyncGeneration,
+          scheduleToken,
+          currentScheduleToken: pendingMlsMpmResidentStepsToken
+        };
+      }
       traceResidentSchedule('refresh-invoked');
       return scene.refreshMlsMpmResidentSteps?.({
-      preferWebGpu: true,
-      computeManager: residentComputeManagerForSchedule,
-      residentStateManager: residentStateManagerForSchedule,
-      residentAuthorityHost: residentAuthorityHostForSchedule,
-      residentComputeManagerMode: residentComputeManagerModeForSchedule,
-      computeTaskModulePath: computeTaskModulePathForSchedule,
-      computeTaskLaneId: 'ulg:sph-resident:demo-auto',
-      computeTaskDomainKey: 'sph-phase-demo',
-      gasPressureSummary: gasPressureForSchedule,
-      pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
-      pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
-      stepCount: normalizedStepCount,
-      readbackMode,
-      // final-only keeps the hot loop free of full readbacks while still
-      // producing the compact GPU summary (fixed-size readback, allowed on
-      // the hot path) once per scheduled batch: it carries maxDisplacementM,
-      // the demo's numeric motion proof. 'none' left every readback-free
-      // presentation path (native consumer, worker-owned producer) unable to
-      // prove motion, tripping the warning banner despite a healthy sim.
-      compactSummaryMode: readbackMode === 'no-full-readback' ? 'final-only' : undefined,
-      continueFromResidentState,
-      ...residentExecutionPolicy,
-      ...schroederExecutionOptions,
-      force: Boolean(force || continueFromResidentState)
+        preferWebGpu: true,
+        computeManager: residentComputeManagerForSchedule,
+        residentStateManager: residentStateManagerForSchedule,
+        residentAuthorityHost: residentAuthorityHostForSchedule,
+        residentComputeManagerMode: residentComputeManagerModeForSchedule,
+        computeTaskModulePath: computeTaskModulePathForSchedule,
+        computeTaskQueueFencePolicy: computeTaskQueueFencePolicyForSchedule,
+        computeTaskLaneId: 'ulg:sph-resident:demo-auto',
+        computeTaskDomainKey: 'sph-phase-demo',
+        gasPressureSummary: gasPressureForSchedule,
+        pressureInterfaceGasCellFieldImport:
+          scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
+        pressureInterfaceGasCellFieldAdmission:
+          scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
+        materialInterfaceSourceField: materialInterfaceSourceFieldForSchedule,
+        stepCount: normalizedStepCount,
+        readbackMode,
+        // Compact summaries map a diagnostic buffer. Keep the mounted hot loop
+        // readback-free unless a caller explicitly opts into that diagnostic.
+        compactSummaryMode: readbackMode === 'no-full-readback'
+          ? initialResidentCompactSummaryMode
+          : undefined,
+        continueFromResidentState,
+        residentSequenceAuthorityEpoch,
+        ...residentExecutionPolicy,
+        ...schroederExecutionOptions,
+        force: Boolean(force || continueFromResidentState)
       });
     }).then(async (execution) => {
       traceResidentSchedule('refresh-settled', {
@@ -6559,13 +7560,37 @@ export async function mountSphPhaseDemoOverlay({
         });
         renderStatus();
         updateWarningBanner();
-        return;
+        throw new Error(overlay.__mlsMpmResidentStepsError);
       }
       const stepSummaries = Array.isArray(execution?.stepSummaries) ? execution.stepSummaries : [];
       const lastStepSummary = stepSummaries.length ? stepSummaries[stepSummaries.length - 1] : null;
       const lastResidentStageTiming = execution?.finalStep?.stageTiming || lastStepSummary?.stageTiming || null;
       if (execution?.stale || generation !== particleSyncGeneration) {
-        scheduleLatestGeneration = true;
+        const staleRetryDecision = residentStaleExecutionRetryDecision({
+          executionStale: execution?.stale === true,
+          requestedGeneration: generation,
+          currentGeneration: particleSyncGeneration
+        });
+        scheduleLatestGeneration = staleRetryDecision.scheduleLatestGeneration;
+        if (staleRetryDecision.haltCurrentGeneration) {
+          residentExecutionFailureGeneration = generation;
+          playing = false;
+          const playButton = overlay.querySelector('#sph-play');
+          if (playButton) playButton.textContent = 'Play';
+          overlay.__mlsMpmResidentStepsError =
+            'resident execution returned stale for the current particle generation; automatic retry halted';
+          overlay.__mlsMpmResidentAutoSchedule = {
+            ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+            schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
+            status: 'resident-auto-schedule-halted-after-current-generation-stale-result',
+            residentAuto: initialResidentAutoEnabled,
+            generation,
+            scheduleToken,
+            error: overlay.__mlsMpmResidentStepsError,
+            retryPolicy: 'explicit-play-retry-or-generation-reset-required',
+            updatedAtMs: performance.now()
+          };
+        }
         overlay.__mlsMpmResidentStepsPending = null;
         overlay.__mlsMpmResidentStepsSlow = null;
         overlay.__mlsMpmResidentStepsStale = {
@@ -6577,6 +7602,7 @@ export async function mountSphPhaseDemoOverlay({
           readbackMode: execution?.readbackMode || 'missing',
           residentMs,
           staleFlag: Boolean(execution?.stale),
+          retryDecision: staleRetryDecision,
           scientificValidation: false,
           sphValidation: false,
           phaseChangeValidation: false,
@@ -6605,6 +7631,8 @@ export async function mountSphPhaseDemoOverlay({
         return;
       }
       overlay.__mlsMpmResidentStepsError = null;
+      overlay.__mlsMpmResidentStepsAdmissionError = null;
+      residentExecutionFailureGeneration = null;
       overlay.__mlsMpmResidentStepsPending = null;
       overlay.__mlsMpmResidentStepsSlow = null;
       overlay.__mlsMpmResidentStepsStale = null;
@@ -6780,52 +7808,129 @@ export async function mountSphPhaseDemoOverlay({
         cadence.particleRenderModeRefresh = forceParticleRenderModeRefresh;
         cadence.particleRenderMode = selectedParticleRenderMode;
         cadence.surfaceDrawDiagnosticMode = selectedSurfaceDrawDiagnosticMode;
-        try {
-          if (cadence.due) {
+        if (cadence.due) {
+          try {
             const renderStartMs = performance.now();
-            overlay.__sphResidentRenderState = await scene.refreshSphResidentRenderState?.({
-              preferWebGpu: true,
-              residentSteps: execution,
-              materialProperties: activeMaterialProperties(),
-              gasPressureSummary: overlay.__sphResidentGasPressureSummary
-                || activeViewStateGasPressure
-                || (driver?.demo ? gasPressureSummary(driver.demo) : null),
-              residentAuthorityHost: residentAuthorityHostForSchedule,
-              pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
-              pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
-              pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
-              renderFieldReadbackMode: selectedNativeSurfaceConsumerRefresh
-                ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
-                : undefined,
-              renderRowsReadbackMode: selectedNativeSurfaceConsumerRefresh
-                ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
-                : undefined,
-              renderFieldSurfaceSummaryMode: (
-                residentSurfaceDrawModeUsesCompactBridge(selectedSurfaceDrawDiagnosticMode)
-                || selectedNativeSurfaceConsumerRefresh
-              )
-                ? 'skip'
-                : 'auto',
+            const renderRefreshCompletion = enqueueResidentRenderRefresh({
+              execution,
+              generation,
               surfaceDrawDiagnosticMode: selectedSurfaceDrawDiagnosticMode,
-              surfaceDrawDiagnosticModeExplicit: residentSurfaceDrawDiagnosticModeExplicit,
-              allowNativeSurfaceExtraction: selectedNativeSurfaceConsumerRefresh ? true : undefined,
-              skipPressureInterfaceRefresh: true
+              source: 'resident-physics-cadence-refresh',
+              reason: cadence.reason,
+              requiredVisible: cadence.forced === true,
+              requiredReason: cadence.forced ? cadence.reason : null,
+              refreshOptions: {
+                preferWebGpu: true,
+                materialProperties: activeMaterialProperties(),
+                gasPressureSummary: overlay.__sphResidentGasPressureSummary
+                  || activeViewStateGasPressure
+                  || (driver?.demo ? gasPressureSummary(driver.demo) : null),
+                residentAuthorityHost: residentAuthorityHostForSchedule,
+                pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
+                pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
+                pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
+                renderFieldReadbackMode: selectedNativeSurfaceConsumerRefresh
+                  ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+                  : undefined,
+                renderRowsReadbackMode: selectedNativeSurfaceConsumerRefresh
+                  ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+                  : undefined,
+                renderFieldSurfaceSummaryMode: (
+                  residentSurfaceDrawModeUsesCompactBridge(selectedSurfaceDrawDiagnosticMode)
+                  || selectedNativeSurfaceConsumerRefresh
+                )
+                  ? 'skip'
+                  : 'auto',
+                surfaceDrawDiagnosticMode: selectedSurfaceDrawDiagnosticMode,
+                surfaceDrawDiagnosticModeExplicit: residentSurfaceDrawDiagnosticModeExplicit,
+                allowNativeSurfaceExtraction: selectedNativeSurfaceConsumerRefresh ? true : undefined,
+                skipPressureInterfaceRefresh: true
+              },
+              publish(renderState) {
+                overlay.__sphResidentRenderState = renderState;
+                overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+                overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+                overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
+                overlay.__sphResidentRenderStateError = null;
+                updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
+                residentRenderReadbackCount += 1;
+                annotateResidentRenderStateCadence(overlay.__sphResidentRenderState, {
+                  ...cadence,
+                  skipped: false,
+                  renderReadbackCount: residentRenderReadbackCount,
+                  skippedCount: residentRenderReadbackSkippedCount,
+                  accumulatedSubvisibleMotionM: 0,
+                  subvisibleMotionBurstCount: 0
+                });
+                updateResidentPerf({
+                  residentStepsPerSchedule: normalizedStepCount,
+                  renderReadbacks: residentRenderReadbackCount,
+                  skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+                  accumulatedSubvisibleMotionM: residentAccumulatedSubvisibleMotionM,
+                  subvisibleMotionBurstCount: residentSubvisibleMotionBurstCount,
+                  effectiveRenderReadbackCadence: cadence.effectiveCadence,
+                  playbackVisualRefreshForced: Boolean(cadence.forced),
+                  lastRenderReadbackMs: performance.now() - renderStartMs,
+                  lastRenderReadbackSkipped: false
+                });
+                traceResidentSchedule('render-refresh-published', {
+                  renderReason: cadence.reason,
+                  renderSourceStep: renderState?.sourceResidentNextStep ?? null,
+                  renderLane: residentRenderRefreshLane?.getState?.() || null
+                });
+                renderStatus();
+                updateWarningBanner();
+              },
+              onError(error) {
+                traceResidentSchedule('render-refresh-error', {
+                  renderReason: cadence.reason,
+                  error: error instanceof Error ? error.message : String(error)
+                });
+                renderStatus();
+                updateWarningBanner();
+              }
             });
-            overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
-            overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
-            overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
-            updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
-            residentRenderReadbackCount += 1;
+            if (renderRefreshCompletion?.sourceSubmission) {
+              residentRenderSourceSubmissionBarriers.push(
+                renderRefreshCompletion.sourceSubmission
+              );
+            }
+            const presentationBackpressure = residentNativePresentationBackpressureDecision({
+              nativeSurfaceConsumer: selectedNativeSurfaceConsumerRefresh,
+              cadenceDue: cadence.due === true,
+              requiredVisible: cadence.forced === true,
+              renderRefreshScheduled: Boolean(renderRefreshCompletion)
+            });
+            if (presentationBackpressure.required) {
+              residentPresentationBackpressurePending = true;
+              const backpressureStartedAtMs = performance.now();
+              const presentationBarrier = Promise.resolve(renderRefreshCompletion)
+                .catch((error) => ({
+                  status: 'resident-async-render-error',
+                  error: error instanceof Error ? error.message : String(error),
+                  published: false
+                }))
+                .then(async (completionResult) => {
+                  const laneState = await residentRenderRefreshLane?.whenIdle?.();
+                  return {
+                    ...presentationBackpressure,
+                    status: 'native-presentation-backpressure-settled',
+                    completionStatus: completionResult?.status ?? 'settled',
+                    completionPublished: completionResult?.published === true,
+                    laneStatus: laneState?.status ?? null,
+                    waitMs: Math.max(0, performance.now() - backpressureStartedAtMs)
+                  };
+                });
+              residentPresentationBackpressureBarriers.push(presentationBarrier);
+            }
+            traceResidentSchedule('render-refresh-enqueued', {
+              renderReason: cadence.reason,
+              requiredVisible: cadence.forced === true,
+              presentationBackpressure,
+              renderLane: residentRenderRefreshLane?.getState?.() || null
+            });
             residentAccumulatedSubvisibleMotionM = 0;
             residentSubvisibleMotionBurstCount = 0;
-            annotateResidentRenderStateCadence(overlay.__sphResidentRenderState, {
-              ...cadence,
-              skipped: false,
-              renderReadbackCount: residentRenderReadbackCount,
-              skippedCount: residentRenderReadbackSkippedCount,
-              accumulatedSubvisibleMotionM: 0,
-              subvisibleMotionBurstCount: 0
-            });
             updateResidentPerf({
               residentStepsPerSchedule: normalizedStepCount,
               renderReadbacks: residentRenderReadbackCount,
@@ -6834,41 +7939,45 @@ export async function mountSphPhaseDemoOverlay({
               subvisibleMotionBurstCount: 0,
               effectiveRenderReadbackCadence: cadence.effectiveCadence,
               playbackVisualRefreshForced: Boolean(cadence.forced),
-              lastRenderReadbackMs: performance.now() - renderStartMs,
+              residentRenderRefreshPending: true,
+              residentPresentationBackpressurePending: presentationBackpressure.required,
+              residentPresentationBackpressureStatus: presentationBackpressure.status,
+              residentPresentationMaxComputeSubmissionsAhead:
+                presentationBackpressure.maxComputeSubmissionsAheadOfPresentation,
               lastRenderReadbackSkipped: false
             });
-          } else {
-            residentRenderReadbackSkippedCount += 1;
-            overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(
-              scene.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null,
-              {
-                ...cadence,
-                skipped: true,
-                renderReadbackCount: residentRenderReadbackCount,
-                skippedCount: residentRenderReadbackSkippedCount
-              }
-            );
-            overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
-            overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.()
-              || overlay.__sphResidentSurfaceDrawOverlayPolicy
-              || null;
-            overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.()
-              || overlay.__sphResidentPressureInterfaceState
-              || null;
-            updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
-            updateResidentPerf({
-              residentStepsPerSchedule: normalizedStepCount,
-              renderReadbacks: residentRenderReadbackCount,
-              skippedRenderReadbacks: residentRenderReadbackSkippedCount,
-              accumulatedSubvisibleMotionM: residentAccumulatedSubvisibleMotionM,
-              subvisibleMotionBurstCount: residentSubvisibleMotionBurstCount,
-              effectiveRenderReadbackCadence: cadence.effectiveCadence,
-              playbackVisualRefreshForced: false,
-              lastRenderReadbackSkipped: true
-            });
+          } catch (error) {
+            overlay.__sphResidentRenderStateError = error instanceof Error ? error.message : String(error);
           }
-        } catch (error) {
-          overlay.__sphResidentRenderStateError = error instanceof Error ? error.message : String(error);
+        } else {
+          residentRenderReadbackSkippedCount += 1;
+          overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(
+            scene.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null,
+            {
+              ...cadence,
+              skipped: true,
+              renderReadbackCount: residentRenderReadbackCount,
+              skippedCount: residentRenderReadbackSkippedCount
+            }
+          );
+          overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+          overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.()
+            || overlay.__sphResidentSurfaceDrawOverlayPolicy
+            || null;
+          overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.()
+            || overlay.__sphResidentPressureInterfaceState
+            || null;
+          updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
+          updateResidentPerf({
+            residentStepsPerSchedule: normalizedStepCount,
+            renderReadbacks: residentRenderReadbackCount,
+            skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+            accumulatedSubvisibleMotionM: residentAccumulatedSubvisibleMotionM,
+            subvisibleMotionBurstCount: residentSubvisibleMotionBurstCount,
+            effectiveRenderReadbackCadence: cadence.effectiveCadence,
+            playbackVisualRefreshForced: false,
+            lastRenderReadbackSkipped: true
+          });
         }
       } else {
         overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
@@ -6880,8 +7989,33 @@ export async function mountSphPhaseDemoOverlay({
       updateWarningBanner();
     }).catch((error) => {
       overlay.__mlsMpmResidentStepsError = error instanceof Error ? error.message : String(error);
+      const admission = error?.admission || null;
+      overlay.__mlsMpmResidentStepsAdmissionError = admission ? {
+        schema: admission.schema ?? null,
+        status: admission.status ?? null,
+        reason: admission.reason ?? null,
+        issues: [...(admission.issues || [])],
+        pressureStateManagerAdmissionBlockers: [
+          ...(admission.payload?.pressureStateManagerAdmissionBlockers || [])
+        ]
+      } : null;
+      residentExecutionFailureGeneration = generation;
+      playing = false;
+      const playButton = overlay.querySelector('#sph-play');
+      if (playButton) playButton.textContent = 'Play';
       overlay.__mlsMpmResidentStepsPending = null;
       overlay.__mlsMpmResidentStepsSlow = null;
+      overlay.__mlsMpmResidentAutoSchedule = {
+        ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+        schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
+        status: 'resident-auto-schedule-halted-after-execution-error',
+        residentAuto: initialResidentAutoEnabled,
+        generation,
+        scheduleToken,
+        error: overlay.__mlsMpmResidentStepsError,
+        retryPolicy: 'explicit-play-retry-or-generation-reset-required',
+        updatedAtMs: performance.now()
+      };
       publishResidentStageOrderTrace({
         status: 'resident-execution-error',
         reason: overlay.__mlsMpmResidentStepsError,
@@ -6898,9 +8032,19 @@ export async function mountSphPhaseDemoOverlay({
     }).finally(() => {
       window.clearTimeout(slowNoticeTimer);
       window.clearTimeout(watchdogTimer);
+      residentExecutionInFlight = false;
+      const renderLaneStateAtPhysicsRelease = residentRenderRefreshLane?.getState?.() || null;
+      traceResidentSchedule('physics-flight-released', {
+        renderRefreshActive: renderLaneStateAtPhysicsRelease?.active === true,
+        renderRefreshPending: renderLaneStateAtPhysicsRelease?.pending === true,
+        renderLane: renderLaneStateAtPhysicsRelease
+      });
       updateResidentPerf({
         residentInterfaceRefreshMode: currentResidentInterfaceRefreshMode(),
         residentInterfaceRefreshPending: Boolean(pendingResidentInterfaceRefreshPromise),
+        residentRenderRefreshPending: Boolean(
+          renderLaneStateAtPhysicsRelease?.active || renderLaneStateAtPhysicsRelease?.pending
+        ),
         lastResidentCycleMs: performance.now() - residentStartMs,
         lastResidentPostComputeMs: Math.max(
           0,
@@ -6913,39 +8057,95 @@ export async function mountSphPhaseDemoOverlay({
       ) {
         pendingMlsMpmResidentStepsSignature = null;
       }
-      if (scheduleLatestGeneration && overlay.isConnected && !resetRebuildPending) {
-        window.requestAnimationFrame(() => {
-          if (!overlay.isConnected || resetRebuildPending) return;
-          scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
-            readbackMode,
-            continueFromResidentState: false,
-            continuationBudget,
-            generation: particleSyncGeneration
+      const scheduleNextResidentFlight = () => {
+        if (scheduleLatestGeneration && overlay.isConnected && !resetRebuildPending) {
+          window.requestAnimationFrame(() => {
+            if (!overlay.isConnected || resetRebuildPending) return;
+            scheduleMlsMpmResidentSteps({
+              stepCount: normalizedStepCount,
+              readbackMode,
+              continueFromResidentState: false,
+              continuationBudget,
+              generation: particleSyncGeneration
+            });
           });
-        });
-      } else if (scheduleContinuation && overlay.isConnected && generation === particleSyncGeneration) {
-        window.requestAnimationFrame(() => {
-          if (!overlay.isConnected || generation !== particleSyncGeneration) return;
-          scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
-            readbackMode,
-            continueFromResidentState: true,
-            continuationBudget: continuationBudget - 1,
-            generation
+        } else if (scheduleContinuation && overlay.isConnected && generation === particleSyncGeneration) {
+          window.requestAnimationFrame(() => {
+            if (!overlay.isConnected || generation !== particleSyncGeneration) return;
+            scheduleMlsMpmResidentSteps({
+              stepCount: normalizedStepCount,
+              readbackMode,
+              continueFromResidentState: true,
+              continuationBudget: continuationBudget - 1,
+              generation
+            });
           });
-        });
-      } else if (restartPlaybackContinuation && overlay.isConnected && generation === particleSyncGeneration) {
-        window.requestAnimationFrame(() => {
-          if (!overlay.isConnected || !playing || generation !== particleSyncGeneration) return;
-          scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
-            readbackMode,
-            continueFromResidentState: true,
-            continuationBudget: RESIDENT_CONTINUATION_CHAIN_BUDGET,
-            generation
+        } else if (restartPlaybackContinuation && overlay.isConnected && generation === particleSyncGeneration) {
+          window.requestAnimationFrame(() => {
+            if (!overlay.isConnected || !playing || generation !== particleSyncGeneration) return;
+            scheduleMlsMpmResidentSteps({
+              stepCount: normalizedStepCount,
+              readbackMode,
+              continueFromResidentState: true,
+              continuationBudget: RESIDENT_CONTINUATION_CHAIN_BUDGET,
+              generation
+            });
           });
+        }
+      };
+      const scheduleAfterPresentationBackpressure = () => {
+        if (residentPresentationBackpressureBarriers.length === 0) {
+          scheduleNextResidentFlight();
+          return;
+        }
+        Promise.allSettled(residentPresentationBackpressureBarriers).then((results) => {
+          residentPresentationBackpressurePending = false;
+          const evidence = results.map((result) => result.status === 'fulfilled'
+            ? result.value
+            : {
+                status: 'native-presentation-backpressure-rejected',
+                reason: result.reason instanceof Error
+                  ? result.reason.message
+                  : String(result.reason)
+              });
+          const waitMs = evidence.reduce(
+            (maximum, item) => Math.max(maximum, Number(item?.waitMs) || 0),
+            0
+          );
+          updateResidentPerf({
+            residentPresentationBackpressurePending: false,
+            residentPresentationBackpressureStatus:
+              'native-presentation-backpressure-settled',
+            residentPresentationBackpressureWaitCount:
+              Math.max(0, Number(residentPerf.residentPresentationBackpressureWaitCount) || 0)
+                + results.length,
+            lastResidentPresentationBackpressureMs: waitMs,
+            residentPresentationMaxComputeSubmissionsAhead: 1,
+            residentRenderRefreshPending: Boolean(
+              residentRenderRefreshLane?.getState?.()?.active
+              || residentRenderRefreshLane?.getState?.()?.pending
+            )
+          });
+          traceResidentSchedule('native-presentation-backpressure-settled', {
+            barrierCount: results.length,
+            waitMs,
+            evidence
+          });
+          scheduleNextResidentFlight();
         });
+      };
+      if (residentRenderSourceSubmissionBarriers.length > 0) {
+        Promise.allSettled(residentRenderSourceSubmissionBarriers).then((results) => {
+          traceResidentSchedule('render-source-submission-barrier-settled', {
+            barrierCount: results.length,
+            statuses: results.map((result) => result.status === 'fulfilled'
+              ? result.value?.status ?? 'fulfilled'
+              : 'rejected')
+          });
+          scheduleAfterPresentationBackpressure();
+        });
+      } else {
+        scheduleAfterPresentationBackpressure();
       }
     });
   }
@@ -6973,10 +8173,17 @@ export async function mountSphPhaseDemoOverlay({
     }
     const renderStartMs = performance.now();
     const nativeSurfaceConsumerRefresh = residentSurfaceDrawModeUsesNativeSurfaceConsumer(mode);
-    try {
-      const renderState = await scene.refreshSphResidentRenderState?.({
+    const completion = await enqueueResidentRenderRefresh({
+      execution,
+      generation: particleSyncGeneration,
+      surfaceDrawDiagnosticMode: mode,
+      source: 'render-mode-control-refresh',
+      reason,
+      requiredVisible: true,
+      requiredReason: reason,
+      isCurrent: () => token === renderModeRefreshToken,
+      refreshOptions: {
         preferWebGpu: true,
-        residentSteps: execution,
         materialProperties: activeMaterialProperties(),
         gasPressureSummary: currentGasPressureSummary(
           overlay.__sphResidentGasPressureSummary
@@ -6996,58 +8203,59 @@ export async function mountSphPhaseDemoOverlay({
         surfaceDrawDiagnosticMode: mode,
         surfaceDrawDiagnosticModeExplicit: residentSurfaceDrawDiagnosticModeExplicit,
         allowNativeSurfaceExtraction: nativeSurfaceConsumerRefresh ? true : undefined
-      });
-      if (token !== renderModeRefreshToken) return renderState;
-      overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(renderState, {
-        cadence: RESIDENT_RENDER_READBACK_CADENCE,
-        effectiveCadence: 1,
-        forced: true,
-        forceReason: reason,
-        reason,
-        sequence: residentRenderReadbackSequence + 1,
-        skipped: false,
-        renderReadbackCount: residentRenderReadbackCount + 1,
-        skippedCount: residentRenderReadbackSkippedCount
-      });
-      overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
-      overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
-      overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
-      overlay.__sphResidentRenderStateError = null;
-      residentRenderReadbackSequence += 1;
-      residentRenderReadbackCount += 1;
-      updateResidentPerf({
-        renderReadbacks: residentRenderReadbackCount,
-        skippedRenderReadbacks: residentRenderReadbackSkippedCount,
-        effectiveRenderReadbackCadence: 1,
-        playbackVisualRefreshForced: true,
-        lastRenderReadbackMs: performance.now() - renderStartMs,
-        lastRenderReadbackSkipped: false
-      });
-      publishRenderModeSelection('render-mode-refresh-complete', {
-        reason,
-        token,
-        visibleRendererBridge:
-          overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
-          || renderState?.surfaceDrawVisibleRendererBridge
-          || null,
-        renderStateStatus: renderState?.status || null
-      });
-      renderStatus();
-      updateWarningBanner();
-      return renderState;
-    } catch (error) {
-      if (token !== renderModeRefreshToken) return null;
-      const message = error instanceof Error ? error.message : String(error);
-      overlay.__sphResidentRenderStateError = message;
-      publishRenderModeSelection('render-mode-refresh-error', {
-        reason,
-        token,
-        error: message
-      });
-      renderStatus();
-      updateWarningBanner();
-      return null;
-    }
+      },
+      publish(renderState) {
+        overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(renderState, {
+          cadence: RESIDENT_RENDER_READBACK_CADENCE,
+          effectiveCadence: 1,
+          forced: true,
+          forceReason: reason,
+          reason,
+          sequence: residentRenderReadbackSequence + 1,
+          skipped: false,
+          renderReadbackCount: residentRenderReadbackCount + 1,
+          skippedCount: residentRenderReadbackSkippedCount
+        });
+        overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+        overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+        overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
+        overlay.__sphResidentRenderStateError = null;
+        residentRenderReadbackSequence += 1;
+        residentRenderReadbackCount += 1;
+        updateResidentPerf({
+          renderReadbacks: residentRenderReadbackCount,
+          skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+          effectiveRenderReadbackCadence: 1,
+          playbackVisualRefreshForced: true,
+          lastRenderReadbackMs: performance.now() - renderStartMs,
+          lastRenderReadbackSkipped: false
+        });
+        publishRenderModeSelection('render-mode-refresh-complete', {
+          reason,
+          token,
+          visibleRendererBridge:
+            overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
+            || renderState?.surfaceDrawVisibleRendererBridge
+            || null,
+          renderStateStatus: renderState?.status || null
+        });
+        renderStatus();
+        updateWarningBanner();
+      },
+      onError(error) {
+        if (token !== renderModeRefreshToken) return;
+        const message = error instanceof Error ? error.message : String(error);
+        overlay.__sphResidentRenderStateError = message;
+        publishRenderModeSelection('render-mode-refresh-error', {
+          reason,
+          token,
+          error: message
+        });
+        renderStatus();
+        updateWarningBanner();
+      }
+    });
+    return completion?.value ?? null;
   }
 
   // Blob size is live: update the scene's surface scale and re-render without a reset.
@@ -7108,15 +8316,16 @@ export async function mountSphPhaseDemoOverlay({
     pendingMlsMpmGridUpdateSignature = null;
     pendingMlsMpmG2pReconstructionSignature = null;
     pendingMlsMpmResidentStepsSignature = null;
+    residentExecutionFailureGeneration = null;
   }
 
   function invalidateResidentRuntimeForReset(reason = 'demo-rebuild') {
     resetRebuildPending = true;
     particleSyncGeneration += 1;
     pendingMlsMpmResidentStepsToken += 1;
+    const renderLaneDrain = beginResidentRenderLaneDrain(reason);
     disposeMountedMechanicsStageWorkerRunner(`${reason}-resident-reset`);
     clearSceneDerivedSignatures();
-    scene.resetResidentStateForParticleReset?.({ reason, clearOverlay: true });
     overlay.__sphLastStepResult = null;
     overlay.__sphResidentRenderState = null;
     overlay.__sphResidentRenderStateError = null;
@@ -7147,6 +8356,7 @@ export async function mountSphPhaseDemoOverlay({
       status: 'resident-state-invalidated-for-reset',
       reason,
       generation: particleSyncGeneration,
+      renderLaneDrainPending: Boolean(renderLaneDrain),
       updatedAtMs: performance.now()
     };
     publishResidentStageOrderTrace({
@@ -7162,7 +8372,7 @@ export async function mountSphPhaseDemoOverlay({
     resetResidentPerf(reason);
   }
 
-  function resetSceneForDimensions(boxDimsM, resetReason) {
+  function resetSceneForDimensionsNow(boxDimsM, resetReason) {
     const nextDims = Array.isArray(boxDimsM) ? [...boxDimsM] : boxDimensionsFromControls();
     disposeMountedMechanicsStageWorkerRunner(`${resetReason}-scene-reset`);
     if (dimensionsEqual(sceneBoxDimsM, nextDims)) {
@@ -7264,6 +8474,22 @@ export async function mountSphPhaseDemoOverlay({
       dimensionsM: [...nextDims],
       updatedAtMs: performance.now()
     };
+  }
+
+  function resetSceneForDimensions(boxDimsM, resetReason) {
+    const nextDims = Array.isArray(boxDimsM) ? [...boxDimsM] : boxDimsM;
+    return runAfterResidentRenderLaneDrain(
+      `${resetReason}-scene-mutation`,
+      () => (overlay.isConnected
+        ? resetSceneForDimensionsNow(nextDims, resetReason)
+        : null)
+    );
+  }
+
+  function afterMaybeAsync(value, continuation) {
+    return value && typeof value.then === 'function'
+      ? value.then(continuation)
+      : continuation(value);
   }
 
   function applyWorkerCacheLookup(lookup) {
@@ -7400,13 +8626,19 @@ export async function mountSphPhaseDemoOverlay({
       artifactViewStateSummary: outputs.viewStateSummary || null,
       updatedAtMs: performance.now()
     };
-    resetSceneForDimensions(viewState.box?.dimensionsM || boxDimensionsFromControls(), 'worker-rebuild');
-    overlay.__sphDriver = null;
-    syncParticles(viewState, 'peercompute-worker-packed-state');
-    renderStatus();
-    updateWarningBanner();
-    if (residentAutoStartEnabled) startWorkerResidentPlayback();
-    return true;
+    const resetResult = resetSceneForDimensions(
+      viewState.box?.dimensionsM || boxDimensionsFromControls(),
+      'worker-rebuild'
+    );
+    return afterMaybeAsync(resetResult, () => {
+      if (!overlay.isConnected || generation !== workerRebuildGeneration) return false;
+      overlay.__sphDriver = null;
+      syncParticles(viewState, 'peercompute-worker-packed-state');
+      renderStatus();
+      updateWarningBanner();
+      if (residentAutoStartEnabled) startWorkerResidentPlayback();
+      return true;
+    });
   }
 
   function rebuildDemoFromControls() {
@@ -7416,11 +8648,18 @@ export async function mountSphPhaseDemoOverlay({
     activeViewStatePreflight = null;
     // The box dimensions may have changed, so rebuild the scene (its field/wireframe/camera are
     // sized to the box at creation) against the new driver's box.
-    resetSceneForDimensions(driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(), 'demo-rebuild');
-    overlay.__sphDriver = driver;
-    syncParticles();
-    renderStatus();
-    updateWarningBanner();
+    const resetResult = resetSceneForDimensions(
+      driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(),
+      'demo-rebuild'
+    );
+    return afterMaybeAsync(resetResult, () => {
+      if (!overlay.isConnected) return false;
+      overlay.__sphDriver = driver;
+      syncParticles();
+      renderStatus();
+      updateWarningBanner();
+      return true;
+    });
   }
 
   function ensureInteractiveDriverFromCache() {
@@ -7443,7 +8682,20 @@ export async function mountSphPhaseDemoOverlay({
     }
     driver = next;
     activeViewStatePreflight = null;
-    resetSceneForDimensions(driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(), 'interactive-driver-from-cache');
+    const resetResult = resetSceneForDimensions(
+      driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(),
+      'interactive-driver-from-cache'
+    );
+    if (resetResult && typeof resetResult.then === 'function') {
+      void resetResult.then(() => {
+        if (!overlay.isConnected || driver !== next) return;
+        overlay.__sphDriver = driver;
+        syncParticles();
+        renderStatus();
+        updateWarningBanner();
+      });
+      return false;
+    }
     overlay.__sphDriver = driver;
     syncParticles();
     renderStatus();
@@ -7511,7 +8763,7 @@ export async function mountSphPhaseDemoOverlay({
           || artifact?.outputs?.viewStateSummary?.materialKeys?.length
           || Object.keys(artifact?.outputs?.viewState?.materialProperties || {}).length
       });
-      applyWorkerRebuildResult(result, generation);
+      return applyWorkerRebuildResult(result, generation);
     }).catch((error) => {
       if (generation !== workerRebuildGeneration) return;
       recordPerformanceSpan('ulg-runtime worker createSphPhaseDemo failed', submittedAtMs, performance.now(), {
@@ -7530,7 +8782,7 @@ export async function mountSphPhaseDemoOverlay({
         location: 'main thread fallback',
         reason: error instanceof Error ? error.message : String(error)
       });
-      rebuildDemoFromControls();
+      return rebuildDemoFromControls();
     }).finally(() => {
       if (generation === workerRebuildGeneration) {
         activeWorkerRebuildTask = null;
@@ -7565,14 +8817,12 @@ export async function mountSphPhaseDemoOverlay({
         scheduleWorkerDemoRebuild();
         return;
       }
-      try {
-        rebuildDemoFromControls();
-      } finally {
+      Promise.resolve(rebuildDemoFromControls()).finally(() => {
         setCpuClosureTask(null);
         publishPeerClosureCacheState();
         renderStatus();
         updateWarningBanner();
-      }
+      });
     }, 0);
   }
 
@@ -8041,6 +9291,16 @@ export async function mountSphPhaseDemoOverlay({
     const gpuAuthoritativeState = residentSteps?.gpuAuthoritativeState
       ?? residentStep?.gpuAuthoritativeState
       ?? false;
+    const gpuAuthorityCandidate =
+      residentSteps?.gpuResidentAuthoritativeContinuationCandidate
+      ?? residentStep?.gpuResidentAuthoritativeContinuationCandidate
+      ?? false;
+    const gpuAuthorityAdmissionSatisfied = residentSteps?.gpuAuthorityAdmissionSatisfied
+      ?? residentStep?.gpuAuthorityAdmissionSatisfied
+      ?? false;
+    const gpuAuthorityStatus = residentSteps?.gpuAuthorityStatus
+      || residentStep?.gpuAuthorityStatus
+      || 'pending';
     const residentSourceMode = residentSteps?.residentSourceMode
       || overlay.__mlsMpmResidentSourceMode
       || 'cpu-packed-state';
@@ -8221,6 +9481,7 @@ export async function mountSphPhaseDemoOverlay({
       `standalone mech  : ${standaloneMechanics?.status || 'pending'} backend=${standaloneMechanics?.backend || 'pending'}`,
       `render authoritative: ${renderAuthoritative}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
+      `gpu authority     : candidate=${Boolean(gpuAuthorityCandidate)} admitted=${Boolean(gpuAuthorityAdmissionSatisfied)} status=${gpuAuthorityStatus}`,
       `per-wall ledger  :\n${ledger}`,
       ``,
       `validation       : scientific=false sph=false phase=false (evidence-only)`
@@ -8267,8 +9528,10 @@ export async function mountSphPhaseDemoOverlay({
     if (!playing) return;
     if (!driver) {
       if (activeViewState) {
+        const forceRetry = residentExecutionFailureGeneration === particleSyncGeneration;
         scheduleMlsMpmResidentSteps({
-          continueFromResidentState: residentGpuContinuationReady()
+          continueFromResidentState: residentGpuContinuationReady(),
+          force: forceRetry
         });
         renderStatus();
         updateWarningBanner();
@@ -8327,8 +9590,10 @@ export async function mountSphPhaseDemoOverlay({
         return;
       }
       if (activeViewState) {
+        const forceRetry = residentExecutionFailureGeneration === particleSyncGeneration;
         scheduleMlsMpmResidentSteps({
-          continueFromResidentState: residentGpuContinuationReady()
+          continueFromResidentState: residentGpuContinuationReady(),
+          force: forceRetry
         });
       }
       renderStatus();
@@ -8358,8 +9623,10 @@ export async function mountSphPhaseDemoOverlay({
         playing = !playing;
         e.target.textContent = playing ? 'Pause' : 'Play';
         if (playing) {
+          const forceRetry = residentExecutionFailureGeneration === particleSyncGeneration;
           scheduleMlsMpmResidentSteps({
-            continueFromResidentState: residentGpuContinuationReady()
+            continueFromResidentState: residentGpuContinuationReady(),
+            force: forceRetry
           });
           requestPlaybackTick();
         }
@@ -8407,16 +9674,34 @@ export async function mountSphPhaseDemoOverlay({
     scheduleStaticTableCacheRead({ reason: 'initial-preload' });
   }
 
+  let closeFinalized = false;
   function close() {
+    if (closeFinalized) return;
+    closeFinalized = true;
     playing = false;
     fpsLoopRunning = false;
     staticTableCacheReadGeneration += 1;
     staticTableCacheGeneration += 1;
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     disposeMountedMechanicsStageWorkerRunner('demo-close');
-    scene.dispose();
-    initialRendererWebGpuDeviceResult?.device?.destroy?.();
+    const renderLane = residentRenderRefreshLane;
+    residentRenderRefreshLane = null;
+    renderLane?.close?.('demo-close');
+    const sceneAtClose = scene;
+    const sceneMutationBarrierAtClose = residentRenderSceneMutationBarrier;
     overlay.remove();
+    const disposeScene = () => {
+      sceneAtClose.dispose();
+      initialRendererWebGpuDeviceResult?.device?.destroy?.();
+    };
+    const waiters = [];
+    if (renderLane?.getState?.().active) waiters.push(renderLane.whenIdle());
+    if (sceneMutationBarrierAtClose) waiters.push(sceneMutationBarrierAtClose);
+    if (waiters.length) {
+      void Promise.all(waiters).then(disposeScene, disposeScene);
+    } else {
+      disposeScene();
+    }
   }
   overlay.querySelector('#sph-close').addEventListener('click', close);
 
@@ -8442,8 +9727,7 @@ export async function mountSphPhaseDemoOverlay({
           location: 'main thread fallback',
           reason: error instanceof Error ? error.message : String(error)
         });
-        rebuildDemoFromControls();
-        return;
+        return rebuildDemoFromControls();
       }
       activeWorkerRebuildTask = {
         ...activeWorkerRebuildTask,
@@ -8462,7 +9746,7 @@ export async function mountSphPhaseDemoOverlay({
           || artifact?.outputs?.viewStateSummary?.materialKeys?.length
           || Object.keys(artifact?.outputs?.viewState?.materialProperties || {}).length
       });
-      applyWorkerRebuildResult(result, generation);
+      return applyWorkerRebuildResult(result, generation);
     }).finally(() => {
       if (overlay.isConnected) {
         activeWorkerRebuildTask = null;

@@ -5,6 +5,9 @@ export const ULG_WEBGPU_ALLOCATION_EVIDENCE_SCHEMA =
 
 const TIMESTAMP_QUERY_FEATURE = 'timestamp-query';
 const TIMESTAMP_BYTES = BigUint64Array.BYTES_PER_ELEMENT;
+export const WEBGPU_TIMESTAMP_QUERY_SET_MAX_QUERIES = 4096;
+export const WEBGPU_TIMESTAMP_PROFILE_MAX_SPANS =
+  WEBGPU_TIMESTAMP_QUERY_SET_MAX_QUERIES / 2;
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -93,37 +96,81 @@ export function webGpuTimestampQueryCapability(device, { requested = false } = {
 }
 
 export function summarizeWebGpuBufferAllocations(entries = [], {
-  scope = 'webgpu-submission'
+  scope = 'webgpu-submission',
+  includeBufferRows = true
 } = {}) {
   const seen = new Set();
   const rows = [];
+  let ownedBufferCount = 0;
+  let borrowedBufferCount = 0;
+  let createdThisSubmissionBufferCount = 0;
+  let persistentWorkspaceBufferCount = 0;
+  let transientSubmissionBufferCount = 0;
+  let knownByteLengthBufferCount = 0;
+  let allocatedByteLength = 0;
+  let createdThisSubmissionByteLength = 0;
+  let persistentWorkspaceByteLength = 0;
+  let transientSubmissionByteLength = 0;
+  let borrowedByteLength = 0;
   for (const entry of entries || []) {
     const buffer = entry?.buffer || entry;
     if (!buffer || seen.has(buffer)) continue;
     seen.add(buffer);
     const size = Number(buffer.size ?? buffer.byteLength ?? entry?.byteLength);
-    rows.push({
-      role: String(entry?.role || buffer.label || 'unnamed-buffer'),
-      label: buffer.label ?? null,
-      byteLength: Number.isFinite(size) && size >= 0 ? Math.round(size) : null,
-      owned: entry?.owned !== false
-    });
+    const owned = entry?.owned !== false;
+    const requestedLifetime = String(entry?.lifetime || '').trim();
+    const lifetime = !owned
+      ? 'borrowed'
+      : (['persistent-workspace', 'transient-submission'].includes(requestedLifetime)
+          ? requestedLifetime
+          : 'transient-submission');
+    const byteLength = Number.isFinite(size) && size >= 0 ? Math.round(size) : null;
+    const createdThisSubmission = owned && (
+      entry?.createdThisSubmission ?? lifetime !== 'persistent-workspace'
+    );
+    if (owned) ownedBufferCount += 1;
+    else borrowedBufferCount += 1;
+    if (createdThisSubmission) createdThisSubmissionBufferCount += 1;
+    if (lifetime === 'persistent-workspace') persistentWorkspaceBufferCount += 1;
+    if (lifetime === 'transient-submission') transientSubmissionBufferCount += 1;
+    if (byteLength !== null) {
+      knownByteLengthBufferCount += 1;
+      if (owned) allocatedByteLength += byteLength;
+      else borrowedByteLength += byteLength;
+      if (createdThisSubmission) createdThisSubmissionByteLength += byteLength;
+      if (lifetime === 'persistent-workspace') persistentWorkspaceByteLength += byteLength;
+      if (lifetime === 'transient-submission') transientSubmissionByteLength += byteLength;
+    }
+    if (includeBufferRows) {
+      rows.push({
+        role: String(entry?.role || buffer.label || 'unnamed-buffer'),
+        label: buffer.label ?? null,
+        byteLength,
+        owned,
+        lifetime,
+        createdThisSubmission
+      });
+    }
   }
-  const knownRows = rows.filter((row) => row.byteLength !== null);
+  const bufferCount = seen.size;
   return {
     schema: ULG_WEBGPU_ALLOCATION_EVIDENCE_SCHEMA,
     scope,
-    bufferCount: rows.length,
-    ownedBufferCount: rows.filter((row) => row.owned).length,
-    borrowedBufferCount: rows.filter((row) => !row.owned).length,
-    knownByteLengthBufferCount: knownRows.length,
-    unknownByteLengthBufferCount: rows.length - knownRows.length,
-    allocatedByteLength: knownRows
-      .filter((row) => row.owned)
-      .reduce((sum, row) => sum + row.byteLength, 0),
-    borrowedByteLength: knownRows
-      .filter((row) => !row.owned)
-      .reduce((sum, row) => sum + row.byteLength, 0),
+    bufferCount,
+    ownedBufferCount,
+    borrowedBufferCount,
+    createdThisSubmissionBufferCount,
+    persistentWorkspaceBufferCount,
+    transientSubmissionBufferCount,
+    knownByteLengthBufferCount,
+    unknownByteLengthBufferCount: bufferCount - knownByteLengthBufferCount,
+    allocatedByteLength,
+    createdThisSubmissionByteLength,
+    persistentWorkspaceByteLength,
+    transientSubmissionByteLength,
+    borrowedByteLength,
+    bufferRowsIncluded: includeBufferRows,
+    bufferRowsOmittedCount: includeBufferRows ? 0 : bufferCount,
     buffers: rows
   };
 }
@@ -134,7 +181,10 @@ export function createWebGpuTimestampProfiler(device, {
   maxSpans = 64
 } = {}) {
   const capability = webGpuTimestampQueryCapability(device, { requested });
-  const normalizedMaxSpans = Math.max(1, Math.min(4096, Math.round(Number(maxSpans) || 1)));
+  const normalizedMaxSpans = Math.max(
+    1,
+    Math.min(WEBGPU_TIMESTAMP_PROFILE_MAX_SPANS, Math.round(Number(maxSpans) || 1))
+  );
   if (!capability.supported) {
     const profile = unavailableProfile({
       requested: capability.requested,

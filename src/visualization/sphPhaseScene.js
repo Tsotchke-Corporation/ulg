@@ -18,15 +18,19 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA,
   ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import {
   createBufferVolumeDescriptor as createWebGpuMarchingCubesBufferVolumeDescriptor,
+  createSparseBrickVolumeDescriptor as createWebGpuMarchingCubesSparseBrickVolumeDescriptor,
   createMarchingCubesSurfaceAdapter
 } from 'three-webgpu-marching-cubes';
 import {
   GPU_PHASE_IDS,
   OPTICAL_GPU_RECORD_LAYOUT,
+  OPTICAL_GPU_RECORD_STATUS,
+  OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT,
   buildOpticalGpuLookupQueries,
   buildOpticalGpuTable,
   decodeOpticalGpuLookupOutputRows,
@@ -61,6 +65,8 @@ import {
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY,
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE,
+  MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY,
+  MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED,
   cloneMlsMpmParticleStateForNext,
   cloneSphParticleStateForNext,
   createMlsMpmResidentStepGpuFenceReport,
@@ -78,8 +84,7 @@ import {
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
   SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
-  createSchroederParticleStorageFreeListPlan,
-  runSchroederSameLevelMechanicsWebGpu
+  createSchroederParticleStorageFreeListPlan
 } from '../runtime/sph/schroederHierarchyGpu.js';
 import {
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
@@ -95,6 +100,11 @@ import {
   uploadSphThermalResponseGraphBuffers
 } from '../runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
+import {
+  assertSphReactionStaticTableUploadGpu,
+  createSphReactionStaticTableUploadGpu,
+  destroySphReactionStaticTableUploadGpu
+} from '../runtime/sph/sphReactionStaticTableUploadGpu.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../runtime/sph/sphMechanicsMaterialTable.js';
 import {
   ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
@@ -124,10 +134,28 @@ import {
 import {
   buildSphMaterialInterfaceSourceFieldLocalWebGpu
 } from '../runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js';
+import { webGpuDeviceId } from '../runtime/sph/sphGpuDeviceIdentity.js';
+import { residentNeighborhoodMutationEpochsForStep } from '../runtime/sph/residentNeighborhoodGpuLane.js';
+import { createSphSparseRenderFieldPlan } from '../runtime/sph/sphSparseRenderFieldPlan.js';
+import {
+  createSphSparseRenderFieldGpu,
+  createSphSparseRenderFieldGpuPlan,
+  deriveSphSparseRenderFieldEligibilityBounds,
+  SPH_SPARSE_RENDER_FIELD_PRODUCT_EVENT_CAPACITY_BUCKET,
+  reserveSphSparseRenderFieldParticleCapacity,
+  reserveSphSparseRenderFieldProductEventCapacity
+} from '../runtime/sph/sphSparseRenderFieldGpu.js';
+import {
+  createSphSparseRenderFieldEvidenceReadbackBuffer,
+  encodeSphSparseRenderFieldEvidenceCopy,
+  mapSphSparseRenderFieldEvidenceReadback
+} from '../runtime/sph/sphSparseRenderFieldAdmission.js';
 import {
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
+  createUlgEffectiveRenderFieldSurfaceTable,
   createUlgWebGpuMarchingCubesExtensionAdapter,
-  createUlgRenderFieldBufferVolumeDescriptor
+  createUlgRenderFieldBufferVolumeDescriptor,
+  createUlgSparseRenderFieldVolumeDescriptor
 } from '../runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 import {
   gasPressureInterfaceCouplingSummary,
@@ -145,6 +173,7 @@ import {
 } from '../runtime/residentBufferLease.js';
 import {
   ULG_RESIDENT_STATE_COMMIT_ADMISSION_SCHEMA,
+  promoteResidentStepsExecutionGpuAuthority,
   readResidentStepsCommittedWarmDelta
 } from '../runtime/peercomputeResidentCommitBridge.js';
 import {
@@ -153,10 +182,23 @@ import {
 } from '../runtime/peercomputeRenderOwnershipPolicy.js';
 import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
 import {
+  installWebGpuImmutablePipelineCache,
+  webGpuImmutablePipelineCacheSummary
+} from '../runtime/webgpuImmutablePipelineCache.js';
+import {
+  deferResidentExecutionCleanupUntilConsumersRelease
+} from '../runtime/residentAsyncRenderLane.js';
+import {
   ULG_WEBGPU_TIMESTAMP_PROFILE_SCHEMA,
   createWebGpuTimestampProfiler,
   summarizeWebGpuBufferAllocations
 } from '../runtime/webgpuTimestampProfiler.js';
+import {
+  coherentSolidDrawEntriesSignature,
+  createCoherentSolidNativeWebGpuExecutor,
+  resolveAdmittedCoherentSolidDrawEntries,
+  validateCoherentSolidPresentationConsumerLease
+} from '../runtime/solid/coherentSolidNativeBridge.js';
 import {
   createUlgWorkerOffscreenPresentationBridge
 } from './offscreenPresentationBridge.js';
@@ -167,11 +209,43 @@ import {
   nativeSurfaceDrawStateUsesExecution,
   prepareNativeSurfaceBridgeForForcedDisposal,
   rendererCanvasResizeRequired,
+  retireNativeRefractionTargetSet,
   resolveAdditionalNativeSurfaceGenerationAttempt,
+  resolveNativeRefractionTargetSetAction,
   resolveNativeSurfaceResourceReleaseAction,
   shouldCommitAdditionalNativeSurfaceCandidate,
   takeNativeSurfaceResourceOwners
 } from './nativeSurfaceResourceLifecycle.js';
+import {
+  createNativeSurfaceGradientSnapshotPool
+} from './nativeSurfaceGradientSnapshotPool.js';
+import {
+  ULG_NATIVE_REFRACTION_TRANSPORT_WGSL
+} from './nativeRefractionTransportWgsl.js';
+
+export const SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE =
+  'SPH_RESIDENT_RENDER_COMMIT_STALE';
+
+export function assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+  stage = 'resident-render-commit'
+} = {}) {
+  if (typeof renderCommitGuard !== 'function') {
+    return {
+      schema: 'peercompute.ulg.sph-resident-render-commit-admission.v0',
+      status: 'resident-render-commit-guard-not-configured',
+      accepted: true,
+      stage
+    };
+  }
+  const result = renderCommitGuard({ stage });
+  const accepted = result === true || result?.accepted === true;
+  if (accepted) return result;
+  const error = new Error(`resident render commit rejected at ${stage}`);
+  error.code = SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE;
+  error.stage = stage;
+  error.admission = result || null;
+  throw error;
+}
 
 // Matches the native WebGPU surface consumer's historical clear color so the
 // default look is consistent across the webgl and native renderer backends
@@ -249,6 +323,23 @@ export function normalizeSphSceneBackgroundColorHex(
   return normalizeHexColor(value)
     || normalizeHexColor(fallback)
     || SPH_SCENE_BACKGROUND_COLOR_DEFAULT;
+}
+
+export function nativeSurfaceBackgroundCoverScale({
+  imageWidth,
+  imageHeight,
+  canvasWidth,
+  canvasHeight
+} = {}) {
+  const sourceWidth = Math.max(1, Number(imageWidth) || 1);
+  const sourceHeight = Math.max(1, Number(imageHeight) || 1);
+  const targetWidth = Math.max(1, Number(canvasWidth) || 1);
+  const targetHeight = Math.max(1, Number(canvasHeight) || 1);
+  const imageAspect = sourceWidth / sourceHeight;
+  const canvasAspect = targetWidth / targetHeight;
+  return imageAspect > canvasAspect
+    ? [canvasAspect / imageAspect, 1]
+    : [1, imageAspect / canvasAspect];
 }
 
 function schroederPhaseVolumeDiagnosticField(row, fieldName) {
@@ -1827,13 +1918,7 @@ export function createSchroederRenderProxyNativeWebGpuExecutor({
     fragment: {
       module,
       entryPoint: 'fs_main',
-      targets: [{
-        format,
-        blend: {
-          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
-        }
-      }]
+      targets: [{ format }]
     },
     primitive: {
       topology: 'triangle-list',
@@ -1842,7 +1927,7 @@ export function createSchroederRenderProxyNativeWebGpuExecutor({
     ...(depthFormat ? {
       depthStencil: {
         format: depthFormat,
-        depthWriteEnabled: false,
+        depthWriteEnabled: true,
         depthCompare: 'less-equal'
       }
     } : {})
@@ -1999,6 +2084,7 @@ export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_SHOW = 1e-2;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_HIDE = 5e-3;
 export const SPH_VAPOR_SURFACE_SCATTER_SHOW_PER_M = 1e-6;
 export const SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT = 'depth24plus';
+export const SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT = 'depth32float';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT = 'rgba16float';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT = 'rgba8unorm';
 export const SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY = 'retain-last-overlay-until-replacement-ready';
@@ -2011,6 +2097,8 @@ export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
 export const SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 8_000;
 export const SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT = 14;
 export const SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL = 15;
+export const SPH_MATERIAL_INTERFACE_GPU_RESIDENT_SOURCE_FIELD_MODE =
+  'gpu-resident-source-field';
 // 256MB worst-case vertex-row allocation (actual MC output is far smaller):
 // at 128MB a typical 4-6 surface scene budgeted down to resolution 29-33,
 // which reads as octahedral droplets and lets small volumes flicker below
@@ -2020,7 +2108,7 @@ export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 256 * 1
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
 const SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS_DEFAULT = Object.freeze({});
 const SPH_THREE_WEBGPU_RENDERER_RESIDENT_REQUIRED_LIMITS = Object.freeze({
-  maxStorageBuffersPerShaderStage: 10,
+  maxStorageBuffersPerShaderStage: 14,
   maxBufferSize: 512 * 1024 * 1024,
   maxStorageBufferBindingSize: 512 * 1024 * 1024
 });
@@ -2551,14 +2639,53 @@ const SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'resident-surface-buffers-no-ov
 const SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'extension-resident-surface-buffers-no-overlay';
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE = 'native-webgpu-surface-consumer';
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS = 'native-webgpu-surface-consumer-ready';
+const COHERENT_SOLID_DIRECT_SHAPE_RENDER_GPU_PROFILE_SCHEMA =
+  'peercompute.ulg.coherent-solid-direct-shape-render-gpu-profile.v0';
+const COHERENT_SOLID_DIRECT_SHAPE_RENDER_GPU_PROFILE_LABEL =
+  'coherentSolidDirectShapeRender';
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_DEBUG_MODES = new Set(['none', 'clear-only']);
 const SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS = 32;
+export const SPH_NATIVE_WEBGPU_SURFACE_MAX_IN_FLIGHT_SUBMITS = 2;
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE = Object.freeze({
   r: 0.08,
   g: 0.48,
   b: 0.76,
   a: 1
 });
+
+export function nativeSurfaceConsumerFrameAdmission(bridge = null, {
+  maxInFlightSubmits = SPH_NATIVE_WEBGPU_SURFACE_MAX_IN_FLIGHT_SUBMITS
+} = {}) {
+  const inFlightSubmitCount = Math.max(
+    0,
+    Math.round(Number(bridge?.nativeSurfaceConsumerInFlightSubmitCount) || 0)
+  );
+  const limit = Math.max(1, Math.round(Number(maxInFlightSubmits) || 1));
+  if (bridge?.nativeSurfaceConsumerSubmitFenceFailed === true) {
+    return {
+      accepted: false,
+      status: 'blocked-native-submit-fence-error',
+      inFlightSubmitCount,
+      maxInFlightSubmits: limit
+    };
+  }
+  if (bridge?.nativeSurfaceConsumerSubmitFenceTimedOut === true) {
+    return {
+      accepted: false,
+      status: 'blocked-native-submit-fence-timeout',
+      inFlightSubmitCount,
+      maxInFlightSubmits: limit
+    };
+  }
+  return {
+    accepted: inFlightSubmitCount < limit,
+    status: inFlightSubmitCount < limit
+      ? 'native-submit-capacity-available'
+      : 'blocked-native-submit-capacity-full',
+    inFlightSubmitCount,
+    maxInFlightSubmits: limit
+  };
+}
 const SPH_THREE_COMPACT_VERTEX_PRESENTATION_ENABLED = false;
 const SPH_THREE_COMPACT_VERTEX_PRESENTATION_BLOCK_REASON =
   'three-compact-vertices disabled: current WebGPU surface extraction emits tetrahedralized render-field cubes and compact readback can stall; using the engine-managed marching-cubes/render-field path until webgpu-marching-cubes direct-buffer integration is pixel validated';
@@ -3980,10 +4107,7 @@ export function resolveThreeWebGpuSurfaceBufferDrawRecords({
   const transparencyClassId = Number.isFinite(explicitTransparencyClassId) && explicitTransparencyClassId >= 0
     ? explicitTransparencyClassId
     : fallbackTransparencyClassId;
-  const explicitDepthWriteFlag = Number(templateSurface.depthWriteFlag);
-  const depthWriteFlag = Number.isFinite(explicitDepthWriteFlag) && explicitDepthWriteFlag >= 0
-    ? explicitDepthWriteFlag
-    : (transparencyClassId > 0 ? 0 : 1);
+  const depthWriteFlag = 1;
   const explicitRenderOrder = Number(templateSurface.renderOrder);
   const renderOrder = Number.isFinite(explicitRenderOrder)
     ? explicitRenderOrder
@@ -5230,6 +5354,14 @@ export function buildSphResidentPressureInterfaceStateSummary({
   source = 'resident-pressure-interface-state',
   sourceCadence = null
 } = {}) {
+  const gpuResidentSourceFieldReady = Boolean(
+    materialInterfaceField?.gpuResidentMaterialInterfaceSourceField === true
+    && materialInterfaceField?.materialInterfaceSourceField?.status
+      === 'material-interface-source-field-ready'
+    && materialInterfaceField?.fieldRowsBufferRetained === true
+    && materialInterfaceField?.surfaceBufferRetained === true
+    && materialInterfaceField?.sourceIndexFieldBufferRetained === true
+  );
   const pressureFeedback = pressureFeedbackFromGasPressureSummary(gasPressureSummary);
   const coupling = pressureInterfaceCoupling || gasPressureInterfaceCouplingSummary({
     pressureFeedback,
@@ -5258,7 +5390,9 @@ export function buildSphResidentPressureInterfaceStateSummary({
   });
   return {
     schema: 'peercompute.ulg.sph-resident-pressure-interface-state.v0',
-    status: rowsReady
+    status: gpuResidentSourceFieldReady
+      ? 'resident-pressure-interface-source-field-ready-for-compute-manager-lane'
+      : rowsReady
       ? 'resident-pressure-interface-force-rows-ready'
       : (uploadBlockedForAdmission
           ? 'resident-pressure-interface-force-rows-admission-required'
@@ -5275,6 +5409,11 @@ export function buildSphResidentPressureInterfaceStateSummary({
     materialInterfaceField,
     materialInterfaceFieldSchema: materialInterfaceField?.schema ?? null,
     materialInterfaceFieldStatus: materialInterfaceField?.status ?? null,
+    gpuResidentMaterialInterfaceSourceFieldReady: gpuResidentSourceFieldReady,
+    materialInterfaceCandidateConstructionAuthority: gpuResidentSourceFieldReady
+      ? 'next-compute-manager-resident-neighborhood-lease'
+      : null,
+    materialInterfaceCandidateConstructionReadbackRequired: false,
     materialInterfaceReadySurfaceCount: materialInterfaceField?.readySurfaceCount ?? 0,
     materialInterfaceTotalSurfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? 0,
     materialInterfaceForceCouplingStatus: solver.forceCouplingStatus
@@ -5375,7 +5514,11 @@ export function buildSphResidentPressureInterfaceStateSummary({
     gasCellEosProducerRetainedSourceReady: gasCellEosProducerStageRequest?.gasCellEosProducerRetainedSourceReady === true,
     gasCellEosProducerStageSpatialLedgerCellCount: gasCellEosProducerStageRequest?.spatialGasSpeciesLedgerCellCount ?? 0,
     ...uploadFields,
-    gpuAuthoritativeState: Boolean(rowsReady || materialInterfaceField?.sourceRenderFieldReadback === false),
+    gpuAuthoritativeState: Boolean(
+      gpuResidentSourceFieldReady
+      || rowsReady
+      || materialInterfaceField?.sourceRenderFieldReadback === false
+    ),
     scientificValidation: false,
     gasValidation: false,
     sphValidation: false,
@@ -5721,6 +5864,42 @@ const CPU_SURFACE_ADAPTIVE_RESOLUTION = Object.freeze([
   { maxParticles: 64, resolution: 16, maxPolyCount: 19000 }
 ]);
 
+export const SPH_NATIVE_WEBGPU_BACKGROUND_WGSL = `
+struct BackgroundParams {
+  cover_scale: vec2<f32>,
+  pad0: vec2<f32>,
+};
+
+@group(0) @binding(0) var background_image: texture_2d<f32>;
+@group(0) @binding(1) var background_sampler: sampler;
+@group(0) @binding(2) var<uniform> params: BackgroundParams;
+
+struct BackgroundVertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> BackgroundVertexOutput {
+  let positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(3.0, -1.0),
+    vec2<f32>(-1.0, 3.0)
+  );
+  let position = positions[vertex_index];
+  var output: BackgroundVertexOutput;
+  output.position = vec4<f32>(position, 1.0, 1.0);
+  output.uv = vec2<f32>(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5);
+  return output;
+}
+
+@fragment
+fn fs_main(input: BackgroundVertexOutput) -> @location(0) vec4<f32> {
+  let uv = (input.uv - vec2<f32>(0.5)) * params.cover_scale + vec2<f32>(0.5);
+  return vec4<f32>(textureSample(background_image, background_sampler, uv).rgb, 1.0);
+}
+`;
+
 export const SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL = `
 struct CameraUniform {
   view_projection: mat4x4<f32>,
@@ -5748,6 +5927,12 @@ struct VertexOut {
 // fixed plausible direction (its camera uniform is only a matrix).
 fn resident_view_direction(world_position: vec3<f32>) -> vec3<f32> {
   return normalize(vec3<f32>(0.15, 0.25, 1.0));
+}
+
+// The compact production variant replaces this with the draw batch's admitted
+// transparency class. Legacy vertex-row draws can only refract exact records.
+fn refractive_draw_admitted() -> bool {
+  return true;
 }
 
 // Thermal emission for hot materials (blackbody-ish ramp). The compact
@@ -5809,6 +5994,25 @@ fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
 // fallback when no background image is active.
 @group(1) @binding(2) var env_map: texture_2d<f32>;
 @group(1) @binding(3) var env_sampler: sampler;
+// Native compact surfaces bind a full-resolution depth32float texture written
+// by a front-culled backface pass. Legacy paths bind a 1x1 dummy and therefore
+// fail closed to reflective/opaque PBR without ray bending.
+@group(1) @binding(4) var refractive_back_depth: texture_depth_2d;
+
+struct RefractiveBackfaceGeometry {
+  world_position: vec3<f32>,
+  valid: f32,
+};
+
+fn resident_refractive_backface(in: VertexOut) -> RefractiveBackfaceGeometry {
+  return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+}
+
+fn resident_refraction_max_path_m() -> f32 {
+  return 0.0;
+}
+
+${ULG_NATIVE_REFRACTION_TRANSPORT_WGSL}
 
 fn env_latlong_sample(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
   var d = dir;
@@ -5827,11 +6031,6 @@ fn env_latlong_sample(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
   return pow(clamp(sampled, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
 }
 
-struct OitFragmentOut {
-  @location(0) accum: vec4<f32>,
-  @location(1) revealage: vec4<f32>,
-};
-
 struct OpticalMaterial {
   base_color_linear: vec3<f32>,
   metalness: f32,
@@ -5845,6 +6044,8 @@ struct OpticalMaterial {
   scattering_coefficient_per_m: f32,
   optical_depth: f32,
   spectral_tint_linear: vec3<f32>,
+  spectral_offset: f32,
+  spectral_count: f32,
   status: f32,
   blocked: f32,
   found: f32,
@@ -5927,6 +6128,64 @@ fn spectral_tint_from_samples(spectral_offset: f32, spectral_count_value: f32, t
   return clamp(tint / max(max_channel, 0.0001), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+struct SpectralComplexIndex {
+  n_rgb: vec3<f32>,
+  k_rgb: vec3<f32>,
+  valid: f32,
+};
+
+fn spectral_complex_index_rgb(spectral_offset: f32, spectral_count_value: f32) -> SpectralComplexIndex {
+  let total_samples = spectral_sample_count();
+  let start = u32(max(0.0, round(spectral_offset)));
+  let count = min(u32(max(0.0, round(spectral_count_value))), 32u);
+  var n_rgb = vec3<f32>(1.0);
+  var k_rgb = vec3<f32>(0.0);
+  var found = vec3<f32>(0.0);
+  var best_distance = vec3<f32>(1.0e9);
+  for (var local = 0u; local < 32u; local = local + 1u) {
+    if (local >= count) { break; }
+    let sample_index = start + local;
+    if (sample_index >= total_samples) { break; }
+    let row0 = spectral_sample_row(sample_index, 0u);
+    let row1 = spectral_sample_row(sample_index, 1u);
+    let wavelength_nm = row0.x;
+    let n = row1.y;
+    let k = row1.z;
+    if (!(wavelength_nm >= 380.0 && wavelength_nm <= 780.0 && n >= 1.0 && n < 10.0 && k >= 0.0 && k < 1.0e6)) {
+      continue;
+    }
+    let red_distance = abs(wavelength_nm - 630.0);
+    if (wavelength_nm >= 600.0 && red_distance < best_distance.r) {
+      best_distance.r = red_distance;
+      n_rgb.r = n;
+      k_rgb.r = k;
+      found.r = 1.0;
+    }
+    let green_distance = abs(wavelength_nm - 530.0);
+    if (wavelength_nm >= 500.0 && wavelength_nm < 600.0 && green_distance < best_distance.g) {
+      best_distance.g = green_distance;
+      n_rgb.g = n;
+      k_rgb.g = k;
+      found.g = 1.0;
+    }
+    let blue_distance = abs(wavelength_nm - 480.0);
+    if (wavelength_nm < 500.0 && blue_distance < best_distance.b) {
+      best_distance.b = blue_distance;
+      n_rgb.b = n;
+      k_rgb.b = k;
+      found.b = 1.0;
+    }
+  }
+  let valid = select(0.0, 1.0, all(found > vec3<f32>(0.5)));
+  return SpectralComplexIndex(n_rgb, k_rgb, valid);
+}
+
+fn complex_normal_fresnel_rgb(n_rgb: vec3<f32>, k_rgb: vec3<f32>) -> vec3<f32> {
+  let numerator = (n_rgb - vec3<f32>(1.0)) * (n_rgb - vec3<f32>(1.0)) + k_rgb * k_rgb;
+  let denominator = (n_rgb + vec3<f32>(1.0)) * (n_rgb + vec3<f32>(1.0)) + k_rgb * k_rgb;
+  return clamp(numerator / max(denominator, vec3<f32>(1.0e-8)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn fallback_optical_material(phase_id: f32) -> OpticalMaterial {
   var color = vec3<f32>(0.72, 0.9, 1.0);
   if (phase_id < 1.5) {
@@ -5936,7 +6195,7 @@ fn fallback_optical_material(phase_id: f32) -> OpticalMaterial {
   } else if (phase_id < 3.5) {
     color = vec3<f32>(0.86, 0.96, 1.0);
   }
-  return OpticalMaterial(color, 0.0, 0.65, 0.0, 0.42, 1.0, vec3<f32>(1.0), 1.0e20, 0.0, 0.0, 0.0, vec3<f32>(1.0), 0.0, 1.0, 0.0);
+  return OpticalMaterial(color, 0.0, 0.65, 0.0, 1.0, 1.0, vec3<f32>(1.0), 1.0e20, 0.0, 0.0, 0.0, vec3<f32>(1.0), 0.0, 0.0, 0.0, 1.0, 0.0);
 }
 
 fn find_optical_material(material_id: f32, phase_id: f32, optical_state_id: f32) -> OpticalMaterial {
@@ -5965,6 +6224,8 @@ fn find_optical_material(material_id: f32, phase_id: f32, optical_state_id: f32)
           max(row4.y, 0.0),
           max(row5.x, 0.0),
           spectral_tint,
+          row0.z,
+          row0.w,
           row5.z,
           row5.y,
           1.0
@@ -5988,18 +6249,20 @@ fn find_optical_material(material_id: f32, phase_id: f32, optical_state_id: f32)
       clamp(mix(row1.xyz, row1.xyz * spectral_tint, 0.35), vec3<f32>(0.0), vec3<f32>(1.0)),
       clamp(row1.w, 0.0, 1.0),
       clamp(row2.x, 0.04, 1.0),
-      clamp(row2.y, 0.0, 1.0),
-      clamp(row2.z, 0.0, 1.0),
-      max(row2.w, 1.0),
+      0.0,
+      1.0,
+      1.0,
       clamp(row3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
       max(row3.w, 0.00001),
       max(row4.x, 0.0),
       max(row4.y, 0.0),
       max(row5.x, 0.0),
       spectral_tint,
-      row5.z,
+      0.0,
+      0.0,
+      1.0,
       row5.y,
-      1.0
+      0.0
     );
   }
   return fallback_optical_material(phase_id);
@@ -6044,9 +6307,18 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let view_dir = resident_view_direction(in.world_position);
   let roughness = clamp(optical.roughness, 0.04, 1.0);
   let metalness = clamp(optical.metalness, 0.0, 1.0);
-  let ior = max(optical.ior, 1.0);
-  let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
-  let f0 = mix(vec3<f32>(dielectric_f0), base_color, metalness);
+  let spectral_index = spectral_complex_index_rgb(optical.spectral_offset, optical.spectral_count);
+  let refractive_authority = optical.found > 0.5
+    && optical.blocked < 0.5
+    && abs(optical.status - 2.0) < 0.5
+    && spectral_index.valid > 0.5
+    && refractive_draw_admitted();
+  let dielectric_f0 = select(
+    vec3<f32>(0.04),
+    complex_normal_fresnel_rgb(spectral_index.n_rgb, spectral_index.k_rgb),
+    refractive_authority
+  );
+  let f0 = mix(dielectric_f0, base_color, metalness);
   let ndotv = clamp(dot(normal, view_dir), 0.0, 1.0);
   // Sphere-lane PBR parity: the particle bridge renders through Three's
   // MeshPhysicalMaterial (GGX microfacet BRDF, energy-conserving Lambert)
@@ -6055,8 +6327,43 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // 0xbfe9ff 0.5 from (-6,3,-4) - with a RoomEnvironment IBL. This shader
   // mirrors that: same lights, GGX + Smith + Schlick, split-sum environment
   // approximation, then the same ACESFilmic(exposure 1.08) tone pipeline.
+  let backface = resident_refractive_backface(in);
+  let refraction_max_path_m = resident_refraction_max_path_m();
+  let refracted_path_r = refracted_path_to_back_plane(
+    in.world_position,
+    backface.world_position,
+    backface.valid,
+    refract(-view_dir, normal, 1.0 / spectral_index.n_rgb.r),
+    camera_data.view_projection,
+    refraction_max_path_m
+  );
+  let refracted_path_g = refracted_path_to_back_plane(
+    in.world_position,
+    backface.world_position,
+    backface.valid,
+    refract(-view_dir, normal, 1.0 / spectral_index.n_rgb.g),
+    camera_data.view_projection,
+    refraction_max_path_m
+  );
+  let refracted_path_b = refracted_path_to_back_plane(
+    in.world_position,
+    backface.world_position,
+    backface.valid,
+    refract(-view_dir, normal, 1.0 / spectral_index.n_rgb.b),
+    camera_data.view_projection,
+    refraction_max_path_m
+  );
+  let scene_color_available = textureDimensions(scene_color_copy, 0).x > 1u;
+  let refracted_geometry_valid = refracted_path_r.valid > 0.5
+    && refracted_path_g.valid > 0.5
+    && refracted_path_b.valid > 0.5;
   let is_vapor = round(in.phase_id) == 3.0;
-  let transmissive_surface = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
+  let transmissive_surface = optical.transmission > 0.01
+    && metalness < 0.1
+    && !is_vapor
+    && refractive_authority
+    && refracted_geometry_valid
+    && scene_color_available;
   // Three's MeshPhysicalMaterial transmission model: transmitted light
   // REPLACES diffuse reflection (energy conservation) - a clear medium has
   // almost no diffuse term. Adding full diffuse on top of transmission was
@@ -6126,78 +6433,46 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // attenuation distance, weighted by (1 - Fresnel) x transmission. The old
   // path drew water as a ghost alpha film (alpha = 1 - 0.72 x transmission).
   if (transmissive_surface) {
-    let fresnel_w = clamp(dot(f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndotv, 5.0), vec3<f32>(0.333)), 0.0, 1.0);
-    let attenuation_sigma = -log(clamp(optical.attenuation_linear, vec3<f32>(1.0e-4), vec3<f32>(1.0)))
-      / max(optical.attenuation_distance_m, 1.0e-3);
-    let path_m = clamp(optical.attenuation_distance_m, 0.02, 2.0);
-    let transmitted_tint = exp(-attenuation_sigma * path_m);
-    var transmitted = vec3<f32>(0.0);
-    let scene_dims = textureDimensions(scene_color_copy, 0);
-    if (scene_dims.x > 1u) {
-      // Screen-space refraction: bend the view ray at the surface by the
-      // material IOR and sample the post-opaque scene copy at the deflected
-      // screen position. The offset scales with the transmission path length
-      // (thicker medium bends the image more); roughness widens the sample
-      // footprint (frosted glass) with a 5-tap blur.
-      let viewport = vec2<f32>(f32(scene_dims.x), f32(scene_dims.y));
-      let screen_uv = in.position.xy / viewport;
-      let refr_dir = refract(-view_dir, normal, 1.0 / ior);
-      let deviation = refr_dir + view_dir;
-      let uv_offset = vec2<f32>(deviation.x, -deviation.y) * path_m * 0.35;
-      let uv = clamp(
-        screen_uv + clamp(uv_offset, vec2<f32>(-0.15), vec2<f32>(0.15)),
-        vec2<f32>(0.001),
-        vec2<f32>(0.999)
-      );
-      let blur_px = roughness * 14.0;
-      let blur_uv = vec2<f32>(blur_px) / viewport;
-      var refracted = textureSampleLevel(scene_color_copy, scene_color_sampler, uv, 0.0).rgb;
-      refracted = refracted
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(blur_uv.x, blur_uv.y), 0.0).rgb
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(-blur_uv.x, blur_uv.y), 0.0).rgb
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(blur_uv.x, -blur_uv.y), 0.0).rgb
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(-blur_uv.x, -blur_uv.y), 0.0).rgb;
-      refracted = refracted * 0.2;
-      // The canvas copy is display-encoded; shading runs in linear light.
-      let refracted_linear = pow(clamp(refracted, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
-      transmitted = refracted_linear * transmitted_tint;
-    } else {
-      // Analytic fallback (opaque pass, legacy lane, non-native bridges).
-      var transmitted_env = mix(vec3<f32>(0.10, 0.13, 0.16), vec3<f32>(0.35, 0.42, 0.48),
-        clamp(-normal.y * 0.5 + 0.5, 0.0, 1.0));
-      if (textureDimensions(env_map, 0).x > 1u) {
-        // Refraction miss-case: with no scene copy bound, the transmitted
-        // light comes from the environment along the refracted ray (total
-        // internal reflection falls back to the reflected ray).
-        var refr_env_dir = refract(-view_dir, normal, 1.0 / ior);
-        if (dot(refr_env_dir, refr_env_dir) <= 1.0e-8) {
-          refr_env_dir = reflect(-view_dir, normal);
-        }
-        transmitted_env = env_latlong_sample(refr_env_dir, roughness);
-      }
-      transmitted = transmitted_env * transmitted_tint * base_color;
-    }
-    lit = lit + (1.0 - fresnel_w) * clamp(optical.transmission, 0.0, 1.0) * transmitted;
+    let fresnel_rgb = clamp(
+      f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndotv, 5.0),
+      vec3<f32>(0.0),
+      vec3<f32>(1.0)
+    );
+    let wavelength_m_rgb = vec3<f32>(630.0e-9, 530.0e-9, 480.0e-9);
+    let path_m_rgb = vec3<f32>(
+      refracted_path_r.path_m,
+      refracted_path_g.path_m,
+      refracted_path_b.path_m
+    );
+    let transmitted_tint = refraction_beer_lambert_from_extinction_rgb(
+      spectral_index.k_rgb,
+      wavelength_m_rgb,
+      path_m_rgb
+    );
+    let refracted = vec3<f32>(
+      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_r.exit_uv, 0.0).r,
+      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_g.exit_uv, 0.0).g,
+      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_b.exit_uv, 0.0).b
+    );
+    // The canvas copy is display-encoded; shading runs in linear light.
+    let refracted_linear = pow(clamp(refracted, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
+    let transmitted = refracted_linear * transmitted_tint;
+    lit = lit + (vec3<f32>(1.0) - fresnel_rgb)
+      * clamp(optical.transmission, 0.0, 1.0)
+      * transmitted;
   }
   // Three tone pipeline: exposure, ACESFilmic, then display encode below.
   lit = lit * 1.08;
   let aces_a = lit * (2.51 * lit + vec3<f32>(0.03));
   let aces_b = lit * (2.43 * lit + vec3<f32>(0.59)) + vec3<f32>(0.14);
   lit = clamp(aces_a / aces_b, vec3<f32>(0.0), vec3<f32>(1.0));
-  // No artistic alpha anywhere (user directive): compositing weights are
-  // physically derived only. Transmissive dielectrics are fully opaque -
-  // their transparency lives entirely in the transmitted-light term above
-  // (Three's MeshPhysicalMaterial transmission model; refracted-scene
-  // sampling is the recorded follow-up). Participating media (vapor) use
-  // Beer-Lambert coverage 1 - exp(-tau) from the derived optical depth -
-  // that IS the PBR transparency of a volume, not a tuned opacity.
-  let optical_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);
-  let base_alpha = select(clamp(optical.opacity, 0.0, 1.0), optical_alpha, is_vapor);
-  let alpha = select(base_alpha, 1.0, transmissive_surface);
+  // Production surfaces are alpha-one. Dielectric transmission is represented
+  // only by the PBR transmitted-light term above; participating media require
+  // a separate volume integrator and never enter the alpha surface route.
   // The canvas format is non-sRGB (getPreferredCanvasFormat), so linear-light
   // shading must be display-encoded here or everything reads ~2x too dark.
   let display_lit = pow(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
-  return vec4<f32>(display_lit * alpha, alpha);
+  return vec4<f32>(display_lit, 1.0);
 }
 
 @fragment
@@ -6205,20 +6480,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   return resident_surface_color(in);
 }
 
-@fragment
-fn fs_oit_main(in: VertexOut) -> OitFragmentOut {
-  let color = resident_surface_color(in);
-  let alpha = clamp(color.a, 0.0, 1.0);
-  let weight = clamp(alpha * 8.0 + 0.01, 0.01, 8.0);
-  var out: OitFragmentOut;
-  out.accum = vec4<f32>(color.rgb * weight, alpha * weight);
-  out.revealage = vec4<f32>(alpha, 0.0, 0.0, alpha);
-  return out;
-}
 `;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH =
-  16 * Float32Array.BYTES_PER_ELEMENT + 192;
+  16 * Float32Array.BYTES_PER_ELEMENT + 192 + 16 * Float32Array.BYTES_PER_ELEMENT;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
@@ -6276,6 +6541,7 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   camera_position_y_m: f32,
   camera_position_z_m: f32,
   emissive_temperature_k: f32,
+  inverse_view_projection: mat4x4<f32>,
 };`
     )
     .replace(
@@ -6296,6 +6562,61 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
 }`
     )
     .replace(
+      `fn refractive_draw_admitted() -> bool {
+  return true;
+}`,
+      `fn refractive_draw_admitted() -> bool {
+  return abs(camera_data.transparency_class_id - 2.0) < 0.5;
+}`
+    )
+    .replace(
+      `fn resident_refractive_backface(in: VertexOut) -> RefractiveBackfaceGeometry {
+  return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+}`,
+      `fn resident_refractive_backface(in: VertexOut) -> RefractiveBackfaceGeometry {
+  let dimensions = textureDimensions(refractive_back_depth);
+  let surface_pixel = refraction_surface_pixel(in.position.xy, dimensions);
+  if (!(surface_pixel.valid > 0.5)) {
+    return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+  }
+  let back_depth = textureLoad(refractive_back_depth, surface_pixel.pixel, 0);
+  let back_point = refraction_unproject_uv_depth(
+    surface_pixel.uv,
+    back_depth,
+    camera_data.inverse_view_projection
+  );
+  if (!(back_point.valid > 0.5)) {
+    return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+  }
+  let back_world = back_point.world_position;
+  return RefractiveBackfaceGeometry(
+    back_world,
+    refraction_rear_surface_admitted(
+      in.position.z,
+      back_depth,
+      in.world_position,
+      back_world,
+      in.normal,
+      resident_view_direction(in.world_position),
+      resident_refraction_max_path_m()
+    )
+  );
+}`
+    )
+    .replace(
+      `fn resident_refraction_max_path_m() -> f32 {
+  return 0.0;
+}`,
+      `fn resident_refraction_max_path_m() -> f32 {
+  let radius_m = camera_data.bounds_radius_m;
+  return select(
+    0.0,
+    2.0 * radius_m,
+    radius_m == radius_m && abs(radius_m) < 1.0e20 && radius_m > 1.0e-6
+  );
+}`
+    )
+    .replace(
       `fn resident_surface_emissive(emissive_temperature_k: f32) -> vec3<f32> {
   return vec3<f32>(0.0);
 }`,
@@ -6309,7 +6630,7 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
     .replace(
       '@group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;',
       `@group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;
-@group(0) @binding(4) var<storage, read> render_field_scalars: array<f32>;`
+@group(0) @binding(4) var<storage, read> compact_packed_normals: array<u32>;`
     )
     .replace(
       /@vertex\nfn vs_main\(@builtin\(vertex_index\) vertex_index: u32\) -> VertexOut \{[\s\S]*?\n\}\n\nfn resident_surface_color/,
@@ -6365,90 +6686,31 @@ fn compact_normal(vertex_index: u32) -> vec3<f32> {
   return normalize(n);
 }
 
-fn field_scalar_at(ix: i32, iy: i32, iz: i32) -> f32 {
-  let cx = clamp(ix, 0, i32(camera_data.field_dim_x) - 1);
-  let cy = clamp(iy, 0, i32(camera_data.field_dim_y) - 1);
-  let cz = clamp(iz, 0, i32(camera_data.field_dim_z) - 1);
-  let index = camera_data.field_offset
-    + u32(cx) * camera_data.field_stride_x
-    + u32(cy) * camera_data.field_stride_y
-    + u32(cz) * camera_data.field_stride_z;
-  return render_field_scalars[index];
+fn octahedral_sign_not_zero(v: vec2<f32>) -> vec2<f32> {
+  return select(vec2<f32>(-1.0), vec2<f32>(1.0), v >= vec2<f32>(0.0));
 }
 
-fn field_sample(p: vec3<f32>) -> f32 {
-  let base = floor(p);
-  let f = p - base;
-  let ix = i32(base.x);
-  let iy = i32(base.y);
-  let iz = i32(base.z);
-  let c00 = mix(field_scalar_at(ix, iy, iz), field_scalar_at(ix + 1, iy, iz), f.x);
-  let c10 = mix(field_scalar_at(ix, iy + 1, iz), field_scalar_at(ix + 1, iy + 1, iz), f.x);
-  let c01 = mix(field_scalar_at(ix, iy, iz + 1), field_scalar_at(ix + 1, iy, iz + 1), f.x);
-  let c11 = mix(field_scalar_at(ix, iy + 1, iz + 1), field_scalar_at(ix + 1, iy + 1, iz + 1), f.x);
-  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
-}
-
-// Smooth outward normal from the density gradient (density falls outward,
-// so the outward normal is -gradient). Grid-space central differences over
-// the retained render field; returns vec3(0) where the gradient degenerates
-// so the caller can keep the flat triangle normal.
-fn field_gradient_normal(grid_position: vec3<f32>) -> vec3<f32> {
-  let h = 1.0;
-  let gx = field_sample(grid_position + vec3<f32>(h, 0.0, 0.0))
-    - field_sample(grid_position - vec3<f32>(h, 0.0, 0.0));
-  let gy = field_sample(grid_position + vec3<f32>(0.0, h, 0.0))
-    - field_sample(grid_position - vec3<f32>(0.0, h, 0.0));
-  let gz = field_sample(grid_position + vec3<f32>(0.0, 0.0, h))
-    - field_sample(grid_position - vec3<f32>(0.0, 0.0, h));
-  let g = vec3<f32>(gx, gy, gz);
-  if (dot(g, g) <= 0.000000000001) {
+fn compact_packed_normal(vertex_index: u32) -> vec3<f32> {
+  if (vertex_index >= arrayLength(&compact_packed_normals)) {
     return vec3<f32>(0.0);
   }
-  return normalize(-g);
-}
-
-// Temperature lane of the render-field cell row (lane offset +4; see
-// SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT): density-weighted mean particle
-// temperature, trilinearly sampled at the vertex and interpolated across the
-// triangle so emission varies spatially instead of per surface.
-fn field_temperature_at(ix: i32, iy: i32, iz: i32) -> f32 {
-  let cx = clamp(ix, 0, i32(camera_data.field_dim_x) - 1);
-  let cy = clamp(iy, 0, i32(camera_data.field_dim_y) - 1);
-  let cz = clamp(iz, 0, i32(camera_data.field_dim_z) - 1);
-  let index = camera_data.field_offset
-    + u32(cx) * camera_data.field_stride_x
-    + u32(cy) * camera_data.field_stride_y
-    + u32(cz) * camera_data.field_stride_z;
-  return render_field_scalars[index + 4u];
-}
-
-fn field_temperature_sample(p: vec3<f32>) -> f32 {
-  // Density-weighted trilinear: temperature is only defined inside matter, so
-  // plain trilinear dilutes surface vertices toward the 0K of neighbouring
-  // empty cells and stamps blocky cold patches on the isosurface. Weighting
-  // each corner by trilinear_weight x density interpolates over occupied
-  // cells only.
-  let base = floor(p);
-  let f = p - base;
-  let ix = i32(base.x);
-  let iy = i32(base.y);
-  let iz = i32(base.z);
-  var temperature_sum = 0.0;
-  var weight_sum = 0.0;
-  for (var corner = 0u; corner < 8u; corner = corner + 1u) {
-    let dx = i32(corner & 1u);
-    let dy = i32((corner >> 1u) & 1u);
-    let dz = i32((corner >> 2u) & 1u);
-    let wx = select(1.0 - f.x, f.x, dx == 1);
-    let wy = select(1.0 - f.y, f.y, dy == 1);
-    let wz = select(1.0 - f.z, f.z, dz == 1);
-    let density = max(field_scalar_at(ix + dx, iy + dy, iz + dz), 0.0);
-    let weight = wx * wy * wz * density;
-    temperature_sum = temperature_sum + field_temperature_at(ix + dx, iy + dy, iz + dz) * weight;
-    weight_sum = weight_sum + weight;
+  let packed = compact_packed_normals[vertex_index];
+  if (packed == 0x80008000u) {
+    return vec3<f32>(0.0);
   }
-  return select(0.0, temperature_sum / weight_sum, weight_sum > 1.0e-6);
+  let oct = unpack2x16snorm(packed);
+  var normal = vec3<f32>(oct, 1.0 - abs(oct.x) - abs(oct.y));
+  if (normal.z < 0.0) {
+    normal = vec3<f32>(
+      (vec2<f32>(1.0) - abs(normal.yx)) * octahedral_sign_not_zero(normal.xy),
+      normal.z
+    );
+  }
+  let length_squared = dot(normal, normal);
+  if (length_squared <= 0.000000000001) {
+    return vec3<f32>(0.0);
+  }
+  return normal / sqrt(length_squared);
 }
 
 @vertex
@@ -6463,20 +6725,15 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   out.position = clip;
   out.world_position = position_m;
   var normal = compact_normal(vertex_index);
-  if (camera_data.field_gradient_enabled > 0.5) {
-    let smooth_normal = field_gradient_normal(compact_position(vertex_index));
-    if (dot(smooth_normal, smooth_normal) > 0.25) {
-      normal = smooth_normal;
-    }
+  let smooth_normal = compact_packed_normal(vertex_index);
+  if (dot(smooth_normal, smooth_normal) > 0.25) {
+    normal = smooth_normal;
   }
   out.normal = normal;
   out.material_id = camera_data.material_id;
   out.phase_id = camera_data.phase_id;
   out.optical_state_id = camera_data.optical_state_id;
   out.emissive_temperature_k = 0.0;
-  if (camera_data.field_gradient_enabled > 0.5) {
-    out.emissive_temperature_k = field_temperature_sample(compact_position(vertex_index));
-  }
   return out;
 }
 
@@ -6610,8 +6867,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   if (r2 > 1.0) {
     discard;
   }
-  let edge = 1.0 - smoothstep(0.72, 1.0, r2);
-  return vec4<f32>(in.color.rgb * in.color.a * edge, in.color.a * edge);
+  let sphere_normal = normalize(vec3<f32>(
+    in.quad_uv,
+    sqrt(max(1.0 - r2, 0.0))
+  ));
+  let light = 0.32 + 0.68 * max(
+    dot(sphere_normal, normalize(vec3<f32>(0.35, 0.55, 1.0))),
+    0.0
+  );
+  return vec4<f32>(in.color.rgb * light, 1.0);
 }
 `;
 
@@ -6702,7 +6966,7 @@ fn vs_main(
     batch_data.native_grid_spacing_and_color.y,
     batch_data.native_grid_spacing_and_color.z,
     batch_data.native_grid_spacing_and_color.w,
-    0.82
+    1.0
   );
   return out;
 }
@@ -6713,8 +6977,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   if (r2 > 1.0) {
     discard;
   }
-  let edge = 1.0 - smoothstep(0.72, 1.0, r2);
-  return vec4<f32>(in.color.rgb * in.color.a * edge, in.color.a * edge);
+  let sphere_normal = normalize(vec3<f32>(
+    in.quad_uv,
+    sqrt(max(1.0 - r2, 0.0))
+  ));
+  let light = 0.32 + 0.68 * max(
+    dot(sphere_normal, normalize(vec3<f32>(0.35, 0.55, 1.0))),
+    0.0
+  );
+  return vec4<f32>(in.color.rgb * light, 1.0);
 }
 `;
 
@@ -6736,6 +7007,8 @@ function normalizeResidentReadbackMode(value) {
 // padding must exceed that to fully contain the dome. Resolutions are raised to keep box detail
 // since the box now occupies only (1−2·pad) of each field axis.
 const FIELD_PADDING = 0.22;
+const SPH_SPARSE_RENDER_FIELD_BRICK_SIZE = 8;
+const SPH_SPARSE_RENDER_FIELD_TOTAL_BYTE_BUDGET_DEFAULT = 512 * 1024 * 1024;
 // 96 (from 64) after the extraction vertex-rows budget landed: vertex
 // allocation no longer scales with res³ (extension clamp), so the ceiling is
 // bound by field-buffer memory (96³·16B·4 surfaces ≈ 57MB) and field-kernel
@@ -6773,6 +7046,271 @@ export function nativeMarchingCubesVertexRowsBudgetPerSurface(surfaceCount, {
   );
   const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   return Math.max(3, Math.floor(resolvedBudget / resolvedSurfaceCount / bytesPerVertexRow));
+}
+
+export function nativeMarchingCubesDescriptorSignature(descriptor = {}) {
+  const dims = Array.isArray(descriptor.dims) ? descriptor.dims : [];
+  const strides = Array.isArray(descriptor.scalarStrides) ? descriptor.scalarStrides : [];
+  return [
+    `surface=${descriptor.surfaceIndex ?? 0}`,
+    `key=${descriptor.surfaceKey ?? ''}`,
+    `dims=${dims.join('x')}`,
+    `strides=${strides.join('x')}`,
+    `offset=${descriptor.scalarOffset ?? 0}`,
+    `bytes=${descriptor.scalarBufferByteLength ?? 0}`,
+    `brick=${descriptor.brickSize ?? 0}`,
+    `directory=${descriptor.directoryOffset ?? 0}:${descriptor.directoryCount ?? 0}`,
+    `directorySentinel=${descriptor.directorySentinel ?? 0xffffffff}`,
+    `active=${descriptor.activeBrickCount ?? 0}:${descriptor.activeBrickCapacity ?? 0}`,
+    `activeRow=${descriptor.activeBrickRowStrideU32 ?? 0}:${descriptor.activeBrickAtlasCellOffsetLane ?? 0}`,
+    `atlas=${descriptor.atlasCellCount ?? 0}:${descriptor.atlasCellCapacity ?? 0}`,
+    `atlasRow=${descriptor.atlasCellStrideFloats ?? 0}:${descriptor.atlasScalarLane ?? 0}`,
+    `candidates=${descriptor.candidateVoxelOffset ?? 0}:${descriptor.candidateVoxelOffsetBytes ?? 0}:${descriptor.candidateVoxelCount ?? 0}:${descriptor.candidateVoxelCapacity ?? 0}`,
+    `candidateIndirect=${descriptor.candidateDispatchIndirectOffsetBytes ?? -1}`,
+    `generation=${descriptor.generationId ?? 0}`,
+    `background=${descriptor.backgroundValue ?? 0}`,
+    `normalSign=${descriptor.normalSign ?? 1}`,
+    `type=${descriptor.scalarType || 'f32'}`,
+    `sourceType=${descriptor.sourceType || 'scalar-buffer'}`,
+    `source=${descriptor.source || 'ulg-render-field-density-storage-buffer'}`
+  ].join('|');
+}
+
+export function nativeMarchingCubesDescriptorResourceBuffers(descriptor = {}) {
+  return descriptor.sourceType === 'sparse-brick-atlas'
+    ? [
+        descriptor.directoryBuffer,
+        descriptor.activeBrickRowsBuffer,
+        descriptor.atlasBuffer,
+        descriptor.candidateVoxelIdsBuffer,
+        ...(descriptor.candidateDispatchIndirectBuffer
+          ? [descriptor.candidateDispatchIndirectBuffer]
+          : [])
+      ]
+    : [descriptor.scalarBuffer];
+}
+
+export async function settleNativeMarchingCubesExtractionJobs(jobs = [], extractJob) {
+  if (typeof extractJob !== 'function') {
+    throw new TypeError('settleNativeMarchingCubesExtractionJobs requires an extractJob function');
+  }
+  const orderedJobs = Array.from(jobs);
+  const settlements = await Promise.allSettled(
+    orderedJobs.map((job, index) => extractJob(job, index))
+  );
+  return orderedJobs.map((job, index) => ({
+    job,
+    index,
+    settlement: settlements[index]
+  }));
+}
+
+function nativeMarchingCubesSurfaceResultFromExtraction(extraction) {
+  return extraction?.extensionExecution?.extensionExecution?.result
+    ?? extraction?.extensionExecution?.result
+    ?? extraction?.result
+    ?? null;
+}
+
+function destroyUnsubmittedNativeMarchingCubesTemporaries(surfaceResults = []) {
+  const destroyed = new Set();
+  for (const result of surfaceResults) {
+    for (const resource of result?.encodingRetirement?.temporaryResources || []) {
+      if (!resource || destroyed.has(resource)) continue;
+      destroyed.add(resource);
+      try {
+        resource.destroy?.();
+      } catch {
+        // Submission already failed. Continue abandoning every unsubmitted
+        // extraction temporary before the caller releases output resources.
+      }
+    }
+  }
+  return destroyed.size;
+}
+
+function nativeMarchingCubesBatchError(message, {
+  status,
+  settlements,
+  errors = [],
+  batch = null
+} = {}) {
+  const error = errors.length > 0
+    ? new AggregateError(errors, message)
+    : new Error(message);
+  error.status = status;
+  error.nativeMarchingCubesSettlements = settlements;
+  error.nativeMarchingCubesBatch = batch;
+  return error;
+}
+
+export async function extractNativeMarchingCubesSurfaceBatch({
+  device,
+  jobs = [],
+  extractJob,
+  measureGpuTimestamps = false,
+  label = 'ulg-native-marching-cubes-multi-surface-extraction'
+} = {}) {
+  if (!device?.createCommandEncoder || !device?.queue?.submit) {
+    throw new TypeError(
+      'extractNativeMarchingCubesSurfaceBatch requires a WebGPU-like device and queue'
+    );
+  }
+  if (typeof extractJob !== 'function') {
+    throw new TypeError('extractNativeMarchingCubesSurfaceBatch requires an extractJob function');
+  }
+  const orderedJobs = Array.from(jobs);
+  if (measureGpuTimestamps) {
+    // The dependency's attributed path owns per-surface query allocation,
+    // resolve, mapping, and submission. Keep it isolated instead of sharing
+    // one encoder and making span ownership ambiguous.
+    const settlements = [];
+    for (let index = 0; index < orderedJobs.length; index += 1) {
+      try {
+        const value = await extractJob(orderedJobs[index], index, {
+          commandEncoder: null,
+          measureGpuTimestamps: true,
+          sharedCommandEncoder: false
+        });
+        settlements.push({
+          job: orderedJobs[index],
+          index,
+          settlement: { status: 'fulfilled', value }
+        });
+      } catch (reason) {
+        settlements.push({
+          job: orderedJobs[index],
+          index,
+          settlement: { status: 'rejected', reason }
+        });
+      }
+    }
+    return {
+      schema: 'peercompute.ulg.sph-native-marching-cubes-extraction-batch.v0',
+      status: 'native-marching-cubes-profiled-per-surface-submissions-complete',
+      mode: 'timestamp-attributed-per-surface-submissions',
+      jobCount: orderedJobs.length,
+      sharedCommandEncoder: false,
+      callerSubmitCount: 0,
+      internalSubmitCount: null,
+      surfaceReadback: false,
+      cpuSurfaceReadback: false,
+      pointFallback: false,
+      temporaryResourceCount: 0,
+      retiredTemporaryResourceCount: 0,
+      settlements
+    };
+  }
+
+  const commandEncoder = device.createCommandEncoder({ label });
+  const settlements = await settleNativeMarchingCubesExtractionJobs(
+    orderedJobs,
+    (job, index) => extractJob(job, index, {
+      commandEncoder,
+      measureGpuTimestamps: false,
+      sharedCommandEncoder: true
+    })
+  );
+  const surfaceResults = settlements
+    .filter(({ settlement }) => settlement.status === 'fulfilled')
+    .map(({ settlement }) => nativeMarchingCubesSurfaceResultFromExtraction(settlement.value))
+    .filter(Boolean);
+  const contractErrors = [];
+  let temporaryResourceCount = 0;
+  for (const result of surfaceResults) {
+    temporaryResourceCount += Math.max(0, Math.round(Number(result.temporaryResourceCount) || 0));
+    if (result.commandEncodingMode !== 'external-command-encoder') {
+      contractErrors.push(new Error(
+        `batched marching-cubes surface used ${result.commandEncodingMode || 'unknown'} encoding`
+      ));
+    }
+    if (Number(result.internalSubmitCount) !== 0) {
+      contractErrors.push(new Error(
+        `batched marching-cubes surface reported ${result.internalSubmitCount} internal submits`
+      ));
+    }
+    if (result.readbackMode !== 'gpu-conservative-no-readback') {
+      contractErrors.push(new Error(
+        `batched marching-cubes surface used ${result.readbackMode || 'unknown'} readback mode`
+      ));
+    }
+    if (typeof result.retireTemporaryResourcesAfterSubmit !== 'function') {
+      contractErrors.push(new Error(
+        'batched marching-cubes surface did not expose post-submit temporary retirement'
+      ));
+    }
+  }
+
+  const submitStartedAtMs = nowMs();
+  try {
+    device.queue.submit([commandEncoder.finish()]);
+  } catch (submitError) {
+    const abandonedTemporaryResourceCount =
+      destroyUnsubmittedNativeMarchingCubesTemporaries(surfaceResults);
+    throw nativeMarchingCubesBatchError(
+      'native marching-cubes batch submission failed',
+      {
+        status: 'native-marching-cubes-batch-submit-failed',
+        settlements,
+        errors: [submitError],
+        batch: {
+          abandonedTemporaryResourceCount,
+          callerSubmitCount: 0
+        }
+      }
+    );
+  }
+  const queueSubmitMs = Math.max(0, nowMs() - submitStartedAtMs);
+  const retirementReports = [];
+  const retirementErrors = [];
+  let retiredTemporaryResourceCount = 0;
+  for (const result of surfaceResults) {
+    try {
+      const report = result.retireTemporaryResourcesAfterSubmit?.();
+      retirementReports.push(report ?? null);
+      retiredTemporaryResourceCount += Math.max(
+        0,
+        Math.round(Number(report?.destroyedResourceCount) || 0)
+      );
+    } catch (error) {
+      retirementErrors.push(error);
+    }
+  }
+  const batch = {
+    schema: 'peercompute.ulg.sph-native-marching-cubes-extraction-batch.v0',
+    status: contractErrors.length === 0 && retirementErrors.length === 0
+      ? 'native-marching-cubes-multi-surface-batch-submitted'
+      : 'native-marching-cubes-multi-surface-batch-contract-failed',
+    mode: 'external-command-encoder-one-submit',
+    jobCount: orderedJobs.length,
+    encodedSurfaceCount: surfaceResults.length,
+    sharedCommandEncoder: true,
+    callerSubmitCount: 1,
+    internalSubmitCount: surfaceResults.reduce(
+      (sum, result) => sum + Math.max(0, Math.round(Number(result.internalSubmitCount) || 0)),
+      0
+    ),
+    queueSubmitMs,
+    surfaceReadback: false,
+    cpuSurfaceReadback: false,
+    pointFallback: false,
+    temporaryResourceCount,
+    retiredTemporaryResourceCount,
+    retirementReports,
+    settlements
+  };
+  if (contractErrors.length > 0 || retirementErrors.length > 0) {
+    throw nativeMarchingCubesBatchError(
+      'native marching-cubes batch violated its GPU-resident encoding contract',
+      {
+        status: 'native-marching-cubes-batch-contract-failed',
+        settlements,
+        errors: [...contractErrors, ...retirementErrors],
+        batch
+      }
+    );
+  }
+  return batch;
 }
 
 export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surfaceCount, {
@@ -6891,9 +7429,13 @@ function normalizeRenderDomainId(value) {
 function normalizeRenderDomainCounts(counts = null) {
   const base = Math.max(0, Math.round(Number(counts?.base) || 0));
   const drop = Math.max(0, Math.round(Number(counts?.drop) || 0));
-  const total = Math.max(0, Math.round(Number(counts?.total) || (base + drop)));
+  const declaredTotal = Math.max(0, Math.round(Number(counts?.total) || 0));
+  const spareProductSlots = Math.max(0, Math.round(
+    Number(counts?.spareProductSlots) || Math.max(0, declaredTotal - base - drop)
+  ));
+  const total = declaredTotal || (base + drop + spareProductSlots);
   if (base <= 0 && drop <= 0) return null;
-  return { base, drop, total };
+  return { base, drop, spareProductSlots, total };
 }
 
 function cohortRangesFromRenderDomainCounts(counts = null) {
@@ -6918,7 +7460,7 @@ function cohortRangesFromRenderDomainCounts(counts = null) {
   };
 }
 
-function renderDomainPositionBoundsFromPositions(positionsM, counts = null) {
+export function renderDomainPositionBoundsFromPositions(positionsM, counts = null) {
   const normalized = normalizeRenderDomainCounts(counts);
   const particleCount = Math.floor((positionsM?.length || 0) / 3);
   if (!normalized || particleCount <= 0) return null;
@@ -6962,7 +7504,7 @@ function renderDomainPositionBoundsFromPositions(positionsM, counts = null) {
   };
   const base = rangeBounds('base', 0, normalized.base);
   const drop = rangeBounds('drop', normalized.base, normalized.base + normalized.drop);
-  const expectedTotal = normalized.base + normalized.drop;
+  const expectedTotal = normalized.base + normalized.drop + normalized.spareProductSlots;
   return {
     schema: 'peercompute.ulg.sph-render-domain-position-bounds.v0',
     status: expectedTotal === particleCount && normalized.total === particleCount
@@ -7159,11 +7701,69 @@ function opticalRecordValue(table, recordIndex, fieldName, fallback = 0) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function opticalParamsFromGpuTableRecord(table, descriptor) {
+function opticalSpectralSampleValue(table, sampleIndex, fieldName, fallback = null) {
+  const layout = table?.spectralSampleLayout || OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT;
+  const fieldIndex = opticalRecordIndex(layout, fieldName);
+  const stride = table?.spectralSampleStrideFloats || layout.length;
+  const offset = sampleIndex * stride + fieldIndex;
+  const value = fieldIndex >= 0 ? table?.spectralSamples?.[offset] : undefined;
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function opticalSpectralSamplesFromGpuTableRecord(table, recordIndex) {
+  if (!(table?.spectralSamples instanceof Float32Array)) return [];
+  const spectralOffset = Math.max(0, Math.round(
+    opticalRecordValue(table, recordIndex, 'spectralOffset', 0)
+  ));
+  const requestedCount = Math.max(0, Math.round(
+    opticalRecordValue(table, recordIndex, 'spectralCount', 0)
+  ));
+  const availableCount = Math.max(0, Math.floor(
+    table.spectralSamples.length
+      / Math.max(1, table?.spectralSampleStrideFloats || OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT.length)
+  ));
+  const spectralCount = Math.min(requestedCount, Math.max(0, availableCount - spectralOffset));
+  return Array.from({ length: spectralCount }, (_, index) => {
+    const sampleIndex = spectralOffset + index;
+    return {
+      wavelengthNm: opticalSpectralSampleValue(table, sampleIndex, 'wavelengthNm'),
+      reflectance: opticalSpectralSampleValue(table, sampleIndex, 'reflectance'),
+      transmittance: opticalSpectralSampleValue(table, sampleIndex, 'transmittance'),
+      absorptionCoefficientPerM: opticalSpectralSampleValue(
+        table,
+        sampleIndex,
+        'absorptionCoefficientPerM'
+      ),
+      scatteringCoefficientPerM: opticalSpectralSampleValue(
+        table,
+        sampleIndex,
+        'scatteringCoefficientPerM'
+      ),
+      n: opticalSpectralSampleValue(table, sampleIndex, 'n'),
+      k: opticalSpectralSampleValue(table, sampleIndex, 'k')
+    };
+  });
+}
+
+export function opticalParamsFromGpuTableRecord(table, descriptor) {
   if (!table?.schema || !(table.records instanceof Float32Array) || !Array.isArray(table.recordMetadata)) return null;
   const coverage = opticalCoverageKey(descriptor);
   const record = table.recordMetadata.find((candidate) => opticalCoverageKey(candidate) === coverage);
   if (!record || !Number.isFinite(record.recordIndex)) return null;
+  const packedStatus = Math.round(opticalRecordValue(table, record.recordIndex, 'status', 0));
+  const packedSpectralOffset = Math.max(0, Math.round(
+    opticalRecordValue(table, record.recordIndex, 'spectralOffset', 0)
+  ));
+  const packedSpectralCount = Math.max(0, Math.round(
+    opticalRecordValue(table, record.recordIndex, 'spectralCount', 0)
+  ));
+  const spectralSamples = opticalSpectralSamplesFromGpuTableRecord(table, record.recordIndex);
+  const metadataMatchesPackedSpectralRange = Number(record.spectralOffset) === packedSpectralOffset
+    && Number(record.spectralCount) === packedSpectralCount;
+  const refractiveAuthority = packedStatus === OPTICAL_GPU_RECORD_STATUS.refractiveAuthority
+    && record.refractiveAuthority === true
+    && metadataMatchesPackedSpectralRange
+    && spectralSamples.length === packedSpectralCount;
   return {
     source: 'optical-gpu-table-row',
     material: record.material,
@@ -7193,8 +7793,14 @@ function opticalParamsFromGpuTableRecord(table, descriptor) {
     vertexColorPolicyId: opticalRecordValue(table, record.recordIndex, 'vertexColorPolicyId', 1),
     opticalDepth: opticalRecordValue(table, record.recordIndex, 'opticalDepth', 0),
     blocked: opticalRecordValue(table, record.recordIndex, 'blocked', 0) > 0,
-    status: opticalRecordValue(table, record.recordIndex, 'status', 1),
-    provenance: record.provenance || null
+    status: packedStatus,
+    provenance: record.provenance || null,
+    refractiveAuthority,
+    refractiveStatus: refractiveAuthority
+      ? record.refractiveStatus
+      : 'blocked-optical-gpu-record-refractive-authority-mismatch',
+    refractiveProvenance: refractiveAuthority ? record.refractiveProvenance || null : null,
+    spectralSamples
   };
 }
 
@@ -7247,10 +7853,6 @@ export function surfaceObjectRenderOrder(baseOrder, surfaceKey = '', {
   depthWrite = true
 } = {}) {
   const base = Number.isFinite(baseOrder) ? baseOrder : 0;
-  const transparentLayer = renderLayer === 'vapor-surface'
-    || renderLayer === 'alpha-surface'
-    || depthWrite === false;
-  if (transparentLayer) return base;
   return stableSurfaceRenderOrder(base, surfaceKey);
 }
 
@@ -7370,36 +7972,44 @@ export function sphereEmissiveIntensityForTemperature(temperatureK) {
 }
 
 export function renderAlphaFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
-  const opacity = clamp(Number.isFinite(optics.opacity) ? optics.opacity : 1, 0, 1);
-  const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
-  const metalness = clamp(Number.isFinite(optics.metalness) ? optics.metalness : 0, 0, 1);
-  const isVapor = isVaporOpticalSurface(optics, descriptorOrRow);
-  if (transmission > 0.01 && metalness < 0.1 && !isVapor) {
-    return 1;
-  }
-  return opacity;
+  return 1;
+}
+
+export function hasAdmittedQuantumRefraction(optics = {}, descriptorOrRow = {}) {
+  if (isVaporOpticalSurface(optics, descriptorOrRow)) return false;
+  if (optics.refractiveAuthority !== true) return false;
+  const status = String(optics.refractiveStatus || '').toLowerCase();
+  if (!status || /blocked|pending|missing|unsupported|failed|rejected/.test(status)) return false;
+  const provenance = optics.refractiveProvenance;
+  if (!provenance || typeof provenance.source !== 'string' || provenance.source.length === 0) return false;
+  const samples = Array.isArray(optics.spectralSamples) ? optics.spectralSamples : [];
+  const validSamples = samples.filter((sample) => (
+    Number.isFinite(Number(sample?.wavelengthNm))
+    && Number(sample.wavelengthNm) > 0
+    && Number.isFinite(Number(sample?.n))
+    && Number(sample.n) >= 1
+    && Number.isFinite(Number(sample?.k))
+    && Number(sample.k) >= 0
+  ));
+  return validSamples.length >= 3
+    && new Set(validSamples.map((sample) => Number(sample.wavelengthNm))).size >= 3;
 }
 
 export function renderDepthWriteFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
-  const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
-  return alpha >= 0.999;
+  return true;
 }
 
 export function renderLayerFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
   const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
-  const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
-  const isVapor = isVaporOpticalSurface(optics, descriptorOrRow);
-  if (isVapor) return 'vapor-surface';
-  if (transmission > 0.01) return 'transmissive-surface';
-  if (alpha < 0.999) return 'alpha-surface';
+  if (transmission > 0.01 && hasAdmittedQuantumRefraction(optics, descriptorOrRow)) {
+    return 'refractive-surface';
+  }
   return 'opaque-surface';
 }
 
 export function renderOrderFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
   const layer = renderLayerFromOpticalResponse(optics, descriptorOrRow);
-  if (layer === 'vapor-surface') return SPH_PHASE_RENDER_ORDER.vaporSurface;
-  if (layer === 'transmissive-surface') return SPH_PHASE_RENDER_ORDER.transmissiveSurface;
-  if (layer === 'alpha-surface') return SPH_PHASE_RENDER_ORDER.alphaSurface;
+  if (layer === 'refractive-surface') return SPH_PHASE_RENDER_ORDER.transmissiveSurface;
   return SPH_PHASE_RENDER_ORDER.opaqueSurface;
 }
 
@@ -7413,9 +8023,7 @@ export function residentSurfaceDrawOrder(surfaces = [], {
       const transparencyClassId = Number.isFinite(Number(surface?.transparencyClassId))
         ? Number(surface.transparencyClassId)
         : 0;
-      const depthWriteFlag = Number.isFinite(Number(surface?.depthWriteFlag))
-        ? Number(surface.depthWriteFlag)
-        : (transparencyClassId > 0 ? 0 : 1);
+      const depthWriteFlag = 1;
       const renderOrder = Number.isFinite(Number(surface?.renderOrder))
         ? Number(surface.renderOrder)
         : (transparencyClassId * 1000 + surfaceIndex);
@@ -7446,7 +8054,11 @@ export function residentSurfaceDrawOrder(surfaces = [], {
 }
 
 export function residentSurfaceDrawPipelineKey(draw = {}) {
-  return Number(draw?.depthWriteFlag) > 0 ? 'opaque-depth-write' : 'transparent-depth-test';
+  return draw?.renderLayer === 'refractive-surface'
+    || draw?.renderLayer === 'transmissive-surface'
+    || Number(draw?.transparencyClassId) === 2
+    ? 'refractive-depth-write'
+    : 'opaque-depth-write';
 }
 
 function finiteNumberOrNull(value) {
@@ -7782,6 +8394,11 @@ export function applyResidentRenderSourceMetadata(target, metadata, {
     metadata.schroederRenderProxyBackendSelection?.cpuGeometryMaterializationPolicy ?? null;
   target.sourceResidentRetainedPrevious = Boolean(markRetainedPrevious);
   target.sourceResidentRetentionReason = retentionReason ?? null;
+  target.residentRenderSourceStaleAfterPublish = Boolean(markRetainedPrevious);
+  target.residentRenderSourceStaleReason = markRetainedPrevious
+    ? (retentionReason ?? 'previous resident render artifact retained')
+    : null;
+  target.residentRenderSourceStaleAgainst = markRetainedPrevious ? metadata : null;
   return target;
 }
 
@@ -7851,7 +8468,7 @@ function updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
   viewProjection = null,
   drawOrder = [],
   opaqueDraws = [],
-  transparentDraws = []
+  refractiveDraws = []
 } = {}) {
   if (!bridge) return null;
   const surfaces = Array.isArray(bridge.drawState?.surfaces) ? bridge.drawState.surfaces : [];
@@ -7873,7 +8490,8 @@ function updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
     ?? finiteNumberOrNull(resolveSphScenePixelRatio(bridgeWindow.devicePixelRatio ?? globalThis.devicePixelRatio));
   bridge.lastDrawOrderCount = Array.isArray(drawOrder) ? drawOrder.length : 0;
   bridge.lastOpaqueDrawCount = Array.isArray(opaqueDraws) ? opaqueDraws.length : 0;
-  bridge.lastTransparentDrawCount = Array.isArray(transparentDraws) ? transparentDraws.length : 0;
+  bridge.lastRefractiveDrawCount = Array.isArray(refractiveDraws) ? refractiveDraws.length : 0;
+  bridge.lastTransparentDrawCount = 0;
   bridge.primarySurfaceIndex = primarySurfaceIndex;
   bridge.primarySurfaceBoundsCenterM = projectedBounds?.boundsCenterM ?? null;
   bridge.primarySurfaceBoundsRadiusM = projectedBounds?.boundsRadiusM ?? null;
@@ -7922,11 +8540,65 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
   target.renderBridgeNativeSurfaceRetiredGenerationCount = Array.isArray(
     bridge.retiredSurfaceResourceOwners
   ) ? bridge.retiredSurfaceResourceOwners.length : 0;
+  target.renderBridgeRefractionTargetSetActive = Boolean(bridge.refractionTargetSet);
+  target.renderBridgeRefractionTargetGeneration = bridge.refractionTargetGeneration ?? null;
+  target.renderBridgeRefractionTargetWidth = bridge.refractionTargetSet?.width ?? 0;
+  target.renderBridgeRefractionTargetHeight = bridge.refractionTargetSet?.height ?? 0;
+  target.renderBridgeRefractionTargetLifecycleStatus =
+    bridge.refractionTargetLifecycleStatus ?? null;
+  target.renderBridgeRefractionTargetRetirementPendingCount =
+    bridge.refractionTargetRetirementPendingCount ?? 0;
+  target.renderBridgeRefractionTargetRetirementCount =
+    bridge.refractionTargetRetirementCount ?? 0;
   target.renderBridgeAdditionalSurfaceAttachStatus = bridge.additionalSurfaceAttachStatus ?? null;
   target.renderBridgeAdditionalSurfaceAttachReason = bridge.additionalSurfaceAttachReason ?? null;
   target.renderBridgeAdditionalSurfaceDrawCount = Array.isArray(
     bridge.drawState?.additionalSurfaceDraws
   ) ? bridge.drawState.additionalSurfaceDraws.length : 0;
+  target.renderBridgeCoherentSolidDrawEntriesStatus =
+    bridge.coherentSolidDrawEntriesStatus ?? null;
+  target.renderBridgeCoherentSolidDrawEntriesReason =
+    bridge.coherentSolidDrawEntriesReason ?? null;
+  target.renderBridgeCoherentSolidDrawEntryCount =
+    bridge.coherentSolidDrawEntryCount ?? 0;
+  target.renderBridgeCoherentSolidDrawEntriesPublicationGeneration =
+    bridge.coherentSolidDrawEntriesPublicationGeneration ?? null;
+  target.renderBridgeCoherentSolidDrawEntriesAdmissionId =
+    bridge.coherentSolidDrawEntriesAdmissionId ?? null;
+  target.renderBridgeCoherentSolidNativeExecutorStatus =
+    bridge.coherentSolidNativeExecutorStatus ?? null;
+  target.renderBridgeCoherentSolidNativeExecutorReady =
+    Boolean(bridge.coherentSolidNativeExecutorReady);
+  target.renderBridgeCoherentSolidNativeOpaqueDrawCount =
+    bridge.coherentSolidNativeOpaqueDrawCount ?? 0;
+  target.renderBridgeCoherentSolidNativeTransparentDrawCount =
+    bridge.coherentSolidNativeTransparentDrawCount ?? 0;
+  target.renderBridgeCoherentSolidDirectFrameStorageBinding =
+    Boolean(bridge.coherentSolidDirectFrameStorageBinding);
+  target.renderBridgeCoherentSolidPersistentRestMeshBinding =
+    Boolean(bridge.coherentSolidPersistentRestMeshBinding);
+  target.renderBridgeCoherentSolidCpuFrameTransformUploadPerformed =
+    Boolean(bridge.coherentSolidCpuFrameTransformUploadPerformed);
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileRequested =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileRequested);
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileSupported =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileSupported);
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileComplete =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileComplete);
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfilePartial =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfilePartial);
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileUnsupported =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileUnsupported);
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileReadbackInFlight =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileReadbackInFlight);
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileStatus =
+    bridge.coherentSolidDirectShapeRenderGpuProfileStatus ?? null;
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileReason =
+    bridge.coherentSolidDirectShapeRenderGpuProfileReason ?? null;
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfile =
+    bridge.coherentSolidDirectShapeRenderGpuProfile ?? null;
+  target.renderBridgeCoherentSolidDirectShapeRenderGpuProfileTelemetry =
+    bridge.coherentSolidDirectShapeRenderGpuProfileTelemetry ?? null;
   target.renderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
   target.renderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
   target.renderBridgeCanvasCssWidth = bridge.lastCanvasCssWidth ?? null;
@@ -7993,6 +8665,7 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
       || bridge.transparencyCompositeMode
       || null;
     target.renderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
+    target.renderBridgeLastRefractiveDrawCount = bridge.lastRefractiveDrawCount ?? 0;
     target.renderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
   target.renderBridgeSchroederRenderProxyLocalResolverStatus =
     bridge.schroederRenderProxyLocalResolverStatus
@@ -8146,7 +8819,56 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
       || bridge.transparencyCompositeMode
       || null;
     target.surfaceDrawRenderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
+    target.surfaceDrawRenderBridgeLastRefractiveDrawCount = bridge.lastRefractiveDrawCount ?? 0;
     target.surfaceDrawRenderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
+  target.surfaceDrawRenderBridgeCoherentSolidDrawEntriesStatus =
+    bridge.coherentSolidDrawEntriesStatus ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidDrawEntriesReason =
+    bridge.coherentSolidDrawEntriesReason ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidDrawEntryCount =
+    bridge.coherentSolidDrawEntryCount ?? 0;
+  target.surfaceDrawRenderBridgeCoherentSolidDrawEntriesPublicationGeneration =
+    bridge.coherentSolidDrawEntriesPublicationGeneration ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidDrawEntriesAdmissionId =
+    bridge.coherentSolidDrawEntriesAdmissionId ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidNativeExecutorStatus =
+    bridge.coherentSolidNativeExecutorStatus ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidNativeExecutorReady =
+    Boolean(bridge.coherentSolidNativeExecutorReady);
+  target.surfaceDrawRenderBridgeCoherentSolidNativeOpaqueDrawCount =
+    bridge.coherentSolidNativeOpaqueDrawCount ?? 0;
+  target.surfaceDrawRenderBridgeCoherentSolidNativeTransparentDrawCount =
+    bridge.coherentSolidNativeTransparentDrawCount ?? 0;
+  target.surfaceDrawRenderBridgeCoherentSolidDirectFrameStorageBinding =
+    Boolean(bridge.coherentSolidDirectFrameStorageBinding);
+  target.surfaceDrawRenderBridgeCoherentSolidPersistentRestMeshBinding =
+    Boolean(bridge.coherentSolidPersistentRestMeshBinding);
+  target.surfaceDrawRenderBridgeCoherentSolidCpuFrameTransformUploadPerformed =
+    Boolean(bridge.coherentSolidCpuFrameTransformUploadPerformed);
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileRequested =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileRequested);
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileSupported =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileSupported);
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileComplete =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileComplete);
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfilePartial =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfilePartial);
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileUnsupported =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileUnsupported);
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileReadbackInFlight =
+    Boolean(bridge.coherentSolidDirectShapeRenderGpuProfileReadbackInFlight);
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileStatus =
+    bridge.coherentSolidDirectShapeRenderGpuProfileStatus ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileReason =
+    bridge.coherentSolidDirectShapeRenderGpuProfileReason ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfile =
+    bridge.coherentSolidDirectShapeRenderGpuProfile ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidDirectShapeRenderGpuProfileTelemetry =
+    bridge.coherentSolidDirectShapeRenderGpuProfileTelemetry ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidLastOpaqueSubmitStatus =
+    bridge.lastCoherentSolidNativeOpaqueSubmitStatus ?? null;
+  target.surfaceDrawRenderBridgeCoherentSolidLastTransparentSubmitStatus =
+    bridge.lastCoherentSolidNativeTransparentSubmitStatus ?? null;
   target.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverStatus =
     bridge.schroederRenderProxyLocalResolverStatus
     ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.status
@@ -8212,9 +8934,9 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
   // extinction): clear media transmit according to optical depth; conductors become opaque from
   // Drude skin depth; missing optical closures block rather than falling back to fake opacity.
   const optics = opticsOverride || opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
-  const usesTransmission = optics.transmission > 0.01;
-  const renderAlpha = renderAlphaFromOpticalResponse(optics, descriptor);
-  const transparent = usesTransmission || renderAlpha < 0.999;
+  const usesTransmission = optics.transmission > 0.01
+    && hasAdmittedQuantumRefraction(optics, descriptor);
+  const renderAlpha = 1;
   const baseColor = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
   const baseColorLinear = optics.baseColorLinear || null;
   const materialColor = new Three.Color();
@@ -8231,12 +8953,12 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
     metalness: optics.metalness,
     roughness: optics.roughness,
     ior: optics.ior ?? 1.5,
-    transmission: optics.transmission,
+    transmission: usesTransmission ? optics.transmission : 0,
     thickness: usesTransmission ? 0.6 : 0,
     envMapIntensity: optics.metalness > 0.5 ? 1.3 : 0.85,
-    transparent,
-    depthWrite: renderDepthWriteFromOpticalResponse(optics, descriptor),
-    opacity: renderAlpha
+    transparent: false,
+    depthWrite: true,
+    opacity: 1
   });
   material.userData.renderLayer = renderLayerFromOpticalResponse(optics, descriptor);
   material.userData.renderOrder = renderOrderFromOpticalResponse(optics, descriptor);
@@ -8279,6 +9001,26 @@ const RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MIN_ROUGHNESS = 0.5;
 const RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MIN_ENVMAP_INTENSITY = 1.8;
 const RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_EMISSIVE_FILL = 0.04;
 const SURFACE_MESH_MOBILE_TRANSMISSIVE_OPACITY = 0.78;
+
+function forceOpaqueDepthWritingPbr(material) {
+  if (!material) return false;
+  const originalOpacity = Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1;
+  const originalTransparent = Boolean(material.transparent);
+  const originalDepthWrite = material.depthWrite !== false;
+  const changed = originalOpacity !== 1 || originalTransparent || !originalDepthWrite;
+  material.userData = material.userData || {};
+  if (material.userData.alphaTransparencyOriginalOpacity == null) {
+    material.userData.alphaTransparencyOriginalOpacity = originalOpacity;
+    material.userData.alphaTransparencyOriginalTransparent = originalTransparent;
+    material.userData.alphaTransparencyOriginalDepthWrite = originalDepthWrite;
+  }
+  material.userData.alphaTransparencyDisabled = true;
+  material.userData.alphaTransparencyPolicy = 'opaque-depth-writing-pbr';
+  material.opacity = 1;
+  material.transparent = false;
+  material.depthWrite = true;
+  return changed;
+}
 
 function srgbLuminance(color = []) {
   const r = Number(color[0]);
@@ -8381,20 +9123,24 @@ export function createThreeWebGpuResidentBridgeMaterialProxy(material, {
     && fallbackLuminance > sourceLuminance + 0.025
   );
   const color = useFallbackColor ? fallbackColorObject : sourceColor;
-  const opacity = Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1;
   const renderRowSphereProxy = bridgeMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
     || String(proxyReason || '').includes('render-row-spheres');
   const proxy = new MaterialCtor({
     color,
     side: Three.DoubleSide,
-    transparent: Boolean(material.transparent) || opacity < 0.999,
-    opacity,
-    depthWrite: material.depthWrite !== false,
+    transparent: false,
+    opacity: 1,
+    depthWrite: true,
     depthTest: material.depthTest !== false
   });
   proxy.name = `${material.name || material.type || 'surface'}-three-webgpu-resident-bridge-proxy`;
   proxy.userData = {
     ...(material.userData || {}),
+    alphaTransparencyOriginalOpacity: Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
+    alphaTransparencyOriginalTransparent: Boolean(material.transparent),
+    alphaTransparencyOriginalDepthWrite: material.depthWrite !== false,
+    alphaTransparencyDisabled: true,
+    alphaTransparencyPolicy: 'opaque-depth-writing-pbr',
     surfaceMaterialRendererProxy: true,
     surfaceMaterialRendererProxyReason: proxyReason,
     surfaceMaterialRendererBridgeMode: bridgeMode || material.userData?.surfaceMaterialRendererBridgeMode || null,
@@ -8448,12 +9194,7 @@ export function stabilizeSurfaceMeshMaterialForRenderer(material, {
     material.userData.surfaceMaterialRendererProxyReason = 'three-webgpu-external-buffer-transmissive-surface-proxy';
     material.transmission = 0;
     material.thickness = 0;
-    material.opacity = Math.max(
-      Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
-      0.92
-    );
-    material.transparent = material.opacity < 0.999;
-    material.depthWrite = material.opacity >= 0.999;
+    forceOpaqueDepthWritingPbr(material);
     if (material.color) {
       material.color.setRGB(
         clamp(fallbackColor[0], 0, 1),
@@ -8467,6 +9208,7 @@ export function stabilizeSurfaceMeshMaterialForRenderer(material, {
     return material;
   }
   if (!(policy.transmissiveProxyRequired && Number.isFinite(transmission) && transmission > 0.01)) {
+    if (forceOpaqueDepthWritingPbr(material)) material.needsUpdate = true;
     return material;
   }
 
@@ -8480,11 +9222,7 @@ export function stabilizeSurfaceMeshMaterialForRenderer(material, {
     : 'mobile-webgl-transmissive-surface-proxy';
   material.transmission = 0;
   material.thickness = 0;
-  material.opacity = Math.max(
-    Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
-    minTransmissiveOpacity
-  );
-  material.transparent = material.opacity < 0.999;
+  forceOpaqueDepthWritingPbr(material);
   material.envMapIntensity = Math.max(Number(material.envMapIntensity) || 0, 0.9);
   if (Number.isFinite(Number(material.roughness))) {
     material.roughness = Math.max(Number(material.roughness), 0.18);
@@ -8517,12 +9255,17 @@ function createThreeWebGpuSurfaceBufferMaterialProxy(material, {
       side: Three.DoubleSide,
       transparent: false,
       opacity: 1,
-      depthWrite: material.depthWrite !== false,
+      depthWrite: true,
       depthTest: material.depthTest !== false
     });
     proxy.name = `${material.name || material.type || 'surface'}-three-webgpu-surface-buffer-normal-proxy`;
     proxy.userData = {
       ...(material.userData || {}),
+      alphaTransparencyOriginalOpacity: Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
+      alphaTransparencyOriginalTransparent: Boolean(material.transparent),
+      alphaTransparencyOriginalDepthWrite: material.depthWrite !== false,
+      alphaTransparencyDisabled: true,
+      alphaTransparencyPolicy: 'opaque-depth-writing-pbr',
       surfaceMaterialRendererProxy: true,
       surfaceMaterialRendererProxyReason: 'three-webgpu-external-buffer-normal-material-pipeline-proxy',
       surfaceMaterialRendererBridgeMode: SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE,
@@ -8719,16 +9462,10 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
     if (blockedOptics) {
       material.transmission = 0;
       material.thickness = 0;
-      material.opacity = Math.max(
-        Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
-        minTransmissiveOpacity
-      );
-      material.transparent = material.opacity < 0.999;
       material.userData.renderRowSphereTransmissionProxy = true;
     } else {
       material.transmission = transmission;
       material.thickness = Math.max(Number(material.thickness) || 0, Number(optics.thickness) || 0.06);
-      material.transparent = true;
       material.userData.renderRowSphereTransmissionProxy = false;
       material.userData.renderRowSpherePreservedTransmission = true;
       if ('ior' in material && Number(optics.ior) > 1) {
@@ -8763,8 +9500,6 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
       clamp(fallbackColor[2], 0, 1),
       (activeThreeNamespace || THREE).SRGBColorSpace
     );
-    material.opacity = Math.max(Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1, 0.72);
-    material.transparent = material.opacity < 0.999;
     material.userData.renderRowSphereFallbackColor = [...fallbackColor];
     material.userData.renderRowSphereFallbackReason = blockedOptics
       ? 'blocked-optical-material'
@@ -8777,15 +9512,12 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
   }
 
   const currentOpacity = Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1;
-  if (gasLikeTransmissiveMaterial && currentOpacity < RENDER_ROW_SPHERE_BRIDGE_GAS_DISPLAY_MIN_OPACITY) {
-    material.userData.renderRowSphereGasDisplayOpacityFloor = true;
+  if (gasLikeTransmissiveMaterial && currentOpacity < 1) {
     if (!Number.isFinite(Number(material.userData.renderRowSphereOriginalOpacity))) {
       material.userData.renderRowSphereOriginalOpacity = currentOpacity;
     }
-    material.opacity = RENDER_ROW_SPHERE_BRIDGE_GAS_DISPLAY_MIN_OPACITY;
-    material.transparent = true;
     material.userData.renderRowSphereFallbackReason =
-      material.userData.renderRowSphereFallbackReason || 'gas-display-opacity-floor';
+      material.userData.renderRowSphereFallbackReason || 'gas-opaque-pbr-alpha-disabled';
     changed = true;
   }
 
@@ -8861,11 +9593,10 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
       material.userData.renderRowSphereMetallicDisplayEmissiveFill =
         RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_EMISSIVE_FILL;
     }
-    material.opacity = Math.max(Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1, 0.84);
-    material.transparent = material.opacity < 0.999;
     changed = true;
   }
 
+  if (forceOpaqueDepthWritingPbr(material)) changed = true;
   if (changed) material.needsUpdate = true;
   return material;
 }
@@ -9624,6 +10355,154 @@ function resolveMaterialInterfaceSurfaceTablePolicy(policy = null) {
   };
 }
 
+export function packedNormalRowsCoverCompactPositionPrefix({
+  normalRowCount = 0,
+  normalBufferByteLength = 0,
+  compactPositionVertexCount = 0
+} = {}) {
+  const drawVertexCount = Math.max(
+    0,
+    Math.floor(Number(compactPositionVertexCount) || 0)
+  );
+  const rowCount = Math.max(0, Math.floor(Number(normalRowCount) || 0));
+  const byteLength = Math.max(0, Math.floor(Number(normalBufferByteLength) || 0));
+  return drawVertexCount >= 3
+    && rowCount >= drawVertexCount
+    && byteLength >= drawVertexCount * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+export function createSphReactionStaticTableSceneUploadOwner({
+  createUpload = createSphReactionStaticTableUploadGpu,
+  validateUpload = assertSphReactionStaticTableUploadGpu,
+  destroyUpload = destroySphReactionStaticTableUploadGpu
+} = {}) {
+  let entry = null;
+
+  function clear(reason = 'scene-reaction-static-table-clear') {
+    if (!entry) return false;
+    const previous = entry;
+    entry = null;
+    destroyUpload(previous.upload);
+    previous.status = 'scene-reaction-static-table-upload-destroyed';
+    previous.destroyReason = reason;
+    return true;
+  }
+
+  function refresh({
+    device,
+    reactionTable,
+    reactionTableContentGeneration,
+    thermalResponseGraphUpload,
+    thermalResponseUploadProvenance = thermalResponseGraphUpload?.signature ?? null
+  } = {}) {
+    if (!device) throw new TypeError('scene reaction static table upload requires a device');
+    if (typeof reactionTableContentGeneration !== 'string'
+      || reactionTableContentGeneration.length === 0) {
+      throw new TypeError('scene reaction static table upload requires a reaction table signature');
+    }
+    if (thermalResponseGraphUpload?.status !== 'webgpu-uploaded') {
+      throw new TypeError('scene reaction static table upload requires a WebGPU thermal response upload');
+    }
+    if (typeof thermalResponseUploadProvenance !== 'string'
+      || thermalResponseUploadProvenance.length === 0
+      || thermalResponseGraphUpload.signature !== thermalResponseUploadProvenance) {
+      throw new Error('scene reaction static table upload thermal provenance mismatch');
+    }
+    const sameKey = Boolean(
+      entry
+      && entry.device === device
+      && entry.reactionTableContentGeneration === reactionTableContentGeneration
+      && entry.thermalResponseGraphUpload === thermalResponseGraphUpload
+      && entry.thermalResponseUploadProvenance === thermalResponseUploadProvenance
+    );
+    if (sameKey) {
+      validateUpload(device, entry.upload, {
+        reactionTable,
+        reactionTableContentGeneration,
+        thermalResponseGraphUpload,
+        thermalResponseUploadProvenance
+      });
+      entry.reuseCount += 1;
+      return entry.upload;
+    }
+
+    clear('scene-reaction-static-table-key-replaced');
+    const upload = createUpload({
+      device,
+      reactionTable,
+      reactionTableContentGeneration,
+      thermalResponseGraphUpload,
+      thermalResponseUploadProvenance,
+      label: 'ulg-sph-scene-reaction-static-tables'
+    });
+    entry = {
+      status: 'scene-reaction-static-table-upload-ready',
+      device,
+      reactionTableContentGeneration,
+      thermalResponseGraphUpload,
+      thermalResponseUploadProvenance,
+      upload,
+      reuseCount: 0
+    };
+    return upload;
+  }
+
+  function clearBeforeThermalUploadDestroyed(
+    thermalResponseGraphUpload,
+    reason = 'scene-thermal-response-upload-destroyed'
+  ) {
+    if (!entry || entry.thermalResponseGraphUpload !== thermalResponseGraphUpload) return false;
+    return clear(reason);
+  }
+
+  return {
+    refresh,
+    clear,
+    clearBeforeThermalUploadDestroyed,
+    get upload() {
+      return entry?.upload ?? null;
+    },
+    snapshot() {
+      return entry
+        ? {
+            status: entry.status,
+            reactionTableContentGeneration: entry.reactionTableContentGeneration,
+            thermalResponseUploadProvenance: entry.thermalResponseUploadProvenance,
+            reuseCount: entry.reuseCount,
+            upload: entry.upload
+          }
+        : null;
+    }
+  };
+}
+
+export function sphReactionStaticTableStepOptions(upload = null) {
+  return {
+    reactionStaticTableUpload: upload,
+    reactionTableContentGeneration: upload?.reactionTableContentGeneration ?? null,
+    thermalResponseUploadProvenance: upload?.thermalResponseUploadProvenance ?? null
+  };
+}
+
+export function residentStepsPublicationFreshness({
+  running = true,
+  executionGeneration = 0,
+  currentExecutionGeneration = 0,
+  submittedSignature = null,
+  currentSignature = null
+} = {}) {
+  if (!running) {
+    return { fresh: false, reason: 'scene-stopped-during-resident-execution' };
+  }
+  if (executionGeneration !== currentExecutionGeneration) {
+    return { fresh: false, reason: 'resident-execution-generation-advanced' };
+  }
+  if (submittedSignature !== currentSignature) {
+    return { fresh: false, reason: 'resident-execution-input-signature-changed' };
+  }
+  return { fresh: true, reason: 'resident-execution-publication-current' };
+}
+
 export function createSphPhaseScene(container, {
   boxEdgeM = 10,
   boxDimsM = null,
@@ -9758,11 +10637,6 @@ export function createSphPhaseScene(container, {
   let sceneBackgroundColorHex = normalizeSphSceneBackgroundColorHex(backgroundColor);
   let sceneBackgroundImageUrl = null;
   function residentSurfaceDrawBackgroundClearValue() {
-    // When a background image is active the canvases clear fully transparent
-    // (premultiplied zero) so the container's CSS image shows through.
-    if (sceneBackgroundImageUrl) {
-      return { r: 0, g: 0, b: 0, a: 0 };
-    }
     // Parse the display-space hex directly (Three.Color may convert managed
     // colors to linear; the native canvas clear wants raw display channels).
     const hex = String(sceneBackgroundColorHex || SPH_SCENE_BACKGROUND_COLOR_DEFAULT).replace('#', '');
@@ -11161,10 +12035,16 @@ export function createSphPhaseScene(container, {
       container.style.backgroundSize = 'cover';
       container.style.backgroundPosition = 'center';
       container.style.backgroundRepeat = 'no-repeat';
-      // Canvases go fully transparent so the CSS image shows through.
       scene.background = null;
-      renderer.setClearColor?.(new Three.Color('#000000'), 0);
-      renderer.domElement.style.backgroundColor = 'transparent';
+      if (useNativeWebGpuRenderer) {
+        // Native presentation is intentionally opaque. The image is uploaded
+        // once and drawn by the native background pass before PBR surfaces.
+        renderer.setClearColor?.(new Three.Color(sceneBackgroundColorHex), 1);
+        renderer.domElement.style.backgroundColor = sceneBackgroundColorHex;
+      } else {
+        renderer.setClearColor?.(new Three.Color('#000000'), 0);
+        renderer.domElement.style.backgroundColor = 'transparent';
+      }
     } else {
       container.style.backgroundImage = '';
       setBackgroundColor(sceneBackgroundColorHex, { reason: `${reason}:cleared`, refresh: false });
@@ -11174,6 +12054,9 @@ export function createSphPhaseScene(container, {
       status: url ? 'scene-background-image-applied' : 'scene-background-image-cleared',
       reason,
       url,
+      presentationMode: url && useNativeWebGpuRenderer
+        ? 'native-webgpu-opaque-background-pass'
+        : (url ? 'css-background-behind-transparent-canvas' : null),
       updatedAtMs: nowMs(),
       scientificValidation: false,
       sphValidation: false,
@@ -11571,6 +12454,8 @@ export function createSphPhaseScene(container, {
   let mlsMpmResidentStepsSignature = null;
   let pendingMlsMpmResidentSteps = null;
   let mlsMpmResidentExecutionGeneration = 0;
+  let mlsMpmResidentSequenceAuthorityEpoch = 0;
+  let mlsMpmResidentSequenceAuthorityTuple = null;
   let schroederPhaseVolumeAssignmentOverlayFeedback = null;
   // Previous adopted merge/split summary for the orchestrator's
   // oscillation guard (see particleStorageAdoptionOscillationGuard).
@@ -11581,6 +12466,8 @@ export function createSphPhaseScene(container, {
   let sphThermalResponseGraphUpload = null;
   let sphThermalResponseGraphUploadSignature = null;
   let pendingSphThermalResponseGraphUpload = null;
+  const sphReactionStaticTableUploadOwner =
+    createSphReactionStaticTableSceneUploadOwner();
   let mlsMpmMechanicsMaterialTable = null;
   let mlsMpmMechanicsMaterialPhaseUpload = null;
   let mlsMpmMechanicsMaterialPhaseUploadSignature = null;
@@ -11590,48 +12477,63 @@ export function createSphPhaseScene(container, {
   let currentRenderDomainCounts = null;
   let currentPhysicalLawGroups = null;
   let sphResidentMaterialInterfaceState = null;
+  let sphResidentRenderMaterialInterfaceState = null;
   let sphResidentRenderState = null;
   let sphResidentPressureInterfaceState = null;
   let sphResidentSurfaceDraw = null;
   let sphResidentSurfaceDrawRenderBridge = null;
+  let coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = null;
+  let admittedCoherentSolidDrawEntries = null;
+  let admittedCoherentSolidPresentationLease = null;
+  let admittedCoherentSolidPresentationLeaseLastSubmitBridge = null;
+  let coherentSolidDrawEntriesHighestPublicationGeneration = 0;
   let sphResidentNativeSurfaceResourceGeneration = 0;
   const releasedSphResidentSurfaceResourceObjects = new WeakSet();
   let sphResidentRenderSurfaceState = null;
   let sphResidentRenderFieldRowsBufferPool = null;
-  // Double-buffered snapshots of the render-field scalars for the native
-  // draw's gradient normals. The pooled field buffer is rewritten by every
-  // render-field pass (~25/s) while frames draw at 60fps; binding it live
-  // made normals flicker mid-generation. Two slots alternate so the copy for
-  // generation N+1 never lands in the buffer generation N still binds.
-  const sphResidentFieldGradientSnapshotRings = new Map();
-  function snapshotResidentFieldGradientBuffer({ device, sourceBuffer, copyByteLength, slotKey = 'primary' }) {
+  let sphResidentSparseRenderFieldRuntimePool = null;
+  let sphResidentSparseRenderFieldGeneration = 0;
+  const sphResidentFieldGradientSnapshotPool = createNativeSurfaceGradientSnapshotPool({
+    maxSlotsPerKey: 3,
+    maxSlotKeys: 64,
+    labelPrefix: 'ulg-sph-field-gradient-snapshot'
+  });
+  function publishResidentFieldGradientSnapshotPool(lastReservation = null) {
+    const summary = sphResidentFieldGradientSnapshotPool.summarize();
+    scene.userData.sphResidentFieldGradientSnapshotPool = {
+      ...summary,
+      lastReservationStatus: lastReservation?.status ?? null,
+      lastReservationCode: lastReservation?.code ?? null,
+      lastReservationReason: lastReservation?.reason ?? null
+    };
+    return scene.userData.sphResidentFieldGradientSnapshotPool;
+  }
+  function reserveResidentFieldGradientSnapshot({
+    device,
+    sourceBuffer,
+    copyByteLength,
+    slotKey = 'primary'
+  }) {
     const bytes = Math.max(0, Math.round(Number(copyByteLength) || 0));
     if (!device?.createBuffer || !sourceBuffer || bytes <= 0) return null;
-    let ring = sphResidentFieldGradientSnapshotRings.get(slotKey);
-    if (!ring) {
-      ring = { slots: [null, null], next: 0 };
-      sphResidentFieldGradientSnapshotRings.set(slotKey, ring);
+    const reservation = sphResidentFieldGradientSnapshotPool.reserve({
+      device,
+      slotKey,
+      byteLength: bytes,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    });
+    publishResidentFieldGradientSnapshotPool(reservation);
+    if (reservation.accepted !== true) return null;
+    try {
+      const encoder = device.createCommandEncoder({ label: 'ulg-sph-field-gradient-snapshot-copy' });
+      encoder.copyBufferToBuffer(sourceBuffer, 0, reservation.buffer, 0, bytes);
+      device.queue.submit([encoder.finish()]);
+      return reservation;
+    } catch (error) {
+      reservation.abort();
+      publishResidentFieldGradientSnapshotPool(reservation);
+      throw error;
     }
-    const slotIndex = ring.next;
-    ring.next = (slotIndex + 1) % 2;
-    let slot = ring.slots[slotIndex];
-    if (!slot || slot.device !== device || slot.byteLength < bytes) {
-      slot?.buffer?.destroy?.();
-      slot = {
-        device,
-        byteLength: bytes,
-        buffer: device.createBuffer({
-          label: `ulg-sph-field-gradient-snapshot-${slotKey}-${slotIndex}`,
-          size: bytes,
-          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-        })
-      };
-      ring.slots[slotIndex] = slot;
-    }
-    const encoder = device.createCommandEncoder({ label: 'ulg-sph-field-gradient-snapshot-copy' });
-    encoder.copyBufferToBuffer(sourceBuffer, 0, slot.buffer, 0, bytes);
-    device.queue.submit([encoder.finish()]);
-    return slot.buffer;
   }
   // Secondary native surfaces (every ok render-field descriptor beyond the
   // primary): each carries its own compact-position translation, per-surface
@@ -11673,6 +12575,24 @@ export function createSphPhaseScene(container, {
     }
     release();
   }
+  function releaseUncommittedNativeMarchingCubesBatchResults({
+    device = null,
+    settlements = [],
+    skipIndexes = [],
+    reason = 'uncommitted-native-marching-cubes-batch-released'
+  } = {}) {
+    const skipped = new Set(skipIndexes);
+    for (const entry of settlements || []) {
+      if (skipped.has(entry?.index) || entry?.settlement?.status !== 'fulfilled') continue;
+      releaseUncommittedNativeSurfaceResources({
+        device,
+        extensionSurfaceResult: nativeMarchingCubesSurfaceResultFromExtraction(
+          entry.settlement.value
+        ),
+        reason
+      });
+    }
+  }
   let sphResidentAdditionalNativeSurfaceGenerationCounter = 0;
   let sphResidentAdditionalNativeSurfaceAttachedGeneration = 0;
   let sphResidentAdditionalNativeSurfaceHighestAttemptedGeneration = 0;
@@ -11682,10 +12602,13 @@ export function createSphPhaseScene(container, {
   }
   function destroyAdditionalNativeSurfaceTranslationList(list, reason) {
     for (const item of list) {
+      item?.gradientSnapshotReservation?.abort?.();
+      item?.gradientSnapshotResource?.release?.();
       const translation = item?.translation || item;
       destroyExtensionSurfaceTranslationOnce(translation, reason);
       releaseExtensionSurfaceResultOnce(item?.extensionSurfaceResult ?? null);
     }
+    publishResidentFieldGradientSnapshotPool();
   }
   function retireAdditionalNativeSurfaceTranslationList(
     list,
@@ -11703,6 +12626,8 @@ export function createSphPhaseScene(container, {
     reason = 'additional-native-surface-draw-discarded'
   ) {
     if (!entries.length) return;
+    for (const entry of entries) entry?.gradientSnapshotReservation?.abort?.();
+    publishResidentFieldGradientSnapshotPool();
     const release = () => destroyAdditionalNativeSurfaceTranslationList(entries, reason);
     if (typeof device?.queue?.onSubmittedWorkDone === 'function') {
       deferSubmittedWorkCleanup(device, release);
@@ -11720,11 +12645,29 @@ export function createSphPhaseScene(container, {
     sphResidentAdditionalNativeSurfaceTranslationBridge = null;
     retireAdditionalNativeSurfaceTranslationList(retired, retirementBridge, reason);
   }
-  function attachAdditionalNativeSurfaceDraws({ device, bridge, entries = [], generation = null }) {
+  function attachAdditionalNativeSurfaceDraws({
+    device,
+    bridge,
+    entries = [],
+    generation = null,
+    renderCommitGuard = null
+  }) {
     // Render refreshes overlap (each awaits per-surface extractions while the
     // next refresh starts); a stale refresh attaching late must not destroy
     // the buffers a newer attach just installed. Late attaches discard their
     // own translations and leave the newer state in place.
+    try {
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'additional-native-surface-candidate-start'
+      });
+    } catch (error) {
+      discardAdditionalNativeSurfaceEntries(
+        entries.filter((entry) => entry?.translation),
+        device,
+        'additional-native-surface-draw-stale-render-candidate-discarded'
+      );
+      throw error;
+    }
     const generationAttempt = resolveAdditionalNativeSurfaceGenerationAttempt({
       highestAttemptedGeneration: sphResidentAdditionalNativeSurfaceHighestAttemptedGeneration,
       generation
@@ -11799,8 +12742,7 @@ export function createSphPhaseScene(container, {
             {
               binding: 4,
               resource: {
-                buffer: execution.renderFieldGradientVolume?.buffer
-                  || bridge.fieldGradientDummyBuffer
+                buffer: nativeDrawInput.normalBuffer || bridge.fieldGradientDummyBuffer
               }
             }
           ]
@@ -11810,6 +12752,8 @@ export function createSphPhaseScene(container, {
           surfaceKey,
           bindGroup,
           cameraBuffer,
+          surfaceInputBuffer: nativeDrawInput.buffer,
+          surfaceGenerationId: execution.compactPositionRowsSurfaceGenerationId ?? null,
           drawIndirectRowsBuffer: execution.drawIndirectRowsBuffer,
           compactPositionDrawState: nativeDrawInput.compactPositionDrawState,
           depthWriteFlag: Number(surface.depthWriteFlag ?? entry.depthWriteFlag ?? 1),
@@ -11818,7 +12762,9 @@ export function createSphPhaseScene(container, {
         });
         acceptedEntries.push({
           translation: entry.translation,
-          extensionSurfaceResult: entry.extensionSurfaceResult ?? null
+          extensionSurfaceResult: entry.extensionSurfaceResult ?? null,
+          gradientSnapshotReservation: entry.gradientSnapshotReservation ?? null,
+          gradientSnapshotResource: null
         });
       }
     } catch (error) {
@@ -11853,6 +12799,42 @@ export function createSphPhaseScene(container, {
         'nonempty candidate contained no valid native surface draws';
       return previousDraws;
     }
+    try {
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'additional-native-surface-candidate-commit'
+      });
+    } catch (error) {
+      discardAdditionalNativeSurfaceEntries(
+        entries.filter((entry) => entry?.translation),
+        device,
+        'additional-native-surface-draw-stale-before-commit-discarded'
+      );
+      throw error;
+    }
+    const ownerGeneration = bridge.activeSurfaceResourceOwner?.generation;
+    const committedGradientResources = [];
+    try {
+      for (const entry of acceptedEntries) {
+        const reservation = entry.gradientSnapshotReservation ?? null;
+        if (!reservation) continue;
+        if (!Number.isFinite(Number(ownerGeneration))) {
+          throw new Error('additional native gradient snapshot requires an active surface owner generation');
+        }
+        entry.gradientSnapshotResource = reservation.commit({ ownerGeneration });
+        entry.gradientSnapshotReservation = null;
+        committedGradientResources.push(entry.gradientSnapshotResource);
+      }
+    } catch (error) {
+      for (const resource of committedGradientResources) resource.release();
+      for (const entry of acceptedEntries) entry.gradientSnapshotReservation?.abort?.();
+      publishResidentFieldGradientSnapshotPool();
+      discardAdditionalNativeSurfaceEntries(
+        entries.filter((entry) => entry?.translation),
+        device,
+        'additional-native-surface-gradient-commit-failed'
+      );
+      throw error;
+    }
     const retiredTranslations = sphResidentAdditionalNativeSurfaceTranslations;
     const retirementBridge = sphResidentAdditionalNativeSurfaceTranslationBridge || bridge;
     bridge.drawState.additionalSurfaceDraws = draws;
@@ -11873,6 +12855,7 @@ export function createSphPhaseScene(container, {
     );
     bridge.additionalSurfaceAttachStatus = 'additional-native-surface-draws-attached';
     bridge.additionalSurfaceAttachReason = null;
+    publishResidentFieldGradientSnapshotPool();
     return draws;
   }
   let sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
@@ -11918,18 +12901,22 @@ export function createSphPhaseScene(container, {
   scene.userData.sphThermalClosureGraphBuffers = null;
   scene.userData.sphThermalPhaseResponseTable = null;
   scene.userData.sphThermalResponseGraphUpload = null;
+  scene.userData.sphReactionStaticTableUpload = null;
+  scene.userData.sphReactionStaticTableUploadLifecycle = null;
   scene.userData.mlsMpmMechanicsMaterialTable = null;
   scene.userData.mlsMpmMechanicsMaterialPhaseUpload = null;
   scene.userData.sphReactionTable = null;
   scene.userData.sphRenderDomainCounts = null;
   scene.userData.sphPhysicalLawGroups = null;
   scene.userData.sphResidentMaterialInterfaceState = null;
+  scene.userData.sphResidentRenderMaterialInterfaceState = null;
   scene.userData.sphResidentRenderState = null;
   scene.userData.sphResidentPressureInterfaceState = null;
   scene.userData.sphResidentSurfaceDraw = null;
   scene.userData.sphResidentSurfaceDrawRenderBridge = null;
   scene.userData.sphResidentRenderSurfaceState = null;
   scene.userData.sphResidentRenderFieldRowsBufferPool = null;
+  scene.userData.sphResidentSparseRenderFieldRuntimePool = null;
   scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
   scene.userData.sphNativeMarchingCubesAdapterCache = null;
   scene.userData.sphPressureInterfaceForceRowsUpload = null;
@@ -12442,7 +13429,8 @@ export function createSphPhaseScene(container, {
     device = null,
     deviceResult = null,
     parityTolerance = 1e-6,
-    webGpuRunner = undefined
+    webGpuRunner = undefined,
+    renderCommitGuard = null
   } = {}) {
     const generation = opticalGpuLookupGeneration;
     const currentTable = opticalGpuTable;
@@ -12478,6 +13466,9 @@ export function createSphPhaseScene(container, {
         scientificValidation: false,
         fullPhysicsValidation: false
       };
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-optical-worker-skip-commit'
+      });
       opticalGpuLookup = {
         ...currentLookup,
         execution
@@ -12523,6 +13514,9 @@ export function createSphPhaseScene(container, {
         scientificValidation: false,
         fullPhysicsValidation: false
       };
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-optical-no-targets-commit'
+      });
       opticalGpuLookup = {
         ...currentLookup,
         execution
@@ -12572,6 +13566,9 @@ export function createSphPhaseScene(container, {
           }
         };
       }
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-optical-lookup-commit'
+      });
       opticalGpuLookup = {
         ...currentLookup,
         execution
@@ -12660,6 +13657,54 @@ export function createSphPhaseScene(container, {
     ].join('|');
   }
 
+  function publishSphReactionStaticTableUpload(upload = null) {
+    scene.userData.sphReactionStaticTableUpload = upload;
+    scene.userData.sphReactionStaticTableUploadLifecycle =
+      sphReactionStaticTableUploadOwner.snapshot();
+    return upload;
+  }
+
+  function clearSphReactionStaticTableUpload({
+    reason = 'scene-reaction-static-table-clear',
+    thermalResponseGraphUpload = null
+  } = {}) {
+    const cleared = thermalResponseGraphUpload
+      ? sphReactionStaticTableUploadOwner.clearBeforeThermalUploadDestroyed(
+          thermalResponseGraphUpload,
+          reason
+        )
+      : sphReactionStaticTableUploadOwner.clear(reason);
+    if (cleared) publishSphReactionStaticTableUpload(null);
+    return cleared;
+  }
+
+  function refreshSphReactionStaticTableUpload({
+    device,
+    reactionTable = sphReactionTable,
+    thermalResponseGraphUpload = sphThermalResponseGraphUpload
+  } = {}) {
+    if (
+      !reactionTable?.schema
+      || !(Number(reactionTable.reactionCount) > 0)
+      || thermalResponseGraphUpload?.status !== 'webgpu-uploaded'
+    ) {
+      clearSphReactionStaticTableUpload({
+        reason: 'scene-reaction-static-table-inputs-unavailable'
+      });
+      return null;
+    }
+    const reactionTableContentGeneration = sphReactionTableSignature(reactionTable);
+    const thermalResponseUploadProvenance = thermalResponseGraphUpload.signature;
+    const upload = sphReactionStaticTableUploadOwner.refresh({
+      device,
+      reactionTable,
+      reactionTableContentGeneration,
+      thermalResponseGraphUpload,
+      thermalResponseUploadProvenance
+    });
+    return publishSphReactionStaticTableUpload(upload);
+  }
+
   function pressureInterfaceForceSolverSignature(solver = sphResidentRenderState?.pressureInterfaceForceSolver) {
     if (!solver?.schema) return 'no-pressure-interface-force-solver';
     const rows = solver.forceRowValues instanceof Float32Array
@@ -12674,6 +13719,99 @@ export function createSphPhaseScene(container, {
       solver.conservationStatus ?? null,
       solver.conservationResidualMagnitudeN ?? 0,
       rows ? Array.from(rows).join(',') : 'no-force-rows'
+    ].join('|');
+  }
+
+  function materialInterfaceSourceFieldReadyForResidentLane(
+    sourceField = null,
+    { particleState = null } = {}
+  ) {
+    const directStateThermoTopologyReady = Boolean(
+      sourceField?.sourceFieldGenerationMode === 'same-encoder-state-thermo-direct'
+      && sourceField?.surfaceTable?.schema
+      && sourceField.surfaceTable.records instanceof Float32Array
+      && sourceField.normalHotLoopReadbackFree === true
+    );
+    if (
+      sourceField?.schema !== 'peercompute.ulg.sph-material-interface-source-field.v0'
+      || sourceField.status !== 'material-interface-source-field-ready'
+      || sourceField.normalHotLoopReadbackFree !== true
+      || (!directStateThermoTopologyReady && (
+        sourceField.fieldRowsBufferRetained !== true
+        || sourceField.surfaceBufferRetained !== true
+        || sourceField.sourceIndexFieldBufferRetained !== true
+        || !sourceField.fieldRowsBuffer
+        || !sourceField.surfaceBuffer
+        || !sourceField.sourceIndexFieldBuffer
+      ))
+    ) {
+      return false;
+    }
+    const sourceParticleCount = sourceField.particleCount == null
+      ? null
+      : Number(sourceField.particleCount);
+    const targetParticleCount = particleState?.particleCount == null
+      ? null
+      : Number(particleState.particleCount);
+    if (
+      Number.isFinite(sourceParticleCount)
+      && Number.isFinite(targetParticleCount)
+      && Math.round(sourceParticleCount) !== Math.round(targetParticleCount)
+    ) {
+      return false;
+    }
+    const sourceStep = sourceField.sourceStep == null ? null : Number(sourceField.sourceStep);
+    const targetStep = particleState?.step == null ? null : Number(particleState.step);
+    const sourcePositionEpoch = Number(sourceField.sourcePositionEpoch);
+    if (
+      !Number.isInteger(sourceStep)
+      || sourceStep < 0
+      || !Number.isInteger(sourcePositionEpoch)
+      || sourcePositionEpoch < 0
+      || typeof sourceField.sourceDeviceId !== 'string'
+      || sourceField.sourceDeviceId.length === 0
+    ) {
+      return false;
+    }
+    if (Number.isFinite(targetStep) && Math.round(targetStep) !== sourceStep) return false;
+    try {
+      return sourcePositionEpoch
+        === residentNeighborhoodMutationEpochsForStep(sourceStep).preStep;
+    } catch {
+      return false;
+    }
+  }
+
+  function materialInterfaceSourceFieldSignature(sourceField = null) {
+    if (!sourceField?.schema) return 'no-material-interface-source-field';
+    return [
+      sourceField.schema,
+      sourceField.status ?? null,
+      sourceField.source ?? null,
+      sourceField.sourceCadence ?? null,
+      sourceField.sourceStep ?? null,
+      sourceField.sourceTime ?? null,
+      sourceField.sourcePositionEpoch ?? null,
+      sourceField.sourceNeighborhoodGeneration ?? null,
+      sourceField.sourceNeighborhoodLaneId ?? null,
+      sourceField.sourceNeighborhoodStateKey ?? null,
+      sourceField.sourceDeviceId ?? null,
+      sourceField.sourceFieldGenerationMode ?? null,
+      sourceField.renderDomainBaseCount ?? 0,
+      sourceField.renderDomainDropCount ?? 0,
+      sourceField.particleCount ?? 0,
+      sourceField.surfaceCount ?? 0,
+      sourceField.totalFieldCells ?? 0,
+      sourceField.fieldRowsBufferByteLength ?? 0,
+      sourceField.surfaceBufferByteLength ?? 0,
+      sourceField.sourceIndexFieldBufferByteLength ?? 0,
+      sourceField.surfaceTable?.records instanceof Float32Array
+        ? Array.from(sourceField.surfaceTable.records).join(',')
+        : 'no-surface-topology-records',
+      sourceField.normalHotLoopReadbackFree === true ? 1 : 0,
+      sourceField.fieldRowsBufferRetained === true ? 1 : 0,
+      sourceField.surfaceBufferRetained === true ? 1 : 0,
+      sourceField.sourceIndexFieldBufferRetained === true ? 1 : 0
     ].join('|');
   }
 
@@ -12819,19 +13957,222 @@ export function createSphPhaseScene(container, {
     return target;
   }
 
-  function publishSphResidentMaterialInterfaceState(state) {
-    if (
-      sphResidentMaterialInterfaceState
-      && sphResidentMaterialInterfaceState !== state
-      && typeof sphResidentMaterialInterfaceState.destroyMaterialInterfaceFieldBuffers === 'function'
-    ) {
-      sphResidentMaterialInterfaceState.destroyMaterialInterfaceFieldBuffers({
-        reason: 'resident-material-interface-state-replaced'
+  function createResidentMaterialInterfaceSourceFieldLifecycle({
+    sourceField,
+    poolLease = null,
+    device = null
+  } = {}) {
+    const consumerLeases = new Map();
+    const originalRelease = sourceField?.releaseMaterialInterfaceSourceFieldLeases?.bind(sourceField);
+    const originalDestroy = sourceField?.destroyMaterialInterfaceSourceFieldBuffers?.bind(sourceField);
+    let owner = null;
+    let leaseGeneration = 0;
+    let retirementRequested = false;
+    let retirementDevice = device;
+    let retirementReason = null;
+    let retirementScheduled = false;
+    let cleanupCompleted = false;
+    let poolReleaseStatus = null;
+
+    const status = () => {
+      if (cleanupCompleted) return 'material-interface-source-field-retired';
+      if (retirementScheduled) return 'material-interface-source-field-retirement-fence-pending';
+      if (retirementRequested && consumerLeases.size > 0) {
+        return 'material-interface-source-field-retirement-waiting-for-consumers';
+      }
+      if (retirementRequested) return 'material-interface-source-field-retirement-requested';
+      if (consumerLeases.size > 0) return 'material-interface-source-field-consumer-leased';
+      return 'material-interface-source-field-generation-retained';
+    };
+
+    const refreshTelemetry = () => {
+      const fields = {
+        materialInterfaceSourceFieldLifecycleStatus: status(),
+        materialInterfaceSourceFieldConsumerLeaseActiveCount: consumerLeases.size,
+        materialInterfaceSourceFieldConsumerLeaseGeneration: leaseGeneration,
+        materialInterfaceSourceFieldRetirementRequested: retirementRequested,
+        materialInterfaceSourceFieldRetirementScheduled: retirementScheduled,
+        materialInterfaceSourceFieldCleanupCompleted: cleanupCompleted,
+        materialInterfaceSourceFieldRetirementReason: retirementReason,
+        materialInterfaceSourceFieldRowsBufferPoolReleaseStatus: poolReleaseStatus
+      };
+      if (sourceField) Object.assign(sourceField, fields);
+      if (owner) Object.assign(owner, fields);
+      return fields;
+    };
+
+    const cleanup = () => {
+      if (cleanupCompleted) return refreshTelemetry();
+      cleanupCompleted = true;
+      originalRelease?.({ status: retirementReason || 'material-interface-source-field-retired' });
+      originalDestroy?.({
+        releaseLeases: true,
+        reason: retirementReason || 'material-interface-source-field-retired'
       });
+      const poolRelease = poolLease?.release?.({
+        reason: retirementReason || 'material-interface-source-field-retired'
+      }) ?? null;
+      poolReleaseStatus = poolRelease?.status ?? null;
+      if (owner) {
+        owner.fieldRowsBufferRetained = false;
+        owner.surfaceBufferRetained = false;
+        owner.sourceIndexFieldBufferRetained = false;
+      }
+      if (sourceField) {
+        sourceField.fieldRowsBufferRetained = false;
+        sourceField.surfaceBufferRetained = false;
+        sourceField.sourceIndexFieldBufferRetained = false;
+      }
+      return refreshTelemetry();
+    };
+
+    const scheduleRetirementIfReady = () => {
+      if (
+        !retirementRequested
+        || consumerLeases.size > 0
+        || retirementScheduled
+        || cleanupCompleted
+      ) {
+        return refreshTelemetry();
+      }
+      retirementScheduled = true;
+      if (retirementDevice?.queue?.onSubmittedWorkDone) {
+        if (owner) {
+          owner.materialInterfaceSourceFieldRetirementStatus =
+            'retirement-deferred-until-last-consumer-submit-fence';
+        }
+        deferSubmittedWorkCleanup(retirementDevice, cleanup);
+      } else {
+        if (owner) {
+          owner.materialInterfaceSourceFieldRetirementStatus =
+            'retired-immediately-no-device-queue-fence';
+        }
+        cleanup();
+      }
+      return refreshTelemetry();
+    };
+
+    const lifecycle = {
+      attachOwner(nextOwner) {
+        owner = nextOwner || null;
+        refreshTelemetry();
+        return owner;
+      },
+      addConsumerLease({
+        consumerStage = 'mls-mpm-resident-pressure-source-field',
+        reason = 'material-interface-source-field-consumed'
+      } = {}) {
+        if (retirementRequested || retirementScheduled || cleanupCompleted) {
+          return {
+            status: 'material-interface-source-field-consumer-lease-rejected-retiring',
+            leaseId: null,
+            consumerStage,
+            reason,
+            ...refreshTelemetry()
+          };
+        }
+        const leaseId = `material-interface-source-field-consumer:${++leaseGeneration}`;
+        consumerLeases.set(leaseId, { leaseId, consumerStage, reason });
+        refreshTelemetry();
+        return {
+          status: 'material-interface-source-field-consumer-lease-acquired',
+          leaseId,
+          consumerStage,
+          reason
+        };
+      },
+      releaseConsumerLease(leaseId, {
+        device: consumerDevice = null,
+        status: releaseStatus = 'released-after-consumer-submit',
+        reason = null
+      } = {}) {
+        const lease = consumerLeases.get(leaseId) || null;
+        if (!lease) {
+          return {
+            status: 'material-interface-source-field-consumer-lease-not-active',
+            leaseId,
+            reason,
+            ...refreshTelemetry()
+          };
+        }
+        consumerLeases.delete(leaseId);
+        if (consumerDevice) retirementDevice = consumerDevice;
+        scheduleRetirementIfReady();
+        return {
+          status: releaseStatus,
+          leaseId,
+          consumerStage: lease.consumerStage,
+          reason,
+          ...refreshTelemetry()
+        };
+      },
+      requestRetirement({
+        device: requestedDevice = null,
+        reason = 'resident-material-interface-source-field-generation-retired'
+      } = {}) {
+        retirementRequested = true;
+        retirementReason = reason;
+        if (requestedDevice) retirementDevice = requestedDevice;
+        scheduleRetirementIfReady();
+        return {
+          schema: 'peercompute.ulg.sph-material-interface-source-field-retirement.v0',
+          status: status(),
+          reason,
+          activeConsumerLeaseCount: consumerLeases.size,
+          cleanupCompleted
+        };
+      }
+    };
+    refreshTelemetry();
+    return lifecycle;
+  }
+
+  function retirePublishedMaterialInterfaceState(previousState, nextState, {
+    deferDevice = null,
+    replacementReason = 'resident-material-interface-state-replaced'
+  } = {}) {
+    if (
+      previousState
+      && previousState !== nextState
+      && (
+        typeof previousState.retireMaterialInterfaceFieldBuffers === 'function'
+        || typeof previousState.destroyMaterialInterfaceFieldBuffers === 'function'
+      )
+    ) {
+      const retiredState = previousState;
+      if (typeof retiredState.retireMaterialInterfaceFieldBuffers === 'function') {
+        retiredState.retireMaterialInterfaceFieldBuffers({
+          device: deferDevice,
+          reason: replacementReason
+        });
+      } else {
+        const cleanup = () => retiredState.destroyMaterialInterfaceFieldBuffers({
+          reason: replacementReason
+        });
+        const deferred = deferSubmittedWorkCleanup(deferDevice, cleanup);
+        retiredState.materialInterfaceSourceFieldRetirementStatus = deferred
+          ? 'retirement-deferred-until-device-queue-fence'
+          : 'retired-immediately-no-device-queue-fence';
+      }
+      retiredState.materialInterfaceSourceFieldRetirementReason = replacementReason;
     }
+  }
+
+  function publishSphResidentMaterialInterfaceState(state, options = {}) {
+    retirePublishedMaterialInterfaceState(sphResidentMaterialInterfaceState, state, options);
     sphResidentMaterialInterfaceState = state || null;
     scene.userData.sphResidentMaterialInterfaceState = sphResidentMaterialInterfaceState;
     return sphResidentMaterialInterfaceState;
+  }
+
+  function publishSphResidentRenderMaterialInterfaceState(state, options = {}) {
+    retirePublishedMaterialInterfaceState(sphResidentRenderMaterialInterfaceState, state, {
+      replacementReason: 'resident-render-material-interface-state-replaced',
+      ...options
+    });
+    sphResidentRenderMaterialInterfaceState = state || null;
+    scene.userData.sphResidentRenderMaterialInterfaceState = sphResidentRenderMaterialInterfaceState;
+    return sphResidentRenderMaterialInterfaceState;
   }
 
   function publishSurfaceMaterialRendererProxySummary(reason = 'surface-material-policy-refresh') {
@@ -13291,8 +14632,15 @@ export function createSphPhaseScene(container, {
     gasPressureSummary = null,
     source = 'resident-physics-material-interface-extractor',
     sourceCadence = 'resident-step-completed',
-    candidateReadbackMode = 'compact-active-readback'
+    candidateReadbackMode = 'compact-active-readback',
+    renderCommitGuard = null
   } = {}) {
+    const publishCurrentMaterialInterfaceState = (state, options = {}) => {
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-material-interface-state-commit'
+      });
+      return publishSphResidentMaterialInterfaceState(state, options);
+    };
     const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
     const nextSphParticleState = residentSteps?.nextSphParticleState || sphGpuParticleState;
     const nextMlsMpmParticleState = residentSteps?.nextMlsMpmParticleState
@@ -13307,7 +14655,7 @@ export function createSphPhaseScene(container, {
       || mlsMpmGpuParticleUpload
       || null;
     if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
-      return publishSphResidentMaterialInterfaceState({
+      return publishCurrentMaterialInterfaceState({
         schema: 'peercompute.ulg.sph-material-interface-field.v0',
         status: 'resident-material-interface-source-unavailable',
         source,
@@ -13329,7 +14677,7 @@ export function createSphPhaseScene(container, {
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
     if (!resolvedDeviceResult?.device) {
-      return publishSphResidentMaterialInterfaceState({
+      return publishCurrentMaterialInterfaceState({
         schema: 'peercompute.ulg.sph-material-interface-field.v0',
         status: 'resident-material-interface-webgpu-unavailable',
         source,
@@ -13350,6 +14698,7 @@ export function createSphPhaseScene(container, {
 
     let renderRowsExecution = null;
     let interfaceSourceField = null;
+    let interfaceSourceFieldTransferred = false;
     try {
       const refreshStartedAtMs = nowMs();
       const materialInterfaceRefreshStageMs = {
@@ -13378,6 +14727,160 @@ export function createSphPhaseScene(container, {
           smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
         });
         needsSurfaceTableSeed = !surfaceTableSeedState?.surfaceTable?.schema;
+      }
+      if (
+        candidateReadbackMode === SPH_MATERIAL_INTERFACE_GPU_RESIDENT_SOURCE_FIELD_MODE
+        && (
+          sphResidentRenderSurfaceState?.surfaceTable?.schema
+          || surfaceTableSeedState?.surfaceTable?.schema
+        )
+      ) {
+        const surfaceTable = sphResidentRenderSurfaceState?.surfaceTable
+          || surfaceTableSeedState.surfaceTable;
+        const materialInterfaceSurfaceTable =
+          createMaterialInterfaceSurfaceTableForResidentState(sphResidentRenderSurfaceState)
+          || surfaceTable;
+        const sourceStep = Math.max(0, Math.round(Number(nextSphParticleState?.step) || 0));
+        const sourcePositionEpoch = residentNeighborhoodMutationEpochsForStep(sourceStep).preStep;
+        // This descriptor carries topology only. Its source rows are generated
+        // from the consuming task's current state/thermo buffers, so producer
+        // lane authority must remain unbound until that task acquires its
+        // ComputeManager lane.
+        const sourceNeighborhoodLaneId = null;
+        const sourceNeighborhoodStateKey = null;
+        const sourceDeviceId = webGpuDeviceId(resolvedDeviceResult.device);
+        const renderDomain = renderDomainExtractionOptions(currentRenderDomainCounts);
+        const sourceField = {
+          schema: 'peercompute.ulg.sph-material-interface-source-field.v0',
+          status: 'material-interface-source-field-ready',
+          backend: 'webgpu-state-thermo-direct-topology',
+          source,
+          sourceCadence,
+          sourceFieldGenerationMode: 'same-encoder-state-thermo-direct',
+          sourceStep,
+          sourceTime: nextSphParticleState?.time ?? null,
+          sourcePositionEpoch,
+          sourceNeighborhoodGeneration: sourcePositionEpoch,
+          sourceNeighborhoodLaneId,
+          sourceNeighborhoodStateKey,
+          sourceNeighborhoodAuthorityBinding:
+            'deferred-to-consuming-compute-manager-lane',
+          sourceDeviceId,
+          particleCount: nextSphParticleState.particleCount,
+          surfaceTable: materialInterfaceSurfaceTable,
+          surfaceCount: materialInterfaceSurfaceTable.surfaceCount,
+          totalFieldCells: materialInterfaceSurfaceTable.totalFieldCells,
+          maxFieldCellCount: materialInterfaceSurfaceTable.maxFieldCellCount,
+          fieldPadding: FIELD_PADDING,
+          refEdgeM,
+          ...renderDomain,
+          fieldRowsBuffer: null,
+          surfaceBuffer: null,
+          sourceIndexFieldBuffer: null,
+          fieldRowsBufferRetained: false,
+          surfaceBufferRetained: false,
+          sourceIndexFieldBufferRetained: false,
+          fieldRowsBufferByteLength: 0,
+          surfaceBufferByteLength: 0,
+          sourceIndexFieldBufferByteLength: 0,
+          queueCompletionStatus: 'topology-only-no-queue-work',
+          queueCompletionMethod: 'no-prelude-submission',
+          normalHotLoopReadbackFree: true,
+          renderRowsReadback: false,
+          renderFieldReadback: false,
+          gpuAuthoritativeState: true,
+          scientificValidation: false,
+          sphValidation: false,
+          forceCouplingValidation: false,
+          fullPhysicsValidation: false
+        };
+        const lifecycle = createResidentMaterialInterfaceSourceFieldLifecycle({
+          sourceField,
+          device: resolvedDeviceResult.device
+        });
+        sourceField.addMaterialInterfaceSourceFieldConsumerLease =
+          (options = {}) => lifecycle.addConsumerLease(options);
+        sourceField.releaseMaterialInterfaceSourceFieldConsumerLease =
+          (leaseId, options = {}) => lifecycle.releaseConsumerLease(leaseId, options);
+        sourceField.retireMaterialInterfaceSourceFieldBuffers =
+          (options = {}) => lifecycle.requestRetirement(options);
+        const materialInterfaceField = {
+          schema: 'peercompute.ulg.sph-material-interface-field.v0',
+          status: 'material-interface-gpu-resident-source-topology-ready',
+          reason: null,
+          backend: sourceField.backend,
+          authority: 'resident-physics-material-interface-source-topology',
+          source,
+          sourceCadence,
+          particleCount: nextSphParticleState.particleCount,
+          sourceStep,
+          sourceTime: sourceField.sourceTime,
+          sourcePositionEpoch,
+          sourceNeighborhoodGeneration: sourcePositionEpoch,
+          sourceNeighborhoodLaneId,
+          sourceNeighborhoodStateKey,
+          sourceDeviceId,
+          surfaceCount: sourceField.surfaceCount,
+          readySurfaceCount: null,
+          readySurfaceCountPending: true,
+          totalSurfaceAreaM2: null,
+          totalSurfaceAreaPending: true,
+          elementCount: 0,
+          elements: [],
+          candidateReadback: false,
+          candidateReadbackMode,
+          candidateRowsBufferRetained: false,
+          gpuResidentMaterialInterfaceSourceField: true,
+          materialInterfaceSourceField: sourceField,
+          materialInterfaceSourceFieldSchema: sourceField.schema,
+          materialInterfaceSourceFieldStatus: sourceField.status,
+          materialInterfaceSourceFieldNormalHotLoopReadbackFree: true,
+          sourceFieldGenerationMode: sourceField.sourceFieldGenerationMode,
+          pressureInterfaceProducer: true,
+          forceCouplingStatus: 'same-encoder-source-field-generation-required',
+          gpuAuthoritativeState: true,
+          normalHotLoopReadbackFree: true,
+          renderRowsReadback: false,
+          renderRowsReadbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+          renderFieldReadback: false,
+          renderFieldReadbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+          materialInterfaceRefreshStageMs: {
+            ...materialInterfaceRefreshStageMs,
+            renderRowsMs: 0,
+            sourceFieldMs: 0,
+            candidateFieldMs: 0,
+            totalMs: nowMs() - refreshStartedAtMs
+          },
+          addMaterialInterfaceSourceFieldConsumerLease(options = {}) {
+            return lifecycle.addConsumerLease(options);
+          },
+          releaseMaterialInterfaceSourceFieldConsumerLease(leaseId, options = {}) {
+            return lifecycle.releaseConsumerLease(leaseId, options);
+          },
+          retireMaterialInterfaceFieldBuffers({
+            device: retirementDevice = resolvedDeviceResult.device,
+            reason = 'resident-material-interface-source-topology-cleanup'
+          } = {}) {
+            return lifecycle.requestRetirement({ device: retirementDevice, reason });
+          },
+          destroyMaterialInterfaceFieldBuffers({
+            device: retirementDevice = resolvedDeviceResult.device,
+            reason = 'resident-material-interface-source-topology-cleanup'
+          } = {}) {
+            return lifecycle.requestRetirement({ device: retirementDevice, reason });
+          },
+          scientificValidation: false,
+          sphValidation: false,
+          forceCouplingValidation: false,
+          fullPhysicsValidation: false
+        };
+        lifecycle.attachOwner(materialInterfaceField);
+        materialInterfaceField.materialInterfaceRefreshTotalMs =
+          materialInterfaceField.materialInterfaceRefreshStageMs.totalMs;
+        return publishCurrentMaterialInterfaceState(materialInterfaceField, {
+          deferDevice: resolvedDeviceResult.device,
+          replacementReason: 'resident-material-interface-source-topology-replaced'
+        });
       }
       const renderRowsStartedAtMs = nowMs();
       renderRowsExecution = await extractSphRenderRowsWebGpu({
@@ -13446,7 +14949,7 @@ export function createSphPhaseScene(container, {
       }
       const surfaceTable = sphResidentRenderSurfaceState?.surfaceTable;
       if (!surfaceTable?.schema) {
-        return publishSphResidentMaterialInterfaceState({
+        return publishCurrentMaterialInterfaceState({
           schema: 'peercompute.ulg.sph-material-interface-field.v0',
           status: 'resident-material-interface-surface-table-unavailable',
           source,
@@ -13497,6 +15000,129 @@ export function createSphPhaseScene(container, {
         targetFieldRowsBufferByteLength: materialInterfaceSourceFieldRowsBufferPool?.byteLength ?? null
       });
       materialInterfaceRefreshStageMs.sourceFieldMs = nowMs() - sourceFieldStartedAtMs;
+      if (candidateReadbackMode === SPH_MATERIAL_INTERFACE_GPU_RESIDENT_SOURCE_FIELD_MODE) {
+        const retainedSourceField = interfaceSourceField;
+        const sourceStep = Math.max(0, Math.round(Number(nextSphParticleState?.step) || 0));
+        const sourcePositionEpoch = residentNeighborhoodMutationEpochsForStep(sourceStep).preStep;
+        const sourceNeighborhoodLane =
+          finalStep?.fusedResidentSequence?.residentNeighborhoodLane
+          || finalStep?.stageTiming?.residentNeighborhoodLane
+          || null;
+        const sourceNeighborhoodGeneration = sourcePositionEpoch;
+        const sourceNeighborhoodLaneId = sourceNeighborhoodLane?.laneId
+          ?? residentSteps?.computeManagerTask?.laneId
+          ?? null;
+        const sourceNeighborhoodStateKey = sourceNeighborhoodLane?.stateKey
+          ?? residentSteps?.computeManagerTask?.stateKey
+          ?? residentSteps?.stateManagerCommit?.stateKey
+          ?? null;
+        const sourceDeviceId = webGpuDeviceId(resolvedDeviceResult.device);
+        retainedSourceField.sourceStep = sourceStep;
+        retainedSourceField.sourceTime = nextSphParticleState?.time ?? null;
+        retainedSourceField.sourcePositionEpoch = sourcePositionEpoch;
+        retainedSourceField.sourceNeighborhoodGeneration = sourceNeighborhoodGeneration;
+        retainedSourceField.sourceNeighborhoodLaneId = sourceNeighborhoodLaneId;
+        retainedSourceField.sourceNeighborhoodStateKey = sourceNeighborhoodStateKey;
+        retainedSourceField.sourceDeviceId = sourceDeviceId;
+        const lifecycle = createResidentMaterialInterfaceSourceFieldLifecycle({
+          sourceField: retainedSourceField,
+          poolLease: materialInterfaceSourceFieldRowsBufferPool,
+          device: resolvedDeviceResult.device
+        });
+        retainedSourceField.addMaterialInterfaceSourceFieldConsumerLease =
+          (options = {}) => lifecycle.addConsumerLease(options);
+        retainedSourceField.releaseMaterialInterfaceSourceFieldConsumerLease =
+          (leaseId, options = {}) => lifecycle.releaseConsumerLease(leaseId, options);
+        retainedSourceField.retireMaterialInterfaceSourceFieldBuffers =
+          (options = {}) => lifecycle.requestRetirement(options);
+        const materialInterfaceField = {
+          schema: 'peercompute.ulg.sph-material-interface-field.v0',
+          status: 'material-interface-gpu-resident-source-field-ready',
+          reason: null,
+          backend: 'webgpu-source-local-retained',
+          authority: 'resident-physics-material-interface-source-field',
+          source,
+          sourceCadence,
+          particleCount: nextSphParticleState.particleCount,
+          sourceStep,
+          sourceTime: nextSphParticleState?.time ?? null,
+          sourcePositionEpoch,
+          sourceNeighborhoodGeneration,
+          sourceNeighborhoodLaneId,
+          sourceNeighborhoodStateKey,
+          sourceDeviceId,
+          surfaceCount: retainedSourceField.surfaceCount,
+          readySurfaceCount: null,
+          readySurfaceCountPending: true,
+          totalSurfaceAreaM2: null,
+          totalSurfaceAreaPending: true,
+          elementCount: 0,
+          elements: [],
+          candidateReadback: false,
+          candidateReadbackMode,
+          candidateRowsBufferRetained: false,
+          gpuResidentMaterialInterfaceSourceField: true,
+          materialInterfaceSourceField: retainedSourceField,
+          materialInterfaceSourceFieldSchema: retainedSourceField.schema,
+          materialInterfaceSourceFieldStatus: retainedSourceField.status,
+          materialInterfaceSourceFieldNormalHotLoopReadbackFree:
+            retainedSourceField.normalHotLoopReadbackFree === true,
+          fieldRowsBuffer: retainedSourceField.fieldRowsBuffer,
+          fieldRowsBufferRetained: retainedSourceField.fieldRowsBufferRetained === true,
+          fieldRowsBufferByteLength: retainedSourceField.fieldRowsBufferByteLength ?? 0,
+          surfaceBuffer: retainedSourceField.surfaceBuffer,
+          surfaceBufferRetained: retainedSourceField.surfaceBufferRetained === true,
+          surfaceBufferByteLength: retainedSourceField.surfaceBufferByteLength ?? 0,
+          sourceIndexFieldBuffer: retainedSourceField.sourceIndexFieldBuffer,
+          sourceIndexFieldBufferRetained:
+            retainedSourceField.sourceIndexFieldBufferRetained === true,
+          sourceIndexFieldBufferByteLength:
+            retainedSourceField.sourceIndexFieldBufferByteLength ?? 0,
+          queueCompletionStatus: retainedSourceField.queueCompletionStatus ?? null,
+          queueCompletionMethod: retainedSourceField.queueCompletionMethod ?? null,
+          forceCouplingStatus: 'gpu-resident-candidate-force-lane-required',
+          pressureInterfaceProducer: true,
+          gpuAuthoritativeState: true,
+          normalHotLoopReadbackFree: true,
+          scientificValidation: false,
+          sphValidation: false,
+          forceCouplingValidation: false,
+          fullPhysicsValidation: false,
+          addMaterialInterfaceSourceFieldConsumerLease(options = {}) {
+            return lifecycle.addConsumerLease(options);
+          },
+          releaseMaterialInterfaceSourceFieldConsumerLease(leaseId, options = {}) {
+            return lifecycle.releaseConsumerLease(leaseId, options);
+          },
+          retireMaterialInterfaceFieldBuffers({
+            device: retirementDevice = resolvedDeviceResult.device,
+            reason = 'resident-material-interface-source-field-cleanup'
+          } = {}) {
+            return lifecycle.requestRetirement({ device: retirementDevice, reason });
+          },
+          destroyMaterialInterfaceFieldBuffers({
+            device: retirementDevice = resolvedDeviceResult.device,
+            reason = 'resident-material-interface-source-field-cleanup'
+          } = {}) {
+            return lifecycle.requestRetirement({ device: retirementDevice, reason });
+          }
+        };
+        lifecycle.attachOwner(materialInterfaceField);
+        materialInterfaceRefreshStageMs.candidateFieldMs = 0;
+        materialInterfaceRefreshStageMs.totalMs = nowMs() - refreshStartedAtMs;
+        materialInterfaceField.materialInterfaceRefreshStageMs = materialInterfaceRefreshStageMs;
+        materialInterfaceField.materialInterfaceRefreshTotalMs =
+          materialInterfaceRefreshStageMs.totalMs;
+        materialInterfaceField.renderRowsReadback = Boolean(renderRowsExecution.renderRowsReadback);
+        materialInterfaceField.renderRowsReadbackMode = renderRowsExecution.readbackMode ?? null;
+        materialInterfaceField.renderFieldReadback = false;
+        materialInterfaceField.renderFieldReadbackMode = retainedSourceField.readbackMode ?? null;
+        interfaceSourceFieldTransferred = true;
+        return publishCurrentMaterialInterfaceState(materialInterfaceField, {
+          deferDevice: resolvedDeviceResult.device,
+          replacementReason: 'resident-material-interface-source-field-generation-replaced'
+        });
+      }
       const candidateFieldStartedAtMs = nowMs();
       const materialInterfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
         device: resolvedDeviceResult.device,
@@ -13581,9 +15207,10 @@ export function createSphPhaseScene(container, {
       materialInterfaceField.interfaceSourceFieldRowsBufferPoolSummary =
         materialInterfaceSourceFieldRowsBufferPool?.summary ?? null;
       materialInterfaceField.gpuAuthoritativeState = true;
-      return publishSphResidentMaterialInterfaceState(materialInterfaceField);
+      return publishCurrentMaterialInterfaceState(materialInterfaceField);
     } catch (error) {
-      return publishSphResidentMaterialInterfaceState({
+      if (error?.code === SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE) throw error;
+      return publishCurrentMaterialInterfaceState({
         schema: 'peercompute.ulg.sph-material-interface-field.v0',
         status: 'resident-material-interface-error',
         source,
@@ -13601,13 +15228,15 @@ export function createSphPhaseScene(container, {
         fullPhysicsValidation: false
       });
     } finally {
-      interfaceSourceField?.releaseMaterialInterfaceSourceFieldLeases?.({
-        status: 'released-after-material-interface-extraction'
-      });
-      interfaceSourceField?.destroyMaterialInterfaceSourceFieldBuffers?.({
-        releaseLeases: true,
-        reason: 'material-interface-extraction-cleanup'
-      });
+      if (!interfaceSourceFieldTransferred) {
+        interfaceSourceField?.releaseMaterialInterfaceSourceFieldLeases?.({
+          status: 'released-after-material-interface-extraction'
+        });
+        interfaceSourceField?.destroyMaterialInterfaceSourceFieldBuffers?.({
+          releaseLeases: true,
+          reason: 'material-interface-extraction-cleanup'
+        });
+      }
       renderRowsExecution?.destroyRenderRowsBuffer?.();
     }
   }
@@ -13633,14 +15262,17 @@ export function createSphPhaseScene(container, {
     pressureInterfaceGasCellFieldImportSourceTaskId = null,
     pressureInterfaceGasCellFieldImportStateKey = null,
     source = 'resident-pressure-interface-physics-refresh',
-    sourceCadence = null
+    sourceCadence = null,
+    renderCommitGuard = null,
+    allowLegacyGasProducers = true
   } = {}) {
     const effectiveResidentAuthorityHost = resolveSceneResidentAuthorityHost(residentAuthorityHost);
     const suppliedImportReady = pressureInterfaceGasCellFieldImportReadyForScene(pressureInterfaceGasCellFieldImport);
     let effectiveGasPressureSummaryForProducer = gasPressureSummary;
     let spatialGasLedgerProducerStageRequest = null;
     if (
-      !suppliedImportReady
+      allowLegacyGasProducers !== false
+      && !suppliedImportReady
       && !gasCellEosProducerStageResult
       && !pressureInterfaceSpatialGasSpeciesLedgerReady(pressureInterfaceSpatialGasSpeciesLedgerFromSummary(effectiveGasPressureSummaryForProducer))
     ) {
@@ -13678,7 +15310,11 @@ export function createSphPhaseScene(container, {
     }
     let effectiveGasCellEosProducerStageResult = gasCellEosProducerStageResult;
     let gasCellEosProducerStageRequest = null;
-    if (!suppliedImportReady && !effectiveGasCellEosProducerStageResult) {
+    if (
+      allowLegacyGasProducers !== false
+      && !suppliedImportReady
+      && !effectiveGasCellEosProducerStageResult
+    ) {
       gasCellEosProducerStageRequest = await submitSceneGasCellEosProducerStageForPressureInterface({
         residentAuthorityHost: effectiveResidentAuthorityHost,
         gasPressureSummary: effectiveGasPressureSummaryForProducer,
@@ -13698,6 +15334,9 @@ export function createSphPhaseScene(container, {
         effectiveGasCellEosProducerStageResult = gasCellEosProducerStageRequest.gasCellEosProducerStageResult;
       }
     }
+    assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+      stage: 'resident-pressure-interface-import-publication-commit'
+    });
     const pressureInterfaceGasCellFieldImportPublication = pressureInterfaceGasCellFieldImport
       ? {
           schema: 'peercompute.ulg.sph-scene-pressure-interface-gas-cell-field-import-publication.v0',
@@ -13783,28 +15422,81 @@ export function createSphPhaseScene(container, {
       pressureFeedback,
       materialInterfaceField
     });
-    const pressureInterfaceForcePreview = gasPressureInterfaceForcePreview({
-      pressureFeedback,
-      materialInterfaceField,
-      pressureInterfaceCoupling
-    });
-    const pressureInterfaceForceSolver = gasPressureInterfaceForceSolver({
-      pressureFeedback,
-      materialInterfaceField,
-      pressureInterfaceCoupling
-    });
-    const admittedPressureInterfaceForceSolver = admitPressureInterfaceForceSolverForGridUpload({
-      pressureInterfaceForceSolver,
-      pressureInterfaceGridForceAdmission
-    });
+    const gpuResidentSourceFieldReady = Boolean(
+      materialInterfaceField?.gpuResidentMaterialInterfaceSourceField === true
+      && materialInterfaceField?.materialInterfaceSourceField?.status
+        === 'material-interface-source-field-ready'
+    );
+    const pressureInterfaceForcePreview = gpuResidentSourceFieldReady
+      ? {
+          schema: 'peercompute.ulg.sph-pressure-interface-force-preview.v0',
+          status: 'pressure-interface-force-preview-gpu-resident-lane-pending',
+          forceApplicationStatus: 'not-applied-source-field-awaiting-compute-manager-lane',
+          executionMode: 'gpu-resident-source-field',
+          authoritativeStateMutationAllowed: false,
+          pressureInterfaceCouplingStatus: pressureInterfaceCoupling.status,
+          forceCouplingStatus: 'gpu-resident-candidate-force-lane-required',
+          gasInterfacePressurePa: Number.isFinite(Number(pressureFeedback?.totalPressurePa))
+            ? Number(pressureFeedback.totalPressurePa)
+            : null,
+          sourceInterfaceElementCount: 0,
+          previewedElementCount: 0,
+          totalAbsInterfaceForceN: null,
+          netForceN: null,
+          surfaceForces: [],
+          cpuInterfaceElementIterationPerformed: false,
+          scientificValidation: false,
+          gasValidation: false,
+          sphValidation: false,
+          fullPhysicsValidation: false
+        }
+      : gasPressureInterfaceForcePreview({
+          pressureFeedback,
+          materialInterfaceField,
+          pressureInterfaceCoupling
+        });
+    const pressureInterfaceForceSolver = gpuResidentSourceFieldReady
+      ? {
+          schema: 'peercompute.ulg.sph-pressure-interface-force-solver.v0',
+          status: 'pressure-interface-force-solver-gpu-resident-lane-pending',
+          reason: null,
+          backend: 'gpu-resident-source-field',
+          forceCouplingStatus: 'gpu-resident-candidate-force-lane-required',
+          forceApplicationStatus: 'not-applied-source-field-awaiting-compute-manager-lane',
+          gridForceApplicationApproved: false,
+          forceRowCount: 0,
+          forceRows: new Float32Array(),
+          cpuInterfaceElementIterationPerformed: false,
+          candidateReadbackPerformed: false,
+          authoritativeStateMutationAllowed: false,
+          conservationStatus: 'pending-gpu-resident-force-row-reduction',
+          conservationResidualMagnitudeN: null,
+          scientificValidation: false,
+          gasValidation: false,
+          sphValidation: false,
+          fullPhysicsValidation: false
+        }
+      : gasPressureInterfaceForceSolver({
+          pressureFeedback,
+          materialInterfaceField,
+          pressureInterfaceCoupling
+        });
+    const admittedPressureInterfaceForceSolver = gpuResidentSourceFieldReady
+      ? pressureInterfaceForceSolver
+      : admitPressureInterfaceForceSolverForGridUpload({
+          pressureInterfaceForceSolver,
+          pressureInterfaceGridForceAdmission
+        });
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
-    const pressureInterfaceForceRowsUploadForState = uploadPressureInterfaceForceRowsBuffer({
-      pressureInterfaceForceSolver: admittedPressureInterfaceForceSolver,
-      pressureInterfaceGridForceAdmission,
-      device: device || resolvedDeviceResult?.device || null
-    });
+    const pressureInterfaceForceRowsUploadForState = gpuResidentSourceFieldReady
+      ? null
+      : uploadPressureInterfaceForceRowsBuffer({
+          pressureInterfaceForceSolver: admittedPressureInterfaceForceSolver,
+          pressureInterfaceGridForceAdmission,
+          device: device || resolvedDeviceResult?.device || null
+        });
     const state = buildSphResidentPressureInterfaceStateSummary({
       materialInterfaceField,
       gasPressureSummary: effectiveGasPressureSummary,
@@ -13818,6 +15510,9 @@ export function createSphPhaseScene(container, {
       gasCellEosProducerStageRequest,
       source,
       sourceCadence
+    });
+    assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+      stage: 'resident-pressure-interface-state-commit'
     });
     scene.userData.sphPressureInterfaceGasCellFieldImportPublication = pressureInterfaceGasCellFieldImportPublication;
     scene.userData.sphPressureInterfaceGasCellFieldImport = state.pressureInterfaceGasCellFieldImport || null;
@@ -13945,6 +15640,8 @@ export function createSphPhaseScene(container, {
     cflFactor = mlsMpmParticleState?.gridCflFactor || 0.6,
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     pressureInterfaceForceSolver = null,
+    materialInterfaceSourceField = null,
+    materialInterfaceCompactCandidateCapacity = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
     residentProductMass = null,
     wallTemperaturesK = currentWallTemperaturesK,
@@ -13985,6 +15682,8 @@ export function createSphPhaseScene(container, {
       physicalLawGroupsSignature(physicalLawGroups),
       sphReactionTableSignature(),
       pressureInterfaceForceSolverSignature(pressureInterfaceForceSolver),
+      materialInterfaceSourceFieldSignature(materialInterfaceSourceField),
+      `materialInterfaceCandidateCapacity=${materialInterfaceCompactCandidateCapacity ?? 'default'}`,
       pressureInterfaceGasCellFieldImportSignature(pressureInterfaceGasCellFieldImport),
       residentProductMassSignature(residentProductMass),
       dims.join(','),
@@ -14004,12 +15703,43 @@ export function createSphPhaseScene(container, {
     return Number.isFinite(count) ? Math.max(1, Math.round(count)) : 1;
   }
 
+  function normalizeResidentSequenceAuthorityEpoch(value, fallback = 0) {
+    const epoch = Number(value);
+    if (Number.isSafeInteger(epoch) && epoch >= 0) return epoch;
+    const fallbackEpoch = Number(fallback);
+    return Number.isSafeInteger(fallbackEpoch) && fallbackEpoch >= 0 ? fallbackEpoch : 0;
+  }
+
+  function resolveResidentSequenceAuthorityEpoch(
+    mountedGeneration,
+    sceneGeneration = mlsMpmResidentExecutionGeneration
+  ) {
+    const normalizedSceneGeneration = normalizeResidentSequenceAuthorityEpoch(sceneGeneration);
+    const hasMountedGeneration = mountedGeneration != null
+      && Number.isSafeInteger(Number(mountedGeneration))
+      && Number(mountedGeneration) >= 0;
+    const normalizedMountedGeneration = hasMountedGeneration
+      ? Number(mountedGeneration)
+      : null;
+    const tuple = `${normalizedMountedGeneration ?? 'scene'}:${normalizedSceneGeneration}`;
+    if (tuple !== mlsMpmResidentSequenceAuthorityTuple) {
+      if (mlsMpmResidentSequenceAuthorityEpoch >= Number.MAX_SAFE_INTEGER) {
+        throw new RangeError('resident sequence authority epoch exhausted');
+      }
+      mlsMpmResidentSequenceAuthorityTuple = tuple;
+      mlsMpmResidentSequenceAuthorityEpoch += 1;
+    }
+    return mlsMpmResidentSequenceAuthorityEpoch;
+  }
+
   function mlsMpmResidentStepsSignatureFor({
     stepCount = 1,
     retainIntermediateSteps = false,
     compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
     compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
     residentSourceMode = 'cpu-packed-state',
+    computeTaskQueueFencePolicy =
+      MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY,
     schroederSimulation = false,
     schroederSelectedLevel = 0,
     schroederMinLevel = null,
@@ -14039,6 +15769,7 @@ export function createSphPhaseScene(container, {
     schroederParticleStorageMaterializationAdmissionStatus = null,
     schroederParticleStorageMaterializationRowCount = 0,
     schroederParticleStorageRequiredCapacity = 0,
+    residentSequenceAuthorityEpoch = 0,
     ...args
   } = {}) {
     const stepSignature = mlsMpmResidentStepSignatureFor(args);
@@ -14050,6 +15781,10 @@ export function createSphPhaseScene(container, {
       normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode),
       normalizeMlsMpmResidentSummaryScope(compactSummaryScope),
       residentSourceMode,
+      `residentSequenceAuthorityEpoch=${normalizeResidentSequenceAuthorityEpoch(
+        residentSequenceAuthorityEpoch
+      )}`,
+      `computeTaskQueueFencePolicy=${computeTaskQueueFencePolicy}`,
       `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
       `ssLevel=${Math.round(Number(schroederSelectedLevel) || 0)}`,
       `ssMin=${schroederMinLevel ?? 'default'}`,
@@ -14226,11 +15961,17 @@ export function createSphPhaseScene(container, {
       ...captured,
       preserveBuffers: normalizedPreserveBuffers
     });
-    if (deferDevice?.queue?.onSubmittedWorkDone) {
-      deferSubmittedWorkCleanup(deferDevice, cleanup);
-    } else {
-      cleanup();
-    }
+    const scheduleCleanup = () => {
+      if (deferDevice?.queue?.onSubmittedWorkDone) {
+        deferSubmittedWorkCleanup(deferDevice, cleanup);
+      } else {
+        cleanup();
+      }
+    };
+    deferResidentExecutionCleanupUntilConsumersRelease(
+      captured.residentSteps,
+      scheduleCleanup
+    );
   }
 
   function advanceMlsMpmResidentExecutionGeneration(reason = 'resident-state-reset') {
@@ -14281,7 +16022,8 @@ export function createSphPhaseScene(container, {
     surfaceDrawExecution = surfaceDraw?.surfaceDraw ?? null,
     surfaceVerticesExecution = surfaceDraw?.surfaceVertices ?? null,
     translation = surfaceDraw?.extensionSurfaceTranslation ?? null,
-    extensionSurfaceResult = surfaceDraw?.extensionSurfaceResult ?? null
+    extensionSurfaceResult = surfaceDraw?.extensionSurfaceResult ?? null,
+    gradientSnapshotReservations = []
   } = {}) {
     if (
       renderBridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
@@ -14289,19 +16031,37 @@ export function createSphPhaseScene(container, {
     ) {
       return null;
     }
-    const owner = createNativeSurfaceResourceOwner({
-      generation: nextNativeSurfaceResourceGeneration(),
-      surfaceDraw,
-      surfaceDrawExecution,
-      surfaceVerticesExecution,
-      translation,
-      extensionSurfaceResult
-    });
-    installNativeSurfaceResourceOwner(renderBridge, owner);
+    const generation = nextNativeSurfaceResourceGeneration();
+    const reservations = Array.isArray(gradientSnapshotReservations)
+      ? gradientSnapshotReservations.filter(Boolean)
+      : [];
+    const presentationResources = [];
+    let owner = null;
+    try {
+      for (const reservation of reservations) {
+        presentationResources.push(reservation.commit({ ownerGeneration: generation }));
+      }
+      owner = createNativeSurfaceResourceOwner({
+        generation,
+        surfaceDraw,
+        surfaceDrawExecution,
+        surfaceVerticesExecution,
+        translation,
+        extensionSurfaceResult,
+        presentationResources
+      });
+      installNativeSurfaceResourceOwner(renderBridge, owner);
+    } catch (error) {
+      for (const resource of presentationResources) resource.release?.();
+      for (const reservation of reservations) reservation.abort?.();
+      publishResidentFieldGradientSnapshotPool();
+      throw error;
+    }
     surfaceDraw.nativeSurfaceResourceGeneration = owner.generation;
     surfaceDraw.renderBridgeNativeSurfaceResourceGeneration = owner.generation;
     renderBridge.nativeSurfaceActiveGenerationRetained = false;
     renderBridge.nativeSurfaceActiveGenerationRetentionReason = null;
+    publishResidentFieldGradientSnapshotPool();
     return owner;
   }
 
@@ -14436,11 +16196,21 @@ export function createSphPhaseScene(container, {
   function forceDrainSphNativeWebGpuSurfaceDeferredResourceReleases(renderBridge, reason) {
     if (renderBridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return;
     const queue = prepareNativeSurfaceBridgeForForcedDisposal(renderBridge);
+    const submitFenceUnsettled = Boolean(
+      renderBridge.nativeSurfaceConsumerSubmitFencePending
+      || renderBridge.nativeSurfaceConsumerSubmitFenceTimedOut
+      || renderBridge.nativeSurfaceConsumerSubmitFenceFailed
+    );
+    const fenceQuarantined = [];
     publishSphNativeWebGpuSurfaceDeferredResourceRelease(renderBridge, {
       status: 'native-webgpu-surface-resource-release-force-disposing',
       reason
     });
     for (const request of queue) {
+      if (request.requiresSuccessfulSubmitFence === true && submitFenceUnsettled) {
+        fenceQuarantined.push(request);
+        continue;
+      }
       if (typeof request.release === 'function') {
         request.release();
         continue;
@@ -14454,6 +16224,13 @@ export function createSphPhaseScene(container, {
         removeCanvas: false,
         status: request.status ?? 'native-webgpu-surface-forced-deferred-resource-release',
         deferNativeValidationRelease: false
+      });
+    }
+    if (fenceQuarantined.length > 0) {
+      renderBridge.nativeSurfaceDeferredResourceReleases = fenceQuarantined;
+      publishSphNativeWebGpuSurfaceDeferredResourceRelease(renderBridge, {
+        status: 'native-webgpu-surface-resource-release-quarantined-submit-fence',
+        reason
       });
     }
   }
@@ -14515,6 +16292,8 @@ export function createSphPhaseScene(container, {
       if (!owner || typeof owner !== 'object') return;
       if (releasedSphResidentSurfaceResourceObjects.has(owner)) return;
       releasedSphResidentSurfaceResourceObjects.add(owner);
+      for (const resource of owner.presentationResources || []) resource?.release?.();
+      publishResidentFieldGradientSnapshotPool();
       releaseSurfaceDrawBundle(owner.surfaceDraw);
       if (!owner.surfaceDraw) {
         destroyExtensionSurfaceTranslationOnce(owner.translation, status);
@@ -14547,14 +16326,37 @@ export function createSphPhaseScene(container, {
         renderBridge.threeMeshCount = 0;
       }
       if (clearOverlay) clearSphResidentSurfaceDrawOverlayCanvas(renderBridge);
+      if (
+        coherentSolidDirectShapeRenderGpuProfileReadbackInFlight?.bridge === renderBridge
+        && !coherentSolidDirectShapeRenderGpuProfileReadbackInFlight.submitted
+      ) {
+        abortCoherentSolidDirectShapeRenderGpuProfile(
+          coherentSolidDirectShapeRenderGpuProfileReadbackInFlight,
+          'timestamp-profile-bridge-released-before-submit',
+          status
+        );
+      }
+      renderBridge.coherentSolidNativeExecutor?.destroy?.();
+      renderBridge.coherentSolidNativeExecutor = null;
+      renderBridge.coherentSolidNativeExecutorSignature = null;
+      renderBridge.coherentSolidNativePipelineBundle = null;
       renderBridge.cameraBuffer?.destroy?.();
       renderBridge.opticalGpuBuffers?.recordsBuffer?.destroy?.();
       renderBridge.opticalGpuBuffers?.spectralSamplesBuffer?.destroy?.();
       renderBridge.fieldGradientDummyBuffer?.destroy?.();
       renderBridge.refractionDummyTexture?.destroy?.();
-      renderBridge.refractionCopyTexture?.destroy?.();
+      renderBridge.refractionBackfaceDummyTexture?.destroy?.();
+      if (!destroySphResidentSurfaceRefractionTargetSet(renderBridge.refractionTargetSet)) {
+        renderBridge.refractionCopyTexture?.destroy?.();
+        renderBridge.refractionBackfaceTexture?.destroy?.();
+      }
       renderBridge.envDummyTexture?.destroy?.();
       renderBridge.envMapTexture?.destroy?.();
+      renderBridge.backgroundImageTexture?.destroy?.();
+      renderBridge.backgroundImageRenderer?.uniformBuffer?.destroy?.();
+      for (const texture of renderBridge.retiredBackgroundImageTextures || []) {
+        texture?.destroy?.();
+      }
       renderBridge.boxWireframe?.uniformBuffer?.destroy?.();
       for (const buffer of renderBridge.additionalSurfaceCameraBuffers?.values?.() || []) {
         buffer?.destroy?.();
@@ -14585,11 +16387,34 @@ export function createSphPhaseScene(container, {
       renderBridge.opticalGpuBuffers = null;
       renderBridge.fieldGradientDummyBuffer = null;
       renderBridge.refractionDummyTexture = null;
+      renderBridge.refractionBackfaceDummyTexture = null;
+      renderBridge.refractionBackfaceDummyView = null;
+      renderBridge.refractionTargetSet = null;
       renderBridge.refractionCopyTexture = null;
+      renderBridge.refractionCopyView = null;
+      renderBridge.refractionBackfaceTexture = null;
+      renderBridge.refractionBackfaceView = null;
+      renderBridge.refractionBindGroup = null;
+      renderBridge.refractionBindGroupSceneColorView = null;
+      renderBridge.refractionBindGroupEnvironmentView = null;
+      renderBridge.refractionBindGroupBackDepthView = null;
+      renderBridge.refractionBackfaceCacheDrawState = null;
+      renderBridge.refractionBackfaceCacheAdditionalSurfaceDraws = null;
+      renderBridge.refractionBackfaceCacheSurfaceInputBuffer = null;
+      renderBridge.refractionBackfaceCacheDrawIndirectRowsBuffer = null;
+      renderBridge.refractionBackfaceCacheSurfaceGenerationId = null;
+      renderBridge.refractionBackfaceCachePrimaryIndirectOffsets = null;
+      renderBridge.refractionBackfaceCacheAdditionalDraws = null;
+      renderBridge.refractionBackfaceCacheViewProjection = null;
+      renderBridge.viewProjectionMatrix = null;
+      renderBridge.inverseViewProjectionMatrix = null;
       renderBridge.envDummyTexture = null;
       renderBridge.envMapTexture = null;
       renderBridge.envMapView = null;
       renderBridge.envMapFailedUrl = null;
+      renderBridge.backgroundImageTexture = null;
+      renderBridge.backgroundImageRenderer = null;
+      renderBridge.retiredBackgroundImageTextures = null;
       renderBridge.boxWireframe = null;
       renderBridge.additionalSurfaceCameraBuffers = null;
       renderBridge.depthTexture = null;
@@ -14875,6 +16700,329 @@ export function createSphPhaseScene(container, {
     return executor;
   }
 
+  function retireCoherentSolidNativeExecutor(
+    bridge,
+    executor,
+    status = 'coherent-solid-native-executor-retired'
+  ) {
+    if (!executor?.destroy) return;
+    const release = () => executor.destroy();
+    if (deferSphNativeWebGpuSurfaceResourceRelease(bridge, { release, status })) return;
+    release();
+  }
+
+  function retireCoherentSolidPresentationLease(
+    bridge,
+    lease,
+    status = 'coherent-solid-presentation-consumer-lease-retired'
+  ) {
+    if (!lease?.release) return false;
+    const release = () => lease.release();
+    if (deferSphNativeWebGpuSurfaceResourceRelease(bridge, {
+      release,
+      status,
+      requiresSuccessfulSubmitFence: true
+    })) {
+      return true;
+    }
+    return release();
+  }
+
+  function clearAdmittedCoherentSolidDrawEntries({
+    bridge = sphResidentSurfaceDrawRenderBridge,
+    status = 'coherent-solid-draw-publication-cleared',
+    resetGeneration = false
+  } = {}) {
+    const previousLease = admittedCoherentSolidPresentationLease;
+    const previousSubmitBridge = admittedCoherentSolidPresentationLeaseLastSubmitBridge;
+    admittedCoherentSolidDrawEntries = null;
+    admittedCoherentSolidPresentationLease = null;
+    admittedCoherentSolidPresentationLeaseLastSubmitBridge = null;
+    if (resetGeneration) coherentSolidDrawEntriesHighestPublicationGeneration = 0;
+    scene.userData.coherentSolidDrawEntries = null;
+    scene.userData.coherentSolidDrawEntriesAdmission = null;
+    if (bridge?.drawState) bridge.drawState.solidDrawEntriesContract = null;
+    retireCoherentSolidPresentationLease(previousSubmitBridge || bridge, previousLease, status);
+  }
+
+  function publishCoherentSolidNativeBridgeDiagnostics(bridge, {
+    contract = bridge?.drawState?.solidDrawEntriesContract || null,
+    executor = bridge?.coherentSolidNativeExecutor || null
+  } = {}) {
+    if (!bridge) return;
+    bridge.coherentSolidDrawEntriesStatus = contract?.status ?? null;
+    bridge.coherentSolidDrawEntriesReason = contract?.reason ?? null;
+    bridge.coherentSolidDrawEntryCount = contract?.entryCount ?? 0;
+    bridge.coherentSolidDrawEntriesPublicationGeneration =
+      contract?.publicationGeneration ?? null;
+    bridge.coherentSolidDrawEntriesAdmissionId = contract?.admissionId ?? null;
+    bridge.coherentSolidNativeExecutorStatus = executor?.status ?? null;
+    bridge.coherentSolidNativeExecutorReady = Boolean(executor?.ready);
+    bridge.coherentSolidNativeOpaqueDrawCount =
+      executor?.opaqueDrawCommands?.length ?? 0;
+    bridge.coherentSolidNativeTransparentDrawCount =
+      executor?.transparentDrawCommands?.length ?? 0;
+    bridge.coherentSolidDirectFrameStorageBinding = Boolean(
+      executor?.directResidentFrameStorageBinding
+    );
+    bridge.coherentSolidPersistentRestMeshBinding = Boolean(
+      executor?.persistentRestMeshBinding
+    );
+    bridge.coherentSolidCpuFrameTransformUploadPerformed = Boolean(
+      executor?.cpuFrameTransformUploadPerformed
+    );
+  }
+
+  function refreshCoherentSolidNativeExecutorForBridge(bridge, {
+    reason = 'native-surface-render-pass'
+  } = {}) {
+    if (!bridge || bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+      return null;
+    }
+    const sourceContract = bridge.drawState?.solidDrawEntriesContract
+      || admittedCoherentSolidDrawEntries
+      || null;
+    const previousExecutor = bridge.coherentSolidNativeExecutor || null;
+    if (!sourceContract) {
+      if (bridge.drawState) bridge.drawState.solidDrawEntriesContract = null;
+      bridge.coherentSolidNativeExecutor = null;
+      bridge.coherentSolidNativeExecutorSignature = null;
+      bridge.coherentSolidNativeExecutorReused = false;
+      if (previousExecutor) {
+        retireCoherentSolidNativeExecutor(
+          bridge,
+          previousExecutor,
+          'coherent-solid-native-executor-publication-cleared'
+        );
+      }
+      publishCoherentSolidNativeBridgeDiagnostics(bridge, {
+        contract: null,
+        executor: null
+      });
+      return null;
+    }
+    const contract = sourceContract?.ready && sourceContract.device === bridge.device
+      ? sourceContract
+      : (() => {
+          const authorityHost = resolveSceneResidentAuthorityHost();
+          const validatedPublication =
+            authorityHost?.validateCoherentSolidDrawPublication?.(sourceContract) || null;
+          return resolveAdmittedCoherentSolidDrawEntries({
+            solidDrawEntries: validatedPublication || sourceContract,
+            device: bridge.device,
+            source: reason,
+            stateManagerAdmissionValidated: Boolean(validatedPublication),
+            presentationLease: sourceContract?.presentationLease ?? null,
+            presentationLeaseRequired: true
+          });
+        })();
+    const presentationAuthority = validateCoherentSolidPresentationConsumerLease(
+      contract?.presentationLease,
+      {
+        device: bridge.device,
+        publicationGeneration: contract?.publicationGeneration ?? null,
+        admissionId: contract?.admissionId ?? null
+      }
+    );
+    if (presentationAuthority.valid !== true) {
+      const blockedContract = {
+        ...contract,
+        status: 'blocked-retired-coherent-solid-draw-publication',
+        reason: presentationAuthority.reason,
+        ready: false,
+        presentationLeaseValidation: presentationAuthority
+      };
+      const retiredLease = contract?.presentationLease
+        ?? sourceContract?.presentationLease
+        ?? null;
+      const retiredLeaseSubmitBridge =
+        admittedCoherentSolidPresentationLease === retiredLease
+          ? admittedCoherentSolidPresentationLeaseLastSubmitBridge
+          : bridge;
+      if (admittedCoherentSolidPresentationLease === retiredLease) {
+        admittedCoherentSolidDrawEntries = null;
+        admittedCoherentSolidPresentationLease = null;
+        admittedCoherentSolidPresentationLeaseLastSubmitBridge = null;
+        scene.userData.coherentSolidDrawEntries = null;
+        scene.userData.coherentSolidDrawEntriesAdmission = blockedContract;
+      }
+      if (bridge.drawState) bridge.drawState.solidDrawEntriesContract = null;
+      bridge.coherentSolidNativeExecutor = null;
+      bridge.coherentSolidNativeExecutorSignature = null;
+      bridge.coherentSolidNativeExecutorReused = false;
+      retireCoherentSolidNativeExecutor(
+        bridge,
+        previousExecutor,
+        'coherent-solid-native-executor-authority-retired'
+      );
+      retireCoherentSolidPresentationLease(
+        retiredLeaseSubmitBridge || bridge,
+        retiredLease,
+        'coherent-solid-presentation-consumer-authority-retired'
+      );
+      publishCoherentSolidNativeBridgeDiagnostics(bridge, {
+        contract: blockedContract,
+        executor: null
+      });
+      return null;
+    }
+    if (bridge.drawState) bridge.drawState.solidDrawEntriesContract = contract;
+    const signature = coherentSolidDrawEntriesSignature(contract);
+    if (
+      previousExecutor?.ready
+      && bridge.coherentSolidNativeExecutorSignature === signature
+      && previousExecutor.device === bridge.device
+      && previousExecutor.format === bridge.format
+      && previousExecutor.validatePresentationAuthority?.().valid === true
+    ) {
+      bridge.coherentSolidNativeExecutorReused = true;
+      publishCoherentSolidNativeBridgeDiagnostics(bridge, { contract, executor: previousExecutor });
+      return previousExecutor;
+    }
+    const executor = createCoherentSolidNativeWebGpuExecutor({
+      contract,
+      device: bridge.device,
+      format: bridge.format,
+      depthFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+      cameraBuffer: bridge.cameraBuffer,
+      pipelineBundle: bridge.coherentSolidNativePipelineBundle || null,
+      source: reason
+    });
+    bridge.coherentSolidNativeExecutor = executor;
+    bridge.coherentSolidNativeExecutorSignature = signature;
+    bridge.coherentSolidNativeExecutorReused = false;
+    if (executor?.ready) {
+      bridge.coherentSolidNativePipelineBundle = executor.pipelineBundle;
+    }
+    if (previousExecutor && previousExecutor !== executor) {
+      retireCoherentSolidNativeExecutor(
+        bridge,
+        previousExecutor,
+        'coherent-solid-native-executor-replaced'
+      );
+    }
+    publishCoherentSolidNativeBridgeDiagnostics(bridge, { contract, executor });
+    return executor;
+  }
+
+  function setAdmittedCoherentSolidDrawEntries(solidDrawEntries, {
+    reason = 'upstream-state-manager-solid-draw-publication'
+  } = {}) {
+    const device = sphResidentSurfaceDrawRenderBridge?.device || solidDrawEntries?.device || null;
+    const authorityHost = resolveSceneResidentAuthorityHost();
+    const validatedPublication =
+      authorityHost?.validateCoherentSolidDrawPublication?.(solidDrawEntries) || null;
+    let presentationLease = null;
+    try {
+      presentationLease = validatedPublication
+        ? authorityHost?.acquireCoherentSolidDrawPublicationPresentationLease?.(
+          validatedPublication,
+          {
+            consumerId: `sph-phase-native-solid:${reason}`,
+            device,
+            publicationGeneration: validatedPublication.publicationGeneration,
+            admissionId: validatedPublication.admissionId
+          }
+        ) || null
+        : null;
+    } catch {
+      presentationLease = null;
+    }
+    const resolved = resolveAdmittedCoherentSolidDrawEntries({
+      solidDrawEntries: validatedPublication || solidDrawEntries,
+      device,
+      source: reason,
+      stateManagerAdmissionValidated: Boolean(validatedPublication),
+      presentationLease,
+      presentationLeaseRequired: true
+    });
+    if (!resolved.ready) {
+      presentationLease?.release?.();
+      scene.userData.coherentSolidDrawEntriesAdmission = {
+        ...resolved,
+        retainedPreviousPublicationGeneration:
+          admittedCoherentSolidDrawEntries?.publicationGeneration ?? null
+      };
+      return scene.userData.coherentSolidDrawEntriesAdmission;
+    }
+    if (
+      resolved.publicationGeneration
+      < coherentSolidDrawEntriesHighestPublicationGeneration
+    ) {
+      const stale = {
+        ...resolved,
+        status: 'blocked-stale-coherent-solid-draw-entries-publication',
+        reason: 'a newer admitted solid draw publication is already retained',
+        ready: false,
+        retainedPreviousPublicationGeneration:
+          admittedCoherentSolidDrawEntries?.publicationGeneration ?? null
+      };
+      presentationLease?.release?.();
+      scene.userData.coherentSolidDrawEntriesAdmission = stale;
+      return stale;
+    }
+    if (
+      admittedCoherentSolidDrawEntries
+      && resolved.publicationGeneration === coherentSolidDrawEntriesHighestPublicationGeneration
+    ) {
+      if (
+        coherentSolidDrawEntriesSignature(resolved)
+        === coherentSolidDrawEntriesSignature(admittedCoherentSolidDrawEntries)
+      ) {
+        presentationLease?.release?.();
+        scene.userData.coherentSolidDrawEntriesAdmission = admittedCoherentSolidDrawEntries;
+        return admittedCoherentSolidDrawEntries;
+      }
+      const conflict = {
+        ...resolved,
+        status: 'blocked-conflicting-coherent-solid-draw-entries-publication',
+        reason: 'publication generation was reused with different admitted draw entries',
+        ready: false,
+        retainedPreviousPublicationGeneration:
+          admittedCoherentSolidDrawEntries.publicationGeneration
+      };
+      presentationLease?.release?.();
+      scene.userData.coherentSolidDrawEntriesAdmission = conflict;
+      return conflict;
+    }
+    const previousPresentationLease = admittedCoherentSolidPresentationLease;
+    const previousPresentationSubmitBridge =
+      admittedCoherentSolidPresentationLeaseLastSubmitBridge;
+    coherentSolidDrawEntriesHighestPublicationGeneration = Math.max(
+      coherentSolidDrawEntriesHighestPublicationGeneration,
+      resolved.publicationGeneration
+    );
+    admittedCoherentSolidDrawEntries = resolved;
+    admittedCoherentSolidPresentationLease = presentationLease;
+    admittedCoherentSolidPresentationLeaseLastSubmitBridge = null;
+    scene.userData.coherentSolidDrawEntries = resolved;
+    scene.userData.coherentSolidDrawEntriesAdmission = resolved;
+    const bridge = sphResidentSurfaceDrawRenderBridge;
+    if (bridge?.drawState) {
+      bridge.drawState.solidDrawEntriesContract = resolved;
+      const previousExecutor = bridge.coherentSolidNativeExecutor || null;
+      bridge.coherentSolidNativeExecutor = null;
+      bridge.coherentSolidNativeExecutorSignature = null;
+      retireCoherentSolidNativeExecutor(
+        bridge,
+        previousExecutor,
+        'coherent-solid-native-executor-publication-replaced'
+      );
+      publishCoherentSolidNativeBridgeDiagnostics(bridge, { contract: resolved, executor: null });
+      if (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+        scheduleSphNativeWebGpuSurfaceConsumerFrame({
+          reason: 'coherent-solid-admitted-draw-publication'
+        });
+      }
+    }
+    retireCoherentSolidPresentationLease(
+      previousPresentationSubmitBridge || bridge,
+      previousPresentationLease,
+      'coherent-solid-presentation-consumer-publication-replaced'
+    );
+    return resolved;
+  }
+
   function retainedPreviousSurfaceDrawOverlay(surfaceDraw, renderBridge, reason) {
     if (!surfaceDraw || !hasVisibleResidentSurfaceDrawBridge(renderBridge)) return surfaceDraw;
     return {
@@ -14900,6 +17048,7 @@ export function createSphPhaseScene(container, {
       renderBridgeOitRevealFormat: renderBridge.oitRevealFormat ?? null,
       renderBridgeOitTargetsReady: Boolean(renderBridge.oitTargetsReady),
       renderBridgeLastOpaqueDrawCount: renderBridge.lastOpaqueDrawCount ?? 0,
+      renderBridgeLastRefractiveDrawCount: renderBridge.lastRefractiveDrawCount ?? 0,
       renderBridgeLastTransparentDrawCount: renderBridge.lastTransparentDrawCount ?? 0,
       renderBridgeOpticalRenderSource: renderBridge.opticalRenderSource ?? null,
       renderBridgeOpticalRecordCount: renderBridge.opticalRecordCount ?? 0,
@@ -14955,8 +17104,17 @@ export function createSphPhaseScene(container, {
     clearMlsMpmResidentExecutionArtifacts();
     clearSphGpuParticleUpload();
     clearMlsMpmGpuParticleUpload();
+    clearAdmittedCoherentSolidDrawEntries({
+      bridge: sphResidentSurfaceDrawRenderBridge,
+      status: `${reason}-coherent-solid-presentation-cleared`,
+      resetGeneration: true
+    });
     clearSphResidentSurfaceDrawArtifacts({ clearOverlay });
+    destroyResidentSparseRenderFieldRuntimePool(`${reason}-sparse-render-field-reset`);
+    destroyResidentRenderFieldRowsBufferPool(`${reason}-dense-render-field-reset`);
+    destroyResidentMaterialInterfaceSourceFieldRowsBufferPool(`${reason}-material-interface-field-reset`);
     publishSphResidentMaterialInterfaceState(null);
+    publishSphResidentRenderMaterialInterfaceState(null);
     publishSphResidentPressureInterfaceState(null);
     destroyPressureInterfaceForceRowsUpload();
     sphResidentRenderState = null;
@@ -14985,7 +17143,7 @@ export function createSphPhaseScene(container, {
       const pass = encoder.beginRenderPass({
         colorAttachments: [{
           view: bridge.context.getCurrentTexture().createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: 'clear',
           storeOp: 'store'
         }]
@@ -15161,7 +17319,7 @@ export function createSphPhaseScene(container, {
           device,
           format,
           usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
-          alphaMode: 'premultiplied'
+          alphaMode: 'opaque'
         });
       }
       const contextConfigureCount = (previous?.contextConfigureCount || 0) + (needsConfigure ? 1 : 0);
@@ -15270,7 +17428,7 @@ export function createSphPhaseScene(container, {
       device,
       format,
       usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
-      alphaMode: 'premultiplied'
+      alphaMode: 'opaque'
     });
     bridge.configuredCanvasWidth = canvas.width;
     bridge.configuredCanvasHeight = canvas.height;
@@ -15292,29 +17450,454 @@ export function createSphPhaseScene(container, {
     return true;
   }
 
-  // Scene-color copy target for screen-space refraction: matches the canvas
-  // size/format, filled by copyTextureToTexture after the opaque pass. Only
-  // the native surface-consumer lane configures its canvas with COPY_SRC.
-  function ensureSphResidentSurfaceRefractionCopy(bridge, width, height) {
-    if (!bridge?.device || !bridge?.format) return null;
-    const w = Math.max(1, Math.round(Number(width) || 0));
-    const h = Math.max(1, Math.round(Number(height) || 0));
-    const existing = bridge.refractionCopyTexture;
-    if (existing && bridge.refractionCopyWidth === w && bridge.refractionCopyHeight === h
-      && bridge.refractionCopyFormat === bridge.format) {
-      return existing;
+  function clearSphResidentSurfaceRefractionTargetBindings(bridge) {
+    if (!bridge) return;
+    bridge.refractionTargetSet = null;
+    bridge.refractionCopyTexture = null;
+    bridge.refractionCopyView = null;
+    bridge.refractionCopyWidth = 0;
+    bridge.refractionCopyHeight = 0;
+    bridge.refractionCopyFormat = null;
+    bridge.refractionCopyByteLength = 0;
+    bridge.refractionBackfaceTexture = null;
+    bridge.refractionBackfaceView = null;
+    bridge.refractionBackfaceWidth = 0;
+    bridge.refractionBackfaceHeight = 0;
+    bridge.refractionBackfaceByteLength = 0;
+    bridge.refractionBackfaceCacheValid = false;
+    bridge.refractionBindGroup = null;
+    bridge.refractionBindGroupSceneColorView = null;
+    bridge.refractionBindGroupEnvironmentView = null;
+    bridge.refractionBindGroupBackDepthView = null;
+  }
+
+  function destroySphResidentSurfaceRefractionTargetSet(targetSet) {
+    if (!targetSet || targetSet.destroyed) return false;
+    targetSet.destroyed = true;
+    try { targetSet.copyTexture?.destroy?.(); } catch { /* device teardown */ }
+    try { targetSet.backfaceTexture?.destroy?.(); } catch { /* device teardown */ }
+    targetSet.copyTexture = null;
+    targetSet.copyView = null;
+    targetSet.backfaceTexture = null;
+    targetSet.backfaceView = null;
+    return true;
+  }
+
+  function retireSphResidentSurfaceRefractionTargetSet(bridge, targetSet, reason) {
+    if (!bridge || !targetSet) return false;
+    targetSet.retirementStatus = 'retirement-requested';
+    targetSet.retirementReason = reason;
+    const retirement = retireNativeRefractionTargetSet({
+      targetSet,
+      status: reason,
+      deferRelease: (request) => deferSphNativeWebGpuSurfaceResourceRelease(bridge, request),
+      destroyTargetSet: destroySphResidentSurfaceRefractionTargetSet,
+      onRelease: ({ released: destroyed }) => {
+      targetSet.retirementStatus = destroyed ? 'retired-after-submit-fence' : 'already-retired';
+      bridge.refractionTargetRetirementPendingCount = Math.max(
+        0,
+        Math.round(Number(bridge.refractionTargetRetirementPendingCount) || 0) - 1
+      );
+      if (destroyed) {
+        bridge.refractionTargetRetirementCount = Math.max(
+          0,
+          Math.round(Number(bridge.refractionTargetRetirementCount) || 0)
+        ) + 1;
+      }
+      }
+    });
+    if (retirement.deferred) {
+      targetSet.retirementStatus = 'retirement-submit-fence-pending';
+      bridge.refractionTargetRetirementPendingCount = Math.max(
+        0,
+        Math.round(Number(bridge.refractionTargetRetirementPendingCount) || 0)
+      ) + 1;
+      return true;
     }
-    try { existing?.destroy?.(); } catch { /* released with device */ }
-    bridge.refractionCopyTexture = bridge.device.createTexture({
-      label: 'ulg-sph-resident-surface-draw-refraction-copy',
-      size: [w, h, 1],
-      format: bridge.format,
+    return false;
+  }
+
+  function detachSphResidentSurfaceRefractionTargetSet(bridge, reason) {
+    const targetSet = bridge?.refractionTargetSet || null;
+    if (!targetSet) {
+      clearSphResidentSurfaceRefractionTargetBindings(bridge);
+      return null;
+    }
+    clearSphResidentSurfaceRefractionTargetBindings(bridge);
+    retireSphResidentSurfaceRefractionTargetSet(bridge, targetSet, reason);
+    return targetSet;
+  }
+
+  // Scene color and rear depth are one exact size/format generation. A frame
+  // either binds both resources or fails closed through the dummy target.
+  function ensureSphResidentSurfaceRefractionTargetSet(bridge, width, height) {
+    const action = resolveNativeRefractionTargetSetAction({
+      required: true,
+      activeTargetSet: bridge?.refractionTargetSet ?? null,
+      device: bridge?.device ?? null,
+      width,
+      height,
+      colorFormat: bridge?.format ?? null,
+      depthFormat: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+      inFlightSubmitCount: bridge?.nativeSurfaceConsumerInFlightSubmitCount ?? 0,
+      submitFencePending: Boolean(bridge?.nativeSurfaceConsumerSubmitFencePending),
+      submitFenceTimedOut: Boolean(bridge?.nativeSurfaceConsumerSubmitFenceTimedOut),
+      submitFenceFailed: Boolean(bridge?.nativeSurfaceConsumerSubmitFenceFailed)
+    });
+    bridge.refractionTargetLifecycleStatus = action.status;
+    if (action.reuse) return bridge.refractionTargetSet;
+    if (action.retireActive) {
+      detachSphResidentSurfaceRefractionTargetSet(
+        bridge,
+        'native-refraction-target-set-replaced'
+      );
+    }
+    if (!action.create || !bridge?.refractiveBackfacePipeline) return null;
+    let copyTexture = null;
+    let backfaceTexture = null;
+    try {
+      copyTexture = bridge.device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-copy',
+        size: [action.width, action.height, 1],
+        format: action.colorFormat,
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+      });
+      backfaceTexture = bridge.device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-backface-depth',
+        size: [action.width, action.height, 1],
+        format: action.depthFormat,
+        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.TEXTURE_BINDING
+      });
+      const targetSet = {
+        schema: 'peercompute.ulg.native-refraction-target-set.v0',
+        generation: Math.max(
+          0,
+          Math.round(Number(bridge.refractionTargetGeneration) || 0)
+        ) + 1,
+        device: bridge.device,
+        width: action.width,
+        height: action.height,
+        colorFormat: action.colorFormat,
+        depthFormat: action.depthFormat,
+        copyTexture,
+        copyView: copyTexture.createView(),
+        backfaceTexture,
+        backfaceView: backfaceTexture.createView(),
+        destroyed: false,
+        retirementStatus: 'active'
+      };
+      bridge.refractionTargetGeneration = targetSet.generation;
+      bridge.refractionTargetSet = targetSet;
+      bridge.refractionCopyTexture = targetSet.copyTexture;
+      bridge.refractionCopyView = targetSet.copyView;
+      bridge.refractionCopyWidth = targetSet.width;
+      bridge.refractionCopyHeight = targetSet.height;
+      bridge.refractionCopyFormat = targetSet.colorFormat;
+      bridge.refractionCopyByteLength = targetSet.width * targetSet.height * 4;
+      bridge.refractionBackfaceTexture = targetSet.backfaceTexture;
+      bridge.refractionBackfaceView = targetSet.backfaceView;
+      bridge.refractionBackfaceWidth = targetSet.width;
+      bridge.refractionBackfaceHeight = targetSet.height;
+      bridge.refractionBackfaceByteLength =
+        targetSet.width * targetSet.height * Float32Array.BYTES_PER_ELEMENT;
+      bridge.refractionBackfaceCacheValid = false;
+      bridge.refractionBindGroup = null;
+      bridge.refractionTargetLifecycleStatus = 'target-set-created';
+      return targetSet;
+    } catch (error) {
+      try { copyTexture?.destroy?.(); } catch { /* device teardown */ }
+      try { backfaceTexture?.destroy?.(); } catch { /* device teardown */ }
+      bridge.refractionTargetLifecycleStatus = 'target-set-create-error';
+      bridge.refractionTargetLifecycleReason = error instanceof Error
+        ? error.message
+        : String(error);
+      return null;
+    }
+  }
+
+  function releaseSphResidentSurfaceRefractionTargetsWhenOpaque(bridge, width, height) {
+    const action = resolveNativeRefractionTargetSetAction({
+      required: false,
+      activeTargetSet: bridge?.refractionTargetSet ?? null,
+      device: bridge?.device ?? null,
+      width,
+      height,
+      colorFormat: bridge?.format ?? null,
+      depthFormat: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+      inFlightSubmitCount: bridge?.nativeSurfaceConsumerInFlightSubmitCount ?? 0,
+      submitFencePending: Boolean(bridge?.nativeSurfaceConsumerSubmitFencePending),
+      submitFenceTimedOut: Boolean(bridge?.nativeSurfaceConsumerSubmitFenceTimedOut),
+      submitFenceFailed: Boolean(bridge?.nativeSurfaceConsumerSubmitFenceFailed)
+    });
+    bridge.refractionTargetLifecycleStatus = action.status;
+    if (action.retireActive) {
+      detachSphResidentSurfaceRefractionTargetSet(
+        bridge,
+        'native-refraction-target-set-released-opaque-only'
+      );
+    } else if (!bridge?.refractionTargetSet) {
+      clearSphResidentSurfaceRefractionTargetBindings(bridge);
+    }
+    return action;
+  }
+
+  function ensureSphResidentSurfaceRefractionCopy(bridge, width, height) {
+    return ensureSphResidentSurfaceRefractionTargetSet(bridge, width, height)?.copyTexture || null;
+  }
+
+  function ensureSphResidentSurfaceRefractionBackfaceDepth(bridge, width, height) {
+    return ensureSphResidentSurfaceRefractionTargetSet(bridge, width, height)?.backfaceView || null;
+  }
+
+  function sphResidentSurfaceRefractionBackfaceCacheHit(bridge, {
+    drawState,
+    additionalSurfaceDraws,
+    refractiveDraws,
+    additionalRefractiveDraws,
+    viewProjection
+  } = {}) {
+    if (
+      !bridge?.refractionBackfaceCacheValid
+      || bridge.refractionBackfaceCacheSurfaceInputBuffer !== drawState?.surfaceInputBuffer
+      || bridge.refractionBackfaceCacheDrawIndirectRowsBuffer !== drawState?.drawIndirectRowsBuffer
+      || bridge.refractionBackfaceCacheSurfaceGenerationId
+        !== (drawState?.surfaceDrawExecution?.compactPositionRowsSurfaceGenerationId ?? null)
+    ) {
+      return false;
+    }
+    const cachedPrimaryOffsets = bridge.refractionBackfaceCachePrimaryIndirectOffsets;
+    if (!Array.isArray(cachedPrimaryOffsets) || cachedPrimaryOffsets.length !== refractiveDraws.length) {
+      return false;
+    }
+    for (let index = 0; index < refractiveDraws.length; index += 1) {
+      if (cachedPrimaryOffsets[index] !== refractiveDraws[index].indirectOffsetBytes) return false;
+    }
+    const cachedAdditional = bridge.refractionBackfaceCacheAdditionalDraws;
+    if (!Array.isArray(cachedAdditional) || cachedAdditional.length !== additionalRefractiveDraws.length) {
+      return false;
+    }
+    for (let index = 0; index < additionalRefractiveDraws.length; index += 1) {
+      const cached = cachedAdditional[index];
+      const currentDraw = additionalRefractiveDraws[index];
+      if (
+        cached.surfaceKey !== currentDraw.surfaceKey
+        || cached.surfaceInputBuffer !== currentDraw.surfaceInputBuffer
+        || cached.surfaceGenerationId !== currentDraw.surfaceGenerationId
+        || cached.drawIndirectRowsBuffer !== currentDraw.drawIndirectRowsBuffer
+      ) {
+        return false;
+      }
+    }
+    const current = viewProjection?.elements;
+    const cached = bridge.refractionBackfaceCacheViewProjection;
+    if (!current || !(cached instanceof Float32Array) || cached.length !== 16) return false;
+    for (let index = 0; index < 16; index += 1) {
+      // Ignore sub-pixel OrbitControls damping noise; a larger camera change
+      // invalidates the cached rear surface on the next frame.
+      if (Math.abs(Number(cached[index]) - Number(current[index])) > 1e-6) return false;
+    }
+    return true;
+  }
+
+  function commitSphResidentSurfaceRefractionBackfaceCache(bridge, {
+    drawState,
+    additionalSurfaceDraws,
+    refractiveDraws,
+    additionalRefractiveDraws,
+    viewProjection
+  } = {}) {
+    bridge.refractionBackfaceCacheValid = true;
+    bridge.refractionBackfaceCacheSurfaceInputBuffer = drawState?.surfaceInputBuffer || null;
+    bridge.refractionBackfaceCacheDrawIndirectRowsBuffer = drawState?.drawIndirectRowsBuffer || null;
+    bridge.refractionBackfaceCacheSurfaceGenerationId =
+      drawState?.surfaceDrawExecution?.compactPositionRowsSurfaceGenerationId ?? null;
+    bridge.refractionBackfaceCachePrimaryIndirectOffsets = refractiveDraws.map(
+      (draw) => draw.indirectOffsetBytes
+    );
+    bridge.refractionBackfaceCacheAdditionalDraws = additionalRefractiveDraws.map((draw) => ({
+      surfaceKey: draw.surfaceKey,
+      surfaceInputBuffer: draw.surfaceInputBuffer,
+      surfaceGenerationId: draw.surfaceGenerationId,
+      drawIndirectRowsBuffer: draw.drawIndirectRowsBuffer
+    }));
+    bridge.refractionBackfaceCacheViewProjection = bridge.refractionBackfaceCacheViewProjection
+      instanceof Float32Array
+      ? bridge.refractionBackfaceCacheViewProjection
+      : new Float32Array(16);
+    bridge.refractionBackfaceCacheViewProjection.set(viewProjection?.elements || []);
+  }
+
+  function ensureSphNativeSurfaceBackgroundRenderer(bridge) {
+    if (!bridge?.device || !bridge?.format) return null;
+    if (bridge.backgroundImageRenderer?.pipeline) return bridge.backgroundImageRenderer;
+    const module = bridge.device.createShaderModule({
+      label: 'ulg-sph-native-surface-background',
+      code: SPH_NATIVE_WEBGPU_BACKGROUND_WGSL
+    });
+    const pipeline = bridge.device.createRenderPipeline({
+      label: 'ulg-sph-native-surface-background',
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs_main' },
+      fragment: {
+        module,
+        entryPoint: 'fs_main',
+        targets: [{ format: bridge.format }]
+      },
+      primitive: { topology: 'triangle-list' },
+      depthStencil: {
+        format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        depthWriteEnabled: false,
+        depthCompare: 'always'
+      }
+    });
+    const sampler = bridge.device.createSampler({
+      label: 'ulg-sph-native-surface-background',
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge'
+    });
+    const uniformBuffer = bridge.device.createBuffer({
+      label: 'ulg-sph-native-surface-background-cover',
+      size: 4 * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    bridge.backgroundImageRenderer = {
+      pipeline,
+      sampler,
+      uniformBuffer,
+      bindGroup: null,
+      coverScaleKey: null,
+      imageWidth: 0,
+      imageHeight: 0
+    };
+    return bridge.backgroundImageRenderer;
+  }
+
+  function retireSphNativeSurfaceBackgroundTexture(bridge, texture) {
+    if (!texture || texture === bridge?.backgroundImageTexture) return;
+    const release = () => {
+      try { texture.destroy?.(); } catch { /* device teardown */ }
+    };
+    if (typeof bridge?.device?.queue?.onSubmittedWorkDone === 'function') {
+      bridge.device.queue.onSubmittedWorkDone().then(release, release);
+    } else {
+      const retired = Array.isArray(bridge?.retiredBackgroundImageTextures)
+        ? bridge.retiredBackgroundImageTextures
+        : [];
+      retired.push(texture);
+      bridge.retiredBackgroundImageTextures = retired;
+    }
+  }
+
+  function uploadSphNativeSurfaceBackgroundImage(bridge, image, url) {
+    if (!bridge?.device || !image || sceneBackgroundImageUrl !== url) return false;
+    const renderer = ensureSphNativeSurfaceBackgroundRenderer(bridge);
+    if (!renderer) return false;
+    const sourceWidth = Math.max(1, Number(image.naturalWidth || image.width) || 1);
+    const sourceHeight = Math.max(1, Number(image.naturalHeight || image.height) || 1);
+    const maxDeviceDimension = Math.max(
+      1,
+      Math.floor(Number(bridge.device.limits?.maxTextureDimension2D) || 2048)
+    );
+    const maxUploadDimension = Math.min(2048, maxDeviceDimension);
+    const resizeScale = Math.min(1, maxUploadDimension / Math.max(sourceWidth, sourceHeight));
+    const width = Math.max(1, Math.round(sourceWidth * resizeScale));
+    const height = Math.max(1, Math.round(sourceHeight * resizeScale));
+    const uploadCanvas = document.createElement('canvas');
+    uploadCanvas.width = width;
+    uploadCanvas.height = height;
+    const context2d = uploadCanvas.getContext('2d');
+    if (!context2d) return false;
+    context2d.drawImage(image, 0, 0, width, height);
+    const imagePixels = context2d.getImageData(0, 0, width, height).data;
+    const sourceBytesPerRow = width * 4;
+    const uploadBytesPerRow = Math.ceil(sourceBytesPerRow / 256) * 256;
+    let uploadPixels = imagePixels;
+    if (uploadBytesPerRow !== sourceBytesPerRow) {
+      uploadPixels = new Uint8Array(uploadBytesPerRow * height);
+      for (let row = 0; row < height; row += 1) {
+        uploadPixels.set(
+          imagePixels.subarray(row * sourceBytesPerRow, (row + 1) * sourceBytesPerRow),
+          row * uploadBytesPerRow
+        );
+      }
+    }
+    const texture = bridge.device.createTexture({
+      label: 'ulg-sph-native-surface-background-image',
+      size: [width, height, 1],
+      format: 'rgba8unorm',
       usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
     });
-    bridge.refractionCopyWidth = w;
-    bridge.refractionCopyHeight = h;
-    bridge.refractionCopyFormat = bridge.format;
-    return bridge.refractionCopyTexture;
+    try {
+      bridge.device.queue.writeTexture(
+        { texture },
+        uploadPixels,
+        { bytesPerRow: uploadBytesPerRow, rowsPerImage: height },
+        [width, height, 1]
+      );
+      const bindGroup = bridge.device.createBindGroup({
+        label: 'ulg-sph-native-surface-background',
+        layout: renderer.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: texture.createView() },
+          { binding: 1, resource: renderer.sampler },
+          { binding: 2, resource: { buffer: renderer.uniformBuffer } }
+        ]
+      });
+      const previousTexture = bridge.backgroundImageTexture;
+      bridge.backgroundImageTexture = texture;
+      bridge.backgroundImageTextureUrl = url;
+      bridge.backgroundImageTextureWidth = width;
+      bridge.backgroundImageTextureHeight = height;
+      bridge.backgroundImageGpuStatus = 'native-opaque-background-image-ready';
+      renderer.bindGroup = bindGroup;
+      renderer.imageWidth = width;
+      renderer.imageHeight = height;
+      renderer.coverScaleKey = null;
+      retireSphNativeSurfaceBackgroundTexture(bridge, previousTexture);
+      return true;
+    } catch (error) {
+      texture.destroy?.();
+      bridge.backgroundImageGpuStatus = 'native-opaque-background-image-upload-failed';
+      bridge.backgroundImageGpuReason = error instanceof Error ? error.message : String(error);
+      return false;
+    }
+  }
+
+  function drawSphNativeSurfaceBackgroundImage(bridge, pass) {
+    const renderer = bridge?.backgroundImageRenderer;
+    if (!renderer?.pipeline || !renderer.bindGroup || !bridge?.backgroundImageTexture) return false;
+    const coverScaleKey = [
+      renderer.imageWidth,
+      renderer.imageHeight,
+      bridge.canvas?.width || 1,
+      bridge.canvas?.height || 1
+    ].join(':');
+    if (renderer.coverScaleKey !== coverScaleKey) {
+      const coverScale = nativeSurfaceBackgroundCoverScale({
+        imageWidth: renderer.imageWidth,
+        imageHeight: renderer.imageHeight,
+        canvasWidth: bridge.canvas?.width,
+        canvasHeight: bridge.canvas?.height
+      });
+      bridge.device.queue.writeBuffer(
+        renderer.uniformBuffer,
+        0,
+        new Float32Array([coverScale[0], coverScale[1], 0, 0])
+      );
+      renderer.coverScaleKey = coverScaleKey;
+      bridge.backgroundImageCoverScale = coverScale;
+    }
+    pass.setPipeline(renderer.pipeline);
+    pass.setBindGroup(0, renderer.bindGroup);
+    pass.draw(3);
+    bridge.backgroundImageDrawCount = Math.max(
+      0,
+      Math.round(Number(bridge.backgroundImageDrawCount) || 0)
+    ) + 1;
+    bridge.backgroundImageGpuStatus = 'native-opaque-background-image-rendered';
+    return true;
   }
 
   // Prefiltered environment map from the scene background image: 256x128
@@ -15334,7 +17917,8 @@ export function createSphPhaseScene(container, {
         { binding: 0, resource: bridge.refractionDummyTexture.createView() },
         { binding: 1, resource: bridge.refractionSampler },
         { binding: 2, resource: bridge.envMapView || bridge.envDummyView },
-        { binding: 3, resource: bridge.envSampler }
+        { binding: 3, resource: bridge.envSampler },
+        { binding: 4, resource: bridge.refractionBackfaceDummyView }
       ]
     });
   }
@@ -15342,21 +17926,34 @@ export function createSphPhaseScene(container, {
   function ensureSphResidentSurfaceEnvMap(bridge) {
     if (!bridge?.device || !bridge.envSampler) return;
     const url = sceneBackgroundImageUrl;
-    if (
-      bridge.envMapUrl === url
-      || bridge.envMapPendingUrl === url
-      || bridge.envMapFailedUrl === url
-    ) return;
     if (!url) {
       bridge.envMapUrl = null;
       bridge.envMapPendingUrl = null;
       bridge.envMapFailedUrl = null;
-      try { bridge.envMapTexture?.destroy?.(); } catch { /* device teardown */ }
+      const previousEnvMap = bridge.envMapTexture;
       bridge.envMapTexture = null;
       bridge.envMapView = null;
+      retireSphNativeSurfaceBackgroundTexture(bridge, previousEnvMap);
+      const backgroundTexture = bridge.backgroundImageTexture;
+      bridge.backgroundImageTexture = null;
+      bridge.backgroundImageTextureUrl = null;
+      bridge.backgroundImageGpuStatus = 'native-opaque-background-image-cleared';
+      if (bridge.backgroundImageRenderer) {
+        bridge.backgroundImageRenderer.bindGroup = null;
+      }
+      retireSphNativeSurfaceBackgroundTexture(bridge, backgroundTexture);
       rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
       return;
     }
+    const backgroundReady = bridge.backgroundImageTextureUrl === url
+      && Boolean(bridge.backgroundImageTexture);
+    if (
+      (bridge.envMapUrl === url && backgroundReady)
+      || bridge.envMapPendingUrl === url
+      || (bridge.envMapFailedUrl === url && (
+        backgroundReady || bridge.backgroundImageFailedUrl === url
+      ))
+    ) return;
     if (typeof Image === 'undefined' || typeof document === 'undefined') return;
     bridge.envMapPendingUrl = url;
     const image = new Image();
@@ -15369,6 +17966,11 @@ export function createSphPhaseScene(container, {
       ) return;
       bridge.envMapPendingUrl = null;
       if (sceneBackgroundImageUrl !== url || !bridge.device) return;
+      if (uploadSphNativeSurfaceBackgroundImage(bridge, image, url)) {
+        bridge.backgroundImageFailedUrl = null;
+      } else {
+        bridge.backgroundImageFailedUrl = url;
+      }
       let texture = null;
       try {
         const baseWidth = 256;
@@ -15405,11 +18007,12 @@ export function createSphPhaseScene(container, {
             [levels[level].width, levels[level].height, 1]
           );
         }
-        try { bridge.envMapTexture?.destroy?.(); } catch { /* replaced */ }
+        const previousEnvMap = bridge.envMapTexture;
         bridge.envMapTexture = texture;
         bridge.envMapView = texture.createView();
         bridge.envMapUrl = url;
         bridge.envMapFailedUrl = null;
+        retireSphNativeSurfaceBackgroundTexture(bridge, previousEnvMap);
         rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
         texture = null;
         markSphResidentRenderProgress('surface-env-map-built', {
@@ -15518,7 +18121,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-  return vec4<f32>(params.color.rgb * params.color.a, params.color.a);
+  return vec4<f32>(params.color.rgb * params.color.a, 1.0);
 }
 `
     });
@@ -15529,13 +18132,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       fragment: {
         module,
         entryPoint: 'fs_main',
-        targets: [{
-          format: bridge.format,
-          blend: {
-            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
-            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }
-          }
-        }]
+        targets: [{ format: bridge.format }]
       },
       primitive: { topology: 'line-list' },
       depthStencil: {
@@ -15575,44 +18172,6 @@ fn fs_main() -> @location(0) vec4<f32> {
     pass.setBindGroup(0, wireframe.bindGroup);
     pass.draw(24);
     return true;
-  }
-
-  function ensureSphResidentSurfaceDrawOitTargets(bridge = sphResidentSurfaceDrawRenderBridge) {
-    if (!bridge?.device || !bridge?.canvas) return null;
-    const widthPx = bridge.canvas.width || 1;
-    const heightPx = bridge.canvas.height || 1;
-    if (
-      bridge.oitAccumTexture
-      && bridge.oitRevealTexture
-      && bridge.oitWidth === widthPx
-      && bridge.oitHeight === heightPx
-    ) {
-      return {
-        accumView: bridge.oitAccumTexture.createView(),
-        revealView: bridge.oitRevealTexture.createView()
-      };
-    }
-    bridge.oitAccumTexture?.destroy?.();
-    bridge.oitRevealTexture?.destroy?.();
-    bridge.oitAccumTexture = bridge.device.createTexture({
-      label: 'ulg-sph-resident-surface-draw-oit-accum',
-      size: [widthPx, heightPx],
-      format: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-      usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.TEXTURE_BINDING
-    });
-    bridge.oitRevealTexture = bridge.device.createTexture({
-      label: 'ulg-sph-resident-surface-draw-oit-reveal',
-      size: [widthPx, heightPx],
-      format: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
-      usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.TEXTURE_BINDING
-    });
-    bridge.oitWidth = widthPx;
-    bridge.oitHeight = heightPx;
-    bridge.oitTargetsReady = true;
-    return {
-      accumView: bridge.oitAccumTexture.createView(),
-      revealView: bridge.oitRevealTexture.createView()
-    };
   }
 
   function ensureSphNativeWebGpuSurfacePixelValidationTexture(bridge = sphResidentSurfaceDrawRenderBridge) {
@@ -16434,8 +18993,9 @@ fn fs_main() -> @location(0) vec4<f32> {
     {
       drawCount = 0,
       opaqueDraws = [],
-      transparentDraws = [],
-      schroederProxyExecutor = null
+      refractiveDraws = [],
+      schroederProxyExecutor = null,
+      coherentSolidExecutor = null
     } = {}
   ) {
     if (bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return null;
@@ -16469,8 +19029,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       || !drawState?.bindGroup
       || !drawState?.drawIndirectRowsBuffer
       || !bridge.opaquePipeline
-      || !bridge.transparentPipeline
-      || ((opaqueDraws.length > 0 || transparentDraws.length > 0) && !bridge.refractionDummyBindGroup)
+      || !bridge.refractivePipeline
+      || ((opaqueDraws.length > 0 || refractiveDraws.length > 0) && !bridge.refractionDummyBindGroup)
       || !encoder?.copyTextureToBuffer
       || !bridge.device?.createBuffer
     ) {
@@ -16510,7 +19070,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       const validationPass = encoder.beginRenderPass({
         colorAttachments: [{
           view: targets.texture.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: 'clear',
           storeOp: 'store'
         }],
@@ -16529,11 +19089,11 @@ fn fs_main() -> @location(0) vec4<f32> {
           validationPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
         }
       }
-      if (transparentDraws.length > 0) {
-        validationPass.setPipeline(bridge.transparentPipeline);
+      if (refractiveDraws.length > 0) {
+        validationPass.setPipeline(bridge.refractivePipeline);
         validationPass.setBindGroup(0, drawState.bindGroup);
         validationPass.setBindGroup(1, bridge.refractionDummyBindGroup);
-        for (const draw of transparentDraws) {
+        for (const draw of refractiveDraws) {
           validationPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
         }
       }
@@ -16544,6 +19104,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           proxySubmit.drawCommandCount;
         bridge.lastSchroederRenderProxyNativeOffscreenValidationDrawInstanceCount =
           proxySubmit.drawInstanceCount;
+      }
+      if (coherentSolidExecutor?.ready) {
+        const opaqueSubmit = coherentSolidExecutor.executeOpaque(validationPass);
+        const transparentSubmit = coherentSolidExecutor.executeTransparent(validationPass);
+        bridge.lastCoherentSolidNativeOffscreenOpaqueSubmitStatus = opaqueSubmit.status;
+        bridge.lastCoherentSolidNativeOffscreenTransparentSubmitStatus = transparentSubmit.status;
+        bridge.lastCoherentSolidNativeOffscreenDrawCommandCount =
+          opaqueSubmit.drawCommandCount + transparentSubmit.drawCommandCount;
       }
       validationPass.end();
       encoder.copyTextureToBuffer(
@@ -17302,15 +19870,16 @@ fn fs_main() -> @location(0) vec4<f32> {
           size: pointSize,
           sizeAttenuation: true,
           vertexColors: true,
-          transparent: true,
-          opacity: 0.82,
-          depthWrite: false,
+          transparent: false,
+          opacity: 1,
+          depthWrite: true,
           depthTest: true
         });
         material.userData.optical = {
-          alpha: material.opacity,
-          transparencyClassId: 1,
-          depthWriteFlag: 0
+          alpha: 1,
+          transparencyClassId: 0,
+          depthWriteFlag: 1,
+          alphaTransparencyDisabled: true
         };
         points = new Three.Points(geometry, material);
         points.name = 'ulg-sph-three-render-row-points';
@@ -17515,13 +20084,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         fragment: {
           module,
           entryPoint: 'fs_main',
-          targets: [{
-            format,
-            blend: {
-              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
-            }
-          }]
+          targets: [{ format }]
         },
         primitive: {
           topology: 'triangle-list',
@@ -18100,6 +20663,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
   function compactPositionCameraUniformPayload({
     viewProjection,
+    inverseViewProjection,
     compactPositionDrawState,
     cameraPosition = null
   } = {}) {
@@ -18110,6 +20674,16 @@ fn fs_main() -> @location(0) vec4<f32> {
       : (Array.isArray(viewProjection) || ArrayBuffer.isView(viewProjection) ? viewProjection : null);
     if (matrixSource) {
       matrix.set(Array.from(matrixSource).slice(0, 16), 0);
+    }
+    const inverseMatrix = new Float32Array(payload, 256, 16);
+    const inverseMatrixSource = Array.isArray(inverseViewProjection?.elements)
+      || ArrayBuffer.isView(inverseViewProjection?.elements)
+      ? inverseViewProjection.elements
+      : (Array.isArray(inverseViewProjection) || ArrayBuffer.isView(inverseViewProjection)
+          ? inverseViewProjection
+          : null);
+    if (inverseMatrixSource) {
+      inverseMatrix.set(Array.from(inverseMatrixSource).slice(0, 16), 0);
     }
     const view = new DataView(payload);
     const state = compactPositionDrawState || {};
@@ -18194,11 +20768,50 @@ fn fs_main() -> @location(0) vec4<f32> {
         ?? surfaceDrawExecution?.compactPositionRowsBufferRowCount
         ?? surfaceDrawExecution?.vertexCount
     ) || 0));
+    const compactNormalRowsBuffer = surfaceDrawExecution?.compactNormalRowsBuffer || null;
+    const compactNormalRowsBufferByteLength = Math.max(
+      0,
+      Math.round(Number(surfaceDrawExecution?.compactNormalRowsBufferByteLength) || 0)
+    );
+    const compactNormalRowCount = Math.max(
+      0,
+      Math.floor(Number(surfaceDrawExecution?.compactNormalRowsBufferRowCount) || 0)
+    );
+    const compactNormalGenerationMatches = Boolean(
+      Number.isInteger(Number(surfaceDrawExecution?.compactNormalRowsSurfaceGenerationId))
+      && surfaceDrawExecution?.compactNormalRowsSurfaceGenerationId
+        === surfaceDrawExecution?.compactPositionRowsSurfaceGenerationId
+      && (
+        surfaceDrawExecution?.compactNormalRowsVolumeGenerationId == null
+        || surfaceDrawExecution?.compactPositionRowsVolumeGenerationId == null
+        || surfaceDrawExecution?.compactNormalRowsVolumeGenerationId
+          === surfaceDrawExecution?.compactPositionRowsVolumeGenerationId
+      )
+    );
+    const compactNormalReady = Boolean(
+      compactNormalRowsBuffer
+      && packedNormalRowsCoverCompactPositionPrefix({
+        normalRowCount: compactNormalRowCount,
+        normalBufferByteLength: compactNormalRowsBufferByteLength,
+        compactPositionVertexCount
+      })
+      && surfaceDrawExecution?.compactNormalRowsSchema
+        === 'peercompute.webgpu-marching-cubes.packed-normal-rows.v0'
+      && surfaceDrawExecution?.compactNormalRowsLayoutName
+        === 'peercompute.webgpu-marching-cubes.layout.normal-octahedral-snorm16x2.v0'
+      && surfaceDrawExecution?.compactNormalRowsEncoding === 'octahedral-snorm16x2'
+      && surfaceDrawExecution?.compactNormalRowsSemantic === 'oriented-scalar-gradient'
+      && surfaceDrawExecution?.compactNormalRowsSourceSemantic === 'scalar-gradient'
+      && surfaceDrawExecution?.compactNormalRowsNormalSign === -1
+      && surfaceDrawExecution?.compactNormalRowsAdditionalSubmitCount === 0
+      && compactNormalGenerationMatches
+    );
     if (
       compactPositionRowsBuffer
       && compactPositionRowsBufferByteLength > 0
       && compactPositionVertexCount >= 3
       && surfaceDrawExecution?.directCompactPositionDraw === true
+      && compactNormalReady
     ) {
       return {
         layout: 'webgpu-marching-cubes-compact-position-rows',
@@ -18210,9 +20823,20 @@ fn fs_main() -> @location(0) vec4<f32> {
             ?? surfaceDrawExecution?.sourceVertexStrideFloats
             ?? 4
         ) || 4)),
-        normalAttribute: false,
-        normalAttributeDisabledReason:
-          'native WebGPU surface consumer derives flat normals from compact marching-cubes triangle position rows',
+        normalAttribute: true,
+        normalBuffer: compactNormalRowsBuffer,
+        normalBufferByteLength: compactNormalRowsBufferByteLength,
+        normalRowCount: compactNormalRowCount,
+        normalEncoding: surfaceDrawExecution.compactNormalRowsEncoding,
+        normalSemantic: surfaceDrawExecution.compactNormalRowsSemantic,
+        normalSign: surfaceDrawExecution.compactNormalRowsNormalSign,
+        normalSurfaceGenerationId:
+          surfaceDrawExecution.compactNormalRowsSurfaceGenerationId,
+        normalVolumeGenerationId:
+          surfaceDrawExecution.compactNormalRowsVolumeGenerationId,
+        normalAdditionalSubmitCount:
+          surfaceDrawExecution.compactNormalRowsAdditionalSubmitCount,
+        normalAttributeDisabledReason: null,
         compactPositionDrawState: resolveCompactPositionSurfaceDrawState(surfaceDrawExecution)
       };
     }
@@ -18244,7 +20868,8 @@ fn fs_main() -> @location(0) vec4<f32> {
 
   function createSphResidentSurfaceDrawNativeWebGpuConsumerBridge({
     surfaceDrawExecution,
-    rendererCapability = null
+    rendererCapability = null,
+    renderCommitGuard = null
   } = {}) {
     const schema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
     const rendererBridge = SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
@@ -18283,14 +20908,16 @@ fn fs_main() -> @location(0) vec4<f32> {
     return createSphResidentSurfaceDrawRenderBridge({
       device: nativeConsumer?.device || nativeConsumer?.gpuDevice || null,
       surfaceDrawExecution,
-      nativeConsumer
+      nativeConsumer,
+      renderCommitGuard
     });
   }
 
   function createSphResidentSurfaceDrawRenderBridge({
     device,
     surfaceDrawExecution,
-    nativeConsumer = null
+    nativeConsumer = null,
+    renderCommitGuard = null
   } = {}) {
     const useNativeConsumer = Boolean(nativeConsumer?.context && nativeConsumer?.canvas);
     const overlayPolicy = useNativeConsumer
@@ -18319,6 +20946,13 @@ fn fs_main() -> @location(0) vec4<f32> {
         fullPhysicsValidation: false
       };
     }
+    const candidateDestroyables = new Set();
+    const retainCandidateDestroyable = (resource) => {
+      if (resource && typeof resource.destroy === 'function') {
+        candidateDestroyables.add(resource);
+      }
+      return resource;
+    };
     try {
       const gpu = navigatorRef?.gpu || globalThis.navigator?.gpu;
       const nativeDrawInput = resolveNativeSurfaceDrawInput(surfaceDrawExecution);
@@ -18348,7 +20982,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           device,
           format,
           usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
-          alphaMode: 'premultiplied'
+          alphaMode: 'opaque'
         });
       }
       const bridgeOpticalGpuTable = opticalGpuTable?.recordCount > 0
@@ -18373,11 +21007,8 @@ fn fs_main() -> @location(0) vec4<f32> {
         && previousBridge.bindGroupLayout
         && previousBridge.cameraBuffer
         && previousBridge.opaquePipeline
-        && previousBridge.transparentPipeline
-        && previousBridge.transparentOitPipeline
-        && previousBridge.oitCompositePipeline
-        && previousBridge.oitCompositeBindGroupLayout
-        && previousBridge.oitSampler
+        && previousBridge.refractivePipeline
+        && previousBridge.refractiveBackfacePipeline
         // Env-map era bridges carry envSampler; older layouts (2-entry
         // refraction group) must rebuild against the 4-entry layout.
         && previousBridge.envSampler
@@ -18389,8 +21020,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         && previousBridge.opticalGpuTableReuseKey === bridgeOpticalGpuTableReuseKey
         && previousBridge.fieldGradientDummyBuffer
         // Bridges built before the refraction bind group exist must rebuild
-        // so the transparent pass can bind group(1).
+        // so the opaque refractive pass can bind group(1).
         && previousBridge.refractionDummyBindGroup
+        && previousBridge.refractionBackfaceDummyTexture
       );
       if (canReuseNativeBridge) {
         const bindGroup = device.createBindGroup({
@@ -18404,8 +21036,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             {
               binding: 4,
               resource: {
-                buffer: surfaceDrawExecution?.renderFieldGradientVolume?.buffer
-                  || previousBridge.fieldGradientDummyBuffer
+                buffer: nativeDrawInput.normalBuffer || previousBridge.fieldGradientDummyBuffer
               }
             }
           ]
@@ -18429,6 +21060,9 @@ fn fs_main() -> @location(0) vec4<f32> {
           additionalSurfaceDraws: Array.isArray(previousBridge.drawState?.additionalSurfaceDraws)
             ? previousBridge.drawState.additionalSurfaceDraws
             : [],
+          solidDrawEntriesContract: admittedCoherentSolidDrawEntries
+            || previousBridge.drawState?.solidDrawEntriesContract
+            || null,
           drawIndirectRowsBuffer: surfaceDrawExecution.drawIndirectRowsBuffer,
           surfaceCount: surfaceDrawExecution.surfaceCount,
           sourceSurfaceCount: surfaceDrawExecution.surfaceCount,
@@ -18437,11 +21071,15 @@ fn fs_main() -> @location(0) vec4<f32> {
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
           drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
-          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthPolicy: 'all-surfaces-depth-write',
           depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          transparencyCompositeMode: 'weighted-blended-oit',
-          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          transparencyCompositeMode: 'disabled-opaque-pbr',
+          surfaceAlphaMode: 'opaque',
+          surfaceBlendEnabled: false,
+          surfaceDepthWriteEnabled: true,
+          quantumSpectralRefractionRequired: true,
+          oitAccumFormat: null,
+          oitRevealFormat: null,
           opticalRenderSource: 'closure-derived-optical-gpu-table',
           opticalRecordCount: bridgeOpticalGpuTable.recordCount,
           opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
@@ -18451,8 +21089,16 @@ fn fs_main() -> @location(0) vec4<f32> {
           indirectStrideBytes,
           surfaceInputLayout,
           surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          packedNormalBuffer: nativeDrawInput.normalBuffer || null,
+          packedNormalBufferByteLength: nativeDrawInput.normalBufferByteLength || 0,
+          packedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+          packedNormalEncoding: nativeDrawInput.normalEncoding || null,
+          packedNormalSurfaceGenerationId: nativeDrawInput.normalSurfaceGenerationId ?? null,
           compactPositionDrawState: nativeDrawInput.compactPositionDrawState
         };
+        assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+          stage: 'native-surface-bridge-reuse-commit'
+        });
         Object.assign(previousBridge, {
           released: false,
           status: SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS,
@@ -18470,6 +21116,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           externalGpuBufferVertexRowStrideFloats: nativeDrawInput.rowStrideFloats,
           externalGpuBufferInputLayout: surfaceInputLayout,
           externalGpuBufferNormalAttribute: Boolean(nativeDrawInput.normalAttribute),
+          externalGpuBufferPackedNormalByteLength:
+            nativeDrawInput.normalBufferByteLength || 0,
+          externalGpuBufferPackedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+          externalGpuBufferPackedNormalEncoding: nativeDrawInput.normalEncoding || null,
+          externalGpuBufferPackedNormalSurfaceGenerationId:
+            nativeDrawInput.normalSurfaceGenerationId ?? null,
+          externalGpuBufferPackedNormalAdditionalSubmitCount:
+            nativeDrawInput.normalAdditionalSubmitCount ?? null,
           externalGpuBufferNormalAttributeDisabledReason:
             nativeDrawInput.normalAttributeDisabledReason,
           compactPositionDirectInput: useCompactPositionRows,
@@ -18535,11 +21189,15 @@ fn fs_main() -> @location(0) vec4<f32> {
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
           drawOrderCount: drawOrder.length,
-          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthPolicy: 'all-surfaces-depth-write',
           depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          transparencyCompositeMode: 'weighted-blended-oit',
-          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          transparencyCompositeMode: 'disabled-opaque-pbr',
+          surfaceAlphaMode: 'opaque',
+          surfaceBlendEnabled: false,
+          surfaceDepthWriteEnabled: true,
+          quantumSpectralRefractionRequired: true,
+          oitAccumFormat: null,
+          oitRevealFormat: null,
           opticalRenderSource: 'closure-derived-optical-gpu-table',
           opticalRecordCount: bridgeOpticalGpuTable.recordCount,
           opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
@@ -18562,11 +21220,9 @@ fn fs_main() -> @location(0) vec4<f32> {
           ? SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL
           : SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
       });
-      const oitCompositeModule = device.createShaderModule({
-        label: 'ulg-sph-resident-surface-draw-oit-composite',
-        code: SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL
-      });
       const opticalGpuBuffers = uploadOpticalGpuTable(device, bridgeOpticalGpuTable);
+      retainCandidateDestroyable(opticalGpuBuffers?.recordsBuffer);
+      retainCandidateDestroyable(opticalGpuBuffers?.spectralSamplesBuffer);
       const bindGroupLayout = device.createBindGroupLayout({
         label: 'ulg-sph-resident-surface-draw-overlay-bind-group-layout',
         entries: [
@@ -18621,6 +21277,11 @@ fn fs_main() -> @location(0) vec4<f32> {
             binding: 3,
             visibility: GPU_SHADER_STAGE.FRAGMENT,
             sampler: { type: 'filtering' }
+          },
+          {
+            binding: 4,
+            visibility: GPU_SHADER_STAGE.FRAGMENT,
+            texture: { sampleType: 'depth' }
           }
         ]
       });
@@ -18628,26 +21289,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         label: 'ulg-sph-resident-surface-draw-overlay-pipeline-layout',
         bindGroupLayouts: [bindGroupLayout, refractionBindGroupLayout]
       });
-      const createOverlayPipeline = ({
-        label,
-        depthWriteEnabled,
-        fragmentEntryPoint = 'fs_main',
-        targets = [{
-          format,
-          blend: {
-            color: {
-              srcFactor: 'one',
-              dstFactor: 'one-minus-src-alpha',
-              operation: 'add'
-            },
-            alpha: {
-              srcFactor: 'one',
-              dstFactor: 'one-minus-src-alpha',
-              operation: 'add'
-            }
-          }
-        }]
-      }) => device.createRenderPipeline({
+      const createOverlayPipeline = ({ label }) => device.createRenderPipeline({
         label,
         layout: pipelineLayout,
         vertex: {
@@ -18656,109 +21298,52 @@ fn fs_main() -> @location(0) vec4<f32> {
         },
         fragment: {
           module,
-          entryPoint: fragmentEntryPoint,
-          targets
+          entryPoint: 'fs_main',
+          targets: [{ format }]
         },
         primitive: {
           topology: 'triangle-list',
           // The marching-cubes kernel enforces outward winding
           // (sv_emit_triangle outward_hint), so back faces are interior
-          // walls; drawing them through the transmissive OIT average showed
-          // as bright streaks that flickered with every field re-extraction.
+          // walls and are excluded from both opaque PBR passes.
           cullMode: 'back'
         },
         depthStencil: {
           format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          depthWriteEnabled,
+          depthWriteEnabled: true,
           depthCompare: 'less-equal'
         }
       });
       const opaquePipeline = createOverlayPipeline({
-        label: 'ulg-sph-resident-surface-draw-overlay-opaque-depth',
-        depthWriteEnabled: true
+        label: 'ulg-sph-resident-surface-draw-overlay-opaque-depth'
       });
-      const transparentPipeline = createOverlayPipeline({
-        label: 'ulg-sph-resident-surface-draw-overlay-transparent-depth-test',
-        depthWriteEnabled: false
+      const refractivePipeline = createOverlayPipeline({
+        label: 'ulg-sph-resident-surface-draw-overlay-refractive-depth-write'
       });
-      const transparentOitPipeline = createOverlayPipeline({
-        label: 'ulg-sph-resident-surface-draw-overlay-transparent-oit',
-        depthWriteEnabled: false,
-        fragmentEntryPoint: 'fs_oit_main',
-        targets: [
-          {
-            format: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-            blend: {
-              color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+      const refractiveBackfacePipeline = useCompactPositionRows
+        ? device.createRenderPipeline({
+            label: 'ulg-sph-resident-surface-draw-refractive-backface-depth',
+            layout: pipelineLayout,
+            vertex: {
+              module,
+              entryPoint: 'vs_main'
+            },
+            primitive: {
+              topology: 'triangle-list',
+              cullMode: 'front'
+            },
+            depthStencil: {
+              format: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+              depthWriteEnabled: true,
+              depthCompare: 'less'
             }
-          },
-          {
-            format: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
-            blend: {
-              color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha', operation: 'add' }
-            }
-          }
-        ]
-      });
-      const oitCompositeBindGroupLayout = device.createBindGroupLayout({
-        label: 'ulg-sph-resident-surface-draw-oit-composite-bind-group-layout',
-        entries: [
-          {
-            binding: 0,
-            visibility: GPU_SHADER_STAGE.FRAGMENT,
-            texture: { sampleType: 'float' }
-          },
-          {
-            binding: 1,
-            visibility: GPU_SHADER_STAGE.FRAGMENT,
-            texture: { sampleType: 'float' }
-          },
-          {
-            binding: 2,
-            visibility: GPU_SHADER_STAGE.FRAGMENT,
-            sampler: { type: 'filtering' }
-          }
-        ]
-      });
-      const oitCompositePipelineLayout = device.createPipelineLayout({
-        label: 'ulg-sph-resident-surface-draw-oit-composite-pipeline-layout',
-        bindGroupLayouts: [oitCompositeBindGroupLayout]
-      });
-      const oitCompositePipeline = device.createRenderPipeline({
-        label: 'ulg-sph-resident-surface-draw-oit-composite-pipeline',
-        layout: oitCompositePipelineLayout,
-        vertex: {
-          module: oitCompositeModule,
-          entryPoint: 'vs_main'
-        },
-        fragment: {
-          module: oitCompositeModule,
-          entryPoint: 'fs_main',
-          targets: [{
-            format,
-            blend: {
-              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
-            }
-          }]
-        },
-        primitive: {
-          topology: 'triangle-list',
-          cullMode: 'none'
-        }
-      });
-      const oitSampler = device.createSampler({
-        label: 'ulg-sph-resident-surface-draw-oit-sampler',
-        magFilter: 'linear',
-        minFilter: 'linear'
-      });
-      const cameraBuffer = device.createBuffer({
+          })
+        : null;
+      const cameraBuffer = retainCandidateDestroyable(device.createBuffer({
         label: 'ulg-sph-resident-surface-draw-camera',
         size: cameraBufferByteLength,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      });
+      }));
       const refractionSampler = device.createSampler({
         label: 'ulg-sph-resident-surface-draw-refraction-sampler',
         magFilter: 'linear',
@@ -18766,12 +21351,19 @@ fn fs_main() -> @location(0) vec4<f32> {
         addressModeU: 'clamp-to-edge',
         addressModeV: 'clamp-to-edge'
       });
-      const refractionDummyTexture = device.createTexture({
+      const refractionDummyTexture = retainCandidateDestroyable(device.createTexture({
         label: 'ulg-sph-resident-surface-draw-refraction-dummy',
         size: [1, 1, 1],
         format: 'rgba8unorm',
         usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
-      });
+      }));
+      const refractionBackfaceDummyTexture = retainCandidateDestroyable(device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-backface-dummy',
+        size: [1, 1, 1],
+        format: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
+      }));
+      const refractionBackfaceDummyView = refractionBackfaceDummyTexture.createView();
       // Environment sampler wraps in longitude (latlong seam) and walks the
       // prefiltered mip chain for roughness-indexed lookups.
       const envSampler = device.createSampler({
@@ -18782,12 +21374,12 @@ fn fs_main() -> @location(0) vec4<f32> {
         addressModeU: 'repeat',
         addressModeV: 'clamp-to-edge'
       });
-      const envDummyTexture = device.createTexture({
+      const envDummyTexture = retainCandidateDestroyable(device.createTexture({
         label: 'ulg-sph-resident-surface-draw-env-dummy',
         size: [1, 1, 1],
         format: 'rgba8unorm',
         usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
-      });
+      }));
       const envDummyView = envDummyTexture.createView();
       const refractionDummyBindGroup = device.createBindGroup({
         label: 'ulg-sph-resident-surface-draw-refraction-dummy-bind-group',
@@ -18796,14 +21388,15 @@ fn fs_main() -> @location(0) vec4<f32> {
           { binding: 0, resource: refractionDummyTexture.createView() },
           { binding: 1, resource: refractionSampler },
           { binding: 2, resource: envDummyView },
-          { binding: 3, resource: envSampler }
+          { binding: 3, resource: envSampler },
+          { binding: 4, resource: refractionBackfaceDummyView }
         ]
       });
-      const fieldGradientDummyBuffer = device.createBuffer({
+      const fieldGradientDummyBuffer = retainCandidateDestroyable(device.createBuffer({
         label: 'ulg-sph-resident-surface-draw-field-gradient-dummy',
         size: 16,
         usage: GPU_BUFFER_USAGE.STORAGE
-      });
+      }));
       const bindGroup = device.createBindGroup({
         label: 'ulg-sph-resident-surface-draw-overlay-bind-group',
         layout: bindGroupLayout,
@@ -18815,8 +21408,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           {
             binding: 4,
             resource: {
-              buffer: surfaceDrawExecution?.renderFieldGradientVolume?.buffer
-                || fieldGradientDummyBuffer
+              buffer: nativeDrawInput.normalBuffer || fieldGradientDummyBuffer
             }
           }
         ]
@@ -18856,6 +21448,13 @@ fn fs_main() -> @location(0) vec4<f32> {
           useNativeConsumer ? nativeDrawInput.rowStrideFloats : 0,
         externalGpuBufferInputLayout: useNativeConsumer ? surfaceInputLayout : null,
         externalGpuBufferNormalAttribute: Boolean(nativeDrawInput.normalAttribute),
+        externalGpuBufferPackedNormalByteLength: nativeDrawInput.normalBufferByteLength || 0,
+        externalGpuBufferPackedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+        externalGpuBufferPackedNormalEncoding: nativeDrawInput.normalEncoding || null,
+        externalGpuBufferPackedNormalSurfaceGenerationId:
+          nativeDrawInput.normalSurfaceGenerationId ?? null,
+        externalGpuBufferPackedNormalAdditionalSubmitCount:
+          nativeDrawInput.normalAdditionalSubmitCount ?? null,
         externalGpuBufferNormalAttributeDisabledReason: useNativeConsumer
           ? nativeDrawInput.normalAttributeDisabledReason
           : null,
@@ -18918,23 +21517,27 @@ fn fs_main() -> @location(0) vec4<f32> {
         offscreenValidationAttemptCount: 0,
         backgroundClearValue: useNativeConsumer
           ? residentSurfaceDrawBackgroundClearValue()
-          : { r: 0, g: 0, b: 0, a: 0 },
-        pipeline: transparentPipeline,
+          : { r: 0, g: 0, b: 0, a: 1 },
+        pipeline: opaquePipeline,
         opaquePipeline,
-        transparentPipeline,
-        transparentOitPipeline,
+        refractivePipeline,
+        refractiveBackfacePipeline,
+        transparentPipeline: null,
+        transparentOitPipeline: null,
         bindGroupLayout,
         pipelineLayout,
-        oitCompositePipeline,
-        oitCompositeBindGroupLayout,
-        oitCompositePipelineLayout,
-        oitSampler,
+        oitCompositePipeline: null,
+        oitCompositeBindGroupLayout: null,
+        oitCompositePipelineLayout: null,
+        oitSampler: null,
         cameraBuffer,
         cameraBufferByteLength,
         fieldGradientDummyBuffer,
         refractionBindGroupLayout,
         refractionSampler,
         refractionDummyTexture,
+        refractionBackfaceDummyTexture,
+        refractionBackfaceDummyView,
         refractionDummyBindGroup,
         envSampler,
         envDummyTexture,
@@ -18950,6 +21553,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           // of this refresh repopulates. (The hot path is the reuse branch,
           // which does carry entries across the per-refresh swap.)
           additionalSurfaceDraws: [],
+          solidDrawEntriesContract: admittedCoherentSolidDrawEntries,
           drawIndirectRowsBuffer: surfaceDrawExecution.drawIndirectRowsBuffer,
           surfaceCount: surfaceDrawExecution.surfaceCount,
           sourceSurfaceCount: surfaceDrawExecution.surfaceCount,
@@ -18958,11 +21562,15 @@ fn fs_main() -> @location(0) vec4<f32> {
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
           drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
-          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthPolicy: 'all-surfaces-depth-write',
           depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          transparencyCompositeMode: 'weighted-blended-oit',
-          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          transparencyCompositeMode: 'disabled-opaque-pbr',
+          surfaceAlphaMode: 'opaque',
+          surfaceBlendEnabled: false,
+          surfaceDepthWriteEnabled: true,
+          quantumSpectralRefractionRequired: true,
+          oitAccumFormat: null,
+          oitRevealFormat: null,
           opticalRenderSource: 'closure-derived-optical-gpu-table',
           opticalRecordCount: bridgeOpticalGpuTable.recordCount,
           opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
@@ -18972,18 +21580,27 @@ fn fs_main() -> @location(0) vec4<f32> {
           indirectStrideBytes,
           surfaceInputLayout,
           surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          packedNormalBuffer: nativeDrawInput.normalBuffer || null,
+          packedNormalBufferByteLength: nativeDrawInput.normalBufferByteLength || 0,
+          packedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+          packedNormalEncoding: nativeDrawInput.normalEncoding || null,
+          packedNormalSurfaceGenerationId: nativeDrawInput.normalSurfaceGenerationId ?? null,
           compactPositionDrawState: nativeDrawInput.compactPositionDrawState
         },
         drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
         drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
         drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
         drawOrderCount: drawOrder.length,
-        depthPolicy: 'opaque-depth-write-transparent-depth-test',
+        depthPolicy: 'all-surfaces-depth-write',
         depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
         depthAttachmentReady: false,
-        transparencyCompositeMode: 'weighted-blended-oit',
-        oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-        oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+        transparencyCompositeMode: 'disabled-opaque-pbr',
+        surfaceAlphaMode: 'opaque',
+        surfaceBlendEnabled: false,
+        surfaceDepthWriteEnabled: true,
+        quantumSpectralRefractionRequired: true,
+        oitAccumFormat: null,
+        oitRevealFormat: null,
         oitTargetsReady: false,
         opticalGpuBuffers,
         opticalGpuTable: bridgeOpticalGpuTable,
@@ -18996,6 +21613,29 @@ fn fs_main() -> @location(0) vec4<f32> {
         temporalSwapPolicy: SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
         retainedPreviousOverlay: false,
         frameCount: 0,
+        coherentSolidDirectShapeRenderGpuProfileRequested: enableGpuProfiling,
+        coherentSolidDirectShapeRenderGpuProfileSupported: Boolean(
+          device?.features?.has?.('timestamp-query')
+        ),
+        coherentSolidDirectShapeRenderGpuProfileComplete: false,
+        coherentSolidDirectShapeRenderGpuProfilePartial: false,
+        coherentSolidDirectShapeRenderGpuProfileUnsupported: Boolean(
+          enableGpuProfiling && !device?.features?.has?.('timestamp-query')
+        ),
+        coherentSolidDirectShapeRenderGpuProfileReadbackInFlight: false,
+        coherentSolidDirectShapeRenderGpuProfileStatus: enableGpuProfiling
+          ? (device?.features?.has?.('timestamp-query')
+            ? 'timestamp-profile-awaiting-coherent-solid-draws'
+            : 'unsupported')
+          : 'not-requested',
+        coherentSolidDirectShapeRenderGpuProfileReason: enableGpuProfiling
+          ? (device?.features?.has?.('timestamp-query')
+            ? 'waiting for an admitted coherent-solid production draw'
+            : 'device feature timestamp-query is not enabled')
+          : 'GPU timestamp profiling was not requested',
+        coherentSolidDirectShapeRenderGpuProfile: null,
+        coherentSolidDirectShapeRenderGpuProfileTelemetry: null,
+        coherentSolidDirectShapeRenderGpuProfileIdentityKey: null,
         lastRenderStatus: useNativeConsumer ? 'native-webgpu-surface-consumer-pending' : 'pending',
         threeRenderBridgeReused: false,
         updateCount: 0,
@@ -19007,10 +21647,22 @@ fn fs_main() -> @location(0) vec4<f32> {
         surfaceExtractionValidation: false,
         fullPhysicsValidation: false
       };
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'native-surface-bridge-new-owner-commit'
+      });
+      candidateDestroyables.clear();
       sphResidentSurfaceDrawRenderBridge = bridge;
       scene.userData.sphResidentSurfaceDrawRenderBridge = bridge;
       return bridge;
     } catch (error) {
+      for (const resource of candidateDestroyables) {
+        try {
+          resource.destroy();
+        } catch {
+          // Candidate cleanup must preserve the original bridge-build error.
+        }
+      }
+      if (error?.code === SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE) throw error;
       return {
         schema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
         status: 'surface-draw-overlay-error',
@@ -19028,6 +21680,311 @@ fn fs_main() -> @location(0) vec4<f32> {
 
   let nativeWebGpuSurfaceConsumerRaf = null;
   let nativeWebGpuSurfaceConsumerRafHost = null;
+  let nativeWebGpuSurfaceConsumerRenderActive = false;
+  let nativeWebGpuSurfaceConsumerPresentationSerial = 0;
+
+  function publishCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+    profile = undefined,
+    requested = enableGpuProfiling,
+    supported = Boolean(bridge?.device?.features?.has?.('timestamp-query')),
+    status = null,
+    reason = null,
+    readbackInFlight = Boolean(coherentSolidDirectShapeRenderGpuProfileReadbackInFlight),
+    publicationGeneration = bridge?.coherentSolidDrawEntriesPublicationGeneration ?? null,
+    admissionId = bridge?.coherentSolidDrawEntriesAdmissionId ?? null,
+    presentationSerial = bridge?.nativeSurfacePresentationSerial ?? null,
+    identityKey = bridge?.coherentSolidDirectShapeRenderGpuProfileIdentityKey ?? null
+  } = {}) {
+    if (!bridge) return null;
+    const resolvedProfile = profile === undefined
+      ? (bridge.coherentSolidDirectShapeRenderGpuProfile ?? null)
+      : profile;
+    const resolvedStatus = status
+      ?? resolvedProfile?.status
+      ?? bridge.coherentSolidDirectShapeRenderGpuProfileStatus
+      ?? (requested ? 'timestamp-profile-awaiting-coherent-solid-draws' : 'not-requested');
+    const resolvedReason = reason
+      ?? resolvedProfile?.reason
+      ?? bridge.coherentSolidDirectShapeRenderGpuProfileReason
+      ?? null;
+    const complete = resolvedStatus === 'timestamp-profile-complete';
+    const partial = resolvedStatus === 'timestamp-profile-partial';
+    const unsupported = Boolean(requested && !supported);
+    const telemetry = {
+      schema: COHERENT_SOLID_DIRECT_SHAPE_RENDER_GPU_PROFILE_SCHEMA,
+      profileSchema: resolvedProfile?.schema ?? ULG_WEBGPU_TIMESTAMP_PROFILE_SCHEMA,
+      label: COHERENT_SOLID_DIRECT_SHAPE_RENDER_GPU_PROFILE_LABEL,
+      requested: Boolean(requested),
+      supported: Boolean(supported),
+      complete,
+      partial,
+      unsupported,
+      readbackInFlight: Boolean(readbackInFlight),
+      status: resolvedStatus,
+      reason: resolvedReason,
+      publicationGeneration,
+      admissionId,
+      presentationSerial,
+      identityKey,
+      spanCount: resolvedProfile?.spanCount ?? 0,
+      validSpanCount: resolvedProfile?.validSpanCount ?? 0,
+      skippedSpanCount: resolvedProfile?.skippedSpanCount ?? 0,
+      invalidSpanCount: resolvedProfile?.invalidSpanCount ?? 0,
+      stageTotals: resolvedProfile?.stageTotals ?? {},
+      profile: resolvedProfile
+    };
+    bridge.coherentSolidDirectShapeRenderGpuProfileRequested = telemetry.requested;
+    bridge.coherentSolidDirectShapeRenderGpuProfileSupported = telemetry.supported;
+    bridge.coherentSolidDirectShapeRenderGpuProfileComplete = telemetry.complete;
+    bridge.coherentSolidDirectShapeRenderGpuProfilePartial = telemetry.partial;
+    bridge.coherentSolidDirectShapeRenderGpuProfileUnsupported = telemetry.unsupported;
+    bridge.coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = telemetry.readbackInFlight;
+    bridge.coherentSolidDirectShapeRenderGpuProfileStatus = telemetry.status;
+    bridge.coherentSolidDirectShapeRenderGpuProfileReason = telemetry.reason;
+    bridge.coherentSolidDirectShapeRenderGpuProfile = resolvedProfile;
+    bridge.coherentSolidDirectShapeRenderGpuProfileTelemetry = telemetry;
+    bridge.coherentSolidDirectShapeRenderGpuProfileIdentityKey = identityKey;
+    if (bridge === sphResidentSurfaceDrawRenderBridge) {
+      scene.userData.coherentSolidDirectShapeRenderGpuProfile = telemetry;
+    }
+    return telemetry;
+  }
+
+  function beginCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+    executor = null,
+    opaqueDrawCount = 0,
+    transparentDrawCount = 0
+  } = {}) {
+    const requested = Boolean(enableGpuProfiling);
+    const supported = Boolean(bridge?.device?.features?.has?.('timestamp-query'));
+    const publicationGeneration = executor?.publicationGeneration
+      ?? bridge?.coherentSolidDrawEntriesPublicationGeneration
+      ?? null;
+    const admissionId = executor?.admissionId
+      ?? bridge?.coherentSolidDrawEntriesAdmissionId
+      ?? null;
+    const presentationSerial = bridge?.nativeSurfacePresentationSerial ?? null;
+    const identityKey = `${publicationGeneration ?? 'none'}:${admissionId ?? 'none'}`;
+    if (!requested) {
+      publishCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+        requested,
+        supported,
+        status: 'not-requested',
+        reason: 'GPU timestamp profiling was not requested',
+        readbackInFlight: false,
+        publicationGeneration,
+        admissionId,
+        presentationSerial
+      });
+      return null;
+    }
+    if (!executor?.ready || opaqueDrawCount + transparentDrawCount <= 0) {
+      publishCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+        requested,
+        supported,
+        status: supported
+          ? 'timestamp-profile-awaiting-coherent-solid-draws'
+          : 'unsupported',
+        reason: supported
+          ? 'waiting for an admitted coherent-solid production draw'
+          : 'device feature timestamp-query is not enabled',
+        readbackInFlight: Boolean(coherentSolidDirectShapeRenderGpuProfileReadbackInFlight),
+        publicationGeneration,
+        admissionId,
+        presentationSerial
+      });
+      return null;
+    }
+    if (bridge.coherentSolidDirectShapeRenderGpuProfileIdentityKey === identityKey) {
+      const existingTelemetry = bridge.coherentSolidDirectShapeRenderGpuProfileTelemetry;
+      publishCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+        requested,
+        supported,
+        status: existingTelemetry?.status ?? null,
+        reason: existingTelemetry?.reason ?? null,
+        readbackInFlight: Boolean(coherentSolidDirectShapeRenderGpuProfileReadbackInFlight),
+        publicationGeneration: existingTelemetry?.publicationGeneration ?? publicationGeneration,
+        admissionId: existingTelemetry?.admissionId ?? admissionId,
+        presentationSerial: existingTelemetry?.presentationSerial ?? presentationSerial,
+        identityKey
+      });
+      return null;
+    }
+    if (coherentSolidDirectShapeRenderGpuProfileReadbackInFlight) {
+      publishCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+        requested,
+        supported,
+        status: 'timestamp-profile-waiting-for-prior-readback',
+        reason: 'one coherent-solid production raster profile readback is already in flight',
+        readbackInFlight: true,
+        publicationGeneration,
+        admissionId,
+        presentationSerial
+      });
+      return null;
+    }
+    const profiler = createWebGpuTimestampProfiler(bridge.device, {
+      requested: true,
+      label: 'ulg-coherent-solid-production-raster',
+      maxSpans: 2
+    });
+    if (!profiler.active) {
+      const profile = profiler.profile;
+      publishCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+        profile,
+        requested: true,
+        supported: Boolean(profiler.capability?.supported),
+        status: profile?.status ?? profiler.capability?.status ?? 'unsupported',
+        reason: profile?.reason ?? profiler.capability?.reason ?? null,
+        readbackInFlight: false,
+        publicationGeneration,
+        admissionId,
+        presentationSerial,
+        identityKey
+      });
+      return null;
+    }
+    const context = {
+      bridge,
+      profiler,
+      publicationGeneration,
+      admissionId,
+      presentationSerial,
+      identityKey,
+      resolveEncoded: false,
+      resolveError: null
+    };
+    coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = context;
+    publishCoherentSolidDirectShapeRenderGpuProfile(bridge, {
+      requested: true,
+      supported: true,
+      status: 'timestamp-profile-pending',
+      reason: 'coherent-solid production raster spans are encoded on the primary presentation',
+      readbackInFlight: true,
+      publicationGeneration,
+      admissionId,
+      presentationSerial,
+      identityKey
+    });
+    return context;
+  }
+
+  function coherentSolidDirectShapeRenderPassDescriptor(profileContext, passKind, drawCount) {
+    const metadata = {
+      passKind,
+      drawCount,
+      publicationGeneration: profileContext?.publicationGeneration ?? null,
+      admissionId: profileContext?.admissionId ?? null,
+      presentationSerial: profileContext?.presentationSerial ?? null
+    };
+    if (!profileContext?.profiler?.active) {
+      return {
+        label: `ulg-coherent-solid-direct-shape-${passKind}`
+      };
+    }
+    return profileContext.profiler.beginComputePassDescriptor(
+      COHERENT_SOLID_DIRECT_SHAPE_RENDER_GPU_PROFILE_LABEL,
+      metadata
+    );
+  }
+
+  function encodeCoherentSolidDirectShapeRenderGpuProfileResolve(profileContext, encoder) {
+    if (!profileContext?.profiler?.active) return false;
+    try {
+      profileContext.resolveEncoded = profileContext.profiler.encodeResolve(encoder);
+      if (!profileContext.resolveEncoded) {
+        throw new Error('coherent-solid production raster profile encoded no timestamp spans');
+      }
+      return true;
+    } catch (error) {
+      profileContext.resolveError = error instanceof Error ? error.message : String(error);
+      publishCoherentSolidDirectShapeRenderGpuProfile(profileContext.bridge, {
+        requested: true,
+        supported: true,
+        status: 'timestamp-profile-encode-failed',
+        reason: profileContext.resolveError,
+        readbackInFlight: false,
+        publicationGeneration: profileContext.publicationGeneration,
+        admissionId: profileContext.admissionId,
+        presentationSerial: profileContext.presentationSerial,
+        identityKey: null
+      });
+      return false;
+    }
+  }
+
+  function completeCoherentSolidDirectShapeRenderGpuProfile(profileContext) {
+    if (!profileContext) return;
+    if (!profileContext.resolveEncoded) {
+      profileContext.profiler.destroy();
+      if (coherentSolidDirectShapeRenderGpuProfileReadbackInFlight === profileContext) {
+        coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = null;
+      }
+      profileContext.bridge.coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = false;
+      return;
+    }
+    profileContext.submitted = true;
+    Promise.resolve(profileContext.profiler.read()).then((profile) => {
+      const retryableProfileFailure = [
+        'timestamp-readback-failed',
+        'no-profiled-passes'
+      ].includes(profile.status);
+      publishCoherentSolidDirectShapeRenderGpuProfile(profileContext.bridge, {
+        profile,
+        requested: true,
+        supported: true,
+        status: profile.status,
+        reason: profile.reason,
+        readbackInFlight: false,
+        publicationGeneration: profileContext.publicationGeneration,
+        admissionId: profileContext.admissionId,
+        presentationSerial: profileContext.presentationSerial,
+        identityKey: retryableProfileFailure ? null : profileContext.identityKey
+      });
+    }).catch((error) => {
+      profileContext.profiler.destroy();
+      publishCoherentSolidDirectShapeRenderGpuProfile(profileContext.bridge, {
+        requested: true,
+        supported: true,
+        status: 'timestamp-readback-failed',
+        reason: error instanceof Error ? error.message : String(error),
+        readbackInFlight: false,
+        publicationGeneration: profileContext.publicationGeneration,
+        admissionId: profileContext.admissionId,
+        presentationSerial: profileContext.presentationSerial,
+        identityKey: null
+      });
+    }).finally(() => {
+      if (coherentSolidDirectShapeRenderGpuProfileReadbackInFlight === profileContext) {
+        coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = null;
+      }
+      profileContext.bridge.coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = false;
+    });
+  }
+
+  function abortCoherentSolidDirectShapeRenderGpuProfile(
+    profileContext,
+    status = 'timestamp-profile-render-aborted',
+    reason = 'coherent-solid production raster presentation aborted before submit'
+  ) {
+    if (!profileContext || profileContext.submitted) return false;
+    profileContext.profiler?.destroy?.();
+    if (coherentSolidDirectShapeRenderGpuProfileReadbackInFlight === profileContext) {
+      coherentSolidDirectShapeRenderGpuProfileReadbackInFlight = null;
+    }
+    publishCoherentSolidDirectShapeRenderGpuProfile(profileContext.bridge, {
+      requested: true,
+      supported: true,
+      status,
+      reason,
+      readbackInFlight: false,
+      publicationGeneration: profileContext.publicationGeneration,
+      admissionId: profileContext.admissionId,
+      presentationSerial: profileContext.presentationSerial,
+      identityKey: null
+    });
+    return true;
+  }
 
   function scheduleSphNativeWebGpuSurfaceConsumerFrame({
     reason = 'native-webgpu-surface-consumer-raf'
@@ -19045,8 +22002,12 @@ fn fs_main() -> @location(0) vec4<f32> {
       bridge.nativeSurfaceConsumerRafBlockedReason = 'scene-not-running';
       return;
     }
-    if (bridge.nativeSurfaceConsumerSubmitFencePending) {
-      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-pending';
+    const frameAdmission = nativeSurfaceConsumerFrameAdmission(bridge);
+    bridge.nativeSurfaceConsumerFramePacing = 'bounded-in-flight-submissions';
+    bridge.nativeSurfaceConsumerMaxInFlightSubmits =
+      SPH_NATIVE_WEBGPU_SURFACE_MAX_IN_FLIGHT_SUBMITS;
+    if (!frameAdmission.accepted) {
+      bridge.nativeSurfaceConsumerRafBlockedReason = frameAdmission.status;
       bridge.nativeSurfaceConsumerRafSustain = true;
       return;
     }
@@ -19067,7 +22028,17 @@ fn fs_main() -> @location(0) vec4<f32> {
       nativeWebGpuSurfaceConsumerRaf = null;
       nativeWebGpuSurfaceConsumerRafHost = null;
       if (!running || sphResidentSurfaceDrawRenderBridge !== bridge) return;
-      renderSphResidentSurfaceDrawOverlay({ reason });
+      nativeWebGpuSurfaceConsumerPresentationSerial += 1;
+      bridge.nativeSurfacePresentationOwner = 'native-webgpu-surface-consumer-scheduler';
+      bridge.nativeSurfacePresentationSerial = nativeWebGpuSurfaceConsumerPresentationSerial;
+      bridge.nativeSurfacePresentationOwnershipStatus =
+        'native-webgpu-surface-consumer-single-presentation-owner';
+      nativeWebGpuSurfaceConsumerRenderActive = true;
+      try {
+        renderSphResidentSurfaceDrawOverlay({ reason });
+      } finally {
+        nativeWebGpuSurfaceConsumerRenderActive = false;
+      }
       if (bridge.nativeSurfaceConsumerContinuousRaf === true) {
         scheduleSphNativeWebGpuSurfaceConsumerFrame({ reason });
       }
@@ -19101,7 +22072,21 @@ fn fs_main() -> @location(0) vec4<f32> {
       bridge.lastRenderAttemptReason = reason;
       bridge.lastRenderAttemptAtMs = nowMs();
     }
-    if (bridge && residentGpuSubmissionPaused()) {
+    if (
+      bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      && !nativeWebGpuSurfaceConsumerRenderActive
+    ) {
+      bridge.nativeSurfacePresentationOwnershipStatus =
+        'native-webgpu-surface-consumer-direct-render-redirected';
+      bridge.lastNativeSurfacePresentationRedirectReason = reason;
+      scheduleSphNativeWebGpuSurfaceConsumerFrame({ reason });
+      return;
+    }
+    if (
+      bridge
+      && residentGpuSubmissionPaused()
+      && bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+    ) {
       const status = 'resident-surface-draw-skipped-resident-gpu-work-in-flight';
       const preservesSceneSubmittedRenderStatus = isThreeResidentRenderRowBridgeMode(bridge.rendererBridge);
       if (preservesSceneSubmittedRenderStatus) {
@@ -19203,21 +22188,24 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
       return;
     }
+    const nativeFrameAdmission = nativeSurfaceConsumerFrameAdmission(bridge);
     if (
       bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-      && bridge.nativeSurfaceConsumerSubmitFencePending
+      && nativeFrameAdmission.status === 'blocked-native-submit-capacity-full'
     ) {
       const status = 'resident-surface-draw-skipped-native-submit-fence-pending';
       bridge.lastRenderStatusPreservedAfterNativeSubmitFence = true;
       bridge.lastRenderStatusPreservedReason = status;
       bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
       bridge.lastRenderSkipStatus = status;
-      bridge.lastRenderSkipReason = 'native WebGPU surface submit fence is pending';
+      bridge.lastRenderSkipReason = 'native WebGPU surface in-flight submit capacity is full';
       scene.userData.sphResidentSurfaceDrawRenderSkip = {
         schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
         status,
         reason: bridge.lastRenderSkipReason,
         submitFenceSerial: bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
+        inFlightSubmitCount: nativeFrameAdmission.inFlightSubmitCount,
+        maxInFlightSubmits: nativeFrameAdmission.maxInFlightSubmits,
         rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
         updatedAtMs: nowMs(),
         scientificValidation: false,
@@ -19345,6 +22333,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
       return;
     }
+    let coherentSolidGpuProfileContext = null;
     try {
       resizeSphResidentSurfaceDrawOverlayCanvas(bridge);
       const nativeContextReconfigured = configureSphNativeWebGpuSurfaceConsumerForCurrentCanvas(bridge, {
@@ -19353,13 +22342,19 @@ fn fs_main() -> @location(0) vec4<f32> {
       const depthView = ensureSphResidentSurfaceDrawDepthView(bridge);
       camera.updateMatrixWorld?.();
       camera.matrixWorldInverse?.copy?.(camera.matrixWorld)?.invert?.();
-      const viewProjection = new Three.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      const viewProjection = bridge.viewProjectionMatrix || new Three.Matrix4();
+      const inverseViewProjection = bridge.inverseViewProjectionMatrix || new Three.Matrix4();
+      bridge.viewProjectionMatrix = viewProjection;
+      bridge.inverseViewProjectionMatrix = inverseViewProjection;
+      viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      inverseViewProjection.copy(viewProjection).invert();
       if (drawState.surfaceInputLayout === 'webgpu-marching-cubes-compact-position-rows') {
         bridge.device.queue.writeBuffer(
           bridge.cameraBuffer,
           0,
           compactPositionCameraUniformPayload({
             viewProjection,
+            inverseViewProjection,
             compactPositionDrawState: drawState.compactPositionDrawState,
             cameraPosition: [camera.position.x, camera.position.y, camera.position.z]
           })
@@ -19376,6 +22371,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           0,
           compactPositionCameraUniformPayload({
             viewProjection,
+            inverseViewProjection,
             compactPositionDrawState: additionalDraw.compactPositionDrawState,
             cameraPosition: [camera.position.x, camera.position.y, camera.position.z]
           })
@@ -19383,8 +22379,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
       const additionalOpaqueDraws = additionalSurfaceDraws
         .filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
-      const additionalTransparentDraws = additionalSurfaceDraws
-        .filter((draw) => residentSurfaceDrawPipelineKey(draw) !== 'opaque-depth-write');
+      const additionalRefractiveDraws = additionalSurfaceDraws
+        .filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'refractive-depth-write');
       const drawOrder = Array.isArray(drawState.drawOrder) && drawState.drawOrder.length
         ? drawState.drawOrder
         : residentSurfaceDrawOrder(
@@ -19392,12 +22388,12 @@ fn fs_main() -> @location(0) vec4<f32> {
           { indirectStrideBytes: drawState.indirectStrideBytes }
         );
       const opaqueDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
-      const transparentDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) !== 'opaque-depth-write');
+      const refractiveDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'refractive-depth-write');
         updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
           viewProjection,
           drawOrder,
           opaqueDraws,
-          transparentDraws
+          refractiveDraws
         });
         const nativeSurfaceDebugMode = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
           ? resolveSphNativeWebGpuSurfaceConsumerDebugMode({ bridge })
@@ -19409,7 +22405,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           ? 'native-webgpu-surface-consumer-debug-clear-only'
           : null;
         bridge.lastNativeSurfaceDebugSkippedDrawCount = nativeSurfaceClearOnly
-          ? opaqueDraws.length + transparentDraws.length
+          ? opaqueDraws.length + refractiveDraws.length
           : null;
         bridge.lastNativeSurfaceDebugClearValue = nativeSurfaceClearOnly
           ? { ...SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE }
@@ -19434,10 +22430,35 @@ fn fs_main() -> @location(0) vec4<f32> {
         bridge.lastSchroederRenderProxyNativeDrawInstanceCount = 0;
         bridge.schroederRenderProxyNativeCameraUpdateStatus = null;
       }
+      const coherentSolidExecutor =
+        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE && !nativeSurfaceClearOnly
+          ? refreshCoherentSolidNativeExecutorForBridge(bridge, {
+            reason: 'native-surface-render-pass'
+          })
+          : null;
+      const coherentSolidOpaqueDrawCount = coherentSolidExecutor?.ready
+        ? coherentSolidExecutor.opaqueDrawCommands.length
+        : 0;
+      const coherentSolidTransparentDrawCount = coherentSolidExecutor?.ready
+        ? coherentSolidExecutor.transparentDrawCommands.length
+        : 0;
+      if (!coherentSolidExecutor?.ready) {
+        bridge.lastCoherentSolidNativeOpaqueSubmitStatus = coherentSolidExecutor?.status ?? null;
+        bridge.lastCoherentSolidNativeTransparentSubmitStatus = coherentSolidExecutor?.status ?? null;
+      }
+      coherentSolidGpuProfileContext = beginCoherentSolidDirectShapeRenderGpuProfile(
+        bridge,
+        {
+          executor: coherentSolidExecutor,
+          opaqueDrawCount: coherentSolidOpaqueDrawCount,
+          transparentDrawCount: coherentSolidTransparentDrawCount
+        }
+      );
         const submittedDrawCount = nativeSurfaceClearOnly
         ? 0
-        : opaqueDraws.length + transparentDraws.length
-          + additionalSurfaceDraws.length + schroederProxyDrawCommandCount;
+        : opaqueDraws.length + refractiveDraws.length
+          + additionalSurfaceDraws.length + schroederProxyDrawCommandCount
+          + coherentSolidOpaqueDrawCount + coherentSolidTransparentDrawCount;
         const nativeSurfaceValidationCadence =
           resolveSphNativeWebGpuSurfaceValidationCadence({
             bridge,
@@ -19460,13 +22481,21 @@ fn fs_main() -> @location(0) vec4<f32> {
           nativeSurfaceValidationCadence.offscreenValidationSkippedReason;
         const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
         const canvasTexture = bridge.context.getCurrentTexture();
+        if (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+          bridge.nativeSurfaceCurrentTextureAcquisitionSerial =
+            Math.max(0, Math.round(Number(bridge.nativeSurfaceCurrentTextureAcquisitionSerial) || 0)) + 1;
+          bridge.lastNativeSurfaceCurrentTexturePresentationSerial =
+            bridge.nativeSurfacePresentationSerial ?? null;
+          bridge.lastNativeSurfaceCurrentTextureOwner = bridge.nativeSurfacePresentationOwner ?? null;
+          bridge.nativeSurfaceCurrentTextureAcquisitionsPerPresentation = 1;
+        }
         const canvasView = canvasTexture.createView();
         const opaquePass = encoder.beginRenderPass({
           colorAttachments: [{
             view: canvasView,
             clearValue: nativeSurfaceClearOnly
               ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE
-              : (bridge.backgroundClearValue || { r: 0, g: 0, b: 0, a: 0 }),
+              : (bridge.backgroundClearValue || { r: 0, g: 0, b: 0, a: 1 }),
             loadOp: 'clear',
             storeOp: 'store'
           }],
@@ -19479,6 +22508,9 @@ fn fs_main() -> @location(0) vec4<f32> {
             }
           : undefined
         });
+        const backgroundImageDrawn = !nativeSurfaceClearOnly
+          && drawSphNativeSurfaceBackgroundImage(bridge, opaquePass);
+        bridge.lastBackgroundImageDrawn = Boolean(backgroundImageDrawn);
         opaquePass.setPipeline(bridge.opaquePipeline || bridge.pipeline);
         opaquePass.setBindGroup(0, drawState.bindGroup);
         if (bridge.refractionDummyBindGroup) {
@@ -19516,15 +22548,103 @@ fn fs_main() -> @location(0) vec4<f32> {
           schroederProxySubmit.drawInstanceCount;
       }
         opaquePass.end();
+        if (coherentSolidOpaqueDrawCount > 0 && !nativeSurfaceClearOnly) {
+          const coherentSolidOpaquePass = encoder.beginRenderPass({
+            ...coherentSolidDirectShapeRenderPassDescriptor(
+              coherentSolidGpuProfileContext,
+              'opaque',
+              coherentSolidOpaqueDrawCount
+            ),
+            colorAttachments: [{
+              view: canvasView,
+              loadOp: 'load',
+              storeOp: 'store'
+            }],
+            depthStencilAttachment: depthView
+              ? {
+                  view: depthView,
+                  depthLoadOp: 'load',
+                  depthStoreOp: 'store'
+                }
+              : undefined
+          });
+          const coherentSolidOpaqueSubmit = coherentSolidExecutor.executeOpaque(
+            coherentSolidOpaquePass
+          );
+          bridge.lastCoherentSolidNativeOpaqueSubmitStatus = coherentSolidOpaqueSubmit.status;
+          bridge.lastCoherentSolidNativeOpaqueSubmitDrawCommandCount =
+            coherentSolidOpaqueSubmit.drawCommandCount;
+          coherentSolidOpaquePass.end();
+        }
         ensureSphResidentSurfaceEnvMap(bridge);
+        const refractionTargetsRequired = Boolean(
+          !nativeSurfaceClearOnly
+          && (refractiveDraws.length > 0 || additionalRefractiveDraws.length > 0)
+        );
+        if (!refractionTargetsRequired) {
+          releaseSphResidentSurfaceRefractionTargetsWhenOpaque(
+            bridge,
+            canvasTexture.width,
+            canvasTexture.height
+          );
+        }
         let refractionBindGroup = bridge.refractionDummyBindGroup || null;
+        let refractionBackfaceView = null;
+        let refractionBackfaceCacheHit = false;
+        let refractionBackfacePassDrawCount = 0;
         if (
           bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
           && !nativeSurfaceClearOnly
           && bridge.refractionBindGroupLayout
           && bridge.refractionSampler
-          && (transparentDraws.length > 0 || additionalTransparentDraws.length > 0)
+          && refractionTargetsRequired
         ) {
+          refractionBackfaceView = ensureSphResidentSurfaceRefractionBackfaceDepth(
+            bridge,
+            canvasTexture.width,
+            canvasTexture.height
+          );
+          refractionBackfaceCacheHit = Boolean(
+            refractionBackfaceView
+            && sphResidentSurfaceRefractionBackfaceCacheHit(bridge, {
+              drawState,
+              additionalSurfaceDraws,
+              refractiveDraws,
+              additionalRefractiveDraws,
+              viewProjection
+            })
+          );
+          if (refractionBackfaceView && !refractionBackfaceCacheHit) {
+            const backfacePass = encoder.beginRenderPass({
+              colorAttachments: [],
+              depthStencilAttachment: {
+                view: refractionBackfaceView,
+                depthClearValue: 1,
+                depthLoadOp: 'clear',
+                depthStoreOp: 'store'
+              }
+            });
+            backfacePass.setPipeline(bridge.refractiveBackfacePipeline);
+            backfacePass.setBindGroup(0, drawState.bindGroup);
+            backfacePass.setBindGroup(1, bridge.refractionDummyBindGroup);
+            for (const draw of refractiveDraws) {
+              backfacePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+            }
+            for (const additionalDraw of additionalRefractiveDraws) {
+              backfacePass.setBindGroup(0, additionalDraw.bindGroup);
+              backfacePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
+            }
+            backfacePass.end();
+            refractionBackfacePassDrawCount =
+              refractiveDraws.length + additionalRefractiveDraws.length;
+            commitSphResidentSurfaceRefractionBackfaceCache(bridge, {
+              drawState,
+              additionalSurfaceDraws,
+              refractiveDraws,
+              additionalRefractiveDraws,
+              viewProjection
+            });
+          }
           const copyTexture = ensureSphResidentSurfaceRefractionCopy(
             bridge,
             canvasTexture.width,
@@ -19536,84 +22656,50 @@ fn fs_main() -> @location(0) vec4<f32> {
               { texture: copyTexture },
               [canvasTexture.width, canvasTexture.height, 1]
             );
-            refractionBindGroup = bridge.device.createBindGroup({
-              label: 'ulg-sph-resident-surface-draw-refraction-bind-group',
-              layout: bridge.refractionBindGroupLayout,
-              entries: [
-                { binding: 0, resource: copyTexture.createView() },
-                { binding: 1, resource: bridge.refractionSampler },
-                { binding: 2, resource: bridge.envMapView || bridge.envDummyView },
-                { binding: 3, resource: bridge.envSampler }
-              ]
-            });
-          }
-        }
-        let transparentCompositeSubmitted = false;
-        if (
-          transparentDraws.length > 0
-          && !nativeSurfaceClearOnly
-          && bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-          && depthView
-          && bridge.transparentOitPipeline
-        && bridge.oitCompositePipeline
-        && bridge.oitCompositeBindGroupLayout
-      ) {
-        const oitTargets = ensureSphResidentSurfaceDrawOitTargets(bridge);
-        if (oitTargets?.accumView && oitTargets?.revealView) {
-          const transparentPass = encoder.beginRenderPass({
-            colorAttachments: [
-              {
-                view: oitTargets.accumView,
-                clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                loadOp: 'clear',
-                storeOp: 'store'
-              },
-              {
-                view: oitTargets.revealView,
-                clearValue: { r: 1, g: 1, b: 1, a: 1 },
-                loadOp: 'clear',
-                storeOp: 'store'
-              }
-            ],
-            depthStencilAttachment: {
-              view: depthView,
-              depthLoadOp: 'load',
-              depthStoreOp: 'store'
+            const sceneColorView = bridge.refractionCopyView || copyTexture.createView();
+            const environmentView = bridge.envMapView || bridge.envDummyView;
+            const backDepthView = refractionBackfaceView || bridge.refractionBackfaceDummyView;
+            if (
+              bridge.refractionBindGroup
+              && bridge.refractionBindGroupSceneColorView === sceneColorView
+              && bridge.refractionBindGroupEnvironmentView === environmentView
+              && bridge.refractionBindGroupBackDepthView === backDepthView
+            ) {
+              refractionBindGroup = bridge.refractionBindGroup;
+            } else {
+              refractionBindGroup = bridge.device.createBindGroup({
+                label: 'ulg-sph-resident-surface-draw-refraction-bind-group',
+                layout: bridge.refractionBindGroupLayout,
+                entries: [
+                  { binding: 0, resource: sceneColorView },
+                  { binding: 1, resource: bridge.refractionSampler },
+                  { binding: 2, resource: environmentView },
+                  { binding: 3, resource: bridge.envSampler },
+                  { binding: 4, resource: backDepthView }
+                ]
+              });
+              bridge.refractionBindGroup = refractionBindGroup;
+              bridge.refractionBindGroupSceneColorView = sceneColorView;
+              bridge.refractionBindGroupEnvironmentView = environmentView;
+              bridge.refractionBindGroupBackDepthView = backDepthView;
             }
-          });
-          transparentPass.setPipeline(bridge.transparentOitPipeline);
-          transparentPass.setBindGroup(0, drawState.bindGroup);
-          if (bridge.refractionDummyBindGroup) {
-            transparentPass.setBindGroup(1, bridge.refractionDummyBindGroup);
           }
-          for (const draw of transparentDraws) {
-            transparentPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
-          }
-          transparentPass.end();
-          const compositeBindGroup = bridge.device.createBindGroup({
-            label: 'ulg-sph-resident-surface-draw-oit-composite-bind-group',
-            layout: bridge.oitCompositeBindGroupLayout,
-            entries: [
-              { binding: 0, resource: bridge.oitAccumTexture.createView() },
-              { binding: 1, resource: bridge.oitRevealTexture.createView() },
-              { binding: 2, resource: bridge.oitSampler }
-            ]
-          });
-          const compositePass = encoder.beginRenderPass({
-            colorAttachments: [{
-              view: canvasView,
-              loadOp: 'load',
-              storeOp: 'store'
-            }]
-          });
-          compositePass.setPipeline(bridge.oitCompositePipeline);
-          compositePass.setBindGroup(0, compositeBindGroup);
-          compositePass.draw(3);
-          compositePass.end();
-          transparentCompositeSubmitted = true;
         }
-        } else if ((transparentDraws.length > 0 || additionalTransparentDraws.length > 0) && !nativeSurfaceClearOnly) {
-          const transparentPass = encoder.beginRenderPass({
+        bridge.lastRefractionBackfaceCacheHit = refractionBackfaceCacheHit;
+        bridge.lastRefractionBackfacePassDrawCount = refractionBackfacePassDrawCount;
+        bridge.refractionBackfaceAdditionalSubmitCount = 0;
+        bridge.refractionBackfaceDepthFormat =
+          SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT;
+        bridge.refractionBackfaceStatus = refractionBackfaceView
+          ? (refractionBackfaceCacheHit
+              ? 'native-refractive-backface-depth-cache-hit'
+              : 'native-refractive-backface-depth-rendered')
+          : 'native-refractive-backface-depth-not-required';
+        if ((
+          refractiveDraws.length > 0
+          || additionalRefractiveDraws.length > 0
+        ) && !nativeSurfaceClearOnly) {
+          const refractivePass = encoder.beginRenderPass({
           colorAttachments: [{
             view: canvasView,
             loadOp: 'load',
@@ -19627,20 +22713,49 @@ fn fs_main() -> @location(0) vec4<f32> {
               }
             : undefined
         });
-        transparentPass.setPipeline(bridge.transparentPipeline || bridge.pipeline);
-        transparentPass.setBindGroup(0, drawState.bindGroup);
+        refractivePass.setPipeline(bridge.refractivePipeline);
+        refractivePass.setBindGroup(0, drawState.bindGroup);
         if (refractionBindGroup) {
-          transparentPass.setBindGroup(1, refractionBindGroup);
+          refractivePass.setBindGroup(1, refractionBindGroup);
         }
-        for (const draw of transparentDraws) {
-          transparentPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+        for (const draw of refractiveDraws) {
+          refractivePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
         }
-        for (const additionalDraw of additionalTransparentDraws) {
-          transparentPass.setBindGroup(0, additionalDraw.bindGroup);
-          transparentPass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
+        for (const additionalDraw of additionalRefractiveDraws) {
+          refractivePass.setBindGroup(0, additionalDraw.bindGroup);
+          refractivePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
         }
-        transparentPass.end();
+        refractivePass.end();
       }
+          if (coherentSolidTransparentDrawCount > 0 && !nativeSurfaceClearOnly) {
+            const coherentSolidTransparentPass = encoder.beginRenderPass({
+              ...coherentSolidDirectShapeRenderPassDescriptor(
+                coherentSolidGpuProfileContext,
+                'transparent',
+                coherentSolidTransparentDrawCount
+              ),
+              colorAttachments: [{
+                view: canvasView,
+                loadOp: 'load',
+                storeOp: 'store'
+              }],
+              depthStencilAttachment: depthView
+                ? {
+                    view: depthView,
+                    depthLoadOp: 'load',
+                    depthStoreOp: 'store'
+                  }
+                : undefined
+            });
+            const coherentSolidTransparentSubmit = coherentSolidExecutor.executeTransparent(
+              coherentSolidTransparentPass
+            );
+            bridge.lastCoherentSolidNativeTransparentSubmitStatus =
+              coherentSolidTransparentSubmit.status;
+            bridge.lastCoherentSolidNativeTransparentSubmitDrawCommandCount =
+              coherentSolidTransparentSubmit.drawCommandCount;
+            coherentSolidTransparentPass.end();
+          }
           const nativeSurfacePixelValidationDrawCount = nativeSurfaceClearOnly
             ? 1
             : submittedDrawCount;
@@ -19655,7 +22770,20 @@ fn fs_main() -> @location(0) vec4<f32> {
                 }
               )
               : null;
+        encodeCoherentSolidDirectShapeRenderGpuProfileResolve(
+          coherentSolidGpuProfileContext,
+          encoder
+        );
         bridge.device.queue.submit([encoder.finish()]);
+        if (
+          coherentSolidOpaqueDrawCount + coherentSolidTransparentDrawCount > 0
+          && coherentSolidExecutor?.presentationLease
+            === admittedCoherentSolidPresentationLease
+        ) {
+          admittedCoherentSolidPresentationLeaseLastSubmitBridge = bridge;
+        }
+        completeCoherentSolidDirectShapeRenderGpuProfile(coherentSolidGpuProfileContext);
+        coherentSolidGpuProfileContext = null;
         trackResidentSurfaceDrawSubmitFence(bridge, {
           reason: 'resident-surface-draw-overlay-submit',
           renderStatus: nativeSurfaceClearOnly
@@ -19688,8 +22816,9 @@ fn fs_main() -> @location(0) vec4<f32> {
                 {
                   drawCount: submittedDrawCount,
                   opaqueDraws,
-                  transparentDraws,
-                  schroederProxyExecutor
+                  refractiveDraws,
+                  schroederProxyExecutor,
+                  coherentSolidExecutor
                 }
               );
             if (completeNativeOffscreenValidation) {
@@ -19698,6 +22827,10 @@ fn fs_main() -> @location(0) vec4<f32> {
           }
           if (validationCompletions.length > 0) {
             bridge.device.queue.submit([validationEncoder.finish()]);
+            trackResidentSurfaceDrawSubmitFence(bridge, {
+              reason: 'resident-surface-draw-validation-submit',
+              renderStatus: 'native-webgpu-surface-consumer-validation-submitted'
+            });
             for (const completeValidation of validationCompletions) {
               completeValidation();
             }
@@ -19712,8 +22845,10 @@ fn fs_main() -> @location(0) vec4<f32> {
           : 'webgpu-overlay-rendered');
         bridge.lastTransparentCompositeMode = nativeSurfaceClearOnly
           ? 'native-debug-clear-only'
-          : (transparentCompositeSubmitted ? 'weighted-blended-oit' : 'direct-alpha-depth-test');
+          : 'disabled-opaque-pbr';
         bridge.transparencyCompositeMode = bridge.lastTransparentCompositeMode;
+        bridge.lastRefractiveDrawCount = nativeSurfaceClearOnly ? 0 : refractiveDraws.length;
+        bridge.lastTransparentDrawCount = 0;
         if (nativeSurfaceClearOnly) {
           bridge.lastOpaqueDrawCount = 0;
           bridge.lastTransparentDrawCount = 0;
@@ -19729,6 +22864,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         sphResidentSurfaceDraw.renderBridgeOitAccumFormat = bridge.oitAccumFormat ?? null;
         sphResidentSurfaceDraw.renderBridgeOitRevealFormat = bridge.oitRevealFormat ?? null;
         sphResidentSurfaceDraw.renderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount;
+        sphResidentSurfaceDraw.renderBridgeLastRefractiveDrawCount = bridge.lastRefractiveDrawCount;
         sphResidentSurfaceDraw.renderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount;
         sphResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = bridge.temporalSwapPolicy ?? null;
         sphResidentSurfaceDraw.renderBridgeRetainedPreviousOverlay = Boolean(bridge.retainedPreviousOverlay);
@@ -19765,6 +22901,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         sphResidentRenderState.surfaceDrawRenderBridgeOitAccumFormat = bridge.oitAccumFormat ?? null;
         sphResidentRenderState.surfaceDrawRenderBridgeOitRevealFormat = bridge.oitRevealFormat ?? null;
         sphResidentRenderState.surfaceDrawRenderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount;
+        sphResidentRenderState.surfaceDrawRenderBridgeLastRefractiveDrawCount = bridge.lastRefractiveDrawCount;
         sphResidentRenderState.surfaceDrawRenderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount;
         sphResidentRenderState.surfaceDrawRenderBridgeTemporalSwapPolicy = bridge.temporalSwapPolicy ?? null;
         sphResidentRenderState.surfaceDrawRenderBridgeRetainedPreviousOverlay = Boolean(bridge.retainedPreviousOverlay);
@@ -19815,6 +22952,11 @@ fn fs_main() -> @location(0) vec4<f32> {
         scheduleSphNativeWebGpuSurfaceConsumerFrame();
       }
     } catch (error) {
+      abortCoherentSolidDirectShapeRenderGpuProfile(
+        coherentSolidGpuProfileContext,
+        'timestamp-profile-render-aborted',
+        error instanceof Error ? error.message : String(error)
+      );
       bridge.lastRenderStatus = 'webgpu-overlay-render-error';
       bridge.reason = error instanceof Error ? error.message : String(error);
       if (
@@ -20215,6 +23357,35 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
   }
 
+  function clearSphThermalResponseGraphUpload(
+    reason = 'scene-thermal-response-graph-upload-clear'
+  ) {
+    const previous = sphThermalResponseGraphUpload;
+    if (previous) {
+      clearSphReactionStaticTableUpload({
+        reason: `${reason}:reaction-static-table-before-thermal`,
+        thermalResponseGraphUpload: previous
+      });
+      if (previous.status === 'webgpu-uploaded') {
+        destroySphThermalResponseGraphBuffers(previous);
+      }
+    }
+    sphThermalResponseGraphUpload = null;
+    sphThermalResponseGraphUploadSignature = null;
+    scene.userData.sphThermalResponseGraphUpload = null;
+    return previous;
+  }
+
+  function installSphThermalResponseGraphUpload(upload, signature, reason) {
+    if (sphThermalResponseGraphUpload !== upload) {
+      clearSphThermalResponseGraphUpload(reason);
+    }
+    sphThermalResponseGraphUpload = upload;
+    sphThermalResponseGraphUploadSignature = signature;
+    scene.userData.sphThermalResponseGraphUpload = upload;
+    return upload;
+  }
+
   async function refreshSphThermalResponseGraphBuffers({
     preferWebGpu = true,
     force = false,
@@ -20224,12 +23395,7 @@ fn fs_main() -> @location(0) vec4<f32> {
   } = {}) {
     const signature = sphThermalResponseGraphSignature();
     if (!signature) {
-      if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
-        destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
-      }
-      sphThermalResponseGraphUpload = null;
-      sphThermalResponseGraphUploadSignature = null;
-      scene.userData.sphThermalResponseGraphUpload = null;
+      clearSphThermalResponseGraphUpload('scene-thermal-response-signature-unavailable');
       return null;
     }
     if (!force && sphThermalResponseGraphUploadSignature === signature && sphThermalResponseGraphUpload) {
@@ -20254,10 +23420,11 @@ fn fs_main() -> @location(0) vec4<f32> {
           phaseChangeValidation: false,
           fullPhysicsValidation: false
         };
-        sphThermalResponseGraphUpload = upload;
-        sphThermalResponseGraphUploadSignature = signature;
-        scene.userData.sphThermalResponseGraphUpload = upload;
-        return upload;
+        return installSphThermalResponseGraphUpload(
+          upload,
+          signature,
+          'scene-thermal-response-not-requested-replacement'
+        );
       }
       const resolvedDeviceResult = device
         ? { status: 'webgpu-device-ready', reason: 'provided device', device }
@@ -20278,10 +23445,11 @@ fn fs_main() -> @location(0) vec4<f32> {
           phaseChangeValidation: false,
           fullPhysicsValidation: false
         };
-        sphThermalResponseGraphUpload = upload;
-        sphThermalResponseGraphUploadSignature = signature;
-        scene.userData.sphThermalResponseGraphUpload = upload;
-        return upload;
+        return installSphThermalResponseGraphUpload(
+          upload,
+          signature,
+          'scene-thermal-response-device-unavailable-replacement'
+        );
       }
       const upload = uploadSphThermalResponseGraphBuffers(resolvedDeviceResult.device, {
         thermalMaterialTable: sphThermalMaterialTable,
@@ -20294,13 +23462,11 @@ fn fs_main() -> @location(0) vec4<f32> {
         destroySphThermalResponseGraphBuffers(upload);
         return { ...upload, status: 'stale-upload-discarded' };
       }
-      if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
-        destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
-      }
-      sphThermalResponseGraphUpload = upload;
-      sphThermalResponseGraphUploadSignature = signature;
-      scene.userData.sphThermalResponseGraphUpload = upload;
-      return upload;
+      return installSphThermalResponseGraphUpload(
+        upload,
+        signature,
+        'scene-thermal-response-webgpu-replacement'
+      );
     })();
     pendingSphThermalResponseGraphUpload = { signature, promise };
     try {
@@ -20818,6 +23984,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
+    materialInterfaceSourceField = sphResidentMaterialInterfaceState?.materialInterfaceSourceField ?? null,
+    materialInterfaceCompactCandidateCapacity = null,
     gasPressureSummary = null,
     pressureFeedback = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
@@ -20836,8 +24004,16 @@ fn fs_main() -> @location(0) vec4<f32> {
     const effectiveDt = lawGroups.mechanics ? dt : 0;
     const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
     const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
+    const effectiveMaterialInterfaceSourceField = lawGroups.pressure
+      && materialInterfaceSourceFieldReadyForResidentLane(materialInterfaceSourceField, {
+        particleState: sphGpuParticleState
+      })
+      ? materialInterfaceSourceField
+      : null;
     const pressureInterfaceForceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
-    const pressureInterfaceGridForceApproved = lawGroups.pressure && pressureInterfaceForceRowsUploadApproved({
+    const pressureInterfaceGridForceApproved = !effectiveMaterialInterfaceSourceField
+      && lawGroups.pressure
+      && pressureInterfaceForceRowsUploadApproved({
       pressureInterfaceForceSolver,
       pressureInterfaceGridForceAdmission,
       forceRowCount: pressureInterfaceForceRowCount
@@ -20862,6 +24038,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       cflFactor,
       readbackMode: requestedReadbackMode,
       pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+      materialInterfaceSourceField: effectiveMaterialInterfaceSourceField,
+      materialInterfaceCompactCandidateCapacity,
       pressureInterfaceGasCellFieldImport,
       internalPressureScale: effectiveInternalPressureScale,
       physicalLawGroups: lawGroups,
@@ -20886,10 +24064,13 @@ fn fs_main() -> @location(0) vec4<f32> {
       stage: 'mls-mpm-resident-step'
     });
     const promise = (async () => {
-      await awaitResidentSurfaceDrawSubmitFence({
-        reason: 'mls-mpm-resident-step-before-compute',
-        stage: 'mls-mpm-resident-step'
-      });
+      scene.userData.mlsMpmResidentSurfaceFencePolicy = {
+        schema: 'peercompute.ulg.sph-resident-surface-fence-policy.v0',
+        status: 'normal-physics-does-not-await-surface-draw-submit-fence',
+        reason: 'versioned leased render resources allow queue overlap',
+        stage: 'mls-mpm-resident-step',
+        updatedAtMs: nowMs()
+      };
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
         : deviceResult;
@@ -20917,6 +24098,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           deviceResult: resolvedDeviceResult
         })
         : sphThermalResponseGraphUpload;
+      const reactionStaticTableDevice = device || resolvedDeviceResult?.device || null;
+      const resolvedReactionStaticTableUpload = preferWebGpu && reactionStaticTableDevice
+        ? refreshSphReactionStaticTableUpload({
+            device: reactionStaticTableDevice,
+            reactionTable: effectiveReactionTable,
+            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
+          })
+        : null;
       const resolvedMechanicsMaterialPhaseUpload = preferWebGpu
         ? await refreshMlsMpmMechanicsMaterialPhaseUpload({
           preferWebGpu,
@@ -20959,10 +24148,18 @@ fn fs_main() -> @location(0) vec4<f32> {
             ?? null,
           pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
           pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
+          materialInterfaceSourceField: effectiveMaterialInterfaceSourceField,
+          materialInterfaceCompactCandidateCapacity,
           pressureFeedback: pressureFeedback || pressureFeedbackFromGasPressureSummary(gasPressureSummary),
           gasPressureSummary,
           pressureInterfaceGasCellFieldImport,
           pressureInterfaceGasCellFieldAdmission,
+          pressureInterfaceStageOptions: {
+            gasPressureSummary,
+            pressureInterfaceGasCellFieldImport,
+            pressureInterfaceGasCellFieldAdmission,
+            readbackMode: requestedReadbackMode
+          },
           contactKinematicsParticleBinMetadataReadback:
             requestedContactKinematicsParticleBinMetadataReadback,
           reactionParticleBinMetadataReadback:
@@ -20987,7 +24184,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
-            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
+            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload,
+            ...sphReactionStaticTableStepOptions(resolvedReactionStaticTableUpload)
           },
           cohortRanges: cohortRangesFromRenderDomainCounts(currentRenderDomainCounts),
           parityTolerances,
@@ -21027,6 +24225,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             cflFactor,
             readbackMode: requestedReadbackMode,
             pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+            materialInterfaceSourceField: effectiveMaterialInterfaceSourceField,
+            materialInterfaceCompactCandidateCapacity,
             pressureInterfaceGasCellFieldImport,
             internalPressureScale: effectiveInternalPressureScale,
             physicalLawGroups: lawGroups,
@@ -21080,6 +24280,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     computeTaskLaneId = 'ulg:sph-resident:scene',
     computeTaskStateKey = null,
     computeTaskDomainKey = 'sph-phase-scene',
+    computeTaskQueueFencePolicy =
+      MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY,
     residentStateManager = null,
     residentAuthorityHost = null,
     sameDeviceHotBufferPublisher = null,
@@ -21149,10 +24351,13 @@ fn fs_main() -> @location(0) vec4<f32> {
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
+    materialInterfaceSourceField = sphResidentMaterialInterfaceState?.materialInterfaceSourceField ?? null,
+    materialInterfaceCompactCandidateCapacity = null,
     gasPressureSummary = null,
     pressureFeedback = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
-    pressureInterfaceGasCellFieldAdmission = null
+    pressureInterfaceGasCellFieldAdmission = null,
+    residentSequenceAuthorityEpoch = null
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -21163,14 +24368,11 @@ fn fs_main() -> @location(0) vec4<f32> {
     const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
     const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
     const pressureInterfaceForceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
-    const pressureInterfaceGridForceApproved = lawGroups.pressure && pressureInterfaceForceRowsUploadApproved({
+    const legacyPressureInterfaceGridForceApproved = lawGroups.pressure && pressureInterfaceForceRowsUploadApproved({
       pressureInterfaceForceSolver,
       pressureInterfaceGridForceAdmission,
       forceRowCount: pressureInterfaceForceRowCount
     });
-    const effectivePressureInterfaceForceSolver = pressureInterfaceGridForceApproved ? pressureInterfaceForceSolver : null;
-    const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
-    const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
     const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
     const normalizedStepCount = normalizeResidentStepCount(stepCount);
@@ -21749,6 +24951,11 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
       return computeManager ? 'compute-manager' : 'direct';
     })();
+    const requestedComputeTaskQueueFencePolicy =
+      computeTaskQueueFencePolicy
+        === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+        ? MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+        : MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY;
     const requestedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
       activeGridDispatchPlanRefreshMode ?? (
         requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
@@ -21771,6 +24978,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null,
       compactSummaryMode: requestedCompactSummaryMode,
       residentComputeManagerMode: requestedResidentComputeManagerMode,
+      computeTaskQueueFencePolicy: requestedComputeTaskQueueFencePolicy,
       residentComputeManagerActive: Boolean(
         computeManager
         && typeof computeManager.submitTask === 'function'
@@ -21908,10 +25116,35 @@ fn fs_main() -> @location(0) vec4<f32> {
     const sourceMlsMpmParticleState = continuationAvailable
       ? mlsMpmResidentSteps.nextMlsMpmParticleState
       : mlsMpmGpuParticleState;
+    const effectiveMaterialInterfaceSourceField = lawGroups.pressure
+      && materialInterfaceSourceFieldReadyForResidentLane(materialInterfaceSourceField, {
+        particleState: sourceSphParticleState
+      })
+      ? materialInterfaceSourceField
+      : null;
+    const pressureInterfaceGridForceApproved = !effectiveMaterialInterfaceSourceField
+      && legacyPressureInterfaceGridForceApproved;
+    const effectivePressureInterfaceForceSolver = pressureInterfaceGridForceApproved
+      ? pressureInterfaceForceSolver
+      : null;
+    const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved
+      ? pressureInterfaceForceRowsBuffer
+      : null;
+    const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved
+      ? pressureInterfaceGridForceAdmission
+      : null;
     const residentSourceMode = continuationAvailable
       ? 'previous-gpu-resident-output'
       : 'cpu-packed-state';
-    const signature = mlsMpmResidentStepsSignatureFor({
+    const requestedResidentSequenceAuthorityEpoch = resolveResidentSequenceAuthorityEpoch(
+      residentSequenceAuthorityEpoch,
+      mlsMpmResidentExecutionGeneration
+    );
+    scene.userData.mlsMpmResidentSequenceAuthorityEpoch =
+      requestedResidentSequenceAuthorityEpoch;
+    scene.userData.mlsMpmResidentSequenceAuthorityTuple =
+      mlsMpmResidentSequenceAuthorityTuple;
+    const residentStepsSignatureForCurrentInputs = () => mlsMpmResidentStepsSignatureFor({
       sphParticleState: sourceSphParticleState,
       mlsMpmParticleState: sourceMlsMpmParticleState,
       gridSpacingM,
@@ -21924,7 +25157,11 @@ fn fs_main() -> @location(0) vec4<f32> {
       compactSummaryMode: requestedCompactSummaryMode,
       compactSummaryScope: requestedCompactSummaryScope,
       residentSourceMode,
+      residentSequenceAuthorityEpoch: requestedResidentSequenceAuthorityEpoch,
+      computeTaskQueueFencePolicy: requestedComputeTaskQueueFencePolicy,
       pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+      materialInterfaceSourceField: effectiveMaterialInterfaceSourceField,
+      materialInterfaceCompactCandidateCapacity,
       pressureInterfaceGasCellFieldImport,
       residentProductMass: continuationResidentProductMass,
       internalPressureScale: effectiveInternalPressureScale,
@@ -21992,6 +25229,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       schroederParticleStorageRequiredCapacity:
         requestedSchroederParticleStorageRequiredCapacity
     });
+    const signature = residentStepsSignatureForCurrentInputs();
     const executionGeneration = mlsMpmResidentExecutionGeneration;
     const residentStepsStartedAtMs = nowMs();
     const residentStepsStageMs = {};
@@ -22044,16 +25282,21 @@ fn fs_main() -> @location(0) vec4<f32> {
       stage: 'mls-mpm-resident-steps'
     });
     const promise = (async () => {
-      markResidentStepsProgress('resident-steps-awaiting-surface-draw-queue-idle');
-      const surfaceDrawSubmitFenceStartedAtMs = nowMs();
-      const surfaceDrawSubmitFenceStatus = await awaitResidentSurfaceDrawSubmitFence({
-        reason: 'mls-mpm-resident-steps-before-compute',
-        stage: 'mls-mpm-resident-steps'
-      });
-      residentStepsMarkStage('surfaceDrawSubmitFenceMs', surfaceDrawSubmitFenceStartedAtMs);
-      markResidentStepsProgress('resident-steps-surface-draw-queue-idle', {
-        surfaceDrawSubmitFenceStatus: surfaceDrawSubmitFenceStatus?.status ?? null,
-        surfaceDrawSubmitFenceElapsedMs: surfaceDrawSubmitFenceStatus?.elapsedMs ?? null
+      const surfaceDrawSubmitFenceStatus = {
+        schema: 'peercompute.ulg.sph-resident-surface-fence-policy.v0',
+        status: 'normal-physics-does-not-await-surface-draw-submit-fence',
+        reason: 'versioned leased render resources allow queue overlap',
+        stage: 'mls-mpm-resident-steps',
+        elapsedMs: 0
+      };
+      residentStepsStageMs.surfaceDrawSubmitFenceMs = 0;
+      scene.userData.mlsMpmResidentSurfaceFencePolicy = {
+        ...surfaceDrawSubmitFenceStatus,
+        updatedAtMs: nowMs()
+      };
+      markResidentStepsProgress('resident-steps-surface-draw-overlap-enabled', {
+        surfaceDrawSubmitFenceStatus: surfaceDrawSubmitFenceStatus.status,
+        surfaceDrawSubmitFenceElapsedMs: 0
       });
       markResidentStepsProgress('resident-steps-requesting-device');
       const deviceAcquireStartedAtMs = nowMs();
@@ -22105,6 +25348,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           deviceResult: resolvedDeviceResult
         })
         : sphThermalResponseGraphUpload;
+      const reactionStaticTableDevice = device || resolvedDeviceResult?.device || null;
+      const resolvedReactionStaticTableUpload = preferWebGpu && reactionStaticTableDevice
+        ? refreshSphReactionStaticTableUpload({
+            device: reactionStaticTableDevice,
+            reactionTable: effectiveReactionTable,
+            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
+          })
+        : null;
       residentStepsMarkStage('thermalUploadMs', thermalUploadStartedAtMs);
       markResidentStepsProgress('resident-steps-thermal-upload-ready', {
         uploadStatus: resolvedThermalResponseGraphUpload?.status ?? null,
@@ -22152,6 +25403,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           pressureRowsRetained: Boolean(effectivePressureInterfaceForceRowsBuffer)
         });
         const residentStepsOptions = {
+          residentSequenceAuthorityEpoch: requestedResidentSequenceAuthorityEpoch,
           sphParticleState: sourceSphParticleState,
           mlsMpmParticleState: sourceMlsMpmParticleState,
           sphParticleUpload: resolvedSphUpload,
@@ -22168,11 +25420,19 @@ fn fs_main() -> @location(0) vec4<f32> {
             ?? null,
           pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
           pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
+          materialInterfaceSourceField: effectiveMaterialInterfaceSourceField,
+          materialInterfaceCompactCandidateCapacity,
           residentProductMass: continuationResidentProductMass,
           pressureFeedback: pressureFeedback || pressureFeedbackFromGasPressureSummary(gasPressureSummary),
           gasPressureSummary,
           pressureInterfaceGasCellFieldImport,
           pressureInterfaceGasCellFieldAdmission,
+          pressureInterfaceStageOptions: {
+            gasPressureSummary,
+            pressureInterfaceGasCellFieldImport,
+            pressureInterfaceGasCellFieldAdmission,
+            readbackMode: requestedReadbackMode
+          },
           contactKinematicsParticleBinMetadataReadback:
             requestedContactKinematicsParticleBinMetadataReadback,
           reactionParticleBinMetadataReadback:
@@ -22199,7 +25459,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
-            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
+            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload,
+            ...sphReactionStaticTableStepOptions(resolvedReactionStaticTableUpload)
           },
           cohortRanges: cohortRangesFromRenderDomainCounts(currentRenderDomainCounts),
           parityTolerances,
@@ -22226,545 +25487,65 @@ fn fs_main() -> @location(0) vec4<f32> {
           measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
           measureGpuTimestamps: requestedMeasureGpuTimestamps,
           activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
-          activeGridSafetyCells: normalizedActiveGridSafetyCells
+          activeGridSafetyCells: normalizedActiveGridSafetyCells,
+          schroederSimulation: requestedSchroederSimulation,
+          schroederSelectedLevel: requestedSchroederSelectedLevel,
+          schroederBaseGridSpacingM: requestedSchroederBaseGridSpacingM,
+          schroederMinLevel: requestedSchroederMinLevel,
+          schroederMaxLevel: requestedSchroederMaxLevel,
+          schroederTileCellCount: requestedSchroederTileCellCount,
+          schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
+          schroederPortableSummaryPeerComputeUseCase,
+          schroederEnableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
+          schroederTwoLevelMechanicsAuthority:
+            requestedSchroederTwoLevelMechanicsAuthority,
+          schroederTwoLevelFineSubstepCount:
+            requestedSchroederTwoLevelFineSubstepCount,
+          schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
+          schroederEnableActiveNodeSortedIndex:
+            requestedSchroederEnableActiveNodeSortedIndex,
+          schroederActiveNodeSortedIndexPolicyMode,
+          schroederLawNeighborTraversalPolicyMode,
+          schroederLawNeighborCandidateReadbackMode,
+          schroederEnableCrossLevelCoupling: Boolean(schroederEnableCrossLevelCoupling),
+          schroederEnableLawQueue: Boolean(schroederEnableLawQueue),
+          schroederEnableLawNeighborCandidates: Boolean(
+            schroederEnableLawNeighborCandidates
+          ),
+          schroederStateDeltaMergeAdmission:
+            requestedSchroederStateDeltaMergeAdmission,
+          schroederPhaseVolumeMigrationAdmission:
+            requestedSchroederPhaseVolumeMigrationAdmission,
+          schroederPhaseVolumeSplitMergeAdmission:
+            requestedSchroederPhaseVolumeSplitMergeAdmission,
+          schroederParticleStorageAllocatorAdmission:
+            requestedSchroederParticleStorageAllocatorAdmission,
+          schroederParticleStorageFreeList: requestedSchroederParticleStorageFreeList,
+          schroederParticleStorageSlotAssignmentAdmission:
+            requestedSchroederParticleStorageSlotAssignmentAdmission,
+          schroederParticleStorageMaterializationAdmission:
+            requestedSchroederParticleStorageMaterializationAdmission
         };
-        const compactSchroederSameLevelMechanicsForScene = (result = null) => {
-          if (!result) return null;
-          return {
-            schema: result.schema ?? null,
-            status: result.status ?? null,
-            backend: result.backend ?? null,
-            readbackMode: result.readbackMode ?? null,
-            selectedLevel: result.selectedLevel ?? null,
-            mechanicsGridSpacingM: result.mechanicsGridSpacingM ?? null,
-            nativeGridSpacingM: result.nativeGridSpacingM ?? null,
-            normalHotLoopReadbackFree: result.normalHotLoopReadbackFree === true,
-            activeNodeConsumerStatus: result.activeNodeConsumerStatus ?? null,
-            activeNodeIndexStatus: result.activeNodeIndexStatus ?? null,
-            activeNodeSortedIndexStatus: result.activeNodeSortedIndexStatus ?? null,
-            phaseVolumeMigrationStatus: result.phaseVolumeMigrationStatus ?? null,
-            phaseVolumeMigrationParticleCount:
-              result.phaseVolumeMigration?.particleCount ?? null,
-            phaseVolumeLevelUpdateStatus: result.phaseVolumeLevelUpdateStatus ?? null,
-            phaseVolumeLevelUpdateConsumerStatus:
-              result.phaseVolumeLevelUpdateConsumerStatus ?? null,
-            phaseVolumeLevelUpdateRetainedBuffer:
-              result.phaseVolumeLevelUpdateRetainedBuffer === true,
-            phaseVolumeLevelUpdateRowCount:
-              result.phaseVolumeLevelUpdateRowCount ?? 0,
-            phaseVolumeAssignmentOverlayStatus: result.phaseVolumeAssignmentOverlayStatus ?? null,
-            phaseVolumeAssignmentOverlayConsumerStatus:
-              result.phaseVolumeAssignmentOverlayConsumerStatus ?? null,
-            phaseVolumeAssignmentOverlayEnabled:
-              result.phaseVolumeAssignmentOverlayEnabled === true,
-            phaseVolumeAssignmentOverlayIndexRequired:
-              result.phaseVolumeAssignmentOverlayIndexRequired === true,
-            phaseVolumeAssignmentOverlayIndexEnabled:
-              result.phaseVolumeAssignmentOverlayIndexEnabled === true,
-            phaseVolumeLevelSelectionSource:
-              result.phaseVolumeLevelSelectionSource ?? null,
-            phaseVolumeAssignmentOverlayFeedbackStatus:
-              result.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
-            phaseVolumeAssignmentOverlayFeedbackReady:
-              result.phaseVolumeAssignmentOverlayFeedbackReady === true,
-            phaseVolumeAssignmentOverlayFeedbackRows:
-              result.phaseVolumeAssignmentOverlayFeedback?.levelUpdateRowCount ?? 0,
-            phaseVolumeNextTickAssignmentOverlayStatus:
-              result.phaseVolumeNextTickAssignmentOverlayStatus ?? null,
-            phaseVolumeNextTickAssignmentOverlayConsumerStatus:
-              result.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null,
-            // Storage-chain per-step accounting (already read back inside the
-            // chain on the hot path) - the conservation battery's raw signal.
-            particleStorageCountSummary:
-              result.particleStorageCountSummary?.countSummary
-                ? { ...result.particleStorageCountSummary.countSummary }
-                : null,
-            particleStorageAdoptionDelta:
-              result.particleStorageCountSummary?.admittedParticleCountDelta ?? null,
-            particleStorageCompactionLiveCount:
-              result.particleStorageCompaction?.liveParticleCount ?? null,
-            particleStorageAdoptionSkipped:
-              result.particleStorageAdoptionSkipped === true,
-            particleStorageAdoptionNoTopologyChange:
-              result.particleStorageAdoptionNoTopologyChange === true,
-            particleStorageAdoptionTornGroupDetected:
-              result.particleStorageAdoptionTornGroupDetected === true,
-            phaseVolumeDiagnosticSummaryStatus:
-              result.phaseVolumeDiagnosticSummaryStatus ?? null,
-            phaseVolumeDiagnosticSummaryConsumerStatus:
-              result.phaseVolumeDiagnosticSummaryConsumerStatus ?? null,
-            phaseVolumeDiagnosticSummary:
-              result.phaseVolumeDiagnosticSummary ?? null,
-            lawQueueStatus: result.lawQueueStatus ?? null,
-            lawNeighborCandidateStatus: result.lawNeighborCandidateStatus ?? null,
-            crossLevelCouplingStatus: result.crossLevelCouplingStatus ?? null,
-            conservativeTransferStatus: result.conservativeTransferStatus ?? null,
-            stateMutationStatus: result.stateMutationStatus ?? null,
-            stateAuthorityStatus: result.stateAuthorityStatus ?? null,
-            portableSummaryStatus: result.portableSummaryStatus ?? result.portableSummary?.status ?? null,
-            renderLodStatus: result.renderLodStatus ?? result.portableSummary?.renderLodStatus ?? null,
-            localRetainedRenderBufferStatus:
-              result.localRetainedRenderBuffers?.status
-              ?? result.schroederLocalRetainedRenderBuffers?.status
-              ?? null,
-            localRetainedRenderBufferRefCount:
-              result.localRetainedRenderBuffers?.retainedBufferRefCount
-              ?? result.schroederLocalRetainedRenderBuffers?.retainedBufferRefCount
-              ?? 0,
-            fullParticleReadbackRequired: result.fullParticleReadbackRequired === true,
-            fullPhysicsValidation: false
-          };
-        };
-        const attachSchroederSceneStepArtifacts = (step, schroederResult) => {
-          if (!step || !schroederResult) return step;
-          const compact = compactSchroederSameLevelMechanicsForScene(schroederResult);
-          step.schroederSimulation = true;
-          step.schroederSameLevelMechanics = compact;
-          step.schroederSameLevelMechanicsStatus = compact?.status ?? null;
-          step.schroederLevelAssignment = schroederResult.levelAssignment ?? null;
-          step.schroederActiveNodeList = schroederResult.activeNodeList ?? null;
-          step.schroederLawQueue = schroederResult.lawQueue ?? null;
-          step.schroederLawNeighborCandidates = schroederResult.lawNeighborCandidates ?? null;
-          step.schroederPhaseVolumeAssignmentOverlayFeedback =
-            schroederResult.phaseVolumeAssignmentOverlayFeedback ?? null;
-          step.schroederPhaseVolumeNextTickAssignmentOverlay =
-            schroederResult.schroederPhaseVolumeNextTickAssignmentOverlay ?? null;
-          step.phaseVolumeMigration = schroederResult.phaseVolumeMigration ?? null;
-          step.schroederPhaseVolumeMigration = schroederResult.phaseVolumeMigration ?? null;
-          step.phaseVolumeMigrationStatus = schroederResult.phaseVolumeMigrationStatus ?? null;
-          step.phaseVolumeLevelUpdate = schroederResult.phaseVolumeLevelUpdate ?? null;
-          step.schroederPhaseVolumeLevelUpdate = schroederResult.phaseVolumeLevelUpdate ?? null;
-          step.phaseVolumeLevelUpdateStatus = schroederResult.phaseVolumeLevelUpdateStatus ?? null;
-          step.phaseVolumeNextTickAssignmentOverlay =
-            schroederResult.phaseVolumeNextTickAssignmentOverlay ?? null;
-          step.phaseVolumeNextTickAssignmentOverlayStatus =
-            schroederResult.phaseVolumeNextTickAssignmentOverlayStatus ?? null;
-          step.phaseVolumeNextTickAssignmentOverlayConsumerStatus =
-            schroederResult.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null;
-          step.phaseVolumeDiagnosticSummary =
-            schroederResult.phaseVolumeDiagnosticSummary ?? null;
-          step.schroederPhaseVolumeDiagnosticSummary =
-            schroederResult.phaseVolumeDiagnosticSummary ?? null;
-          step.phaseVolumeDiagnosticSummaryStatus =
-            schroederResult.phaseVolumeDiagnosticSummaryStatus ?? null;
-          step.schroederPhaseVolumeDiagnosticSummaryStatus =
-            schroederResult.phaseVolumeDiagnosticSummaryStatus ?? null;
-          step.schroederPortableSummary = schroederResult.portableSummary ?? null;
-          step.portableSummary = schroederResult.portableSummary ?? null;
-          step.renderLod = schroederResult.portableSummary?.renderLod ?? null;
-          step.localRetainedRenderBuffers = schroederResult.localRetainedRenderBuffers ?? null;
-          step.schroederLocalRetainedRenderBuffers =
-            schroederResult.schroederLocalRetainedRenderBuffers
-            || schroederResult.localRetainedRenderBuffers
-            || null;
-          return step;
-        };
-        const runSchroederSceneResidentSteps = async (baseOptions) => {
-          const count = normalizedStepCount;
-          let currentSphParticleState = baseOptions.sphParticleState;
-          let currentMlsMpmParticleState = baseOptions.mlsMpmParticleState;
-          let currentSphParticleUpload = baseOptions.sphParticleUpload ?? null;
-          let currentMlsMpmParticleUpload = baseOptions.mlsMpmParticleUpload ?? null;
-          let currentResidentProductMass =
-            baseOptions.residentProductMass
-            ?? baseOptions.nextParticleUploads?.residentProductMass
-            ?? null;
-          let currentSourceSlot = currentSphParticleUpload?.slot ?? 0;
-          let finalStep = null;
-          let finalSchroederResult = null;
-          const retainedSteps = [];
-          const stepSummaries = [];
-          const schroederStepSummaries = [];
-          // Compact per-step input provenance: catches silent chaining breaks
-          // where a step re-consumes the packed CPU state instead of the
-          // previous step's retained output (sim time advances, state does
-          // not - the numeric motion gate reads this trail to explain why).
-          const uploadProvenance = [];
-          let currentPhaseVolumeAssignmentOverlayFeedback =
-            cachedSchroederPhaseVolumeAssignmentOverlayFeedback;
-          let finalPhaseVolumeAssignmentOverlayFeedback = null;
-          markResidentStepsProgress('resident-steps-schroeder-sequence-started', {
-            stepCount: count,
-            selectedLevel: requestedSchroederSelectedLevel,
-            baseGridSpacingM: requestedSchroederBaseGridSpacingM,
-            phaseVolumeAssignmentOverlayFeedbackStatus:
-              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.status,
-            phaseVolumeAssignmentOverlayFeedbackReady:
-              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true
-          });
-          for (let index = 0; index < count; index += 1) {
-            const summarizeStep = requestedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
-              && (
-                requestedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY
-                || index === count - 1
-              );
-            markResidentStepsProgress('resident-steps-schroeder-step-started', {
-              stepIndex: index,
-              selectedLevel: requestedSchroederSelectedLevel,
-              summarizeStep,
-              phaseVolumeAssignmentOverlayFeedbackStatus:
-                currentPhaseVolumeAssignmentOverlayFeedback?.status ?? null,
-              phaseVolumeAssignmentOverlayFeedbackReady:
-                currentPhaseVolumeAssignmentOverlayFeedback?.ready === true,
-              phaseVolumeAssignmentOverlayFeedbackRows:
-                currentPhaseVolumeAssignmentOverlayFeedback?.levelUpdateRowCount ?? 0
-            });
-            const stepPhaseVolumeAssignmentOverlay =
-              currentPhaseVolumeAssignmentOverlayFeedback?.ready === true
-                ? currentPhaseVolumeAssignmentOverlayFeedback.phaseVolumeAssignmentOverlay
-                : null;
-            uploadProvenance.push({
-              index,
-              sphUploadStatus: currentSphParticleUpload?.status ?? null,
-              sphUploadSourceStage: currentSphParticleUpload?.sourceStage ?? null,
-              sphUploadStateBufferBound: Boolean(currentSphParticleUpload?.stateBuffer),
-              mlsUploadStatus: currentMlsMpmParticleUpload?.status ?? null,
-              mlsUploadMechanicsBufferBound: Boolean(currentMlsMpmParticleUpload?.mechanicsBuffer),
-              sourceStateStep: currentSphParticleState?.step ?? null,
-              sourceStateParticleCount: currentSphParticleState?.particleCount ?? null,
-              sourceStateCpuLen: currentSphParticleState?.state?.length ?? null,
-              requestedStepReadbackMode: requestedReadbackMode ?? null
-            });
-            const residentStepOptions = {
-              ...baseOptions,
-              sphParticleState: currentSphParticleState,
-              mlsMpmParticleState: currentMlsMpmParticleState,
-              sphParticleUpload: currentSphParticleUpload,
-              mlsMpmParticleUpload: currentMlsMpmParticleUpload,
-              residentProductMass: currentResidentProductMass,
-              sourceSlot: currentSourceSlot,
-              compactSummaryScope: requestedCompactSummaryScope,
-              sequenceIndex: index,
-              sequenceStepCount: count,
-              onResidentStageProgress(progress = {}) {
-                markResidentStepsProgress(progress.status || 'resident-steps-schroeder-inner-progress', {
-                  innerProgress: progress,
-                  currentStage: progress.stage ?? null,
-                  stepIndex: progress.stepIndex ?? progress.sequenceIndex ?? index,
-                  stageElapsedMs: progress.elapsedMs ?? null
-                });
-              }
-            };
-            if (!summarizeStep) residentStepOptions.summaryRunner = null;
-            const schroederResult = await runSchroederSameLevelMechanicsWebGpu({
-              device: resolvedDeviceResult.device,
-              sphParticleState: currentSphParticleState,
-              mlsMpmParticleState: currentMlsMpmParticleState,
-              sphParticleUpload: currentSphParticleUpload,
-              mlsMpmParticleUpload: currentMlsMpmParticleUpload,
-              selectedLevel: requestedSchroederSelectedLevel,
-              baseGridSpacingM: requestedSchroederBaseGridSpacingM,
-              enableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
-              twoLevelMechanicsAuthority: requestedSchroederTwoLevelMechanicsAuthority,
-              twoLevelFineSubstepCount: requestedSchroederTwoLevelFineSubstepCount,
-              ...(requestedSchroederMinLevel !== null ? { minLevel: requestedSchroederMinLevel } : {}),
-              ...(requestedSchroederMaxLevel !== null ? { maxLevel: requestedSchroederMaxLevel } : {}),
-              ...(requestedSchroederTileCellCount !== null ? { tileCellCount: requestedSchroederTileCellCount } : {}),
-              ...(stepPhaseVolumeAssignmentOverlay
-                ? { phaseVolumeAssignmentOverlay: stepPhaseVolumeAssignmentOverlay }
-                : {}),
-              ...(requestedSchroederStateDeltaMergeAdmission
-                ? { stateDeltaMergeAdmission: requestedSchroederStateDeltaMergeAdmission }
-                : {}),
-              ...(requestedSchroederPhaseVolumeMigrationAdmission
-                ? { phaseVolumeMigrationAdmission: requestedSchroederPhaseVolumeMigrationAdmission }
-                : {}),
-              ...(requestedSchroederPhaseVolumeSplitMergeAdmission
-                ? { phaseVolumeSplitMergeAdmission: requestedSchroederPhaseVolumeSplitMergeAdmission }
-                : {}),
-              ...(requestedSchroederParticleStorageAllocatorAdmission
-                ? { particleStorageAllocatorAdmission: requestedSchroederParticleStorageAllocatorAdmission }
-                : {}),
-              ...(requestedSchroederParticleStorageFreeList
-                ? { particleStorageFreeList: requestedSchroederParticleStorageFreeList }
-                : {}),
-              ...(requestedSchroederParticleStorageSlotAssignmentAdmission
-                ? { particleStorageSlotAssignmentAdmission: requestedSchroederParticleStorageSlotAssignmentAdmission }
-                : {}),
-              ...(requestedSchroederParticleStorageMaterializationAdmission
-                ? { particleStorageMaterializationAdmission: requestedSchroederParticleStorageMaterializationAdmission }
-                : {}),
-              enablePortableSummary: requestedSchroederEnablePortableSummary,
-              portableSummaryPeerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
-              enableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
-              enableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
-              ...(schroederActiveNodeSortedIndexPolicyMode !== undefined
-                ? { activeNodeSortedIndexPolicyMode: schroederActiveNodeSortedIndexPolicyMode }
-                : {}),
-              ...(schroederLawNeighborTraversalPolicyMode !== undefined
-                ? { lawNeighborTraversalPolicyMode: schroederLawNeighborTraversalPolicyMode }
-                : {}),
-              lawNeighborCandidateReadbackMode: schroederLawNeighborCandidateReadbackMode,
-              enableCrossLevelCoupling: Boolean(schroederEnableCrossLevelCoupling),
-              enableLawQueue: Boolean(schroederEnableLawQueue),
-              enableLawNeighborCandidates: Boolean(schroederEnableLawNeighborCandidates),
-              particleStorageAdoptionOscillationGuard: schroederParticleStorageAdoptionGuardState,
-              boxDimsM: dims,
-              dt: effectiveDt,
-              gravityMPerS2: effectiveGravity,
-              cflFactor,
-              readbackMode: requestedReadbackMode,
-              residentStepRunner: runMlsMpmResidentStepWithOptionalWebGpu,
-              residentStepOptions
-            });
-            const nextPhaseVolumeAssignmentOverlayFeedback =
-              createSchroederPhaseVolumeAssignmentOverlayFeedbackCacheEntry({
-                residentExecution: schroederResult,
-                residentExecutionGeneration: executionGeneration,
-                currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
-                source: 'schroeder-same-level-resident-step'
-              });
-            const nextPhaseVolumeAssignmentOverlayFeedbackSummary =
-              summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
-                nextPhaseVolumeAssignmentOverlayFeedback
-              );
-            schroederResult.phaseVolumeAssignmentOverlayFeedback =
-              nextPhaseVolumeAssignmentOverlayFeedbackSummary;
-            schroederResult.phaseVolumeAssignmentOverlayFeedbackStatus =
-              nextPhaseVolumeAssignmentOverlayFeedbackSummary.status;
-            schroederResult.phaseVolumeAssignmentOverlayFeedbackReady =
-              nextPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true;
-            schroederResult.phaseVolumeAssignmentOverlayFeedbackConsumerStatus =
-              stepPhaseVolumeAssignmentOverlay
-                ? 'cached-phase-volume-assignment-overlay-consumed-by-schroeder-same-level-step'
-                : 'no-cached-phase-volume-assignment-overlay-for-schroeder-same-level-step';
-            const step = attachSchroederSceneStepArtifacts(schroederResult.residentStep, schroederResult);
-            if (!step) {
-              throw new Error('Schroeder same-level scene runner did not return a resident step');
-            }
-            step.sequenceIndex = index;
-            step.schroederSequenceIndex = index;
-            step.schroederSequenceStepCount = count;
-            const compactSchroederStep = compactSchroederSameLevelMechanicsForScene(schroederResult);
-            stepSummaries.push({
-              index,
-              backend: step.backend,
-              status: step.status,
-              stageStatus: { ...(step.stageStatus || {}) },
-              stageBackends: { ...(step.stageBackends || {}) },
-              readbackMode: step.readbackMode ?? null,
-              schroederSimulation: true,
-              schroederStatus: compactSchroederStep?.status ?? null,
-              schroederSelectedLevel: compactSchroederStep?.selectedLevel ?? null,
-              schroederRenderLodStatus: compactSchroederStep?.renderLodStatus ?? null,
-              schroederLocalRetainedRenderBufferStatus:
-                compactSchroederStep?.localRetainedRenderBufferStatus ?? null,
-              phaseVolumeAssignmentOverlayFeedbackStatus:
-                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
-              phaseVolumeAssignmentOverlayFeedbackReady:
-                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackReady === true
-            });
-            schroederStepSummaries.push(compactSchroederStep);
-            markResidentStepsProgress('resident-steps-schroeder-step-complete', {
-              stepIndex: index,
-              backend: step.backend,
-              stageTiming: step.stageTiming || null,
-              schroederStatus: compactSchroederStep?.status ?? null,
-              renderLodStatus: compactSchroederStep?.renderLodStatus ?? null,
-              phaseVolumeAssignmentOverlayFeedbackStatus:
-                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
-              phaseVolumeAssignmentOverlayFeedbackReady:
-                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackReady === true
-            });
-            const carriedResidentProductMass =
-              step.nextParticleUploads?.residentProductMass
-              ?? step.residentProductMass
-              ?? null;
-            if (finalStep && !retainIntermediateSteps) {
-              destroyMlsMpmResidentStepBuffers(finalStep, {
-                preserveResidentProductMass: carriedResidentProductMass,
-                preserveResidentProductMassHandles: [
-                  step.inputResidentProductMass,
-                  step.emittedResidentProductMass,
-                  carriedResidentProductMass
-                ].filter(Boolean),
-                destroyInputResidentProductMass: true,
-                preserveBuffers: retainedContinuationBuffersFromUploads(step.nextParticleUploads)
-              });
-            } else if (finalStep) {
-              retainedSteps.push(finalStep);
-            }
-            finalStep = step;
-            finalSchroederResult = schroederResult;
-            {
-              // Oscillation guard bookkeeping: remember the adopted
-              // merge/split summary for the next step; while the guard is
-              // tripping (adoption skipped), keep it armed so repeated
-              // reversal proposals stay suppressed until the pattern breaks.
-              const stepAdoptionForGuard = step.schroederParticleStorageAdoption;
-              if (stepAdoptionForGuard?.adopted === true
-                && Math.round(Number(stepAdoptionForGuard.admittedParticleCountDelta) || 0) !== 0) {
-                schroederParticleStorageAdoptionGuardState = {
-                  admittedParticleCountDelta: stepAdoptionForGuard.admittedParticleCountDelta,
-                  authoritativeParticleCount: stepAdoptionForGuard.authoritativeParticleCount
-                };
-              } else if (!schroederResult?.particleStorageAdoptionOscillationDetected) {
-                schroederParticleStorageAdoptionGuardState = null;
-              }
-            }
-            {
-              const provenanceEntry = uploadProvenance[uploadProvenance.length - 1];
-              if (provenanceEntry) {
-                provenanceEntry.stepReadbackMode = step.readbackMode ?? null;
-                provenanceEntry.stepStateLen = step.state?.length ?? null;
-                provenanceEntry.stepThermalStateLen =
-                  (step.thermalStep?.result || step.thermalStep)?.state?.length ?? null;
-                provenanceEntry.stepReactionStateLen =
-                  (step.reactionStep?.result || step.reactionStep)?.state?.length ?? null;
-                const stepAdoption = step.schroederParticleStorageAdoption || null;
-                provenanceEntry.stepAdopted = stepAdoption?.adopted ?? null;
-                provenanceEntry.stepAdoptSourceCount = stepAdoption?.sourceParticleCount ?? null;
-                provenanceEntry.stepAdoptDelta = stepAdoption?.admittedParticleCountDelta ?? null;
-                provenanceEntry.stepAdoptAuthCount = stepAdoption?.authoritativeParticleCount ?? null;
-                const stepCountSummary =
-                  schroederResult?.particleStorageCountSummary?.countSummary
-                  || step.schroederParticleStorageMaterialization?.countSummary
-                  || null;
-                provenanceEntry.stepCountSummary = stepCountSummary
-                  ? {
-                    rows: stepCountSummary.materializationRowCount ?? null,
-                    admittedRows: stepCountSummary.admittedRowCount ?? null,
-                    written: stepCountSummary.writtenTargetSlotCount ?? null,
-                    appended: stepCountSummary.appendedTargetSlotCount ?? null,
-                    freed: stepCountSummary.freedSourceSlotCount ?? null,
-                    delta: stepCountSummary.admittedParticleCountDelta ?? null,
-                    blocked: stepCountSummary.blockedRowCount ?? null
-                  }
-                  : null;
-              }
-            }
-            currentSphParticleState = cloneSphParticleStateForNext(currentSphParticleState, step);
-            currentMlsMpmParticleState = cloneMlsMpmParticleStateForNext(currentMlsMpmParticleState, step);
-            currentSphParticleUpload = step.nextParticleUploads?.sphParticleUpload ?? null;
-            currentMlsMpmParticleUpload = step.nextParticleUploads?.mlsMpmParticleUpload ?? null;
-            currentResidentProductMass = carriedResidentProductMass;
-            currentSourceSlot = step.particlePingPong?.nextSlot ?? (currentSourceSlot === 0 ? 1 : 0);
-            currentPhaseVolumeAssignmentOverlayFeedback =
-              nextPhaseVolumeAssignmentOverlayFeedback.ready
-                ? nextPhaseVolumeAssignmentOverlayFeedback
-                : null;
-            finalPhaseVolumeAssignmentOverlayFeedback = currentPhaseVolumeAssignmentOverlayFeedback;
-          }
-          const compactFinalSchroeder = compactSchroederSameLevelMechanicsForScene(finalSchroederResult);
-          const finalPhaseVolumeAssignmentOverlayFeedbackSummary =
-            summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
-              finalPhaseVolumeAssignmentOverlayFeedback
-            );
-          markResidentStepsProgress('resident-steps-schroeder-sequence-complete', {
-            completedStepCount: stepSummaries.length,
-            backend: finalStep?.backend || 'webgpu',
-            schroederStatus: compactFinalSchroeder?.status ?? null,
-            renderLodStatus: compactFinalSchroeder?.renderLodStatus ?? null,
-            phaseVolumeAssignmentOverlayFeedbackStatus:
-              finalPhaseVolumeAssignmentOverlayFeedbackSummary.status,
-            phaseVolumeAssignmentOverlayFeedbackReady:
-              finalPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true
-          });
-          const execution = {
-            schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
-            backend: finalStep?.backend || 'webgpu',
-            status: 'resident-steps-executed',
-            schroederSimulation: true,
-            schroederSameLevelSequenceStatus: 'schroeder-same-level-resident-steps-executed',
-            schroederSameLevelMechanics: compactFinalSchroeder,
-            schroederSameLevelMechanicsSummaries: schroederStepSummaries,
-            schroederPhaseVolumeNextTickAssignmentOverlay:
-              finalPhaseVolumeAssignmentOverlayFeedback?.phaseVolumeAssignmentOverlay ?? null,
-            schroederPhaseVolumeAssignmentOverlayFeedback:
-              finalPhaseVolumeAssignmentOverlayFeedbackSummary,
-            phaseVolumeAssignmentOverlayFeedback:
-              finalPhaseVolumeAssignmentOverlayFeedbackSummary,
-            phaseVolumeAssignmentOverlayFeedbackStatus:
-              finalPhaseVolumeAssignmentOverlayFeedbackSummary.status,
-            phaseVolumeAssignmentOverlayFeedbackReady:
-              finalPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true,
-            stepCount: count,
-            completedStepCount: stepSummaries.length,
-            compactSummaryMode: requestedCompactSummaryMode,
-            compactSummaryScope: requestedCompactSummaryScope,
-            activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
-            retainIntermediateSteps,
-            retainedIntermediateStepCount: retainedSteps.length,
-            retainedSteps,
-            finalStep,
-            stepSummaries,
-            schroederUploadProvenance: uploadProvenance,
-            nextSphParticleState: currentSphParticleState,
-            nextMlsMpmParticleState: currentMlsMpmParticleState,
-            nextParticleUploads: finalStep?.nextParticleUploads ?? null,
-            nextResidentProductMass: currentResidentProductMass,
-            nextParticleBufferMode: finalStep?.nextParticleBufferMode ?? 'not-available',
-            readbackMode: finalStep?.readbackMode ?? requestedReadbackMode,
-            normalHotLoopReadbackFree: Boolean(finalStep?.normalHotLoopReadbackFree),
-            renderStateReadbackAvailable: finalStep?.renderStateReadbackAvailable ?? false,
-            portableSummary: finalSchroederResult?.portableSummary ?? null,
-            renderLod: finalSchroederResult?.portableSummary?.renderLod ?? null,
-            localRetainedRenderBuffers: finalSchroederResult?.localRetainedRenderBuffers ?? null,
-            schroederLocalRetainedRenderBuffers:
-              finalSchroederResult?.schroederLocalRetainedRenderBuffers
-              || finalSchroederResult?.localRetainedRenderBuffers
-              || null,
-            levelAssignment: finalSchroederResult?.levelAssignment ?? null,
-            activeNodeList: finalSchroederResult?.activeNodeList ?? null,
-            activeNodeIndex: finalSchroederResult?.activeNodeIndex ?? null,
-            activeNodeSortedIndex: finalSchroederResult?.activeNodeSortedIndex ?? null,
-            lawQueue: finalSchroederResult?.lawQueue ?? null,
-            lawNeighborCandidates: finalSchroederResult?.lawNeighborCandidates ?? null,
-            crossLevelCoupling: finalSchroederResult?.crossLevelCoupling ?? null,
-            conservationSummary: finalSchroederResult?.conservationSummary ?? null,
-            phaseVolumeMigration: finalSchroederResult?.phaseVolumeMigration ?? null,
-            schroederPhaseVolumeMigration: finalSchroederResult?.phaseVolumeMigration ?? null,
-            phaseVolumeMigrationStatus:
-              finalSchroederResult?.phaseVolumeMigrationStatus ?? null,
-            phaseVolumeLevelUpdate: finalSchroederResult?.phaseVolumeLevelUpdate ?? null,
-            schroederPhaseVolumeLevelUpdate:
-              finalSchroederResult?.phaseVolumeLevelUpdate ?? null,
-            phaseVolumeLevelUpdateStatus:
-              finalSchroederResult?.phaseVolumeLevelUpdateStatus ?? null,
-            phaseVolumeLevelUpdateConsumerStatus:
-              finalSchroederResult?.phaseVolumeLevelUpdateConsumerStatus ?? null,
-            phaseVolumeNextTickAssignmentOverlay:
-              finalSchroederResult?.phaseVolumeNextTickAssignmentOverlay ?? null,
-            phaseVolumeNextTickAssignmentOverlayStatus:
-              finalSchroederResult?.phaseVolumeNextTickAssignmentOverlayStatus ?? null,
-            phaseVolumeNextTickAssignmentOverlayConsumerStatus:
-              finalSchroederResult?.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null,
-            phaseVolumeDiagnosticSummary:
-              finalSchroederResult?.phaseVolumeDiagnosticSummary ?? null,
-            schroederPhaseVolumeDiagnosticSummary:
-              finalSchroederResult?.phaseVolumeDiagnosticSummary ?? null,
-            phaseVolumeDiagnosticSummaryStatus:
-              finalSchroederResult?.phaseVolumeDiagnosticSummaryStatus ?? null,
-            schroederPhaseVolumeDiagnosticSummaryStatus:
-              finalSchroederResult?.phaseVolumeDiagnosticSummaryStatus ?? null,
-            phaseVolumeDiagnosticSummaryConsumerStatus:
-              finalSchroederResult?.phaseVolumeDiagnosticSummaryConsumerStatus ?? null,
-            residentAuthorityLedgerStatus: finalStep?.residentAuthorityLedgerStatus ?? null,
-            residentAuthorityFamilyOwners: finalStep?.residentAuthorityFamilyOwners || finalStep?.residentAuthoritySummary?.familyOwners || {},
-            residentAuthorityWarnings: [...(finalStep?.residentAuthorityWarnings || [])],
-            residentAuthorityBlockers: [...(finalStep?.residentAuthorityBlockers || [])],
-            residentBufferLeaseLedgerStatus: finalStep?.residentBufferLeaseLedgerStatus ?? null,
-            residentBufferLeaseResourceCount: finalStep?.residentBufferLeaseResourceCount ?? 0,
-            residentBufferLeaseActiveLeaseCount: finalStep?.residentBufferLeaseActiveLeaseCount ?? 0,
-            residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
-            residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
-            gpuAuthoritativeState: false,
-            scientificValidation: false,
-            sphValidation: false,
-            phaseChangeValidation: false,
-            fullPhysicsValidation: false
-          };
-          execution.schroederPhaseVolumeDiagnostics =
-            summarizeSchroederPhaseVolumeDiagnosticStatus(execution);
-          return execution;
-          };
         let execution = null;
         const kernelsStartedAtMs = nowMs();
+        if (
+          requestedSchroederSimulation
+          && (
+            !computeManager
+            || typeof computeManager.submitTask !== 'function'
+            || requestedResidentComputeManagerMode === 'direct'
+          )
+        ) {
+          const error = new Error(
+            'Production Schroeder execution requires the ComputeManager/StateManager resident authority path'
+          );
+          error.code = 'ULG_SCHROEDER_COMPUTE_MANAGER_AUTHORITY_REQUIRED';
+          throw error;
+        }
         if (
           computeManager
           && typeof computeManager.submitTask === 'function'
           && requestedResidentComputeManagerMode !== 'direct'
-          && !requestedSchroederSimulation
         ) {
           const continuationTaskStateKey = continueFromResidentState
             ? (mlsMpmResidentSteps?.computeManagerTask?.stateKey
@@ -22795,9 +25576,38 @@ fn fs_main() -> @location(0) vec4<f32> {
             ...residentStepsOptions,
             modulePath: resolvedComputeTaskModulePath,
             taskId: `ulg:sph-resident-steps:${signature}`,
+            taskFamily: requestedSchroederSimulation
+              ? 'ulg-schroeder-two-level-resident-steps'
+              : 'ulg-mls-mpm-sph-resident-steps',
+            solverId: requestedSchroederSimulation
+              ? 'ulg-schroeder-two-level-resident-steps'
+              : 'ulg-mls-mpm-sph-resident-steps',
+            owner: requestedSchroederSimulation
+              ? 'ulg-schroeder-compute-manager-resident-steps'
+              : 'ulg-sph-resident-steps',
+            lawGraphNodeId: requestedSchroederSimulation
+              ? 'ulg-schroeder-two-level-resident-authority-sequence'
+              : 'ulg-mls-mpm-sph-resident-pass-dag',
+            readFamilies: requestedSchroederSimulation
+              ? [
+                  'sph-particle-state',
+                  'mls-mpm-mechanics',
+                  'schroeder-level-assignment',
+                  'schroeder-sparse-hierarchy'
+                ]
+              : undefined,
+            writeFamilies: requestedSchroederSimulation
+              ? [
+                  'sph-particle-state',
+                  'sph-thermo-phase',
+                  'mls-mpm-mechanics',
+                  'schroeder-conservation-evidence'
+                ]
+              : undefined,
             laneId: effectiveComputeTaskLaneId,
             stateKey: taskStateKey,
-            domainKey: computeTaskDomainKey
+            domainKey: computeTaskDomainKey,
+            queueFencePolicy: requestedComputeTaskQueueFencePolicy
           });
           execution = submission?.result
             || submission?.taskResult
@@ -22815,6 +25625,16 @@ fn fs_main() -> @location(0) vec4<f32> {
               taskId: `ulg:sph-resident-steps:${signature}`,
               scope: execution.commitDelta?.scope || 'ulg-sph-resident-pass-dag'
             });
+            const gpuAuthorityPromotion = promoteResidentStepsExecutionGpuAuthority(
+              execution,
+              stateManagerCommit
+            );
+            execution.gpuAuthorityPromotion = {
+              promoted: gpuAuthorityPromotion.promoted === true,
+              status: gpuAuthorityPromotion.status,
+              gpuAuthoritativeState:
+                gpuAuthorityPromotion.gpuAuthoritativeState === true
+            };
             execution.stateManagerCommit = {
               ...stateManagerCommit,
               warmEntry: stateManagerCommit.warmEntry
@@ -22823,7 +25643,16 @@ fn fs_main() -> @location(0) vec4<f32> {
                     ts: stateManagerCommit.warmEntry.ts ?? null,
                     payloadSchema: stateManagerCommit.warmEntry.payload?.schema ?? null,
                     payloadStateKey: stateManagerCommit.warmEntry.payload?.stateKey ?? null,
-                    payloadCompletedStepCount: stateManagerCommit.warmEntry.payload?.completedStepCount ?? null
+                    payloadCompletedStepCount: stateManagerCommit.warmEntry.payload?.completedStepCount ?? null,
+                    payloadGpuResidentAuthoritativeContinuationCandidate:
+                      stateManagerCommit.warmEntry.payload
+                        ?.gpuResidentAuthoritativeContinuationCandidate === true,
+                    payloadGpuAuthorityAdmissionSatisfied:
+                      stateManagerCommit.warmEntry.payload?.gpuAuthorityAdmissionSatisfied === true,
+                    payloadGpuAuthorityStatus:
+                      stateManagerCommit.warmEntry.payload?.gpuAuthorityStatus ?? null,
+                    payloadGpuAuthoritativeState:
+                      stateManagerCommit.warmEntry.payload?.gpuAuthoritativeState === true
                   }
                 : null
             };
@@ -22845,6 +25674,11 @@ fn fs_main() -> @location(0) vec4<f32> {
           } else if (shouldRequireStateManagerCommit) {
             throw new Error('ComputeManager resident-steps publication requires a StateManager commit, but no residentStateManager was provided');
           }
+          const acceptedTaskId = submission?.acceptedTaskId
+            ?? submission?.taskId
+            ?? execution?.computeTaskId
+            ?? execution?.commitDelta?.taskId
+            ?? null;
           execution.computeManagerTask = {
             schema: 'peercompute.ulg.sph-scene-resident-compute-manager-task.v0',
             status: stateManagerCommit?.accepted
@@ -22856,7 +25690,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             stateKeySource: taskStateKeySource,
             domainKey: computeTaskDomainKey,
             submissionStatus: submission?.status ?? null,
-            acceptedTaskId: submission?.acceptedTaskId ?? submission?.taskId ?? null,
+            acceptedTaskId,
             solverId: execution?.peerComputeSolverTask?.solverId ?? submission?.solverId ?? null,
             solverTaskCreated: execution?.peerComputeSolverTask?.created === true,
             solverTaskStatus: execution?.peerComputeSolverTask?.status ?? null,
@@ -22865,7 +25699,11 @@ fn fs_main() -> @location(0) vec4<f32> {
             solverTaskWarmDeltaScope: execution?.peerComputeSolverTask?.warmDeltaScope ?? null,
             stateManagerCommitAccepted: stateManagerCommit?.accepted ?? false,
             stateManagerCommitStatus: stateManagerCommit?.status ?? null,
-            stateManagerCommitReason: stateManagerCommit?.reason ?? null
+            stateManagerCommitReason: stateManagerCommit?.reason ?? null,
+            gpuAuthorityAdmissionSatisfied:
+              execution.gpuAuthorityAdmissionSatisfied === true,
+            gpuAuthorityStatus: execution.gpuAuthorityStatus ?? null,
+            gpuAuthoritativeState: execution.gpuAuthoritativeState === true
           };
           markResidentStepsProgress('resident-steps-compute-manager-task-complete', {
             backend: execution?.backend ?? null,
@@ -22875,13 +25713,9 @@ fn fs_main() -> @location(0) vec4<f32> {
             stateManagerCommitStatus: stateManagerCommit?.status ?? null
           });
         } else {
-          execution = requestedSchroederSimulation
-            ? await runSchroederSceneResidentSteps(residentStepsOptions)
-            : await runMlsMpmResidentStepsWithOptionalWebGpu(residentStepsOptions);
+          execution = await runMlsMpmResidentStepsWithOptionalWebGpu(residentStepsOptions);
         }
-        execution.residentComputeManagerMode = requestedSchroederSimulation
-          ? 'direct-schroeder-scene'
-          : requestedResidentComputeManagerMode;
+        execution.residentComputeManagerMode = requestedResidentComputeManagerMode;
         execution.residentComputeManagerActive = Boolean(execution.computeManagerTask);
         residentStepsMarkStage('kernelsWallMs', kernelsStartedAtMs);
         markResidentStepsProgress('resident-steps-kernels-complete', {
@@ -22893,7 +25727,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         execution.requestedReadbackMode = requestedReadbackMode;
         execution.compactSummaryMode = requestedCompactSummaryMode;
         execution.compactSummaryScope = requestedCompactSummaryScope;
-        execution.residentSourceMode = residentSourceMode;
+        if (!requestedSchroederSimulation) {
+          execution.residentSourceMode = residentSourceMode;
+        }
         execution.continuedFromResidentState = continuationAvailable;
         execution.continuationAvailable = Boolean(execution.nextParticleUploads);
         execution.physicalLawGroups = { ...lawGroups };
@@ -22922,90 +25758,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           Object.assign(execution, pressureRowsTemporaryUploadCleanupEvidence);
           resolvedPressureForceRowsUpload = null;
         }
-        if (
-          residentExecutionGenerationIsStale(executionGeneration)
-          || mlsMpmResidentStepsSignatureFor({
-            sphParticleState: sourceSphParticleState,
-            mlsMpmParticleState: sourceMlsMpmParticleState,
-            gridSpacingM,
-            dt: effectiveDt,
-            gravityMPerS2: effectiveGravity,
-            cflFactor,
-            readbackMode: requestedReadbackMode,
-            stepCount: normalizedStepCount,
-            retainIntermediateSteps,
-            compactSummaryMode: requestedCompactSummaryMode,
-            compactSummaryScope: requestedCompactSummaryScope,
-            residentSourceMode,
-            pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
-            pressureInterfaceGasCellFieldImport,
-            residentProductMass: continuationResidentProductMass,
-            internalPressureScale: effectiveInternalPressureScale,
-            physicalLawGroups: lawGroups,
-            fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
-            fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
-            measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
-            measureGpuTimestamps: requestedMeasureGpuTimestamps,
-            contactKinematicsParticleBinMetadataReadback:
-              requestedContactKinematicsParticleBinMetadataReadback,
-            reactionParticleBinMetadataReadback:
-              requestedReactionParticleBinMetadataReadback,
-            activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
-            activeGridSafetyCells: normalizedActiveGridSafetyCells,
-            schroederSimulation: requestedSchroederSimulation,
-            schroederSelectedLevel: requestedSchroederSelectedLevel,
-            schroederMinLevel: requestedSchroederMinLevel,
-            schroederMaxLevel: requestedSchroederMaxLevel,
-            schroederTileCellCount: requestedSchroederTileCellCount,
-            schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
-      schroederEnableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
-      schroederTwoLevelMechanicsAuthority: requestedSchroederTwoLevelMechanicsAuthority,
-      schroederTwoLevelFineSubstepCount: requestedSchroederTwoLevelFineSubstepCount,
-            schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
-            schroederEnableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
-            schroederLawNeighborTraversalPolicyMode,
-            schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
-              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
-                ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.status
-                : null,
-            schroederPhaseVolumeAssignmentOverlayFeedbackRowCount:
-              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
-                ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.levelUpdateRowCount
-                : 0,
-            schroederPhaseVolumeAssignmentOverlayFeedbackGeneration:
-              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
-                ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.residentExecutionGeneration
-                : null,
-            schroederStateDeltaMergeAdmissionStatus:
-              requestedSchroederStateDeltaMergeAdmission?.status ?? null,
-            schroederStateDeltaMergeAdmissionRowCount:
-              requestedSchroederStateDeltaMergeAdmissionRowCount,
-            schroederPhaseVolumeMigrationAdmissionStatus:
-              requestedSchroederPhaseVolumeMigrationAdmission?.status ?? null,
-            schroederPhaseVolumeMigrationAdmissionRowCount:
-              requestedSchroederPhaseVolumeMigrationAdmissionRowCount,
-            schroederPhaseVolumeSplitMergeAdmissionStatus:
-              requestedSchroederPhaseVolumeSplitMergeAdmission?.status ?? null,
-            schroederPhaseVolumeSplitMergeAdmissionRowCount:
-              requestedSchroederPhaseVolumeSplitMergeAdmissionRowCount,
-            schroederParticleStorageMaterializationPolicyEnabled:
-              requestedSchroederEnableParticleStorageMaterialization,
-            schroederParticleStorageAllocatorAdmissionStatus:
-              requestedSchroederParticleStorageAllocatorAdmission?.status ?? null,
-            schroederParticleStorageAllocationRowCount:
-              requestedSchroederParticleStorageAllocationRowCount,
-            schroederParticleStorageSlotAssignmentAdmissionStatus:
-              requestedSchroederParticleStorageSlotAssignmentAdmission?.status ?? null,
-            schroederParticleStorageSlotAssignmentRowCount:
-              requestedSchroederParticleStorageSlotAssignmentRowCount,
-            schroederParticleStorageMaterializationAdmissionStatus:
-              requestedSchroederParticleStorageMaterializationAdmission?.status ?? null,
-            schroederParticleStorageMaterializationRowCount:
-              requestedSchroederParticleStorageMaterializationRowCount,
-            schroederParticleStorageRequiredCapacity:
-              requestedSchroederParticleStorageRequiredCapacity
-          }) !== signature
-        ) {
+        const publicationFreshness = residentStepsPublicationFreshness({
+          running,
+          executionGeneration,
+          currentExecutionGeneration: mlsMpmResidentExecutionGeneration,
+          submittedSignature: signature,
+          currentSignature: residentStepsSignatureForCurrentInputs()
+        });
+        if (!publicationFreshness.fresh) {
           // Same live-continuation hazard as the single-step stale discard:
           // a no-emission schedule passes the published product-mass handle
           // through, so tearing this execution down bare would destroy the
@@ -23013,7 +25773,11 @@ fn fs_main() -> @location(0) vec4<f32> {
           destroyMlsMpmResidentStepsBuffers(execution, {
             preserveBuffers: residentContinuationBuffersFromExecution(mlsMpmResidentSteps)
           });
-          return markResidentExecutionStale(execution, executionGeneration);
+          return markResidentExecutionStale(
+            execution,
+            executionGeneration,
+            publicationFreshness.reason
+          );
         }
         const sameDeviceHotBufferPublisherFn = sameDeviceHotBufferPublisher
           || residentAuthorityHost?.publishSameDeviceHotBufferSource
@@ -24015,11 +26779,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       const renderLayer = renderLayerFromOpticalResponse(optics, batch.descriptor);
       const renderOrder = renderOrderFromOpticalResponse(optics, batch.descriptor);
       const depthWriteFlag = renderDepthWriteFromOpticalResponse(optics, batch.descriptor) ? 1 : 0;
-      const transparencyClassId = renderLayer === 'vapor-surface'
-        ? 3
-        : (renderLayer === 'transmissive-surface'
-          ? 2
-          : (renderLayer === 'alpha-surface' ? 1 : 0));
+      const transparencyClassId = renderLayer === 'refractive-surface' ? 2 : 0;
       return {
         surfaceKey: batch.surfaceKey,
         material: batch.material,
@@ -24287,10 +27047,19 @@ fn fs_main() -> @location(0) vec4<f32> {
     };
   }
 
-  function colorForResidentSurfaceDescriptor(descriptor, materialProperties) {
-    const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
-    const optics = opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
-    return optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
+  function residentSurfaceSeedColor(batch = null) {
+    const candidates = [
+      batch?.averageColorRgb,
+      batch?.colorsRgb,
+      batch?.descriptor?.averageColorRgb,
+      batch?.descriptor?.colorRgb
+    ];
+    for (const candidate of candidates) {
+      if (!Array.isArray(candidate) && !ArrayBuffer.isView(candidate)) continue;
+      const color = [Number(candidate[0]), Number(candidate[1]), Number(candidate[2])];
+      if (color.every(Number.isFinite)) return color.map((value) => clamp(value, 0, 1));
+    }
+    return [1, 1, 1];
   }
 
   function createResidentRenderSurfaceBatches({
@@ -24303,6 +27072,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     const batchesByKey = new Map();
     const countByMaterial = new Map();
     const radiusByMaterial = new Map();
+    const colorByMaterial = new Map();
     const presentMaterialPhaseKeys = new Set();
     const materials = materialKeysFromReactionTable(reactionTable);
     const renderBatches = mergeSameMaterialPhaseSurfaceBatchesForRenderField([
@@ -24322,6 +27092,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         if (Number.isFinite(batch.surfaceRadiusM) && batch.surfaceRadiusM > 0) {
           radiusByMaterial.set(batch.material, batch.surfaceRadiusM);
         }
+        if (!colorByMaterial.has(batch.material)) {
+          colorByMaterial.set(batch.material, residentSurfaceSeedColor(batch));
+        }
       }
     }
     for (const material of materials) {
@@ -24335,7 +27108,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         const descriptor = renderDescriptorOf({ material, phase, renderKey });
         if (batchesByKey.has(descriptor.surfaceKey)) continue;
         const count = Math.max(1, countByMaterial.get(material) || 0);
-        const color = colorForResidentSurfaceDescriptor(descriptor, materialProperties);
+        // This row only seeds a phase that is not present yet. Reuse the
+        // material's existing lightweight display color; the optical closure
+        // table below remains authoritative for PBR and spectral rendering.
+        const color = colorByMaterial.get(material) || [1, 1, 1];
         const colorsRgb = [];
         for (let i = 0; i < count; i += 1) {
           colorsRgb.push(
@@ -24803,6 +27579,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     currentRenderDomainCounts = normalizeRenderDomainCounts(renderDomainCounts);
     currentPhysicalLawGroups = normalizePhysicalLawGroups(physicalLawGroups);
     currentWallTemperaturesK = wallTemperaturesK ? { ...wallTemperaturesK } : null;
+    const previousReactionTableSignature = sphReactionTableSignature();
     const renderDomainPositionBounds = renderDomainPositionBoundsFromPositions(positionsM, currentRenderDomainCounts);
     scene.userData.sphRenderDomainCounts = currentRenderDomainCounts ? { ...currentRenderDomainCounts } : null;
     scene.userData.sphRenderDomainPositionBounds = renderDomainPositionBounds;
@@ -24865,12 +27642,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       sphThermalResponseGraphUpload
       && sphThermalResponseGraphUploadSignature !== nextThermalResponseGraphSignature
     ) {
-      if (sphThermalResponseGraphUpload.status === 'webgpu-uploaded') {
-        destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
-      }
-      sphThermalResponseGraphUpload = null;
-      sphThermalResponseGraphUploadSignature = null;
-      scene.userData.sphThermalResponseGraphUpload = null;
+      clearSphThermalResponseGraphUpload('set-particles-thermal-response-inputs-changed');
     }
     sphReactionTable = measure('reactionTable', () => (
       staticTableCache?.reactionTable?.schema
@@ -24882,6 +27654,11 @@ fn fs_main() -> @location(0) vec4<f32> {
       })
         : null
     ));
+    if (previousReactionTableSignature !== sphReactionTableSignature()) {
+      clearSphReactionStaticTableUpload({
+        reason: 'set-particles-reaction-table-inputs-changed'
+      });
+    }
     const residentFieldBatches = measure('residentSurfaceBatches', () => (
       skipCpuSurfaceGeometry
         ? createResidentRenderSurfaceBatches({
@@ -24944,6 +27721,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
     currentSurfaceBatchIdentitySignature = nextSurfaceBatchIdentitySignature;
     publishSphResidentMaterialInterfaceState(null);
+    publishSphResidentRenderMaterialInterfaceState(null);
     sphResidentRenderState = null;
     scene.userData.sphResidentRenderState = null;
     publishSphResidentPressureInterfaceState(null);
@@ -25150,6 +27928,18 @@ fn fs_main() -> @location(0) vec4<f32> {
       scalarOffset: descriptor.scalarOffset ?? null,
       scalarOffsetBytes: descriptor.scalarOffsetBytes ?? null,
       scalarStrides: Array.isArray(descriptor.scalarStrides) ? [...descriptor.scalarStrides] : null,
+      brickSize: descriptor.brickSize ?? null,
+      brickCounts: Array.isArray(descriptor.brickCounts) ? [...descriptor.brickCounts] : null,
+      directoryOffset: descriptor.directoryOffset ?? null,
+      directoryCount: descriptor.directoryCount ?? null,
+      activeBrickCount: descriptor.activeBrickCount ?? null,
+      atlasCellCount: descriptor.atlasCellCount ?? null,
+      candidateVoxelOffset: descriptor.candidateVoxelOffset ?? null,
+      candidateVoxelCount: descriptor.candidateVoxelCount ?? null,
+      candidateDispatchIndirectOffsetBytes:
+        descriptor.candidateDispatchIndirectOffsetBytes ?? null,
+      candidateDispatchWorkgroupSize: descriptor.candidateDispatchWorkgroupSize ?? null,
+      generationId: descriptor.generationId ?? null,
       dims: Array.isArray(descriptor.dims) ? [...descriptor.dims] : null,
       surfaceIndex: descriptor.surfaceIndex ?? null,
       surfaceKey: descriptor.surfaceKey ?? null,
@@ -25160,6 +27950,10 @@ fn fs_main() -> @location(0) vec4<f32> {
       fieldCellCount: descriptor.fieldCellCount ?? null,
       isovalue: descriptor.isovalue ?? null,
       surfaceExtractionPolicyStatus: descriptor.surfaceExtractionPolicyStatus ?? null,
+      surfaceExtractionPolicyIsovalueAuthorityStatus:
+        descriptor.surfaceExtractionPolicyIsovalueAuthorityStatus ?? null,
+      surfaceExtractionPolicyIsovalueApplied:
+        descriptor.surfaceExtractionPolicyIsovalueApplied ?? null,
       surfaceExtractionPolicyRowsSchema: descriptor.surfaceExtractionPolicyRowsSchema ?? null,
       surfaceExtractionPolicyRowSchema: descriptor.surfaceExtractionPolicyRowSchema ?? null,
       surfaceExtractionPolicyRole: descriptor.surfaceExtractionPolicyRole ?? null,
@@ -25191,13 +27985,16 @@ fn fs_main() -> @location(0) vec4<f32> {
     const surfaces = Array.isArray(renderFieldExecution?.surfaceTable?.metadata)
       ? renderFieldExecution.surfaceTable.metadata
       : [];
-    return surfaces.map((surface, surfaceIndex) => createUlgRenderFieldBufferVolumeDescriptor({
-      device,
-      renderField: renderFieldExecution,
-      surface,
-      surfaceIndex,
-      algorithmMaterialSurfaceExtractionRows
-    }));
+    const descriptorFactory = renderFieldExecution?.schema === ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA
+      ? createUlgSparseRenderFieldVolumeDescriptor
+      : createUlgRenderFieldBufferVolumeDescriptor;
+    return surfaces.map((surface, surfaceIndex) => descriptorFactory({
+        device,
+        renderField: renderFieldExecution,
+        surface,
+        surfaceIndex,
+        algorithmMaterialSurfaceExtractionRows
+      }));
   }
 
   function summarizeRenderFieldBufferVolumeDescriptors(descriptors = []) {
@@ -25216,9 +28013,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       descriptorCount: summarizedDescriptors.length,
       readyCount,
       blockedCount,
-      extensionDescriptorFactory: 'createBufferVolumeDescriptor',
-      nativeConsumerKind: 'native-webgpu-marching-cubes-buffer-volume',
-      nativeRequiredAdapter: 'webgpu-marching-cubes.buffer-volume.v0',
+      extensionDescriptorFactory: summarizedDescriptors[0]?.extensionDescriptorFactory ?? null,
+      nativeConsumerKind: summarizedDescriptors[0]?.nativeConsumerKind ?? null,
+      nativeRequiredAdapter: summarizedDescriptors[0]?.nativeRequiredAdapter ?? null,
       descriptors: summarizedDescriptors
     };
   }
@@ -25349,6 +28146,655 @@ fn fs_main() -> @location(0) vec4<f32> {
     };
   }
 
+  function sparseRenderFieldRuntimeSignature({ surfaceTable } = {}) {
+    const surfaces = (surfaceTable?.metadata || []).map((surface) => [
+      surface.materialId ?? 0,
+      surface.phaseId ?? 0,
+      surface.renderDomainId ?? 0,
+      surface.resolution ?? 0,
+      surface.isolation ?? 0,
+      surface.subtract ?? 0,
+      surface.strength ?? 0
+    ]);
+    return JSON.stringify([
+      surfaces
+    ]);
+  }
+
+  function createSparseRenderFieldRuntimePlan({
+    device,
+    surfaceTable,
+    particleCapacity,
+    productEventCapacity,
+    generationId
+  } = {}) {
+    const metadata = Array.isArray(surfaceTable?.metadata) ? surfaceTable.metadata : [];
+    if (!device?.createBuffer || metadata.length === 0) {
+      throw new TypeError('sparse render-field runtime requires a WebGPU device and nonempty surface table');
+    }
+    const particles = Math.max(0, Math.round(Number(particleCapacity) || 0));
+    const products = Math.max(0, Math.round(Number(productEventCapacity) || 0));
+    const surfaces = metadata.map((surface, surfaceIndex) => ({
+      surfaceIndex,
+      dimensions: [
+        Math.max(2, Math.round(Number(surface.resolution) || 2)),
+        Math.max(2, Math.round(Number(surface.resolution) || 2)),
+        Math.max(2, Math.round(Number(surface.resolution) || 2))
+      ],
+      brickSize: SPH_SPARSE_RENDER_FIELD_BRICK_SIZE
+    }));
+    const eligibility = deriveSphSparseRenderFieldEligibilityBounds(metadata, {
+      surfaceCount: metadata.length
+    });
+    const routeCapacity = Math.max(
+      1,
+      particles * Math.max(1, eligibility.maxParticleSurfacesPerSource)
+        + products * Math.max(0, eligibility.maxProductSurfacesPerEvent)
+    );
+    const directoryCapacity = surfaces.reduce((sum, surface) => {
+      const resolution = surface.dimensions[0];
+      const bricks = Math.ceil(resolution / SPH_SPARSE_RENDER_FIELD_BRICK_SIZE);
+      return sum + bricks ** 3;
+    }, 0);
+    const activeBrickCapacity = Math.max(1, directoryCapacity);
+    const atlasCellCapacity = activeBrickCapacity * SPH_SPARSE_RENDER_FIELD_BRICK_SIZE ** 3;
+    const candidateVoxelCapacities = surfaces.map((surface) =>
+      Math.max(1, surface.dimensions[0] - 1) ** 3
+    );
+    const activeVoxelCapacity = candidateVoxelCapacities.reduce((sum, value) => sum + value, 0);
+    const maxSupportRadiusBricks = Math.max(1, ...metadata.map((surface) => {
+      const subtract = Math.max(1e-12, Number(surface.subtract) || 0);
+      const supportNorm = Math.sqrt(Math.abs(Number(surface.strength) || 0) / subtract);
+      const supportCells = supportNorm * Math.max(2, Math.round(Number(surface.resolution) || 2));
+      return Math.min(64, Math.max(1, Math.ceil(supportCells / SPH_SPARSE_RENDER_FIELD_BRICK_SIZE)));
+    }));
+    const sparsePlan = createSphSparseRenderFieldPlan({
+      surfaces,
+      brickSize: SPH_SPARSE_RENDER_FIELD_BRICK_SIZE,
+      generationId,
+      requiredRouteCount: routeCapacity,
+      capacity: {
+        directoryEntryCount: directoryCapacity,
+        routeCount: routeCapacity,
+        activeBrickCount: activeBrickCapacity,
+        atlasCellCount: atlasCellCapacity,
+        activeVoxelCount: activeVoxelCapacity
+      },
+      maxTotalByteLength: SPH_SPARSE_RENDER_FIELD_TOTAL_BYTE_BUDGET_DEFAULT
+    });
+    const gpuPlan = createSphSparseRenderFieldGpuPlan({
+      sparsePlan,
+      particleCapacity: particles,
+      productEventCapacity: products,
+      surfaceMetadata: metadata,
+      maxParticleSurfacesPerSource: Math.max(1, eligibility.maxParticleSurfacesPerSource),
+      maxProductSurfacesPerEvent: products > 0
+        ? Math.max(1, eligibility.maxProductSurfacesPerEvent)
+        : 0,
+      maxSupportRadiusBricks,
+      candidateVoxelCapacities,
+      minStorageBufferOffsetAlignment: device.limits?.minStorageBufferOffsetAlignment ?? 256,
+      maxBufferSize: device.limits?.maxBufferSize ?? null,
+      maxStorageBufferBindingSize: device.limits?.maxStorageBufferBindingSize ?? null,
+      maxStorageBuffersPerShaderStage:
+        device.limits?.maxStorageBuffersPerShaderStage ?? null,
+      maxComputeWorkgroupsPerDimension: device.limits?.maxComputeWorkgroupsPerDimension ?? 65535
+    });
+    if (!gpuPlan.admitted) {
+      throw Object.assign(
+        new RangeError(`sparse render-field capacity admission failed: ${gpuPlan.reasons.join(', ')}`),
+        { status: gpuPlan.status, sparsePlan, gpuPlan }
+      );
+    }
+    if (gpuPlan.byteLayout.peakAllocatedByteLength
+      > SPH_SPARSE_RENDER_FIELD_TOTAL_BYTE_BUDGET_DEFAULT) {
+      throw Object.assign(
+        new RangeError('sparse render-field peak allocation exceeds the configured total byte budget'),
+        { status: 'sparse-render-field-total-byte-budget-exceeded', sparsePlan, gpuPlan }
+      );
+    }
+    const exactCapacityProof = gpuPlan.exactCapacityProof;
+    if (!gpuPlan.runtimeOverflowImpossibleForDeclaredInputBounds || !exactCapacityProof?.admitted) {
+      throw Object.assign(
+        new RangeError('sparse render-field exact capacity proof failed before allocation'),
+        {
+          status: exactCapacityProof?.status
+            ?? 'sparse-render-field-runtime-overflow-not-proven-for-declared-input-bounds',
+          sparsePlan,
+          gpuPlan,
+          exactCapacityProof
+        }
+      );
+    }
+    return {
+      sparsePlan,
+      gpuPlan,
+      metadata,
+      particles,
+      products,
+      candidateVoxelCapacities,
+      maxSupportRadiusBricks,
+      exactCapacityProof
+    };
+  }
+
+  function summarizeResidentSparseRenderFieldRuntimePool(
+    pool = sphResidentSparseRenderFieldRuntimePool,
+    extra = {}
+  ) {
+    return {
+      schema: 'peercompute.ulg.sph-resident-sparse-render-field-runtime-pool.v0',
+      status: pool?.status ?? 'sparse-render-field-runtime-pool-empty',
+      generationId: pool?.generationId ?? null,
+      surfaceCount: pool?.surfaceTable?.surfaceCount ?? 0,
+      particleCount: pool?.particleCount ?? 0,
+      particleCapacity: pool?.particleCapacity ?? 0,
+      reservedParticleCapacity: pool?.particleCapacity ?? 0,
+      particleCapacityHeadroom: Math.max(
+        0,
+        (pool?.particleCapacity ?? 0) - (pool?.particleCount ?? 0)
+      ),
+      particleCapacityReservationStatus:
+        pool?.particleCapacityReservation?.status ?? null,
+      particleCapacityBucketSize:
+        pool?.particleCapacityReservation?.bucketSize ?? 0,
+      particleCapacityGrowthCount: pool?.particleCapacityGrowthCount ?? 0,
+      productEventCount: pool?.productEventCount ?? 0,
+      productEventCapacity: pool?.productEventCapacity ?? 0,
+      reservedProductEventCapacity: pool?.productEventCapacity ?? 0,
+      productEventCapacityHeadroom: Math.max(
+        0,
+        (pool?.productEventCapacity ?? 0) - (pool?.productEventCount ?? 0)
+      ),
+      productEventCapacityReservationStatus:
+        pool?.productEventCapacityReservation?.status ?? null,
+      productEventCapacityBucketSize:
+        pool?.productEventCapacityReservation?.bucketSize ?? 0,
+      productEventCapacityGrowthCount: pool?.productEventCapacityGrowthCount ?? 0,
+      retainedByteLength: pool?.runtime?.byteLayout?.retainedByteLength ?? 0,
+      directScratchByteLength: pool?.runtime?.byteLayout?.directScratchByteLength ?? 0,
+      directAllocatedByteLength: pool?.runtime?.byteLayout?.directAllocatedByteLength ?? 0,
+      primitivePersistentByteLength:
+        pool?.runtime?.byteLayout?.primitivePersistentByteLength ?? 0,
+      primitiveTransientByteLength:
+        pool?.runtime?.byteLayout?.primitiveTransientByteLength ?? 0,
+      peakAllocatedByteLength: pool?.runtime?.byteLayout?.peakAllocatedByteLength ?? 0,
+      structuralArenaReused: pool?.runtime?.structuralArenaReused === true,
+      structuralArenaReferenceCount:
+        pool?.runtime?.structuralArena?.referenceCount ?? 0,
+      structuralArenaReuseCount: pool?.structuralArenaReuseCount ?? 0,
+      totalByteBudget: SPH_SPARSE_RENDER_FIELD_TOTAL_BYTE_BUDGET_DEFAULT,
+      reuseCount: pool?.reuseCount ?? 0,
+      createCount: pool?.createCount ?? 0,
+      replaceCount: pool?.replaceCount ?? 0,
+      lastReason: pool?.lastReason ?? null,
+      ...extra
+    };
+  }
+
+  function releaseSparseRenderFieldRuntimePool(
+    pool,
+    reason = 'sparse-render-field-runtime-pool-release'
+  ) {
+    if (!pool || pool.released) return;
+    pool.released = true;
+    pool.status = 'sparse-render-field-runtime-pool-released';
+    pool.lastReason = reason;
+    pool.runtime?.destroy?.();
+    pool.surfaceInputBuffer?.destroy?.();
+  }
+
+  function destroyResidentSparseRenderFieldRuntimePool(
+    reason = 'sparse-render-field-runtime-pool-destroy'
+  ) {
+    const pool = sphResidentSparseRenderFieldRuntimePool;
+    sphResidentSparseRenderFieldRuntimePool = null;
+    scene.userData.sphResidentSparseRenderFieldRuntimePool = null;
+    if (!pool) return;
+    flushNativeMarchingCubesAdapterCaches(reason);
+    if (pool.device?.queue?.onSubmittedWorkDone) {
+      deferSubmittedWorkCleanup(pool.device, () => releaseSparseRenderFieldRuntimePool(pool, reason));
+    } else {
+      releaseSparseRenderFieldRuntimePool(pool, reason);
+    }
+  }
+
+  function ensureResidentSparseRenderFieldRuntimePool({
+    device,
+    surfaceTable,
+    particleCapacity,
+    productEventCount,
+    productEventArenaCapacityDescriptor = null
+  } = {}) {
+    const signature = sparseRenderFieldRuntimeSignature({
+      surfaceTable
+    });
+    const current = sphResidentSparseRenderFieldRuntimePool;
+    const currentStructurallyReusable = Boolean(
+      current
+        && current.device === device
+        && current.signature === signature
+        && !current.released
+    );
+    const activeProductEventCount = Math.max(0, Math.round(Number(productEventCount) || 0));
+    const activeParticleCount = Math.max(0, Math.round(Number(particleCapacity) || 0));
+    const particleCapacityReservation = reserveSphSparseRenderFieldParticleCapacity({
+      particleCount: activeParticleCount,
+      currentCapacity: currentStructurallyReusable ? current.particleCapacity : 0
+    });
+    const arenaReservedProductEventCapacity = Math.max(0, Math.round(Number(
+      productEventArenaCapacityDescriptor?.reservedRowCapacity
+    ) || 0));
+    const warmBootstrapProductEventCapacity =
+      SPH_SPARSE_RENDER_FIELD_PRODUCT_EVENT_CAPACITY_BUCKET;
+    const requestedProductEventCapacity = Math.max(
+      activeProductEventCount,
+      arenaReservedProductEventCapacity,
+      warmBootstrapProductEventCapacity
+    );
+    const capacityReservationBase = reserveSphSparseRenderFieldProductEventCapacity({
+      productEventCount: requestedProductEventCapacity,
+      currentCapacity: currentStructurallyReusable ? current.productEventCapacity : 0
+    });
+    const capacityReservation = {
+      ...capacityReservationBase,
+      productEventCount: activeProductEventCount,
+      capacityHeadroom: capacityReservationBase.reservedProductEventCapacity
+        - activeProductEventCount,
+      arenaReservedProductEventCapacity,
+      warmBootstrapProductEventCapacity,
+      requestedProductEventCapacity,
+      arenaCapacityDescriptorSchema: productEventArenaCapacityDescriptor?.schema ?? null,
+      capacityAuthority: productEventArenaCapacityDescriptor
+        ? 'resident-product-event-arena-capacity-descriptor'
+        : (activeProductEventCount > 0
+            ? 'live-product-event-count-bucket'
+            : 'bounded-warm-product-event-reservation')
+    };
+    if (
+      currentStructurallyReusable
+      && particleCapacityReservation.fitsCurrentCapacity
+      && capacityReservation.fitsCurrentCapacity
+    ) {
+      current.reuseCount += 1;
+      current.status = 'sparse-render-field-runtime-pool-reused';
+      current.lastReason = null;
+      current.surfaceTable = surfaceTable;
+      current.particleCount = activeParticleCount;
+      current.particleCapacityReservation = particleCapacityReservation;
+      current.productEventCount = capacityReservation.productEventCount;
+      current.productEventCapacityReservation = capacityReservation;
+      current.productEventArenaCapacityDescriptor = productEventArenaCapacityDescriptor;
+      device.queue.writeBuffer(current.surfaceInputBuffer, 0, surfaceTable.records);
+      const summary = summarizeResidentSparseRenderFieldRuntimePool(current, { reused: true });
+      scene.userData.sphResidentSparseRenderFieldRuntimePool = summary;
+      return { ...current, reused: true, summary };
+    }
+
+    sphResidentSparseRenderFieldGeneration += 1;
+    const generationId = sphResidentSparseRenderFieldGeneration;
+    const planned = createSparseRenderFieldRuntimePlan({
+      device,
+      surfaceTable,
+      particleCapacity: particleCapacityReservation.reservedParticleCapacity,
+      productEventCapacity: capacityReservation.reservedProductEventCapacity,
+      generationId
+    });
+    const runtime = createSphSparseRenderFieldGpu(device, {
+      sparsePlan: planned.sparsePlan,
+      particleCapacity: planned.particles,
+      productEventCapacity: planned.products,
+      surfaceMetadata: planned.metadata,
+      maxParticleSurfacesPerSource: Math.max(
+        1,
+        planned.gpuPlan.eligibility.maxParticleSurfacesPerSource
+      ),
+      maxProductSurfacesPerEvent: planned.products > 0
+        ? Math.max(1, planned.gpuPlan.eligibility.maxProductSurfacesPerEvent)
+        : 0,
+      maxSupportRadiusBricks: planned.maxSupportRadiusBricks,
+      candidateVoxelCapacities: planned.candidateVoxelCapacities,
+      structuralArena: currentStructurallyReusable
+        ? current?.runtime?.structuralArena || null
+        : null,
+      label: `ulg-sph-sparse-render-field-generation-${generationId}`
+    });
+    if (runtime.failClosed || typeof runtime.encode !== 'function') {
+      runtime.destroy?.();
+      throw Object.assign(
+        new Error(`sparse render-field runtime creation failed: ${(runtime.reasons || []).join(', ')}`),
+        { status: runtime.status || runtime.runtimeStatus, runtime }
+      );
+    }
+    const surfaceInputBuffer = runtime.structuralArenaReused && current?.surfaceInputBuffer
+      ? current.surfaceInputBuffer
+      : device.createBuffer({
+          label: `ulg-sph-sparse-render-field-surface-input-generation-${generationId}`,
+          size: Math.max(4, surfaceTable.records.byteLength),
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+        });
+    if (runtime.structuralArenaReused && current?.surfaceInputBuffer === surfaceInputBuffer) {
+      current.surfaceInputBuffer = null;
+    }
+    device.queue.writeBuffer(surfaceInputBuffer, 0, surfaceTable.records);
+    const pool = {
+      status: current
+        ? 'sparse-render-field-runtime-pool-replaced'
+        : 'sparse-render-field-runtime-pool-created',
+      device,
+      signature,
+      generationId,
+      surfaceTable,
+      particleCount: activeParticleCount,
+      particleCapacity: planned.particles,
+      particleCapacityReservation,
+      particleCapacityGrowthCount:
+        (current?.particleCapacityGrowthCount ?? 0)
+          + (currentStructurallyReusable && particleCapacityReservation.growthRequired ? 1 : 0),
+      productEventCount: capacityReservation.productEventCount,
+      productEventCapacity: planned.products,
+      productEventCapacityReservation: capacityReservation,
+      productEventArenaCapacityDescriptor,
+      productEventCapacityGrowthCount:
+        (current?.productEventCapacityGrowthCount ?? 0)
+          + (currentStructurallyReusable && capacityReservation.growthRequired ? 1 : 0),
+      sparsePlan: planned.sparsePlan,
+      gpuPlan: planned.gpuPlan,
+      exactCapacityProof: planned.exactCapacityProof,
+      runtime,
+      surfaceInputBuffer,
+      structuralArenaReuseCount:
+        (current?.structuralArenaReuseCount ?? 0) + (runtime.structuralArenaReused ? 1 : 0),
+      reuseCount: current?.reuseCount ?? 0,
+      createCount: (current?.createCount ?? 0) + 1,
+      replaceCount: current ? (current.replaceCount ?? 0) + 1 : 0,
+      lastReason: current
+        ? currentStructurallyReusable
+          ? (particleCapacityReservation.growthRequired
+              ? 'live particle count exceeded the grow-only reserved capacity bucket'
+              : 'live product-event count exceeded the grow-only reserved capacity bucket')
+          : 'sparse render-field structural capacity or device changed'
+        : null,
+      released: false
+    };
+    sphResidentSparseRenderFieldRuntimePool = pool;
+    if (current) {
+      if (!runtime.structuralArenaReused) {
+        flushNativeMarchingCubesAdapterCaches('sparse-render-field-structural-arena-replaced');
+      }
+      deferSubmittedWorkCleanup(
+        current.device,
+        () => releaseSparseRenderFieldRuntimePool(current, 'sparse-render-field-runtime-pool-replaced')
+      );
+    }
+    const summary = summarizeResidentSparseRenderFieldRuntimePool(pool, { reused: false });
+    scene.userData.sphResidentSparseRenderFieldRuntimePool = summary;
+    return { ...pool, reused: false, summary };
+  }
+
+  async function buildSphSparseRenderFieldForScene({
+    device,
+    renderRowsBuffer,
+    productEventBuffer,
+    productEventCount,
+    productEventArenaCapacityDescriptor = null,
+    surfaceTable,
+    algorithmMaterialSurfaceExtractionRows = null,
+    particleCount,
+    fieldPadding,
+    refEdgeM,
+    renderSmearDtS,
+    measureGpuTimestamps = false,
+    validateGpuAdmissionEvidence = false
+  } = {}) {
+    const effectiveSurfaceTable = createUlgEffectiveRenderFieldSurfaceTable({
+      surfaceTable,
+      algorithmMaterialSurfaceExtractionRows
+    });
+    const pool = ensureResidentSparseRenderFieldRuntimePool({
+      device,
+      surfaceTable: effectiveSurfaceTable,
+      particleCapacity: particleCount,
+      productEventCount,
+      productEventArenaCapacityDescriptor
+    });
+    const activeProductEventCount = pool.productEventCount;
+    const profiler = createWebGpuTimestampProfiler(device, {
+      requested: Boolean(measureGpuTimestamps),
+      label: 'ulg-sph-sparse-render-field',
+      maxSpans: 96
+    });
+    const encoder = device.createCommandEncoder({
+      label: `ulg-sph-sparse-render-field-generation-${pool.generationId}`
+    });
+    const artifact = pool.runtime.encode(encoder, {
+      renderRowsBuffer,
+      surfaceBuffer: pool.surfaceInputBuffer,
+      productEventBuffer,
+      particleCount,
+      productEventCount: activeProductEventCount,
+      generationId: pool.generationId,
+      fieldPadding,
+      refEdgeM,
+      renderSmearDtS,
+      backgroundValue: 0,
+      timestampProfiler: profiler.active ? profiler : null,
+      timestampMetadata: {
+        particleCount,
+        productEventCount: activeProductEventCount,
+        surfaceCount: effectiveSurfaceTable.surfaceCount
+      }
+    });
+    const admissionEvidenceReadbackBuffer = validateGpuAdmissionEvidence
+      ? createSphSparseRenderFieldEvidenceReadbackBuffer(device, {
+        label: `ulg-sph-sparse-render-field-admission-generation-${pool.generationId}`
+      })
+      : null;
+    if (admissionEvidenceReadbackBuffer) {
+      encodeSphSparseRenderFieldEvidenceCopy(encoder, {
+        evidenceBuffer: artifact.runtimeEvidenceBuffer,
+        readbackBuffer: admissionEvidenceReadbackBuffer
+      });
+    }
+    profiler.encodeResolve(encoder);
+    const submitStartedAtMs = nowMs();
+    device.queue.submit([encoder.finish()]);
+    const queueSubmitMs = Math.max(0, nowMs() - submitStartedAtMs);
+    let queueFenceMs = null;
+    let queueCompletionStatus = 'queue-submitted-gpu-handoff-no-cpu-fence';
+    let queueCompletionMethod = 'queue.submit(in-order-sparse-field-to-marching-cubes-handoff)';
+    if (profiler.active && typeof device.queue?.onSubmittedWorkDone === 'function') {
+      const fenceStartedAtMs = nowMs();
+      await device.queue.onSubmittedWorkDone();
+      queueFenceMs = Math.max(0, nowMs() - fenceStartedAtMs);
+      queueCompletionStatus = 'queue-work-completed-for-timestamp-readback';
+      queueCompletionMethod = 'queue.onSubmittedWorkDone -> timestamp mapAsync';
+    }
+    let admissionMapWaitMs = null;
+    let gpuAdmissionEvidence = null;
+    if (admissionEvidenceReadbackBuffer) {
+      const admissionMapStartedAtMs = nowMs();
+      try {
+        gpuAdmissionEvidence = await mapSphSparseRenderFieldEvidenceReadback(
+          admissionEvidenceReadbackBuffer,
+          { expectedGenerationId: pool.generationId }
+        );
+      } catch (error) {
+        gpuAdmissionEvidence = {
+        schema: 'peercompute.ulg.sph-gpu-sparse-render-field-fixed-evidence.v0',
+        status: 'sparse-render-field-fixed-evidence-map-failed',
+        admitted: false,
+        generationMatches: false,
+        expectedGenerationId: pool.generationId,
+        mappedByteLength: 0,
+        overflowFlags: artifact.plan?.admission?.overflowFlags ?? 0,
+        generationPublicationAllowed: false,
+        failClosed: true,
+        retainPreviousAcceptedGeneration: true,
+        reasons: [error instanceof Error ? error.message : String(error)]
+        };
+      }
+      admissionMapWaitMs = Math.max(0, nowMs() - admissionMapStartedAtMs);
+    }
+    if (!profiler.active && gpuAdmissionEvidence) {
+      queueFenceMs = admissionMapWaitMs;
+      queueCompletionStatus = gpuAdmissionEvidence.admitted
+        ? 'queue-work-completed-for-fixed-admission-evidence'
+        : 'queue-work-completed-generation-rejected-by-fixed-admission-evidence';
+      queueCompletionMethod = 'fixed 144-byte evidence copy -> mapAsync';
+    }
+    const gpuTimestampProfile = await profiler.read();
+    const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+      { role: 'render-rows-source', buffer: renderRowsBuffer, owned: false },
+      { role: 'product-events-source', buffer: productEventBuffer, owned: false },
+      { role: 'dense-surface-metadata-input', buffer: pool.surfaceInputBuffer, owned: false },
+      { role: 'fixed-admission-evidence-readback', buffer: admissionEvidenceReadbackBuffer, owned: true },
+      ...pool.runtime.allocationEntries().map((entry) => ({
+        ...entry,
+        lifetime: 'persistent-workspace',
+        createdThisSubmission: !pool.reused
+      })),
+      ...profiler.allocationEntries()
+    ], { scope: 'sph-sparse-render-field' });
+    if (profiler.active) {
+      pool.runtime.releaseTransientBuffers(artifact);
+    } else {
+      deferSubmittedWorkCleanup(device, () => pool.runtime.releaseTransientBuffers(artifact));
+    }
+    admissionEvidenceReadbackBuffer?.destroy?.();
+    const exactCapacityProof = pool.exactCapacityProof;
+    const generationAdmitted = gpuAdmissionEvidence
+      ? gpuAdmissionEvidence.admitted === true
+      : exactCapacityProof?.admitted === true;
+    artifact.execution.generationPublicationAllowed = generationAdmitted;
+    artifact.execution.readbackPerformed = Boolean(gpuAdmissionEvidence);
+    artifact.execution.fixedEvidenceReadback = Boolean(gpuAdmissionEvidence);
+    artifact.status = generationAdmitted
+      ? 'sparse-render-field-built-gpu-resident'
+      : 'sparse-render-field-generation-rejected-retain-previous-surface';
+    artifact.backend = 'webgpu';
+    artifact.generationPublicationAllowed = generationAdmitted;
+    artifact.generationPublicationStatus = gpuAdmissionEvidence?.status
+      ?? 'exact-host-upper-bound-with-gpu-indirect-fail-closed-gate';
+    artifact.failClosed = !generationAdmitted;
+    artifact.retainPreviousAcceptedGeneration = !generationAdmitted;
+    artifact.admission = {
+      ...(artifact.plan.admission || {}),
+      admitted: generationAdmitted,
+      overflowFlags: gpuAdmissionEvidence?.overflowFlags ?? 0,
+      generationPublicationAllowed: generationAdmitted,
+      failClosed: !generationAdmitted,
+      retainPreviousAcceptedGeneration: !generationAdmitted,
+      status: gpuAdmissionEvidence?.status ?? exactCapacityProof?.status ?? null,
+      reasons: [...(gpuAdmissionEvidence?.reasons || [])],
+      runtimeEvidencePending: !gpuAdmissionEvidence,
+      gpuIndirectFailClosedGate: true,
+      exactCapacityProof
+    };
+    artifact.surfaceCount = effectiveSurfaceTable.surfaceCount;
+    artifact.totalFieldCells = effectiveSurfaceTable.totalFieldCells;
+    artifact.maxFieldCellCount = effectiveSurfaceTable.maxFieldCellCount;
+    artifact.effectiveExtractionPolicyResolved = true;
+    artifact.effectiveExtractionPolicyRowsSchema =
+      effectiveSurfaceTable.effectiveExtractionPolicyRowsSchema;
+    artifact.effectiveExtractionIsovalues = [
+      ...(effectiveSurfaceTable.effectiveExtractionIsovalues || [])
+    ];
+    artifact.particleCount = particleCount;
+    artifact.particleCapacity = pool.particleCapacity;
+    artifact.reservedParticleCapacity = pool.particleCapacity;
+    artifact.particleCapacityHeadroom = Math.max(0, pool.particleCapacity - particleCount);
+    artifact.particleCapacityReservation = pool.particleCapacityReservation;
+    artifact.productEventCount = activeProductEventCount;
+    artifact.productEventCapacity = pool.productEventCapacity;
+    artifact.reservedProductEventCapacity = pool.productEventCapacity;
+    artifact.productEventCapacityHeadroom = Math.max(
+      0,
+      pool.productEventCapacity - activeProductEventCount
+    );
+    artifact.productEventCapacityReservation = pool.productEventCapacityReservation;
+    artifact.productEventArenaCapacityDescriptor = pool.productEventArenaCapacityDescriptor;
+    artifact.productEventCountAuthority = pool.productEventArenaCapacityDescriptor
+      ? 'host-conservative-occupied-upper-bound-for-sparse-capacity'
+      : 'host-product-event-row-count';
+    artifact.productEventExactCountAuthority =
+      pool.productEventArenaCapacityDescriptor?.activeEventCountAuthority ?? null;
+    artifact.productEventMetadataConsumedBySparseEligibility = false;
+    artifact.productEventArenaSparseEligibilityLimitation =
+      pool.productEventArenaCapacityDescriptor
+        ? 'sparse eligibility reads the dense arena prefix but still scans the conservative host upper bound; exact metadata-driven sparse dispatch remains future work'
+        : null;
+    artifact.exactProductEventCountPreserved = !pool.productEventArenaCapacityDescriptor
+      && artifact.execution.productEventCount === activeProductEventCount;
+    artifact.conservativeProductEventUpperBoundPreserved =
+      artifact.execution.productEventCount === activeProductEventCount;
+    artifact.productEventBufferBound = Boolean(productEventBuffer && activeProductEventCount > 0);
+    artifact.renderFieldInputSource = productEventBuffer && activeProductEventCount > 0
+      ? 'resident-render-rows-and-product-events-buffer'
+      : 'resident-render-rows-buffer';
+    artifact.readbackMode = RESIDENT_NO_FULL_READBACK_MODE;
+    artifact.renderFieldReadback = false;
+    artifact.fullReadbackPerformed = false;
+    artifact.normalHotLoopReadbackFree = true;
+    artifact.admissionEvidenceReadback = Boolean(gpuAdmissionEvidence);
+    artifact.admissionEvidenceReadbackMode = gpuAdmissionEvidence
+      ? 'fixed-144-byte-gpu-validation-record'
+      : 'diagnostic-only-not-requested';
+    artifact.admissionEvidenceMappedByteLength = gpuAdmissionEvidence?.mappedByteLength ?? 0;
+    artifact.admissionEvidenceMapWaitMs = admissionMapWaitMs;
+    artifact.gpuAdmissionEvidence = gpuAdmissionEvidence || {
+      schema: 'peercompute.ulg.sph-gpu-sparse-render-field-pending-evidence.v0',
+      status: 'gpu-evidence-enforced-by-indirect-gate-without-host-map',
+      readbackPerformed: false,
+      candidateDispatchIndirectBufferBound: Boolean(artifact.candidateDispatchIndirectBuffer)
+    };
+    artifact.exactCapacityProof = exactCapacityProof;
+    artifact.fieldRows = new Float32Array();
+    artifact.fieldRowsBuffer = null;
+    artifact.fieldRowsBufferRetained = false;
+    artifact.fieldRowByteLength = 0;
+    artifact.surfaceBuffer = pool.surfaceInputBuffer;
+    artifact.surfaceBufferByteLength = pool.surfaceInputBuffer.size;
+    artifact.activeBrickCount = generationAdmitted
+      ? (gpuAdmissionEvidence?.row?.activeBrickCount ?? artifact.activeBrickCapacity)
+      : 0;
+    artifact.atlasCellCount = generationAdmitted
+      ? (gpuAdmissionEvidence?.row?.atlasCellRequiredCount ?? artifact.atlasCellCapacity)
+      : 0;
+    artifact.queueSubmitMs = queueSubmitMs;
+    artifact.queueFenceMs = queueFenceMs;
+    artifact.queueCompletionStatus = queueCompletionStatus;
+    artifact.queueCompletionMethod = queueCompletionMethod;
+    artifact.gpuTimestampProfile = gpuTimestampProfile;
+    artifact.gpuTimestampRequested = Boolean(measureGpuTimestamps);
+    artifact.gpuTimestampStatus = gpuTimestampProfile.status;
+    artifact.gpuTimestampMappedByteLength = gpuTimestampProfile.mappedByteLength;
+    artifact.gpuAllocationEvidence = gpuAllocationEvidence;
+    artifact.sparseRenderFieldRuntimePoolStatus = pool.status;
+    artifact.sparseRenderFieldRuntimePoolReused = pool.reused;
+    artifact.sparseRenderFieldRuntimePoolSummary = pool.summary;
+    artifact.releaseRenderFieldBufferLeases = () => null;
+    const retainPooledSparseRenderFieldBuffers = ({ reason = null } = {}) => ({
+      schema: 'peercompute.ulg.sph-sparse-render-field-pooled-cleanup.v0',
+      status: 'sparse-render-field-retained-by-runtime-pool',
+      reason,
+      generationId: pool.generationId,
+      runtimePoolStatus: pool.status,
+      retainedByteLength: pool.runtime.byteLayout?.retainedByteLength ?? 0,
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    });
+    artifact.destroySparseRenderFieldBuffers = retainPooledSparseRenderFieldBuffers;
+    artifact.destroyRenderFieldBuffers = retainPooledSparseRenderFieldBuffers;
+    artifact.cleanup = {
+      ...(artifact.cleanup || {}),
+      submissionOwnership: 'scene-runtime-pool',
+      destroyRetainedBuffers: retainPooledSparseRenderFieldBuffers
+    };
+    return artifact;
+  }
+
   function summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(
     pool = sphResidentMaterialInterfaceSourceFieldRowsBufferPool,
     extra = {}
@@ -25357,6 +28803,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       schema: 'peercompute.ulg.sph-resident-material-interface-source-field-rows-buffer-pool.v0',
       status: pool?.status ?? 'material-interface-source-field-rows-buffer-pool-empty',
       byteLength: pool?.byteLength ?? 0,
+      slotCount: pool?.slots?.length ?? 0,
+      slotCapacity: pool?.slotCapacity ?? 2,
+      activeLeaseCount: pool?.slots?.filter((slot) => slot.leased === true).length ?? 0,
       surfaceCount: pool?.surfaceCount ?? 0,
       totalFieldCells: pool?.totalFieldCells ?? 0,
       deviceMatched: pool ? pool.device === extra.device : null,
@@ -25371,11 +28820,19 @@ fn fs_main() -> @location(0) vec4<f32> {
   function destroyResidentMaterialInterfaceSourceFieldRowsBufferPool(
     reason = 'material-interface-source-field-rows-buffer-pool-destroy'
   ) {
-    if (sphResidentMaterialInterfaceSourceFieldRowsBufferPool?.buffer) {
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.buffer.destroy?.();
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status =
-        'material-interface-source-field-rows-buffer-pool-destroyed';
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.lastReason = reason;
+    const pool = sphResidentMaterialInterfaceSourceFieldRowsBufferPool;
+    if (pool?.slots?.length) {
+      pool.destroyRequested = true;
+      for (const slot of pool.slots) {
+        if (slot.leased === true || slot.destroyed === true) continue;
+        slot.buffer?.destroy?.();
+        slot.destroyed = true;
+      }
+      pool.status =
+        pool.slots.some((slot) => slot.leased === true)
+          ? 'material-interface-source-field-rows-buffer-pool-retirement-waiting-for-leases'
+          : 'material-interface-source-field-rows-buffer-pool-destroyed';
+      pool.lastReason = reason;
     }
     sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
     scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
@@ -25396,81 +28853,199 @@ fn fs_main() -> @location(0) vec4<f32> {
         })
       };
     }
-    const canReuse = Boolean(
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool?.buffer
-      && sphResidentMaterialInterfaceSourceFieldRowsBufferPool.device === device
-      && sphResidentMaterialInterfaceSourceFieldRowsBufferPool.byteLength >= requiredByteLength
-    );
-    if (canReuse) {
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.reuseCount += 1;
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status =
-        'material-interface-source-field-rows-buffer-pool-reused';
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.lastReason = null;
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.surfaceCount = surfaceTable.surfaceCount ?? 0;
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.totalFieldCells = surfaceTable.totalFieldCells ?? 0;
-      const summary = summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(
-        sphResidentMaterialInterfaceSourceFieldRowsBufferPool,
-        {
-          device,
-          requiredByteLength,
-          reused: true
-        }
-      );
+    let pool = sphResidentMaterialInterfaceSourceFieldRowsBufferPool;
+    if (pool && pool.device !== device) {
+      const retiredPool = pool;
+      retiredPool.destroyRequested = true;
+      retiredPool.status =
+        'material-interface-source-field-rows-buffer-pool-device-replacement-retiring';
+      retiredPool.lastReason = 'source-field rows buffer pool device changed';
+      for (const slot of retiredPool.slots || []) {
+        if (slot.leased === true || slot.destroyed === true) continue;
+        slot.buffer?.destroy?.();
+        slot.destroyed = true;
+      }
+      pool = null;
+    }
+    if (!pool) {
+      pool = {
+        status: 'material-interface-source-field-rows-buffer-pool-created',
+        device,
+        slots: [],
+        slotCapacity: 2,
+        byteLength: 0,
+        surfaceCount: 0,
+        totalFieldCells: 0,
+        reuseCount: 0,
+        createCount: 0,
+        replaceCount: 0,
+          leaseGeneration: 0,
+          destroyRequested: false,
+          lastReason: 'created leased material-interface source-field buffer pool'
+      };
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool = pool;
+    }
+    let slot = pool.slots.find((candidate) => (
+      candidate.leased !== true && candidate.byteLength >= requiredByteLength
+    ));
+    let reused = Boolean(slot);
+    if (!slot) {
+      slot = pool.slots.find((candidate) => candidate.leased !== true) || null;
+      if (slot) {
+        slot.buffer?.destroy?.();
+        slot.buffer = device.createBuffer({
+          label: `ulg-sph-material-interface-source-field-cells-pooled-${slot.index}`,
+          size: requiredByteLength,
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+        });
+        slot.byteLength = requiredByteLength;
+        pool.createCount += 1;
+        pool.replaceCount += 1;
+      } else if (pool.slots.length < pool.slotCapacity) {
+        const index = pool.slots.length;
+        slot = {
+          index,
+          buffer: device.createBuffer({
+            label: `ulg-sph-material-interface-source-field-cells-pooled-${index}`,
+            size: requiredByteLength,
+            usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+          }),
+          byteLength: requiredByteLength,
+          leased: false,
+          leaseId: null,
+          destroyed: false
+        };
+        pool.slots.push(slot);
+        pool.createCount += 1;
+      }
+    }
+    pool.surfaceCount = surfaceTable.surfaceCount ?? 0;
+    pool.totalFieldCells = surfaceTable.totalFieldCells ?? 0;
+    pool.byteLength = pool.slots.reduce((sum, candidate) => sum + candidate.byteLength, 0);
+    if (!slot) {
+      pool.status = 'material-interface-source-field-rows-buffer-pool-exhausted-owned-spill-required';
+      pool.lastReason = 'both pooled source-field generations are leased by submitted or pending work';
+      const summary = summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(pool, {
+        device,
+        requiredByteLength,
+        reused: false,
+        ownedSpillRequired: true
+      });
       scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = summary;
       return {
-        buffer: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.buffer,
-        byteLength: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.byteLength,
-        status: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status,
-        reason: null,
-        reused: true,
+        buffer: null,
+        byteLength: 0,
+        status: pool.status,
+        reason: pool.lastReason,
+        reused: false,
+        ownedSpillRequired: true,
+        release: null,
         summary
       };
     }
-    const previous = sphResidentMaterialInterfaceSourceFieldRowsBufferPool;
-    if (previous?.buffer) {
-      previous.buffer.destroy?.();
-    }
-    const buffer = device.createBuffer({
-      label: 'ulg-sph-material-interface-source-field-cells-pooled',
-      size: requiredByteLength,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-    });
-    sphResidentMaterialInterfaceSourceFieldRowsBufferPool = {
-      status: previous
-        ? 'material-interface-source-field-rows-buffer-pool-replaced'
-        : 'material-interface-source-field-rows-buffer-pool-created',
-      buffer,
-      device,
-      byteLength: requiredByteLength,
-      surfaceCount: surfaceTable.surfaceCount ?? 0,
-      totalFieldCells: surfaceTable.totalFieldCells ?? 0,
-      reuseCount: previous?.reuseCount ?? 0,
-      createCount: (previous?.createCount ?? 0) + 1,
-      replaceCount: previous ? (previous.replaceCount ?? 0) + 1 : 0,
-      lastReason: previous
-        ? 'existing pooled material-interface source-field buffer did not match device or byte-length requirements'
-        : 'created pooled material-interface source-field buffer'
+    const leaseId = `material-interface-source-field-slot:${slot.index}:${++pool.leaseGeneration}`;
+    slot.leased = true;
+    slot.leaseId = leaseId;
+    pool.reuseCount += reused ? 1 : 0;
+    pool.status = reused
+      ? 'material-interface-source-field-rows-buffer-pool-slot-reused'
+      : 'material-interface-source-field-rows-buffer-pool-slot-created';
+    pool.lastReason = null;
+    const release = ({ reason = 'material-interface-source-field-generation-retired' } = {}) => {
+      if (slot.leaseId !== leaseId || slot.leased !== true) {
+        return {
+          status: 'material-interface-source-field-rows-buffer-pool-lease-already-released',
+          leaseId,
+          reason
+        };
+      }
+      slot.leased = false;
+      slot.leaseId = null;
+      if (pool.destroyRequested && slot.destroyed !== true) {
+        slot.buffer?.destroy?.();
+        slot.destroyed = true;
+      }
+      pool.status = pool.destroyRequested
+        ? (pool.slots.some((candidate) => candidate.leased === true)
+            ? 'material-interface-source-field-rows-buffer-pool-retirement-waiting-for-leases'
+            : 'material-interface-source-field-rows-buffer-pool-destroyed')
+        : 'material-interface-source-field-rows-buffer-pool-slot-released';
+      pool.lastReason = reason;
+      return {
+        status: pool.destroyRequested
+          ? 'material-interface-source-field-rows-buffer-pool-lease-released-and-slot-destroyed'
+          : 'material-interface-source-field-rows-buffer-pool-lease-released',
+        leaseId,
+        slotIndex: slot.index,
+        reason
+      };
     };
     const summary = summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(
-      sphResidentMaterialInterfaceSourceFieldRowsBufferPool,
+      pool,
       {
         device,
         requiredByteLength,
-        reused: false
+        reused,
+        leaseId,
+        slotIndex: slot.index
       }
     );
     scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = summary;
     return {
-      buffer,
-      byteLength: requiredByteLength,
-      status: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status,
-      reason: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.lastReason,
-      reused: false,
+      buffer: slot.buffer,
+      byteLength: slot.byteLength,
+      status: pool.status,
+      reason: null,
+      reused,
+      leaseId,
+      slotIndex: slot.index,
+      release,
       summary
     };
   }
 
   function createWebGpuMarchingCubesExtensionVolumeFromUlgDescriptor(descriptor) {
+    if (descriptor.sourceType === 'sparse-brick-atlas') {
+      return createWebGpuMarchingCubesSparseBrickVolumeDescriptor({
+        device: descriptor.device,
+        directoryBuffer: descriptor.directoryBuffer,
+        activeBrickRowsBuffer: descriptor.activeBrickRowsBuffer,
+        atlasBuffer: descriptor.atlasBuffer,
+        candidateVoxelIdsBuffer: descriptor.candidateVoxelIdsBuffer,
+        candidateDispatchIndirectBuffer: descriptor.candidateDispatchIndirectBuffer,
+        dims: descriptor.dims,
+        brickSize: descriptor.brickSize,
+        directoryOffset: descriptor.directoryOffset,
+        directoryCount: descriptor.directoryCount,
+        directorySentinel: descriptor.directorySentinel,
+        activeBrickCount: descriptor.activeBrickCount,
+        activeBrickCapacity: descriptor.activeBrickCapacity,
+        activeBrickRowStrideU32: descriptor.activeBrickRowStrideU32,
+        activeBrickAtlasCellOffsetLane: descriptor.activeBrickAtlasCellOffsetLane,
+        atlasCellCount: descriptor.atlasCellCount,
+        atlasCellCapacity: descriptor.atlasCellCapacity,
+        atlasCellStrideFloats: descriptor.atlasCellStrideFloats,
+        atlasScalarLane: descriptor.atlasScalarLane,
+        candidateVoxelCount: descriptor.candidateVoxelCount,
+        candidateVoxelCapacity: descriptor.candidateVoxelCapacity,
+        candidateVoxelOffset: descriptor.candidateVoxelOffset,
+        candidateVoxelOffsetBytes: descriptor.candidateVoxelOffsetBytes,
+        candidateDispatchIndirectOffsetBytes:
+          descriptor.candidateDispatchIndirectOffsetBytes,
+        candidateSentinel: descriptor.candidateSentinel,
+        generationId: descriptor.generationId,
+        backgroundValue: descriptor.backgroundValue,
+        normalSign: descriptor.normalSign,
+        directoryBufferByteLength: descriptor.directoryBufferByteLength,
+        activeBrickRowsBufferByteLength: descriptor.activeBrickRowsBufferByteLength,
+        atlasBufferByteLength: descriptor.atlasBufferByteLength,
+        candidateVoxelIdsBufferByteLength: descriptor.candidateVoxelIdsBufferByteLength,
+        candidateDispatchIndirectBufferByteLength:
+          descriptor.candidateDispatchIndirectBufferByteLength,
+        label: descriptor.label || `ulg-sph-native-sparse-mc-${descriptor.surfaceKey || descriptor.surfaceIndex || 0}`,
+        source: descriptor.source || 'ulg-sparse-render-field-density-atlas'
+      });
+    }
     return createWebGpuMarchingCubesBufferVolumeDescriptor({
       device: descriptor.device,
       scalarBuffer: descriptor.scalarBuffer,
@@ -25479,24 +29054,10 @@ fn fs_main() -> @location(0) vec4<f32> {
       scalarOffset: descriptor.scalarOffset,
       bufferByteLength: descriptor.scalarBufferByteLength,
       scalarType: descriptor.scalarType || 'f32',
+      normalSign: descriptor.normalSign,
       label: descriptor.label || `ulg-sph-native-mc-${descriptor.surfaceKey || descriptor.surfaceIndex || 0}`,
       source: descriptor.source || 'ulg-render-field-density-storage-buffer'
     });
-  }
-
-  function nativeMarchingCubesDescriptorSignature(descriptor = {}) {
-    const dims = Array.isArray(descriptor.dims) ? descriptor.dims : [];
-    const strides = Array.isArray(descriptor.scalarStrides) ? descriptor.scalarStrides : [];
-    return [
-      `surface=${descriptor.surfaceIndex ?? 0}`,
-      `key=${descriptor.surfaceKey ?? ''}`,
-      `dims=${dims.join('x')}`,
-      `strides=${strides.join('x')}`,
-      `offset=${descriptor.scalarOffset ?? 0}`,
-      `bytes=${descriptor.scalarBufferByteLength ?? 0}`,
-      `type=${descriptor.scalarType || 'f32'}`,
-      `source=${descriptor.source || 'ulg-render-field-density-storage-buffer'}`
-    ].join('|');
   }
 
   async function releaseNativeMarchingCubesAdapterCacheEntry(entry, reason = 'native-marching-cubes-cache-release') {
@@ -25553,22 +29114,28 @@ fn fs_main() -> @location(0) vec4<f32> {
   }
 
   async function getNativeMarchingCubesAdapterForDescriptor({ device, descriptor } = {}) {
+    scene.userData.sphWebGpuImmutablePipelineCache =
+      installWebGpuImmutablePipelineCache(device);
     const signature = nativeMarchingCubesDescriptorSignature(descriptor);
+    const descriptorBuffers = nativeMarchingCubesDescriptorResourceBuffers(descriptor);
     const canCache = Boolean(
       device
-      && descriptor?.scalarBuffer
       && typeof device === 'object'
-      && typeof descriptor.scalarBuffer === 'object'
+      && descriptorBuffers.length > 0
+      && descriptorBuffers.every((buffer) => buffer && typeof buffer === 'object')
     );
+    const adapterId = descriptor?.sourceType === 'sparse-brick-atlas'
+      ? 'webgpu-marching-cubes.sparse-brick-volume.v0'
+      : 'webgpu-marching-cubes.buffer-volume.v0';
     const createWrapper = (volume) => createUlgWebGpuMarchingCubesExtensionAdapter({
       device,
       volume,
-      adapterId: 'webgpu-marching-cubes.buffer-volume.v0',
+      adapterId,
       adapterFactory({ device: adapterDevice, volume: adapterVolume }) {
         return createMarchingCubesSurfaceAdapter({
           device: adapterDevice,
           volume: adapterVolume,
-          adapterId: 'webgpu-marching-cubes.buffer-volume.v0'
+          adapterId
         });
       }
     });
@@ -25598,12 +29165,17 @@ fn fs_main() -> @location(0) vec4<f32> {
         lastReason: null
       };
       sphNativeMarchingCubesAdapterCacheByDevice.set(device, cache);
-      sphNativeMarchingCubesAdapterCaches.add(cache);
     }
+    // flushNativeMarchingCubesAdapterCaches clears the strong registry after
+    // releasing entries. A surviving per-device cache must re-register here
+    // so every later structural reset remains observable and flushable.
+    sphNativeMarchingCubesAdapterCaches.add(cache);
     const cached = cache.entries.get(signature);
     if (
       cached
-      && cached.scalarBuffer === descriptor.scalarBuffer
+      && Array.isArray(cached.resourceBuffers)
+      && cached.resourceBuffers.length === descriptorBuffers.length
+      && cached.resourceBuffers.every((buffer, index) => buffer === descriptorBuffers[index])
       && cached.signature === signature
       && !cached.released
     ) {
@@ -25636,7 +29208,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     const wrapper = createWrapper(volume);
     const entry = {
       signature,
-      scalarBuffer: descriptor.scalarBuffer,
+      resourceBuffers: [...descriptorBuffers],
       volume,
       wrapper,
       hitCount: 0,
@@ -25674,8 +29246,17 @@ fn fs_main() -> @location(0) vec4<f32> {
     readbackMode = 'gpu-conservative-no-readback',
     vertexRowsBudget = 0,
     measureGpuTimestamps = enableGpuProfiling,
-    timestampMetadata = null
+    timestampMetadata = null,
+    commandEncoder = null
   } = {}) {
+    if (commandEncoder && measureGpuTimestamps) {
+      throw Object.assign(
+        new Error(
+          'shared marching-cubes command encoding is incompatible with per-surface timestamp attribution'
+        ),
+        { status: 'native-marching-cubes-shared-encoder-timestamp-conflict' }
+      );
+    }
     if (!descriptor?.ok) {
       return {
         schema: 'peercompute.ulg.sph-native-marching-cubes-extraction.v0',
@@ -25718,13 +29299,16 @@ fn fs_main() -> @location(0) vec4<f32> {
           surfaceMaterial: descriptor.surfaceExtractionPolicyMaterial ?? null,
           surfacePhase: descriptor.surfaceExtractionPolicyPhase ?? null,
           ...(timestampMetadata || {})
-        }
+        },
+        commandEncoder: commandEncoder || undefined
       });
     } catch (error) {
       gpuTimestampProfiler.destroy();
       throw error;
     }
     const extractionElapsedMs = Math.max(0, nowMs() - extractionStartedMs);
+    scene.userData.sphWebGpuImmutablePipelineCache =
+      webGpuImmutablePipelineCacheSummary(device);
     let gpuTimestampResolveQueueSubmitMs = null;
     let gpuTimestampResolveQueueFenceMs = null;
     let gpuTimestampResolveQueueFenceStatus = gpuTimestampProfiler.active
@@ -25769,10 +29353,25 @@ fn fs_main() -> @location(0) vec4<f32> {
     const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
       ...gpuTimestampProfiler.allocationEntries(),
       { role: 'render-field-scalar-source', buffer: descriptor.scalarBuffer, owned: false },
+      { role: 'sparse-render-field-directory-source', buffer: descriptor.directoryBuffer, owned: false },
+      { role: 'sparse-render-field-active-brick-source', buffer: descriptor.activeBrickRowsBuffer, owned: false },
+      { role: 'sparse-render-field-atlas-source', buffer: descriptor.atlasBuffer, owned: false },
+      { role: 'sparse-render-field-candidate-source', buffer: descriptor.candidateVoxelIdsBuffer, owned: false },
+      {
+        role: 'sparse-render-field-candidate-indirect-source',
+        buffer: descriptor.candidateDispatchIndirectBuffer,
+        owned: false
+      },
       {
         role: 'marching-cubes-position-output',
         buffer: extensionExecution?.extensionExecution?.result?.buffer
           ?? extensionExecution?.result?.buffer,
+        owned: false
+      },
+      {
+        role: 'marching-cubes-packed-normal-output',
+        buffer: extensionExecution?.extensionExecution?.result?.normalBuffer
+          ?? extensionExecution?.result?.normalBuffer,
         owned: false
       },
       {
@@ -25792,17 +29391,72 @@ fn fs_main() -> @location(0) vec4<f32> {
       reason: extensionExecution?.reason ?? extensionExecution?.summary?.reason ?? null,
       // Echo the scalar field so the surface translation stage can derive
       // per-vertex isosurface normals from the density gradient.
-      fieldVolume: {
-        scalarBuffer: descriptor.scalarBuffer ?? null,
-        scalarOffsetFloats: descriptor.scalarOffset ?? 0,
-        rowStrideFloats: descriptor.cellRowStrideFloats ?? descriptor.scalarStrides?.[0] ?? 1,
-        resolution: descriptor.resolution
-          ?? (Array.isArray(descriptor.dims) ? descriptor.dims[0] : null)
-      },
+      fieldVolume: descriptor.sourceType === 'sparse-brick-atlas'
+        ? null
+        : {
+          scalarBuffer: descriptor.scalarBuffer ?? null,
+          scalarOffsetFloats: descriptor.scalarOffset ?? 0,
+          rowStrideFloats: descriptor.cellRowStrideFloats ?? descriptor.scalarStrides?.[0] ?? 1,
+          resolution: descriptor.resolution
+            ?? (Array.isArray(descriptor.dims) ? descriptor.dims[0] : null)
+        },
       descriptorStatus: descriptor.status,
       volumeSchema: volume.schema,
       volumeSourceType: volume.sourceType,
       volumeScalarLayoutName: volume.scalarLayoutName,
+      volumeGenerationId: volume.generationId ?? volume.sparseBrickAtlas?.generationId
+        ?? descriptor.generationId ?? null,
+      surfaceGenerationId:
+        extensionExecution?.extensionExecution?.result?.surfaceGenerationId
+          ?? extensionExecution?.result?.surfaceGenerationId
+          ?? null,
+      packedNormalBufferByteLength:
+        extensionExecution?.extensionExecution?.result?.normalBufferByteLength
+          ?? extensionExecution?.result?.normalBufferByteLength
+          ?? 0,
+      packedNormalAdditionalSubmitCount:
+        extensionExecution?.extensionExecution?.result?.normalAdditionalSubmitCount
+          ?? extensionExecution?.result?.normalAdditionalSubmitCount
+          ?? null,
+      packedNormalTimestampSpanLabel:
+        extensionExecution?.extensionExecution?.result?.normalTimestampSpanLabel
+          ?? extensionExecution?.result?.normalTimestampSpanLabel
+          ?? null,
+      packedNormalEncoding:
+        extensionExecution?.extensionExecution?.result?.normalEncoding
+          ?? extensionExecution?.result?.normalEncoding
+          ?? null,
+      packedNormalSign:
+        extensionExecution?.extensionExecution?.result?.normalSign
+          ?? extensionExecution?.result?.normalSign
+          ?? null,
+      commandEncodingMode:
+        extensionExecution?.extensionExecution?.result?.commandEncodingMode
+          ?? extensionExecution?.result?.commandEncodingMode
+          ?? null,
+      internalSubmitCount:
+        extensionExecution?.extensionExecution?.result?.internalSubmitCount
+          ?? extensionExecution?.result?.internalSubmitCount
+          ?? null,
+      requiresExternalSubmit:
+        extensionExecution?.extensionExecution?.result?.requiresExternalSubmit
+          ?? extensionExecution?.result?.requiresExternalSubmit
+          ?? false,
+      temporaryResourceCount:
+        extensionExecution?.extensionExecution?.result?.temporaryResourceCount
+          ?? extensionExecution?.result?.temporaryResourceCount
+          ?? 0,
+      immutablePipelineCache: webGpuImmutablePipelineCacheSummary(device),
+      volumeActiveBrickCount: volume.activeBrickCount ?? volume.sparseBrickAtlas?.activeBrickCount
+        ?? descriptor.activeBrickCount ?? null,
+      volumeAtlasCellCount: volume.atlasCellCount ?? volume.sparseBrickAtlas?.atlasCellCount
+        ?? descriptor.atlasCellCount ?? null,
+      volumeCandidateVoxelOffset: volume.candidateVoxelOffset
+        ?? volume.sparseBrickAtlas?.candidateVoxelOffset
+        ?? descriptor.candidateVoxelOffset ?? null,
+      volumeCandidateVoxelCount: volume.candidateVoxelCount
+        ?? volume.sparseBrickAtlas?.candidateVoxelCount
+        ?? descriptor.candidateVoxelCount ?? null,
       isovalue: isovalue ?? descriptor.isovalue ?? 0,
       surfaceExtractionPolicyStatus: descriptor.surfaceExtractionPolicyStatus ?? null,
       surfaceExtractionPolicyRole: descriptor.surfaceExtractionPolicyRole ?? null,
@@ -25841,10 +29495,11 @@ fn fs_main() -> @location(0) vec4<f32> {
     async function buildSphResidentSurfaceDrawBridge({
       device,
       renderFieldExecution,
-      buildDrawMetadata = true,
+        buildDrawMetadata = true,
         renderBridgeMode = null,
         materialProperties = currentMaterialProperties,
-        rendererOwnedDevice = false
+        rendererOwnedDevice = false,
+        renderCommitGuard = null
     } = {}) {
       let surfaceVerticesExecution = null;
       let surfaceDrawExecution = null;
@@ -26172,6 +29827,9 @@ fn fs_main() -> @location(0) vec4<f32> {
           ? rendererCapability?.reason ?? 'same-device Three WebGPU surface buffers unavailable'
           : null
       });
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'surface-draw-render-bridge-commit'
+      });
       const renderBridge = useEffectiveThreeCompactVertexBridge
         ? createSphResidentSurfaceDrawThreeCompactBridge({
           surfaceDrawExecution,
@@ -26186,11 +29844,13 @@ fn fs_main() -> @location(0) vec4<f32> {
           : (useNativeWebGpuSurfaceConsumerBridge
             ? createSphResidentSurfaceDrawNativeWebGpuConsumerBridge({
               surfaceDrawExecution,
-              rendererCapability
+              rendererCapability,
+              renderCommitGuard
             })
           : createSphResidentSurfaceDrawRenderBridge({
           device,
-          surfaceDrawExecution
+          surfaceDrawExecution,
+          renderCommitGuard
         })));
       const renderBridgeReady = renderBridge?.status === 'webgpu-storage-indirect-overlay-ready'
         || renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS
@@ -26524,6 +30184,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       // forever. Re-resolve with the real bridge capability now that it
       // exists and republish, so the native proxy backend can go
       // submit/visible ready.
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'surface-draw-proxy-backend-selection-commit'
+      });
       const proxyDrawSourceForReselect = scene.userData.schroederRenderProxyDrawSource || null;
       if (proxyDrawSourceForReselect) {
         const reselectedProxyBackend = resolveSchroederRenderProxyBackendSelection({
@@ -26542,6 +30205,9 @@ fn fs_main() -> @location(0) vec4<f32> {
           renderer.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
         }
       }
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'surface-draw-bridge-resource-owner-commit'
+      });
       if (
         renderBridgeReady
         && renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
@@ -26565,6 +30231,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         releaseLeases: true,
         reason: 'surface-draw-bridge-build-error'
       });
+      if (error?.code === SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE) throw error;
       return residentSurfaceDrawUnavailable(error instanceof Error ? error.message : String(error), {
         renderFieldExecution,
         surfaceVerticesExecution,
@@ -26627,8 +30294,12 @@ fn fs_main() -> @location(0) vec4<f32> {
     waitForQueueCompletion = true,
     rendererOwnedDevice = false,
     renderFieldGradientVolume = null,
-    emissiveTemperatureK = 0
+    emissiveTemperatureK = 0,
+    renderCommitGuard = null
   } = {}) {
+    assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+      stage: 'extension-surface-refresh-start'
+    });
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
     const suppliedRawExtensionExecution = extensionExecution?.extensionExecution || extensionExecution;
@@ -26655,6 +30326,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       unavailable.status = 'resident-extension-surface-draw-unavailable';
       unavailable.visibleRendererBridge = SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
       unavailable.visibleRenderSource = 'webgpu-marching-cubes-extension-unavailable';
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'extension-surface-unavailable-commit'
+      });
       sphResidentSurfaceDraw = unavailable;
       scene.userData.sphResidentSurfaceDraw = unavailable;
       sphResidentSurfaceDrawRenderBridge = null;
@@ -26725,17 +30399,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         positionGridBias,
         positionClampMinM,
         positionClampMaxM,
-        fieldGradient: extensionExecution?.fieldVolume?.scalarBuffer
-          ? {
-              buffer: extensionExecution.fieldVolume.scalarBuffer,
-              scalarOffsetFloats: extensionExecution.fieldVolume.scalarOffsetFloats,
-              rowStrideFloats: extensionExecution.fieldVolume.rowStrideFloats,
-              resolution: extensionExecution.fieldVolume.resolution
-            }
-          : null,
         readbackMode: translationReadbackMode,
         compactSummaryReadback: false,
         translateVertexRows: !renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge,
+        allowExtensionDrawIndirectBuffer: true,
         retainVertexRowsBuffer: true,
         retainDrawRowsBuffer: true,
         retainDrawIndirectRowsBuffer: true,
@@ -26749,34 +30416,16 @@ fn fs_main() -> @location(0) vec4<f32> {
         }
       });
       const extensionSurfaceTranslationElapsedMs = Math.max(0, nowMs() - translationStartedMs);
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'extension-surface-translation-complete'
+      });
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
       surfaceDrawExecution.emissiveTemperatureK = Math.max(0, Number(emissiveTemperatureK) || 0);
-      if (renderFieldGradientVolume?.buffer) {
-        // Snapshot the render-field scalars for smooth gradient normals in
-        // the native draw. The live pooled buffer is rewritten every field
-        // pass, so the draw binds a copy that stays consistent with the
-        // vertices extracted this refresh (queue-ordered after the field
-        // compute and before any frame that binds it).
-        const snapshotBuffer = snapshotResidentFieldGradientBuffer({
-          device: resolvedDeviceResult.device,
-          sourceBuffer: renderFieldGradientVolume.buffer,
-          copyByteLength: renderFieldGradientVolume.byteLength
-        });
-        if (snapshotBuffer) {
-          surfaceDrawExecution.renderFieldGradientVolume = {
-            buffer: snapshotBuffer,
-            dims: Array.isArray(renderFieldGradientVolume.dims)
-              ? [...renderFieldGradientVolume.dims]
-              : [0, 0, 0],
-            scalarStrides: Array.isArray(renderFieldGradientVolume.scalarStrides)
-              ? [...renderFieldGradientVolume.scalarStrides]
-              : [0, 0, 0],
-            scalarOffset: Math.max(0, Math.round(Number(renderFieldGradientVolume.scalarOffset) || 0))
-          };
-        }
-      }
       const renderBridgeBuildStartedMs = nowMs();
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'extension-surface-render-bridge-commit'
+      });
       const renderBridge = renderBridgePlan.useThreeCompactBridge
         ? createSphResidentSurfaceDrawThreeCompactBridge({
           surfaceDrawExecution,
@@ -26791,7 +30440,8 @@ fn fs_main() -> @location(0) vec4<f32> {
           : (renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge
             ? createSphResidentSurfaceDrawNativeWebGpuConsumerBridge({
               surfaceDrawExecution,
-              rendererCapability
+              rendererCapability,
+              renderCommitGuard
             })
           : null));
       const extensionSurfaceRenderBridgeBuildElapsedMs = Math.max(0, nowMs() - renderBridgeBuildStartedMs);
@@ -26934,11 +30584,15 @@ fn fs_main() -> @location(0) vec4<f32> {
         renderBridgeStatus: renderBridgeReady
           ? renderBridge.status
           : 'extension-surface-buffers-retained-no-overlay',
+        renderBridgeCandidateStatus: renderBridge?.status ?? null,
+        renderBridgeCandidateReason: renderBridge?.reason ?? null,
         renderBridgeReason: renderBridgeReady
           ? renderBridge.reason
           : (renderBridgePlan.useThreeCompactBridge
             ? (renderBridge?.reason || 'extension surface rows were not available for the Three compact bridge')
-            : (rendererCapability.reason || 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path')),
+            : (renderBridge?.reason
+              || rendererCapability.reason
+              || 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path')),
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
         renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
         renderBridgeReused: Boolean(renderBridge?.threeRenderBridgeReused),
@@ -27099,6 +30753,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       // bridge capability (the metadata-step selection ran before the
       // bridge bound, with a null capability - see the sibling reselect in
       // the surface-draw bridge path).
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'extension-surface-proxy-backend-selection-commit'
+      });
       const proxyDrawSourceForReselect = scene.userData.schroederRenderProxyDrawSource || null;
       if (proxyDrawSourceForReselect) {
         const reselectedProxyBackend = resolveSchroederRenderProxyBackendSelection({
@@ -27117,6 +30774,9 @@ fn fs_main() -> @location(0) vec4<f32> {
           renderer.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
         }
       }
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'extension-surface-resource-owner-commit'
+      });
       if (
         renderBridgeReady
         && renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
@@ -27126,8 +30786,11 @@ fn fs_main() -> @location(0) vec4<f32> {
           surfaceDrawExecution,
           surfaceVerticesExecution,
           translation,
-          extensionSurfaceResult
+          extensionSurfaceResult,
+          gradientSnapshotReservations: []
         });
+      } else {
+        publishResidentFieldGradientSnapshotPool();
       }
       sphResidentSurfaceDraw = residentDraw;
       scene.userData.sphResidentSurfaceDraw = residentDraw;
@@ -27135,7 +30798,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         sphResidentSurfaceDrawRenderBridge = null;
         scene.userData.sphResidentSurfaceDrawRenderBridge = null;
       } else if (renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
-        renderSphResidentSurfaceDrawOverlay({
+        scheduleSphNativeWebGpuSurfaceConsumerFrame({
           reason: 'native-webgpu-surface-consumer-resident-draw-ready'
         });
         refreshSphNativeWebGpuSurfaceVisibleConsumerFromBridge(renderBridge);
@@ -27161,18 +30824,23 @@ fn fs_main() -> @location(0) vec4<f32> {
       });
       return residentDraw;
     } catch (error) {
+      publishResidentFieldGradientSnapshotPool();
       releaseUncommittedNativeSurfaceResources({
         device: resolvedDeviceResult.device,
         translation,
         extensionSurfaceResult,
         reason: 'extension-surface-draw-error-cleanup'
       });
+      if (error?.code === SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE) throw error;
       const unavailable = residentSurfaceDrawUnavailable(error instanceof Error ? error.message : String(error), {
         overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy()
       });
       unavailable.status = 'resident-extension-surface-draw-error';
       unavailable.visibleRendererBridge = SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
       unavailable.visibleRenderSource = 'webgpu-marching-cubes-extension-error';
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'extension-surface-error-commit'
+      });
       sphResidentSurfaceDraw = unavailable;
       scene.userData.sphResidentSurfaceDraw = unavailable;
       sphResidentSurfaceDrawRenderBridge = null;
@@ -27210,8 +30878,13 @@ fn fs_main() -> @location(0) vec4<f32> {
     pressureInterfaceGasCellFieldImportStateKey = null,
     skipPressureInterfaceRefresh = false,
     allowNativeSurfaceExtraction = true,
-    measureGpuTimestamps = enableGpuProfiling
+    measureGpuTimestamps = enableGpuProfiling,
+    onSourceBuffersSubmitted = null,
+    renderCommitGuard = null
   } = {}) {
+    assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+      stage: 'resident-render-refresh-start'
+    });
     const nativeBridgeFailure = nativeSurfaceBridgeFailureReason(
       sphResidentSurfaceDrawRenderBridge
     );
@@ -27227,6 +30900,29 @@ fn fs_main() -> @location(0) vec4<f32> {
     };
     const renderRefreshMarkStage = (key, startedAtMs) => {
       renderRefreshIncrementStage(key, nowMs() - startedAtMs);
+    };
+    let sourceBuffersSubmissionPublished = false;
+    const publishSourceBuffersSubmitted = (status, extra = {}) => {
+      if (sourceBuffersSubmissionPublished) return null;
+      sourceBuffersSubmissionPublished = true;
+      const evidence = {
+        schema: 'peercompute.ulg.sph-resident-render-source-submission.v0',
+        status,
+        sourceResidentExecutionGeneration:
+          residentSteps?.residentExecutionGeneration ?? null,
+        sourceResidentNextStep:
+          residentSteps?.nextStep ?? residentSteps?.finalStep?.sequenceIndex ?? null,
+        submittedBeforePhysicsContinuation: status
+          === 'resident-render-source-consumers-command-submitted',
+        updatedAtMs: nowMs(),
+        ...extra
+      };
+      try {
+        onSourceBuffersSubmitted?.(evidence);
+      } catch {
+        // Source-order telemetry must not turn a submitted render into failure.
+      }
+      return evidence;
     };
     const nativeSurfaceExtractionAllowed = allowNativeSurfaceExtraction !== false;
     const effectiveResidentAuthorityHost = resolveSceneResidentAuthorityHost(residentAuthorityHost);
@@ -27348,6 +31044,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       })
       : null;
     if (presentationWorkerRetainedOutputStatus) {
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-worker-output-commit'
+      });
       const preservedWorkerRenderRowsStatus = publishWorkerOffscreenRenderRowsStatus({
         ...presentationWorkerRetainedOutputStatus,
         retainedStageOutputPreservedByResidentRenderAssembly: true,
@@ -27425,6 +31124,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput: true
       };
       applyResidentRenderSourceMetadata(sphResidentRenderState, residentRenderSource);
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-worker-state-publish'
+      });
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       markSphResidentRenderProgress('resident-render-presentation-worker-retained-output-preserved', {
         stage: 'resident-render-refresh',
@@ -27487,6 +31189,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         Boolean(sphResidentSurfaceDrawRenderBridge?.sourceResidentRetainedPrevious);
       sphResidentRenderState.surfaceDrawRenderBridgeSourceResidentRetentionReason =
         sphResidentSurfaceDrawRenderBridge?.sourceResidentRetentionReason ?? null;
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-unavailable-state-publish'
+      });
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       markSphResidentRenderProgress('resident-render-refresh-unavailable', {
         stage: 'resident-render-refresh',
@@ -27500,6 +31205,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
     renderRefreshMarkStage('deviceAcquireMs', deviceAcquireStartedAtMs);
+    assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+      stage: 'resident-render-device-ready'
+    });
     if (!resolvedDeviceResult?.device) {
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
@@ -27524,6 +31232,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         phaseChangeValidation: false,
         fullPhysicsValidation: false
       };
+      applyResidentRenderSourceMetadata(sphResidentRenderState, residentRenderSource);
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-webgpu-unavailable-state-publish'
+      });
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       markSphResidentRenderProgress('resident-render-refresh-webgpu-unavailable', {
         stage: 'resident-render-refresh',
@@ -27590,6 +31302,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       const reactionSummary = reactionResult?.reactionSummary || null;
       const residentProductMass = finalStep?.residentProductMass || reactionResult?.residentProductMass || null;
       const productEventBuffer = residentProductMass?.productEventBuffer || reactionSummary?.productEventBuffer || null;
+      const productEventArenaCapacityDescriptor =
+        residentProductMass?.productEventArenaCapacityDescriptor || null;
       const productEventCount = Math.max(0, Math.round(Number(
         residentProductMass?.productEventRowCount ?? reactionSummary?.productEventRowCount
       ) || 0));
@@ -27892,6 +31606,17 @@ fn fs_main() -> @location(0) vec4<f32> {
         queueCompletionStatus: renderRowsExecution.queueCompletionStatus ?? null,
         queueCompletionMethod: renderRowsExecution.queueCompletionMethod ?? null
       });
+      if (!productEventBuffer || productEventCount === 0) {
+        publishSourceBuffersSubmitted(
+          'resident-render-source-consumers-command-submitted',
+          {
+            sourceConsumerStages: ['render-rows'],
+            renderRowsQueueCompletionStatus:
+              renderRowsExecution.queueCompletionStatus ?? null,
+            productEventCount
+          }
+        );
+      }
       const hasRenderRowsReadback = renderRowsExecution.renderRows instanceof Float32Array
         && renderRowsExecution.renderRows.length > 0;
       let decoded = null;
@@ -28185,7 +31910,12 @@ fn fs_main() -> @location(0) vec4<f32> {
           surfaceExtractionValidation: false,
           fullPhysicsValidation: false
         };
-        publishSphResidentMaterialInterfaceState(materialInterfaceField);
+        assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+          stage: 'resident-render-row-material-interface-commit'
+        });
+        publishSphResidentRenderMaterialInterfaceState(materialInterfaceField, {
+          deferDevice: resolvedDeviceResult.device
+        });
         markSphResidentRenderProgress(
           shouldUseWebGpuRenderRowOverlayBridge
             ? 'resident-render-field-skipped-webgpu-render-row-overlay'
@@ -28198,8 +31928,14 @@ fn fs_main() -> @location(0) vec4<f32> {
         );
       } else {
         try {
-          const shouldUseRenderFieldRowsBufferPool = Boolean(
+          const shouldUseSparseRenderField = Boolean(
             shouldRetainRenderFieldBufferHandoff
+            && shouldUseNativeWebGpuSurfaceConsumerBridge
+            && visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+          );
+          const shouldUseRenderFieldRowsBufferPool = Boolean(
+            !shouldUseSparseRenderField
+            && shouldRetainRenderFieldBufferHandoff
             && shouldUseNativeWebGpuSurfaceConsumerBridge
             && visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
           );
@@ -28209,9 +31945,10 @@ fn fs_main() -> @location(0) vec4<f32> {
               surfaceTable
             })
             : null;
-          if (!shouldUseRenderFieldRowsBufferPool) {
-            destroyResidentRenderFieldRowsBufferPool('render-field-rows-buffer-pool-route-disabled');
-          }
+          // A refresh can briefly select a diagnostic route while an accepted
+          // native extraction still consumes the previous field generation.
+          // Keep both pools resident across route changes; structural
+          // replacement, reset, and scene disposal own retirement.
           const buildRenderFieldForRows = () => {
             // Measured interval since the previous field build, clamped to a
             // quarter second so a paused tab does not smear everything away.
@@ -28220,27 +31957,49 @@ fn fs_main() -> @location(0) vec4<f32> {
               ? Math.min(Math.max((nowBuildMs - sphResidentLastRenderFieldBuildMs) / 1000, 0), 0.25)
               : 0;
             sphResidentLastRenderFieldBuildMs = nowBuildMs;
+            if (shouldUseSparseRenderField) {
+              if (!renderRowsExecution.renderRowsBuffer) {
+                throw new Error(
+                  'native sparse render-field construction requires the retained same-device render-row buffer'
+                );
+              }
+              return buildSphSparseRenderFieldForScene({
+                device: resolvedDeviceResult.device,
+                renderRowsBuffer: renderRowsExecution.renderRowsBuffer,
+                productEventBuffer,
+                productEventCount,
+                productEventArenaCapacityDescriptor,
+                surfaceTable,
+                algorithmMaterialSurfaceExtractionRows:
+                  mlsMpmGpuParticleState?.algorithmMaterialSurfaceExtractionRows ?? null,
+                particleCount: renderRowsExecution.particleCount,
+                fieldPadding: FIELD_PADDING,
+                refEdgeM,
+                renderSmearDtS,
+                measureGpuTimestamps
+              });
+            }
             return buildSphRenderFieldWebGpu({
-            device: resolvedDeviceResult.device,
-            renderRows: renderRowsExecution.renderRows,
-            renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
-            productEventBuffer,
-            productEventCount,
-            surfaceTable,
-            particleCount: renderRowsExecution.particleCount,
-            fieldPadding: FIELD_PADDING,
-            refEdgeM,
-            renderSmearDtS,
-            readbackMode: visibleRenderFieldReadbackMode,
-            retainFieldRowsBuffer: true,
-            retainSurfaceBuffer: true,
-            waitForQueueCompletion: visibleRenderFieldReadbackMode !== RESIDENT_NO_FULL_READBACK_MODE
-              || (shouldRetainRenderFieldBufferHandoff && !shouldUseNativeWebGpuSurfaceConsumerBridge),
-            deferCleanup: visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE,
-            useQueueFenceForCleanup: false,
-            targetFieldRowsBuffer: renderFieldRowsBufferPool?.buffer || null,
-            targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null,
-            measureGpuTimestamps
+              device: resolvedDeviceResult.device,
+              renderRows: renderRowsExecution.renderRows,
+              renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
+              productEventBuffer,
+              productEventCount,
+              surfaceTable,
+              particleCount: renderRowsExecution.particleCount,
+              fieldPadding: FIELD_PADDING,
+              refEdgeM,
+              renderSmearDtS,
+              readbackMode: visibleRenderFieldReadbackMode,
+              retainFieldRowsBuffer: true,
+              retainSurfaceBuffer: true,
+              waitForQueueCompletion: visibleRenderFieldReadbackMode !== RESIDENT_NO_FULL_READBACK_MODE
+                || (shouldRetainRenderFieldBufferHandoff && !shouldUseNativeWebGpuSurfaceConsumerBridge),
+              deferCleanup: visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE,
+              useQueueFenceForCleanup: false,
+              targetFieldRowsBuffer: renderFieldRowsBufferPool?.buffer || null,
+              targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null,
+              measureGpuTimestamps
             });
           };
           const timedBuildRenderFieldForRows = async () => {
@@ -28282,11 +32041,26 @@ fn fs_main() -> @location(0) vec4<f32> {
           readbackMode: visibleRenderFieldReadbackMode
         });
         renderFieldExecution = await timedBuildRenderFieldForRows();
+        publishSourceBuffersSubmitted(
+          'resident-render-source-consumers-command-submitted',
+          {
+            sourceConsumerStages: ['render-rows', 'render-field'],
+            renderRowsQueueCompletionStatus:
+              renderRowsExecution.queueCompletionStatus ?? null,
+            renderFieldQueueCompletionStatus:
+              renderFieldExecution.queueCompletionStatus ?? null,
+            productEventCount
+          }
+        );
         renderFieldExecution.renderFieldRowsBufferPoolStatus = renderFieldRowsBufferPool?.status ?? null;
         renderFieldExecution.renderFieldRowsBufferPoolReason = renderFieldRowsBufferPool?.reason ?? null;
         renderFieldExecution.renderFieldRowsBufferPoolReused = Boolean(renderFieldRowsBufferPool?.reused);
         renderFieldExecution.renderFieldRowsBufferPoolByteLength = renderFieldRowsBufferPool?.byteLength ?? 0;
         renderFieldExecution.renderFieldRowsBufferPoolSummary = renderFieldRowsBufferPool?.summary ?? null;
+        renderFieldExecution.sparseRenderFieldProductionRoute = shouldUseSparseRenderField;
+        renderFieldExecution.sparseRenderFieldProductionRouteStatus = shouldUseSparseRenderField
+          ? 'native-no-full-sparse-render-field-selected'
+          : 'dense-render-field-diagnostic-or-nonnative-route-selected';
         markSphResidentRenderProgress('resident-render-field-complete', {
           stage: 'render-field',
           surfaceCount: renderFieldExecution.surfaceCount,
@@ -28348,6 +32122,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         if (
           (renderFieldExecution.fieldRows instanceof Float32Array && renderFieldExecution.fieldRows.length > 0)
           || renderFieldExecution.fieldRowsBuffer
+          || renderFieldExecution.schema === ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA
         ) {
           renderFieldCpuParitySummary = summarizeRenderFieldCpuParity({
             renderRowsExecution,
@@ -28472,7 +32247,12 @@ fn fs_main() -> @location(0) vec4<f32> {
             materialInterfaceField.renderFieldQueueCompletionStatus = renderFieldExecution.queueCompletionStatus ?? null;
             materialInterfaceField.renderFieldQueueCompletionMethod = renderFieldExecution.queueCompletionMethod ?? null;
             materialInterfaceField.gpuAuthoritativeState = true;
-            publishSphResidentMaterialInterfaceState(materialInterfaceField);
+            assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+              stage: 'resident-render-material-interface-field-commit'
+            });
+            publishSphResidentRenderMaterialInterfaceState(materialInterfaceField, {
+              deferDevice: resolvedDeviceResult.device
+            });
             const surfaceFields = renderFieldExecution.fieldRows instanceof Float32Array && renderFieldExecution.fieldRows.length > 0
               ? splitSphRenderFieldBySurface(renderFieldExecution)
               : [];
@@ -28519,7 +32299,12 @@ fn fs_main() -> @location(0) vec4<f32> {
               surfaceExtractionValidation: false,
               fullPhysicsValidation: false
             };
-            publishSphResidentMaterialInterfaceState(materialInterfaceField);
+            assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+              stage: 'resident-render-material-interface-summary-commit'
+            });
+            publishSphResidentRenderMaterialInterfaceState(materialInterfaceField, {
+              deferDevice: resolvedDeviceResult.device
+            });
           }
         } else {
           materialInterfaceField = {
@@ -28680,6 +32465,9 @@ fn fs_main() -> @location(0) vec4<f32> {
               bridgeMode: requestedSurfaceDrawDiagnosticMode
             }));
           if (retainPreviousThreeRenderRowBridgeNoFull && renderBridge === previousResidentRenderBridge) {
+            assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+              stage: 'resident-render-row-bridge-retention-commit'
+            });
             renderBridgeRetainedPrevious = true;
             renderBridge.temporalSwapPolicy = SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY;
             renderBridge.retainedPreviousOverlay = true;
@@ -28882,8 +32670,16 @@ fn fs_main() -> @location(0) vec4<f32> {
           const renderFieldHandoffReady = Boolean(
             shouldRetainRenderFieldBufferHandoff
             && renderFieldSurfaceSummarySkipped
-            && renderFieldExecution?.fieldRowsBuffer
-            && renderFieldExecution?.surfaceBuffer
+            && (
+              (renderFieldExecution?.fieldRowsBuffer && renderFieldExecution?.surfaceBuffer)
+              || (
+                renderFieldExecution?.schema === ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA
+                && renderFieldExecution?.directoryBuffer
+                && renderFieldExecution?.activeBrickRowsBuffer
+                && renderFieldExecution?.atlasBuffer
+                && renderFieldExecution?.candidateVoxelIdsBuffer
+              )
+            )
           );
           if (renderFieldHandoffReady) {
             nextResidentSurfaceDraw = residentSurfaceDrawUnavailable(
@@ -28899,8 +32695,10 @@ fn fs_main() -> @location(0) vec4<f32> {
             nextResidentSurfaceDraw.vertexCount = 0;
             nextResidentSurfaceDraw.triangleCount = 0;
             nextResidentSurfaceDraw.renderFieldBufferMode = 'retained-render-field-buffers-no-summary';
-            nextResidentSurfaceDraw.renderFieldRowsBufferRetained = true;
-            nextResidentSurfaceDraw.renderFieldRowsBufferByteLength = renderFieldExecution.fieldRowByteLength ?? 0;
+            nextResidentSurfaceDraw.renderFieldRowsBufferRetained =
+              Boolean(renderFieldExecution.fieldRowsBuffer);
+            nextResidentSurfaceDraw.renderFieldRowsBufferByteLength =
+              renderFieldExecution.fieldRowByteLength ?? 0;
             nextResidentSurfaceDraw.renderFieldRowsBufferBorrowed =
               Boolean(renderFieldExecution.fieldRowsBufferBorrowed);
             nextResidentSurfaceDraw.renderFieldRowsBufferReused =
@@ -28915,7 +32713,8 @@ fn fs_main() -> @location(0) vec4<f32> {
               renderFieldExecution.renderFieldRowsBufferPoolByteLength ?? 0;
             nextResidentSurfaceDraw.renderFieldRowsBufferPoolSummary =
               renderFieldExecution.renderFieldRowsBufferPoolSummary ?? null;
-            nextResidentSurfaceDraw.renderFieldSurfaceBufferRetained = true;
+            nextResidentSurfaceDraw.renderFieldSurfaceBufferRetained =
+              Boolean(renderFieldExecution.surfaceBuffer);
             nextResidentSurfaceDraw.renderFieldSurfaceBufferByteLength = renderFieldExecution.surfaceBufferByteLength ?? 0;
             const renderFieldBufferVolumeDescriptors = createRenderFieldBufferVolumeDescriptors({
               device: resolvedDeviceResult.device,
@@ -28954,6 +32753,7 @@ fn fs_main() -> @location(0) vec4<f32> {
               )
             );
             let nativeMarchingCubesSurfaceDrawReady = false;
+            let nativeExtractionBatch = null;
             if (
               nativeDescriptor
               && nativeSurfaceRecord
@@ -28991,19 +32791,59 @@ fn fs_main() -> @location(0) vec4<f32> {
                   surfaceExtractionPolicyIsovaluePolicy:
                     nativeDescriptor.surfaceExtractionPolicyIsovaluePolicy ?? null
                 });
-                const nativeExtraction = await extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
-                  device: resolvedDeviceResult.device,
-                  descriptor: nativeDescriptor,
-                  isovalue: nativeDescriptor.isovalue,
-                  vertexRowsBudget: nativeMarchingCubesVertexRowsBudget,
-                  materialPayload: {
-                    material: nativeSurfaceRecord.material ?? null,
-                    phase: nativeSurfaceRecord.phase ?? null,
-                    renderKey: nativeSurfaceRecord.renderKey ?? null,
-                    surfaceKey: nativeSurfaceRecord.surfaceKey ?? null
+                const additionalDescriptors = shouldUseNativeWebGpuSurfaceConsumerBridge
+                  ? renderFieldBufferVolumeDescriptors.filter((additionalDescriptor) =>
+                      additionalDescriptor?.ok && additionalDescriptor !== nativeDescriptor)
+                  : [];
+                const additionalJobs = additionalDescriptors
+                  .map((descriptor) => ({
+                    descriptor,
+                    record: renderFieldExecution?.surfaceTable?.metadata?.[descriptor.surfaceIndex]
+                      ?? null,
+                    primary: false
+                  }))
+                  .filter((job) => job.record);
+                const nativeExtractionJobs = [
+                  {
+                    descriptor: nativeDescriptor,
+                    record: nativeSurfaceRecord,
+                    primary: true
                   },
-                  pbrPayload: nativeSurfaceRecord.opticalState || null
+                  ...additionalJobs
+                ];
+                nativeExtractionBatch = await extractNativeMarchingCubesSurfaceBatch({
+                  device: resolvedDeviceResult.device,
+                  jobs: nativeExtractionJobs,
+                  measureGpuTimestamps: enableGpuProfiling,
+                  extractJob: (
+                    { descriptor, record },
+                    batchIndex,
+                    { commandEncoder, measureGpuTimestamps }
+                  ) => extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
+                    device: resolvedDeviceResult.device,
+                    descriptor,
+                    isovalue: descriptor.isovalue,
+                    vertexRowsBudget: nativeMarchingCubesVertexRowsBudget,
+                    materialPayload: {
+                      material: record.material ?? null,
+                      phase: record.phase ?? null,
+                      renderKey: record.renderKey ?? null,
+                      surfaceKey: record.surfaceKey ?? null
+                    },
+                    pbrPayload: record.opticalState || null,
+                    measureGpuTimestamps,
+                    commandEncoder,
+                    timestampMetadata: {
+                      surfaceBatchIndex: batchIndex,
+                      surfaceBatchCount: nativeExtractionJobs.length
+                    }
+                  })
                 });
+                const primaryExtractionJob = nativeExtractionBatch.settlements[0];
+                if (primaryExtractionJob?.settlement?.status === 'rejected') {
+                  throw primaryExtractionJob.settlement.reason;
+                }
+                const nativeExtraction = primaryExtractionJob?.settlement?.value;
                 const extensionExecution = nativeExtraction.extensionExecution;
                 if (extensionExecution?.extensionExecution?.ok === true) {
                   const nativeSurfaceDraw = await refreshSphResidentSurfaceDrawFromExtension({
@@ -29039,16 +32879,8 @@ fn fs_main() -> @location(0) vec4<f32> {
                         : SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE),
                     materialProperties,
                     waitForQueueCompletion: !shouldUseNativeWebGpuSurfaceConsumerBridge,
-                    renderFieldGradientVolume: {
-                      buffer: nativeDescriptor.scalarBuffer ?? null,
-                      dims: nativeDescriptor.dims ?? null,
-                      scalarStrides: nativeDescriptor.scalarStrides ?? null,
-                      scalarOffset: nativeDescriptor.scalarOffset ?? 0,
-                      byteLength: nativeDescriptor.scalarRequiredByteLength
-                        ?? nativeDescriptor.scalarBufferByteLength
-                        ?? 0
-                    },
-                    emissiveTemperatureK: nativeSurfaceRecord.emissiveTemperatureK ?? 0
+                    emissiveTemperatureK: nativeSurfaceRecord.emissiveTemperatureK ?? 0,
+                    renderCommitGuard
                   });
                   nextResidentSurfaceDraw = {
                     ...nativeSurfaceDraw,
@@ -29084,6 +32916,30 @@ fn fs_main() -> @location(0) vec4<f32> {
                     nativeMarchingCubesExtractionAllowed: nativeSurfaceExtractionAllowed,
                     nativeMarchingCubesExtractionSchema: nativeExtraction.schema,
                     nativeMarchingCubesExtractionStatus: nativeExtraction.status,
+                    nativeMarchingCubesExtractionBatchSchema:
+                      nativeExtractionBatch.schema,
+                    nativeMarchingCubesExtractionBatchStatus:
+                      nativeExtractionBatch.status,
+                    nativeMarchingCubesExtractionBatchMode:
+                      nativeExtractionBatch.mode,
+                    nativeMarchingCubesExtractionBatchJobCount:
+                      nativeExtractionBatch.jobCount,
+                    nativeMarchingCubesExtractionBatchSharedCommandEncoder:
+                      nativeExtractionBatch.sharedCommandEncoder,
+                    nativeMarchingCubesExtractionBatchCallerSubmitCount:
+                      nativeExtractionBatch.callerSubmitCount,
+                    nativeMarchingCubesExtractionBatchInternalSubmitCount:
+                      nativeExtractionBatch.internalSubmitCount,
+                    nativeMarchingCubesExtractionBatchQueueSubmitMs:
+                      nativeExtractionBatch.queueSubmitMs ?? null,
+                    nativeMarchingCubesExtractionBatchCpuSurfaceReadback:
+                      nativeExtractionBatch.cpuSurfaceReadback,
+                    nativeMarchingCubesExtractionBatchPointFallback:
+                      nativeExtractionBatch.pointFallback,
+                    nativeMarchingCubesExtractionBatchTemporaryResourceCount:
+                      nativeExtractionBatch.temporaryResourceCount,
+                    nativeMarchingCubesExtractionBatchRetiredTemporaryResourceCount:
+                      nativeExtractionBatch.retiredTemporaryResourceCount,
                     nativeMarchingCubesExtractionElapsedMs: nativeExtraction.elapsedMs ?? null,
                     nativeMarchingCubesExtensionExecutionElapsedMs:
                       nativeExtraction.extensionExecutionElapsedMs ?? null,
@@ -29109,6 +32965,18 @@ fn fs_main() -> @location(0) vec4<f32> {
                     nativeMarchingCubesVolumeSchema: nativeExtraction.volumeSchema,
                     nativeMarchingCubesVolumeSourceType: nativeExtraction.volumeSourceType,
                     nativeMarchingCubesVolumeScalarLayoutName: nativeExtraction.volumeScalarLayoutName,
+                    nativeMarchingCubesSurfaceGenerationId:
+                      nativeExtraction.surfaceGenerationId ?? null,
+                    nativeMarchingCubesPackedNormalBufferByteLength:
+                      nativeExtraction.packedNormalBufferByteLength ?? 0,
+                    nativeMarchingCubesPackedNormalAdditionalSubmitCount:
+                      nativeExtraction.packedNormalAdditionalSubmitCount ?? null,
+                    nativeMarchingCubesPackedNormalTimestampSpanLabel:
+                      nativeExtraction.packedNormalTimestampSpanLabel ?? null,
+                    nativeMarchingCubesPackedNormalEncoding:
+                      nativeExtraction.packedNormalEncoding ?? null,
+                    nativeMarchingCubesPackedNormalSign:
+                      nativeExtraction.packedNormalSign ?? null,
                     nativeMarchingCubesExtractionIsovalue: nativeExtraction.isovalue ?? null,
                     nativeMarchingCubesSurfaceExtractionPolicyStatus:
                       nativeExtraction.surfaceExtractionPolicyStatus ?? null,
@@ -29143,31 +33011,18 @@ fn fs_main() -> @location(0) vec4<f32> {
                   // records resolve in the shared surface shader.
                   if (shouldUseNativeWebGpuSurfaceConsumerBridge) {
                     const additionalGeneration = nextAdditionalNativeSurfaceGeneration();
-                    const additionalDescriptors = renderFieldBufferVolumeDescriptors
-                      .filter((additionalDescriptor) =>
-                        additionalDescriptor?.ok && additionalDescriptor !== nativeDescriptor);
+                    const additionalExtractionJobs = nativeExtractionBatch.settlements.slice(1);
                     const additionalEntries = [];
-                    for (const additionalDescriptor of additionalDescriptors) {
-                      const additionalRecord =
-                        renderFieldExecution?.surfaceTable?.metadata?.[additionalDescriptor.surfaceIndex];
-                      if (!additionalRecord) continue;
+                    for (const extractionJob of additionalExtractionJobs) {
+                      const { descriptor: additionalDescriptor, record: additionalRecord } =
+                        extractionJob.job;
                       let additionalTranslation = null;
                       let additionalSurfaceResult = null;
                       try {
-                        const additionalExtraction =
-                          await extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
-                            device: resolvedDeviceResult.device,
-                            descriptor: additionalDescriptor,
-                            isovalue: additionalDescriptor.isovalue,
-                            vertexRowsBudget: nativeMarchingCubesVertexRowsBudget,
-                            materialPayload: {
-                              material: additionalRecord.material ?? null,
-                              phase: additionalRecord.phase ?? null,
-                              renderKey: additionalRecord.renderKey ?? null,
-                              surfaceKey: additionalRecord.surfaceKey ?? null
-                            },
-                            pbrPayload: additionalRecord.opticalState || null
-                          });
+                        if (extractionJob.settlement.status === 'rejected') {
+                          throw extractionJob.settlement.reason;
+                        }
+                        const additionalExtraction = extractionJob.settlement.value;
                         const additionalWrapped = additionalExtraction?.extensionExecution;
                         additionalSurfaceResult = additionalWrapped?.extensionExecution?.result ?? null;
                         if (additionalWrapped?.extensionExecution?.ok !== true) {
@@ -29214,6 +33069,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                             readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
                             compactSummaryReadback: false,
                             translateVertexRows: false,
+                            allowExtensionDrawIndirectBuffer: true,
                             retainVertexRowsBuffer: true,
                             retainDrawRowsBuffer: true,
                             retainDrawIndirectRowsBuffer: true,
@@ -29230,30 +33086,6 @@ fn fs_main() -> @location(0) vec4<f32> {
                         }
                         additionalTranslation.surfaceDraw.emissiveTemperatureK =
                           Math.max(0, Number(additionalRecord.emissiveTemperatureK) || 0);
-                        const additionalSnapshotBuffer = snapshotResidentFieldGradientBuffer({
-                          device: resolvedDeviceResult.device,
-                          sourceBuffer: additionalDescriptor.scalarBuffer ?? null,
-                          copyByteLength: additionalDescriptor.scalarRequiredByteLength
-                            ?? additionalDescriptor.scalarBufferByteLength
-                            ?? 0,
-                          slotKey: additionalRecord.surfaceKey
-                            ?? `surface:${additionalDescriptor.surfaceIndex}`
-                        });
-                        if (additionalSnapshotBuffer) {
-                          additionalTranslation.surfaceDraw.renderFieldGradientVolume = {
-                            buffer: additionalSnapshotBuffer,
-                            dims: Array.isArray(additionalDescriptor.dims)
-                              ? [...additionalDescriptor.dims]
-                              : [0, 0, 0],
-                            scalarStrides: Array.isArray(additionalDescriptor.scalarStrides)
-                              ? [...additionalDescriptor.scalarStrides]
-                              : [0, 0, 0],
-                            scalarOffset: Math.max(
-                              0,
-                              Math.round(Number(additionalDescriptor.scalarOffset) || 0)
-                            )
-                          };
-                        }
                         additionalEntries.push({
                           translation: additionalTranslation,
                           extensionSurfaceResult: additionalSurfaceResult,
@@ -29266,6 +33098,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                           depthWriteFlag: additionalRecord.depthWriteFlag ?? 1
                         });
                       } catch (additionalError) {
+                        publishResidentFieldGradientSnapshotPool();
                         releaseUncommittedNativeSurfaceResources({
                           device: resolvedDeviceResult.device,
                           translation: additionalTranslation,
@@ -29284,14 +33117,20 @@ fn fs_main() -> @location(0) vec4<f32> {
                       device: resolvedDeviceResult.device,
                       bridge: sphResidentSurfaceDrawRenderBridge,
                       entries: additionalEntries,
-                      generation: additionalGeneration
+                      generation: additionalGeneration,
+                      renderCommitGuard
                     });
                     nextResidentSurfaceDraw.additionalNativeSurfaceDrawCount =
                       attachedAdditionalDraws.length;
+                    nextResidentSurfaceDraw.additionalNativeSurfaceExtractionMode =
+                      nativeExtractionBatch.mode;
+                    nextResidentSurfaceDraw.additionalNativeSurfaceExtractionJobCount =
+                      additionalJobs.length;
                     markSphResidentRenderProgress('additional-native-surface-draws-attached', {
                       stage: 'native-marching-cubes',
                       surfaceCount: attachedAdditionalDraws.length,
-                      requestedCount: additionalDescriptors.length
+                      requestedCount: additionalJobs.length,
+                      extractionMode: nativeExtractionBatch.mode
                     });
                   }
                   renderFieldExecution?.releaseRenderFieldBufferLeases?.({
@@ -29314,9 +33153,9 @@ fn fs_main() -> @location(0) vec4<f32> {
                     surfaceDrawRefreshElapsedMs: nativeSurfaceDraw.extensionSurfaceRefreshElapsedMs ?? null
                   });
                 } else {
-                  releaseUncommittedNativeSurfaceResources({
+                  releaseUncommittedNativeMarchingCubesBatchResults({
                     device: resolvedDeviceResult.device,
-                    extensionSurfaceResult: extensionExecution?.extensionExecution?.result ?? null,
+                    settlements: nativeExtractionBatch.settlements,
                     reason: 'native-marching-cubes-primary-extraction-not-ready'
                   });
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionSchema = nativeExtraction.schema;
@@ -29353,6 +33192,15 @@ fn fs_main() -> @location(0) vec4<f32> {
                   });
                 }
               } catch (error) {
+                if (!nativeMarchingCubesSurfaceDrawReady) {
+                  releaseUncommittedNativeMarchingCubesBatchResults({
+                    device: resolvedDeviceResult.device,
+                    settlements: error?.nativeMarchingCubesSettlements
+                      ?? nativeExtractionBatch?.settlements
+                      ?? [],
+                    reason: 'native-marching-cubes-batch-extraction-error'
+                  });
+                }
                 nextResidentSurfaceDraw.nativeMarchingCubesExtractionAllowed = nativeSurfaceExtractionAllowed;
                 nextResidentSurfaceDraw.nativeMarchingCubesExtractionStatus =
                   'native-marching-cubes-render-field-extraction-error';
@@ -29563,6 +33411,9 @@ fn fs_main() -> @location(0) vec4<f32> {
                   )
                     ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
                     : null));
+            assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+              stage: 'resident-surface-draw-bridge-start'
+            });
             nextResidentSurfaceDraw = await buildSphResidentSurfaceDrawBridge({
               device: resolvedDeviceResult.device,
               renderFieldExecution,
@@ -29572,7 +33423,8 @@ fn fs_main() -> @location(0) vec4<f32> {
               ),
               renderBridgeMode: surfaceDrawBridgeMode,
               materialProperties,
-              rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice)
+              rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+              renderCommitGuard
             });
             markSphResidentRenderProgress('resident-render-surface-draw-diagnostic-complete', {
               stage: 'surface-draw-diagnostic',
@@ -29659,6 +33511,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         const replacementReason = nextResidentSurfaceDraw.reason
           || renderFieldExecution?.reason
           || 'native WebGPU refresh produced no replacement surface geometry';
+        assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+          stage: 'resident-surface-previous-bridge-retention-commit'
+        });
         nextResidentSurfaceDraw = previousResidentSurfaceDraw;
         nextResidentSurfaceDraw.temporalSwapPolicy = SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY;
         nextResidentSurfaceDraw.retainedPreviousOverlay = true;
@@ -29737,12 +33592,18 @@ fn fs_main() -> @location(0) vec4<f32> {
           nextResidentSurfaceDraw.renderBridgeSourceResidentRetentionReason =
             sphResidentSurfaceDrawRenderBridge?.sourceResidentRetentionReason ?? null;
         }
+        assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+          stage: 'resident-surface-draw-state-commit'
+        });
         sphResidentSurfaceDraw = nextResidentSurfaceDraw;
         scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
         if (!retainingPreviousResidentSurfaceDraw) {
           releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
         }
       } else {
+        assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+          stage: 'resident-surface-draw-clear-commit'
+        });
         clearSphResidentSurfaceDrawArtifacts();
         applyResidentRenderSourceMetadata(nextResidentSurfaceDraw, residentRenderSource);
         sphResidentSurfaceDraw = nextResidentSurfaceDraw;
@@ -29763,20 +33624,18 @@ fn fs_main() -> @location(0) vec4<f32> {
         ),
         navigatorRef: overrideNavigatorRef,
         device,
-        deviceResult: resolvedDeviceResult
+        deviceResult: resolvedDeviceResult,
+        renderCommitGuard
       });
       renderRefreshMarkStage('opticalLookupMs', opticalLookupStartedAtMs);
       markSphResidentRenderProgress('resident-render-optical-lookup-complete', {
         stage: 'optical-lookup',
         source: 'resident-render-refresh'
       });
-      const shouldSkipPressureInterfaceRefresh = Boolean(
-        skipPressureInterfaceRefresh
-        || (
-          surfaceOverlayPolicy.enabled
-          && visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
-        )
-      );
+      // A visual refresh may consume the latest physics-fed pressure state,
+      // but it must not become a competing producer. Physics publication owns
+      // this state independently of bounded presentation lag.
+      const shouldSkipPressureInterfaceRefresh = true;
       markSphResidentRenderProgress('resident-render-pressure-interface-started', {
         stage: 'pressure-interface',
         source: 'resident-render-refresh',
@@ -29784,15 +33643,13 @@ fn fs_main() -> @location(0) vec4<f32> {
       });
       const pressureInterfaceStartedAtMs = nowMs();
       const pressureInterfaceState = shouldSkipPressureInterfaceRefresh
-        ? {
+        ? (sphResidentPressureInterfaceState || {
           schema: 'peercompute.ulg.sph-pressure-interface-state.v0',
           status: 'pressure-interface-refresh-skipped',
           source: 'resident-render-validation',
           sourceCadence: 'visual-render-refresh',
-          reason: skipPressureInterfaceRefresh
-            ? 'validation render refresh requested pressure-interface skip'
-            : 'resident overlay render refresh skips pressure-interface producer work'
-        }
+          reason: 'visual render refresh consumes but does not publish physics-fed pressure interface state'
+        })
         : await refreshSphResidentPressureInterfaceState({
           preferWebGpu,
           navigatorRef: overrideNavigatorRef,
@@ -29808,7 +33665,8 @@ fn fs_main() -> @location(0) vec4<f32> {
           pressureInterfaceGasCellFieldImport,
           pressureInterfaceGasCellFieldImportStateKey,
           source: 'resident-render-field-pressure-interface-producer',
-          sourceCadence: 'visual-render-refresh'
+          sourceCadence: 'visual-render-refresh',
+          renderCommitGuard
         });
       renderRefreshMarkStage('pressureInterfaceMs', pressureInterfaceStartedAtMs);
       markSphResidentRenderProgress('resident-render-pressure-interface-complete', {
@@ -29816,6 +33674,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         source: 'resident-render-refresh',
         skipped: shouldSkipPressureInterfaceRefresh,
         status: pressureInterfaceState?.status ?? null
+      });
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-worker-output-status-commit'
       });
       const retainedStageOutputAlreadyRenderedStatus = mainThreadSurfaceDrawDisplayOwnershipRequested
         ? null
@@ -29888,6 +33749,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         source: 'resident-render-refresh',
         surfaceDrawBridge: sphResidentSurfaceDraw?.visibleRendererBridge ?? null,
         pressureInterfaceStatus: pressureInterfaceStateFields.residentPressureInterfaceStateStatus ?? null
+      });
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-state-assembly-commit'
       });
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
@@ -30118,6 +33982,31 @@ fn fs_main() -> @location(0) vec4<f32> {
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionAllowed ?? null,
         surfaceDrawNativeMarchingCubesExtractionStatus:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionStatus ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchSchema:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchSchema ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchStatus:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchStatus ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchMode:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchMode ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchJobCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchJobCount ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchSharedCommandEncoder:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchSharedCommandEncoder ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchCallerSubmitCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchCallerSubmitCount ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchInternalSubmitCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchInternalSubmitCount ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchQueueSubmitMs:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchQueueSubmitMs ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchCpuSurfaceReadback:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchCpuSurfaceReadback ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchPointFallback:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchPointFallback ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchTemporaryResourceCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionBatchTemporaryResourceCount ?? null,
+        surfaceDrawNativeMarchingCubesExtractionBatchRetiredTemporaryResourceCount:
+          sphResidentSurfaceDraw
+            ?.nativeMarchingCubesExtractionBatchRetiredTemporaryResourceCount ?? null,
         surfaceDrawNativeMarchingCubesExtractionReason:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionReason ?? null,
         surfaceDrawNativeMarchingCubesExtractionElapsedMs:
@@ -30178,6 +34067,12 @@ fn fs_main() -> @location(0) vec4<f32> {
           sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheMissCount ?? null,
         surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount:
           sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheReleaseCount ?? null,
+        surfaceDrawAdditionalNativeSurfaceExtractionMode:
+          sphResidentSurfaceDraw?.additionalNativeSurfaceExtractionMode ?? null,
+        surfaceDrawAdditionalNativeSurfaceExtractionJobCount:
+          sphResidentSurfaceDraw?.additionalNativeSurfaceExtractionJobCount ?? 0,
+        surfaceDrawAdditionalNativeSurfaceDrawCount:
+          sphResidentSurfaceDraw?.additionalNativeSurfaceDrawCount ?? 0,
         surfaceDrawExtensionSurfaceAdapterExecutionStatus:
           sphResidentSurfaceDraw?.extensionSurfaceAdapterExecutionStatus ?? null,
         surfaceDrawExtensionSurfaceRawExecutionStatus:
@@ -30654,6 +34549,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         phaseChangeValidation: false,
         fullPhysicsValidation: false
       };
+      applyResidentRenderSourceMetadata(sphResidentRenderState, residentRenderSource);
       renderRefreshMarkStage('renderStateAssemblyMs', renderStateAssemblyStartedAtMs);
       const renderRefreshTotalMs = nowMs() - renderRefreshStartedAtMs;
       const renderRefreshTiming = {
@@ -30683,6 +34579,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         renderRefreshStageMs.workerOffscreenRenderRowsMs ?? null;
       sphResidentRenderState.renderRefreshRenderStateAssemblyMs =
         renderRefreshStageMs.renderStateAssemblyMs ?? null;
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-state-publish'
+      });
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       markSphResidentRenderProgress('resident-render-state-published', {
         stage: 'resident-render-state',
@@ -30693,6 +34592,11 @@ fn fs_main() -> @location(0) vec4<f32> {
       });
       return sphResidentRenderState;
     } catch (error) {
+      publishSourceBuffersSubmitted(
+        'resident-render-source-consumption-aborted-before-submit',
+        { reason: error instanceof Error ? error.message : String(error) }
+      );
+      if (error?.code === SPH_RESIDENT_RENDER_COMMIT_STALE_ERROR_CODE) throw error;
       const message = error instanceof Error ? error.message : String(error);
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
@@ -30721,6 +34625,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         phaseChangeValidation: false,
         fullPhysicsValidation: false
       };
+      applyResidentRenderSourceMetadata(sphResidentRenderState, residentRenderSource);
+      assertSphResidentRenderCommitCurrent(renderCommitGuard, {
+        stage: 'resident-render-error-state-publish'
+      });
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       markSphResidentRenderProgress('resident-render-refresh-error', {
         stage: 'resident-render-refresh',
@@ -30730,6 +34638,10 @@ fn fs_main() -> @location(0) vec4<f32> {
       });
       return sphResidentRenderState;
     } finally {
+      publishSourceBuffersSubmitted(
+        'resident-render-source-consumption-not-required',
+        { reason: 'render-refresh-settled-without-hot-source-consumer' }
+      );
       if (fenceResidentRenderRefreshQueue) {
         const queueFenceStartedAtMs = nowMs();
         markSphResidentRenderProgress('resident-render-queue-fence-started', {
@@ -30919,6 +34831,14 @@ fn fs_main() -> @location(0) vec4<f32> {
     bridge.lastSubmitFenceSerial = serial;
     bridge.lastSubmitFenceStatus = 'pending';
     if (nativeConsumerFence) {
+      bridge.nativeSurfaceConsumerInFlightSubmitCount = Math.max(
+        0,
+        Math.round(Number(bridge.nativeSurfaceConsumerInFlightSubmitCount) || 0)
+      ) + 1;
+      bridge.nativeSurfaceConsumerInFlightSubmitPeak = Math.max(
+        Math.round(Number(bridge.nativeSurfaceConsumerInFlightSubmitPeak) || 0),
+        bridge.nativeSurfaceConsumerInFlightSubmitCount
+      );
       bridge.nativeSurfaceConsumerSubmitFencePending = true;
       bridge.nativeSurfaceConsumerSubmitFenceSerial = serial;
       bridge.nativeSurfaceConsumerSubmitFenceReason = reason;
@@ -30932,7 +34852,9 @@ fn fs_main() -> @location(0) vec4<f32> {
     publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-pending', {
       reason,
       renderStatus,
-      startedAtMs
+      startedAtMs,
+      nativeSurfaceConsumerInFlightSubmitCount:
+        bridge.nativeSurfaceConsumerInFlightSubmitCount ?? null
     });
     let nativeFenceTimeoutHandle = null;
     let nativeFenceExceededBudget = false;
@@ -30998,13 +34920,20 @@ fn fs_main() -> @location(0) vec4<f32> {
           nativeFenceTimeoutHandle = null;
         }
         const elapsedMs = Math.max(0, nowMs() - startedAtMs);
+        if (nativeConsumerFence) {
+          bridge.nativeSurfaceConsumerInFlightSubmitCount = Math.max(
+            0,
+            Math.round(Number(bridge.nativeSurfaceConsumerInFlightSubmitCount) || 0) - 1
+          );
+          bridge.nativeSurfaceConsumerSubmitFencePending =
+            bridge.nativeSurfaceConsumerInFlightSubmitCount > 0;
+        }
         if (result.status === 'error') {
           const error = result.error;
           const message = error instanceof Error ? error.message : String(error);
           bridge.lastSubmitFenceStatus = 'error';
           bridge.lastSubmitFenceReason = message;
-          if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
-            bridge.nativeSurfaceConsumerSubmitFencePending = false;
+          if (nativeConsumerFence) {
             bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
             bridge.nativeSurfaceConsumerSubmitFenceFailed = true;
             bridge.nativeSurfaceConsumerSubmitFenceReason = message;
@@ -31032,7 +34961,6 @@ fn fs_main() -> @location(0) vec4<f32> {
           : 'resolved';
         bridge.lastSubmitFenceElapsedMs = elapsedMs;
         if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
-          bridge.nativeSurfaceConsumerSubmitFencePending = false;
           bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = elapsedMs;
           bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
           bridge.nativeSurfaceConsumerSubmitFenceFailed = false;
@@ -31040,17 +34968,19 @@ fn fs_main() -> @location(0) vec4<f32> {
           bridge.nativeSurfaceConsumerSubmitFenceReason = nativeFenceExceededBudget
             ? `${reason}; queue completion resolved after exceeding the ${SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS}ms budget`
             : reason;
-          if (
-            bridge.nativeSurfaceConsumerContinuousRaf === true
-            && running
-            && sphResidentSurfaceDrawRenderBridge === bridge
-          ) {
-            scheduleSphNativeWebGpuSurfaceConsumerFrame({
-              reason: nativeFenceExceededBudget
-                ? 'native-webgpu-surface-consumer-after-late-submit-fence'
-                : 'native-webgpu-surface-consumer-after-submit-fence'
-            });
-          }
+        }
+        if (
+          nativeConsumerFence
+          && bridge.nativeSurfaceConsumerContinuousRaf === true
+          && running
+          && sphResidentSurfaceDrawRenderBridge === bridge
+          && nativeSurfaceConsumerFrameAdmission(bridge).accepted
+        ) {
+          scheduleSphNativeWebGpuSurfaceConsumerFrame({
+            reason: nativeFenceExceededBudget
+              ? 'native-webgpu-surface-consumer-after-late-submit-fence'
+              : 'native-webgpu-surface-consumer-after-submit-fence'
+          });
         }
         const resolvedTelemetry = publishFenceSettlement(nativeFenceExceededBudget
           ? 'resident-surface-draw-submit-fence-resolved-after-timeout'
@@ -31059,7 +34989,9 @@ fn fs_main() -> @location(0) vec4<f32> {
           renderStatus,
           elapsedMs,
           exceededTimeoutBudget: nativeFenceExceededBudget,
-          timeoutMs: nativeFenceExceededBudget ? SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS : null
+          timeoutMs: nativeFenceExceededBudget ? SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS : null,
+          nativeSurfaceConsumerInFlightSubmitCount:
+            bridge.nativeSurfaceConsumerInFlightSubmitCount ?? null
         });
         if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
         if (nativeConsumerFence) {
@@ -31230,7 +35162,16 @@ fn fs_main() -> @location(0) vec4<f32> {
     controls.update();
     const rendered = renderSceneFrame({ reason: 'animation-frame' });
     if (rendered) {
-      renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
+      if (
+        sphResidentSurfaceDrawRenderBridge?.rendererBridge
+          === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      ) {
+        scheduleSphNativeWebGpuSurfaceConsumerFrame({
+          reason: 'native-webgpu-surface-consumer-animation-frame'
+        });
+      } else {
+        renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
+      }
     }
     requestAnimationFrame(animate);
   }
@@ -31300,7 +35241,16 @@ fn fs_main() -> @location(0) vec4<f32> {
       const resizeStatus = resize({ reason });
       controls.update();
       const rendered = renderSceneFrame({ reason });
-      if (rendered) renderSphResidentSurfaceDrawOverlay({ reason });
+      if (rendered) {
+        if (
+          sphResidentSurfaceDrawRenderBridge?.rendererBridge
+            === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+        ) {
+          scheduleSphNativeWebGpuSurfaceConsumerFrame({ reason });
+        } else {
+          renderSphResidentSurfaceDrawOverlay({ reason });
+        }
+      }
       const rect = renderer.domElement?.getBoundingClientRect?.();
       const drawingBufferSize = renderer.getDrawingBufferSize?.(new Three.Vector2());
       const status = {
@@ -31454,16 +35404,28 @@ fn fs_main() -> @location(0) vec4<f32> {
     backgroundEnvironmentTexture = null;
     if (sphGpuParticleUpload?.status === 'webgpu-uploaded') destroySphGpuParticleBuffers(sphGpuParticleUpload);
     if (mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded') destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
-    if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
-      destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
-    }
+    clearSphReactionStaticTableUpload({
+      reason: 'sph-phase-scene-dispose-reaction-static-table'
+    });
+    clearSphThermalResponseGraphUpload('sph-phase-scene-dispose-thermal-response');
     if (mlsMpmMechanicsMaterialPhaseUpload?.status === 'webgpu-uploaded') {
       destroyMlsMpmMechanicsMaterialPhaseUpload(mlsMpmMechanicsMaterialPhaseUpload);
     }
     clearMlsMpmResidentExecutionArtifacts();
+    clearAdmittedCoherentSolidDrawEntries({
+      bridge: sphResidentSurfaceDrawRenderBridge,
+      status: 'sph-phase-scene-dispose-coherent-solid-presentation',
+      resetGeneration: true
+    });
     clearSphResidentSurfaceDrawArtifacts();
+    sphResidentFieldGradientSnapshotPool.destroy({ force: true });
+    publishResidentFieldGradientSnapshotPool();
     flushNativeMarchingCubesAdapterCaches('sph-phase-scene-dispose');
+    destroyResidentSparseRenderFieldRuntimePool('sph-phase-scene-dispose');
+    destroyResidentRenderFieldRowsBufferPool('sph-phase-scene-dispose');
+    destroyResidentMaterialInterfaceSourceFieldRowsBufferPool('sph-phase-scene-dispose');
     publishSphResidentMaterialInterfaceState(null);
+    publishSphResidentRenderMaterialInterfaceState(null);
     publishSphResidentPressureInterfaceState(null);
     destroyPressureInterfaceForceRowsUpload();
     if (sphResidentSurfaceDrawRenderBridge?.canvas?.parentNode) {
@@ -32232,6 +36194,9 @@ fn fs_main() -> @location(0) vec4<f32> {
     getSphThermalResponseGraphUpload() {
       return sphThermalResponseGraphUpload;
     },
+    getSphReactionStaticTableUpload() {
+      return sphReactionStaticTableUploadOwner.upload;
+    },
     getMlsMpmMechanicsMaterialTable() {
       return mlsMpmMechanicsMaterialTable;
     },
@@ -32304,6 +36269,9 @@ fn fs_main() -> @location(0) vec4<f32> {
     getSphResidentMaterialInterfaceState() {
       return sphResidentMaterialInterfaceState;
     },
+    getSphResidentRenderMaterialInterfaceState() {
+      return sphResidentRenderMaterialInterfaceState;
+    },
     getSphResidentPressureInterfaceState() {
       return sphResidentPressureInterfaceState;
     },
@@ -32312,6 +36280,13 @@ fn fs_main() -> @location(0) vec4<f32> {
     },
     getSphResidentSurfaceDrawRenderBridge() {
       return sphResidentSurfaceDrawRenderBridge;
+    },
+    setAdmittedCoherentSolidDrawEntries,
+    getAdmittedCoherentSolidDrawEntries() {
+      return admittedCoherentSolidDrawEntries;
+    },
+    getCoherentSolidDrawEntriesAdmission() {
+      return scene.userData.coherentSolidDrawEntriesAdmission || null;
     },
     getWorkerOffscreenPresentation() {
       return currentWorkerOffscreenPresentationStatus();

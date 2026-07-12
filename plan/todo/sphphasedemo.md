@@ -1,7 +1,34 @@
 # SPH Phase Demo Plan - Ice On Molten Iron In A Sealed Box
 
 Date: 2026-06-08 AKDT
-Updated: 2026-06-10 AKDT
+Updated: 2026-07-11 AKDT
+
+## Superseding GPU-Resident Directive - 2026-07-11
+
+The active implementation is the ComputeManager/GPUHub-supervised resident
+WebGPU path. Do not build a CPU mirror/reference solver or use CPU parity as an
+acceptance gate for Schroeder, MLS-MPM, reaction, thermal, optical, or coherent-
+solid work. Validate with manufactured GPU states, mathematical invariants,
+metamorphic same-device executions, compact GPU reductions, and close-spaced
+native compositor frames. Read back fixed-size evidence only.
+
+The production surface is one native WebGPU triangle renderer with packed
+generation-owned normals. Every draw is alpha-one, unblended, and depth
+writing. The native opaque background pass precedes surfaces; dielectric
+refraction requires exact provenance-bearing spectral authority and uses a
+same-encoder `depth32float` rear-surface pass for geometric thickness. The
+current STO-3G RHF/Lorentz-Lorenz molecular response is reduced and
+scientifically unvalidated. Missing authority or valid rear depth fails closed
+to opaque non-refractive PBR.
+
+The renderer now sustains about 60 FPS with at most two submissions in flight,
+and the reaction path no longer uploads 192 MB of host zeros in the 300k
+manufactured case. Complete demo acceptance is still open: parallel product
+placement, redundant-neighborhood removal, exact live-prefix dispatch,
+thermal indexing, persistent workspaces, manufactured thickness/metamorphic
+optics, and the fresh water-cycle/iron-ice/sodium-water/cesium-fluorine/random
+native visual matrix all remain required. Historical CPU/parity and
+transparent-surface notes below are not current acceptance policy.
 
 ## Purpose
 
@@ -25,15 +52,15 @@ ramps, arbitrary material constants, or hard-coded pressure curves. Every
 visible behavior and every material property must come from the closure, field,
 carrier, thermodynamic, radiation, mechanical, and validation chain.
 
-Implementation checkpoint, 2026-06-10 AKDT: the live browser demo now uploads
+Historical implementation checkpoint, 2026-06-10 AKDT: the live browser demo then uploaded
 closure-derived optical lookup rows, SPH particle state/thermo rows, and
 MLS-MPM mechanics rows into WebGPU storage buffers. The mechanics buffer holds
 `F`, `C`, `J`, rest volume, solid flag, and status for each macro-particle.
 It also runs a first WebGPU mechanics prediction kernel from those resident rows
-and accepts the result only after CPU parity. A first gather-form WebGPU P2G
+and accepted the result only after CPU parity. A first gather-form WebGPU P2G
 grid projection now also writes grid mass/momentum rows from those resident
 particles with CPU parity. The next required implementation step is still to
-replace the CPU-authoritative MLS-MPM carrier with WebGPU stress projection,
+replace the then CPU-authoritative MLS-MPM carrier with WebGPU stress projection,
 grid update/contact/wall handling, G2P, and heat/phase kernels.
 
 ## Non-Negotiables
@@ -262,9 +289,12 @@ Renderer rules:
 - Conductive materials must use conductor PBR parameters (`metalness = 1`,
   opaque skin-depth transmission, spectral base color / complex Fresnel
   approximation).
-- Transparent molecular phases must use transmission/refraction plus
-  Beer-Lambert attenuation from the generic molecular spectrum, not a fixed
-  blue water color.
+- Molecular dielectrics must use alpha-one, unblended, depth-writing PBR
+  transmission/refraction plus Beer-Lambert attenuation from the generic
+  molecular spectrum, not framebuffer transparency or a fixed blue water
+  color. Ray bending requires admitted quantum-derived spectral
+  `n(lambda),k(lambda)`; missing response fails closed to opaque
+  non-refractive PBR.
 - Steam/cloud visibility requires a scattering/condensation closure. Pure
   water vapor may remain nearly invisible if the spectrum and phase state say
   so.

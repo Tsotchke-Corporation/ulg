@@ -36,8 +36,31 @@ physics loop is incoherent.
   visual tuning or integrated demo fixes. Use `npm run test:physics-atomics`
   as the current fast gate and extend it whenever a new law group or failure
   class is touched.
+- For Schroeder WebGPU physics, do not create a CPU mirror/reference solver or
+  CPU parity acceptance gate. Use manufactured GPU states, mathematical
+  invariants, metamorphic same-device executions, GPU A/B paths, and fixed-size
+  reductions. Existing historical CPU tools are not the architecture for the
+  resident hot loop.
 
 ## Active Priority Order
+
+Current routing note, 2026-07-11 AKDT: native presentation is again one smooth
+triangle-surface canvas. Packed generation-owned normals, alpha-one unblended
+depth-writing PBR, the native opaque background, exact fail-closed spectral
+authority, same-encoder `depth32float` geometric thickness, and bounded two-in-
+flight pacing are implemented. The accepted screenshots are
+`/tmp/ulg-background-native-after2.png` and
+`/tmp/ulg-thickness-refraction-live2.png`; measured cadence is about 60 FPS.
+These do not close SURF-4/OPTICS until manufactured/metamorphic thickness gates
+and a fresh close-spaced named/random native matrix pass.
+
+The 300k reaction path has removed 192 MB/substep of host zero uploads. Warm
+reactive physics remains about 48-52 ms/substep. P0 order is parallel product
+carrier/placement and elimination of redundant five-word neighborhood builds;
+both are active implementation slices but remain unaccepted. P1 is exact live-
+prefix indirect dispatch, retained/indexed thermal lookup, and persistent
+stage workspaces. No optimization may add a CPU hot-state island, demo/pair
+special case, or scene-local scheduler.
 
 Current routing note, 2026-07-10 AKDT: branch
 `gpu-resident-physics-refactor` starts from the clean SS checkpoint `33c3075`.

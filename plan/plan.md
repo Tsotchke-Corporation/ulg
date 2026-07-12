@@ -1,5 +1,23 @@
 # ULG Implementation Plan
 
+## Trajectory Pause And Handoff - 2026-07-12
+
+- [x] Stop broad refactor expansion before mutation-certificate physics-writer
+  integration.
+- [x] Retain the certificate lane as default-off infrastructure only.
+- [x] Remove stale Vite processes and validate the app and mounted SPH screen
+  against one fresh server.
+- [x] Run focused renderer/optics/lane validation and a production build.
+- [x] Publish the current evidence, rejected artifacts, open risks, and safe
+  restart order in `plan/todo/sol-handoff.md`.
+- [ ] Re-establish the full native surface visual matrix before any further
+  performance or architecture source change.
+
+`plan/todo/sol-handoff.md` is the authoritative restart document for this
+pause. The older detailed checklists below have not yet been fully reconciled
+with the July 12 evidence and must not be treated as current solely from their
+checkbox state.
+
 ## Active Branch - GPU-Resident Physics Refactor
 
 - [x] Create `gpu-resident-physics-refactor` from the clean SS checkpoint
@@ -11,10 +29,34 @@
   reject fallback/no-overlay frames.
 - [x] SURF-2: retire replaced primary and additional surface resources only
   after the relevant native submit fence and validation work settle.
+- [x] SURF-3: make native surface mode the sole main-canvas presenter, suppress
+  the worker particle canvas/stage chain, and reject composed point fallback.
+- [x] PRES-0: render the selected background image inside the native opaque
+  WebGPU pass so it is visible behind surfaces and present in the refraction
+  scene-color copy.
+- [x] PRES-1: replace per-frame whole-queue fence serialization with a bounded
+  two-submission presentation window while retaining fenced resource lifetime.
+- [ ] SURF-4: restore smooth native shading after FIELD-0 by deriving packed
+  per-vertex normals from the sparse atlas in a same-queue post-extraction GPU
+  pass. The normal buffer must share the exact marching-cubes generation and
+  retire behind its native submit fence; never bind a mutable live atlas or
+  rebuild/snapshot a dense field for draw-time normals.
+- [ ] OPTICS-0: remove alpha transparency, blend targets, weighted OIT, and
+  depth-write-disabled surface draws from the production WebGPU surface path.
+  Render dielectric transmission/refraction as an unblended, depth-writing
+  opaque PBR pass over a scene-color copy.
+- [ ] OPTICS-1: admit refraction only from provenance-bearing quantum optical
+  response. Consume spectral `n(lambda), k(lambda)` and derive RGB dispersion;
+  remove material-bank IOR authority and fixed water/gas/compound IOR from the
+  admitted path. Missing quantum response must block ray bending rather than
+  silently substitute a display constant.
 - [x] PROF-0: add optional GPU timestamp-query spans and explicit submit,
   allocation, map, fence, byte, generation, and pixel-liveness evidence.
-- [ ] FIELD-0: replace dense render-field construction with a general sparse
+- [x] FIELD-0: replace dense render-field construction with a general sparse
   algorithm and prove bounded memory/work across the standard matrix.
+- [x] REACT-PERF-0: remove host-created zero arrays and CPU-to-GPU zero uploads
+  from resident reaction outputs; initialize live rows in ordered shaders and
+  clear only compact counters/metadata on the command encoder.
 - [ ] NEIGH-0: establish one persistent resident multiresolution neighborhood
   authority shared by mechanics, thermal, radiation, reaction,
   pressure/interface, and future solid contact.
@@ -30,6 +72,57 @@
   regression suites, build, diff checks, ICC refresh, and branch audit.
 
 Branch goals: `plan/todo/gpu-resident-physics-refactor/README.md`.
+
+Native presentation correction, 2026-07-11 21:10 AKDT: the normal app route
+now resolves the selected native surface presenter before PeerCompute display
+ownership. Native mode uses one main-thread canvas and ComputeManager physics;
+it does not create the worker particle canvas or its duplicate stage chain.
+The mounted one-canvas proof has zero visible Points and 466,033 native
+triangles. A correct three-batch water run keeps sparse generation 1 and the
+native marching-cubes cache resident with 1.4-1.7 ms extraction. Full reactive
+physics is still about 48-52 ms/substep warm, so the performance target remains
+open pending timestamp attribution and removal of fixed-row/serial product
+work. The benchmark must also fail closed when its inner probe is incomplete.
+
+Surface/optics evidence reset, 2026-07-11 21:27 AKDT: the FIELD-0 sparse
+descriptor stopped supplying the dense scalar buffer used by the pre-refactor
+gradient-normal path, so `fieldGradientEnabled=0` made per-triangle face
+normals the effective production path. A live sparse-atlas binding is rejected
+because the atlas is rewritten between generations, recreating the flicker
+fixed by `80dd2f8`. SURF-4 instead owns a packed octahedral normal buffer per
+MC generation (4 bytes/vertex; about 5.6 MB for the observed 1,398,099-vertex
+frame) and computes it immediately after extraction on the same queue.
+
+The optical audit also rejects the current implementation as a basis for a
+first-principles claim. Water/ice/vapor IOR is fixed at
+`1.333/1.309/1.00025`, generic compounds use `1.4`, gases use `1.0005`, warm
+material-bank rows can override closure IOR, the shader bends all channels by
+one scalar, and vapor still uses alpha/OIT. OPTICS-0/1 remain open until those
+routes are removed or fail closed and mounted native evidence proves the new
+opaque spectral path.
+
+Superseding implementation checkpoint, 2026-07-11 23:33 AKDT: the native
+surface now binds 1,398,101 packed normal words for a 1,398,099-vertex surface,
+matches the marching-cubes generation, and adds zero queue submits. Quantum
+spectral admission fails closed on provenance, exact optical state, nonblocked
+status, and distinct blue/green/red coverage. The framebuffer path is alpha
+one, unblended, and depth writing across native surfaces and diagnostic
+proxies. A same-encoder `depth32float` backface pass now supplies geometric
+thickness; the old attenuation-distance displacement, `0.35` scale, and
+`+/-0.15` screen clamps are gone. The first live pass exposed and then fixed a
+missing bind-group validation error. The accepted 960x640 frame has zero
+browser/WebGPU issues, one refractive draw, zero transparent draws, a 2,457,600
+byte backface target, a stable-camera backface cache hit, the restored opaque
+GPU background, and 60.296 FPS. OPTICS-0/1 and SURF-4 remain unchecked until
+their manufactured-state gates and the fresh full production matrix pass.
+
+Physics performance checkpoint, 2026-07-11 23:33 AKDT: a 300k resident
+reaction substep previously created/uploaded 192,000,000 zero bytes for source,
+proposal, output, state, thermo, and mechanics rows. Ordered GPU stages now
+initialize those live rows with `hostZeroInitializationByteLength=0`; only bin
+counts/metadata use `commandEncoder.clearBuffer`. Remaining P0 work is parallel
+product allocation, fewer neighborhood generations, exact live-prefix indirect
+dispatch, and persistent stage workspaces.
 
 ## Current Documentation Target - 2026-07-10 Solver/Law Inventory
 
@@ -135,11 +228,59 @@ ULG surface translation. The benchmark keeps host, submit, fence, map,
 allocation, generation, and pixel-liveness evidence separate and refuses a
 host-timing substitute when GPU timestamps are unsupported.
 
-The active target is `FIELD-0`. Its u32 sparse-brick ABI and fail-closed
-capacity/admission planner are landed, but GPU route fanout, radix/scan/unique,
-brick evaluation, sparse native extraction, and production scene integration
-remain open. The same sort/scan/unique backbone must also serve `NEIGH-0` and
-`SS-0`; do not create independent hash or serial-prefix implementations.
+`FIELD-0` is accepted after the reopened audit. The planner now proves
+wildcard-aware route multiplicity, declared support radius, full
+directory/atlas/candidate capacity, exact direct plus primitive peak bytes,
+and device limits before allocation. One parallel unique-home CSR feeds the
+sparse atlas; producer and marching-cubes consumer share one authority-aware
+isovalue; unexpected overflow or incomplete GPU evidence sets candidate
+indirect X to zero. Production performs no FIELD admission map or dense scalar
+snapshot. `/tmp/ulg-field0-vulkan-native.json` passes with native indirect
+`[10968,1,0,0]`, four surface-varying frames, completed resident execution,
+and zero browser/WebGPU issues. The earlier timestamp range remains useful
+performance characterization, while the up-to-eight predecessor/direct
+activation atomic fanout remains explicit optimization debt.
+
+`SS-0` is reopened after production-consumer review. The shared radix/scan
+runtime and `/tmp/ulg-schroeder-sparse-hierarchy-final.json` still prove exact
+five-word unique nodes, fail-closed overflow, and bounded 300,000-route arenas.
+The current cross-level orchestrator carries that artifact, but the actual P2G
+signature does not consume it to bound mechanics storage/work. Browser tests
+also still expect a host conservation summary even though default readback was
+disabled. Acceptance now requires compact hierarchy consumption by production
+P2G/G2P plus GPU-resident conservation evidence; the third level remains
+rejected.
+
+The active target is `NEIGH-0` plus `LANE-0`: make the neighborhood authority
+persistent and multilevel, bind it to the actual ComputeManager lease and
+source family, rebuild after every position mutation, include pressure and
+reaction consumers, prove peak runtime bytes, and keep candidate-to-force-to-
+grid application on the caller-owned StateManager-admitted lane without a host
+force-row upload.
+
+NEIGH/LANE remediation checkpoint, 2026-07-11 14:09 AKDT: the reusable
+device-local lane pool, exact single-arena peak proof, external GPU per-source
+chart/level/support metadata, post-separation rebuild, and authoritative
+ComputeManager lease/source-family token binding are implemented. The shared
+consumer contract now includes mechanics, contact, thermal, radiation,
+reaction, pressure/interface, and coherent-solid kinematics. A native WebGPU
+probe proves pressure candidate construction and grid force-row application in
+one caller-owned encoder with no local submit, map, or readback. Acceptance
+remains open until the older scene pressure route stops constructing and
+uploading host force rows and the resulting mutation is admitted through the
+production StateManager boundary.
+
+GPU gas/EOS checkpoint, 2026-07-11 16:09 AKDT: the CPU map/decode/reupload
+island between retained reaction product events and pressure cells has a
+same-device replacement. A persistent ComputeManager-identity-bound lane now
+builds spatial keys, stable radix/unique cells, parallel ideal-gas reductions,
+and lookup-indexed gradients into retained 12-float rows plus a compact
+fail-close metadata record. Pressure consumes GPU metadata word 9 as the
+active count and checks device, lane lease, source epoch/generation, capacity,
+status, and zero overflow before lookup. The durable native proof passes
+`12/12` at `/tmp/ulg-sph-spatial-gas-cell-eos-gpu.json`; LANE-0 remains open
+until the SS-owned production task-chain wiring and StateManager admission are
+green in the mounted path.
 
 ## Previous Target - 2026-06-29
 
@@ -3399,3 +3540,84 @@ physics work:
 PeerCompute remains the orchestration authority. Eshkol and MoonLab services do
 not own networking, GPU scheduling, or child worker spawning outside PeerCompute
 leases.
+
+## GPU-Resident Performance Refactor Checkpoint - 2026-07-12 01:24 AKDT
+
+- [x] Remove the mounted scheduler's blanket one-substep cap when the reactive
+  pressure/reaction/product route is available inside one fused encoder. The
+  normal mounted sodium/water configuration now requests its configured `16`
+  substeps instead of silently running `1`.
+- [x] Add a persistent same-device resident sequence workspace with a bounded
+  two-submission window. State, thermo, mechanics, grid, P2G accumulator,
+  updated-grid, thermal, pressure, and exact product-prefix workspaces persist
+  under the ComputeManager lane rather than being recreated per substep.
+- [x] Make source continuity epoch-explicit. Same-epoch work must consume the
+  exact authoritative GPU buffers; a newer epoch waits old submitted work and
+  rebases without reallocating; an older epoch fails closed. The scene resolves
+  a monotonic epoch from both mounted particle-sync and scene execution
+  generations, and the mount rejects stale async preludes before GPU launch.
+- [x] Pool the reaction core scratch across same-encoder substeps, then remove
+  the packed-source and packed-output buffers entirely. The final direct-SoA
+  arena is one proposal row (`16 bytes/particle`, `4.8 MB` at 300k) instead of
+  `432 bytes/particle/substep` (`2.074 GB` of batch allocation pressure at 16
+  steps).
+- [x] Replace the reaction pack/propose/resolve/unpack AoS bridge with direct
+  SoA `propose -> resolve`. The native manufactured gate runs only
+  `bin_particles`, `propose`, and `resolve`, conserves mass, and reports no
+  validation errors, packed buffers, or pack/unpack pipelines.
+- [x] Group ordered radix/scan/unique dispatches into bounded command passes in
+  normal mode while retaining per-stage pass boundaries when timestamp queries
+  are active. A 300k five-word sort+unique now uses `2` compute passes instead
+  of `209`, with the same `209` dispatches and zero redundant histogram clears.
+- [ ] Reduce the resident-neighborhood command graph without skipping required
+  mutation barriers. Reactive pressure + separation currently requires
+  `1 + 3S` exact generations (`49` at `S=16`), and each generation expands into
+  a five-key radix/scan/CSR graph. Candidate solutions must carry a GPU
+  max-displacement/skin proof or replace the sort-based structure.
+  - [x] Select a deterministic direct GPU count/scan/fill CSR builder when a
+    static topology cost model makes it cheaper than radix. At 171 particles
+    the native forced A/B gate is byte-identical and uses `5` dispatches
+    including metadata instead of `132` for radix; overflow still fails closed
+    through indirect `x=0`.
+  - [x] For large radix-built neighborhoods, retain a GPU position reference
+    and gate rebuild shader work from a same-device max-displacement proof
+    using the conservative `2d <= skin` condition. The native sequence records
+    two reuse decisions and one rebuild without particle readback.
+  - [ ] Quantify and reduce the remaining large-N CPU command-template cost.
+    Indirect gates skip shader work, but WebGPU still encodes the ordered radix
+    dispatch sequence; do not claim this portion solved until a normal-mode
+    300k trace shows whether it is material.
+- [x] Retain immutable reaction and thermal binding resources across mounted
+  substeps. One scene-owned reaction upload is keyed by exact device, reaction
+  content signature, thermal upload identity, and thermal provenance; stages
+  borrow it, and replacement/disposal destroys the reaction owner before its
+  borrowed thermal resource. The focused scene/kernel/static suites pass
+  `134/134`.
+- [ ] Make Schroeder sparse-grid capacity proportional to actual unique touched
+  stencil nodes, not `activeTileCount * tileCellCount^3`. At 300k the current
+  planner declares `153.6M` tile-cell invocations and reaches the entire dense
+  `16,777,216`-node domain despite a bounded sparse arena.
+- [ ] Re-run native mounted timestamp profiling after the authority race and
+  reaction workspace changes, then run 300k performance plus the standard
+  time-separated WebGPU surface matrix before claiming the refactor complete.
+
+## Native Refraction Safety Checkpoint - 2026-07-12 03:22 AKDT
+
+- [x] Share projection, unprojection, pixel admission, rear-surface admission,
+  geometric path, and Beer-Lambert transport between the production compact
+  surface shader and the manufactured Vulkan gate. Invalid fragment bounds,
+  missing/clear/unordered rear depth, camera-inside outward-normal orientation,
+  invalid path bounds, behind-camera geometry, and offscreen geometry fail
+  closed before scene-color sampling.
+- [x] Replace independently resized scene-color and back-depth textures with
+  one exact device/size/format target-set generation. Opaque-only frames detach
+  both resources and publish zero active dimensions/bytes; replacement uses the
+  existing nonblocking submit-fence release queue and destroys the retired set
+  exactly once only after both admitted submissions settle.
+- [x] Expand `probe:native-refraction-science` to perspective, DPR 1/DPR 2, and
+  aspect-changing resize roundtrips while preserving one submission and one
+  fixed 512-byte diagnostic map. The accepted artifact passes 52 checks and
+  compiles the production compact surface shader with no validation errors.
+- [ ] Keep SURF-4, OPTICS-0, OPTICS-1, and the refactor completion gate open
+  until the fresh close-spaced native scenario matrix and full timestamp/
+  allocation analysis pass on the integrated mounted path.

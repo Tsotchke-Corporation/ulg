@@ -15,6 +15,7 @@ import {
   waterSaturationPressurePa
 } from '../src/runtime/material/opticalClosure.js';
 import { deriveElementProperties } from '../src/runtime/material/elementClosures.js';
+import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { SPH_PHASE_CLOSURE_SCHEMAS } from '../ulg-gpu-abi/src/index.js';
 
 const fastHeavyOptics = {
@@ -23,6 +24,7 @@ const fastHeavyOptics = {
   maxScf: 100,
   opticalInterbandOptions: { gridPointsN: 420, rMaxBohr: 42, maxScf: 100 }
 };
+const waterProperties = createReferenceMaterialClosures().h2o.properties;
 
 test('a flat unit reflectance integrates to white; flat zero to black', () => {
   const white = spectralResponseToSrgb(() => 1);
@@ -67,6 +69,16 @@ test('optical closure artifact is physically derived but not optically validated
   assert.equal(closure.validation.scientificValidation, false);
 });
 
+test('water without phase-density quantum inputs blocks refraction instead of using a display IOR', () => {
+  clearOpticalRenderParamsCache();
+  const water = opticalRenderParams({ material: 'h2o', phase: 'liquid' });
+  assert.equal(water.refractiveAuthority, false);
+  assert.equal(water.ior, 1);
+  assert.equal(water.transmission, 0);
+  assert.equal(water.refractiveStatus, 'blocked-missing-or-out-of-domain-quantum-response');
+  assert.ok(water.spectralSamples.every((sample) => sample.n == null && sample.k == null));
+});
+
 test('render params are derived from the optics: iron opaque metal, water refracts, vapour barely', () => {
   clearOpticalRenderParamsCache();
   const fe = deriveElementProperties(26, fastHeavyOptics);
@@ -82,20 +94,26 @@ test('render params are derived from the optics: iron opaque metal, water refrac
   assert.ok(iron.spectralSamples.every((sample) => sample.wavelengthNm >= 380 && sample.wavelengthNm <= 780));
   assert.equal(iron.provenance.source, 'scalar-relativistic-kohn-sham-drude-lorentz-skin-depth');
 
-  const water = opticalRenderParams({ material: 'h2o', phase: 'liquid' });
-  assert.ok(Math.abs(water.ior - 1.333) < 1e-6); // refractive index sets IOR
-  assert.ok(water.transmission > 0.8); // clear water mostly transmits
+  const water = opticalRenderParams({ material: 'h2o', phase: 'liquid', properties: waterProperties });
+  assert.equal(water.refractiveAuthority, true);
+  assert.equal(water.refractiveStatus, 'quantum-refractive-response-derived-reduced-unvalidated');
+  assert.equal(water.refractiveProvenance.source, 'rhf-dipole-response-plus-lorentz-lorenz-local-field');
+  assert.ok(water.ior > 1);
+  assert.notEqual(water.ior, 1.333);
+  assert.ok(water.spectralSamples[0].n > water.spectralSamples.at(-1).n);
+  assert.equal(water.transmission, 1); // PBR lobe weight; absorption is spectral k
   assert.ok(water.opacity >= 0 && water.opacity < 0.2);
   assert.equal(water.vertexColorPolicy, 'material-pbr');
-  assert.equal(water.renderModel, 'molecular-transparent-beer-lambert-pbr');
+  assert.equal(water.renderModel, 'molecular-dielectric-beer-lambert-pbr');
   assert.ok(Array.isArray(water.attenuationColor)); // Beer-Lambert tint
   // Blue tint: less attenuation in the blue than the red over the path.
   assert.ok(water.attenuationColor[2] >= water.attenuationColor[0]);
   assert.ok(water.attenuationDistanceM > 0);
 
-  const steam = opticalRenderParams({ material: 'steam' });
+  const steam = opticalRenderParams({ material: 'h2o', phase: 'gas', properties: waterProperties });
+  assert.equal(steam.refractiveAuthority, true);
   assert.ok(steam.ior < 1.01); // vapour barely refracts (n ~ 1)
-  assert.ok(steam.transmission > water.transmission); // pure vapour is optically thinner than liquid
+  assert.equal(steam.transmission, 1);
   assert.equal(steam.condensationScatter, 0);
 
   const air = opticalRenderParams({
@@ -105,10 +123,12 @@ test('render params are derived from the optics: iron opaque metal, water refrac
     properties: { phases: [{ name: 'gas', densityKgPerM3: 1.225 }] }
   });
   assert.equal(air.vertexColorPolicy, 'material-pbr');
-  assert.equal(air.renderModel, 'gas-rayleigh-transparent-pbr');
+  assert.equal(air.renderModel, 'gas-rayleigh-scattering-pbr');
   assert.equal(air.blocked, undefined);
-  assert.ok(air.ior > 1 && air.ior < 1.001);
-  assert.ok(air.transmission > 0.999);
+  assert.equal(air.ior, 1);
+  assert.equal(air.transmission, 0);
+  assert.equal(air.refractiveAuthority, false);
+  assert.equal(air.refractiveStatus, 'blocked-missing-quantum-optical-response');
   assert.ok(air.opacity > 0 && air.opacity < 0.001);
   assert.ok(air.baseColorSrgb.every((value) => value > 0.8));
   assert.ok(air.spectralSamples.some((sample) => sample.scatteringCoefficientPerM > 0));
@@ -128,6 +148,7 @@ test('supersaturated water vapor derives visible droplet scattering without chan
   const pureVapor = opticalRenderParams({
     material: 'h2o',
     phase: 'gas',
+    properties: waterProperties,
     pathLengthM: 1,
     opticalState: {
       temperatureK,
@@ -138,6 +159,7 @@ test('supersaturated water vapor derives visible droplet scattering without chan
   const condensedSteam = opticalRenderParams({
     material: 'h2o',
     phase: 'gas',
+    properties: waterProperties,
     pathLengthM: 1,
     opticalState: {
       temperatureK,
@@ -152,13 +174,13 @@ test('supersaturated water vapor derives visible droplet scattering without chan
     pathLengthM: 1
   });
 
-  assert.equal(pureVapor.renderModel, 'molecular-vapor-transparent-spectrum');
+  assert.equal(pureVapor.renderModel, 'molecular-vapor-volume-spectrum');
   assert.equal(pureVapor.condensationScatter, 0);
-  assert.ok(pureVapor.transmission > 0.95);
+  assert.equal(pureVapor.transmission, 1);
   assert.equal(condensedSteam.renderModel, 'molecular-condensed-droplet-scattering-pbr');
   assert.ok(condensedSteam.condensationScatter > 0);
   assert.ok(condensedSteam.opacity > pureVapor.opacity);
-  assert.ok(condensedSteam.transmission < pureVapor.transmission);
+  assert.equal(condensedSteam.transmission, 1);
   assert.equal(pureVapor.dropletMicrophysics.status, 'subsaturated-pure-vapor');
   assert.equal(condensedSteam.dropletMicrophysics.status, 'supersaturated-condensed-droplets');
   assert.ok(Math.abs(condensedSteam.dropletMicrophysics.condensedMassFraction - microphysics.condensedMassFraction) < 1e-12);
@@ -167,6 +189,7 @@ test('supersaturated water vapor derives visible droplet scattering without chan
   const largerDroplets = opticalRenderParams({
     material: 'h2o',
     phase: 'gas',
+    properties: waterProperties,
     pathLengthM: 1,
     opticalState: {
       temperatureK,
@@ -180,6 +203,7 @@ test('supersaturated water vapor derives visible droplet scattering without chan
   const reread = opticalRenderParams({
     material: 'h2o',
     phase: 'gas',
+    properties: waterProperties,
     pathLengthM: 1,
     opticalState: {
       temperatureK,
@@ -207,10 +231,10 @@ test('gold opacity is derived from conductor skin depth, not a generic transluce
 
 test('optical render params are cached but returned as caller-safe clones', () => {
   clearOpticalRenderParamsCache();
-  const first = opticalRenderParams({ material: 'h2o', phase: 'liquid' });
+  const first = opticalRenderParams({ material: 'h2o', phase: 'liquid', properties: waterProperties });
   first.baseColorSrgb[0] = 0;
   first.spectralSamples[0].reflectance = 99;
-  const second = opticalRenderParams({ material: 'h2o', phase: 'liquid' });
+  const second = opticalRenderParams({ material: 'h2o', phase: 'liquid', properties: waterProperties });
   assert.notEqual(second.spectralSamples[0].reflectance, 99);
   assert.ok(second.baseColorSrgb[0] > 0);
 });

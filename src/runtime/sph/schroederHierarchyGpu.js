@@ -150,16 +150,42 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import {
+  cloneMlsMpmParticleStateForNext,
+  cloneSphParticleStateForNext,
   createSchroederParticleStorageAdoption,
+  destroyMlsMpmResidentStepBuffers,
   reactionOutputMutatesParticles,
   retainedReactionOutputBuffers,
   runMlsMpmResidentStepWithOptionalWebGpu
 } from './sphMlsMpmGpuStep.js';
 import { runSphReactionStepWebGpu } from './sphReactionGpuKernel.js';
 import { runSphThermalStepWebGpu } from './sphThermalGpuKernel.js';
-import { runSchroederParticleStorageCountSummaryWebGpu } from './schroederParticleStorageCountGpu.js';
-import { runSchroederParticleStorageCompactionWebGpu } from './schroederParticleStorageCompactionGpu.js';
+import {
+  encodeSchroederParticleStorageCountSummaryWebGpu,
+  runSchroederParticleStorageCountSummaryWebGpu
+} from './schroederParticleStorageCountGpu.js';
+import {
+  encodeSchroederParticleStorageCompactionWebGpu,
+  runSchroederParticleStorageCompactionWebGpu
+} from './schroederParticleStorageCompactionGpu.js';
+import {
+  createSchroederParticleStorageResidencyAdoptionCandidate
+} from './schroederParticleStorageAdoptionGpu.js';
+import {
+  attachSchroederParticleCountResidencyToUpload,
+  dispatchSchroederParticleWorkgroups,
+  resolveSchroederParticleCountResidency,
+  schroederParticleCountResidencyPublicFields,
+  schroederParticleIterationCapacity
+} from './schroederParticleCountResidencyGpu.js';
 import { runSchroederTwoLevelMechanicsStepWebGpu } from './schroederCrossLevelCouplingGpu.js';
+import {
+  SCHROEDER_SPARSE_HIERARCHY_DEFAULT_MAX_TILES_PER_SOURCE,
+  SCHROEDER_SPARSE_HIERARCHY_DEFAULT_RETAINED_ARENA_BYTES,
+  SCHROEDER_SPARSE_HIERARCHY_DEFAULT_SCRATCH_ARENA_BYTES,
+  createSchroederSparseHierarchyArenaPlan,
+  createSchroederSparseHierarchyGpu
+} from './schroederSparseHierarchyGpu.js';
 import { createMlsMpmGridSpec, runMlsMpmP2gGridProjectionWebGpu } from './sphGridGpuKernel.js';
 import { runMlsMpmGridUpdateWebGpu } from './sphGridUpdateGpuKernel.js';
 import { runMlsMpmG2pWebGpu } from './sphG2pGpuKernel.js';
@@ -571,9 +597,373 @@ const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
 
+function withSchroederHierarchyParticleCountResidencyGuard(
+  source,
+  metadataBinding,
+  label
+) {
+  const marker = `@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {`;
+  if (!source.includes(marker)) {
+    throw new Error(`Unable to build ${label} resident-count shader; missing particle guard`);
+  }
+  return source.replace(
+    marker,
+    `@group(0) @binding(${metadataBinding}) var<storage, read> particle_count_residency_metadata: array<u32>;
+
+fn schroeder_resident_particle_count() -> u32 {
+  if (arrayLength(&particle_count_residency_metadata) < 16u) {
+    return 0u;
+  }
+  let active_count = particle_count_residency_metadata[4];
+  let capacity = particle_count_residency_metadata[6];
+  let valid = particle_count_residency_metadata[0] == 0x53535052u
+    && particle_count_residency_metadata[1] == 1u
+    && particle_count_residency_metadata[2] == 1u
+    && particle_count_residency_metadata[3] == 2u
+    && particle_count_residency_metadata[9] == 0u
+    && capacity == params.particle_count
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= schroeder_resident_particle_count()) {`
+  );
+}
+
+function requiredParticleCountResidencyReplacement(source, search, replacement, label) {
+  if (!source.includes(search)) {
+    throw new Error(`Unable to build ${label} resident-count shader`);
+  }
+  return source.replace(search, replacement);
+}
+
+function withSchroederLawQueueParticleCountResidencyGuard(source) {
+  return requiredParticleCountResidencyReplacement(
+    source,
+    `@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.active_node_count) {`,
+    `@group(0) @binding(3) var<storage, read> particle_count_residency_metadata: array<u32>;
+
+fn schroeder_law_queue_active_count() -> u32 {
+  if (arrayLength(&particle_count_residency_metadata) < 16u) {
+    return 0u;
+  }
+  let active_count = particle_count_residency_metadata[4];
+  let capacity = particle_count_residency_metadata[6];
+  let valid = particle_count_residency_metadata[0] == 0x53535052u
+    && particle_count_residency_metadata[1] == 1u
+    && particle_count_residency_metadata[2] == 1u
+    && particle_count_residency_metadata[3] == 2u
+    && particle_count_residency_metadata[9] == 0u
+    && capacity == params.active_node_count
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= schroeder_law_queue_active_count()) {`,
+    'law queue'
+  );
+}
+
+function withSchroederLawNeighborParticleCountResidencyGuard(source) {
+  let guarded = source
+    .replaceAll('params.law_queue_count', 'schroeder_neighbor_active_count()')
+    .replaceAll('params.active_node_count', 'schroeder_neighbor_active_count()')
+    .replaceAll('params.particle_count', 'schroeder_neighbor_active_count()');
+  const mainStart = `@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let candidate_index = global_id.x;
+  let candidate_budget = max(params.candidate_budget, 1u);
+  let candidate_count = schroeder_neighbor_active_count() * candidate_budget;
+  if (candidate_index >= candidate_count) {
+    return;
+  }
+  ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_CANDIDATE_INVOCATIONS, 1u);`;
+  guarded = requiredParticleCountResidencyReplacement(
+    guarded,
+    mainStart,
+    `fn schroeder_neighbor_process_candidate(candidate_index: u32, candidate_budget: u32) {
+  ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_CANDIDATE_INVOCATIONS, 1u);`,
+    'law-neighbor candidate worker'
+  );
+  const selectionStart = guarded.indexOf('  var selected_active_index = schroeder_neighbor_active_count();');
+  const selectionEnd = guarded.indexOf('  var matched_count = 0u;', selectionStart);
+  if (selectionStart < 0 || selectionEnd < 0) {
+    throw new Error('Unable to build exact-scan law-neighbor resident-count shader');
+  }
+  guarded = `${guarded.slice(0, selectionStart)}  var selected_active_index = schroeder_neighbor_active_count();
+  let fallback_target_slot = candidate_slot;
+${guarded.slice(selectionEnd)}`;
+  guarded = requiredParticleCountResidencyReplacement(
+    guarded,
+    `        active_index != source_active_index
+        && !ss_neighbor_sorted_index_contains(queue_offset, active_index)
+        && !ss_neighbor_active_index_contains(queue_offset, active_index)`,
+    '        active_index != source_active_index',
+    'law-neighbor exact scan'
+  );
+  const workerMarker = 'fn schroeder_neighbor_process_candidate';
+  const helper = `fn schroeder_neighbor_active_count() -> u32 {
+  if (arrayLength(&active_node_index_bucket_slots) < 16u) {
+    return 0u;
+  }
+  let active_count = active_node_index_bucket_slots[4];
+  let capacity = active_node_index_bucket_slots[6];
+  let valid = active_node_index_bucket_slots[0] == 0x53535052u
+    && active_node_index_bucket_slots[1] == 1u
+    && active_node_index_bucket_slots[2] == 1u
+    && active_node_index_bucket_slots[3] == 2u
+    && active_node_index_bucket_slots[9] == 0u
+    && capacity == params.law_queue_count
+    && capacity == params.active_node_count
+    && capacity == params.particle_count
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+`;
+  guarded = requiredParticleCountResidencyReplacement(
+    guarded,
+    workerMarker,
+    `${helper}${workerMarker}`,
+    'law-neighbor active count helper'
+  );
+  return `${guarded}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let queue_row_index = global_id.x;
+  let active_count = schroeder_neighbor_active_count();
+  if (queue_row_index >= active_count) {
+    return;
+  }
+  let candidate_budget = max(params.candidate_budget, 1u);
+  for (var candidate_slot = 0u; candidate_slot < candidate_budget; candidate_slot = candidate_slot + 1u) {
+    schroeder_neighbor_process_candidate(
+      queue_row_index * candidate_budget + candidate_slot,
+      candidate_budget
+    );
+  }
+}
+`;
+}
+
+function withSchroederCandidateCountResidencyGuard({
+  source,
+  metadataBinding,
+  countField,
+  indexName,
+  label
+}) {
+  const guard = `if (${indexName} >= params.${countField}) {`;
+  if (!source.includes(guard)) {
+    throw new Error(`Unable to build ${label} resident-count shader; missing candidate guard`);
+  }
+  const computeMarker = '@compute @workgroup_size(64)';
+  const helper = `@group(0) @binding(${metadataBinding}) var<storage, read> particle_count_residency_metadata: array<u32>;
+
+fn schroeder_candidate_active_count() -> u32 {
+  if (arrayLength(&particle_count_residency_metadata) < 16u) {
+    return 0u;
+  }
+  let active_count = particle_count_residency_metadata[4];
+  let capacity = particle_count_residency_metadata[6];
+  let valid = particle_count_residency_metadata[0] == 0x53535052u
+    && particle_count_residency_metadata[1] == 1u
+    && particle_count_residency_metadata[2] == 1u
+    && particle_count_residency_metadata[3] == 2u
+    && particle_count_residency_metadata[9] == 0u
+    && capacity == params.${countField}
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+`;
+  return source
+    .replace(computeMarker, `${helper}${computeMarker}`)
+    .replace(guard, `if (${indexName} >= schroeder_candidate_active_count()) {`);
+}
+
+function withSchroederConservationCountResidencyGuard(source) {
+  const condition = 'if (particle_index < params.candidate_count) {';
+  if (!source.includes(condition)) {
+    throw new Error('Unable to build conservation-summary resident-count shader');
+  }
+  const computeMarker = '@compute @workgroup_size(64)';
+  const helper = `@group(0) @binding(3) var<storage, read> particle_count_residency_metadata: array<u32>;
+
+fn schroeder_conservation_active_count() -> u32 {
+  if (arrayLength(&particle_count_residency_metadata) < 16u) {
+    return 0u;
+  }
+  let active_count = particle_count_residency_metadata[4];
+  let capacity = particle_count_residency_metadata[6];
+  let valid = particle_count_residency_metadata[0] == 0x53535052u
+    && particle_count_residency_metadata[1] == 1u
+    && particle_count_residency_metadata[2] == 1u
+    && particle_count_residency_metadata[3] == 2u
+    && particle_count_residency_metadata[9] == 0u
+    && capacity == params.candidate_count
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+`;
+  return source
+    .replace(computeMarker, `${helper}${computeMarker}`)
+    .replace(condition, 'if (particle_index < schroeder_conservation_active_count()) {');
+}
+
+function withSchroederAggregateNodeCountResidencyGuard(source) {
+  const computeMarker = '@compute @workgroup_size(64)';
+  if (!source.includes(computeMarker) || !source.includes('params.row_count')) {
+    throw new Error('Unable to build hierarchy aggregate-node resident-count shader');
+  }
+  const helper = `@group(0) @binding(3) var<storage, read> particle_count_residency_metadata: array<u32>;
+
+fn schroeder_aggregate_node_active_count() -> u32 {
+  if (arrayLength(&particle_count_residency_metadata) < 16u) {
+    return 0u;
+  }
+  let active_count = particle_count_residency_metadata[4];
+  let capacity = particle_count_residency_metadata[6];
+  let valid = particle_count_residency_metadata[0] == 0x53535052u
+    && particle_count_residency_metadata[1] == 1u
+    && particle_count_residency_metadata[2] == 1u
+    && particle_count_residency_metadata[3] == 2u
+    && particle_count_residency_metadata[9] == 0u
+    && capacity == params.row_count
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+`;
+  const guardedSource = source.replaceAll(
+    'params.row_count',
+    'schroeder_aggregate_node_active_count()'
+  );
+  return guardedSource.replace(computeMarker, `${helper}${computeMarker}`);
+}
+
+export const schroederHierarchyParticleCountResidencyWgsl = Object.freeze({
+  levelAssignment: withSchroederHierarchyParticleCountResidencyGuard(
+    schroederLevelAssignmentWgsl,
+    5,
+    'level assignment'
+  ),
+  activeNodeList: withSchroederHierarchyParticleCountResidencyGuard(
+    schroederActiveNodeListWgsl,
+    5,
+    'active node list'
+  ),
+  lawQueue: withSchroederLawQueueParticleCountResidencyGuard(
+    schroederLawQueueWgsl
+  ),
+  lawNeighborCandidate: withSchroederLawNeighborParticleCountResidencyGuard(
+    schroederLawNeighborCandidateWgsl
+  ),
+  crossLevelCoupling: withSchroederHierarchyParticleCountResidencyGuard(
+    schroederCrossLevelCouplingWgsl,
+    4,
+    'cross-level coupling'
+  ),
+  conservationSummary: withSchroederConservationCountResidencyGuard(
+    schroederConservationSummaryWgsl
+  ),
+  crossLevelTransfer: withSchroederCandidateCountResidencyGuard({
+    source: schroederCrossLevelTransferWgsl,
+    metadataBinding: 4,
+    countField: 'candidate_count',
+    indexName: 'candidate_index',
+    label: 'cross-level transfer'
+  }),
+  crossLevelStateDelta: withSchroederCandidateCountResidencyGuard({
+    source: schroederCrossLevelStateDeltaWgsl,
+    metadataBinding: 3,
+    countField: 'candidate_count',
+    indexName: 'candidate_index',
+    label: 'cross-level state delta'
+  }),
+  phaseVolumeTargetAggregate: withSchroederHierarchyParticleCountResidencyGuard(
+    schroederPhaseVolumeTargetAggregateWgsl,
+    5,
+    'phase-volume target aggregate'
+  ),
+  hierarchyAggregateNode: withSchroederAggregateNodeCountResidencyGuard(
+    schroederHierarchyAggregateNodeReduceWgsl
+  ),
+  phaseVolumeMigration: withSchroederHierarchyParticleCountResidencyGuard(
+    schroederPhaseVolumeMigrationWgsl,
+    5,
+    'phase-volume migration'
+  )
+});
+
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function rejectUnsupportedSchroederParticleCountResidency({
+  artifact,
+  stage,
+  supportedRoute
+}) {
+  if (!resolveSchroederParticleCountResidency({ artifact })) return;
+  const error = new RangeError(
+    `${stage} does not accept GPU-authored particle counts; ${supportedRoute}`
+  );
+  error.code = 'ULG_SCHROEDER_PARTICLE_COUNT_RESIDENCY_STAGE_UNSUPPORTED';
+  error.stage = stage;
+  error.supportedRoute = supportedRoute;
+  throw error;
+}
+
+function compactComputeManagerLaneIdentity(identity = null) {
+  if (!identity || typeof identity !== 'object') return null;
+  const compact = {
+    schema: identity.schema ?? null,
+    authoritative: identity.authoritative === true,
+    leaseId: identity.leaseId ?? null,
+    laneId: identity.laneId ?? null,
+    stateKey: identity.stateKey ?? null,
+    sourceFamily: identity.sourceFamily ?? null,
+    domainKey: identity.domainKey ?? null,
+    solverId: identity.solverId ?? null,
+    taskId: identity.taskId ?? null,
+    owner: identity.owner ?? null
+  };
+  compact.ready = compact.authoritative
+    && [compact.leaseId, compact.laneId, compact.stateKey, compact.sourceFamily, compact.taskId]
+      .every((value) => typeof value === 'string' && value.length > 0);
+  return compact;
+}
+
+function destroyParticleStorageResidencyCandidateUnlessPreserved(step, preserveBuffers = []) {
+  const candidate = step?.schroederParticleStorageResidencyAdoptionCandidate ?? null;
+  if (!candidate || typeof candidate.destroy !== 'function') return;
+  const preserved = preserveBuffers instanceof Set
+    ? preserveBuffers
+    : new Set((preserveBuffers || []).filter(Boolean));
+  const candidateBuffers = [
+    candidate.stateBuffer,
+    candidate.thermoBuffer,
+    candidate.mechanicsBuffer,
+    candidate.residencyMetadataBuffer,
+    candidate.residencyDispatchIndirectBuffer
+  ].filter(Boolean);
+  if (candidateBuffers.some((buffer) => preserved.has(buffer))) return;
+  candidate.destroy();
 }
 
 function nextPowerOfTwo(value) {
@@ -701,12 +1091,12 @@ function assertPackedInputs({ sphParticleState, mlsMpmParticleState }) {
   }
 }
 
-function writeStorageBuffer(device, label, data) {
+function writeStorageBuffer(device, label, data, extraUsage = 0) {
   const byteLength = Math.max(4, data.byteLength);
   const buffer = device.createBuffer({
     label,
     size: byteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
@@ -749,6 +1139,7 @@ export function estimateSchroederLevelDeltaForVolumeRatio(volumeRatio) {
 
 export function createSchroederLevelAssignmentParamsArray({
   particleCount = 0,
+  particleRowCapacity = null,
   minLevel = DEFAULT_MIN_LEVEL,
   maxLevel = DEFAULT_MAX_LEVEL,
   baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
@@ -763,7 +1154,10 @@ export function createSchroederLevelAssignmentParamsArray({
 } = {}) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(
+    particleRowCapacity ?? particleCount,
+    0
+  ))), true);
   view.setInt32(4, Math.round(finiteNumber(minLevel, DEFAULT_MIN_LEVEL)), true);
   view.setInt32(8, Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)), true);
   view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
@@ -781,6 +1175,7 @@ export function createSchroederLevelAssignmentParamsArray({
 export function createSchroederLevelAssignmentPlan({
   sphParticleState,
   mlsMpmParticleState,
+  particleRowCapacity = null,
   baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
   minLevel = DEFAULT_MIN_LEVEL,
   maxLevel = DEFAULT_MAX_LEVEL,
@@ -794,9 +1189,14 @@ export function createSchroederLevelAssignmentPlan({
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const particleCount = sphParticleState.particleCount;
+  const resolvedParticleRowCapacity = Math.max(
+    particleCount,
+    Math.round(finiteNumber(particleRowCapacity, particleCount))
+  );
   const assignmentByteLength = Math.max(
     4,
-    particleCount * SCHROEDER_LEVEL_ASSIGNMENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    resolvedParticleRowCapacity
+      * SCHROEDER_LEVEL_ASSIGNMENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
   return {
     schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
@@ -805,6 +1205,8 @@ export function createSchroederLevelAssignmentPlan({
     dataStructure: 'schroeder-tree',
     kernelScope: SCHROEDER_LEVEL_ASSIGNMENT_SCOPE,
     particleCount,
+    particleRowCapacity: resolvedParticleRowCapacity,
+    authoritativeParticleCount: particleRowCapacity == null ? particleCount : null,
     minLevel: Math.round(finiteNumber(minLevel, DEFAULT_MIN_LEVEL)),
     maxLevel: Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)),
     baseGridSpacingM: finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M),
@@ -830,6 +1232,7 @@ export function createSchroederLevelAssignmentPlan({
 
 export function createSchroederActiveNodeParamsArray({
   particleCount = 0,
+  particleRowCapacity = null,
   tileCellCount = DEFAULT_TILE_CELL_COUNT,
   supportInflateCells = DEFAULT_SUPPORT_INFLATE_CELLS,
   minTileSpacingM = 0,
@@ -842,7 +1245,10 @@ export function createSchroederActiveNodeParamsArray({
 } = {}) {
   const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(
+    particleRowCapacity ?? particleCount,
+    0
+  ))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(tileCellCount, DEFAULT_TILE_CELL_COUNT))), true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
   view.setUint32(12, 0, true);
@@ -954,6 +1360,7 @@ export function createSchroederActiveNodeSortedIndexParamsArray({
 
 export function createSchroederLawQueueParamsArray({
   activeNodeCount = 0,
+  activeNodeRowCapacity = null,
   activeNodeStrideFloats = SCHROEDER_ACTIVE_NODE_FLOATS,
   lawQueueStrideFloats = SCHROEDER_LAW_QUEUE_FLOATS,
   flags = 0,
@@ -964,7 +1371,10 @@ export function createSchroederLawQueueParamsArray({
 } = {}) {
   const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(activeNodeCount, 0))), true);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(
+    activeNodeRowCapacity ?? activeNodeCount,
+    0
+  ))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(
     activeNodeStrideFloats,
     SCHROEDER_ACTIVE_NODE_FLOATS
@@ -988,6 +1398,7 @@ export function createSchroederLawNeighborCandidateParamsArray({
   lawQueueCount = 0,
   activeNodeCount = 0,
   particleCount = 0,
+  particleRowCapacity = null,
   lawQueueStrideFloats = SCHROEDER_LAW_QUEUE_FLOATS,
   activeNodeStrideFloats = SCHROEDER_ACTIVE_NODE_FLOATS,
   neighborCandidateStrideFloats = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
@@ -1006,9 +1417,19 @@ export function createSchroederLawNeighborCandidateParamsArray({
 } = {}) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(lawQueueCount, 0))), true);
-  view.setUint32(4, Math.max(0, Math.round(finiteNumber(activeNodeCount, 0))), true);
-  view.setUint32(8, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  const rowCapacity = Math.max(0, Math.round(finiteNumber(
+    particleRowCapacity ?? Math.max(lawQueueCount, activeNodeCount, particleCount),
+    0
+  )));
+  view.setUint32(0, particleRowCapacity == null
+    ? Math.max(0, Math.round(finiteNumber(lawQueueCount, 0)))
+    : rowCapacity, true);
+  view.setUint32(4, particleRowCapacity == null
+    ? Math.max(0, Math.round(finiteNumber(activeNodeCount, 0)))
+    : rowCapacity, true);
+  view.setUint32(8, particleRowCapacity == null
+    ? Math.max(0, Math.round(finiteNumber(particleCount, 0)))
+    : rowCapacity, true);
   view.setUint32(12, Math.max(1, Math.round(finiteNumber(
     lawQueueStrideFloats,
     SCHROEDER_LAW_QUEUE_FLOATS
@@ -1491,6 +1912,7 @@ export function createSchroederFarAggregateForceApplicationParamsArray({
 
 export function createSchroederCrossLevelCouplingParamsArray({
   particleCount = 0,
+  particleRowCapacity = null,
   maxLevel = DEFAULT_MAX_LEVEL,
   parentLevelDelta = 1,
   baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
@@ -1502,7 +1924,10 @@ export function createSchroederCrossLevelCouplingParamsArray({
 } = {}) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(
+    particleRowCapacity ?? particleCount,
+    0
+  ))), true);
   view.setInt32(4, Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)), true);
   view.setInt32(8, Math.max(1, Math.round(finiteNumber(parentLevelDelta, 1))), true);
   view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
@@ -1519,13 +1944,17 @@ export function createSchroederCrossLevelCouplingParamsArray({
 
 export function createSchroederConservationSummaryParamsArray({
   crossLevelCandidateCount = 0,
+  crossLevelCandidateRowCapacity = null,
   crossLevelStrideFloats = SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
   summaryStrideFloats = SCHROEDER_CONSERVATION_SUMMARY_FLOATS,
   flags = 0
 } = {}) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(crossLevelCandidateCount, 0))), true);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(
+    crossLevelCandidateRowCapacity ?? crossLevelCandidateCount,
+    0
+  ))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(
     crossLevelStrideFloats,
     SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS
@@ -1540,6 +1969,7 @@ export function createSchroederConservationSummaryParamsArray({
 
 export function createSchroederCrossLevelTransferParamsArray({
   crossLevelCandidateCount = 0,
+  crossLevelCandidateRowCapacity = null,
   crossLevelStrideFloats = SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
   stateStrideFloats = SPH_GPU_PARTICLE_STATE_FLOATS,
   transferStrideFloats = SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
@@ -1547,7 +1977,10 @@ export function createSchroederCrossLevelTransferParamsArray({
 } = {}) {
   const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(crossLevelCandidateCount, 0))), true);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(
+    crossLevelCandidateRowCapacity ?? crossLevelCandidateCount,
+    0
+  ))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(
     crossLevelStrideFloats,
     SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS
@@ -1569,13 +2002,17 @@ export function createSchroederCrossLevelTransferParamsArray({
 
 export function createSchroederCrossLevelStateDeltaParamsArray({
   crossLevelCandidateCount = 0,
+  crossLevelCandidateRowCapacity = null,
   transferStrideFloats = SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
   stateDeltaStrideFloats = SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS,
   flags = 0
 } = {}) {
   const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
-  view.setUint32(0, Math.max(0, Math.round(finiteNumber(crossLevelCandidateCount, 0))), true);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(
+    crossLevelCandidateRowCapacity ?? crossLevelCandidateCount,
+    0
+  ))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(
     transferStrideFloats,
     SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS
@@ -3857,6 +4294,14 @@ export function createSchroederActiveNodeListPlan({
   });
   const overlaySummary = summarizeSchroederPhaseVolumeAssignmentOverlay(resolvedPhaseVolumeAssignmentOverlay);
   const particleCount = Math.max(0, Math.round(finiteNumber(levelAssignment.particleCount, 0)));
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: levelAssignment
+  });
+  const particleRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      particleCount,
+      Math.round(finiteNumber(levelAssignment.particleRowCapacity, particleCount))
+    );
   if (phaseVolumeAssignmentOverlayIndex) {
     assertPhaseVolumeAssignmentOverlayIndexInput(phaseVolumeAssignmentOverlayIndex, particleCount);
   }
@@ -3872,7 +4317,7 @@ export function createSchroederActiveNodeListPlan({
         : overlaySummary.consumerStatus);
   const activeNodeByteLength = Math.max(
     4,
-    particleCount * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    particleRowCapacity * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
   return {
     schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
@@ -3913,6 +4358,8 @@ export function createSchroederActiveNodeListPlan({
     sourcePhaseVolumeLevelUpdateSchema: overlaySummary.sourcePhaseVolumeLevelUpdateSchema ?? null,
     sourcePhaseVolumeLevelUpdateStatus: overlaySummary.sourcePhaseVolumeLevelUpdateStatus ?? null,
     particleCount,
+    particleRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : particleCount,
     activeCandidateCount: particleCount,
     selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
     tileCellCount: Math.max(1, Math.round(finiteNumber(tileCellCount, DEFAULT_TILE_CELL_COUNT))),
@@ -4031,6 +4478,14 @@ export function createSchroederLawQueuePlan({
     activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
     0
   )));
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: activeNodeList
+  });
+  const activeNodeRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      activeNodeCount,
+      Math.round(finiteNumber(activeNodeList.particleRowCapacity, activeNodeCount))
+    );
   const resolvedLawMask = Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK)));
   const lawFamilies = [];
   if ((resolvedLawMask & SCHROEDER_LOCAL_LAW_REACTION_MASK) !== 0) lawFamilies.push('reaction');
@@ -4038,7 +4493,7 @@ export function createSchroederLawQueuePlan({
   if ((resolvedLawMask & SCHROEDER_LOCAL_LAW_INTERFACE_MASK) !== 0) lawFamilies.push('interface');
   const lawQueueByteLength = Math.max(
     4,
-    activeNodeCount * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    activeNodeRowCapacity * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
   return {
     schema: ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
@@ -4049,6 +4504,9 @@ export function createSchroederLawQueuePlan({
     sourceActiveNodeSchema: activeNodeList.schema,
     sourceActiveNodeStatus: activeNodeList.status ?? null,
     activeNodeCount,
+    activeNodeRowCapacity,
+    particleRowCapacity: activeNodeRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : activeNodeCount,
     activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
     lawQueueRowLayout: [...SCHROEDER_LAW_QUEUE_ROW_LAYOUT],
     lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
@@ -4111,6 +4569,17 @@ export function createSchroederLawNeighborCandidatePlan({
     activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
     0
   )));
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload: lawQueue,
+    mlsMpmParticleUpload: activeNodeList,
+    artifact: sphParticleUpload
+  });
+  const particleRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      resolvedParticleCount,
+      lawQueue.activeNodeRowCapacity ?? lawQueue.particleRowCapacity ?? lawQueueCount,
+      activeNodeList.particleRowCapacity ?? activeNodeCount
+    );
   const activeNodeIndexEnabled = Boolean(activeNodeIndex);
   const activeNodeSortedIndexEnabled = Boolean(activeNodeSortedIndex);
   const activeNodeIndexActiveNodeCount = activeNodeIndexEnabled
@@ -4145,12 +4614,17 @@ export function createSchroederLawNeighborCandidatePlan({
     DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET
   )));
   const resolvedLawMask = Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK)));
-  const neighborCandidateCount = lawQueueCount * resolvedCandidateBudget;
+  const neighborCandidateRowCapacity = particleRowCapacity * resolvedCandidateBudget;
+  const neighborCandidateCount = particleCountResidency
+    ? neighborCandidateRowCapacity
+    : lawQueueCount * resolvedCandidateBudget;
   const neighborCandidateByteLength = Math.max(
     4,
     neighborCandidateCount * SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
-  const sourceCandidateSpanCount = resolvedParticleCount;
+  const sourceCandidateSpanCount = particleCountResidency
+    ? particleRowCapacity
+    : resolvedParticleCount;
   const sourceCandidateSpanByteLength = Math.max(
     4,
     sourceCandidateSpanCount * SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS * Float32Array.BYTES_PER_ELEMENT
@@ -4172,6 +4646,8 @@ export function createSchroederLawNeighborCandidatePlan({
     sourceActiveNodeSortedIndexSchema: activeNodeSortedIndex?.schema ?? null,
     sourceActiveNodeSortedIndexStatus: activeNodeSortedIndex?.status ?? null,
     particleCount: resolvedParticleCount,
+    particleRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : resolvedParticleCount,
     lawQueueCount,
     activeNodeCount,
     activeNodeIndexEnabled,
@@ -4184,6 +4660,7 @@ export function createSchroederLawNeighborCandidatePlan({
     lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
     activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
     neighborCandidateCount,
+    neighborCandidateRowCapacity,
     neighborCandidateRowLayout: [...SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT],
     neighborCandidateStrideFloats: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
     neighborCandidateStrideBytes: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
@@ -4272,9 +4749,20 @@ export function createSchroederCrossLevelCouplingPlan({
   assertLevelAssignmentInput(levelAssignment);
   const particleCount = Math.max(0, Math.round(finiteNumber(levelAssignment.particleCount, 0)));
   assertActiveNodeListInput(activeNodeList, particleCount);
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload: levelAssignment,
+    mlsMpmParticleUpload: activeNodeList
+  });
+  const particleRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      particleCount,
+      Math.round(finiteNumber(levelAssignment.particleRowCapacity, particleCount)),
+      Math.round(finiteNumber(activeNodeList.particleRowCapacity, particleCount))
+    );
   const crossLevelByteLength = Math.max(
     4,
-    particleCount * SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    particleRowCapacity
+      * SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
   return {
     schema: ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
@@ -4287,7 +4775,10 @@ export function createSchroederCrossLevelCouplingPlan({
     sourceActiveNodeSchema: activeNodeList.schema,
     sourceActiveNodeStatus: activeNodeList.status ?? null,
     particleCount,
+    particleRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : particleCount,
     crossLevelCandidateCount: particleCount,
+    crossLevelCandidateRowCapacity: particleRowCapacity,
     parentLevelDelta: Math.max(1, Math.round(finiteNumber(parentLevelDelta, 1))),
     maxLevel: Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)),
     baseGridSpacingM: finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M),
@@ -4320,9 +4811,21 @@ export function createSchroederCrossLevelTransferPlan({
   assertCrossLevelCouplingInput(crossLevelCoupling);
   assertSphParticleStateInput(sphParticleState);
   const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelCoupling.crossLevelCandidateCount, 0)));
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: crossLevelCoupling
+  });
+  const candidateRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      candidateCount,
+      Math.round(finiteNumber(
+        crossLevelCoupling.crossLevelCandidateRowCapacity,
+        candidateCount
+      ))
+    );
   const transferByteLength = Math.max(
     4,
-    candidateCount * SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    candidateRowCapacity
+      * SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
   return {
     schema: ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
@@ -4334,6 +4837,9 @@ export function createSchroederCrossLevelTransferPlan({
     sourceCrossLevelStatus: crossLevelCoupling.status ?? null,
     sourceParticleSchema: sphParticleState.schema,
     crossLevelCandidateCount: candidateCount,
+    crossLevelCandidateRowCapacity: candidateRowCapacity,
+    particleRowCapacity: candidateRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : candidateCount,
     crossLevelStrideFloats: SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     transferRowLayout: [...SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT],
@@ -4354,9 +4860,21 @@ export function createSchroederCrossLevelStateDeltaPlan({
 } = {}) {
   assertCrossLevelTransferInput(crossLevelTransfer);
   const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelTransfer.crossLevelCandidateCount, 0)));
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: crossLevelTransfer
+  });
+  const candidateRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      candidateCount,
+      Math.round(finiteNumber(
+        crossLevelTransfer.crossLevelCandidateRowCapacity,
+        candidateCount
+      ))
+    );
   const stateDeltaByteLength = Math.max(
     4,
-    candidateCount * SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    candidateRowCapacity
+      * SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
   return {
     schema: ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_SCHEMA,
@@ -4367,6 +4885,9 @@ export function createSchroederCrossLevelStateDeltaPlan({
     sourceTransferSchema: crossLevelTransfer.schema,
     sourceTransferStatus: crossLevelTransfer.status ?? null,
     crossLevelCandidateCount: candidateCount,
+    crossLevelCandidateRowCapacity: candidateRowCapacity,
+    particleRowCapacity: candidateRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : candidateCount,
     transferStrideFloats: SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
     stateDeltaRowLayout: [...SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT],
     stateDeltaStrideFloats: SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS,
@@ -4496,7 +5017,18 @@ export function createSchroederPhaseVolumeTargetAggregatePlan({
   stateFamilyId = 1
 } = {}) {
   assertLevelAssignmentInput(levelAssignment);
-  const aggregateRowCount = Math.max(0, Math.round(finiteNumber(levelAssignment.particleCount, 0)));
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: levelAssignment
+  });
+  const sourceParticleCount = Math.max(
+    0,
+    Math.round(finiteNumber(levelAssignment.particleCount, 0))
+  );
+  const aggregateRowCount = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      sourceParticleCount,
+      Math.round(finiteNumber(levelAssignment.particleRowCapacity, sourceParticleCount))
+    );
   const aggregateByteLength = Math.max(
     4,
     aggregateRowCount * SCHROEDER_HIERARCHY_AGGREGATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
@@ -4510,7 +5042,10 @@ export function createSchroederPhaseVolumeTargetAggregatePlan({
     sourceAssignmentSchema: levelAssignment.schema,
     sourceAssignmentStatus: levelAssignment.status ?? null,
     aggregateSourceMode: 'phase-volume-target-level-assignment',
+    sourceParticleCount,
     aggregateRowCount,
+    particleRowCapacity: aggregateRowCount,
+    authoritativeParticleCount: particleCountResidency ? null : sourceParticleCount,
     assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
     aggregateRowLayout: [...SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT],
     aggregateStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
@@ -5556,14 +6091,24 @@ export function createSchroederPhaseVolumeMigrationPlan({
 } = {}) {
   assertLevelAssignmentInput(levelAssignment);
   assertHierarchyAggregateNodeInput(hierarchyAggregateNode);
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: levelAssignment
+  });
   const particleCount = Math.max(0, Math.round(finiteNumber(levelAssignment.particleCount, 0)));
+  const particleRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      particleCount,
+      Math.round(finiteNumber(levelAssignment.particleRowCapacity, particleCount))
+    );
   const aggregateNodeCount = Math.max(0, Math.round(finiteNumber(
     hierarchyAggregateNode.aggregateNodeCount ?? hierarchyAggregateNode.aggregateRowCount,
     0
   )));
   const migrationByteLength = Math.max(
     4,
-    particleCount * SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    particleRowCapacity
+      * SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
   );
   return {
     schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
@@ -5576,6 +6121,8 @@ export function createSchroederPhaseVolumeMigrationPlan({
     sourceHierarchyAggregateNodeSchema: hierarchyAggregateNode.schema,
     sourceHierarchyAggregateNodeStatus: hierarchyAggregateNode.status ?? null,
     particleCount,
+    particleRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : particleCount,
     aggregateNodeCount,
     minLevel: Math.round(finiteNumber(minLevel, DEFAULT_MIN_LEVEL)),
     maxLevel: Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)),
@@ -6476,11 +7023,22 @@ export function createSchroederConservationSummaryPlan({
 } = {}) {
   assertCrossLevelCouplingInput(crossLevelCoupling);
   const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelCoupling.crossLevelCandidateCount, 0)));
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: crossLevelCoupling
+  });
+  const candidateRowCapacity = particleCountResidency?.outputParticleCapacity
+    ?? Math.max(
+      candidateCount,
+      Math.round(finiteNumber(
+        crossLevelCoupling.crossLevelCandidateRowCapacity,
+        candidateCount
+      ))
+    );
   const workgroupSize = Math.max(1, Math.round(finiteNumber(
     summaryWorkgroupSize,
     SCHROEDER_CONSERVATION_SUMMARY_WORKGROUP_SIZE
   )));
-  const summaryRowCount = Math.max(1, Math.ceil(candidateCount / workgroupSize));
+  const summaryRowCount = Math.max(1, Math.ceil(candidateRowCapacity / workgroupSize));
   const summaryByteLength = Math.max(
     4,
     summaryRowCount * SCHROEDER_CONSERVATION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT
@@ -6494,6 +7052,9 @@ export function createSchroederConservationSummaryPlan({
     sourceCrossLevelSchema: crossLevelCoupling.schema,
     sourceCrossLevelStatus: crossLevelCoupling.status ?? null,
     crossLevelCandidateCount: candidateCount,
+    crossLevelCandidateRowCapacity: candidateRowCapacity,
+    particleRowCapacity: candidateRowCapacity,
+    authoritativeParticleCount: particleCountResidency ? null : candidateCount,
     crossLevelStrideFloats: SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
     summaryRowLayout: [...SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT],
     summaryStrideFloats: SCHROEDER_CONSERVATION_SUMMARY_FLOATS,
@@ -7062,9 +7623,25 @@ export async function runSchroederLevelAssignmentWebGpu({
     throw new TypeError('runSchroederLevelAssignmentWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const particleRowCapacity = schroederParticleIterationCapacity({
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError(
+      'GPU-authored Schroeder level-assignment count requires no-full-readback execution'
+    );
+  }
   const plan = createSchroederLevelAssignmentPlan({
     sphParticleState,
     mlsMpmParticleState,
+    particleRowCapacity,
     baseGridSpacingM,
     minLevel,
     maxLevel,
@@ -7080,6 +7657,14 @@ export async function runSchroederLevelAssignmentWebGpu({
   const borrowedStateBuffer = optionalSourceStateBuffer(sphParticleUpload);
   const borrowedThermoBuffer = optionalSourceThermoBuffer(sphParticleUpload);
   const borrowedMechanicsBuffer = optionalSourceMechanicsBuffer(mlsMpmParticleUpload);
+  if (
+    particleCountResidency
+    && (!borrowedStateBuffer || !borrowedThermoBuffer || !borrowedMechanicsBuffer)
+  ) {
+    throw new TypeError(
+      'GPU-authored Schroeder level assignment requires complete retained particle buffers'
+    );
+  }
   const stateBuffer = borrowedStateBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-level-sph-state-in', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer
@@ -7112,12 +7697,17 @@ export async function runSchroederLevelAssignmentWebGpu({
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'read-only-storage'),
       computeBufferBinding(3, 'storage'),
-      computeBufferBinding(4, 'uniform')
+      computeBufferBinding(4, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(5, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-level-assignment.v0',
+      cacheKey: `ulg-schroeder-level-assignment.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-level-assignment',
-      code: schroederLevelAssignmentWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.levelAssignment
+        : schroederLevelAssignmentWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -7128,14 +7718,24 @@ export async function runSchroederLevelAssignmentWebGpu({
         { binding: 1, resource: { buffer: thermoBuffer } },
         { binding: 2, resource: { buffer: mechanicsBuffer } },
         { binding: 3, resource: { buffer: assignmentBuffer } },
-        { binding: 4, resource: { buffer: paramsBuffer } }
+        { binding: 4, resource: { buffer: paramsBuffer } },
+        ...(particleCountResidency
+          ? [{
+              binding: 5,
+              resource: { buffer: particleCountResidency.metadataBuffer }
+            }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(plan.particleCount / SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE)));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.particleCount,
+      workgroupSize: SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(assignmentBuffer, 0, readBuffer, 0, plan.assignmentByteLength);
@@ -7172,6 +7772,14 @@ export async function runSchroederLevelAssignmentWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.particleCount },
+        particleCountResidency
+      )
+    );
     if (retainAssignmentBuffer) {
       result.assignmentBuffer = assignmentBuffer;
       result.destroyAssignmentBuffer = () => assignmentBuffer.destroy?.();
@@ -7228,6 +7836,19 @@ export async function runSchroederActiveNodeListWebGpu({
     minTileSpacingM,
     maxTileSpacingM
   });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: levelAssignment
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError(
+      'GPU-authored active-node count requires no-full-readback execution'
+    );
+  }
+  if (particleCountResidency && plan.phaseVolumeAssignmentOverlayEnabled) {
+    throw new Error(
+      'GPU-authored active-node count requires a count-resident phase-volume overlay'
+    );
+  }
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedAssignmentBuffer = levelAssignment?.assignmentBuffer || null;
   const assignmentRows = levelAssignment?.assignments instanceof Float32Array
@@ -7293,12 +7914,17 @@ export async function runSchroederActiveNodeListWebGpu({
       computeBufferBinding(1, 'storage'),
       computeBufferBinding(2, 'uniform'),
       computeBufferBinding(3, 'read-only-storage'),
-      computeBufferBinding(4, 'storage')
+      computeBufferBinding(4, 'storage'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(5, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-active-node-list.v2',
+      cacheKey: `ulg-schroeder-active-node-list.${particleCountResidency ? 'resident-count.v3' : 'v2'}`,
       label: 'ulg-schroeder-active-node-list',
-      code: schroederActiveNodeListWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.activeNodeList
+        : schroederActiveNodeListWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -7309,14 +7935,24 @@ export async function runSchroederActiveNodeListWebGpu({
         { binding: 1, resource: { buffer: activeNodeBuffer } },
         { binding: 2, resource: { buffer: paramsBuffer } },
         { binding: 3, resource: { buffer: phaseVolumeAssignmentOverlayBuffer } },
-        { binding: 4, resource: { buffer: phaseVolumeAssignmentOverlayIndexBuffer } }
+        { binding: 4, resource: { buffer: phaseVolumeAssignmentOverlayIndexBuffer } },
+        ...(particleCountResidency
+          ? [{
+              binding: 5,
+              resource: { buffer: particleCountResidency.metadataBuffer }
+            }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(plan.particleCount / SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE)));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.particleCount,
+      workgroupSize: SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(activeNodeBuffer, 0, readBuffer, 0, plan.activeNodeByteLength);
@@ -7374,6 +8010,14 @@ export async function runSchroederActiveNodeListWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.particleCount },
+        particleCountResidency
+      )
+    );
     if (retainActiveNodeBuffer) {
       result.activeNodeBuffer = activeNodeBuffer;
       result.destroyActiveNodeBuffer = () => activeNodeBuffer.destroy?.();
@@ -7566,6 +8210,11 @@ export async function runSchroederActiveNodeIndexWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederActiveNodeIndexWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: activeNodeList,
+    stage: 'Schroeder active-node bucket index',
+    supportedRoute: 'use the count-resident exact-scan law-neighbor route'
+  });
   const plan = createSchroederActiveNodeIndexPlan({
     activeNodeList,
     bucketCount,
@@ -7784,6 +8433,11 @@ export async function runSchroederActiveNodeSortedIndexWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederActiveNodeSortedIndexWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: activeNodeList,
+    stage: 'Schroeder sorted active-node radix index',
+    supportedRoute: 'use the count-resident exact-scan law-neighbor route'
+  });
   const plan = createSchroederActiveNodeSortedIndexPlan({
     activeNodeList,
     bucketCount
@@ -8060,6 +8714,12 @@ export async function runSchroederLawQueueWebGpu({
     queueEpoch,
     stateFamilyId
   });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: activeNodeList
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError('GPU-authored law-queue count requires no-full-readback execution');
+  }
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedActiveNodeBuffer = activeNodeList?.activeNodeBuffer || null;
   const activeNodeRows = activeNodeList?.activeNodes instanceof Float32Array
@@ -8094,12 +8754,17 @@ export async function runSchroederLawQueueWebGpu({
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
-      computeBufferBinding(2, 'uniform')
+      computeBufferBinding(2, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(3, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-law-queue.v0',
+      cacheKey: `ulg-schroeder-law-queue.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-law-queue',
-      code: schroederLawQueueWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.lawQueue
+        : schroederLawQueueWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -8108,14 +8773,24 @@ export async function runSchroederLawQueueWebGpu({
       entries: [
         { binding: 0, resource: { buffer: activeNodeBuffer } },
         { binding: 1, resource: { buffer: lawQueueBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        ...(particleCountResidency
+          ? [{
+              binding: 3,
+              resource: { buffer: particleCountResidency.metadataBuffer }
+            }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(plan.activeNodeCount / SCHROEDER_LAW_QUEUE_WORKGROUP_SIZE)));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.activeNodeCount,
+      workgroupSize: SCHROEDER_LAW_QUEUE_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(lawQueueBuffer, 0, readBuffer, 0, plan.lawQueueByteLength);
@@ -8158,6 +8833,14 @@ export async function runSchroederLawQueueWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.activeNodeCount },
+        particleCountResidency
+      )
+    );
     if (retainLawQueueBuffer) {
       result.lawQueueBuffer = lawQueueBuffer;
       result.destroyLawQueueBuffer = () => lawQueueBuffer.destroy?.();
@@ -8217,6 +8900,21 @@ export async function runSchroederLawNeighborCandidateWebGpu({
     candidateBudget,
     enabledLawMask
   });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload: lawQueue,
+    mlsMpmParticleUpload: activeNodeList,
+    artifact: sphParticleUpload
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError(
+      'GPU-authored law-neighbor count requires no-full-readback execution'
+    );
+  }
+  if (particleCountResidency && (activeNodeIndex || activeNodeSortedIndex)) {
+    throw new Error(
+      'GPU-authored law-neighbor count currently requires exact-scan traversal'
+    );
+  }
   const compactDiagnosticReadback = readbackMode === SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE;
   const fullCandidateReadback = readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE && !compactDiagnosticReadback;
   const noFullReadback = !fullCandidateReadback;
@@ -8323,12 +9021,12 @@ export async function runSchroederLawNeighborCandidateWebGpu({
   const neighborCandidateBuffer = device.createBuffer({
     label: 'ulg-schroeder-law-neighbor-candidates-out',
     size: plan.neighborCandidateByteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
   const sourceCandidateSpanBuffer = device.createBuffer({
     label: 'ulg-schroeder-law-neighbor-source-spans-out',
     size: plan.sourceCandidateSpanByteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
   const diagnosticCounterBuffer = device.createBuffer({
     label: 'ulg-schroeder-law-neighbor-diagnostic-counters',
@@ -8377,13 +9075,21 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       computeBufferBinding(5, 'uniform'),
       computeBufferBinding(6, 'read-only-storage'),
       computeBufferBinding(7, 'storage'),
-      computeBufferBinding(8, 'read-only-storage'),
-      computeBufferBinding(9, 'read-only-storage')
+      ...(particleCountResidency
+        ? []
+        : [
+            computeBufferBinding(8, 'read-only-storage'),
+            computeBufferBinding(9, 'read-only-storage')
+          ])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-law-neighbor-candidates.active-node-traversal.v5',
+      cacheKey: particleCountResidency
+        ? 'ulg-schroeder-law-neighbor-candidates.resident-count-exact-scan.v1'
+        : 'ulg-schroeder-law-neighbor-candidates.active-node-traversal.v5',
       label: 'ulg-schroeder-law-neighbor-candidates',
-      code: schroederLawNeighborCandidateWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.lawNeighborCandidate
+        : schroederLawNeighborCandidateWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -8396,20 +9102,35 @@ export async function runSchroederLawNeighborCandidateWebGpu({
         { binding: 3, resource: { buffer: neighborCandidateBuffer } },
         { binding: 4, resource: { buffer: sourceCandidateSpanBuffer } },
         { binding: 5, resource: { buffer: paramsBuffer } },
-        { binding: 6, resource: { buffer: activeNodeIndexBucketSlotBuffer } },
+        {
+          binding: 6,
+          resource: {
+            buffer: particleCountResidency?.metadataBuffer
+              ?? activeNodeIndexBucketSlotBuffer
+          }
+        },
         { binding: 7, resource: { buffer: diagnosticCounterBuffer } },
-        { binding: 8, resource: { buffer: activeNodeSortedIndexBucketRangeOffsetBuffer } },
-        { binding: 9, resource: { buffer: activeNodeSortedIndexActiveIndexBuffer } }
+        ...(particleCountResidency
+          ? []
+          : [
+              { binding: 8, resource: { buffer: activeNodeSortedIndexBucketRangeOffsetBuffer } },
+              { binding: 9, resource: { buffer: activeNodeSortedIndexActiveIndexBuffer } }
+            ])
       ]
     });
     const encoder = device.createCommandEncoder();
+    if (particleCountResidency) {
+      encoder.clearBuffer(neighborCandidateBuffer);
+      encoder.clearBuffer(sourceCandidateSpanBuffer);
+    }
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(
-      1,
-      Math.ceil(plan.neighborCandidateCount / SCHROEDER_LAW_NEIGHBOR_CANDIDATE_WORKGROUP_SIZE)
-    ));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.neighborCandidateCount,
+      workgroupSize: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_WORKGROUP_SIZE
+    });
     pass.end();
     if (fullCandidateReadback) {
       encoder.copyBufferToBuffer(
@@ -8518,6 +9239,14 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.particleCount },
+        particleCountResidency
+      )
+    );
     const traversalPolicy = createSchroederLawNeighborTraversalPolicy({
       lawNeighborCandidates: result,
       traversalPolicyMode,
@@ -8611,6 +9340,15 @@ export async function runSchroederCrossLevelCouplingWebGpu({
     maxCouplingRadiusM,
     tileCellCount
   });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload: levelAssignment,
+    mlsMpmParticleUpload: activeNodeList
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError(
+      'GPU-authored cross-level count requires no-full-readback execution'
+    );
+  }
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedAssignmentBuffer = levelAssignment?.assignmentBuffer || null;
   const assignmentRows = levelAssignment?.assignments instanceof Float32Array
@@ -8655,12 +9393,17 @@ export async function runSchroederCrossLevelCouplingWebGpu({
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(4, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-cross-level-coupling.v0',
+      cacheKey: `ulg-schroeder-cross-level-coupling.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-cross-level-coupling',
-      code: schroederCrossLevelCouplingWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.crossLevelCoupling
+        : schroederCrossLevelCouplingWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -8670,17 +9413,24 @@ export async function runSchroederCrossLevelCouplingWebGpu({
         { binding: 0, resource: { buffer: assignmentBuffer } },
         { binding: 1, resource: { buffer: activeNodeBuffer } },
         { binding: 2, resource: { buffer: crossLevelBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
+        { binding: 3, resource: { buffer: paramsBuffer } },
+        ...(particleCountResidency
+          ? [{
+              binding: 4,
+              resource: { buffer: particleCountResidency.metadataBuffer }
+            }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(
-      1,
-      Math.ceil(plan.particleCount / SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE)
-    ));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.particleCount,
+      workgroupSize: SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(crossLevelBuffer, 0, readBuffer, 0, plan.crossLevelByteLength);
@@ -8716,6 +9466,14 @@ export async function runSchroederCrossLevelCouplingWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.particleCount },
+        particleCountResidency
+      )
+    );
     if (retainCrossLevelBuffer) {
       result.crossLevelBuffer = crossLevelBuffer;
       result.destroyCrossLevelBuffer = () => crossLevelBuffer.destroy?.();
@@ -8748,6 +9506,14 @@ export async function runSchroederConservationSummaryWebGpu({
     throw new TypeError('runSchroederConservationSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   const plan = createSchroederConservationSummaryPlan({ crossLevelCoupling });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: crossLevelCoupling
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError(
+      'GPU-authored conservation count requires no-full-readback execution'
+    );
+  }
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedCrossLevelBuffer = crossLevelCoupling?.crossLevelBuffer || null;
   const crossLevelRows = crossLevelCoupling?.crossLevelCouplings instanceof Float32Array
@@ -8782,12 +9548,17 @@ export async function runSchroederConservationSummaryWebGpu({
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
-      computeBufferBinding(2, 'uniform')
+      computeBufferBinding(2, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(3, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-conservation-summary.v0',
+      cacheKey: `ulg-schroeder-conservation-summary.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-conservation-summary',
-      code: schroederConservationSummaryWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.conservationSummary
+        : schroederConservationSummaryWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -8796,14 +9567,24 @@ export async function runSchroederConservationSummaryWebGpu({
       entries: [
         { binding: 0, resource: { buffer: crossLevelBuffer } },
         { binding: 1, resource: { buffer: summaryBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        ...(particleCountResidency
+          ? [{
+              binding: 3,
+              resource: { buffer: particleCountResidency.metadataBuffer }
+            }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(plan.summaryRowCount);
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.crossLevelCandidateCount,
+      workgroupSize: plan.summaryWorkgroupSize
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, plan.summaryByteLength);
@@ -8843,6 +9624,14 @@ export async function runSchroederConservationSummaryWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.crossLevelCandidateCount },
+        particleCountResidency
+      )
+    );
     if (retainSummaryBuffer) {
       result.summaryBuffer = summaryBuffer;
       result.destroySummaryBuffer = () => summaryBuffer.destroy?.();
@@ -8876,6 +9665,15 @@ export async function runSchroederCrossLevelTransferWebGpu({
     throw new TypeError('runSchroederCrossLevelTransferWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   const plan = createSchroederCrossLevelTransferPlan({ crossLevelCoupling, sphParticleState });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    artifact: crossLevelCoupling
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError(
+      'GPU-authored cross-level transfer count requires no-full-readback execution'
+    );
+  }
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedCrossLevelBuffer = crossLevelCoupling?.crossLevelBuffer || null;
   const crossLevelRows = crossLevelCoupling?.crossLevelCouplings instanceof Float32Array
@@ -8885,6 +9683,11 @@ export async function runSchroederCrossLevelTransferWebGpu({
     throw new TypeError('Schroeder cross-level transfer requires a retained cross-level buffer or explicit rows');
   }
   const borrowedStateBuffer = optionalSourceStateBuffer(sphParticleUpload);
+  if (particleCountResidency && !borrowedStateBuffer) {
+    throw new TypeError(
+      'GPU-authored cross-level transfer count requires a retained particle state buffer'
+    );
+  }
   const crossLevelBuffer = borrowedCrossLevelBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-transfer-cross-level-in', crossLevelRows);
   const stateBuffer = borrowedStateBuffer
@@ -8914,12 +9717,17 @@ export async function runSchroederCrossLevelTransferWebGpu({
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(4, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-cross-level-transfer.v0',
+      cacheKey: `ulg-schroeder-cross-level-transfer.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-cross-level-transfer',
-      code: schroederCrossLevelTransferWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.crossLevelTransfer
+        : schroederCrossLevelTransferWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -8929,17 +9737,24 @@ export async function runSchroederCrossLevelTransferWebGpu({
         { binding: 0, resource: { buffer: crossLevelBuffer } },
         { binding: 1, resource: { buffer: stateBuffer } },
         { binding: 2, resource: { buffer: transferBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
+        { binding: 3, resource: { buffer: paramsBuffer } },
+        ...(particleCountResidency
+          ? [{
+              binding: 4,
+              resource: { buffer: particleCountResidency.metadataBuffer }
+            }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(
-      1,
-      Math.ceil(plan.crossLevelCandidateCount / SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE)
-    ));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.crossLevelCandidateCount,
+      workgroupSize: SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(transferBuffer, 0, readBuffer, 0, plan.transferByteLength);
@@ -8979,6 +9794,14 @@ export async function runSchroederCrossLevelTransferWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.crossLevelCandidateCount },
+        particleCountResidency
+      )
+    );
     if (retainTransferBuffer) {
       result.transferBuffer = transferBuffer;
       result.destroyTransferBuffer = () => transferBuffer.destroy?.();
@@ -9011,6 +9834,14 @@ export async function runSchroederCrossLevelStateDeltaWebGpu({
     throw new TypeError('runSchroederCrossLevelStateDeltaWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   const plan = createSchroederCrossLevelStateDeltaPlan({ crossLevelTransfer });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: crossLevelTransfer
+  });
+  if (particleCountResidency && readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+    throw new RangeError(
+      'GPU-authored cross-level state-delta count requires no-full-readback execution'
+    );
+  }
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedTransferBuffer = crossLevelTransfer?.transferBuffer || null;
   const transferRows = crossLevelTransfer?.transferRows instanceof Float32Array
@@ -9045,12 +9876,17 @@ export async function runSchroederCrossLevelStateDeltaWebGpu({
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
-      computeBufferBinding(2, 'uniform')
+      computeBufferBinding(2, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(3, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-cross-level-state-delta.v0',
+      cacheKey: `ulg-schroeder-cross-level-state-delta.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-cross-level-state-delta',
-      code: schroederCrossLevelStateDeltaWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.crossLevelStateDelta
+        : schroederCrossLevelStateDeltaWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -9059,17 +9895,24 @@ export async function runSchroederCrossLevelStateDeltaWebGpu({
       entries: [
         { binding: 0, resource: { buffer: transferBuffer } },
         { binding: 1, resource: { buffer: stateDeltaBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        ...(particleCountResidency
+          ? [{
+              binding: 3,
+              resource: { buffer: particleCountResidency.metadataBuffer }
+            }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(
-      1,
-      Math.ceil(plan.crossLevelCandidateCount / SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE)
-    ));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.crossLevelCandidateCount,
+      workgroupSize: SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(stateDeltaBuffer, 0, readBuffer, 0, plan.stateDeltaByteLength);
@@ -9110,6 +9953,14 @@ export async function runSchroederCrossLevelStateDeltaWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.crossLevelCandidateCount },
+        particleCountResidency
+      )
+    );
     if (retainStateDeltaBuffer) {
       result.stateDeltaBuffer = stateDeltaBuffer;
       result.destroyStateDeltaBuffer = () => stateDeltaBuffer.destroy?.();
@@ -9142,6 +9993,11 @@ export async function runSchroederCrossLevelStateDeltaMergeWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederCrossLevelStateDeltaMergeWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: crossLevelStateDelta,
+    stage: 'Schroeder cross-level state-delta merge',
+    supportedRoute: 'retain the count-resident state-delta artifact until a count-resident merge reducer is selected'
+  });
   const plan = createSchroederCrossLevelStateDeltaMergePlan({
     crossLevelStateDelta,
     stateDeltaMergeAdmission,
@@ -9441,6 +10297,10 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederPhaseVolumeTargetAggregateWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    artifact: levelAssignment
+  });
   const plan = createSchroederPhaseVolumeTargetAggregatePlan({
     levelAssignment,
     baseGridSpacingM,
@@ -9454,6 +10314,11 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
     stateFamilyId
   });
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  if (particleCountResidency && !noFullReadback) {
+    throw new RangeError(
+      'GPU-authored phase-volume target aggregation requires no-full-readback execution'
+    );
+  }
   const borrowedAssignmentBuffer = levelAssignment?.assignmentBuffer || null;
   const assignmentRows = levelAssignment?.assignments instanceof Float32Array
     ? levelAssignment.assignments
@@ -9461,24 +10326,36 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   if (!borrowedAssignmentBuffer && !(assignmentRows instanceof Float32Array)) {
     throw new TypeError('Schroeder phase-volume target aggregate requires a retained assignment buffer or explicit rows');
   }
-  const assignmentBuffer = borrowedAssignmentBuffer
-    || writeStorageBuffer(device, 'ulg-schroeder-phase-volume-target-aggregate-assignment-in', assignmentRows);
   const borrowedStateBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
     ? sphParticleUpload.stateBuffer
     : null;
   const stateRows = sphParticleState?.state instanceof Float32Array ? sphParticleState.state : null;
   const stateProvided = Boolean(borrowedStateBuffer || stateRows);
+  const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
+    ? sphParticleUpload.thermoBuffer
+    : null;
+  const thermoRows = sphParticleState?.thermo instanceof Float32Array ? sphParticleState.thermo : null;
+  const thermoProvided = Boolean(borrowedThermoBuffer || thermoRows);
+  if (
+    particleCountResidency
+    && (!borrowedAssignmentBuffer || !borrowedStateBuffer || !borrowedThermoBuffer)
+  ) {
+    throw new TypeError(
+      'GPU-authored phase-volume target aggregation requires complete retained assignment and particle buffers'
+    );
+  }
+  const assignmentBuffer = borrowedAssignmentBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-phase-volume-target-aggregate-assignment-in',
+      assignmentRows
+    );
   const stateBuffer = borrowedStateBuffer
     || writeStorageBuffer(
       device,
       'ulg-schroeder-phase-volume-target-aggregate-state-in',
       stateRows || new Float32Array(SPH_GPU_PARTICLE_STATE_FLOATS)
     );
-  const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
-    ? sphParticleUpload.thermoBuffer
-    : null;
-  const thermoRows = sphParticleState?.thermo instanceof Float32Array ? sphParticleState.thermo : null;
-  const thermoProvided = Boolean(borrowedThermoBuffer || thermoRows);
   const thermoBuffer = borrowedThermoBuffer
     || writeStorageBuffer(
       device,
@@ -9489,6 +10366,7 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
     label: 'ulg-schroeder-phase-volume-target-aggregate-out',
     size: plan.aggregateByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      | (particleCountResidency ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const paramsArray = createSchroederPhaseVolumeTargetAggregateParamsArray({
     ...plan,
@@ -9516,12 +10394,17 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
       computeBufferBinding(1, 'storage'),
       computeBufferBinding(2, 'uniform'),
       computeBufferBinding(3, 'read-only-storage'),
-      computeBufferBinding(4, 'read-only-storage')
+      computeBufferBinding(4, 'read-only-storage'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(5, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-phase-volume-target-aggregate.v2',
+      cacheKey: `ulg-schroeder-phase-volume-target-aggregate.${particleCountResidency ? 'resident-count.v1' : 'v2'}`,
       label: 'ulg-schroeder-phase-volume-target-aggregate',
-      code: schroederPhaseVolumeTargetAggregateWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.phaseVolumeTargetAggregate
+        : schroederPhaseVolumeTargetAggregateWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -9532,17 +10415,29 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
         { binding: 1, resource: { buffer: aggregateBuffer } },
         { binding: 2, resource: { buffer: paramsBuffer } },
         { binding: 3, resource: { buffer: stateBuffer } },
-        { binding: 4, resource: { buffer: thermoBuffer } }
+        { binding: 4, resource: { buffer: thermoBuffer } },
+        ...(particleCountResidency
+          ? [{ binding: 5, resource: { buffer: particleCountResidency.metadataBuffer } }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
+    if (particleCountResidency) {
+      if (typeof encoder.clearBuffer !== 'function') {
+        throw new TypeError(
+          'GPU-authored phase-volume target aggregation requires GPUCommandEncoder.clearBuffer'
+        );
+      }
+      encoder.clearBuffer(aggregateBuffer, 0, plan.aggregateByteLength);
+    }
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(
-      1,
-      Math.ceil(plan.aggregateRowCount / SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE)
-    ));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.aggregateRowCount,
+      workgroupSize: SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(aggregateBuffer, 0, readBuffer, 0, plan.aggregateByteLength);
@@ -9584,6 +10479,14 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.sourceParticleCount },
+        particleCountResidency
+      )
+    );
     if (retainAggregateBuffer) {
       result.aggregateBuffer = aggregateBuffer;
       result.destroyAggregateBuffer = () => aggregateBuffer.destroy?.();
@@ -9627,6 +10530,19 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
   });
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const bucketReduction = plan.aggregateReductionMode === SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE;
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: hierarchyAggregate
+  });
+  if (particleCountResidency && !noFullReadback) {
+    throw new RangeError(
+      'GPU-authored hierarchy aggregate-node count requires no-full-readback execution'
+    );
+  }
+  if (particleCountResidency && bucketReduction) {
+    throw new RangeError(
+      'GPU-authored hierarchy aggregate-node count requires the exact reduction route'
+    );
+  }
   const borrowedAggregateBuffer = hierarchyAggregate?.aggregateBuffer || null;
   const aggregateRows = hierarchyAggregate?.aggregateRows instanceof Float32Array
     ? hierarchyAggregate.aggregateRows
@@ -9634,12 +10550,19 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
   if (!borrowedAggregateBuffer && !(aggregateRows instanceof Float32Array)) {
     throw new TypeError('Schroeder hierarchy aggregate-node reduction requires a retained aggregate buffer or explicit rows');
   }
+  if (particleCountResidency && !borrowedAggregateBuffer) {
+    throw new TypeError(
+      'GPU-authored hierarchy aggregate-node count requires a retained aggregate buffer'
+    );
+  }
   const aggregateBuffer = borrowedAggregateBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-hierarchy-aggregate-node-in', aggregateRows);
   const aggregateNodeBuffer = device.createBuffer({
     label: 'ulg-schroeder-hierarchy-aggregate-nodes-out',
     size: plan.aggregateNodeByteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    usage: GPU_BUFFER_USAGE.STORAGE
+      | GPU_BUFFER_USAGE.COPY_SRC
+      | (particleCountResidency ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const paramsArray = createSchroederHierarchyAggregateNodeParamsArray(plan);
   const paramsBuffer = device.createBuffer({
@@ -9685,7 +10608,10 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
     const exactBindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
-      computeBufferBinding(2, 'uniform')
+      computeBufferBinding(2, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(3, 'read-only-storage')]
+        : [])
     ];
     const bucketBindings = [
       computeBufferBinding(0, 'read-only-storage'),
@@ -9696,9 +10622,11 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
       computeBufferBinding(5, 'uniform')
     ];
     const exactPipeline = bucketReduction ? null : createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-hierarchy-aggregate-node-reduction.v0',
+      cacheKey: `ulg-schroeder-hierarchy-aggregate-node-reduction.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-hierarchy-aggregate-node-reduction',
-      code: schroederHierarchyAggregateNodeReduceWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.hierarchyAggregateNode
+        : schroederHierarchyAggregateNodeReduceWgsl,
       entryPoint: 'main',
       bindings: exactBindings
     });
@@ -9737,10 +10665,21 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
         : [
           { binding: 0, resource: { buffer: aggregateBuffer } },
           { binding: 1, resource: { buffer: aggregateNodeBuffer } },
-          { binding: 2, resource: { buffer: paramsBuffer } }
+          { binding: 2, resource: { buffer: paramsBuffer } },
+          ...(particleCountResidency
+            ? [{ binding: 3, resource: { buffer: particleCountResidency.metadataBuffer } }]
+            : [])
         ]
     });
     const encoder = device.createCommandEncoder();
+    if (particleCountResidency) {
+      if (typeof encoder.clearBuffer !== 'function') {
+        throw new TypeError(
+          'GPU-authored hierarchy aggregate-node reduction requires GPUCommandEncoder.clearBuffer'
+        );
+      }
+      encoder.clearBuffer(aggregateNodeBuffer, 0, plan.aggregateNodeByteLength);
+    }
     const pass = encoder.beginComputePass();
     if (bucketReduction) {
       pass.setPipeline(bucketClearPipeline.pipeline);
@@ -9758,15 +10697,20 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
         Math.ceil(plan.aggregateRowCount / SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE)
       ));
       pass.setPipeline(bucketReducePipeline.pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.max(
+        1,
+        Math.ceil(plan.aggregateRowCount / SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE)
+      ));
     } else {
       pass.setPipeline(exactPipeline.pipeline);
       pass.setBindGroup(0, bindGroup);
+      dispatchSchroederParticleWorkgroups(pass, {
+        residency: particleCountResidency,
+        fallbackParticleCount: plan.aggregateRowCount,
+        workgroupSize: SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE
+      });
     }
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(
-      1,
-      Math.ceil(plan.aggregateRowCount / SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE)
-    ));
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(aggregateNodeBuffer, 0, readBuffer, 0, plan.aggregateNodeByteLength);
@@ -9820,6 +10764,17 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        {
+          particleCount: hierarchyAggregate.sourceParticleCount
+            ?? hierarchyAggregate.aggregateRowCount
+        },
+        particleCountResidency
+      )
+    );
     if (retainAggregateNodeBuffer) {
       result.aggregateNodeBuffer = aggregateNodeBuffer;
       result.destroyAggregateNodeBuffer = () => aggregateNodeBuffer.destroy?.();
@@ -9862,6 +10817,11 @@ export async function runSchroederFarAggregateCandidateWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederFarAggregateCandidateWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: activeNodeList,
+    stage: 'Schroeder far-aggregate candidate topology',
+    supportedRoute: 'use the count-resident local law-neighbor path until far topology is count-resident'
+  });
   const plan = createSchroederFarAggregateCandidatePlan({
     activeNodeList,
     hierarchyAggregateNode,
@@ -11373,6 +12333,9 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederPhaseVolumeMigrationWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    artifact: levelAssignment
+  });
   const plan = createSchroederPhaseVolumeMigrationPlan({
     levelAssignment,
     hierarchyAggregateNode,
@@ -11388,6 +12351,11 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
     aggregateResidualTolerance
   });
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  if (particleCountResidency && !noFullReadback) {
+    throw new RangeError(
+      'GPU-authored phase-volume migration requires no-full-readback execution'
+    );
+  }
   const borrowedAssignmentBuffer = levelAssignment?.assignmentBuffer || null;
   const assignmentRows = levelAssignment?.assignments instanceof Float32Array
     ? levelAssignment.assignments
@@ -11402,6 +12370,11 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
   if (!borrowedAggregateNodeBuffer && !(aggregateNodeRows instanceof Float32Array)) {
     throw new TypeError('Schroeder phase-volume migration requires a retained aggregate-node buffer or explicit rows');
   }
+  if (particleCountResidency && (!borrowedAssignmentBuffer || !borrowedAggregateNodeBuffer)) {
+    throw new TypeError(
+      'GPU-authored phase-volume migration requires retained assignment and aggregate-node buffers'
+    );
+  }
 
   const assignmentBuffer = borrowedAssignmentBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-phase-volume-assignment-in', assignmentRows);
@@ -11411,6 +12384,7 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
     label: 'ulg-schroeder-phase-volume-migration-out',
     size: plan.migrationByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      | (particleCountResidency ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-phase-volume-migration-params',
@@ -11427,17 +12401,25 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
   let returnedRetainedMigrationBuffer = false;
 
   try {
-    device.queue.writeBuffer(paramsBuffer, 0, createSchroederPhaseVolumeMigrationParamsArray(plan));
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederPhaseVolumeMigrationParamsArray({
+      ...plan,
+      particleCount: plan.particleRowCapacity
+    }));
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      ...(particleCountResidency
+        ? [computeBufferBinding(5, 'read-only-storage')]
+        : [])
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-phase-volume-migration.v0',
+      cacheKey: `ulg-schroeder-phase-volume-migration.${particleCountResidency ? 'resident-count.v1' : 'v0'}`,
       label: 'ulg-schroeder-phase-volume-migration',
-      code: schroederPhaseVolumeMigrationWgsl,
+      code: particleCountResidency
+        ? schroederHierarchyParticleCountResidencyWgsl.phaseVolumeMigration
+        : schroederPhaseVolumeMigrationWgsl,
       entryPoint: 'main',
       bindings
     });
@@ -11447,17 +12429,29 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
         { binding: 0, resource: { buffer: assignmentBuffer } },
         { binding: 1, resource: { buffer: aggregateNodeBuffer } },
         { binding: 2, resource: { buffer: migrationBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
+        { binding: 3, resource: { buffer: paramsBuffer } },
+        ...(particleCountResidency
+          ? [{ binding: 5, resource: { buffer: particleCountResidency.metadataBuffer } }]
+          : [])
       ]
     });
     const encoder = device.createCommandEncoder();
+    if (particleCountResidency) {
+      if (typeof encoder.clearBuffer !== 'function') {
+        throw new TypeError(
+          'GPU-authored phase-volume migration requires GPUCommandEncoder.clearBuffer'
+        );
+      }
+      encoder.clearBuffer(migrationBuffer, 0, plan.migrationByteLength);
+    }
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(
-      1,
-      Math.ceil(plan.particleCount / SCHROEDER_PHASE_VOLUME_MIGRATION_WORKGROUP_SIZE)
-    ));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: plan.particleCount,
+      workgroupSize: SCHROEDER_PHASE_VOLUME_MIGRATION_WORKGROUP_SIZE
+    });
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(migrationBuffer, 0, readBuffer, 0, plan.migrationByteLength);
@@ -11503,6 +12497,14 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    Object.assign(
+      result,
+      schroederParticleCountResidencyPublicFields(particleCountResidency),
+      attachSchroederParticleCountResidencyToUpload(
+        { particleCount: result.particleCount },
+        particleCountResidency
+      )
+    );
     if (retainMigrationBuffer) {
       result.migrationBuffer = migrationBuffer;
       result.destroyMigrationBuffer = () => migrationBuffer.destroy?.();
@@ -11541,6 +12543,11 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
       'runSchroederPhaseVolumeSplitMergeProposalWebGpu requires a WebGPU-like device with queue.writeBuffer'
     );
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: phaseVolumeMigration,
+    stage: 'Schroeder phase-volume split/merge proposal',
+    supportedRoute: 'retain the count-resident migration artifact until the proposal chain is count-resident'
+  });
   const plan = createSchroederPhaseVolumeSplitMergeProposalPlan({
     phaseVolumeMigration,
     hierarchyAggregateNode,
@@ -11704,6 +12711,11 @@ export async function runSchroederPhaseVolumeSplitMergeApplyWebGpu({
       'runSchroederPhaseVolumeSplitMergeApplyWebGpu requires a WebGPU-like device with queue.writeBuffer'
     );
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: phaseVolumeSplitMergeProposal,
+    stage: 'Schroeder phase-volume split/merge apply',
+    supportedRoute: 'use only host-count proposals until the split/merge application chain is count-resident'
+  });
   const plan = createSchroederPhaseVolumeSplitMergeApplyPlan({
     phaseVolumeSplitMergeProposal,
     phaseVolumeSplitMergeAdmission,
@@ -11875,6 +12887,11 @@ export async function runSchroederParticleStorageAllocationWebGpu({
       'runSchroederParticleStorageAllocationWebGpu requires a WebGPU-like device with queue.writeBuffer'
     );
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: phaseVolumeSplitMergeApply,
+    stage: 'Schroeder particle-storage allocation',
+    supportedRoute: 'use only host-count split/merge application rows until allocation is count-resident'
+  });
   const plan = createSchroederParticleStorageAllocationPlan({
     phaseVolumeSplitMergeApply,
     particleStorageAllocatorAdmission,
@@ -12048,6 +13065,11 @@ export async function runSchroederParticleStorageSlotAssignmentWebGpu({
       'runSchroederParticleStorageSlotAssignmentWebGpu requires a WebGPU-like device with queue.writeBuffer'
     );
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: particleStorageAllocation,
+    stage: 'Schroeder particle-storage slot assignment',
+    supportedRoute: 'use only host-count allocation rows until slot assignment is count-resident'
+  });
   const plan = createSchroederParticleStorageSlotAssignmentPlan({
     particleStorageAllocation,
     particleStorageFreeList,
@@ -12238,6 +13260,11 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       'runSchroederParticleStorageMaterializationWebGpu requires a WebGPU-like device with queue.writeBuffer'
     );
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: particleStorageSlotAssignment,
+    stage: 'Schroeder particle-storage materialization',
+    supportedRoute: 'use only host-count slot assignments until materialization is count-resident'
+  });
   const plan = createSchroederParticleStorageMaterializationPlan({
     sphParticleState,
     mlsMpmParticleState,
@@ -12293,14 +13320,25 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       slotAssignmentRows
     );
   const sourceStateBuffer = borrowedStateBuffer
-    || writeStorageBuffer(device, 'ulg-schroeder-particle-storage-materialization-state-in', sphParticleState.state);
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-particle-storage-materialization-state-in',
+      sphParticleState.state,
+      GPU_BUFFER_USAGE.COPY_SRC
+    );
   const sourceThermoBuffer = borrowedThermoBuffer
-    || writeStorageBuffer(device, 'ulg-schroeder-particle-storage-materialization-thermo-in', sphParticleState.thermo);
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-particle-storage-materialization-thermo-in',
+      sphParticleState.thermo,
+      GPU_BUFFER_USAGE.COPY_SRC
+    );
   const sourceMechanicsBuffer = borrowedMechanicsBuffer
     || writeStorageBuffer(
       device,
       'ulg-schroeder-particle-storage-materialization-mechanics-in',
-      mlsMpmParticleState.mechanics
+      mlsMpmParticleState.mechanics,
+      GPU_BUFFER_USAGE.COPY_SRC
     );
   const outputStateBuffer = device.createBuffer({
     label: 'ulg-schroeder-particle-storage-materialization-state-out',
@@ -12336,17 +13374,20 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
     });
   let returnedRetainedParticleBuffers = false;
   let returnedRetainedMaterializationBuffer = false;
+  const sourceStateCopyByteLength = plan.sourceParticleCount
+    * SPH_GPU_PARTICLE_STATE_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const sourceThermoCopyByteLength = plan.sourceParticleCount
+    * SPH_GPU_PARTICLE_THERMO_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const sourceMechanicsCopyByteLength = plan.sourceParticleCount
+    * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const gpuInitializationCopyByteLength = sourceStateCopyByteLength
+    + sourceThermoCopyByteLength
+    + sourceMechanicsCopyByteLength;
 
   try {
-    if (sphParticleState.state.byteLength > 0) {
-      device.queue.writeBuffer(outputStateBuffer, 0, sphParticleState.state);
-    }
-    if (sphParticleState.thermo.byteLength > 0) {
-      device.queue.writeBuffer(outputThermoBuffer, 0, sphParticleState.thermo);
-    }
-    if (mlsMpmParticleState.mechanics.byteLength > 0) {
-      device.queue.writeBuffer(outputMechanicsBuffer, 0, mlsMpmParticleState.mechanics);
-    }
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederParticleStorageMaterializationParamsArray({
       ...plan,
       admissionApproved: plan.particleStorageMaterializationAdmissionApproved
@@ -12384,6 +13425,33 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       ]
     });
     const encoder = device.createCommandEncoder();
+    if (sourceStateCopyByteLength > 0) {
+      encoder.copyBufferToBuffer(
+        sourceStateBuffer,
+        0,
+        outputStateBuffer,
+        0,
+        sourceStateCopyByteLength
+      );
+    }
+    if (sourceThermoCopyByteLength > 0) {
+      encoder.copyBufferToBuffer(
+        sourceThermoBuffer,
+        0,
+        outputThermoBuffer,
+        0,
+        sourceThermoCopyByteLength
+      );
+    }
+    if (sourceMechanicsCopyByteLength > 0) {
+      encoder.copyBufferToBuffer(
+        sourceMechanicsBuffer,
+        0,
+        outputMechanicsBuffer,
+        0,
+        sourceMechanicsCopyByteLength
+      );
+    }
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
@@ -12425,6 +13493,11 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       stateBufferByteLength: plan.stateByteLength,
       thermoBufferByteLength: plan.thermoByteLength,
       mechanicsBufferByteLength: plan.mechanicsByteLength,
+      particleBufferInitializationMode: 'gpu-copy-from-authoritative-source-before-materialization',
+      outputHostInitializationByteLength: 0,
+      bulkHostUploadByteLength: 0,
+      gpuInitializationCopyByteLength,
+      gpuInitializationCopyCount: plan.sourceParticleCount > 0 ? 3 : 0,
       materializationBufferByteLength: plan.materializationByteLength,
       materializationRows,
       conservativeTransferStatus: 'particle-storage-materialization-submitted',
@@ -12489,6 +13562,11 @@ export async function runSchroederPhaseVolumeLevelUpdateWebGpu({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederPhaseVolumeLevelUpdateWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  rejectUnsupportedSchroederParticleCountResidency({
+    artifact: phaseVolumeMigration,
+    stage: 'Schroeder phase-volume level update',
+    supportedRoute: 'retain the count-resident migration artifact until level update is count-resident'
+  });
   const plan = createSchroederPhaseVolumeLevelUpdatePlan({
     phaseVolumeMigration,
     phaseVolumeMigrationAdmission,
@@ -12790,9 +13868,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   levelAssignment = null,
   activeNodeList = null,
   coarseActiveNodeList = null,
+  sparseHierarchy = null,
+  sparseHierarchyRuntime = null,
   enableTwoLevelMechanics = false,
   twoLevelFineSubstepCount = 1,
   twoLevelMechanicsAuthority = 'observation',
+  twoLevelConservationSummaryReadback = false,
+  sparseHierarchyRetainedArenaByteBudget =
+    SCHROEDER_SPARSE_HIERARCHY_DEFAULT_RETAINED_ARENA_BYTES,
+  sparseHierarchyScratchArenaByteBudget =
+    SCHROEDER_SPARSE_HIERARCHY_DEFAULT_SCRATCH_ARENA_BYTES,
+  sparseHierarchyRouteCapacity = null,
+  sparseHierarchyMaxTilesPerSource =
+    SCHROEDER_SPARSE_HIERARCHY_DEFAULT_MAX_TILES_PER_SOURCE,
   activeNodeIndex = null,
   activeNodeSortedIndex = null,
   lawQueue = null,
@@ -12889,6 +13977,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableParticleStorageCompaction = true,
   particleStorageCountSummary = null,
   particleStorageCompaction = null,
+  particleStorageResidencyMode = 'auto',
   // Oscillation guard: the previous step's adoption summary. When this
   // step's admitted count delta exactly reverses the previous one (a
   // merge/split period-2 orbit re-deriving opposite topologies from the
@@ -12998,6 +14087,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   particleStorageMaterializationRunner = runSchroederParticleStorageMaterializationWebGpu,
   particleStorageCountSummaryRunner = runSchroederParticleStorageCountSummaryWebGpu,
   particleStorageCompactionRunner = runSchroederParticleStorageCompactionWebGpu,
+  particleStorageResidentCountEncoder = encodeSchroederParticleStorageCountSummaryWebGpu,
+  particleStorageResidentCompactionEncoder = encodeSchroederParticleStorageCompactionWebGpu,
+  particleStorageResidencyAdoptionCandidateFactory =
+    createSchroederParticleStorageResidencyAdoptionCandidate,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   portableSummaryRunner = createSchroederPortableSummaryPlan,
@@ -13012,6 +14105,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (typeof residentStepRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a residentStepRunner function');
+  }
+  const normalizedParticleStorageResidencyMode = String(particleStorageResidencyMode || 'auto');
+  if (![
+    'auto',
+    'gpu-resident-metadata',
+    'legacy-diagnostic-readback'
+  ].includes(normalizedParticleStorageResidencyMode)) {
+    throw new RangeError(`Unsupported Schroeder particle-storage residency mode: ${normalizedParticleStorageResidencyMode}`);
   }
   if (enableActiveNodeIndex && typeof activeNodeIndexRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires an activeNodeIndexRunner function');
@@ -13360,29 +14461,101 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     retainActiveNodeBuffer: true,
     readbackMode
   });
+  const twoLevelAuthoritative = enableTwoLevelMechanics
+    && twoLevelMechanicsAuthority === 'authoritative';
+  const computeManagerLaneIdentity = compactComputeManagerLaneIdentity(
+    residentStepOptions.gpuResidentLaneLeaseIdentity
+  );
+  if (
+    twoLevelAuthoritative
+    && residentStepOptions.requireComputeManagerAuthority === true
+    && computeManagerLaneIdentity?.ready !== true
+  ) {
+    const error = new Error(
+      'Schroeder two-level authority requires the actual ComputeManager GPU lane lease identity'
+    );
+    error.code = 'ULG_SCHROEDER_COMPUTE_MANAGER_LANE_IDENTITY_REQUIRED';
+    throw error;
+  }
+  const twoLevelAuthorityEncoder = twoLevelAuthoritative
+    ? device.createCommandEncoder({
+        label: 'ulg-schroeder-two-level-compute-manager-authority-sequence'
+      })
+    : null;
+  if (twoLevelAuthoritative && typeof device.queue?.onSubmittedWorkDone !== 'function') {
+    throw new TypeError(
+      'Schroeder two-level authority requires queue.onSubmittedWorkDone before StateManager admission'
+    );
+  }
+  let ownedSparseHierarchyRuntime = null;
+  const sparseHierarchyRequiredByMechanics = Boolean(
+    enableTwoLevelMechanics
+    || sparseHierarchy
+    || sparseHierarchyRuntime
+    || residentStepRunner === runMlsMpmResidentStepWithOptionalWebGpu
+  );
+  const resolvedSparseHierarchy = !sparseHierarchyRequiredByMechanics
+    ? null
+    : sparseHierarchy || (() => {
+      const arenaPlan = createSchroederSparseHierarchyArenaPlan({
+        sourceRowCount: resolvedActiveNodeList.activeCandidateCount,
+        fineLevel: plan.selectedLevel,
+        coarseLevel: plan.selectedLevel + 1,
+        retainedArenaByteBudget: sparseHierarchyRetainedArenaByteBudget,
+        scratchArenaByteBudget: sparseHierarchyScratchArenaByteBudget,
+        routeCapacity: sparseHierarchyRouteCapacity,
+        maxTilesPerSource: sparseHierarchyMaxTilesPerSource,
+        maxBufferSize: device.limits?.maxBufferSize ?? Number.POSITIVE_INFINITY,
+        maxStorageBufferBindingSize:
+          device.limits?.maxStorageBufferBindingSize ?? Number.POSITIVE_INFINITY,
+        maxComputeWorkgroupsPerDimension:
+          device.limits?.maxComputeWorkgroupsPerDimension ?? 65535
+      });
+      const runtime = sparseHierarchyRuntime || createSchroederSparseHierarchyGpu(device, {
+        plan: arenaPlan,
+        label: 'ulg-schroeder-mechanics-sparse-hierarchy'
+      });
+      if (runtime.plan?.sourceRowCount !== arenaPlan.sourceRowCount
+        || runtime.plan?.fineLevel !== arenaPlan.fineLevel
+        || runtime.plan?.coarseLevel !== arenaPlan.coarseLevel) {
+        if (!sparseHierarchyRuntime) runtime.destroy();
+        throw new RangeError('Supplied Schroeder sparse hierarchy runtime does not match the mechanics step');
+      }
+      if (!sparseHierarchyRuntime) ownedSparseHierarchyRuntime = runtime;
+      try {
+        const encoder = twoLevelAuthorityEncoder || device.createCommandEncoder({
+          label: 'ulg-schroeder-two-level-sparse-hierarchy-encoder'
+        });
+        const execution = runtime.encode(encoder, {
+          activeNodeList: resolvedActiveNodeList,
+          generationId: mergeEpoch
+        });
+        if (!twoLevelAuthorityEncoder) {
+          device.queue.submit([encoder.finish()]);
+          deferSubmittedWorkCleanup(device, () => execution.releaseTransientBuffers());
+        }
+        return execution;
+      } catch (error) {
+        if (!sparseHierarchyRuntime) {
+          runtime.destroy();
+          ownedSparseHierarchyRuntime = null;
+        }
+        throw error;
+      }
+    })();
   // Two-level mechanics: observation mode runs the coupled step beside the
   // resident authority path with telemetry only; authoritative mode replaces
-  // the resident mechanics entirely (sidecars are not yet available on this
-  // path). Particle-storage materialization composes with authority: the
+  // the resident mechanics entirely. The compact mechanics core owns one
+  // submission; thermal/reaction sidecars consume its retained output in
+  // explicit sequential stages. Particle-storage materialization composes
+  // with authority: the
   // storage chain merges/splits from the step's INPUT configuration and its
   // adopted buffers supersede the coupled step's mechanics outputs for the
   // continuation - the same topology-step precedence the single-level
   // resident path applies through buildNextParticleUploads.
-  const twoLevelAuthoritative = enableTwoLevelMechanics
-    && twoLevelMechanicsAuthority === 'authoritative';
   const resolvedCoarseActiveNodeList = !enableTwoLevelMechanics
     ? null
-    : coarseActiveNodeList || await runSchroederActiveNodeListWebGpu({
-      device,
-      levelAssignment: resolvedLevelAssignment,
-      phaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
-      phaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
-      selectedLevel: plan.selectedLevel + 1,
-      tileCellCount,
-      supportInflateCells,
-      retainActiveNodeBuffer: true,
-      readbackMode
-    });
+    : coarseActiveNodeList;
   const resolvedTwoLevelMechanics = !enableTwoLevelMechanics
     ? null
     : await twoLevelMechanicsRunner({
@@ -13394,6 +14567,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       levelAssignment: resolvedLevelAssignment,
       fineActiveNodeList: resolvedActiveNodeList,
       coarseActiveNodeList: resolvedCoarseActiveNodeList,
+      sparseHierarchy: resolvedSparseHierarchy,
       fineLevel: plan.selectedLevel,
       baseGridSpacingM: plan.baseGridSpacingM,
       boxDimsM,
@@ -13407,13 +14581,43 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       // Observation mode releases outputs and keeps telemetry only;
       // authoritative mode retains the continuation envelope.
       retainOutputParticleBuffers: twoLevelAuthoritative,
-      conservationSummaryReadback: true,
+      conservationSummaryReadback: twoLevelAuthoritative
+        ? false
+        : twoLevelConservationSummaryReadback === true,
       // When the two-level step is the state authority it must also carry
       // the compact particle summary (maxDisplacementM/maxSpeedMPerS): the
       // resident step that normally produces it is replaced, and the demo's
       // numeric motion proof reads it from the synthesized envelope.
-      compactSummaryReadback: twoLevelAuthoritative
+      compactSummaryReadback: false,
+      commandEncoder: twoLevelAuthorityEncoder,
+      authoritySequenceStagePrefix: twoLevelAuthoritative
+        ? ['sparse-hierarchy-compaction']
+        : []
     });
+  if (twoLevelAuthoritative) {
+    if (
+      resolvedTwoLevelMechanics?.authoritySequence?.schema
+        !== 'peercompute.ulg.schroeder-two-level-authority-sequence.v0'
+    ) {
+      throw new Error(
+        'authoritative Schroeder two-level mechanics requires an encoded caller-owned authority sequence'
+      );
+    }
+    resolvedTwoLevelMechanics.authoritySequence.computeManagerLaneIdentity =
+      computeManagerLaneIdentity;
+    resolvedTwoLevelMechanics.authoritySequence.computeManagerLaneIdentityStatus =
+      computeManagerLaneIdentity?.ready === true
+        ? 'actual-compute-manager-lane-identity-bound'
+        : 'compute-manager-lane-identity-not-required-by-caller';
+    device.queue.submit([twoLevelAuthorityEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    resolvedTwoLevelMechanics.markAuthoritySequenceSubmitted?.({
+      queueCompletionStatus: 'queue-work-completed',
+      queueCompletionMethod: 'queue.onSubmittedWorkDone'
+    });
+    resolvedSparseHierarchy?.releaseTransientBuffers?.();
+    resolvedTwoLevelMechanics.cleanupSubmittedWork?.();
+  }
   const resolvedActiveNodeIndex = !enableActiveNodeIndex
     ? null
     : activeNodeIndex || await activeNodeIndexRunner({
@@ -13827,54 +15031,160 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         readbackMode
       })
   );
-  // Compact GPU count summary over admitted materialization rows: the
-  // explicit admittedParticleCountDelta storage adoption consumes. The
-  // single 16-float row is the only readback.
-  const resolvedParticleStorageCountSummary = particleStorageCountSummary || (
-    !resolvedParticleStorageMaterialization
-    || resolvedParticleStorageMaterialization.particleStorageMaterializationAdmissionApproved !== true
-    || !resolvedParticleStorageMaterialization.materializationBuffer
-    || !enableParticleStorageCountSummary
-      ? null
-      : await particleStorageCountSummaryRunner({
-        device,
-        particleStorageMaterialization: resolvedParticleStorageMaterialization
-      })
-  );
-  if (resolvedParticleStorageCountSummary && resolvedParticleStorageMaterialization) {
-    resolvedParticleStorageMaterialization.admittedParticleCountDelta =
-      resolvedParticleStorageCountSummary.admittedParticleCountDelta;
+  const particleStorageResidentAuthorityRequested =
+    normalizedParticleStorageResidencyMode === 'gpu-resident-metadata'
+    || (
+      normalizedParticleStorageResidencyMode === 'auto'
+      && readbackMode === SCHROEDER_NO_FULL_READBACK_MODE
+      && computeManagerLaneIdentity?.ready === true
+      && !particleStorageCountSummary
+      && !particleStorageCompaction
+    );
+  if (
+    normalizedParticleStorageResidencyMode === 'gpu-resident-metadata'
+    && computeManagerLaneIdentity?.ready !== true
+  ) {
+    throw new Error(
+      'GPU-resident Schroeder particle-storage adoption requires an authoritative ComputeManager lane identity'
+    );
   }
-  // Freed source slots are zero-mass holes; compaction rebuilds a dense live
-  // range so merges become real count reductions. Only runs when holes
-  // exist and the materialized buffers are retained.
-  // Torn-group detection must precede compaction: an epoch that freed source
-  // slots while writing NO targets is a merge group split apart by admission
-  // (participants admitted, their child-writing leader blocked). Its
-  // materialized buffers are discarded wholesale below, so compacting them
-  // would be wasted work on state that must never become authoritative.
-  const tornFreeOnlyEpochDetected = Boolean(
-    resolvedParticleStorageCountSummary?.countSummary
-    && resolvedParticleStorageCountSummary.countSummary.freedSourceSlotCount > 0
-    && !(resolvedParticleStorageCountSummary.countSummary.writtenTargetSlotCount > 0)
+  const particleStorageResidentAuthorityEnabled = Boolean(
+    particleStorageResidentAuthorityRequested
+    && resolvedParticleStorageMaterialization
+    && resolvedParticleStorageMaterialization.particleStorageMaterializationAdmissionApproved === true
+    && resolvedParticleStorageMaterialization.materializationBuffer
+    && resolvedParticleStorageMaterialization.particleStateBuffer
+    && enableParticleStorageCountSummary
+    && enableParticleStorageCompaction
   );
-  const resolvedParticleStorageCompaction = particleStorageCompaction || (
-    !resolvedParticleStorageCountSummary
-    || !enableParticleStorageCompaction
-    || tornFreeOnlyEpochDetected
-    || !(resolvedParticleStorageCountSummary.countSummary?.freedSourceSlotCount > 0)
-    || !resolvedParticleStorageMaterialization?.particleStateBuffer
-      ? null
-      : await particleStorageCompactionRunner({
+  if (
+    particleStorageResidentAuthorityRequested
+    && resolvedParticleStorageMaterialization
+    && !particleStorageResidentAuthorityEnabled
+  ) {
+    throw new Error(
+      'GPU-resident Schroeder particle-storage adoption requires admitted retained materialization, count, and compaction inputs'
+    );
+  }
+  let residentParticleStorageCountSummary = null;
+  let residentParticleStorageCompaction = null;
+  let particleStorageResidencyAdoptionCandidate = null;
+  if (particleStorageResidentAuthorityEnabled) {
+    if (
+      typeof particleStorageResidentCountEncoder !== 'function'
+      || typeof particleStorageResidentCompactionEncoder !== 'function'
+      || typeof particleStorageResidencyAdoptionCandidateFactory !== 'function'
+    ) {
+      throw new TypeError(
+        'GPU-resident Schroeder particle storage requires count, compaction, and adoption-candidate encoders'
+      );
+    }
+    const residencyGeneration = Math.max(1, Math.round(finiteNumber(
+      resolvedParticleStorageMaterialization.materializationEpoch ?? mergeEpoch,
+      1
+    )));
+    const encoder = device.createCommandEncoder();
+    try {
+      residentParticleStorageCountSummary = particleStorageResidentCountEncoder({
         device,
-        particleStorageMaterialization: resolvedParticleStorageMaterialization
-      })
+        commandEncoder: encoder,
+        particleStorageMaterialization: resolvedParticleStorageMaterialization,
+        generationId: residencyGeneration
+      });
+      residentParticleStorageCompaction = particleStorageResidentCompactionEncoder({
+        device,
+        commandEncoder: encoder,
+        particleStorageMaterialization: resolvedParticleStorageMaterialization,
+        countResidency: residentParticleStorageCountSummary.residency,
+        generationId: residencyGeneration
+      });
+      particleStorageResidencyAdoptionCandidate =
+        particleStorageResidencyAdoptionCandidateFactory({
+          device,
+          particleStorageMaterialization: resolvedParticleStorageMaterialization,
+          particleStorageCountSummary: residentParticleStorageCountSummary,
+          particleStorageCompaction: residentParticleStorageCompaction,
+          computeManagerLaneIdentity,
+          generationId: residencyGeneration
+        });
+      if (particleStorageResidencyAdoptionCandidate?.ready !== true) {
+        throw new Error(
+          `GPU-resident Schroeder particle-storage candidate blocked: ${
+            particleStorageResidencyAdoptionCandidate?.reason || 'unknown-residency-candidate-failure'
+          }`
+        );
+      }
+      device.queue.submit([encoder.finish()]);
+      residentParticleStorageCountSummary.orchestratorQueueSubmitPerformed = true;
+      residentParticleStorageCountSummary.queueSubmissionStatus =
+        'submitted-same-device-awaiting-state-manager-fence';
+      residentParticleStorageCompaction.orchestratorQueueSubmitPerformed = true;
+      residentParticleStorageCompaction.queueSubmissionStatus =
+        'submitted-same-device-awaiting-state-manager-fence';
+      deferSubmittedWorkCleanup(device, () => {
+        residentParticleStorageCountSummary.releaseTransientBuffers?.();
+        residentParticleStorageCountSummary.destroyRetainedEvidenceBuffers?.();
+        residentParticleStorageCompaction.releaseTransientBuffers?.();
+        if (!particleStorageMaterialization) {
+          resolvedParticleStorageMaterialization.destroyParticleBuffers?.();
+          resolvedParticleStorageMaterialization.destroyMaterializationBuffer?.();
+        }
+      });
+    } catch (error) {
+      residentParticleStorageCountSummary?.releaseTransientBuffers?.();
+      residentParticleStorageCountSummary?.destroyRetainedEvidenceBuffers?.();
+      residentParticleStorageCompaction?.releaseTransientBuffers?.();
+      residentParticleStorageCompaction?.destroyParticleBuffers?.();
+      throw error;
+    }
+  }
+
+  // The mapped wrappers remain available only for explicit legacy diagnostic
+  // routes. They retain their original readback labels and provenance.
+  const legacyParticleStorageCountSummary = particleStorageResidentAuthorityEnabled
+    ? null
+    : particleStorageCountSummary || (
+      !resolvedParticleStorageMaterialization
+      || resolvedParticleStorageMaterialization.particleStorageMaterializationAdmissionApproved !== true
+      || !resolvedParticleStorageMaterialization.materializationBuffer
+      || !enableParticleStorageCountSummary
+        ? null
+        : await particleStorageCountSummaryRunner({
+          device,
+          particleStorageMaterialization: resolvedParticleStorageMaterialization
+        })
+    );
+  const resolvedParticleStorageCountSummary =
+    residentParticleStorageCountSummary || legacyParticleStorageCountSummary;
+  if (
+    legacyParticleStorageCountSummary
+    && resolvedParticleStorageMaterialization
+  ) {
+    resolvedParticleStorageMaterialization.admittedParticleCountDelta =
+      legacyParticleStorageCountSummary.admittedParticleCountDelta;
+  }
+  const tornFreeOnlyEpochDetected = Boolean(
+    legacyParticleStorageCountSummary?.countSummary
+    && legacyParticleStorageCountSummary.countSummary.freedSourceSlotCount > 0
+    && !(legacyParticleStorageCountSummary.countSummary.writtenTargetSlotCount > 0)
   );
-  // Adoption consumes the compacted storage when compaction ran; the
-  // superseded materialization particle buffers are destroyed here (the
-  // compaction summary readback fences their last GPU read) unless the
-  // materialization was caller-injected.
-  if (resolvedParticleStorageCompaction && !particleStorageMaterialization) {
+  const legacyParticleStorageCompaction = particleStorageResidentAuthorityEnabled
+    ? null
+    : particleStorageCompaction || (
+      !legacyParticleStorageCountSummary
+      || !enableParticleStorageCompaction
+      || tornFreeOnlyEpochDetected
+      || !(legacyParticleStorageCountSummary.countSummary?.freedSourceSlotCount > 0)
+      || !resolvedParticleStorageMaterialization?.particleStateBuffer
+        ? null
+        : await particleStorageCompactionRunner({
+          device,
+          particleStorageMaterialization: resolvedParticleStorageMaterialization
+        })
+    );
+  const resolvedParticleStorageCompaction =
+    residentParticleStorageCompaction || legacyParticleStorageCompaction;
+  if (legacyParticleStorageCompaction && !particleStorageMaterialization) {
     resolvedParticleStorageMaterialization.destroyParticleBuffers?.();
     resolvedParticleStorageMaterialization.particleStateBuffer = null;
     resolvedParticleStorageMaterialization.particleThermoBuffer = null;
@@ -13883,8 +15193,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     resolvedParticleStorageMaterialization.particleBuffersSuperseded =
       'schroeder-particle-storage-compaction';
   }
-  const candidateParticleStorageAdoptionSource =
-    resolvedParticleStorageCompaction || resolvedParticleStorageMaterialization;
+  const candidateParticleStorageAdoptionSource = particleStorageResidentAuthorityEnabled
+    ? null
+    : legacyParticleStorageCompaction || resolvedParticleStorageMaterialization;
   // Oscillation guard: an admitted delta that exactly reverses the previous
   // step's (source count matching the previous authoritative count) is a
   // merge/split period-2 orbit, not new topology. Skip adoption for this
@@ -13916,7 +15227,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   // freeze the simulation (observed live: boiling scene pinned at 293K with
   // zero motion under steady assignment pressure). Real topology changes
   // always append or free slots, so those still adopt.
-  const candidateCountSummaryRows = resolvedParticleStorageCountSummary?.countSummary || null;
+  const candidateCountSummaryRows = legacyParticleStorageCountSummary?.countSummary || null;
   const particleStorageAdoptionNoTopologyChange = Boolean(
     candidateParticleStorageAdoptionSource
     && !particleStorageAdoptionOscillationDetected
@@ -14108,7 +15419,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   // single-level path: the storage chain materialized/compacted the merged
   // set from the step's input configuration, and the adopted buffers take
   // precedence over the coupled step's mechanics outputs (topology step).
-  const twoLevelParticleStorageAdoption = twoLevelAuthoritative && resolvedParticleStorageAdoptionSource
+  const twoLevelParticleStorageAdoption = twoLevelAuthoritative
+    && resolvedParticleStorageAdoptionSource
+    && !particleStorageResidencyAdoptionCandidate
     ? createSchroederParticleStorageAdoption({
       schroederParticleStorageMaterialization: resolvedParticleStorageAdoptionSource,
       sphParticleState,
@@ -14286,8 +15599,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? null,
       schroederParticleStorageAdoption: twoLevelParticleStorageAdoption,
       schroederParticleStorageAdoptionStatus:
-        twoLevelParticleStorageAdoption?.status ?? particleStorageAdoptionSkipReason ?? null,
+        twoLevelParticleStorageAdoption?.status
+        ?? particleStorageResidencyAdoptionCandidate?.status
+        ?? particleStorageAdoptionSkipReason
+        ?? null,
+      schroederParticleStorageResidencyAdoptionCandidate:
+        particleStorageResidencyAdoptionCandidate,
+      schroederParticleStorageResidencyAdoptionToken:
+        particleStorageResidencyAdoptionCandidate?.admissionToken ?? null,
       twoLevelConservation: resolvedTwoLevelMechanics?.conservation ?? null,
+      schroederTwoLevelAuthoritySequence:
+        resolvedTwoLevelMechanics?.authoritySequence ?? null,
       // Compact particle summary (fixed-size readback) doubles as the
       // resident-step diagnostics: residentMotionDiagnostic reads
       // maxDisplacementM/maxSpeedMPerS/compactGpuSummaryAvailable from here.
@@ -14310,6 +15632,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederLevelAssignment: resolvedLevelAssignment,
     schroederSelectedLevel: plan.selectedLevel,
     schroederActiveNodeList: resolvedActiveNodeList,
+    schroederSparseHierarchy: resolvedSparseHierarchy,
+    schroederSparseGridArenaByteBudget: sparseHierarchyRetainedArenaByteBudget,
     schroederActiveNodeSortedIndex: resolvedActiveNodeSortedIndex,
     schroederLawQueue: resolvedLawQueue,
     schroederLawNeighborCandidates: resolvedLawNeighborCandidates,
@@ -14337,6 +15661,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederParticleStorageAllocation: resolvedParticleStorageAllocation,
     schroederParticleStorageSlotAssignment: resolvedParticleStorageSlotAssignment,
     schroederParticleStorageMaterialization: resolvedParticleStorageAdoptionSource,
+    schroederParticleStorageResidencyAdoptionCandidate:
+      particleStorageResidencyAdoptionCandidate,
+    schroederParticleStorageResidencyAdoptionToken:
+      particleStorageResidencyAdoptionCandidate?.admissionToken ?? null,
     schroederParticleStorageAdoptionSkipReason: particleStorageAdoptionSkipReason,
     schroederPhaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
     schroederPhaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
@@ -14347,11 +15675,44 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
   });
+  const resolvedParticleStorageResidencyAdoptionCandidate =
+    residentStep?.schroederParticleStorageResidencyAdoptionCandidate
+    ?? particleStorageResidencyAdoptionCandidate;
   if (residentStep && typeof residentStep === 'object') {
     // Requested-vs-reported readback provenance on the step envelope: the
     // scene's continuation gate needs the reported mode to match the
     // requested one; a silent downgrade becomes a replay treadmill.
     residentStep.schroederRequestedReadbackMode = readbackMode;
+    if (resolvedParticleStorageResidencyAdoptionCandidate) {
+      residentStep.schroederParticleStorageResidencyAdoptionCandidate =
+        resolvedParticleStorageResidencyAdoptionCandidate;
+      residentStep.schroederParticleStorageResidencyAdoptionToken =
+        resolvedParticleStorageResidencyAdoptionCandidate.admissionToken;
+      residentStep.schroederParticleStorageResidencyStatus =
+        resolvedParticleStorageResidencyAdoptionCandidate.status;
+      residentStep.schroederParticleStorageAuthoritativeParticleCount = null;
+      residentStep.schroederParticleStorageAuthoritativeParticleCountAuthority =
+        resolvedParticleStorageResidencyAdoptionCandidate.authoritativeParticleCountAuthority;
+      residentStep.schroederParticleStorageAuthoritativeParticleCountMetadataWord =
+        resolvedParticleStorageResidencyAdoptionCandidate.authoritativeParticleCountMetadataWord;
+      residentStep.schroederParticleStorageActiveDispatchIndirectByteOffset =
+        resolvedParticleStorageResidencyAdoptionCandidate.activeDispatchIndirectByteOffset;
+    }
+  }
+  let sparseHierarchyBuffersDestroyed = false;
+  const destroyOwnedSparseHierarchyBuffers = !ownedSparseHierarchyRuntime
+    && !resolvedTwoLevelMechanics?.destroyConservationEvidenceBuffer
+    ? null
+    : () => {
+      if (sparseHierarchyBuffersDestroyed) return;
+      sparseHierarchyBuffersDestroyed = true;
+      resolvedTwoLevelMechanics?.destroyConservationEvidenceBuffer?.();
+      ownedSparseHierarchyRuntime?.destroy();
+    };
+  if (residentStep && resolvedSparseHierarchy) {
+    residentStep.schroederSparseHierarchy = resolvedSparseHierarchy;
+    residentStep.schroederSparseHierarchyStatus = resolvedSparseHierarchy.status;
+    residentStep.destroySchroederSparseHierarchyBuffers = destroyOwnedSparseHierarchyBuffers;
   }
 
   return {
@@ -14361,6 +15722,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     status: 'schroeder-same-level-mechanics-submitted',
     backend: 'webgpu',
     readbackMode,
+    particleStorageResidencyMode: particleStorageResidentAuthorityEnabled
+      ? 'gpu-resident-metadata'
+      : 'legacy-diagnostic-readback',
+    particleStorageResidencyAuthorityRequested: particleStorageResidentAuthorityRequested,
+    particleStorageResidencyAuthorityEnabled: particleStorageResidentAuthorityEnabled,
+    particleStorageResidencyAdoptionCandidate:
+      resolvedParticleStorageResidencyAdoptionCandidate,
+    particleStorageResidencyAdoptionToken:
+      resolvedParticleStorageResidencyAdoptionCandidate?.admissionToken ?? null,
+    particleStorageAdoptionDecisionAuthority: particleStorageResidentAuthorityEnabled
+      ? 'gpu-residency-metadata-status-generation-and-indirect-selection'
+      : 'legacy-decoded-compact-summary',
     particleStorageAdoptionOscillationDetected,
     particleStorageAdoptionNoTopologyChange,
     particleStorageAdoptionTornGroupDetected,
@@ -14372,7 +15745,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       }
       : null,
     fullParticleReadbackPerformed: false,
-    normalHotLoopReadbackFree: readbackMode === SCHROEDER_NO_FULL_READBACK_MODE,
+    normalHotLoopReadbackFree: readbackMode === SCHROEDER_NO_FULL_READBACK_MODE
+      && resolvedParticleStorageCountSummary?.normalHotLoopReadbackFree !== false
+      && resolvedParticleStorageCompaction?.normalHotLoopReadbackFree !== false,
     localRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
     schroederLocalRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
     schroederPhaseVolumeNextTickAssignmentOverlay: resolvedPhaseVolumeNextTickAssignmentOverlay,
@@ -14407,6 +15782,36 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainedActiveNodeBuffer: Boolean(resolvedActiveNodeList.activeNodeBuffer),
       activeNodeBufferByteLength: resolvedActiveNodeList.activeNodeBufferByteLength ?? resolvedActiveNodeList.activeNodeByteLength ?? 0
     },
+    sparseHierarchy: resolvedSparseHierarchy ? {
+      schema: resolvedSparseHierarchy.schema,
+      sparseHierarchySchema: resolvedSparseHierarchy.sparseHierarchySchema,
+      status: resolvedSparseHierarchy.status,
+      generationId: resolvedSparseHierarchy.generationId,
+      fineLevel: resolvedSparseHierarchy.fineLevel,
+      coarseLevel: resolvedSparseHierarchy.coarseLevel,
+      levelCount: resolvedSparseHierarchy.levelCount,
+      thirdLevelHold: resolvedSparseHierarchy.thirdLevelHold === true,
+      routeCapacity: resolvedSparseHierarchy.routeCapacity,
+      maxUniqueNodeCount: resolvedSparseHierarchy.maxUniqueNodeCount,
+      retainedArenaByteBudget: resolvedSparseHierarchy.retainedArenaByteBudget,
+      scratchArenaByteBudget: resolvedSparseHierarchy.scratchArenaByteBudget,
+      retainedArenaBytes: resolvedSparseHierarchy.retainedArenaBytes,
+      scratchArenaBytes: resolvedSparseHierarchy.scratchArenaBytes,
+      compaction: resolvedSparseHierarchy.compaction,
+      sourceMembershipEncoding: resolvedSparseHierarchy.sourceMembershipEncoding,
+      retainedCompactNodeBuffer: Boolean(resolvedSparseHierarchy.compactNodeBuffer),
+      retainedSourceMembershipBuffers: Boolean(
+        resolvedSparseHierarchy.routeSourceIndexBuffer
+        && resolvedSparseHierarchy.sortedRouteIndexBuffer
+        && resolvedSparseHierarchy.sourceMembershipOffsetBuffer
+      ),
+      retainedEvidenceBuffer: Boolean(resolvedSparseHierarchy.evidenceBuffer),
+      readbackMode: resolvedSparseHierarchy.readbackMode,
+      fullParticleReadbackPerformed: resolvedSparseHierarchy.fullParticleReadbackPerformed === true,
+      gpuAdmissionEvidenceStatus: 'retained-fixed-evidence-no-default-map'
+    } : null,
+    schroederSparseHierarchyExecution: resolvedSparseHierarchy,
+    destroySparseHierarchyBuffers: destroyOwnedSparseHierarchyBuffers,
     activeNodeIndex: resolvedActiveNodeIndex ? {
       schema: resolvedActiveNodeIndex.schema,
       activeNodeIndexSchema: resolvedActiveNodeIndex.activeNodeIndexSchema,
@@ -15010,7 +16415,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       fineSubstepDt: resolvedTwoLevelMechanics.fineSubstepDt,
       fineGridSpacingM: resolvedTwoLevelMechanics.fineGridSpacingM,
       coarseGridSpacingM: resolvedTwoLevelMechanics.coarseGridSpacingM,
+      sparseHierarchyStatus: resolvedTwoLevelMechanics.sparseHierarchyStatus,
+      sparseHierarchyCompaction: resolvedTwoLevelMechanics.sparseHierarchyCompaction,
+      sparseHierarchyRetained: resolvedTwoLevelMechanics.sparseHierarchyRetained === true,
       conservation: resolvedTwoLevelMechanics.conservation,
+      conservationEvidenceStatus: resolvedTwoLevelMechanics.conservationEvidenceStatus ?? null,
+      conservationEvidenceBufferByteLength:
+        resolvedTwoLevelMechanics.conservationEvidenceBufferByteLength ?? 0,
+      conservationEvidenceReadbackPerformed:
+        resolvedTwoLevelMechanics.conservationEvidenceReadbackPerformed === true,
+      authoritySequence: resolvedTwoLevelMechanics.authoritySequence ?? null,
       conservativeTransferStatus: resolvedTwoLevelMechanics.conservativeTransferStatus
     } : null,
     particleStorageCountSummary: resolvedParticleStorageCountSummary ? {
@@ -15019,7 +16433,32 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       countPolicy: resolvedParticleStorageCountSummary.countPolicy,
       admittedParticleCountDelta: resolvedParticleStorageCountSummary.admittedParticleCountDelta,
       authoritativeParticleCount: resolvedParticleStorageCountSummary.authoritativeParticleCount,
-      countSummary: resolvedParticleStorageCountSummary.countSummary
+      authoritativeParticleCountAuthority:
+        resolvedParticleStorageCountSummary.authoritativeParticleCountAuthority ?? null,
+      authoritativeParticleCountMetadataWord:
+        resolvedParticleStorageCountSummary.authoritativeParticleCountMetadataWord ?? null,
+      outputParticleCapacity: resolvedParticleStorageCountSummary.outputParticleCapacity ?? null,
+      countSummary: resolvedParticleStorageCountSummary.countSummary,
+      normalHotLoopReadbackFree:
+        resolvedParticleStorageCountSummary.normalHotLoopReadbackFree === true,
+      compactSummaryReadbackPerformed:
+        resolvedParticleStorageCountSummary.compactSummaryReadbackPerformed === true,
+      residencyMetadataRetained:
+        Boolean(resolvedParticleStorageCountSummary.particleStorageResidencyMetadataBuffer)
+          && !particleStorageResidentAuthorityEnabled,
+      residencyDispatchIndirectRetained:
+        Boolean(resolvedParticleStorageCountSummary.particleStorageResidencyDispatchIndirectBuffer)
+          && !particleStorageResidentAuthorityEnabled,
+      residencyMetadataIntermediate:
+        Boolean(resolvedParticleStorageCountSummary.particleStorageResidencyMetadataBuffer)
+          && particleStorageResidentAuthorityEnabled,
+      residencyDispatchIndirectIntermediate:
+        Boolean(resolvedParticleStorageCountSummary.particleStorageResidencyDispatchIndirectBuffer)
+          && particleStorageResidentAuthorityEnabled,
+      activeDispatchIndirectByteOffset:
+        resolvedParticleStorageCountSummary.activeDispatchIndirectByteOffset ?? null,
+      selectionDispatchIndirectByteOffset:
+        resolvedParticleStorageCountSummary.selectionDispatchIndirectByteOffset ?? null
     } : null,
     particleStorageCompaction: resolvedParticleStorageCompaction ? {
       schema: resolvedParticleStorageCompaction.schema,
@@ -15030,7 +16469,26 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       sourceParticleCount: resolvedParticleStorageCompaction.sourceParticleCount,
       outputParticleCapacity: resolvedParticleStorageCompaction.outputParticleCapacity,
       retainedParticleBuffers: Boolean(resolvedParticleStorageCompaction.particleStateBuffer),
-      compactionSummary: resolvedParticleStorageCompaction.compactionSummary
+      authoritativeParticleCount:
+        resolvedParticleStorageCompaction.authoritativeParticleCount ?? null,
+      authoritativeParticleCountAuthority:
+        resolvedParticleStorageCompaction.authoritativeParticleCountAuthority ?? null,
+      authoritativeParticleCountMetadataWord:
+        resolvedParticleStorageCompaction.authoritativeParticleCountMetadataWord ?? null,
+      compactionSummary: resolvedParticleStorageCompaction.compactionSummary,
+      normalHotLoopReadbackFree:
+        resolvedParticleStorageCompaction.normalHotLoopReadbackFree === true,
+      compactSummaryReadbackPerformed:
+        resolvedParticleStorageCompaction.compactSummaryReadbackPerformed === true,
+      residencyMetadataRetained:
+        Boolean(resolvedParticleStorageCompaction.particleStorageResidencyMetadataBuffer),
+      residencyDispatchIndirectRetained:
+        Boolean(resolvedParticleStorageCompaction.particleStorageResidencyDispatchIndirectBuffer),
+      activeDispatchIndirectByteOffset:
+        resolvedParticleStorageCompaction.activeDispatchIndirectByteOffset ?? null,
+      selectionDispatchIndirectByteOffset:
+        resolvedParticleStorageCompaction.selectionDispatchIndirectByteOffset ?? null,
+      capacityTailPolicy: resolvedParticleStorageCompaction.capacityTailPolicy ?? null
     } : null,
     phaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate ? {
       schema: resolvedPhaseVolumeLevelUpdate.schema,
@@ -15157,7 +16615,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     residentStepSchema: residentStep?.schema ?? null,
     mechanicsGridSpacingM: plan.nativeGridSpacingM,
     denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
-    activeNodeConsumerStatus: 'active-node-list-forwarded-to-mls-mpm-p2g-g2p',
+    activeNodeConsumerStatus: enableTwoLevelMechanics
+      ? 'byte-bounded-sparse-two-level-hierarchy-forwarded-to-coupled-mechanics'
+      : 'active-node-list-forwarded-to-mls-mpm-p2g-g2p',
     phaseVolumeAssignmentOverlayStatus: resolvedActiveNodeList.phaseVolumeAssignmentOverlayStatus
       ?? 'disabled-phase-volume-level-update-overlay-not-provided',
     phaseVolumeAssignmentOverlayConsumerStatus: resolvedActiveNodeList.phaseVolumeAssignmentOverlayConsumerStatus
@@ -15551,6 +17011,247 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export async function runSchroederResidentStepsWithOptionalWebGpu({
+  sphParticleState,
+  mlsMpmParticleState,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  residentProductMass = null,
+  stepCount = 1,
+  retainIntermediateSteps = false,
+  schroederSelectedLevel = 0,
+  schroederBaseGridSpacingM = sphParticleState?.smoothingLengthM,
+  schroederMinLevel = DEFAULT_MIN_LEVEL,
+  schroederMaxLevel = DEFAULT_MAX_LEVEL,
+  schroederTileCellCount = DEFAULT_TILE_CELL_COUNT,
+  schroederEnablePortableSummary = true,
+  schroederPortableSummaryPeerComputeUseCase = 'compute-manager-schroeder-resident-steps',
+  schroederEnableTwoLevelMechanics = false,
+  schroederTwoLevelMechanicsAuthority = 'observation',
+  schroederTwoLevelFineSubstepCount = 1,
+  schroederEnableActiveNodeIndex = false,
+  schroederEnableActiveNodeSortedIndex = false,
+  schroederActiveNodeSortedIndexPolicyMode = SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_AUTO_MODE,
+  schroederLawNeighborTraversalPolicyMode = SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
+  schroederLawNeighborCandidateReadbackMode = null,
+  schroederEnableCrossLevelCoupling = true,
+  schroederEnableLawQueue = true,
+  schroederEnableLawNeighborCandidates = true,
+  schroederStateDeltaMergeAdmission = null,
+  schroederPhaseVolumeMigrationAdmission = null,
+  schroederPhaseVolumeSplitMergeAdmission = null,
+  schroederParticleStorageAllocatorAdmission = null,
+  schroederParticleStorageFreeList = null,
+  schroederParticleStorageSlotAssignmentAdmission = null,
+  schroederParticleStorageMaterializationAdmission = null,
+  gpuResidentLaneLeaseIdentity = null,
+  device = null,
+  deviceResult = null,
+  boxDimsM = [5, 5, 5],
+  dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+  gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2,
+  cflFactor = mlsMpmParticleState?.gridCflFactor,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
+  ...residentStepOptions
+} = {}) {
+  const resolvedDevice = device || deviceResult?.device || null;
+  if (!resolvedDevice?.createBuffer || !resolvedDevice.queue?.writeBuffer) {
+    throw new TypeError(
+      'runSchroederResidentStepsWithOptionalWebGpu requires a same-device WebGPU lane'
+    );
+  }
+  const laneIdentity = compactComputeManagerLaneIdentity(gpuResidentLaneLeaseIdentity);
+  if (laneIdentity?.ready !== true) {
+    const error = new Error(
+      'ComputeManager Schroeder resident steps require an authoritative GPU lane lease identity'
+    );
+    error.code = 'ULG_SCHROEDER_COMPUTE_MANAGER_LANE_IDENTITY_REQUIRED';
+    throw error;
+  }
+  const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  let currentSphParticleState = sphParticleState;
+  let currentMlsMpmParticleState = mlsMpmParticleState;
+  let currentSphParticleUpload = sphParticleUpload;
+  let currentMlsMpmParticleUpload = mlsMpmParticleUpload;
+  let currentResidentProductMass = residentProductMass;
+  let finalStep = null;
+  let finalSchroederResult = null;
+  const retainedSteps = [];
+  const stepSummaries = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const schroederResult = await runSchroederSameLevelMechanicsWebGpu({
+      ...residentStepOptions,
+      device: resolvedDevice,
+      sphParticleState: currentSphParticleState,
+      mlsMpmParticleState: currentMlsMpmParticleState,
+      sphParticleUpload: currentSphParticleUpload,
+      mlsMpmParticleUpload: currentMlsMpmParticleUpload,
+      selectedLevel: schroederSelectedLevel,
+      baseGridSpacingM: schroederBaseGridSpacingM,
+      minLevel: schroederMinLevel,
+      maxLevel: schroederMaxLevel,
+      tileCellCount: schroederTileCellCount,
+      enablePortableSummary: schroederEnablePortableSummary,
+      portableSummaryPeerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+      enableTwoLevelMechanics: schroederEnableTwoLevelMechanics,
+      twoLevelMechanicsAuthority: schroederTwoLevelMechanicsAuthority,
+      twoLevelFineSubstepCount: schroederTwoLevelFineSubstepCount,
+      enableActiveNodeIndex: schroederEnableActiveNodeIndex,
+      enableActiveNodeSortedIndex: schroederEnableActiveNodeSortedIndex,
+      activeNodeSortedIndexPolicyMode: schroederActiveNodeSortedIndexPolicyMode,
+      lawNeighborTraversalPolicyMode: schroederLawNeighborTraversalPolicyMode,
+      lawNeighborCandidateReadbackMode: schroederLawNeighborCandidateReadbackMode,
+      enableCrossLevelCoupling: schroederEnableCrossLevelCoupling,
+      enableLawQueue: schroederEnableLawQueue,
+      enableLawNeighborCandidates: schroederEnableLawNeighborCandidates,
+      stateDeltaMergeAdmission: schroederStateDeltaMergeAdmission,
+      phaseVolumeMigrationAdmission: schroederPhaseVolumeMigrationAdmission,
+      phaseVolumeSplitMergeAdmission: schroederPhaseVolumeSplitMergeAdmission,
+      particleStorageAllocatorAdmission: schroederParticleStorageAllocatorAdmission,
+      particleStorageFreeList: schroederParticleStorageFreeList,
+      particleStorageSlotAssignmentAdmission:
+        schroederParticleStorageSlotAssignmentAdmission,
+      particleStorageMaterializationAdmission:
+        schroederParticleStorageMaterializationAdmission,
+      boxDimsM,
+      dt,
+      gravityMPerS2,
+      cflFactor,
+      readbackMode,
+      residentStepRunner,
+      residentStepOptions: {
+        ...residentStepOptions,
+        residentProductMass: currentResidentProductMass,
+        gpuResidentLaneLeaseIdentity,
+        requireComputeManagerAuthority: true,
+        sequenceIndex: index,
+        sequenceStepCount: count
+      }
+    });
+    const step = schroederResult.residentStep;
+    if (!step) {
+      throw new Error('ComputeManager Schroeder runner did not produce a resident step');
+    }
+    step.sequenceIndex = index;
+    step.schroederSimulation = true;
+    step.schroederSameLevelMechanicsStatus = schroederResult.status;
+    step.schroederTwoLevelAuthoritySequence =
+      schroederResult.twoLevelMechanics?.authoritySequence
+      ?? step.schroederTwoLevelAuthoritySequence
+      ?? null;
+    step.gpuAuthoritativeState = false;
+    step.gpuAuthorityAdmissionSatisfied = false;
+    if (step.gpuResidentAuthoritativeContinuationCandidate === true) {
+      step.gpuAuthorityAdmissionRequired = true;
+      step.gpuAuthorityStatus =
+        'gpu-resident-continuation-candidate-awaiting-state-manager-commit';
+    }
+    step.computeManagerLaneIdentity = laneIdentity;
+    stepSummaries.push({
+      index,
+      backend: step.backend ?? 'webgpu',
+      status: step.status ?? schroederResult.status,
+      readbackMode: step.readbackMode ?? readbackMode,
+      schroederSimulation: true,
+      schroederStatus: schroederResult.status,
+      twoLevelAuthoritySequence: step.schroederTwoLevelAuthoritySequence,
+      gpuResidentAuthoritativeContinuationCandidate:
+        step.gpuResidentAuthoritativeContinuationCandidate === true,
+      gpuAuthorityAdmissionRequired: step.gpuAuthorityAdmissionRequired === true,
+      gpuAuthorityAdmissionSatisfied: false,
+      gpuAuthorityStatus: step.gpuAuthorityStatus ?? null,
+      gpuAuthorityCandidateBlockers: [...(step.gpuAuthorityCandidateBlockers || [])],
+      gpuAuthoritativeState: false,
+      schroederParticleStorageResidencyAdoptionToken:
+        step.schroederParticleStorageResidencyAdoptionToken ?? null,
+      schroederParticleStorageAuthoritativeParticleCount:
+        step.schroederParticleStorageAuthoritativeParticleCount ?? null,
+      schroederParticleStorageAuthoritativeParticleCountMetadataWord:
+        step.schroederParticleStorageAuthoritativeParticleCountMetadataWord ?? null
+    });
+    if (finalStep) {
+      if (retainIntermediateSteps) {
+        retainedSteps.push(finalStep);
+      } else {
+        const nextUploads = step.nextParticleUploads || {};
+        const preserveBuffers = [
+          nextUploads.sphParticleUpload?.stateBuffer,
+          nextUploads.sphParticleUpload?.thermoBuffer,
+          nextUploads.mlsMpmParticleUpload?.mechanicsBuffer
+        ].filter(Boolean);
+        destroyMlsMpmResidentStepBuffers(finalStep, { preserveBuffers });
+        destroyParticleStorageResidencyCandidateUnlessPreserved(finalStep, preserveBuffers);
+      }
+    }
+    finalStep = step;
+    finalSchroederResult = schroederResult;
+    currentSphParticleState = cloneSphParticleStateForNext(currentSphParticleState, step);
+    currentMlsMpmParticleState = cloneMlsMpmParticleStateForNext(
+      currentMlsMpmParticleState,
+      step
+    );
+    currentSphParticleUpload = step.nextParticleUploads?.sphParticleUpload ?? null;
+    currentMlsMpmParticleUpload =
+      step.nextParticleUploads?.mlsMpmParticleUpload ?? null;
+    currentResidentProductMass =
+      step.nextParticleUploads?.residentProductMass
+      ?? step.residentProductMass
+      ?? currentResidentProductMass;
+  }
+
+  const authoritySequence = finalStep?.schroederTwoLevelAuthoritySequence ?? null;
+  return {
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    status: 'resident-steps-executed',
+    backend: finalStep?.backend ?? 'webgpu',
+    schroederSimulation: true,
+    schroederSameLevelSequenceStatus:
+      'compute-manager-schroeder-resident-steps-executed',
+    stepCount: count,
+    completedStepCount: stepSummaries.length,
+    retainIntermediateSteps,
+    retainedSteps,
+    finalStep,
+    stepSummaries,
+    nextSphParticleState: currentSphParticleState,
+    nextMlsMpmParticleState: currentMlsMpmParticleState,
+    nextParticleUploads: finalStep?.nextParticleUploads ?? null,
+    nextResidentProductMass: currentResidentProductMass,
+    continuationAvailable: Boolean(finalStep?.nextParticleUploads),
+    continuedFromResidentState: Boolean(sphParticleUpload && mlsMpmParticleUpload),
+    residentSourceMode: 'compute-manager-gpu-resident-schroeder',
+    readbackMode: finalStep?.readbackMode ?? readbackMode,
+    normalHotLoopReadbackFree: finalStep?.normalHotLoopReadbackFree === true,
+    gpuResidentAuthoritativeContinuationCandidate:
+      finalStep?.gpuResidentAuthoritativeContinuationCandidate === true,
+    gpuAuthorityAdmissionRequired: finalStep?.gpuAuthorityAdmissionRequired === true,
+    gpuAuthorityAdmissionSatisfied: false,
+    gpuAuthorityStatus: finalStep?.gpuAuthorityStatus ?? null,
+    gpuAuthorityCandidateBlockers: [...(finalStep?.gpuAuthorityCandidateBlockers || [])],
+    gpuAuthoritativeState: false,
+    computeManagerLaneIdentity: laneIdentity,
+    schroederParticleStorageResidencyAdoptionToken:
+      finalStep?.schroederParticleStorageResidencyAdoptionToken ?? null,
+    schroederParticleStorageResidencyAdoptionCandidate:
+      finalStep?.schroederParticleStorageResidencyAdoptionCandidate ?? null,
+    schroederSameLevelMechanics: finalSchroederResult,
+    schroederTwoLevelAuthoritySequence: authoritySequence,
+    schroederTwoLevelAuthoritySequenceStatus: authoritySequence?.status ?? null,
+    schroederTwoLevelAuthoritySubmissionCount:
+      authoritySequence?.commandSubmissionCount ?? 0,
+    schroederTotalQueueSubmissionPolicy:
+      'non-authoritative-prelude-submits-plus-one-authoritative-mechanics-submit',
+    schroederNormalPathMapCount: authoritySequence?.normalPathMapCount ?? 0,
+    schroederNormalPathReadbackBytes:
+      authoritySequence?.normalPathReadbackBytes ?? 0,
+    schroederThirdLevelHold: authoritySequence?.sparseHierarchyThirdLevelHold === true,
+    scientificValidation: false,
     fullPhysicsValidation: false
   };
 }

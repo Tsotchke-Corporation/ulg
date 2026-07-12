@@ -2,6 +2,12 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import {
+  nativeSurfacePresentationSequenceGate
+} from './sph-long-horizon-probe.mjs';
+
+export { nativeSurfacePresentationSequenceGate };
 
 const repoDir = path.resolve(process.env.ULG_BENCH_REPO_DIR || process.cwd());
 const profile = String(process.env.ULG_BENCH_PROFILE || 'smoke').trim().toLowerCase();
@@ -311,6 +317,61 @@ function byteCountLabel(bytes) {
   return `${Math.round(value)} B`;
 }
 
+const GPU_TIMESTAMP_UNSUPPORTED_STATUSES = new Set([
+  'unsupported',
+  'unsupported-api',
+  'allocation-failed'
+]);
+
+export function gpuTimestampStageCoverage(profiles, requirements = []) {
+  const captures = [...new Set((profiles || []).filter(Boolean))];
+  const validSpans = captures.flatMap((profile) => (profile?.spans || []).filter(
+    (span) => span?.valid === true
+  ));
+  const activeRequirements = requirements.filter((requirement) => requirement?.active !== false);
+  const rows = activeRequirements.map((requirement) => {
+    const matched = validSpans.some((span) => {
+      if (requirement.label && span.label !== requirement.label) return false;
+      if (requirement.labelPrefix && !String(span.label || '').startsWith(requirement.labelPrefix)) {
+        return false;
+      }
+      if (requirement.metadata) {
+        return Object.entries(requirement.metadata).every(
+          ([key, value]) => span.metadata?.[key] === value
+        );
+      }
+      return Boolean(requirement.label || requirement.labelPrefix);
+    });
+    return {
+      id: requirement.id,
+      matched,
+      label: requirement.label ?? null,
+      labelPrefix: requirement.labelPrefix ?? null,
+      metadata: requirement.metadata ?? null
+    };
+  });
+  const missing = rows.filter((row) => !row.matched).map((row) => row.id);
+  const statuses = captures.map((profile) => profile?.status).filter(Boolean);
+  const allUnsupported = statuses.length > 0
+    && statuses.every((status) => GPU_TIMESTAMP_UNSUPPORTED_STATUSES.has(status));
+  return {
+    schema: 'peercompute.ulg.required-gpu-timestamp-stage-coverage.v0',
+    status: activeRequirements.length === 0
+      ? 'no-required-stages'
+      : (allUnsupported
+          ? 'inconclusive-unsupported'
+          : (missing.length === 0
+              ? 'required-gpu-stages-attributed'
+              : 'required-gpu-stages-missing')),
+    profileCount: captures.length,
+    validSpanCount: validSpans.length,
+    requiredStageCount: rows.length,
+    matchedStageCount: rows.length - missing.length,
+    missingStageIds: missing,
+    stages: rows
+  };
+}
+
 function workerOffscreenFrameTransportBudget({
   width,
   height,
@@ -368,13 +429,15 @@ function workerOffscreenFrameTransportBudget({
   };
 }
 
-function scenarioPerformanceGate({
+export function scenarioPerformanceGate({
   residentGpuCompletedStageMs,
   residentStageStepsPerSecond,
   estimatedReadbackBytesPerStep,
   activeGridDispatch,
   residentStageTiming,
   residentGpuTimestampProfile,
+  requiredGpuTimestampCoverage = null,
+  nativeSurfacePresentationGate = null,
   fusedResidentSequenceBlockedForSidecars = false
 }) {
   const blockers = [];
@@ -398,6 +461,13 @@ function scenarioPerformanceGate({
     )
   ) {
     blockers.push('valid-gpu-timestamps-required');
+  }
+  if (
+    requireGpuTimestampsGate
+    && !gpuTimestampUnsupported
+    && requiredGpuTimestampCoverage?.status === 'required-gpu-stages-missing'
+  ) {
+    blockers.push('required-gpu-timestamp-stages-missing');
   }
   if (requireActiveGridGate && activeGridDispatch?.useActiveGrid !== true) {
     blockers.push('active-grid-dispatch-required');
@@ -436,11 +506,17 @@ function scenarioPerformanceGate({
   ) {
     blockers.push('readback-bytes-per-step-above-threshold');
   }
+  if (nativeSurfacePresentationGate?.status === 'fail') {
+    blockers.push('native-surface-presentation-sequence-failed');
+  }
+  const hardBlockers = blockers.filter((blocker) => blocker !== 'gpu-timestamps-unsupported');
   return {
     schema: 'peercompute.ulg.sph-performance-benchmark-gate.v0',
     status: blockers.length === 0
       ? 'pass'
-      : (gpuTimestampUnsupported ? 'inconclusive-unsupported' : 'fail'),
+      : (gpuTimestampUnsupported && hardBlockers.length === 0
+          ? 'inconclusive-unsupported'
+          : 'fail'),
     blockers,
     requireActiveGrid: requireActiveGridGate,
     requireQueueFence: requireQueueFenceGate,
@@ -457,6 +533,10 @@ function scenarioPerformanceGate({
       activeGridUsed: activeGridDispatch?.useActiveGrid === true,
       gpuTimestampStatus,
       gpuTimestampValidSpanCount: residentGpuTimestampProfile?.validSpanCount ?? 0,
+      requiredGpuTimestampCoverageStatus: requiredGpuTimestampCoverage?.status ?? null,
+      missingGpuTimestampStageIds: requiredGpuTimestampCoverage?.missingStageIds ?? [],
+      nativeSurfacePresentationGateStatus: nativeSurfacePresentationGate?.status ?? null,
+      nativeSurfacePresentationBlockers: nativeSurfacePresentationGate?.blockers ?? [],
       queueFenceStatuses: Object.fromEntries(queueFenceStatuses),
       queueFenceSatisfied,
       queueFenceBypassedBySidecarFallback: fusedResidentSequenceBlockedForSidecars === true
@@ -487,6 +567,8 @@ function firstNonNullMetricValue(...values) {
 function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const analysis = result?.analysis || {};
   const metrics = Array.isArray(result?.timeline?.metrics) ? result.timeline.metrics : [];
+  const nativeSurfacePresentationGate = nativeSurfacePresentationSequenceGate(result?.timeline);
+  const nativeSurfacePresentationRequired = nativeSurfacePresentationGate.status !== 'not-requested';
   const initialMetric = metrics.find((entry) => entry?.initial) || null;
   const initialParticleEdgeDiagnostics = initialMetric?.initial?.initialParticleEdgeDiagnostics || null;
   const metric = lastMetricWithRenderState(result);
@@ -2274,6 +2356,132 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       && fusedResidentSequencePreflight?.fallbackMode === 'per-step-fused-mechanics-active-grid'
     )
   );
+  const fusedResidentSequence = residentStep?.fusedResidentSequence
+    ?? residentSteps?.finalStep?.fusedResidentSequence
+    ?? null;
+  const residentNeighborhoodLane = residentStageTiming?.residentNeighborhoodLane
+    ?? fusedResidentSequence?.residentNeighborhoodLane
+    ?? null;
+  const residentNeighborhoodProfileRequired = Number(
+    residentNeighborhoodLane?.generationCount ?? 0
+  ) > 0;
+  const gasCellEosProfileRequired = fusedResidentSequence?.residentGasCellEosStatus
+    === 'sph-spatial-gas-cell-eos-gpu-encoded';
+  const pressureScatterProfileRequired = Boolean(
+    fusedResidentSequence?.pressureInterfaceForceRowScatter
+  );
+  const sparseSchroederProfileRequired = fusedResidentSequence?.schroederSparseGridEnabled === true;
+  const residentCoreProfileRequired = residentStageTiming?.fusedResidentSequence === true;
+  const requiredGpuTimestampCoverage = gpuTimestampStageCoverage([
+    ...residentGpuTimestampCaptures,
+    renderFieldGpuTimestampProfile,
+    nativeMarchingCubesGpuTimestampProfile,
+    surfaceTranslationGpuTimestampProfile
+  ], [
+    { id: 'resident-p2g', label: 'p2gGridProjection', active: residentCoreProfileRequired },
+    { id: 'resident-grid-update', label: 'gridUpdate', active: residentCoreProfileRequired },
+    { id: 'resident-g2p', label: 'g2pReconstruction', active: residentCoreProfileRequired },
+    {
+      id: 'resident-neighborhood-key-build',
+      label: 'residentNeighborhoodKeyBuild',
+      active: residentNeighborhoodProfileRequired
+    },
+    {
+      id: 'resident-neighborhood-radix',
+      metadata: { residentNeighborhoodStage: 'cell-sort-unique' },
+      active: residentNeighborhoodProfileRequired
+    },
+    {
+      id: 'resident-neighborhood-cell-assemble',
+      label: 'residentNeighborhoodCellAssemble',
+      active: residentNeighborhoodProfileRequired
+    },
+    {
+      id: 'resident-neighborhood-candidate-count',
+      label: 'residentNeighborhoodCandidateCount',
+      active: residentNeighborhoodProfileRequired
+    },
+    {
+      id: 'resident-neighborhood-candidate-scan',
+      metadata: { residentNeighborhoodStage: 'candidate-count-scan' },
+      active: residentNeighborhoodProfileRequired
+    },
+    {
+      id: 'resident-neighborhood-finalize',
+      label: 'residentNeighborhoodFinalize',
+      active: residentNeighborhoodProfileRequired
+    },
+    {
+      id: 'resident-neighborhood-candidate-fill',
+      label: 'residentNeighborhoodCandidateFill',
+      active: residentNeighborhoodProfileRequired
+    },
+    {
+      id: 'pressure-interface-force-row-scatter',
+      label: 'pressureInterfaceForceRowScatter',
+      active: pressureScatterProfileRequired
+    },
+    {
+      id: 'gas-cell-eos-key-build',
+      label: 'sphGasCellEosKeyBuild',
+      active: gasCellEosProfileRequired
+    },
+    {
+      id: 'gas-cell-eos-radix',
+      metadata: { sphGasCellEosStage: 'radix' },
+      active: gasCellEosProfileRequired
+    },
+    {
+      id: 'gas-cell-eos-cell-reduce',
+      label: 'sphGasCellEosCellReduce',
+      active: gasCellEosProfileRequired
+    },
+    {
+      id: 'gas-cell-eos-finalize',
+      label: 'sphGasCellEosFinalize',
+      active: gasCellEosProfileRequired
+    },
+    {
+      id: 'gas-cell-eos-gradient',
+      label: 'sphGasCellEosGradient',
+      active: gasCellEosProfileRequired
+    },
+    {
+      id: 'schroeder-sparse-grid-view',
+      metadata: { stage: 'schroeder-sparse-grid-view' },
+      active: sparseSchroederProfileRequired
+    },
+    {
+      id: 'sparse-field-gather-atlas',
+      metadata: { stage: 'gather-atlas-indirect' },
+      active: Boolean(renderFieldGpuTimestampProfile)
+    },
+    {
+      id: 'sparse-field-compact-voxels',
+      metadata: { stage: 'compact-surface-voxels-indirect' },
+      active: Boolean(renderFieldGpuTimestampProfile)
+    },
+    {
+      id: 'sparse-field-finalize-candidates',
+      metadata: { stage: 'finalize-surface-candidates' },
+      active: Boolean(renderFieldGpuTimestampProfile)
+    },
+    {
+      id: 'marching-cubes-vertex-count',
+      label: 'marchingCubesVertexCount',
+      active: Boolean(nativeMarchingCubesGpuTimestampProfile)
+    },
+    {
+      id: 'marching-cubes-vertex-emit',
+      label: 'marchingCubesVertexEmit',
+      active: Boolean(nativeMarchingCubesGpuTimestampProfile)
+    },
+    {
+      id: 'surface-translation',
+      label: 'marchingCubesSurfaceTranslation',
+      active: Boolean(surfaceTranslationGpuTimestampProfile)
+    }
+  ]);
   const performanceGate = scenarioPerformanceGate({
     residentGpuCompletedStageMs,
     residentStageStepsPerSecond,
@@ -2281,6 +2489,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     activeGridDispatch,
     residentStageTiming,
     residentGpuTimestampProfile,
+    requiredGpuTimestampCoverage,
+    nativeSurfacePresentationGate: nativeSurfacePresentationRequired
+      ? nativeSurfacePresentationGate
+      : null,
     fusedResidentSequenceBlockedForSidecars
   });
   const profilingEvidence = {
@@ -2307,7 +2519,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
         .reduce((sum, value) => sum + value, 0) || null,
       queueFenceMs: residentGpuQueueFenceMs,
       mappedByteLength: residentGpuTimestampProfile?.mappedByteLength ?? 0,
-      allocationEvidence: residentStageTiming?.gpuAllocationEvidence ?? null
+      allocationEvidence: residentStageTiming?.gpuAllocationEvidence ?? null,
+      requiredStageCoverage: requiredGpuTimestampCoverage
     },
     renderField: {
       profile: renderFieldGpuTimestampProfile,
@@ -2350,6 +2563,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const benchmarkStatus = exit.code === 0
     && Number(browserConsoleIssueCount ?? 0) === 0
     && Number.isFinite(residentStageMs)
+    && (!nativeSurfacePresentationRequired || nativeSurfacePresentationGate.status === 'pass')
     && (effectiveProbeMode === 'direct-resident'
       ? validDirectResidentLoop
       : (
@@ -2622,6 +2836,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     browserConsoleIssueCount,
     browserConsoleIssueCounts: analysis.browserConsoleIssueCounts || {},
     browserConsoleWarningCounts: analysis.browserConsoleWarningCounts || {},
+    nativeSurfacePresentationRequired,
+    nativeSurfacePresentationGate,
     surfaceDrawStatus,
     surfaceDrawBridge,
     surfaceDrawBridgeCapabilityStatus,
@@ -3086,7 +3302,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exitCode = 2;
-});
+const invokedAsScript = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (invokedAsScript) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exitCode = 2;
+  });
+}

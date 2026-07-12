@@ -2218,16 +2218,33 @@ export function gasPressureInterfaceCouplingSummary({
     && pressureFeedback?.gasCellField?.status === 'gas-cell-pressure-field-ready';
   const strictGateBlocked = pressureFeedback?.forceCouplingStatus === 'blocked-strict-reaction-gate'
     || (pressureFeedback?.strictReactionGateStatus && pressureFeedback.strictReactionGateStatus !== 'strict-reaction-gate-pass');
-  const interfaceReady = materialInterfaceField?.schema === 'peercompute.ulg.sph-material-interface-field.v0'
+  const gpuResidentInterfaceSchemaReady = [
+    'peercompute.ulg.sph-material-interface-field.v0',
+    'peercompute.ulg.sph-material-interface-candidate-field.v0'
+  ].includes(materialInterfaceField?.schema);
+  const gpuResidentInterfaceReady = gpuResidentInterfaceSchemaReady
+    && materialInterfaceField?.gpuResidentInterfaceCandidates === true
+    && materialInterfaceField?.candidateRowsBufferRetained === true
+    && materialInterfaceField?.compactMetadataBufferRetained === true
+    && materialInterfaceField?.residentAuthorityStatus === 'resident-candidate-authority-bound'
+    && (
+      materialInterfaceField?.candidateCompactCapacity
+      ?? materialInterfaceField?.compactCandidateCapacity
+      ?? 0
+    ) > 0;
+  const cpuDiagnosticInterfaceReady = materialInterfaceField?.schema === 'peercompute.ulg.sph-material-interface-field.v0'
     && (materialInterfaceField.readySurfaceCount || 0) > 0
     && (materialInterfaceField.totalSurfaceAreaM2 || 0) > 0;
+  const interfaceReady = gpuResidentInterfaceReady || cpuDiagnosticInterfaceReady;
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const forceCouplingStatus = strictGateBlocked
     ? 'blocked-strict-reaction-gate'
     : (!gasReady
         ? 'blocked-gas-pressure-field-unavailable'
         : (interfaceReady
-            ? 'blocked-pressure-force-solver-not-implemented'
+            ? (gpuResidentInterfaceReady
+                ? 'gpu-resident-pressure-force-stage-ready'
+                : 'blocked-pressure-force-solver-not-implemented')
             : 'blocked-material-surface-normals-not-resolved'));
   return {
     schema: 'peercompute.ulg.sph-pressure-interface-coupling.v0',
@@ -2253,6 +2270,14 @@ export function gasPressureInterfaceCouplingSummary({
     materialInterfaceReadySurfaceCount: materialInterfaceField?.readySurfaceCount ?? 0,
     materialInterfaceTotalSurfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? 0,
     materialInterfaceSurfaceCount: materialInterfaceField?.surfaceCount ?? 0,
+    materialInterfaceInputMode: gpuResidentInterfaceReady
+      ? 'gpu-resident-compact-candidate-buffer'
+      : (cpuDiagnosticInterfaceReady ? 'cpu-diagnostic-interface-elements' : 'unavailable'),
+    materialInterfaceGpuResidentCandidateCapacity:
+      materialInterfaceField?.candidateCompactCapacity
+        ?? materialInterfaceField?.compactCandidateCapacity
+        ?? 0,
+    materialInterfaceGpuResidentMetadataGuardRequired: gpuResidentInterfaceReady,
     strictReactionGateStatus: pressureFeedback?.strictReactionGateStatus ?? null,
     strictReactionGateBlockers: [...(pressureFeedback?.strictReactionGateBlockers || [])],
     forceCouplingStatus,
@@ -2381,6 +2406,8 @@ export function gasPressureInterfaceForcePreview({
     schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
     status: canPreview ? 'pressure-interface-force-preview-ready' : 'pressure-interface-force-preview-blocked',
     forceApplicationStatus: 'not-applied-diagnostic-preview',
+    executionMode: 'cpu-diagnostic-only',
+    authoritativeStateMutationAllowed: false,
     pressureInterfaceCouplingStatus: coupling.status,
     forceCouplingStatus: coupling.forceCouplingStatus,
     gasInterfacePressurePa: Number.isFinite(fallbackPressurePa) ? fallbackPressurePa : null,
@@ -2578,6 +2605,8 @@ export function gasPressureInterfaceForceSolver({
     schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
     status: ready ? 'pressure-interface-force-solver-ready' : 'pressure-interface-force-solver-blocked',
     forceApplicationStatus: ready ? 'solver-ready-not-applied' : 'not-applied-solver-blocked',
+    executionMode: 'cpu-diagnostic-only',
+    authoritativeStateMutationAllowed: false,
     pressureInterfaceCouplingStatus: coupling.status,
     forceCouplingStatus: ready
       ? 'pressure-force-solver-ready-not-applied'

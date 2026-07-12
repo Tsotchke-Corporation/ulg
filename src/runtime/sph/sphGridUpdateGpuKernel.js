@@ -12,6 +12,8 @@ import { mlsMpmGridUpdateWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { MLS_MPM_GPU_GRID_NODE_FLOATS } from './sphGridGpuKernel.js';
+import { tagWebGpuBufferDevice, webGpuDeviceMismatchInfo } from './sphGpuDeviceIdentity.js';
+import { assertSchroederSparseGridView } from './schroederSparseHierarchyGpu.js';
 
 export {
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -503,9 +505,28 @@ export function pressureInterfaceGridForceAdmissionAllowsApplication({
   );
   const solverForceRowCount = Math.max(0, Math.round(finiteNumber(pressureInterfaceForceSolver?.forceRowCount, forceRowCount)));
   const admissionApproved = pressureInterfaceGridForceAdmission?.gridForceApplicationApproved === true;
+  const laneLocalExecutionToken = pressureInterfaceGridForceAdmission?.laneLocalExecutionToken ?? null;
+  const laneLocalDescriptorAdmitted = Boolean(
+    status === 'pressure-interface-lane-local-force-consumption-approved'
+    && laneLocalExecutionToken
+      ?.schema === 'peercompute.ulg.pressure-interface-lane-local-execution-token.v0'
+    && laneLocalExecutionToken?.status
+      === 'pressure-interface-lane-local-execution-token-valid'
+    && typeof laneLocalExecutionToken?.leaseId === 'string'
+    && laneLocalExecutionToken.leaseId.length > 0
+    && typeof laneLocalExecutionToken?.laneId === 'string'
+    && laneLocalExecutionToken.laneId.length > 0
+    && typeof laneLocalExecutionToken?.stateKey === 'string'
+    && laneLocalExecutionToken.stateKey.length > 0
+    && typeof laneLocalExecutionToken?.taskId === 'string'
+    && laneLocalExecutionToken.taskId.length > 0
+    && laneLocalExecutionToken.queueSubmitPerformed === false
+    && laneLocalExecutionToken.stateManagerCommitted === false
+  );
   const descriptorAdmitted = PRESSURE_INTERFACE_ADMITTED_DESCRIPTOR_STATUSES.has(descriptorStatus)
     || descriptor?.committed === true
-    || pressureInterfaceGridForceAdmission?.committed === true;
+    || pressureInterfaceGridForceAdmission?.committed === true
+    || laneLocalDescriptorAdmitted;
   const familyAccepted = outputFamilies.includes('pressure-interface-force-rows');
   const rowCountAccepted = admittedForceRowCount >= solverForceRowCount || solverForceRowCount === 0;
   return {
@@ -516,6 +537,9 @@ export function pressureInterfaceGridForceAdmissionAllowsApplication({
     approved: admissionApproved && descriptorAdmitted && familyAccepted && rowCountAccepted,
     admissionApproved,
     descriptorAdmitted,
+    laneLocalDescriptorAdmitted,
+    laneLocalExecutionTokenSchema: laneLocalExecutionToken?.schema ?? null,
+    laneLocalExecutionTokenStatus: laneLocalExecutionToken?.status ?? null,
     descriptorStatus,
     familyAccepted,
     rowCountAccepted,
@@ -904,12 +928,17 @@ export async function runMlsMpmGridUpdateWebGpu({
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
   retainUpdatedGridBuffer = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  commandEncoder = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmGridUpdateWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   assertP2gGridProjection(p2gGridProjection);
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -935,6 +964,9 @@ export async function runMlsMpmGridUpdateWebGpu({
     wallBarrierMinGapM: Math.max(1e-12, Math.abs(finiteNumber(wallBarrierMinGapM, DEFAULT_WALL_BARRIER_MIN_GAP_M)))
   });
   const outputByteLength = p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const schroederSparseGrid = p2gGridProjection.schroederSparseGrid
+    ? assertSchroederSparseGridView(p2gGridProjection.schroederSparseGrid, { device })
+    : null;
   const borrowedGridBuffer = p2gGridBuffer || p2gGridProjection.gridBuffer || p2gGridProjection.gpuResult?.gridBuffer || null;
   assertP2gGridProjection(p2gGridProjection, { requireGridNodes: !borrowedGridBuffer });
   const solverGridApplicationApproved = pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver);
@@ -945,6 +977,21 @@ export async function runMlsMpmGridUpdateWebGpu({
     ? pressureForceRowCountFromSolver(pressureInterfaceForceSolver, candidatePressureForceRows)
     : 0;
   const borrowedPressureForceRowsBuffer = pressureInterfaceForceRowsBuffer || null;
+  const gridDeviceMismatch = webGpuDeviceMismatchInfo({ buffer: borrowedGridBuffer, device });
+  if (gridDeviceMismatch.mismatch) {
+    throw new Error(
+      `grid update rejected cross-device P2G grid buffer (${gridDeviceMismatch.sourceDeviceId} -> ${gridDeviceMismatch.consumerDeviceId})`
+    );
+  }
+  const forceDeviceMismatch = webGpuDeviceMismatchInfo({
+    buffer: borrowedPressureForceRowsBuffer,
+    device
+  });
+  if (forceDeviceMismatch.mismatch) {
+    throw new Error(
+      `grid update rejected cross-device pressure force rows (${forceDeviceMismatch.sourceDeviceId} -> ${forceDeviceMismatch.consumerDeviceId})`
+    );
+  }
   const pressureForceApplicationApproved = solverGridApplicationApproved
     && pressureInterfaceGridForceAdmissionAllowsApplication({
       pressureInterfaceGridForceAdmission,
@@ -969,17 +1016,17 @@ export async function runMlsMpmGridUpdateWebGpu({
       ? pressureForceRows
       : EMPTY_PRESSURE_INTERFACE_FORCE_ROWS
   );
-  const updatedGridBuffer = device.createBuffer({
+  const updatedGridBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-mls-mpm-grid-update-out',
     size: Math.max(4, outputByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  });
+  }), device);
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-grid-update-params',
     size: 80,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
-  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE || callerOwnsEncoder;
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
   const readBuffer = noFullReadback
@@ -990,6 +1037,7 @@ export async function runMlsMpmGridUpdateWebGpu({
       usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
     });
   let returnedRetainedUpdatedGridBuffer = false;
+  let callerOwnedUpdate = null;
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createGridUpdateParamsArray({
@@ -1024,26 +1072,38 @@ export async function runMlsMpmGridUpdateWebGpu({
         { binding: 3, resource: { buffer: sourcePressureForceRowsBuffer } }
       ]
     });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(p2gGridProjection.gridNodeCount / 64)));
+    if (schroederSparseGrid) {
+      pass.dispatchWorkgroupsIndirect(
+        schroederSparseGrid.dispatchIndirectBuffer,
+        schroederSparseGrid.dispatchIndirectByteOffset ?? 0
+      );
+    } else {
+      pass.dispatchWorkgroups(Math.max(1, Math.ceil(p2gGridProjection.gridNodeCount / 64)));
+    }
     pass.end();
-    if (!noFullReadback) {
+    if (!noFullReadback && !callerOwnsEncoder) {
       encoder.copyBufferToBuffer(updatedGridBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
     }
-    device.queue.submit([encoder.finish()]);
-    queueCompletionStatus = 'queue-submitted';
-    queueCompletionMethod = 'queue.submit';
+    if (!callerOwnsEncoder) {
+      device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted';
+      queueCompletionMethod = 'queue.submit';
+    } else {
+      queueCompletionStatus = 'encoded-awaiting-caller-submit';
+      queueCompletionMethod = 'caller-owned-command-encoder';
+    }
     let updatedGridNodes = new Float32Array();
-    if (!noFullReadback) {
+    if (!noFullReadback && !callerOwnsEncoder) {
       await readBuffer.mapAsync(GPU_MAP_MODE.READ);
       queueCompletionStatus = 'readback-map-completed';
       queueCompletionMethod = 'mapAsync(readback-buffer)';
       updatedGridNodes = new Float32Array(readBuffer.getMappedRange()).slice(0, p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS);
       readBuffer.unmap();
-    } else {
+    } else if (!callerOwnsEncoder) {
       queueCompletionStatus = device.queue?.onSubmittedWorkDone
         ? 'queue-submitted-cleanup-deferred'
         : 'queue-submitted-no-explicit-completion';
@@ -1090,12 +1150,26 @@ export async function runMlsMpmGridUpdateWebGpu({
       queueCompletionStatus,
       queueCompletionMethod
     });
-    if (retainUpdatedGridBuffer) {
+    update.commandEncoderOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    update.submissionOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    update.queueSubmitPerformed = !callerOwnsEncoder;
+    update.mapPerformed = !noFullReadback && !callerOwnsEncoder;
+    update.readbackPerformed = !noFullReadback && !callerOwnsEncoder;
+    if (schroederSparseGrid) {
+      update.fullGridNodeCount = p2gGridProjection.fullGridNodeCount;
+      update.gridStorageMode = 'schroeder-byte-bounded-compact-grid';
+      update.schroederSparseGrid = schroederSparseGrid;
+      update.schroederSparseHierarchyGenerationId =
+        p2gGridProjection.schroederSparseHierarchyGenerationId;
+      update.gridArenaPeakAllocatedByteLength = schroederSparseGrid.peakAllocatedByteLength;
+    }
+    if (retainUpdatedGridBuffer || callerOwnsEncoder) {
       update.updatedGridBuffer = updatedGridBuffer;
       update.updatedGridBufferByteLength = outputByteLength;
       update.destroyUpdatedGridBuffer = () => updatedGridBuffer.destroy?.();
       returnedRetainedUpdatedGridBuffer = true;
     }
+    if (callerOwnsEncoder) callerOwnedUpdate = update;
     return update;
   } finally {
     const cleanup = () => {
@@ -1105,12 +1179,25 @@ export async function runMlsMpmGridUpdateWebGpu({
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
     };
-    if (noFullReadback) {
+    if (callerOwnsEncoder) {
+      if (callerOwnedUpdate) callerOwnedUpdate.cleanupSubmittedWork = cleanup;
+    } else if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);
     } else {
       cleanup();
     }
   }
+}
+
+export function createMlsMpmGridUpdateWebGpuEncoderStage(args = {}) {
+  if (!args.commandEncoder) {
+    throw new TypeError('grid-update encoder stage requires a caller-owned commandEncoder');
+  }
+  return runMlsMpmGridUpdateWebGpu({
+    ...args,
+    retainUpdatedGridBuffer: true,
+    readbackMode: NO_FULL_READBACK_MODE
+  });
 }
 
 function createNoFullReadbackParityReport(tolerance = 1e-5) {

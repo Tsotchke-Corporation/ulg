@@ -5,6 +5,7 @@ import {
   OPTICAL_GPU_RECORD_LAYOUT,
   OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS,
   OPTICAL_GPU_LOOKUP_QUERY_FLOATS,
+  OPTICAL_GPU_RECORD_STATUS,
   OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS,
   OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT,
   ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
@@ -18,6 +19,7 @@ import {
   createOpticalGpuLookupParityReport,
   decodeOpticalGpuLookupOutputRows,
   opticalLookupWgsl,
+  quantumSpectralRefractionAdmission,
   requestOpticalGpuDevice,
   runOpticalGpuLookup,
   runOpticalGpuLookupWithOptionalWebGpu,
@@ -223,12 +225,74 @@ test('optical GPU table packs derived PBR records and spectral samples', () => {
   const water = table.recordMetadata.find((record) => record.material === 'h2o');
   const gold = table.recordMetadata.find((record) => record.material === 'Au');
   assert.equal(water.phase, 'liquid');
-  assert.equal(water.renderModel, 'molecular-transparent-beer-lambert-pbr');
+  assert.equal(water.renderModel, 'molecular-dielectric-beer-lambert-pbr');
   assert.ok(water.spectralCount > 0);
   assert.equal(gold.renderModel, 'conductor-drude-free-electron');
   assert.ok(gold.renderModelId > 0);
   assert.equal(table.scientificValidation, false);
   assert.equal(table.fullPhysicsValidation, false);
+});
+
+test('optical GPU rows carry fail-closed refractive authority into the packed status', () => {
+  const waterProperties = {
+    formula: 'H2O',
+    molarMassKgPerMol: 0.01801528,
+    phases: [{ name: 'liquid', densityKgPerM3: 997 }]
+  };
+  const table = buildOpticalGpuTable([
+    { material: 'h2o', phase: 'liquid', properties: waterProperties },
+    { material: 'air', phase: 'gas', properties: { phases: [{ name: 'gas', densityKgPerM3: 1.225 }] } },
+    { material: 'unsupported', phase: 'solid' }
+  ]);
+  const water = table.recordMetadata.find((record) => record.material === 'h2o');
+  const air = table.recordMetadata.find((record) => record.material === 'air');
+  const unsupported = table.recordMetadata.find((record) => record.material === 'unsupported');
+
+  assert.equal(water.refractiveAuthority, true);
+  assert.equal(
+    opticalRecordField(table, water, 'status'),
+    OPTICAL_GPU_RECORD_STATUS.refractiveAuthority
+  );
+  assert.equal(air.refractiveAuthority, false);
+  assert.equal(opticalRecordField(table, air, 'status'), OPTICAL_GPU_RECORD_STATUS.ready);
+  assert.equal(unsupported.blocked, true);
+  assert.equal(opticalRecordField(table, unsupported, 'status'), OPTICAL_GPU_RECORD_STATUS.blocked);
+});
+
+test('quantum spectral refraction admission requires provenance and distinct RGB coverage', () => {
+  const valid = {
+    refractiveAuthority: true,
+    refractiveStatus: 'quantum-refractive-response-derived-reduced-unvalidated',
+    refractiveProvenance: {
+      source: 'rhf-dipole-response-plus-lorentz-lorenz-local-field'
+    },
+    spectralSamples: [
+      { wavelengthNm: 480, n: 1.07, k: 0 },
+      { wavelengthNm: 530, n: 1.069, k: 0 },
+      { wavelengthNm: 630, n: 1.068, k: 0 }
+    ]
+  };
+  assert.equal(quantumSpectralRefractionAdmission(valid).accepted, true);
+  assert.equal(quantumSpectralRefractionAdmission({
+    ...valid,
+    refractiveProvenance: null
+  }).reason, 'refractive-provenance-source-missing');
+  assert.equal(quantumSpectralRefractionAdmission({
+    ...valid,
+    spectralSamples: valid.spectralSamples.map((sample) => ({ ...sample, wavelengthNm: 480 }))
+  }).reason, 'distinct-refractive-spectral-samples-missing');
+  assert.equal(quantumSpectralRefractionAdmission({
+    ...valid,
+    spectralSamples: [
+      { wavelengthNm: 440, n: 1.07, k: 0 },
+      { wavelengthNm: 460, n: 1.069, k: 0 },
+      { wavelengthNm: 480, n: 1.068, k: 0 }
+    ]
+  }).reason, 'rgb-refractive-spectral-coverage-missing');
+  assert.equal(quantumSpectralRefractionAdmission({
+    ...valid,
+    blocked: true
+  }).reason, 'optical-closure-blocked');
 });
 
 test('optical GPU table consumes non-authoritative material-bank display PBR warm inputs', () => {
@@ -279,7 +343,14 @@ test('optical GPU table consumes non-authoritative material-bank display PBR war
   assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearB') - srgbToLinear(0.72)) < 1e-6);
   assert.equal(opticalRecordField(table, sodium, 'metalness'), 1);
   assert.ok(Math.abs(opticalRecordField(table, sodium, 'roughness') - 0.31) < 1e-6);
-  assert.ok(Math.abs(opticalRecordField(table, sodium, 'ior') - 1.1) < 1e-6);
+  assert.ok(
+    Math.abs(opticalRecordField(table, sodium, 'ior') - sodium.closurePbr.ior) < 1e-6,
+    'display warm inputs must not override the closure refractive index'
+  );
+  assert.ok(
+    Math.abs(opticalRecordField(table, sodium, 'ior') - 1.1) > 1e-6,
+    'the warm-input display IOR is not refractive authority'
+  );
   assert.equal(water.materialPropertyBankPbrWarmInput, null);
   assert.equal(water.materialPropertyBankPbrWarmInputStatus, 'no-material-bank-pbr-warm-input');
   assert.equal(water.displayPbrSource, 'closure-derived-optical-pbr');
@@ -293,7 +364,7 @@ test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit whe
       async requestAdapter() {
         return {
           limits: {
-            maxStorageBuffersPerShaderStage: 10,
+            maxStorageBuffersPerShaderStage: 16,
             maxBufferSize: 512 * 1024 * 1024,
             maxStorageBufferBindingSize: 512 * 1024 * 1024
           },
@@ -310,17 +381,19 @@ test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit whe
   assert.equal(result.device, device);
   assert.deepEqual(requestDescriptor, {
     requiredLimits: {
-      maxStorageBuffersPerShaderStage: 10,
+      maxStorageBuffersPerShaderStage: 14,
       maxBufferSize: 512 * 1024 * 1024,
       maxStorageBufferBindingSize: 512 * 1024 * 1024
     }
   });
-  assert.equal(result.requiredLimits.maxStorageBuffersPerShaderStage, 10);
+  assert.equal(result.requiredLimits.maxStorageBuffersPerShaderStage, 14);
   assert.equal(result.requiredLimits.maxBufferSize, 512 * 1024 * 1024);
   assert.equal(result.requiredLimits.maxStorageBufferBindingSize, 512 * 1024 * 1024);
-  assert.equal(result.adapterLimits.maxStorageBuffersPerShaderStage, 10);
+  assert.equal(result.adapterLimits.maxStorageBuffersPerShaderStage, 16);
   assert.equal(result.adapterLimits.maxBufferSize, 512 * 1024 * 1024);
   assert.equal(result.adapterLimits.maxStorageBufferBindingSize, 512 * 1024 * 1024);
+  assert.equal(result.residentSphStorageBuffersPerStageRequired, 14);
+  assert.equal(result.residentSphStorageBuffersPerStageSupported, true);
 });
 
 test('requestOpticalGpuDevice enables timestamp queries only when the adapter exposes them', async () => {
@@ -521,7 +594,7 @@ test('optical GPU table and lookup distinguish phase-resolved optical state', ()
     [stableOpticalStateId(clearVaporState), stableOpticalStateId(supersaturatedState)]
   );
   assert.notEqual(table.recordMetadata[0].opticalStateId, table.recordMetadata[1].opticalStateId);
-  assert.equal(table.recordMetadata[0].renderModel, 'molecular-vapor-transparent-spectrum');
+  assert.equal(table.recordMetadata[0].renderModel, 'molecular-vapor-volume-spectrum');
   assert.equal(table.recordMetadata[1].renderModel, 'molecular-condensed-droplet-scattering-pbr');
   assert.match(table.recordMetadata[1].opticalStateKey, /h2oPartialPressurePa/);
   assert.match(table.recordMetadata[1].opticalStateKey, /temperatureK/);
@@ -537,7 +610,7 @@ test('optical GPU table and lookup distinguish phase-resolved optical state', ()
   assert.equal(lookup.queries[2], stableOpticalStateId(supersaturatedState));
 });
 
-test('optical GPU table packs air as transparent Rayleigh PBR instead of blocked black', () => {
+test('optical GPU table keeps Rayleigh scattering while blocking unsupported air refraction', () => {
   const table = buildOpticalGpuTable([
     {
       material: 'air',
@@ -549,7 +622,7 @@ test('optical GPU table packs air as transparent Rayleigh PBR instead of blocked
   assert.equal(table.recordCount, 1);
   assert.equal(metadata.material, 'air');
   assert.equal(metadata.phase, 'gas');
-  assert.equal(metadata.renderModel, 'gas-rayleigh-transparent-pbr');
+  assert.equal(metadata.renderModel, 'gas-rayleigh-scattering-pbr');
 
   const lookup = buildOpticalGpuLookupQueries(table, [{ material: 'air', phase: 'gas' }]);
   const result = sampleOpticalGpuTableCpu(table, lookup);
@@ -558,8 +631,11 @@ test('optical GPU table packs air as transparent Rayleigh PBR instead of blocked
   assert.equal(row.phase, 'gas');
   assert.equal(row.status, 1);
   assert.notEqual(row.status, 255);
-  assert.ok(row.transmission > 0.999);
-  assert.ok(row.opacity < 0.001);
+  assert.equal(row.transmission, 0);
+  assert.equal(row.ior, 1);
+  assert.equal(metadata.refractiveAuthority, false);
+  assert.match(metadata.refractiveStatus, /pending|blocked|unsupported/);
+  assert.equal(metadata.refractiveSpectralSampleCount, 0);
   assert.ok(row.scatteringCoefficientPerM > 0);
   assert.ok(row.baseColorLinear.every((value) => value > 0.6));
 });

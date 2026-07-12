@@ -1,8 +1,5 @@
 export function runUlgRemoteResidentPlacementTask(data = {}) {
-  const retainedBufferRefs = [
-    ...(data.gpuFenceRequirement?.retainedBufferRefs || []),
-    'remote-placement-output-buffer'
-  ];
+  const retainedBufferRefs = [...(data.gpuFenceRequirement?.retainedBufferRefs || [])];
   const gpuFence = {
     schema: 'peercompute.compute.gpu-fence-report.v0',
     status: 'queue-work-completed',
@@ -39,7 +36,7 @@ export function runUlgRemoteResidentPlacementTask(data = {}) {
         schema: 'peercompute.ulg.mls-mpm-resident-steps-state-delta.v0',
         status: 'resident-steps-delta-ready',
         stateKey: data.commitDeltaStateKey || null,
-        backend: 'remote-webgpu-fixture',
+        backend: 'webgpu',
         readbackMode: data.readbackMode || 'no-full-readback',
         requestedReadbackMode: data.readbackMode || 'no-full-readback',
         completedStepCount,
@@ -51,23 +48,55 @@ export function runUlgRemoteResidentPlacementTask(data = {}) {
         gpuFence,
         retainedBufferRefs,
         gpuResidentLaneRequirement: data.gpuResidentLane || null,
+        residentSequenceLaneContract: data.residentSequenceLaneContract || null,
         finalStep: {
           schema: 'peercompute.ulg.mls-mpm-resident-step-sequence-summary.v0',
           stepIndex: completedStepCount - 1,
-          backend: 'remote-webgpu-fixture',
+          backend: 'webgpu',
           status: 'resident-step-remote-placement-executed',
           readbackMode: data.readbackMode || 'no-full-readback',
           normalHotLoopReadbackFree: true,
-          gpuAuthoritativeState: true,
+          gpuResidentAuthoritativeContinuationCandidate: true,
+          gpuAuthorityAdmissionRequired: true,
+          gpuAuthorityAdmissionSatisfied: false,
+          gpuAuthorityStatus:
+            'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+          gpuAuthorityCandidateBlockers: [],
+          gpuAuthoritativeState: false,
           renderStateReadbackAvailable: false,
           diagnostics: {
             particleCount: data.sphParticleState?.particleCount ?? null,
             gpuResidentLaneFenceSatisfied: false
           }
         },
-        stepSummaries: [],
+        stepSummaries: Array.from({ length: completedStepCount }, (_, stepIndex) => ({
+          schema: 'peercompute.ulg.mls-mpm-resident-step-sequence-summary.v0',
+          stepIndex,
+          backend: 'webgpu',
+          status: 'resident-step-remote-placement-executed',
+          readbackMode: data.readbackMode || 'no-full-readback',
+          normalHotLoopReadbackFree: true,
+          gpuResidentAuthoritativeContinuationCandidate: true,
+          gpuAuthorityAdmissionRequired: true,
+          gpuAuthorityAdmissionSatisfied: false,
+          gpuAuthorityStatus:
+            'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+          gpuAuthorityCandidateBlockers: [],
+          gpuAuthoritativeState: false,
+          renderStateReadbackAvailable: false,
+          diagnostics: {
+            particleCount: data.sphParticleState?.particleCount ?? null,
+            gpuResidentLaneFenceSatisfied: false
+          }
+        })),
         normalHotLoopReadbackFree: true,
-        gpuAuthoritativeState: true,
+        gpuResidentAuthoritativeContinuationCandidate: true,
+        gpuAuthorityAdmissionRequired: true,
+        gpuAuthorityAdmissionSatisfied: false,
+        gpuAuthorityStatus:
+          'gpu-resident-continuation-candidate-awaiting-state-manager-commit',
+        gpuAuthorityCandidateBlockers: [],
+        gpuAuthoritativeState: false,
         scientificValidation: false,
         sphValidation: false,
         phaseChangeValidation: false,

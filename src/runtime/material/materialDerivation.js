@@ -415,6 +415,7 @@ export function deriveFormulaMaterialProperties({
       ? gasVerticalExcitationEv(counts, geom)
       : null;
     return withPropertyProvenance({
+      atomCounts: { ...counts },
       molarMassKgPerMol,
       atomsPerFormula,
       formula: resolvedFormula,
@@ -438,7 +439,7 @@ export function deriveFormulaMaterialProperties({
     }, {
       entries: [
         propertyProvenanceEntry({
-          paths: ['molarMassKgPerMol', 'atomsPerFormula'],
+          paths: ['formula', 'atomCounts', 'molarMassKgPerMol', 'atomsPerFormula'],
           status: DS.EXACT_CONSTANT,
           source: 'periodic-table-atomic-masses',
           method: 'formula molar mass and atom count from parsed chemical formula',
@@ -499,6 +500,7 @@ export function deriveFormulaMaterialProperties({
   };
 
   return withPropertyProvenance({
+    atomCounts: { ...counts },
     molarMassKgPerMol,
     atomsPerFormula,
     formula: resolvedFormula,
@@ -529,7 +531,7 @@ export function deriveFormulaMaterialProperties({
   }, {
     entries: [
       propertyProvenanceEntry({
-        paths: ['molarMassKgPerMol', 'atomsPerFormula'],
+        paths: ['formula', 'atomCounts', 'molarMassKgPerMol', 'atomsPerFormula'],
         status: DS.EXACT_CONSTANT,
         source: 'periodic-table-atomic-masses',
         method: 'formula molar mass and atom count from parsed chemical formula',

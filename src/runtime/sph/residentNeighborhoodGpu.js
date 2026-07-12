@@ -8,12 +8,18 @@ import {
   RESIDENT_NEIGHBORHOOD_CONSUMER,
   RESIDENT_NEIGHBORHOOD_CSR_OFFSET_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_EVIDENCE_VERSION,
+  RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_SOURCE_SPAN_U32_LAYOUT,
+  RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_STATUS_FLAG,
   RESIDENT_NEIGHBORHOOD_SUPPORT_CLASS_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_SUPPORT_FLAG,
+  RESIDENT_NEIGHBORHOOD_UNASSIGNED_SUPPORT_CLASS,
+  RESIDENT_NEIGHBORHOOD_VALIDITY_FLAG,
   ULG_RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_SCHEMA,
-  ULG_RESIDENT_NEIGHBORHOOD_DESCRIPTOR_SCHEMA
+  ULG_RESIDENT_NEIGHBORHOOD_DESCRIPTOR_SCHEMA,
+  ULG_RESIDENT_NEIGHBORHOOD_PACKED_CSR_SCHEMA,
+  ULG_RESIDENT_NEIGHBORHOOD_POSITION_VALIDITY_SCHEMA
 } from '../../../ulg-gpu-abi/src/residentNeighborhood.js';
 
 export {
@@ -26,19 +32,33 @@ export {
   RESIDENT_NEIGHBORHOOD_CONSUMER,
   RESIDENT_NEIGHBORHOOD_CSR_OFFSET_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_EVIDENCE_VERSION,
+  RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_SOURCE_SPAN_U32_LAYOUT,
+  RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_STATUS_FLAG,
   RESIDENT_NEIGHBORHOOD_SUPPORT_CLASS_U32_LAYOUT,
   RESIDENT_NEIGHBORHOOD_SUPPORT_FLAG,
+  RESIDENT_NEIGHBORHOOD_UNASSIGNED_SUPPORT_CLASS,
+  RESIDENT_NEIGHBORHOOD_VALIDITY_FLAG,
   ULG_RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_SCHEMA,
-  ULG_RESIDENT_NEIGHBORHOOD_DESCRIPTOR_SCHEMA
+  ULG_RESIDENT_NEIGHBORHOOD_DESCRIPTOR_SCHEMA,
+  ULG_RESIDENT_NEIGHBORHOOD_PACKED_CSR_SCHEMA,
+  ULG_RESIDENT_NEIGHBORHOOD_POSITION_VALIDITY_SCHEMA
 };
 
 const UINT32_MAX = 0xffff_ffff;
+const UINT64_MASK = 0xffff_ffff_ffff_ffffn;
+const FNV1A64_OFFSET_BASIS = 0xcbf2_9ce4_8422_2325n;
+const FNV1A64_PRIME = 0x0000_0100_0000_01b3n;
 const INT32_MIN = -0x8000_0000;
 const INT32_MAX = 0x7fff_ffff;
 const SIGN_ORDER_BIAS = 0x8000_0000;
 const U32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
+
+export const PEERCOMPUTE_GPU_RESIDENT_LANE_LEASE_IDENTITY_SCHEMA =
+  'peercompute.compute.gpu-resident-lane-lease-identity.v0';
+export const RESIDENT_NEIGHBORHOOD_AUTHORITY_TOKEN_BINDING =
+  'fnv1a64:leaseId:laneId:stateKey:sourceFamily:v0';
 
 export const RESIDENT_NEIGHBORHOOD_CELL_KEY_STRIDE_U32 =
   RESIDENT_NEIGHBORHOOD_CELL_KEY_U32_LAYOUT.length;
@@ -48,6 +68,10 @@ export const RESIDENT_NEIGHBORHOOD_SUPPORT_CLASS_STRIDE_U32 =
   RESIDENT_NEIGHBORHOOD_SUPPORT_CLASS_U32_LAYOUT.length;
 export const RESIDENT_NEIGHBORHOOD_SUPPORT_CLASS_STRIDE_BYTES =
   RESIDENT_NEIGHBORHOOD_SUPPORT_CLASS_STRIDE_U32 * U32_BYTES;
+export const RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32 =
+  RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_U32_LAYOUT.length;
+export const RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_BYTES =
+  RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32 * U32_BYTES;
 export const RESIDENT_NEIGHBORHOOD_CANDIDATE_STRIDE_U32 =
   RESIDENT_NEIGHBORHOOD_CANDIDATE_U32_LAYOUT.length;
 export const RESIDENT_NEIGHBORHOOD_CANDIDATE_STRIDE_BYTES =
@@ -56,6 +80,32 @@ export const RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_STRIDE_U32 =
   RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_U32_LAYOUT.length;
 export const RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_STRIDE_BYTES =
   RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_STRIDE_U32 * U32_BYTES;
+export const RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_U32 =
+  RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_U32_LAYOUT.length;
+export const RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_BYTES =
+  RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_U32 * U32_BYTES;
+
+const CONSUMER_SLOTS = Object.freeze([
+  ['mechanics', RESIDENT_NEIGHBORHOOD_CONSUMER.MECHANICS],
+  ['contact', RESIDENT_NEIGHBORHOOD_CONSUMER.CONTACT],
+  ['thermal', RESIDENT_NEIGHBORHOOD_CONSUMER.THERMAL],
+  ['radiation', RESIDENT_NEIGHBORHOOD_CONSUMER.RADIATION],
+  ['reaction', RESIDENT_NEIGHBORHOOD_CONSUMER.REACTION],
+  ['pressureInterface', RESIDENT_NEIGHBORHOOD_CONSUMER.PRESSURE_INTERFACE],
+  ['solidKinematics', RESIDENT_NEIGHBORHOOD_CONSUMER.SOLID_KINEMATICS],
+  ['ssUniqueNodeCompaction', RESIDENT_NEIGHBORHOOD_CONSUMER.SS_UNIQUE_NODE_COMPACTION]
+]);
+
+const DEFAULT_SELF_INCLUSION = Object.freeze({
+  mechanics: 'exclude',
+  contact: 'exclude',
+  thermal: 'exclude',
+  radiation: 'exclude',
+  reaction: 'exclude',
+  pressureInterface: 'include',
+  solidKinematics: 'exclude',
+  ssUniqueNodeCompaction: 'include'
+});
 
 function requireUint32(value, name) {
   const number = Number(value);
@@ -81,11 +131,47 @@ function requireSafeUint(value, name) {
   return number;
 }
 
+function requireNonNegativeFinite(value, name) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    throw new RangeError(`${name} must be a non-negative finite number`);
+  }
+  return number;
+}
+
 function requireNonEmptyString(value, name) {
   if (typeof value !== 'string' || value.length === 0) {
     throw new TypeError(`${name} must be a non-empty string`);
   }
   return value;
+}
+
+export function createResidentNeighborhoodAuthorityToken({
+  leaseId,
+  laneId,
+  stateKey,
+  sourceFamily
+} = {}) {
+  const parts = [
+    requireNonEmptyString(leaseId, 'leaseId'),
+    requireNonEmptyString(laneId, 'laneId'),
+    requireNonEmptyString(stateKey, 'stateKey'),
+    requireNonEmptyString(sourceFamily, 'sourceFamily')
+  ];
+  const bytes = new TextEncoder().encode([
+    RESIDENT_NEIGHBORHOOD_AUTHORITY_TOKEN_BINDING,
+    ...parts.map((value) => `${value.length}:${value}`)
+  ].join('\0'));
+  let hash = FNV1A64_OFFSET_BASIS;
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = (hash * FNV1A64_PRIME) & UINT64_MASK;
+  }
+  return Object.freeze({
+    low: Number(hash & 0xffff_ffffn) >>> 0,
+    high: Number((hash >> 32n) & 0xffff_ffffn) >>> 0,
+    binding: RESIDENT_NEIGHBORHOOD_AUTHORITY_TOKEN_BINDING
+  });
 }
 
 function checkedAdd(left, right, name) {
@@ -102,6 +188,24 @@ function checkedMultiply(left, right, name) {
     throw new RangeError(`${name} exceeds Number.MAX_SAFE_INTEGER`);
   }
   return product;
+}
+
+function alignU32(value, alignment = 4) {
+  const count = requireSafeUint(value, 'u32 offset');
+  const resolvedAlignment = requireUint32(alignment, 'u32 alignment');
+  if (resolvedAlignment === 0) throw new RangeError('u32 alignment must be positive');
+  return checkedMultiply(
+    Math.ceil(count / resolvedAlignment),
+    resolvedAlignment,
+    'aligned u32 offset'
+  );
+}
+
+function float32Bits(value, name) {
+  const buffer = new ArrayBuffer(4);
+  const view = new DataView(buffer);
+  view.setFloat32(0, requireNonNegativeFinite(value, name), true);
+  return view.getUint32(0, true);
 }
 
 function resolveCapacity(value, fallback, name) {
@@ -291,6 +395,211 @@ export function packResidentNeighborhoodSupportClassesU32(supportClasses, option
   return rows;
 }
 
+function assignmentSupportClassId(assignment, consumerName) {
+  return assignment?.[consumerName]
+    ?? assignment?.[`${consumerName}SupportClassId`]
+    ?? assignment?.supportClassIds?.[consumerName]
+    ?? RESIDENT_NEIGHBORHOOD_UNASSIGNED_SUPPORT_CLASS;
+}
+
+export function normalizeResidentNeighborhoodSourceSupportAssignments(
+  sourceSupportAssignments,
+  { sourceCount = 0, supportClasses = [] } = {}
+) {
+  const normalizedSourceCount = requireUint32(sourceCount, 'sourceCount');
+  const uniformAssignment = !Array.isArray(sourceSupportAssignments)
+    ? sourceSupportAssignments?.uniform
+    : null;
+  if (!Array.isArray(sourceSupportAssignments) && !uniformAssignment) {
+    throw new TypeError(
+      'sourceSupportAssignments must be an array or { uniform: assignment }'
+    );
+  }
+  if (Array.isArray(sourceSupportAssignments)
+    && sourceSupportAssignments.length !== normalizedSourceCount) {
+    throw new RangeError(
+      `sourceSupportAssignments must contain exactly ${normalizedSourceCount} source rows`
+    );
+  }
+  const normalizedSupportClasses = normalizeResidentNeighborhoodSupportClasses(supportClasses);
+  const classesById = new Map(
+    normalizedSupportClasses.map((supportClass) => [supportClass.supportClassId, supportClass])
+  );
+  const inputAssignments = uniformAssignment ? [uniformAssignment] : sourceSupportAssignments;
+  const normalized = inputAssignments.map((assignment, packedSourceIndex) => {
+    const sourceIndex = uniformAssignment ? null : packedSourceIndex;
+    const sourceLabel = uniformAssignment ? 'uniform' : sourceIndex;
+    if (!assignment || typeof assignment !== 'object') {
+      throw new TypeError(`sourceSupportAssignments[${sourceLabel}] must be an object`);
+    }
+    const supportClassIds = {};
+    let consumerMask = 0;
+    for (const [consumerName, consumerBit] of CONSUMER_SLOTS) {
+      const supportClassId = requireUint32(
+        assignmentSupportClassId(assignment, consumerName),
+        `sourceSupportAssignments[${sourceLabel}].${consumerName}`
+      );
+      supportClassIds[consumerName] = supportClassId;
+      if (supportClassId === RESIDENT_NEIGHBORHOOD_UNASSIGNED_SUPPORT_CLASS) continue;
+      const supportClass = classesById.get(supportClassId);
+      if (!supportClass) {
+        throw new RangeError(
+          `sourceSupportAssignments[${sourceIndex}].${consumerName} references unknown supportClassId ${supportClassId}`
+        );
+      }
+      if ((supportClass.consumerMask & consumerBit) === 0) {
+        throw new RangeError(
+          `supportClassId ${supportClassId} does not admit the ${consumerName} consumer`
+        );
+      }
+      consumerMask = (consumerMask | consumerBit) >>> 0;
+    }
+    return Object.freeze({
+      sourceIndex,
+      consumerMask,
+      supportClassIds: Object.freeze(supportClassIds)
+    });
+  });
+  const consumerMask = normalized.reduce(
+    (mask, assignment) => (mask | assignment.consumerMask) >>> 0,
+    0
+  );
+  return Object.freeze({
+    rowCount: normalizedSourceCount,
+    packedRowCount: normalized.length,
+    rowStrideU32: RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32,
+    rowStrideBytes: RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_BYTES,
+    rowLayout: [...RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_U32_LAYOUT],
+    sourceIndexing: 'row-index-is-source-index',
+    unassignedSupportClassId: RESIDENT_NEIGHBORHOOD_UNASSIGNED_SUPPORT_CLASS,
+    consumerSlotOrder: Object.freeze(CONSUMER_SLOTS.map(([consumerName]) => consumerName)),
+    consumerMask,
+    storageMode: uniformAssignment ? 'uniform-gpu-expanded' : 'per-source-rows',
+    uniform: Boolean(uniformAssignment),
+    assignments: Object.freeze(normalized)
+  });
+}
+
+export function packResidentNeighborhoodSourceSupportAssignmentsU32(
+  sourceSupportAssignments,
+  options = {}
+) {
+  const normalized = normalizeResidentNeighborhoodSourceSupportAssignments(
+    sourceSupportAssignments,
+    options
+  );
+  const rows = new Uint32Array(
+    normalized.packedRowCount * RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32
+  );
+  normalized.assignments.forEach((assignment, packedSourceIndex) => {
+    const offset = packedSourceIndex
+      * RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32;
+    CONSUMER_SLOTS.forEach(([consumerName], slot) => {
+      rows[offset + slot] = assignment.supportClassIds[consumerName];
+    });
+  });
+  return rows;
+}
+
+function normalizeSelfRule(value, label) {
+  if (value === true || value === 'include') return 'include';
+  if (value === false || value === 'exclude') return 'exclude';
+  throw new TypeError(`${label} must be "include", "exclude", or a boolean`);
+}
+
+export function normalizeResidentNeighborhoodSelfInclusionPolicy(
+  selfInclusionPolicy = {},
+  { consumerMask = 0 } = {}
+) {
+  if (!selfInclusionPolicy || typeof selfInclusionPolicy !== 'object') {
+    throw new TypeError('selfInclusionPolicy must be an object');
+  }
+  const normalizedConsumerMask = requireUint32(consumerMask, 'consumerMask');
+  let includeConsumerMask = 0;
+  let excludeConsumerMask = 0;
+  const byConsumer = {};
+  const directMasks = selfInclusionPolicy.includeConsumerMask !== undefined
+    || selfInclusionPolicy.excludeConsumerMask !== undefined;
+  if (directMasks) {
+    includeConsumerMask = requireUint32(
+      selfInclusionPolicy.includeConsumerMask ?? 0,
+      'selfInclusionPolicy.includeConsumerMask'
+    ) & normalizedConsumerMask;
+    excludeConsumerMask = requireUint32(
+      selfInclusionPolicy.excludeConsumerMask ?? 0,
+      'selfInclusionPolicy.excludeConsumerMask'
+    ) & normalizedConsumerMask;
+    for (const [consumerName, consumerBit] of CONSUMER_SLOTS) {
+      if ((normalizedConsumerMask & consumerBit) === 0) continue;
+      if ((includeConsumerMask & consumerBit) !== 0) byConsumer[consumerName] = 'include';
+      if ((excludeConsumerMask & consumerBit) !== 0) byConsumer[consumerName] = 'exclude';
+    }
+  } else {
+    for (const [consumerName, consumerBit] of CONSUMER_SLOTS) {
+      if ((normalizedConsumerMask & consumerBit) === 0) continue;
+      const rule = normalizeSelfRule(
+        selfInclusionPolicy[consumerName] ?? DEFAULT_SELF_INCLUSION[consumerName],
+        `selfInclusionPolicy.${consumerName}`
+      );
+      byConsumer[consumerName] = rule;
+      if (rule === 'include') includeConsumerMask = (includeConsumerMask | consumerBit) >>> 0;
+      else excludeConsumerMask = (excludeConsumerMask | consumerBit) >>> 0;
+    }
+  }
+  if ((includeConsumerMask & excludeConsumerMask) !== 0) {
+    throw new RangeError('self inclusion and exclusion consumer masks must not overlap');
+  }
+  const coveredConsumerMask = (includeConsumerMask | excludeConsumerMask) >>> 0;
+  if (coveredConsumerMask !== normalizedConsumerMask) {
+    throw new RangeError('self inclusion policy must cover every enabled consumer exactly once');
+  }
+  return Object.freeze({
+    status: 'resident-neighborhood-self-inclusion-policy-ready',
+    consumerMask: normalizedConsumerMask,
+    includeConsumerMask: includeConsumerMask >>> 0,
+    excludeConsumerMask: excludeConsumerMask >>> 0,
+    coveredConsumerMask,
+    complete: true,
+    byConsumer: Object.freeze(byConsumer)
+  });
+}
+
+export function createResidentNeighborhoodPositionValidity({
+  positionEpoch = 0,
+  skinDistanceM = 0,
+  maxDisplacementM = 0
+} = {}) {
+  const normalizedPositionEpoch = requireUint32(positionEpoch, 'positionEpoch');
+  const normalizedSkinDistanceM = requireNonNegativeFinite(skinDistanceM, 'skinDistanceM');
+  const normalizedMaxDisplacementM = requireNonNegativeFinite(
+    maxDisplacementM,
+    'maxDisplacementM'
+  );
+  const displacementBudgetM = normalizedSkinDistanceM * 0.5;
+  const valid = normalizedMaxDisplacementM <= displacementBudgetM;
+  let validityFlags = RESIDENT_NEIGHBORHOOD_VALIDITY_FLAG.POSITION_EPOCH_BOUND
+    | RESIDENT_NEIGHBORHOOD_VALIDITY_FLAG.MAX_DISPLACEMENT_RECORDED;
+  if (valid) validityFlags |= RESIDENT_NEIGHBORHOOD_VALIDITY_FLAG.SKIN_ENVELOPE_VALID;
+  else validityFlags |= RESIDENT_NEIGHBORHOOD_VALIDITY_FLAG.REBUILD_REQUIRED;
+  return Object.freeze({
+    schema: ULG_RESIDENT_NEIGHBORHOOD_POSITION_VALIDITY_SCHEMA,
+    status: valid
+      ? 'resident-neighborhood-position-envelope-valid'
+      : 'resident-neighborhood-position-envelope-exhausted-rebuild-required',
+    positionEpoch: normalizedPositionEpoch,
+    skinDistanceM: normalizedSkinDistanceM,
+    maxDisplacementM: normalizedMaxDisplacementM,
+    displacementBudgetM,
+    pairClosureBoundM: normalizedMaxDisplacementM * 2,
+    validityRule: 'two-times-max-displacement-not-greater-than-skin-distance',
+    validityFlags: validityFlags >>> 0,
+    valid,
+    rebuildRequired: !valid,
+    consumerDispatchAllowed: valid,
+    reasonCodes: valid ? [] : ['position-skin-envelope-exhausted']
+  });
+}
+
 export function splitResidentNeighborhoodUint64(value) {
   const normalized = BigInt(requireSafeUint(value, 'uint64 evidence value'));
   return {
@@ -304,6 +613,7 @@ export function computeResidentNeighborhoodStorageBytes({
   cellOffsetCount = 0,
   cellMemberCount = 0,
   sourceOffsetCount = 0,
+  sourceSupportAssignmentCount = 0,
   candidateCount = 0,
   supportClassCount = 0
 } = {}) {
@@ -315,11 +625,17 @@ export function computeResidentNeighborhoodStorageBytes({
     ),
     checkedMultiply(requireUint32(cellOffsetCount, 'cellOffsetCount'), U32_BYTES, 'cell-offset bytes'),
     checkedMultiply(requireUint32(cellMemberCount, 'cellMemberCount'), U32_BYTES, 'cell-member bytes'),
-    checkedMultiply(requireUint32(sourceOffsetCount, 'sourceOffsetCount'), U32_BYTES, 'source-offset bytes'),
     checkedMultiply(
-      requireUint32(candidateCount, 'candidateCount'),
-      RESIDENT_NEIGHBORHOOD_CANDIDATE_STRIDE_BYTES,
-      'candidate bytes'
+      packedCsrU32Length({
+        sourceOffsetCount: requireUint32(sourceOffsetCount, 'sourceOffsetCount'),
+        sourceSupportAssignmentCount: requireUint32(
+          sourceSupportAssignmentCount,
+          'sourceSupportAssignmentCount'
+        ),
+        candidateCount: requireUint32(candidateCount, 'candidateCount')
+      }),
+      U32_BYTES,
+      'packed source-candidate CSR bytes'
     ),
     checkedMultiply(
       requireUint32(supportClassCount, 'supportClassCount'),
@@ -341,6 +657,7 @@ export function createResidentNeighborhoodCapacityPlan({
   requiredCandidateCount = 0,
   supportClassCount = 0,
   consumerMask = 0,
+  admissionReasonCodes = [],
   capacities = {}
 } = {}) {
   const normalizedGeneration = requireUint32(generation, 'generation');
@@ -354,6 +671,7 @@ export function createResidentNeighborhoodCapacityPlan({
     ),
     cellMemberCount: requireUint32(requiredCellMemberCount, 'requiredCellMemberCount'),
     sourceOffsetCount: checkedAdd(normalizedSourceCount, 1, 'requiredSourceOffsetCount'),
+    sourceSupportAssignmentCount: normalizedSourceCount,
     candidateCount: requireUint32(requiredCandidateCount, 'requiredCandidateCount')
   };
   if (required.cellOffsetCount > UINT32_MAX || required.sourceOffsetCount > UINT32_MAX) {
@@ -380,6 +698,11 @@ export function createResidentNeighborhoodCapacityPlan({
       required.sourceOffsetCount,
       'capacities.sourceOffsetCount'
     ),
+    sourceSupportAssignmentCount: resolveCapacity(
+      capacities.sourceSupportAssignmentCount,
+      required.sourceSupportAssignmentCount,
+      'capacities.sourceSupportAssignmentCount'
+    ),
     candidateCount: resolveCapacity(
       capacities.candidateCount,
       required.candidateCount,
@@ -404,12 +727,23 @@ export function createResidentNeighborhoodCapacityPlan({
     cellOffsetCount: countOverflow(required.cellOffsetCount, capacity.cellOffsetCount),
     cellMemberCount: countOverflow(required.cellMemberCount, capacity.cellMemberCount),
     sourceOffsetCount: countOverflow(required.sourceOffsetCount, capacity.sourceOffsetCount),
+    sourceSupportAssignmentCount: countOverflow(
+      required.sourceSupportAssignmentCount,
+      capacity.sourceSupportAssignmentCount
+    ),
     candidateCount: countOverflow(required.candidateCount, capacity.candidateCount),
     bytes: countOverflow(requiredBytes, capacity.bytes)
   };
-  const reasonCodes = Object.entries(overflow)
+  const capacityReasonCodes = Object.entries(overflow)
     .filter(([, value]) => value > 0)
     .map(([name]) => `${name}-capacity-overflow`);
+  if (!Array.isArray(admissionReasonCodes)) {
+    throw new TypeError('admissionReasonCodes must be an array');
+  }
+  const reasonCodes = [
+    ...capacityReasonCodes,
+    ...admissionReasonCodes.map((reason) => String(reason)).filter(Boolean)
+  ];
   const failClosed = reasonCodes.length > 0;
   const consumerDispatchAllowed = !failClosed;
   const admitted = failClosed
@@ -418,25 +752,34 @@ export function createResidentNeighborhoodCapacityPlan({
         cellOffsetCount: 0,
         cellMemberCount: 0,
         sourceOffsetCount: 0,
+        sourceSupportAssignmentCount: 0,
         candidateCount: 0,
         bytes: 0
       }
     : { ...required, bytes: requiredBytes };
   let statusFlags = RESIDENT_NEIGHBORHOOD_STATUS_FLAG.LEASE_BOUND
-    | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.GENERATION_BOUND;
+    | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.GENERATION_BOUND
+    | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.POSITION_EPOCH_BOUND
+    | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.SELF_POLICY_BOUND
+    | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.SOURCE_SUPPORT_ASSIGNMENTS_BOUND;
   if (failClosed) {
-    statusFlags |= RESIDENT_NEIGHBORHOOD_STATUS_FLAG.OVERFLOW
-      | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.FAIL_CLOSED
+    statusFlags |= RESIDENT_NEIGHBORHOOD_STATUS_FLAG.FAIL_CLOSED
       | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.REBUILD_REQUIRED;
+    if (capacityReasonCodes.length > 0) {
+      statusFlags |= RESIDENT_NEIGHBORHOOD_STATUS_FLAG.OVERFLOW;
+    }
   } else {
     statusFlags |= RESIDENT_NEIGHBORHOOD_STATUS_FLAG.READY
+      | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.POSITION_SKIN_VALID
       | RESIDENT_NEIGHBORHOOD_STATUS_FLAG.CONSUMER_DISPATCH_ADMITTED;
   }
 
   return {
     schema: ULG_RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_SCHEMA,
     status: failClosed
-      ? 'resident-neighborhood-capacity-overflow-fail-closed'
+      ? (capacityReasonCodes.length > 0
+          ? 'resident-neighborhood-capacity-overflow-fail-closed'
+          : 'resident-neighborhood-validity-fail-closed')
       : 'resident-neighborhood-capacity-ready',
     generation: normalizedGeneration,
     leaseTokenLow: requireUint32(leaseTokenLow, 'leaseTokenLow'),
@@ -452,6 +795,8 @@ export function createResidentNeighborhoodCapacityPlan({
     failClosed,
     consumerDispatchAllowed,
     reasonCodes,
+    capacityReasonCodes,
+    validityReasonCodes: reasonCodes.slice(capacityReasonCodes.length),
     gpuFirst: true,
     cpuSolverOracleRequired: false,
     fullParticleReadbackRequired: false,
@@ -489,6 +834,10 @@ export function packResidentNeighborhoodCapacityEvidenceU32(evidence) {
     evidence.admitted.sourceOffsetCount,
     evidence.capacity.sourceOffsetCount,
     evidence.overflow.sourceOffsetCount,
+    evidence.required.sourceSupportAssignmentCount,
+    evidence.admitted.sourceSupportAssignmentCount,
+    evidence.capacity.sourceSupportAssignmentCount,
+    evidence.overflow.sourceSupportAssignmentCount,
     evidence.required.candidateCount,
     evidence.admitted.candidateCount,
     evidence.capacity.candidateCount,
@@ -511,15 +860,201 @@ export function packResidentNeighborhoodCapacityEvidenceU32(evidence) {
   ]);
 }
 
+function packedCsrU32Length({
+  sourceOffsetCount,
+  sourceSupportAssignmentCount,
+  candidateCount
+}) {
+  let cursor = RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_U32;
+  cursor = checkedAdd(cursor, sourceOffsetCount, 'packed CSR source-offset end');
+  cursor = alignU32(cursor);
+  cursor = checkedAdd(
+    cursor,
+    checkedMultiply(
+      sourceSupportAssignmentCount,
+      RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32,
+      'packed CSR source-support-assignment words'
+    ),
+    'packed CSR source-support-assignment end'
+  );
+  cursor = alignU32(cursor);
+  cursor = checkedAdd(
+    cursor,
+    checkedMultiply(
+      candidateCount,
+      RESIDENT_NEIGHBORHOOD_CANDIDATE_STRIDE_U32,
+      'packed CSR candidate words'
+    ),
+    'packed CSR candidate end'
+  );
+  return alignU32(cursor);
+}
+
+export function createResidentNeighborhoodPackedCsrPlan({
+  capacityEvidence,
+  positionValidity,
+  selfInclusionPolicy
+} = {}) {
+  if (capacityEvidence?.schema !== ULG_RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_SCHEMA) {
+    throw new TypeError('capacityEvidence must be a resident-neighborhood capacity plan');
+  }
+  if (positionValidity?.schema !== ULG_RESIDENT_NEIGHBORHOOD_POSITION_VALIDITY_SCHEMA) {
+    throw new TypeError('positionValidity must be resident-neighborhood position evidence');
+  }
+  if (selfInclusionPolicy?.complete !== true) {
+    throw new TypeError('selfInclusionPolicy must completely cover enabled consumers');
+  }
+  const sourceOffsetBaseU32 = RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_U32;
+  const sourceSupportAssignmentBaseU32 = alignU32(
+    checkedAdd(
+      sourceOffsetBaseU32,
+      capacityEvidence.capacity.sourceOffsetCount,
+      'packed CSR source-offset capacity end'
+    )
+  );
+  const candidateBaseU32 = alignU32(checkedAdd(
+    sourceSupportAssignmentBaseU32,
+    checkedMultiply(
+      capacityEvidence.capacity.sourceSupportAssignmentCount,
+      RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32,
+      'packed CSR assignment capacity words'
+    ),
+    'packed CSR assignment capacity end'
+  ));
+  const backingCapacityU32 = alignU32(checkedAdd(
+    candidateBaseU32,
+    checkedMultiply(
+      capacityEvidence.capacity.candidateCount,
+      RESIDENT_NEIGHBORHOOD_CANDIDATE_STRIDE_U32,
+      'packed CSR candidate capacity words'
+    ),
+    'packed CSR candidate capacity end'
+  ));
+  if (backingCapacityU32 > UINT32_MAX) {
+    throw new RangeError('packed CSR backing buffer exceeds u32 shader addressability');
+  }
+  const backingBufferByteLength = checkedMultiply(
+    backingCapacityU32,
+    U32_BYTES,
+    'packed CSR backing-buffer bytes'
+  );
+  const requiredPayloadU32 = packedCsrU32Length({
+    sourceOffsetCount: capacityEvidence.required.sourceOffsetCount,
+    sourceSupportAssignmentCount: capacityEvidence.required.sourceSupportAssignmentCount,
+    candidateCount: capacityEvidence.required.candidateCount
+  });
+  const requiredPayloadWords = splitResidentNeighborhoodUint64(requiredPayloadU32);
+  const backingBytes = splitResidentNeighborhoodUint64(backingBufferByteLength);
+  const headerU32 = new Uint32Array([
+    RESIDENT_NEIGHBORHOOD_EVIDENCE_VERSION,
+    capacityEvidence.generation,
+    capacityEvidence.leaseTokenLow,
+    capacityEvidence.leaseTokenHigh,
+    positionValidity.positionEpoch,
+    capacityEvidence.sourceCount,
+    RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_U32,
+    backingCapacityU32,
+    sourceOffsetBaseU32,
+    capacityEvidence.required.sourceOffsetCount,
+    capacityEvidence.admitted.sourceOffsetCount,
+    capacityEvidence.capacity.sourceOffsetCount,
+    sourceSupportAssignmentBaseU32,
+    capacityEvidence.required.sourceSupportAssignmentCount,
+    capacityEvidence.admitted.sourceSupportAssignmentCount,
+    capacityEvidence.capacity.sourceSupportAssignmentCount,
+    RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32,
+    candidateBaseU32,
+    capacityEvidence.required.candidateCount,
+    capacityEvidence.admitted.candidateCount,
+    capacityEvidence.capacity.candidateCount,
+    RESIDENT_NEIGHBORHOOD_CANDIDATE_STRIDE_U32,
+    capacityEvidence.consumerMask,
+    selfInclusionPolicy.includeConsumerMask,
+    selfInclusionPolicy.excludeConsumerMask,
+    capacityEvidence.supportClassCount,
+    float32Bits(positionValidity.skinDistanceM, 'skinDistanceM'),
+    float32Bits(positionValidity.maxDisplacementM, 'maxDisplacementM'),
+    float32Bits(positionValidity.displacementBudgetM, 'displacementBudgetM'),
+    positionValidity.validityFlags,
+    capacityEvidence.statusFlags,
+    capacityEvidence.consumerDispatchAllowed ? 1 : 0,
+    0,
+    capacityEvidence.failClosed ? 1 : 0,
+    requiredPayloadWords.low,
+    requiredPayloadWords.high,
+    backingBytes.low,
+    backingBytes.high,
+    0,
+    0
+  ]);
+  return {
+    schema: ULG_RESIDENT_NEIGHBORHOOD_PACKED_CSR_SCHEMA,
+    status: capacityEvidence.consumerDispatchAllowed
+      ? 'resident-neighborhood-packed-csr-ready'
+      : 'resident-neighborhood-packed-csr-fail-closed',
+    singleStorageBinding: true,
+    storageBindingCount: 1,
+    shaderStorageType: 'array<u32>',
+    thermalStorageBindingCompatible: true,
+    headerLayout: [...RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_U32_LAYOUT],
+    headerStrideU32: RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_U32,
+    headerByteLength: RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_BYTES,
+    headerU32,
+    regions: {
+      header: {
+        baseU32: 0,
+        count: RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_STRIDE_U32,
+        strideU32: 1
+      },
+      sourceOffsets: {
+        baseU32: sourceOffsetBaseU32,
+        requiredCount: capacityEvidence.required.sourceOffsetCount,
+        admittedCount: capacityEvidence.admitted.sourceOffsetCount,
+        capacity: capacityEvidence.capacity.sourceOffsetCount,
+        strideU32: 1
+      },
+      sourceSupportAssignments: {
+        baseU32: sourceSupportAssignmentBaseU32,
+        requiredCount: capacityEvidence.required.sourceSupportAssignmentCount,
+        admittedCount: capacityEvidence.admitted.sourceSupportAssignmentCount,
+        capacity: capacityEvidence.capacity.sourceSupportAssignmentCount,
+        strideU32: RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_STRIDE_U32
+      },
+      candidates: {
+        baseU32: candidateBaseU32,
+        requiredCount: capacityEvidence.required.candidateCount,
+        admittedCount: capacityEvidence.admitted.candidateCount,
+        capacity: capacityEvidence.capacity.candidateCount,
+        strideU32: RESIDENT_NEIGHBORHOOD_CANDIDATE_STRIDE_U32
+      }
+    },
+    requiredPayloadU32,
+    backingCapacityU32,
+    backingBufferByteLength,
+    generation: capacityEvidence.generation,
+    positionEpoch: positionValidity.positionEpoch,
+    consumerDispatchAllowed: capacityEvidence.consumerDispatchAllowed,
+    stateMutationAllowed: false,
+    failClosed: capacityEvidence.failClosed
+  };
+}
+
 export function createResidentNeighborhoodDescriptor({
   generation = 0,
   leaseId,
   laneId,
   stateKey,
+  sourceFamily = 'sph-particle-state',
   deviceId = '',
   leaseTokenLow = 0,
   leaseTokenHigh = 0,
+  leaseAuthorityIdentity = null,
   supportClasses = [],
+  sourceSupportAssignments = [],
+  selfInclusionPolicy = {},
+  positionEpoch = 0,
+  skinDistanceM = 0,
+  maxDisplacementM = 0,
   sourceCount = 0,
   requiredUniqueCellCount = 0,
   requiredCellMemberCount = sourceCount,
@@ -531,17 +1066,63 @@ export function createResidentNeighborhoodDescriptor({
     supportClasses,
     { generation: normalizedGeneration }
   );
-  const consumerMask = normalizedSupportClasses.reduce(
-    (mask, supportClass) => (mask | supportClass.consumerMask) >>> 0,
-    0
+  const normalizedSourceSupportAssignments = normalizeResidentNeighborhoodSourceSupportAssignments(
+    sourceSupportAssignments,
+    { sourceCount, supportClasses: normalizedSupportClasses }
   );
+  const sourceSupportAssignmentRows = packResidentNeighborhoodSourceSupportAssignmentsU32(
+    sourceSupportAssignments,
+    { sourceCount, supportClasses: normalizedSupportClasses }
+  );
+  const consumerMask = normalizedSourceSupportAssignments.consumerMask;
+  const normalizedSelfInclusionPolicy = normalizeResidentNeighborhoodSelfInclusionPolicy(
+    selfInclusionPolicy,
+    { consumerMask }
+  );
+  const positionValidity = createResidentNeighborhoodPositionValidity({
+    positionEpoch,
+    skinDistanceM,
+    maxDisplacementM
+  });
+  const resolvedLeaseId = requireNonEmptyString(leaseId, 'leaseId');
+  const resolvedLaneId = requireNonEmptyString(laneId, 'laneId');
+  const resolvedStateKey = requireNonEmptyString(stateKey, 'stateKey');
+  const resolvedSourceFamily = requireNonEmptyString(sourceFamily, 'sourceFamily');
+  let authorityToken = {
+    low: requireUint32(leaseTokenLow, 'leaseTokenLow'),
+    high: requireUint32(leaseTokenHigh, 'leaseTokenHigh'),
+    binding: 'diagnostic-caller-supplied-v0'
+  };
+  if (leaseAuthorityIdentity !== null) {
+    if (leaseAuthorityIdentity?.schema !== PEERCOMPUTE_GPU_RESIDENT_LANE_LEASE_IDENTITY_SCHEMA
+      || leaseAuthorityIdentity.authoritative !== true) {
+      throw new TypeError(
+        'leaseAuthorityIdentity must be an authoritative ComputeManager lane lease identity'
+      );
+    }
+    for (const [field, expected] of [
+      ['leaseId', resolvedLeaseId],
+      ['laneId', resolvedLaneId],
+      ['stateKey', resolvedStateKey],
+      ['sourceFamily', resolvedSourceFamily]
+    ]) {
+      if (leaseAuthorityIdentity[field] !== expected) {
+        throw new RangeError(`leaseAuthorityIdentity.${field} does not match descriptor ${field}`);
+      }
+    }
+    authorityToken = createResidentNeighborhoodAuthorityToken(leaseAuthorityIdentity);
+  }
   const lease = {
-    leaseId: requireNonEmptyString(leaseId, 'leaseId'),
-    laneId: requireNonEmptyString(laneId, 'laneId'),
-    stateKey: requireNonEmptyString(stateKey, 'stateKey'),
+    leaseId: resolvedLeaseId,
+    laneId: resolvedLaneId,
+    stateKey: resolvedStateKey,
+    sourceFamily: resolvedSourceFamily,
     deviceId: typeof deviceId === 'string' ? deviceId : '',
-    tokenLow: requireUint32(leaseTokenLow, 'leaseTokenLow'),
-    tokenHigh: requireUint32(leaseTokenHigh, 'leaseTokenHigh')
+    tokenLow: authorityToken.low,
+    tokenHigh: authorityToken.high,
+    tokenBinding: authorityToken.binding,
+    identitySchema: leaseAuthorityIdentity?.schema ?? null,
+    authoritative: leaseAuthorityIdentity?.authoritative === true
   };
   const capacityEvidence = createResidentNeighborhoodCapacityPlan({
     generation: normalizedGeneration,
@@ -553,14 +1134,23 @@ export function createResidentNeighborhoodDescriptor({
     requiredCandidateCount,
     supportClassCount: normalizedSupportClasses.length,
     consumerMask,
+    admissionReasonCodes: positionValidity.reasonCodes,
     capacities
   });
   const admitted = capacityEvidence.consumerDispatchAllowed;
+  const packedCsr = createResidentNeighborhoodPackedCsrPlan({
+    capacityEvidence,
+    positionValidity,
+    selfInclusionPolicy: normalizedSelfInclusionPolicy
+  });
+  const status = admitted
+    ? 'resident-neighborhood-descriptor-ready'
+    : (capacityEvidence.capacityReasonCodes.length > 0
+        ? 'resident-neighborhood-capacity-overflow-fail-closed'
+        : 'resident-neighborhood-position-validity-fail-closed');
   return {
     schema: ULG_RESIDENT_NEIGHBORHOOD_DESCRIPTOR_SCHEMA,
-    status: admitted
-      ? 'resident-neighborhood-descriptor-ready'
-      : 'resident-neighborhood-capacity-overflow-fail-closed',
+    status,
     generation: normalizedGeneration,
     authority: {
       laneOwner: 'peercompute-compute-manager',
@@ -577,21 +1167,34 @@ export function createResidentNeighborhoodDescriptor({
       hashAuthority: false
     },
     supportClasses: normalizedSupportClasses,
+    sourceSupportAssignments: {
+      ...normalizedSourceSupportAssignments,
+      rows: sourceSupportAssignmentRows
+    },
+    selfInclusionPolicy: normalizedSelfInclusionPolicy,
+    positionValidity,
     consumerMask,
     layouts: {
       cellKey: layoutDescriptor(RESIDENT_NEIGHBORHOOD_CELL_KEY_U32_LAYOUT),
       supportClass: layoutDescriptor(RESIDENT_NEIGHBORHOOD_SUPPORT_CLASS_U32_LAYOUT),
+      sourceSupportAssignment: layoutDescriptor(
+        RESIDENT_NEIGHBORHOOD_SOURCE_SUPPORT_ASSIGNMENT_U32_LAYOUT
+      ),
       csrOffset: layoutDescriptor(RESIDENT_NEIGHBORHOOD_CSR_OFFSET_U32_LAYOUT),
       sourceSpan: layoutDescriptor(RESIDENT_NEIGHBORHOOD_SOURCE_SPAN_U32_LAYOUT),
       candidate: layoutDescriptor(RESIDENT_NEIGHBORHOOD_CANDIDATE_U32_LAYOUT),
+      packedCsrHeader: layoutDescriptor(RESIDENT_NEIGHBORHOOD_PACKED_CSR_HEADER_U32_LAYOUT),
       capacityEvidence: layoutDescriptor(RESIDENT_NEIGHBORHOOD_CAPACITY_EVIDENCE_U32_LAYOUT)
     },
     csr: {
       cellMembership: 'unique-cell-keys-plus-cell-offsets-plus-member-indices',
-      sourceCandidates: 'source-offsets-plus-target-index-consumer-mask-rows',
+      sourceCandidates:
+        'single-packed-u32-buffer-with-source-offsets-support-assignments-and-target-mask-rows',
       sentinelOffsetsRequired: true,
-      truncationAdmissible: false
+      truncationAdmissible: false,
+      positionValidityRule: positionValidity.validityRule
     },
+    packedCsr,
     capacityEvidence,
     capacityEvidenceU32: packResidentNeighborhoodCapacityEvidenceU32(capacityEvidence),
     admission: {
@@ -599,6 +1202,9 @@ export function createResidentNeighborhoodDescriptor({
       consumerDispatchAllowed: admitted,
       stateMutationAllowed: false,
       stateMutationAdmissionRequired: true,
+      positionEpoch: positionValidity.positionEpoch,
+      positionValid: positionValidity.valid,
+      rebuildRequired: positionValidity.rebuildRequired,
       reasonCodes: [...capacityEvidence.reasonCodes]
     },
     reuse: {
@@ -607,7 +1213,16 @@ export function createResidentNeighborhoodDescriptor({
       thermal: Boolean(consumerMask & RESIDENT_NEIGHBORHOOD_CONSUMER.THERMAL),
       radiation: Boolean(consumerMask & RESIDENT_NEIGHBORHOOD_CONSUMER.RADIATION),
       reaction: Boolean(consumerMask & RESIDENT_NEIGHBORHOOD_CONSUMER.REACTION),
-      ssUniqueNodeCompaction: true
+      pressureInterface: Boolean(
+        consumerMask & RESIDENT_NEIGHBORHOOD_CONSUMER.PRESSURE_INTERFACE
+      ),
+      solidKinematics: Boolean(
+        consumerMask & RESIDENT_NEIGHBORHOOD_CONSUMER.SOLID_KINEMATICS
+      ),
+      ssUniqueNodeCompaction: Boolean(
+        consumerMask & RESIDENT_NEIGHBORHOOD_CONSUMER.SS_UNIQUE_NODE_COMPACTION
+      ),
+      structuralKeySortUniquePrimitiveReusable: true
     },
     gpuFirst: true,
     cpuSolverOracleRequired: false,
@@ -616,11 +1231,31 @@ export function createResidentNeighborhoodDescriptor({
   };
 }
 
+export function residentNeighborhoodSelfPolicyForConsumer(descriptor, consumer) {
+  if (descriptor?.schema !== ULG_RESIDENT_NEIGHBORHOOD_DESCRIPTOR_SCHEMA) {
+    throw new TypeError('descriptor must be a resident-neighborhood descriptor');
+  }
+  const named = CONSUMER_SLOTS.find(([consumerName]) => consumerName === consumer);
+  const consumerBit = named
+    ? named[1]
+    : requireUint32(consumer, 'consumer');
+  if (consumerBit === 0 || (consumerBit & (consumerBit - 1)) !== 0) {
+    throw new RangeError('consumer must identify exactly one consumer family');
+  }
+  if ((descriptor.consumerMask & consumerBit) === 0) return 'disabled';
+  if ((descriptor.selfInclusionPolicy.includeConsumerMask & consumerBit) !== 0) return 'include';
+  if ((descriptor.selfInclusionPolicy.excludeConsumerMask & consumerBit) !== 0) return 'exclude';
+  return 'unresolved';
+}
+
 export function validateResidentNeighborhoodLease(descriptor, {
   generation,
+  positionEpoch,
+  maxDisplacementM,
   leaseId,
   laneId,
   stateKey,
+  sourceFamily,
   leaseTokenLow,
   leaseTokenHigh
 } = {}) {
@@ -632,9 +1267,16 @@ export function validateResidentNeighborhoodLease(descriptor, {
     && descriptor.generation !== requireUint32(generation, 'generation')) {
     mismatches.push('generation');
   }
+  if (positionEpoch !== undefined
+    && descriptor.positionValidity.positionEpoch !== requireUint32(positionEpoch, 'positionEpoch')) {
+    mismatches.push('positionEpoch');
+  }
   if (leaseId !== undefined && descriptor.lease.leaseId !== leaseId) mismatches.push('leaseId');
   if (laneId !== undefined && descriptor.lease.laneId !== laneId) mismatches.push('laneId');
   if (stateKey !== undefined && descriptor.lease.stateKey !== stateKey) mismatches.push('stateKey');
+  if (sourceFamily !== undefined && descriptor.lease.sourceFamily !== sourceFamily) {
+    mismatches.push('sourceFamily');
+  }
   if (leaseTokenLow !== undefined
     && descriptor.lease.tokenLow !== requireUint32(leaseTokenLow, 'leaseTokenLow')) {
     mismatches.push('leaseTokenLow');
@@ -644,14 +1286,28 @@ export function validateResidentNeighborhoodLease(descriptor, {
     mismatches.push('leaseTokenHigh');
   }
   const identityValid = mismatches.length === 0;
-  const capacityAdmitted = descriptor.admission.consumerDispatchAllowed === true;
+  const observedPositionValidity = maxDisplacementM === undefined
+    ? descriptor.positionValidity
+    : createResidentNeighborhoodPositionValidity({
+        positionEpoch: descriptor.positionValidity.positionEpoch,
+        skinDistanceM: descriptor.positionValidity.skinDistanceM,
+        maxDisplacementM
+      });
+  const positionValid = observedPositionValidity.valid;
+  const capacityAdmitted = descriptor.capacityEvidence.capacityReasonCodes.length === 0;
+  const descriptorAdmitted = descriptor.admission.consumerDispatchAllowed === true;
+  const consumerDispatchAllowed = identityValid && descriptorAdmitted && positionValid;
   return {
-    status: identityValid && capacityAdmitted
+    status: consumerDispatchAllowed
       ? 'resident-neighborhood-lease-valid'
       : 'resident-neighborhood-lease-invalid-fail-closed',
     identityValid,
     capacityAdmitted,
-    consumerDispatchAllowed: identityValid && capacityAdmitted,
+    descriptorAdmitted,
+    positionValid,
+    positionValidity: observedPositionValidity,
+    rebuildRequired: !positionValid || descriptor.positionValidity.rebuildRequired,
+    consumerDispatchAllowed,
     stateMutationAllowed: false,
     mismatches
   };

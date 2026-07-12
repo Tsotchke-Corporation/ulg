@@ -1,9 +1,11 @@
 import {
   SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
@@ -41,6 +43,13 @@ export const WEBGPU_MARCHING_CUBES_SURFACE_OUTPUT_DESCRIPTOR_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface-output-descriptor.v0';
 export const WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA =
   'peercompute.webgpu-marching-cubes.compact-position-rows.v0';
+export const WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA =
+  'peercompute.webgpu-marching-cubes.packed-normal-rows.v0';
+export const WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME =
+  'peercompute.webgpu-marching-cubes.layout.normal-octahedral-snorm16x2.v0';
+export const WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA =
+  'peercompute.webgpu-marching-cubes.normal-buffer-descriptor.v0';
+export const WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING = 'octahedral-snorm16x2';
 export const WEBGPU_MARCHING_CUBES_SURFACE_DRAW_ROWS_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface-draw-rows.v0';
 export const WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA =
@@ -49,6 +58,8 @@ export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-translation.v0';
 export const ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-buffer-volume-descriptor.v0';
+export const ULG_SPH_WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_DESCRIPTOR_SCHEMA =
+  'peercompute.ulg.sph-webgpu-marching-cubes-sparse-brick-volume-descriptor.v0';
 
 export const ULG_MARCHING_CUBES_EXTENSION_POSITION_VERTEX_FORMAT = 'float32x4-position';
 export const ULG_MARCHING_CUBES_REQUIRED_SURFACE_VERTEX_FORMAT =
@@ -56,6 +67,9 @@ export const ULG_MARCHING_CUBES_REQUIRED_SURFACE_VERTEX_FORMAT =
 export const WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE = 'scalar-buffer';
 export const WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME =
   'peercompute.webgpu-marching-cubes.layout.scalar-field-f32.v0';
+export const WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_SOURCE = 'sparse-brick-atlas';
+export const WEBGPU_MARCHING_CUBES_SPARSE_BRICK_LAYOUT_NAME =
+  'peercompute.webgpu-marching-cubes.layout.sparse-brick-atlas-f32.v0';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -576,11 +590,21 @@ function normalizeSurfacePolicyMaterial(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
-function resolveAlgorithmSurfaceExtractionPolicy(rows, surfaceRecord) {
+function surfacePolicyIsovalueAuthoritative(row) {
+  if (!row) return false;
+  return row.rendererAuthoritativeIsovalue === true
+    || row.strictSourceOfTruth === true
+    || row.rendererAuthority === 'renderer-authoritative-surface-policy-row'
+    || row.isovalueAuthority === 'render-field-scalar-authority';
+}
+
+export function resolveAlgorithmSurfaceExtractionPolicy(rows, surfaceRecord) {
   if (!rows || rows.schema !== ULG_ALGORITHM_SURFACE_EXTRACTION_ROWS_SCHEMA) {
     return {
       status: 'algorithm-surface-policy-rows-not-supplied',
-      row: null
+      row: null,
+      isovalueAuthoritative: false,
+      isovalueAuthorityStatus: 'algorithm-surface-policy-rows-not-supplied'
     };
   }
   const policyRows = Array.isArray(rows.rows) ? rows.rows : [];
@@ -593,9 +617,95 @@ function resolveAlgorithmSurfaceExtractionPolicy(rows, surfaceRecord) {
       && (!phase || normalizeSurfacePolicyMaterial(candidate.phase) === phase)
     )
     || null;
+  const isovalueAuthoritative = surfacePolicyIsovalueAuthoritative(row);
   return {
     status: row ? 'algorithm-surface-policy-row-selected' : 'algorithm-surface-policy-row-not-found',
-    row
+    row,
+    isovalueAuthoritative,
+    isovalueAuthorityStatus: !row
+      ? 'algorithm-surface-policy-row-not-found'
+      : (isovalueAuthoritative
+        ? 'algorithm-surface-policy-isovalue-renderer-authoritative'
+        : 'algorithm-surface-policy-isovalue-advisory')
+  };
+}
+
+export function createUlgEffectiveRenderFieldSurfaceTable({
+  surfaceTable,
+  algorithmMaterialSurfaceExtractionRows = null
+} = {}) {
+  if (!(surfaceTable?.records instanceof Float32Array)
+    || !Array.isArray(surfaceTable?.metadata)) {
+    throw new TypeError('effective extraction policy resolution requires a render-field surface table');
+  }
+  const surfaceCount = Math.max(0, Math.round(finiteNumber(
+    surfaceTable.surfaceCount,
+    surfaceTable.metadata.length
+  )));
+  if (surfaceCount !== surfaceTable.metadata.length) {
+    throw new RangeError('render-field surface metadata length must equal surfaceCount');
+  }
+  const rowStrideFloats = Math.max(1, Math.round(finiteNumber(
+    surfaceTable.rowStrideFloats,
+    SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length
+  )));
+  const isolationLane = SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.indexOf('isolation:f32');
+  if (isolationLane < 0 || rowStrideFloats <= isolationLane
+    || surfaceTable.records.length < surfaceCount * rowStrideFloats) {
+    throw new RangeError('render-field surface records do not cover the isolation lane');
+  }
+
+  const records = new Float32Array(surfaceTable.records);
+  const effectiveExtractionIsovalues = [];
+  const metadata = surfaceTable.metadata.map((surfaceRecord, index) => {
+    const policy = resolveAlgorithmSurfaceExtractionPolicy(
+      algorithmMaterialSurfaceExtractionRows,
+      surfaceRecord
+    );
+    const sourceIsolation = Number(surfaceRecord?.sourceIsolation
+      ?? surfaceRecord?.fieldIsolation
+      ?? surfaceRecord?.isolation
+      ?? records[index * rowStrideFloats + isolationLane]);
+    if (!Number.isFinite(sourceIsolation)) {
+      throw new RangeError(`surface ${index} isolation must be finite`);
+    }
+    const policyIsovalue = policy.row?.isovalue == null
+      ? Number.NaN
+      : Number(policy.row.isovalue);
+    const effectiveIsovalue = policy.isovalueAuthoritative && Number.isFinite(policyIsovalue)
+      ? policyIsovalue
+      : sourceIsolation;
+    records[index * rowStrideFloats + isolationLane] = effectiveIsovalue;
+    effectiveExtractionIsovalues.push(effectiveIsovalue);
+    return {
+      ...surfaceRecord,
+      sourceIsolation,
+      fieldIsolation: sourceIsolation,
+      isolation: effectiveIsovalue,
+      effectiveExtractionIsovalue: effectiveIsovalue,
+      effectiveExtractionPolicyResolved: true,
+      effectiveExtractionPolicyIsovalueApplied: policy.isovalueAuthoritative,
+      effectiveExtractionPolicyIsovalueAuthorityStatus: policy.isovalueAuthorityStatus,
+      surfaceExtractionPolicyStatus: policy.status,
+      surfaceExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null,
+      surfaceExtractionPolicyRowSchema: policy.row?.schema ?? null,
+      surfaceExtractionPolicyRole: policy.row?.role ?? null,
+      surfaceExtractionPolicyMaterial: policy.row?.material ?? null,
+      surfaceExtractionPolicyPhase: policy.row?.phase ?? null,
+      surfaceExtractionPolicyIsovaluePolicy: policy.row?.isovaluePolicy ?? null
+    };
+  });
+
+  return {
+    ...surfaceTable,
+    status: 'render-field-surface-table-effective-extraction-policy-resolved',
+    sourceSurfaceTableStatus: surfaceTable.status ?? null,
+    records,
+    metadata,
+    rowStrideFloats,
+    effectiveExtractionIsovalues,
+    effectiveExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null,
+    effectiveExtractionPolicyResolved: true
   };
 }
 
@@ -722,7 +832,9 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     surfaceRecord
   );
   const surfacePolicyRow = surfacePolicy.row;
-  const resolvedIsovalue = surfacePolicyRow?.isovalue ?? surfaceRecord.isolation ?? null;
+  const resolvedIsovalue = surfacePolicy.isovalueAuthoritative
+    ? (surfacePolicyRow?.isovalue ?? surfaceRecord.isolation ?? null)
+    : (surfaceRecord.isolation ?? null);
   return {
     schema: ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA,
     ok: true,
@@ -737,6 +849,9 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     scalarType: 'f32',
     scalarLane: 'density',
     scalarLaneIndex: 0,
+    normalSign: -1,
+    normalSemantic: 'outward-density-gradient',
+    normalSourceSemantic: 'scalar-gradient',
     scalarBuffer,
     storageBuffer: scalarBuffer,
     buffer: scalarBuffer,
@@ -762,6 +877,8 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     isolation: resolvedIsovalue,
     isovalue: resolvedIsovalue,
     surfaceExtractionPolicyStatus: surfacePolicy.status,
+    surfaceExtractionPolicyIsovalueAuthorityStatus: surfacePolicy.isovalueAuthorityStatus,
+    surfaceExtractionPolicyIsovalueApplied: surfacePolicy.isovalueAuthoritative,
     surfaceExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null,
     surfaceExtractionPolicyRowSchema: surfacePolicyRow?.schema ?? null,
     surfaceExtractionPolicyRole: surfacePolicyRow?.role ?? null,
@@ -784,6 +901,481 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     label,
     nativeConsumerKind: 'native-webgpu-marching-cubes-buffer-volume',
     nativeRequiredAdapter: 'webgpu-marching-cubes.buffer-volume.v0',
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function sparseRenderFieldVolumeBlocked(status, reason, extra = {}) {
+  return {
+    schema: ULG_SPH_WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_DESCRIPTOR_SCHEMA,
+    ok: false,
+    status,
+    reason,
+    sourceType: WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_SOURCE,
+    scalarLayoutName: WEBGPU_MARCHING_CUBES_SPARSE_BRICK_LAYOUT_NAME,
+    scalarType: 'f32',
+    extensionDescriptorFactory: 'createSparseBrickVolumeDescriptor',
+    ...extra
+  };
+}
+
+function gpuBufferByteLength(buffer, declaredByteLength = null) {
+  const declared = Math.round(finiteNumber(declaredByteLength, 0));
+  if (declared > 0) return declared;
+  return Math.max(0, Math.round(finiteNumber(
+    buffer?.size ?? buffer?.byteLength ?? buffer?.byteLengthBytes,
+    0
+  )));
+}
+
+function explicitGpuBufferDevice(buffer) {
+  return buffer?.device
+    || buffer?.ownerDevice
+    || buffer?.__webgpuDevice
+    || buffer?.__webgpuMarchingCubesDevice
+    || null;
+}
+
+function sparseSurfacePlanFor(field, index) {
+  return field?.plan?.surfaceTable?.surfaces?.[index]
+    || field?.sparsePlan?.surfaceTable?.surfaces?.[index]
+    || field?.surfacePlans?.[index]
+    || field?.surfaceTable?.sparseSurfaces?.[index]
+    || field?.surfaceTable?.surfaces?.[index]
+    || null;
+}
+
+function sparseCandidateSliceFor(field, surfacePlan, surfaceRecord, index) {
+  return field?.candidateVoxelSlices?.[index]
+    || field?.surfaceCandidateSlices?.[index]
+    || field?.candidateVoxelRanges?.[index]
+    || surfacePlan?.candidateVoxelSlice
+    || surfacePlan?.candidateVoxelRange
+    || surfaceRecord?.candidateVoxelSlice
+    || surfaceRecord?.candidateVoxelRange
+    || null;
+}
+
+export function createUlgSparseRenderFieldVolumeDescriptor({
+  device = null,
+  renderField = null,
+  renderFieldExecution = null,
+  surface = null,
+  surfaceIndex = 0,
+  algorithmMaterialSurfaceExtractionRows = null,
+  label = 'ulg-sph-sparse-render-field-density-volume',
+  source = 'ulg-sparse-render-field-density-atlas'
+} = {}) {
+  const field = renderField || renderFieldExecution?.result || renderFieldExecution?.renderField || null;
+  if (!field) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-missing-render-field',
+      'retained ULG sparse render-field metadata is required before native sparse marching-cubes extraction'
+    );
+  }
+  if (field.schema !== ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-schema',
+      'ULG sparse marching-cubes extraction requires peercompute.ulg.sph-gpu-sparse-render-field.v0 input',
+      { renderFieldSchema: field.schema ?? null }
+    );
+  }
+  if (
+    field.generationPublicationAllowed === false
+    || field.admission?.admitted === false
+    || field.failClosed === true
+    || Math.round(finiteNumber(field.admission?.overflowFlags ?? field.overflowFlags, 0)) !== 0
+  ) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-generation-admission',
+      'incomplete or overflowed sparse generations cannot be published to the native surface consumer',
+      {
+        renderFieldSchema: field.schema,
+        generationId: field.generationId ?? field.generation ?? null,
+        generationPublicationAllowed: field.generationPublicationAllowed !== false,
+        failClosed: Boolean(field.failClosed),
+        overflowFlags: field.admission?.overflowFlags ?? field.overflowFlags ?? 0
+      }
+    );
+  }
+
+  const index = Math.max(0, Math.round(finiteNumber(surfaceIndex, 0)));
+  const surfaceTable = field.surfaceTable || renderFieldExecution?.surfaceTable || null;
+  const surfaceRecord = surface || surfaceTable?.metadata?.[index] || surfaceTable?.surfaces?.[index] || null;
+  const surfacePlan = sparseSurfacePlanFor(field, index);
+  if (!surfaceRecord || !surfacePlan) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-missing-surface',
+      'sparse extraction requires both domain-facing surface metadata and its structural sparse surface plan',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        surfaceCount: surfaceTable?.surfaceCount ?? field.surfaceCount ?? 0
+      }
+    );
+  }
+
+  const dimsSource = surfacePlan.dimensions || surfacePlan.dims
+    || (surfaceRecord.resolution ? [surfaceRecord.resolution, surfaceRecord.resolution, surfaceRecord.resolution] : null);
+  const dims = Array.isArray(dimsSource) || ArrayBuffer.isView(dimsSource)
+    ? Array.from(dimsSource).slice(0, 3).map((value) => Math.round(finiteNumber(value, 0)))
+    : [];
+  if (dims.length !== 3 || dims.some((value) => value < 2)) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-dimensions',
+      'sparse surface dimensions must contain three integer sample extents of at least two',
+      { renderFieldSchema: field.schema, surfaceIndex: index, dims }
+    );
+  }
+  const brickSize = Math.max(1, Math.round(finiteNumber(surfacePlan.brickSize ?? field.brickSize, 8)));
+  const brickCounts = dims.map((dimension) => Math.ceil(dimension / brickSize));
+  const directoryCount = brickCounts[0] * brickCounts[1] * brickCounts[2];
+  const declaredDirectoryCount = Math.round(finiteNumber(surfacePlan.directoryCount, directoryCount));
+  if (declaredDirectoryCount !== directoryCount) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-directory-shape',
+      'surface directory count must equal the exact sparse brick-grid product',
+      { renderFieldSchema: field.schema, surfaceIndex: index, directoryCount, declaredDirectoryCount }
+    );
+  }
+
+  const directoryBuffer = field.directoryBuffer || field.buffers?.directory || null;
+  const activeBrickRowsBuffer = field.activeBrickRowsBuffer || field.buffers?.activeBrickRows || null;
+  const atlasBuffer = field.atlasBuffer || field.buffers?.atlas || null;
+  const candidateSlice = sparseCandidateSliceFor(field, surfacePlan, surfaceRecord, index) || {};
+  const candidateVoxelIdsBuffer = field.candidateVoxelIdsBuffer
+    || field.buffers?.candidateVoxelIds
+    || null;
+  const candidateDispatchIndirectBuffer = candidateSlice.candidateDispatchIndirectBuffer
+    || field.candidateDispatchIndirectBuffer
+    || field.buffers?.candidateDispatchIndirect
+    || null;
+  const buffers = [
+    directoryBuffer,
+    activeBrickRowsBuffer,
+    atlasBuffer,
+    candidateVoxelIdsBuffer,
+    candidateDispatchIndirectBuffer
+  ];
+  if (!buffers.every(isObject)) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-missing-buffer',
+      'directory, active-brick, atlas, candidate-voxel, and candidate-indirect buffers must all be retained on the producing device',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        directoryBufferRetained: Boolean(directoryBuffer),
+        activeBrickRowsBufferRetained: Boolean(activeBrickRowsBuffer),
+        atlasBufferRetained: Boolean(atlasBuffer),
+        candidateVoxelIdsBufferRetained: Boolean(candidateVoxelIdsBuffer),
+        candidateDispatchIndirectBufferRetained: Boolean(candidateDispatchIndirectBuffer)
+      }
+    );
+  }
+  const crossDeviceBuffer = device
+    ? buffers.find((buffer) => explicitGpuBufferDevice(buffer) && explicitGpuBufferDevice(buffer) !== device)
+    : null;
+  if (crossDeviceBuffer) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-cross-device',
+      'all sparse render-field buffers must belong to the native marching-cubes GPUDevice',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        sameDeviceStatus: 'cross-device-resource',
+        crossDeviceBufferLabel: crossDeviceBuffer.label ?? null
+      }
+    );
+  }
+
+  const candidateVoxelOffset = Math.max(0, Math.round(finiteNumber(
+    candidateSlice.offsetU32
+      ?? candidateSlice.candidateVoxelOffset
+      ?? surfacePlan.candidateVoxelOffset,
+    0
+  )));
+  const candidateVoxelCount = Math.max(0, Math.round(finiteNumber(
+    candidateSlice.count
+      ?? candidateSlice.candidateVoxelCount
+      ?? candidateSlice.capacity
+      ?? candidateSlice.candidateVoxelCapacity
+      ?? surfacePlan.candidateVoxelCount
+      ?? surfacePlan.candidateVoxelCapacity,
+    0
+  )));
+  const candidateVoxelCapacity = Math.max(candidateVoxelCount, Math.round(finiteNumber(
+    candidateSlice.capacity
+      ?? candidateSlice.candidateVoxelCapacity
+      ?? surfacePlan.candidateVoxelCapacity,
+    candidateVoxelCount
+  )));
+  const candidateVoxelOffsetBytes = candidateVoxelOffset * Uint32Array.BYTES_PER_ELEMENT;
+  const candidateDispatchIndirectOffsetBytes = Math.max(0, Math.round(finiteNumber(
+    candidateSlice.candidateDispatchIndirectOffsetBytes
+      ?? candidateSlice.dispatchIndirectOffsetBytes,
+    0
+  )));
+  const candidateDispatchWorkgroupSize = Math.max(0, Math.round(finiteNumber(
+    candidateSlice.candidateDispatchWorkgroupSize
+      ?? field.candidateDispatchWorkgroupSize,
+    0
+  )));
+  if (candidateDispatchIndirectOffsetBytes % Uint32Array.BYTES_PER_ELEMENT !== 0
+    || candidateDispatchWorkgroupSize !== 32) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-candidate-indirect-layout',
+      'candidate indirect rows must be 4-byte aligned u32x3 dispatch rows authored for 32-thread marching-cubes workgroups',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        candidateDispatchIndirectOffsetBytes,
+        candidateDispatchWorkgroupSize
+      }
+    );
+  }
+  const minimumStorageOffsetAlignment = Math.max(
+    1,
+    Math.round(finiteNumber(device?.limits?.minStorageBufferOffsetAlignment, 1))
+  );
+  if (candidateVoxelOffsetBytes % minimumStorageOffsetAlignment !== 0) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-candidate-offset-alignment',
+      'per-surface candidate slices must satisfy minStorageBufferOffsetAlignment',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        candidateVoxelOffset,
+        candidateVoxelOffsetBytes,
+        minStorageBufferOffsetAlignment: minimumStorageOffsetAlignment
+      }
+    );
+  }
+
+  const directoryOffset = Math.max(0, Math.round(finiteNumber(surfacePlan.directoryOffset, 0)));
+  const generationId = Math.max(0, Math.round(finiteNumber(
+    field.generationId ?? field.generation ?? surfacePlan.generationId,
+    0
+  )));
+  const surfaceGenerationId = Math.max(0, Math.round(finiteNumber(surfacePlan.generationId, generationId)));
+  if (surfaceGenerationId !== generationId) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-stale-surface-generation',
+      'surface structural metadata must belong to the published sparse generation',
+      { renderFieldSchema: field.schema, surfaceIndex: index, generationId, surfaceGenerationId }
+    );
+  }
+  const activeBrickCount = Math.max(0, Math.round(finiteNumber(
+    field.activeBrickCount
+      ?? field.activeBrickCapacity
+      ?? field.activeBricks?.activeBrickCount
+      ?? field.gpuPlan?.activeBrickCapacity,
+    0
+  )));
+  const atlasCellCount = Math.max(0, Math.round(finiteNumber(
+    field.atlasCellCount
+      ?? field.atlasCellCapacity
+      ?? field.activeBricks?.atlasCellCount
+      ?? field.gpuPlan?.atlasCellCapacity,
+    0
+  )));
+  const activeBrickRowStrideU32 = Math.max(1, Math.round(finiteNumber(field.activeBrickRowStrideU32, 16)));
+  const activeBrickAtlasCellOffsetLane = Math.max(0, Math.round(finiteNumber(
+    field.activeBrickAtlasCellOffsetLane,
+    7
+  )));
+  const atlasCellStrideFloats = Math.max(1, Math.round(finiteNumber(field.atlasCellStrideFloats, 8)));
+  const atlasScalarLane = Math.max(0, Math.round(finiteNumber(field.atlasScalarLane, 0)));
+  const directoryBufferByteLength = gpuBufferByteLength(
+    directoryBuffer,
+    field.directoryBufferByteLength
+  );
+  const activeBrickRowsBufferByteLength = gpuBufferByteLength(
+    activeBrickRowsBuffer,
+    field.activeBrickRowsBufferByteLength
+  );
+  const atlasBufferByteLength = gpuBufferByteLength(atlasBuffer, field.atlasBufferByteLength);
+  const candidateVoxelIdsBufferByteLength = gpuBufferByteLength(
+    candidateVoxelIdsBuffer,
+    field.candidateVoxelIdsBufferByteLength
+  );
+  const candidateDispatchIndirectBufferByteLength = gpuBufferByteLength(
+    candidateDispatchIndirectBuffer,
+    field.candidateDispatchIndirectBufferByteLength
+  );
+  const requiredByteLengths = {
+    directory: (directoryOffset + directoryCount) * Uint32Array.BYTES_PER_ELEMENT,
+    activeBrickRows: activeBrickCount * activeBrickRowStrideU32 * Uint32Array.BYTES_PER_ELEMENT,
+    atlas: atlasCellCount * atlasCellStrideFloats * Float32Array.BYTES_PER_ELEMENT,
+    candidateVoxelIds: (candidateVoxelOffset + candidateVoxelCount) * Uint32Array.BYTES_PER_ELEMENT,
+    candidateDispatchIndirect: candidateDispatchIndirectOffsetBytes
+      + 3 * Uint32Array.BYTES_PER_ELEMENT
+  };
+  const availableByteLengths = {
+    directory: directoryBufferByteLength,
+    activeBrickRows: activeBrickRowsBufferByteLength,
+    atlas: atlasBufferByteLength,
+    candidateVoxelIds: candidateVoxelIdsBufferByteLength,
+    candidateDispatchIndirect: candidateDispatchIndirectBufferByteLength
+  };
+  const undersizedRole = Object.keys(requiredByteLengths).find((role) =>
+    availableByteLengths[role] < requiredByteLengths[role]
+  );
+  if (undersizedRole) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-undersized-buffer',
+      `${undersizedRole} buffer is smaller than the published sparse generation range`,
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        undersizedRole,
+        requiredByteLength: requiredByteLengths[undersizedRole],
+        availableByteLength: availableByteLengths[undersizedRole]
+      }
+    );
+  }
+
+  const surfacePolicy = resolveAlgorithmSurfaceExtractionPolicy(
+    algorithmMaterialSurfaceExtractionRows,
+    surfaceRecord
+  );
+  const surfacePolicyRow = surfacePolicy.row;
+  const selectedPolicyIsovalue = !surfacePolicy.isovalueAuthoritative
+    || surfacePolicyRow?.isovalue == null
+    ? Number.NaN
+    : Number(surfacePolicyRow.isovalue);
+  const producerIsovalue = Number(
+    surfaceRecord.effectiveExtractionIsovalue ?? surfaceRecord.isolation
+  );
+  if (!Number.isFinite(producerIsovalue)) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-producer-isovalue',
+      'sparse FIELD production requires a finite effective extraction isovalue',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        producerIsovalue
+      }
+    );
+  }
+  const resolvedIsovalue = Number.isFinite(selectedPolicyIsovalue)
+    ? selectedPolicyIsovalue
+    : producerIsovalue;
+  const isovalueTolerance = Math.max(1e-6, Math.abs(resolvedIsovalue) * 1e-6);
+  if (Math.abs(producerIsovalue - resolvedIsovalue) > isovalueTolerance) {
+    return sparseRenderFieldVolumeBlocked(
+      'ulg-sparse-render-field-volume-blocked-isovalue-mismatch',
+      'sparse FIELD compaction and native marching-cubes extraction must consume the same effective isovalue',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        producerIsovalue,
+        resolvedIsovalue,
+        sourceIsolation: surfaceRecord.sourceIsolation ?? surfaceRecord.fieldIsolation ?? null,
+        surfaceExtractionPolicyStatus: surfacePolicy.status,
+        surfaceExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null
+      }
+    );
+  }
+  const resolution = dims[0];
+  const positionTransform = createUlgRenderFieldPositionTransform({
+    resolution,
+    fieldPadding: field.fieldPadding,
+    refEdgeM: field.refEdgeM
+  });
+  const sameDeviceStatus = device && buffers.every((buffer) => explicitGpuBufferDevice(buffer) === device)
+    ? 'same-device'
+    : 'same-device-validation-deferred-to-extension';
+
+  return {
+    schema: ULG_SPH_WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_DESCRIPTOR_SCHEMA,
+    ok: true,
+    status: 'ulg-sparse-render-field-volume-descriptor-ready',
+    reason: null,
+    extensionDescriptorFactory: 'createSparseBrickVolumeDescriptor',
+    renderFieldSchema: field.schema,
+    renderFieldBackend: field.backend ?? renderFieldExecution?.backend ?? null,
+    source,
+    sourceType: WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_SOURCE,
+    scalarLayoutName: WEBGPU_MARCHING_CUBES_SPARSE_BRICK_LAYOUT_NAME,
+    scalarType: 'f32',
+    scalarLane: 'density',
+    scalarLaneIndex: atlasScalarLane,
+    normalSign: -1,
+    normalSemantic: 'outward-density-gradient',
+    normalSourceSemantic: 'scalar-gradient',
+    directoryBuffer,
+    activeBrickRowsBuffer,
+    atlasBuffer,
+    candidateVoxelIdsBuffer,
+    candidateDispatchIndirectBuffer,
+    directoryBufferByteLength,
+    activeBrickRowsBufferByteLength,
+    atlasBufferByteLength,
+    candidateVoxelIdsBufferByteLength,
+    candidateDispatchIndirectBufferByteLength,
+    dims,
+    brickSize,
+    brickCounts,
+    directoryOffset,
+    directoryCount,
+    directorySentinel: 0xffffffff,
+    activeBrickCount,
+    activeBrickCapacity: activeBrickCount,
+    activeBrickRowStrideU32,
+    activeBrickAtlasCellOffsetLane,
+    atlasCellCount,
+    atlasCellCapacity: atlasCellCount,
+    atlasCellStrideFloats,
+    atlasScalarLane,
+    candidateVoxelCount,
+    candidateVoxelCapacity,
+    candidateVoxelOffset,
+    candidateVoxelOffsetBytes,
+    candidateDispatchIndirectOffsetBytes,
+    candidateDispatchWorkgroupSize,
+    candidateSentinel: 0xffffffff,
+    generationId,
+    generationPublicationAllowed: true,
+    backgroundValue: finiteNumber(field.backgroundValue, 0),
+    surfaceIndex: index,
+    surfaceKey: surfaceRecord.surfaceKey ?? null,
+    material: surfaceRecord.material ?? null,
+    phase: surfaceRecord.phase ?? null,
+    renderKey: surfaceRecord.renderKey ?? null,
+    renderDomainId: surfaceRecord.renderDomainId ?? null,
+    renderDomainKey: surfaceRecord.renderDomainKey ?? null,
+    fieldOffset: 0,
+    fieldCellCount: surfacePlan.logicalSampleCount ?? dims[0] * dims[1] * dims[2],
+    isolation: resolvedIsovalue,
+    isovalue: resolvedIsovalue,
+    surfaceExtractionPolicyStatus: surfacePolicy.status,
+    surfaceExtractionPolicyIsovalueAuthorityStatus: surfacePolicy.isovalueAuthorityStatus,
+    surfaceExtractionPolicyIsovalueApplied: surfacePolicy.isovalueAuthoritative,
+    surfaceExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null,
+    surfaceExtractionPolicyRowSchema: surfacePolicyRow?.schema ?? null,
+    surfaceExtractionPolicyRole: surfacePolicyRow?.role ?? null,
+    surfaceExtractionPolicyMaterial: surfacePolicyRow?.material ?? null,
+    surfaceExtractionPolicyPhase: surfacePolicyRow?.phase ?? null,
+    surfaceExtractionPolicyIsovaluePolicy: surfacePolicyRow?.isovaluePolicy ?? null,
+    surfaceExtractionPolicySmoothingRadiusM: surfacePolicyRow?.smoothingRadiusM ?? null,
+    surfaceExtractionPolicyVoxelSizeM: surfacePolicyRow?.voxelSizeM ?? null,
+    surfaceExtractionPolicyNormalScaleM: surfacePolicyRow?.normalScaleM ?? null,
+    fieldPadding: field.fieldPadding ?? null,
+    refEdgeM: field.refEdgeM ?? null,
+    positionTransform,
+    positionTransformStatus: positionTransform.status,
+    positionTransformGridBias: positionTransform.gridBias,
+    positionTransformScaleM: positionTransform.scaleM,
+    positionTransformOriginM: [...positionTransform.originM],
+    device,
+    sameDeviceRequired: true,
+    sameDeviceStatus,
+    label,
+    nativeConsumerKind: 'native-webgpu-marching-cubes-sparse-brick-volume',
+    nativeRequiredAdapter: 'webgpu-marching-cubes.sparse-brick-volume.v0',
     scientificValidation: false,
     sphValidation: false,
     surfaceExtractionValidation: false,
@@ -1004,6 +1596,13 @@ function assertSameDeviceExtensionSurfaceBuffer(extensionExecution) {
   if (ownership?.ok === false || ownership?.status === 'cross-device-resource') {
     throw new TypeError(`extension surface buffer is not owned by this GPUDevice (${ownership.status})`);
   }
+  const normal = result?.outputDescriptors?.rows?.normal
+    || result?.rowMetadata?.normal
+    || null;
+  const normalOwnership = normal?.resourceOwnership || null;
+  if (normalOwnership?.ok === false || normalOwnership?.status === 'cross-device-resource') {
+    throw new TypeError(`extension normal buffer is not owned by this GPUDevice (${normalOwnership.status})`);
+  }
 }
 
 function compactPositionRowsSource(result = null) {
@@ -1070,6 +1669,80 @@ function compactPositionRowsSource(result = null) {
   };
 }
 
+function packedNormalRowsSource(result = null) {
+  const outputDescriptors = result?.outputDescriptors || null;
+  const outputNormal = outputDescriptors?.rows?.normal || null;
+  const rowMetadataNormal = result?.rowMetadata?.normal || null;
+  const normal = outputNormal || rowMetadataNormal || null;
+  const descriptor = normal?.normalBufferDescriptor
+    || outputDescriptors?.normalBufferDescriptor
+    || null;
+  const buffer = normal?.buffer
+    || outputDescriptors?.retainedBuffers?.normal
+    || result?.normalBuffer
+    || null;
+  const bufferByteLength = Math.max(0, Math.round(finiteNumber(
+    normal?.bufferByteLength
+      ?? descriptor?.bufferByteLength
+      ?? result?.normalBufferByteLength,
+    0
+  )));
+  const rowCount = Math.max(0, Math.round(finiteNumber(
+    normal?.rowCount ?? descriptor?.rowCount,
+    0
+  )));
+  const surfaceGenerationId = descriptor?.generation?.surfaceGenerationId
+    ?? result?.surfaceGenerationId
+    ?? null;
+  const pairedPositionSurfaceGenerationId =
+    descriptor?.generation?.pairedPositionSurfaceGenerationId
+      ?? surfaceGenerationId;
+  const volumeGenerationId = descriptor?.generation?.volumeGenerationId
+    ?? result?.volumeGenerationId
+    ?? null;
+  return {
+    descriptorSchema: descriptor?.schema ?? null,
+    rowSchema: normal?.schema ?? descriptor?.rowSchema ?? null,
+    layoutName: normal?.layoutName ?? descriptor?.layoutName ?? null,
+    encoding: normal?.encoding ?? descriptor?.encoding ?? result?.normalEncoding ?? null,
+    semantic: normal?.semantic ?? descriptor?.semantic ?? result?.normalSemantic ?? null,
+    sourceSemantic: normal?.sourceSemantic
+      ?? descriptor?.sourceSemantic
+      ?? result?.normalSourceSemantic
+      ?? null,
+    normalSign: Number(normal?.normalSign ?? descriptor?.normalSign ?? result?.normalSign),
+    status: normal?.status ?? descriptor?.status ?? null,
+    available: Boolean(normal?.available ?? descriptor?.available),
+    buffer,
+    bufferRetained: Boolean(
+      (normal?.bufferRetained && normal?.buffer)
+      || (descriptor?.bufferRetained && descriptor?.buffer)
+      || (outputDescriptors?.retainedBuffers?.normal && buffer)
+    ),
+    bufferByteLength,
+    rowStrideBytes: Math.max(0, Math.round(finiteNumber(
+      normal?.rowStrideBytes ?? descriptor?.rowStrideBytes,
+      0
+    ))),
+    rowCount,
+    ownerDeviceId: normal?.ownerDeviceId ?? descriptor?.ownerDeviceId ?? null,
+    resourceOwnership: normal?.resourceOwnership ?? descriptor?.resourceOwnership ?? null,
+    surfaceGenerationId,
+    pairedPositionSurfaceGenerationId,
+    volumeGenerationId,
+    sameSubmitAsPosition: descriptor?.generation?.sameSubmitAsPosition === true,
+    lifetimeOwner: descriptor?.lifetime?.owner ?? null,
+    pairedWithPositionBuffer: descriptor?.lifetime?.pairedWithPositionBuffer === true,
+    producerStage: descriptor?.producer?.stage ?? result?.normalProducerStage ?? null,
+    timestampSpanLabel:
+      descriptor?.producer?.timestampSpanLabel ?? result?.normalTimestampSpanLabel ?? null,
+    additionalSubmitCount: Math.max(0, Math.round(finiteNumber(
+      descriptor?.producer?.additionalSubmitCount ?? result?.normalAdditionalSubmitCount,
+      0
+    )))
+  };
+}
+
 function createMissingExecutionSummary(reason) {
   return {
     schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
@@ -1090,6 +1763,14 @@ function createMissingExecutionSummary(reason) {
     extensionVertexCount: 0,
     extensionTriangleCount: 0,
     extensionBufferRetained: false,
+    extensionPackedNormalReady: false,
+    extensionPackedNormalStatus: 'packed-normal-unavailable',
+    extensionNormalBufferRetained: false,
+    extensionNormalBufferByteLength: 0,
+    extensionNormalRowCount: 0,
+    extensionNormalSurfaceGenerationId: null,
+    extensionNormalVolumeGenerationId: null,
+    extensionNormalSign: null,
     extensionReadback: null,
     extensionSurfaceVertexReadback: null,
     readyForUlgSurfaceVertexRows: false,
@@ -1116,6 +1797,7 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
   }
   const result = execution.result || null;
   const positionRows = compactPositionRowsSource(result);
+  const normalRows = packedNormalRowsSource(result);
   const extensionSurfaceSchema = result?.schema ?? null;
   const extensionOk = execution.ok === true;
   const extensionVertexCount = Math.max(0, Math.round(finiteNumber(result?.vertexCount, 0)));
@@ -1155,6 +1837,46 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
   const extensionVertexFormat = result?.vertexFormat ?? null;
   const extensionBufferRetained = positionRows.bufferRetained;
   const extensionResourceOwnershipStatus = positionRows.resourceOwnership?.status ?? null;
+  const normalGenerationMatches = Boolean(
+    Number.isInteger(Number(normalRows.surfaceGenerationId))
+    && Number(normalRows.surfaceGenerationId) === Number(normalRows.pairedPositionSurfaceGenerationId)
+    && Number(normalRows.surfaceGenerationId) === Number(result?.surfaceGenerationId)
+    && (
+      normalRows.volumeGenerationId == null
+      || result?.volumeGenerationId == null
+      || Number(normalRows.volumeGenerationId) === Number(result.volumeGenerationId)
+    )
+  );
+  const extensionPackedNormalReady = Boolean(
+    normalRows.descriptorSchema === WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA
+    && normalRows.rowSchema === WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA
+    && normalRows.layoutName === WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME
+    && normalRows.encoding === WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING
+    && normalRows.semantic === 'oriented-scalar-gradient'
+    && normalRows.sourceSemantic === 'scalar-gradient'
+    && (normalRows.normalSign === -1 || normalRows.normalSign === 1)
+    && normalRows.available
+    && normalRows.bufferRetained
+    && normalRows.buffer
+    && normalRows.rowStrideBytes === Uint32Array.BYTES_PER_ELEMENT
+    && normalRows.rowCount === extensionVertexCount
+    && normalRows.bufferByteLength >= extensionVertexCount * Uint32Array.BYTES_PER_ELEMENT
+    && normalRows.resourceOwnership?.ok !== false
+    && normalRows.resourceOwnership?.status !== 'cross-device-resource'
+    && normalGenerationMatches
+    && normalRows.sameSubmitAsPosition
+    && normalRows.pairedWithPositionBuffer
+    && normalRows.lifetimeOwner === 'surface-result'
+    && normalRows.additionalSubmitCount === 0
+  );
+  let extensionPackedNormalStatus = 'packed-normal-ready';
+  if (!normalRows.buffer || !normalRows.bufferRetained) {
+    extensionPackedNormalStatus = 'packed-normal-buffer-unavailable';
+  } else if (!normalGenerationMatches) {
+    extensionPackedNormalStatus = 'packed-normal-generation-mismatch';
+  } else if (!extensionPackedNormalReady) {
+    extensionPackedNormalStatus = 'packed-normal-contract-invalid';
+  }
   const extensionError = execution.errors?.[0]
     || execution.webgpuStatus?.error
     || result?.error
@@ -1219,6 +1941,31 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionTriangleCount,
     extensionBufferRetained,
     extensionBufferByteLength: positionRows.bufferByteLength,
+    extensionPackedNormalReady,
+    extensionPackedNormalStatus,
+    extensionNormalDescriptorSchema: normalRows.descriptorSchema,
+    extensionNormalRowsSchema: normalRows.rowSchema,
+    extensionNormalLayoutName: normalRows.layoutName,
+    extensionNormalEncoding: normalRows.encoding,
+    extensionNormalSemantic: normalRows.semantic,
+    extensionNormalSourceSemantic: normalRows.sourceSemantic,
+    extensionNormalSign: Number.isFinite(normalRows.normalSign) ? normalRows.normalSign : null,
+    extensionNormalBufferRetained: normalRows.bufferRetained,
+    extensionNormalBufferByteLength: normalRows.bufferByteLength,
+    extensionNormalRowStrideBytes: normalRows.rowStrideBytes,
+    extensionNormalRowCount: normalRows.rowCount,
+    extensionNormalOwnerDeviceId: normalRows.ownerDeviceId,
+    extensionNormalResourceOwnershipStatus: normalRows.resourceOwnership?.status ?? null,
+    extensionNormalSurfaceGenerationId: normalRows.surfaceGenerationId,
+    extensionNormalPairedPositionSurfaceGenerationId:
+      normalRows.pairedPositionSurfaceGenerationId,
+    extensionNormalVolumeGenerationId: normalRows.volumeGenerationId,
+    extensionNormalSameSubmitAsPosition: normalRows.sameSubmitAsPosition,
+    extensionNormalLifetimeOwner: normalRows.lifetimeOwner,
+    extensionNormalPairedWithPositionBuffer: normalRows.pairedWithPositionBuffer,
+    extensionNormalProducerStage: normalRows.producerStage,
+    extensionNormalTimestampSpanLabel: normalRows.timestampSpanLabel,
+    extensionNormalAdditionalSubmitCount: normalRows.additionalSubmitCount,
     extensionOutputDescriptorSchema: positionRows.outputDescriptorSchema,
     extensionOutputDescriptorStatus: positionRows.outputDescriptorStatus,
     extensionOutputDescriptorTopology: positionRows.outputDescriptorTopology,
@@ -1759,16 +2506,25 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     throw new TypeError('buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu requires a retained extension surface buffer');
   }
   assertSameDeviceExtensionSurfaceBuffer(extensionExecution);
+  const extensionResult = extensionExecution?.result || null;
+  const packedNormalSource = packedNormalRowsSource(extensionResult);
 
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const directCompactPositionDraw = Boolean(noFullReadback && translateVertexRows === false);
   if (!noFullReadback && translateVertexRows === false) {
     throw new TypeError('direct compact-position surface draw metadata requires no-full-readback mode');
   }
+  if (directCompactPositionDraw && summary.extensionPackedNormalReady !== true) {
+    throw new TypeError(
+      `direct compact-position surface draw requires generation-coupled packed normals (${summary.extensionPackedNormalStatus})`
+    );
+  }
+  if (directCompactPositionDraw && packedNormalSource.normalSign !== -1) {
+    throw new TypeError('ULG SPH density surfaces require packed normalSign=-1');
+  }
   const sourceStrideFloats = Math.max(3, Math.round(finiteNumber(summary.extensionVertexStrideFloats, 4)));
   const sourceVertexCount = Math.max(0, Math.round(finiteNumber(summary.extensionVertexCount, 0)));
   const sourceVertexCountMode = summary.extensionVertexCountMode ?? null;
-  const extensionResult = extensionExecution?.result || null;
   const extensionActualVertexCounterBuffer = extensionResult?.actualVertexCounterBuffer
     || extensionResult?.vertexCounterBuffer
     || null;
@@ -2157,6 +2913,11 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
     ...gpuTimestampProfiler.allocationEntries(),
     { role: 'extension-position-source', buffer: sourceBuffer, owned: false },
+    {
+      role: 'extension-packed-normal-source',
+      buffer: packedNormalSource?.buffer,
+      owned: false
+    },
     { role: 'translated-vertex-rows', buffer: vertexRowsBuffer, owned: true },
     { role: 'surface-draw-rows', buffer: drawRowsBuffer, owned: true },
     {
@@ -2226,6 +2987,14 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     0,
     Math.round(finiteNumber(summary.extensionVertexStrideBytes, sourceStrideFloats * Float32Array.BYTES_PER_ELEMENT))
   ) * sourceVertexCount;
+  const compactNormalRowsBufferRetained = Boolean(
+    directCompactPositionDraw
+    && packedNormalSource.buffer
+    && summary.extensionPackedNormalReady
+  );
+  const compactNormalRowsBufferByteLength = compactNormalRowsBufferRetained
+    ? packedNormalSource.bufferByteLength
+    : 0;
   const surfaceVertices = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
     backend: 'webgpu',
@@ -2282,6 +3051,46 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactPositionRowsFormat: summary.extensionVertexFormat,
     compactPositionRowsSchema: WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
     compactPositionRowsOwnership: 'extension-owned-retained-buffer',
+    compactPositionRowsSurfaceGenerationId: extensionResult?.surfaceGenerationId ?? null,
+    compactPositionRowsVolumeGenerationId: extensionResult?.volumeGenerationId ?? null,
+    compactNormalRowsBufferRetained,
+    compactNormalRowsBufferByteLength,
+    compactNormalRowsBufferRowCount: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowCount
+      : 0,
+    compactNormalRowsStrideBytes: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowStrideBytes
+      : 0,
+    compactNormalRowsSchema: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowSchema
+      : null,
+    compactNormalRowsLayoutName: compactNormalRowsBufferRetained
+      ? packedNormalSource.layoutName
+      : null,
+    compactNormalRowsEncoding: compactNormalRowsBufferRetained
+      ? packedNormalSource.encoding
+      : null,
+    compactNormalRowsSemantic: compactNormalRowsBufferRetained
+      ? packedNormalSource.semantic
+      : null,
+    compactNormalRowsSourceSemantic: compactNormalRowsBufferRetained
+      ? packedNormalSource.sourceSemantic
+      : null,
+    compactNormalRowsNormalSign: compactNormalRowsBufferRetained
+      ? packedNormalSource.normalSign
+      : null,
+    compactNormalRowsSurfaceGenerationId: compactNormalRowsBufferRetained
+      ? packedNormalSource.surfaceGenerationId
+      : null,
+    compactNormalRowsVolumeGenerationId: compactNormalRowsBufferRetained
+      ? packedNormalSource.volumeGenerationId
+      : null,
+    compactNormalRowsAdditionalSubmitCount: compactNormalRowsBufferRetained
+      ? packedNormalSource.additionalSubmitCount
+      : null,
+    compactNormalRowsOwnership: compactNormalRowsBufferRetained
+      ? 'extension-surface-result-generation-owned'
+      : 'none',
     vertexRowsBufferClearStatus,
     translationPipelineCacheStatus,
     directCompactPositionDrawIndirectSource,
@@ -2307,6 +3116,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   };
   if (keepVertexRowsBuffer) surfaceVertices.vertexRowsBuffer = vertexRowsBuffer;
   if (compactPositionRowsBufferRetained) surfaceVertices.compactPositionRowsBuffer = sourceBuffer;
+  if (compactNormalRowsBufferRetained) {
+    surfaceVertices.compactNormalRowsBuffer = packedNormalSource.buffer;
+  }
 
   const surfaceDraw = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
@@ -2368,6 +3180,46 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactPositionRowsFormat: summary.extensionVertexFormat,
     compactPositionRowsSchema: WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
     compactPositionRowsOwnership: 'extension-owned-retained-buffer',
+    compactPositionRowsSurfaceGenerationId: extensionResult?.surfaceGenerationId ?? null,
+    compactPositionRowsVolumeGenerationId: extensionResult?.volumeGenerationId ?? null,
+    compactNormalRowsBufferRetained,
+    compactNormalRowsBufferByteLength,
+    compactNormalRowsBufferRowCount: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowCount
+      : 0,
+    compactNormalRowsStrideBytes: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowStrideBytes
+      : 0,
+    compactNormalRowsSchema: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowSchema
+      : null,
+    compactNormalRowsLayoutName: compactNormalRowsBufferRetained
+      ? packedNormalSource.layoutName
+      : null,
+    compactNormalRowsEncoding: compactNormalRowsBufferRetained
+      ? packedNormalSource.encoding
+      : null,
+    compactNormalRowsSemantic: compactNormalRowsBufferRetained
+      ? packedNormalSource.semantic
+      : null,
+    compactNormalRowsSourceSemantic: compactNormalRowsBufferRetained
+      ? packedNormalSource.sourceSemantic
+      : null,
+    compactNormalRowsNormalSign: compactNormalRowsBufferRetained
+      ? packedNormalSource.normalSign
+      : null,
+    compactNormalRowsSurfaceGenerationId: compactNormalRowsBufferRetained
+      ? packedNormalSource.surfaceGenerationId
+      : null,
+    compactNormalRowsVolumeGenerationId: compactNormalRowsBufferRetained
+      ? packedNormalSource.volumeGenerationId
+      : null,
+    compactNormalRowsAdditionalSubmitCount: compactNormalRowsBufferRetained
+      ? packedNormalSource.additionalSubmitCount
+      : null,
+    compactNormalRowsOwnership: compactNormalRowsBufferRetained
+      ? 'extension-surface-result-generation-owned'
+      : 'none',
     directCompactPositionDraw,
     sourceVertexRowCount: translatedVertexCount,
     sourceVertexRowsBufferBound: true,
@@ -2402,6 +3254,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   if (keepDrawIndirectRowsBuffer) surfaceDraw.drawIndirectRowsBuffer = drawIndirectRowsBuffer;
   if (keepVertexRowsBuffer) surfaceDraw.compactedVertexRowsBuffer = vertexRowsBuffer;
   if (compactPositionRowsBufferRetained) surfaceDraw.compactPositionRowsBuffer = sourceBuffer;
+  if (compactNormalRowsBufferRetained) {
+    surfaceDraw.compactNormalRowsBuffer = packedNormalSource.buffer;
+  }
 
   const leaseLedger = createResidentBufferLeaseLedger({
     ledgerId: `sph-extension-surface:${resolvedSurfaceIndex}:${translatedVertexCount}:buffer-leases`,
@@ -2442,6 +3297,32 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   const vertexRowsResourceKey = `extension-surface:vertex-rows:${translatedVertexCount}:${vertexRowsByteLength}`;
   const drawRowsResourceKey = `extension-surface:draw-rows:1:${drawRowsByteLength}`;
   const drawIndirectRowsResourceKey = `extension-surface:draw-indirect:1:${drawIndirectRowsByteLength}`;
+  const compactPositionRowsResourceKey =
+    `extension-surface:compact-position:g${packedNormalSource.surfaceGenerationId ?? 'unknown'}:${compactPositionRowsBufferByteLength}`;
+  const compactNormalRowsResourceKey =
+    `extension-surface:packed-normal:g${packedNormalSource.surfaceGenerationId ?? 'unknown'}:${compactNormalRowsBufferByteLength}`;
+  if (directCompactPositionDraw && compactPositionRowsBufferRetained) {
+    registerRetainedBuffer({
+      resourceKey: compactPositionRowsResourceKey,
+      resourceKind: 'extension-owned-compact-position-buffer',
+      buffer: sourceBuffer,
+      byteLength: compactPositionRowsBufferByteLength,
+      rowCount: sourceVertexCount,
+      expectedConsumers: ['surface-draw-renderer', 'diagnostics'],
+      status: 'resident-extension-surface-buffer-borrowed-generation-owned'
+    });
+  }
+  if (compactNormalRowsBufferRetained) {
+    registerRetainedBuffer({
+      resourceKey: compactNormalRowsResourceKey,
+      resourceKind: 'extension-owned-packed-normal-buffer',
+      buffer: packedNormalSource.buffer,
+      byteLength: compactNormalRowsBufferByteLength,
+      rowCount: packedNormalSource.rowCount,
+      expectedConsumers: ['surface-draw-renderer', 'diagnostics'],
+      status: 'resident-extension-surface-buffer-borrowed-generation-owned'
+    });
+  }
   if (keepVertexRowsBuffer) {
     registerRetainedBuffer({
       resourceKey: vertexRowsResourceKey,
@@ -2498,6 +3379,46 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactPositionRowsStrideFloats: sourceStrideFloats,
     compactPositionRowsFormat: summary.extensionVertexFormat,
     compactPositionRowsOwnership: 'extension-owned-retained-buffer',
+    compactPositionRowsSurfaceGenerationId: extensionResult?.surfaceGenerationId ?? null,
+    compactPositionRowsVolumeGenerationId: extensionResult?.volumeGenerationId ?? null,
+    compactNormalRowsBufferRetained,
+    compactNormalRowsBufferByteLength,
+    compactNormalRowsBufferRowCount: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowCount
+      : 0,
+    compactNormalRowsStrideBytes: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowStrideBytes
+      : 0,
+    compactNormalRowsSchema: compactNormalRowsBufferRetained
+      ? packedNormalSource.rowSchema
+      : null,
+    compactNormalRowsLayoutName: compactNormalRowsBufferRetained
+      ? packedNormalSource.layoutName
+      : null,
+    compactNormalRowsEncoding: compactNormalRowsBufferRetained
+      ? packedNormalSource.encoding
+      : null,
+    compactNormalRowsSemantic: compactNormalRowsBufferRetained
+      ? packedNormalSource.semantic
+      : null,
+    compactNormalRowsSourceSemantic: compactNormalRowsBufferRetained
+      ? packedNormalSource.sourceSemantic
+      : null,
+    compactNormalRowsNormalSign: compactNormalRowsBufferRetained
+      ? packedNormalSource.normalSign
+      : null,
+    compactNormalRowsSurfaceGenerationId: compactNormalRowsBufferRetained
+      ? packedNormalSource.surfaceGenerationId
+      : null,
+    compactNormalRowsVolumeGenerationId: compactNormalRowsBufferRetained
+      ? packedNormalSource.volumeGenerationId
+      : null,
+    compactNormalRowsAdditionalSubmitCount: compactNormalRowsBufferRetained
+      ? packedNormalSource.additionalSubmitCount
+      : null,
+    compactNormalRowsOwnership: compactNormalRowsBufferRetained
+      ? 'extension-surface-result-generation-owned'
+      : 'none',
     directCompactPositionDraw,
     sourceVertexCount,
     translatedVertexCount,
@@ -2535,6 +3456,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     residentBufferLeaseResourceCount: leaseLedger.resourceCount,
     residentBufferLeaseActiveLeaseCount: leaseLedger.activeLeaseCount
   };
+  if (compactNormalRowsBufferRetained) {
+    result.compactNormalRowsBuffer = packedNormalSource.buffer;
+  }
   const refreshLeaseSummary = () => {
     result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(leaseLedger);
     result.residentBufferLeaseLedgerStatus = result.residentBufferLeaseSummary.status;
@@ -2577,6 +3501,22 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       destroyResidentBufferWithLease(leaseLedger, vertexRowsResourceKey, () => {
         destroyBufferOnce(vertexRowsResourceKey, vertexRowsBuffer);
       }, { force, reason });
+    }
+    if (directCompactPositionDraw && compactPositionRowsBufferRetained) {
+      destroyResidentBufferWithLease(
+        leaseLedger,
+        compactPositionRowsResourceKey,
+        null,
+        { force, reason }
+      );
+    }
+    if (compactNormalRowsBufferRetained) {
+      destroyResidentBufferWithLease(
+        leaseLedger,
+        compactNormalRowsResourceKey,
+        null,
+        { force, reason }
+      );
     }
     if (keepDrawRowsBuffer) {
       destroyResidentBufferWithLease(leaseLedger, drawRowsResourceKey, () => {

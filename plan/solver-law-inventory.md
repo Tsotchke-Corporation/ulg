@@ -1,7 +1,8 @@
 # ULG Solver And Law Inventory
 
-Runtime source snapshot: 2026-07-10, baseline commit `c072c10`. Documentation
-is maintained on branch `gpu-resident-physics-refactor`.
+Runtime source snapshot: 2026-07-11, branch
+`gpu-resident-physics-refactor` at committed HEAD `b4d1a38` plus the inspected
+uncommitted GPU-resident refactor worktree.
 
 ## Reading Rules
 
@@ -19,6 +20,9 @@ Status terms:
 - **Kernel suite:** individual GPU stages execute, but the intended complete
   solver still has missing representation, sparsity, coupling, or authority
   work.
+- **Integration open:** the GPU producer/consumer kernels execute, but the
+  normal mounted authority path still has an older host-mediated, multi-submit,
+  or unadmitted edge. This is not full solver acceptance.
 - **Metadata only:** a law graph or service descriptor exists without an
   independently promoted solver.
 - **Missing:** no executable implementation of the planned solver/law exists.
@@ -26,6 +30,12 @@ Status terms:
 `Implemented` does not mean scientifically validated. Most material,
 chemistry, continuum, and Schroeder outputs still carry false scientific or
 full-physics validation flags.
+
+The historical CPU solvers labeled as oracles below remain useful analysis or
+legacy paths, but they are not acceptance gates for new Schroeder WebGPU work.
+The current refactor uses manufactured GPU states, mathematical invariants,
+metamorphic GPU executions, same-device paths, and fixed-size GPU reductions;
+it does not add a CPU mirror to the hot pipeline.
 
 Rendering, cache management, scheduling, admission, and diagnostics are not
 physics solvers. Their important boundaries are called out separately.
@@ -65,6 +75,7 @@ solvers.
 | Molecular geometry optimizer | CPU reduced solver | Numerical gradients plus backtracking/internal-coordinate handling. | `optimizeGeometry()` in `molecularHartreeFock.js` |
 | Molecular vibration solver | CPU reduced solver | Finite-difference Hessian, mass weighting, and normal-mode eigenvalues. | `vibrationalFrequencies()` in `molecularHartreeFock.js` |
 | Born-Oppenheimer molecular dynamics | CPU reduced solver | Velocity-Verlet nuclear motion on numerical electronic-energy gradients. | `bornOppenheimerMD()` in `molecularHartreeFock.js` |
+| Reduced molecular refractive response | CPU reduced response; WebGPU render consumer | Provenance-bearing occupied-to-virtual dipole response from a converged STO-3G RHF wavefunction, converted from dynamic molecular polarizability and phase number density to spectral refractive index with Lorentz-Lorenz. It is independent-particle, returns zero-loss refractive samples, and explicitly carries `scientificValidation: false`; it is not TDHF, periodic dielectric response, or validated condensed-phase optics. | `src/runtime/material/molecularOpticalResponse.js` |
 | All-element molecular energy solver | CPU reduced solver | Atomic Kohn-Sham descriptors feeding a universal Morse-like pair Hamiltonian and saturation term for Z=1..118. It is broad coverage, not quantitative quantum chemistry. | `src/runtime/electronicStructure/allElementMolecularSolver.js` |
 | Classical pair-potential molecular dynamics | CPU oracle | Periodic-box NVE/NVT velocity-Verlet, virial pressure, velocity-rescaling thermostat, and diffusion/energy samples. | `src/runtime/md/mdEngine.js` |
 | Pair potential and fit solvers | CPU oracle/reduced | Lennard-Jones, tabulated potentials, Morse potential, and Morse fitting including the MoonLab H2 curve. | `src/runtime/md/pairPotential.js`, `src/runtime/md/potentialFitting.js` |
@@ -79,7 +90,7 @@ solvers.
 | Phase equilibrium and enthalpy inversion | CPU runtime and GPU table consumer | Stable phase from temperature or specific energy, energy-to-temperature inversion, and latent-plateau lever-rule fractions. | `src/runtime/material/phaseEquilibrium.js`, `src/runtime/material/thermoState.js`, `src/runtime/sph/sphThermalGpuKernel.js` |
 | Gruneisen thermal expansion closure | CPU reduced solver | Thermal expansion and density as a function of temperature; this is not a complete shock Mie-Gruneisen EOS. | `src/runtime/material/gruneisenEos.js` |
 | Thermodynamic scenario preflight | CPU analysis solver | Energy/mass feasibility checks for the configured phase scenario. It does not advance the live simulation. | `src/runtime/thermoPreflight.js`, `src/runtime/material/thermodynamicPreflight.js` |
-| Optical closure derivation and lookup | CPU derivation plus WebGPU lookup | CPU derives spectral/PBR rows; WebGPU looks up packed rows. The lower-level optical derivation is not GPU-native. | `src/runtime/material/opticalClosure.js`, `src/runtime/material/opticalGpuBuffers.js` |
+| Optical closure derivation, admission, and lookup | CPU reduced derivation plus WebGPU lookup/render | Derives and packs spectral/PBR rows. Refractive admission requires nonblocked provenance, exact optical-state identity, and distinct blue/green/red samples; display fallback rows cannot bend rays. The lower-level derivation is not GPU-native or scientifically validated. | `src/runtime/material/opticalClosure.js`, `src/runtime/material/opticalGpuBuffers.js`, `src/runtime/material/molecularOpticalResponse.js` |
 
 ## Material Property Determination Matrix
 
@@ -97,13 +108,13 @@ conductivity solver.
 | Bulk/shear modulus, Lame parameters, and sound speed | Element closure reductions and phase mechanics-table construction; MLS-MPM consumes the resulting rows. | CPU-derived, WebGPU-consumed | Validated anisotropic/plastic constitutive properties and GPU-native property derivation. |
 | Heat capacity, internal energy, Debye temperature, and vibrations | Debye/statistical-mechanics laws, phase enthalpy tables, molecular vibrational analysis, and reduced MD estimators. | CPU reduced, WebGPU table-consumed | General phonon/quasiharmonic free-energy solver and GPU-native graph construction. |
 | Melting, boiling, latent heat, and phase fractions | Lindemann, Richards, Trouton, Clausius-Clapeyron, piecewise enthalpy ladders, and lever-rule inversion. | CPU reduced, WebGPU table-consumed | General Gibbs minimization, nucleation, nonequilibrium phase kinetics, and validated high-pressure phase diagrams. |
-| EOS and thermal expansion | Jellium cold curve, Gruneisen expansion, Tait/Cole condensed EOS, and local ideal-gas rows. | Mixed reduced runtime | Stiff/shock and mixture EOS, GPU-native gas-cell construction, pressure-work coupling, and broader validation. |
+| EOS and thermal expansion | Jellium cold curve, Gruneisen expansion, Tait/Cole condensed EOS, and GPU-native local ideal-gas cells. | Mixed CPU-oracle and WebGPU runtime | Stiff/shock and mixture EOS, pressure-work coupling, and broader validation. |
 | Viscosity and momentum transport | MLS-MPM consumes closure-supplied phase viscosity and adds a resolution-dependent artificial-viscosity term; CPU SPH has Monaghan artificial viscosity. | Runtime constitutive law, incomplete property derivation | A general material/phase viscosity resolver, temperature dependence, and GPU transport-closure kernels. |
 | Thermal conductivity and heat diffusion | The thermal kernel performs conservative pair conduction using configured global/pair rates and fixed-temperature wall exchange. | Reduced runtime law; **no general material-property solver** | Derive validated phase- and temperature-dependent thermal conductivity/diffusivity, mix it at interfaces, and model finite-capacity conductive solids/walls. |
 | Electrical conductivity, resistivity, and charge transport | Element closures derive conduction-electron density and plasma frequency for Drude optics only. | **Missing as a transport/property solver** | Scattering/relaxation-time or stronger conductivity closure, resistivity versus phase/temperature, carrier transport, charge conservation, and coupling to Maxwell/MHD/PIC. |
 | Diffusion and species transport | The MD property estimator can infer a diffusion coefficient from sampled trajectories; live continuum chemistry has no general species-diffusion solve. | CPU estimator; live solver missing | Resident multicomponent mass diffusion, mixing, electrochemical transport, and reaction-diffusion coupling. |
 | Surface tension and interfacial energy | A supplied `surfaceTensionNPerM` coefficient can be packed into mechanics rows. | Coefficient transport only; force solver missing | Derived phase/state-dependent interfacial properties plus an admitted curvature/free-energy force law. |
-| Optical dielectric response, color, IOR, absorption, scattering, and emissivity | Drude/Drude-Lorentz, interband oscillators, Beer-Lambert, molecular bands, Rayleigh/droplet scattering, CIE conversion, and gray-emissivity derivation. | CPU-derived, WebGPU lookup/thermal consumer | GPU-native spectral derivation, broader band/structure fidelity, microstructure closure, and scientific validation. |
+| Optical dielectric response, color, IOR, absorption, scattering, and emissivity | Conductors have Drude/Drude-Lorentz plus interband spectral `n,k`; molecular absorption/scattering uses O-H overtones, electronic bands, Beer-Lambert, and Rayleigh/droplet reductions. Molecular refraction can use the reduced STO-3G RHF/Lorentz-Lorenz response. The opaque native renderer consumes admitted blue/green/red samples, requires exact provenance/state, and fails closed rather than granting fixed display IOR authority. | Mixed CPU-derived/reduced and WebGPU-consumed; **reduced unvalidated spectral refraction implemented** | Replace the reduced independent-particle/minimal-basis model with validated frequency-dependent molecular and periodic dielectric response, include loss/anisotropy/microstructure consistently, move derivation into the admitted GPU law graph where justified, and validate the combined optical chain scientifically. |
 | Reaction products, energetics, and activation | Formula balancing, candidate discovery, reduced electronic/product energies, contact gating, and GPU extent/product conversion. | Mixed reduced runtime | Validated barriers/rates, reversible networks, competing reactions, electrochemistry, catalysis, and body-aware surface chemistry. |
 | Nuclear and radiation material properties | Thermal blackbody/emissive closures exist; the resolver manifest reserves isotope and nuclear/radiation row families. | Thermal emission only; nuclear properties missing | Isotope inventory, half-lives, cross sections/channels, daughter products, stopping/deposition data, and validation provenance. |
 
@@ -118,13 +129,14 @@ for an arbitrary material.
 | --- | --- | --- | --- |
 | Conservative SPH/PBF phase carrier | CPU oracle | Cubic-spline density, symmetric pressure/energy, Monaghan viscosity, kick-drift-kick integration, optional density projection, reduced solid grouping/contact, and phase-aware EOS. | `src/runtime/sph/sphOperators.js`, `src/runtime/sph/sphPhaseCarrier.js` |
 | MLS-MPM/APIC carrier | CPU oracle | Quadratic B-spline P2G/G2P, APIC affine transfer, pressure fluid stress, fixed-corotated solid elasticity, Newtonian viscosity, gravity, walls, and phase-derived constitutive state. | `src/runtime/sph/mlsMpmCarrier.js` |
-| Resident MLS-MPM/APIC solver | WebGPU runtime | Particle-parallel P2G, grid update, G2P, fused/split resident steps, retained buffers, compact summaries, thermal/reaction sidecars, and admitted pressure impulses. This is the default mechanics path. | `sphGridGpuKernel.js`, `sphGridUpdateGpuKernel.js`, `sphG2pGpuKernel.js`, `sphMlsMpmGpuStep.js` |
+| Resident MLS-MPM/APIC solver | WebGPU runtime | Particle-parallel P2G, grid update, G2P, fused/split resident steps, retained buffers, compact summaries, and thermal/reaction sidecars. This is the default mechanics path. Pressure impulses still reach it through the older host-mediated production edge while the direct resident lane integration is completed. | `sphGridGpuKernel.js`, `sphGridUpdateGpuKernel.js`, `sphG2pGpuKernel.js`, `sphMlsMpmGpuStep.js` |
 | MLS-MPM mechanics predictor and constitutive refresh | CPU oracle plus WebGPU runtime | Predicts/refreshes phase-dependent mechanics rows and reset state after thermal/reaction changes. These are stages of the resident MLS-MPM solver, not separate continuum methods. | `sphMechanicsGpuKernel.js`, `sphMechanicsRefreshGpuKernel.js` |
 | Thermal and phase transport | CPU oracle plus WebGPU runtime | Pair conduction, six wall reservoirs, pair/ambient graybody radiation, temperature/phase response, and latent-energy updates. | `src/runtime/sph/thermalPhase.js`, `src/runtime/sph/sphThermalGpuKernel.js` |
-| Reaction/product conversion | CPU oracle plus WebGPU runtime | Contact-pair proposals, balanced stoichiometric extent, reactant consumption, product placement, heat release, gas/product ledgers, phase reset, and atom/charge/mass diagnostics. | `src/runtime/sph/reactiveChemistry.js`, `src/runtime/sph/sphReactionGpuKernel.js`, `src/runtime/sph/sphReactionGpuSummary.js` |
-| Pressure/interface force-row solver | WebGPU runtime with CPU helpers | Particle-bin contact kinematics, material-interface normal/area rows, local gas-cell pressure input, cubic-barrier/damping/inertial contact pressure, and force rows admitted into grid update. | `src/runtime/sph/sphPressureInterfaceGpuKernel.js` |
-| Local material-interface source field | WebGPU partial runtime | Source-local GPU splat produces retained interface candidates efficiently, but the default GPU pressure/force consumer is not yet wired end to end. | `src/runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js` |
-| Spatial gas ledger and gas-cell EOS producer | CPU calculation plus GPU-retained upload | Builds positioned gas ledgers and applies an ideal-gas cell law. The current `webgpu` backend uploads CPU-derived rows; it is not a WGSL EOS solve. | stage functions in `src/runtime/sph/sphMlsMpmGpuStep.js` |
+| Reaction/product conversion | CPU oracle plus WebGPU runtime | Contact-pair proposals, balanced stoichiometric extent, reactant consumption, product placement, heat release, gas/product ledgers, phase reset, and atom/charge/mass diagnostics. The resident kernel now shader-initializes the 300k live rows with zero host zero upload; carrier search/placement scalability and exact live-prefix work remain open. | `src/runtime/sph/reactiveChemistry.js`, `src/runtime/sph/sphReactionGpuKernel.js`, `src/runtime/sph/sphReactionGpuSummary.js` |
+| Pressure/interface force-row solver | WebGPU runtime; resident integration open | Particle-bin or packed resident-neighborhood contact kinematics, material-interface normal/area rows, local gas-cell pressure input, and cubic-barrier/damping/inertial contact pressure. The shader can consume retained GPU candidate rows and fail closed from compact metadata plus neighborhood identity; production StateManager-admitted candidate-to-force-to-grid integration is still in progress. | `src/runtime/sph/sphPressureInterfaceGpuKernel.js` |
+| Resident material-interface candidate producer | WebGPU runtime; production integration open | Source-local GPU work compacts active interface candidates, source keys, and fixed metadata into retained same-device buffers without a normal-path map. A direct force consumer and caller-owned-encoder probe exist, but the mounted scene still has a host-mediated pressure edge. | `src/runtime/sph/sphRenderGpuKernel.js`, `src/runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js` |
+| Spatial gas ledger and gas-cell EOS producer | WebGPU resident runtime; CPU diagnostic/oracle retained | Consumes retained product-event or compact gas rows, performs GPU key/radix/unique aggregation, parallel per-cell ideal-gas reduction, and lookup-indexed pressure gradients, then retains 12-float pressure rows plus compact fail-close metadata without normal-path map/decode/reupload. | `src/runtime/sph/sphSpatialGasCellEosGpu.js`; stage integration in `src/runtime/sph/sphMlsMpmGpuStep.js` |
+| Coherent-solid rigid-frame suite (SOL-0/SOL-1) | WebGPU reduced kernel suite; full slice acceptance open | Versioned frame/member/contact/shape contracts, parallel body-wrench and invariant reductions, objective `SE(3)` frame integration, transformed member/contact rows, global fail-close, ComputeManager/StateManager admission, persistent two-slot resident arenas, and indirect native rest-mesh rendering. It does not yet implement SOL-2 contact dynamics, solid-liquid coupling, deformation, fracture, or orbital mechanics. | `src/runtime/solid/`, `ulg-gpu-abi/src/coherentSolid*.js` |
 
 ### Schroeder Simulation Kernel Suite
 
@@ -146,6 +158,11 @@ Schroeder solver:
 - Phase-volume/storage: migration decisions, split/merge proposals and admitted
   apply rows, allocation, free-list/slot assignment, materialization, level
   updates, count summaries, and order-preserving compaction.
+- Sparse representation: exact five-word chart/level/tile keys,
+  radix/scan/unique compaction, byte-bounded retained and scratch arenas, an
+  activity-sized open-addressed hash from compact nodes to compact grid rows,
+  indirect work, and fail-closed overflow evidence. Sparse P2G, G2P,
+  restriction, and prolongation shader variants consume the same lookup.
 - Orchestration: same-level mechanics and the two-level mechanics step.
 
 Two-level thermal and reaction sidecars execute. Equivalent authoritative
@@ -159,13 +176,18 @@ Primary executable entry points are the `runSchroeder*WebGpu()` exports in:
 
 - `src/runtime/sph/schroederHierarchyGpu.js`
 - `src/runtime/sph/schroederCrossLevelCouplingGpu.js`
+- `src/runtime/sph/schroederSparseHierarchyGpu.js`
 - `src/runtime/sph/schroederParticleStorageCountGpu.js`
 - `src/runtime/sph/schroederParticleStorageCompactionGpu.js`
+- `src/runtime/webgpuRadixScanUnique.js`
 
-The suite remains **partial** because active-node/candidate storage is not yet
-truly sparse in cost, only two levels are exercised, several rows are
-proposal/admission artifacts, and the full variable-support and general
-split/merge policy is unfinished.
+The suite remains **partial**. The worktree now contains genuinely compact
+two-level node and hash-backed grid kernels, but `SS-0` acceptance is still
+open while the production P2G/update/G2P and cross-level path is consolidated
+onto one caller-owned submission and retained conservation evidence replaces
+the disabled host summary. Only two adjacent levels are admitted, several
+rows remain proposal/admission artifacts, and general variable-support and
+split/merge policy is unfinished. The third level remains explicitly held.
 
 ## Implemented Physical Laws And Closures
 
@@ -218,6 +240,10 @@ implemented.
 - Newtonian deviatoric viscous stress plus closure/artificial viscosity.
 - Cubic-barrier wall contact and material-interface elastic, damping, and
   inertial contact-pressure response.
+- Reduced coherent-body Newton-Euler momentum updates and objective quaternion
+  `SE(3)` pose integration from parallel member force/torque reductions. This
+  is the implemented SOL-1 rigid-frame law, not SOL-2 collision/contact or
+  SOL-3 solid-liquid coupling.
 - Gas buoyancy from phase-density contrast in the CPU/reference demo path; the
   resident GPU mechanics path has no equivalent steam convection/buoyancy law.
 - Hydrostatic pressure initialization/optional reduced SPH hydrostatic field.
@@ -256,8 +282,17 @@ not particle, neutron, gamma, or spectral radiation transport solvers.
 - Rayleigh gas scattering and reduced Mie/Rayleigh droplet extinction.
 - Saturation-pressure/supersaturation-derived reduced water-droplet optical
   state.
-- Molecular electronic-band absorption, band-gap absorption, Fresnel/IOR PBR
-  mapping, and spectral-response to CIE/sRGB integration.
+- Molecular electronic-band and band-gap absorption plus spectral-response to
+  CIE/sRGB integration.
+- Reduced molecular dynamic polarizability from STO-3G RHF occupied/virtual
+  dipole response and Lorentz-Lorenz phase-density conversion to spectral
+  refractive index. This response is explicitly scientifically unvalidated;
+  it is not coupled-perturbed TDHF or periodic condensed-matter dielectric
+  response.
+- Fail-closed spectral refractive admission requires exact state identity,
+  provenance, and distinct blue/green/red coverage. Native Fresnel/PBR ray
+  bending uses those channels plus same-encoder geometric rear-surface depth;
+  fixed/model display IOR cannot grant refractive authority.
 
 These are optical/material closures and render inputs, not a Maxwell field
 solver.
@@ -316,33 +351,44 @@ The UI/query keys are `lawmech`, `lawg`, `laweos`, `lawp`, `lawt`, `lawr`,
 - **Surface-tension curvature solver:** the property row and toggle exist, but
   `sphPhaseDemo.js` explicitly reports it as unimplemented. There is no CSF,
   curvature, pair-potential, or free-energy surface-tension force.
-- **General GPU-native gas-cell EOS:** local ideal-gas cells are computed on
-  CPU and uploaded; no WGSL EOS producer currently derives those rows.
-- **End-to-end source-local GPU pressure consumer:** the efficient retained
-  material-interface source field exists, but its force consumer is not wired
-  as one resident GPU-to-GPU path.
+- **Broader gas-cell EOS closure:** the ideal-gas GPU lane is implemented;
+  non-ideal mixtures, ionized/plasma gas closures, pressure-work energy
+  feedback, and validation beyond the manufactured/metamorphic gate remain.
+- **Production-admitted source-local GPU pressure path:** retained candidate,
+  source-key, metadata, and force buffers now have direct GPU producer/consumer
+  kernels. The normal scene still must remove its host row construction/upload
+  edge and admit candidate-to-force-to-grid mutation through the production
+  ComputeManager/StateManager lane.
 - **Resident steam buoyancy/convection and pressure-work closure:** the CPU demo
   has a density-contrast buoyancy acceleration, but the resident GPU route
   lacks the equivalent gas rise, venting, and convection law.
 
-### Coherent Solid Solvers, All Unstarted
+### Coherent Solid Solver Status
 
-- **SOL-0:** body/member/contact/shape schemas and compact GPU invariants.
-- **SOL-1:** objective `SE(3)` rigid-body frame, inertia/wrench integration,
-  and direct resident mesh transform.
-- **SOL-2:** solid-solid proxy contact with equal/opposite force and torque,
-  plus derived friction/restitution behavior.
-- **SOL-3:** solid-liquid mixed-cell velocity, pressure, and viscous traction
-  reduced into body wrench.
-- **SOL-4:** persistent material-space deformable surface, plasticity, and
-  objective grid-crossing representation.
-- **SOL-5:** admitted melting, solidification, fracture, and component
+- **SOL-0 - implemented kernel/authority suite; full acceptance open:** exact
+  body/member/contact/shape schemas, PeerCompute ownership contracts, compact
+  GPU body/global invariants, fail-close evidence, and bounded resident
+  publication lifecycle exist. Remaining declared gates vary contact-proxy
+  ordering, workgroup/dispatch partition, and admitted SS chart/level
+  transitions.
+- **SOL-1 - implemented reduced rigid-frame/direct-render suite; full
+  acceptance open:** objective `SE(3)` pose, inertia/wrench integration,
+  persistent same-device frames, indirect rest-mesh rendering, and a 120-step
+  close-spaced native sequence execute. The same remaining metamorphic and
+  SS-transition gates prevent checking the complete slice.
+- **SOL-2 - missing:** solid-solid proxy contact with equal/opposite force and
+  torque, plus derived friction/restitution behavior.
+- **SOL-3 - missing:** solid-liquid mixed-cell velocity, pressure, and viscous
+  traction reduced into body wrench.
+- **SOL-4 - missing:** persistent material-space deformable surface, plasticity,
+  and objective grid-crossing representation.
+- **SOL-5 - missing:** admitted melting, solidification, fracture, and component
   merge/split topology.
-- **SOL-6:** body-spanning levels, local charts/rebasing, far-field moments,
-  and planetary/orbital mechanics.
+- **SOL-6 - missing:** body-spanning levels, local charts/rebasing, far-field
+  moments, and planetary/orbital mechanics.
 
 The existing fixed-corotated particle elasticity and CPU solid-group contact
-do not satisfy any of these coherent-body slices.
+do not substitute for SOL-0/SOL-1 and do not satisfy SOL-2 through SOL-6.
 
 ### Adaptive MLS-MPM And Schroeder Gaps
 
@@ -350,8 +396,11 @@ do not satisfy any of these coherent-body slices.
 - The `ocean-tiled-experimental` P2G policy has no tiled kernel and falls back;
   `resident-scatter` is the implemented backend.
 - Bounded support tiers and conservation-safe general adaptive split/merge.
-- Truly compact unique active nodes and byte-bounded CSR/global neighbor
-  arenas instead of particle-proportional candidate reservations.
+- Production integration of the implemented compact unique-node and
+  hash-backed grid view through one activity-bounded, caller-owned two-level
+  mechanics submission.
+- Retained GPU conservation admission for the compact two-level route, plus
+  measured tile expansion and capacity proportional to admitted activity.
 - Complete cross-level affine/angular/internal-energy reflux invariants.
 - General third-and-higher levels; the third level is currently on hold.
 - Production refine/coarsen policy at interfaces, walls, reactions, and high
@@ -382,8 +431,14 @@ do not satisfy any of these coherent-body slices.
   coverage, and ECPs for heavy atoms.
 - UMP2, CASSCF or spin-projected bond-breaking treatment.
 - Analytic gradients/Hessians for molecular optimization and dynamics.
+- Validated frequency-dependent molecular polarizability beyond the current
+  independent-particle STO-3G RHF reduction (for example coupled-perturbed
+  TDHF/response or validated excited-state transition moments), including
+  consistent complex `n(lambda),k(lambda)`, condensed-phase local fields, and
+  anisotropic/microstructure response.
 - Periodic DFT with k-points, phonons, quasiharmonic free energy, and
-  quantitative solid/liquid bulk closures.
+  quantitative solid/liquid bulk closures, including periodic dielectric
+  tensors and anisotropic optical response.
 - The planned material-polytope response registry and adaptive property-fit
   pipeline.
 - A high-fidelity stiff/shock EOS beyond the interactive weakly-compressible
@@ -447,10 +502,24 @@ atomic-to-supergalactic representation target.
 
 ## Non-Solver Compute Paths
 
-For completeness, ULG also implements GPU render-field construction,
-marching-cubes/tetrahedral surface extraction, indirect draw metadata, optical
-lookup, compact diagnostics, retained-buffer authority/admission, and
-PeerCompute stage scheduling. These are important compute systems but are not
-additional physical laws or solvers. The production WebGPU surface lifecycle
-failure documented in `plan/todo/sol-critic.md` is therefore a renderer
-correctness blocker, not a missing physics law.
+For completeness, ULG also implements the accepted source-local sparse render
+field and native sparse-atlas extraction path, marching-cubes/tetrahedral
+surface extraction, indirect draw metadata, optical lookup, compact
+diagnostics, retained-buffer authority/admission, and PeerCompute stage
+scheduling. The persistent resident-neighborhood builder/lane adds exact
+five-word structural keys, radix/unique compaction, packed CSR, multichart/
+multilevel support assignments, lease/epoch/device guards, and shared consumer
+views for mechanics, contact, thermal, radiation, reaction,
+pressure/interface, and coherent-solid kinematics. These are compute and data-
+authority systems, not additional physical laws.
+
+`FIELD-0` and the native surface resource-lifecycle repair are accepted. The
+worktree also implements generation-owned packed normals, alpha-one unblended
+depth-writing native PBR, the native opaque background, exact spectral optical
+admission, same-encoder `depth32float` geometric thickness, and bounded two-in-
+flight presentation. Those are renderer/authority mechanisms, not new physical
+laws, and SURF-4/OPTICS acceptance remains open for manufactured/metamorphic
+and fresh standard-matrix evidence. The resident neighborhood exists and its
+focused lane/consumer probes pass, but `NEIGH-0`/`LANE-0` remain integration-
+open at the production pressure and StateManager edge. GPU timestamp
+instrumentation is likewise diagnostic evidence, not another solver.

@@ -12,6 +12,7 @@ import {
   ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA
 } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
+  createMlsMpmMechanicsRefreshWebGpuEncoderStage,
   destroyMlsMpmMechanicsMaterialPhaseUpload,
   refreshMlsMpmMechanicsCpu,
   runMlsMpmMechanicsRefreshWebGpu,
@@ -30,6 +31,52 @@ function nearlyEqual(actual, expected, tolerance = 1e-6) {
     Math.abs(actual - expected) <= tolerance,
     `expected ${actual} to be within ${tolerance} of ${expected}`
   );
+}
+
+function fakeMechanicsRefreshDevice() {
+  const buffers = [];
+  const bindGroups = [];
+  const device = {
+    buffers,
+    bindGroups,
+    queue: {
+      writeBuffer() {},
+      submit() {},
+      onSubmittedWorkDone() {
+        return Promise.resolve();
+      }
+    },
+    createBuffer({ label, size, usage }) {
+      const buffer = {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        destroy() {
+          this.destroyed = true;
+        }
+      };
+      buffers.push(buffer);
+      return buffer;
+    },
+    createShaderModule({ label, code }) {
+      return { label, code };
+    },
+    createComputePipeline({ compute }) {
+      return {
+        compute,
+        getBindGroupLayout(index) {
+          return { index };
+        }
+      };
+    },
+    createBindGroup({ layout, entries }) {
+      const bindGroup = { layout, entries };
+      bindGroups.push(bindGroup);
+      return bindGroup;
+    }
+  };
+  return device;
 }
 
 test('MLS-MPM mechanics material table packs phase mechanics for condensed and gas phases', () => {
@@ -478,4 +525,90 @@ test('WebGPU mechanics refresh reuses uploaded material phase records', async ()
   assert.equal(materialPhaseUpload.destroyed, false);
   destroyMlsMpmMechanicsMaterialPhaseUpload(materialPhaseUpload);
   assert.equal(materialPhaseUpload.destroyed, true);
+});
+
+test('WebGPU mechanics refresh encoder borrows a caller-owned ping output', () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        {
+          name: 'liquid',
+          densityKgPerM3: 997,
+          bulkModulusPa: 2.2e9,
+          shearModulusPa: 0,
+          cpJPerKgK: 4184,
+          temperatureRange: [273.15, 373.15]
+        }
+      ]
+    }
+  });
+  const state = new Float32Array(8);
+  const thermo = new Float32Array(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length);
+  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
+  const device = fakeMechanicsRefreshDevice();
+  const sourceStateBuffer = { label: 'mechanics-source-state' };
+  const sourceThermoBuffer = { label: 'mechanics-source-thermo' };
+  const sourceMechanicsBuffer = { label: 'mechanics-source-mechanics' };
+  const outputMechanicsBuffer = device.createBuffer({
+    label: 'mechanics-ping-output',
+    size: mechanics.byteLength,
+    usage: 128
+  });
+
+  const stage = createMlsMpmMechanicsRefreshWebGpuEncoderStage({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      state,
+      thermo
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      mechanics
+    },
+    mechanicsMaterialTable: table,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer,
+    outputMechanicsBuffer,
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(stage.mechanicsBuffer, outputMechanicsBuffer);
+  assert.equal(stage.outputMechanicsBufferOwned, false);
+  assert.equal(stage.result.outputMechanicsBufferBorrowed, true);
+  assert.equal(
+    device.bindGroups.at(-1).entries.find((entry) => entry.binding === 4).resource.buffer,
+    outputMechanicsBuffer
+  );
+  stage.cleanupSubmittedWork();
+  stage.result.destroyOutputParticleBuffers();
+  assert.equal(outputMechanicsBuffer.destroyed, false);
+
+  assert.throws(
+    () => createMlsMpmMechanicsRefreshWebGpuEncoderStage({
+      device,
+      sphParticleState: {
+        schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+        particleCount: 1,
+        state,
+        thermo
+      },
+      mlsMpmParticleState: {
+        schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+        particleCount: 1,
+        mechanics
+      },
+      mechanicsMaterialTable: table,
+      sourceStateBuffer,
+      sourceThermoBuffer,
+      sourceMechanicsBuffer,
+      outputMechanicsBuffer: sourceMechanicsBuffer
+    }),
+    /distinct from every source/
+  );
 });

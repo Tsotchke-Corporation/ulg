@@ -56,6 +56,7 @@ const MLS_MPM_EOS_MODEL_IDS = Object.freeze({
 });
 
 const GPU_BUFFER_USAGE = {
+  COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
 };
@@ -398,12 +399,12 @@ export function buildSphGpuParticleBuffers(state, {
   };
 }
 
-function writeStorageBuffer(device, label, data) {
+function writeStorageBuffer(device, label, data, extraUsage = 0) {
   const byteLength = Math.max(4, data.byteLength);
   const buffer = device.createBuffer({
     label,
     size: byteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
@@ -437,8 +438,18 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     particleCount: packed.particleCount,
     stateStrideBytes: packed.stateStrideBytes,
     thermoStrideBytes: packed.thermoStrideBytes,
-    stateBuffer: writeStorageBuffer(device, 'ulg-sph-particle-state', packed.state),
-    thermoBuffer: writeStorageBuffer(device, 'ulg-sph-particle-thermo', packed.thermo),
+    stateBuffer: writeStorageBuffer(
+      device,
+      'ulg-sph-particle-state',
+      packed.state,
+      GPU_BUFFER_USAGE.COPY_SRC
+    ),
+    thermoBuffer: writeStorageBuffer(
+      device,
+      'ulg-sph-particle-thermo',
+      packed.thermo,
+      GPU_BUFFER_USAGE.COPY_SRC
+    ),
     materialPropertyBankWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer,
     materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,
@@ -598,7 +609,12 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
     sourceSchema: packed.schema,
     particleCount: packed.particleCount,
     mechanicsStrideBytes: packed.mechanicsStrideBytes,
-    mechanicsBuffer: writeStorageBuffer(device, 'ulg-mls-mpm-particle-mechanics', packed.mechanics),
+    mechanicsBuffer: writeStorageBuffer(
+      device,
+      'ulg-mls-mpm-particle-mechanics',
+      packed.mechanics,
+      GPU_BUFFER_USAGE.COPY_SRC
+    ),
     materialPropertyBankWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer,
     materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,

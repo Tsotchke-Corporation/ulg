@@ -8911,8 +8911,15 @@ test('SPH phase resident steps publish after StateManager warm-delta admission',
           stateKey: task.gpuResidentLane?.stateKey ?? null
         });
         const module = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
+        const bridge = await window.__ulgImportWithRetry('/src/runtime/peercomputeResidentCommitBridge.js');
         const execution = await module.runMlsMpmResidentStepsComputeTask(task.data);
-        stateManager.commitDelta(execution.commitDelta);
+        const admission = bridge.validateResidentStepsCommitDelta(execution.commitDelta);
+        stateManager.commitDelta(
+          bridge.createStateManagerCommittedResidentStepsDelta(
+            execution.commitDelta,
+            admission
+          )
+        );
         return {
           status: 'accepted-inline-state-manager',
           acceptedTaskId: task.id,
@@ -13964,7 +13971,30 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
     if (!navigator.gpu) return { status: 'webgpu-unavailable' };
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
-    const device = await adapter.requestDevice();
+    const deviceLimitsModule = await import('/src/runtime/webgpuDeviceLimits.js');
+    const adapterStorageBuffersPerStage = Number(
+      adapter.limits.maxStorageBuffersPerShaderStage || 0
+    );
+    if (adapterStorageBuffersPerStage < 10) {
+      return {
+        status: 'resident-device-limit-insufficient',
+        adapterStorageBuffersPerStage,
+        requiredStorageBuffersPerStage: 10
+      };
+    }
+    const deviceDescriptor = deviceLimitsModule.webGpuDeviceDescriptorForResidentSph(adapter);
+    const requestedStorageBuffersPerStage = Number(
+      deviceDescriptor?.requiredLimits?.maxStorageBuffersPerShaderStage || 8
+    );
+    const device = await adapter.requestDevice(deviceDescriptor);
+    const deviceLimits = {
+      adapterStorageBuffersPerStage,
+      requestedStorageBuffersPerStage,
+      deviceStorageBuffersPerStage: Number(
+        device.limits.maxStorageBuffersPerShaderStage || 0
+      )
+    };
+    device.pushErrorScope('validation');
     const importWithRetry = async (path) => {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
@@ -14045,13 +14075,16 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
       mechanics
     };
 
-    // Admitted level-assignment decision rows; everything downstream (both
-    // active-node lists and the two-level coupled step) is produced by the
-    // real orchestrator on GPU.
+    // Admitted level-assignment decision rows; the source ranges, exact
+    // sparse two-level hierarchy, and coupled step are produced by the real
+    // orchestrator on GPU.
     const assignments = new Float32Array(particleCount * ASSIGNMENT_FLOATS);
     for (let index = 0; index < particleCount; index += 1) {
       const offset = index * ASSIGNMENT_FLOATS;
       assignments[offset] = levels[index];
+      assignments[offset + 1] = baseDx * (2 ** levels[index]);
+      assignments[offset + 2] = levels[index] === 0 ? 0.5 : 1.0;
+      assignments[offset + 10] = 1;
       assignments[offset + 12] = positions[index][0];
       assignments[offset + 13] = positions[index][1];
       assignments[offset + 14] = positions[index][2];
@@ -14076,6 +14109,7 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
       dt,
       gravityMPerS2: [0, 0, 0],
       enableTwoLevelMechanics: true,
+      twoLevelConservationSummaryReadback: true,
       twoLevelFineSubstepCount: 2,
       residentStepRunner: async (options) => {
         residentCalls.push({ selectedLevel: options.schroederSelectedLevel });
@@ -14087,19 +14121,31 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
       status: 'ok',
       executionStatus: execution.status,
       twoLevelMechanics: execution.twoLevelMechanics,
+      sparseHierarchy: execution.sparseHierarchy,
+      deviceLimits,
       residentCallCount: residentCalls.length,
       totalMass,
       expectedMomentum: velocity.map((v) => totalMass * v)
     };
+    await device.queue.onSubmittedWorkDone();
+    summary.validationError = (await device.popErrorScope())?.message ?? null;
+    execution.destroySparseHierarchyBuffers?.();
     device.destroy?.();
     return summary;
   });
 
   expect(result.status).toBe('ok');
+  expect(result.deviceLimits).toEqual({
+    adapterStorageBuffersPerStage: expect.any(Number),
+    requestedStorageBuffersPerStage: 10,
+    deviceStorageBuffersPerStage: 10
+  });
+  expect(result.deviceLimits.adapterStorageBuffersPerStage).toBeGreaterThanOrEqual(10);
+  expect(result.validationError).toBeNull();
   expect(result.executionStatus).toBe('schroeder-same-level-mechanics-submitted');
 
   // The observation-mode two-level stage ran inside the real orchestrator
-  // (both active-node lists produced on GPU from the admitted assignment)
+  // (exact sparse hierarchy produced on GPU from the admitted assignment)
   // while the resident authority path still executed.
   expect(result.residentCallCount).toBe(1);
   const twoLevel = result.twoLevelMechanics;
@@ -14110,6 +14156,13 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
   expect(twoLevel.fineSubstepCount).toBe(2);
   expect(twoLevel.fineLevel).toBe(0);
   expect(twoLevel.coarseLevel).toBe(1);
+  expect(result.sparseHierarchy.status).toBe('schroeder-sparse-two-level-hierarchy-encoded');
+  expect(result.sparseHierarchy.compaction).toBe('exact-stable-u32-radix-unique-csr');
+  expect(result.sparseHierarchy.thirdLevelHold).toBe(true);
+  expect(result.sparseHierarchy.retainedCompactNodeBuffer).toBe(true);
+  expect(result.sparseHierarchy.retainedSourceMembershipBuffers).toBe(true);
+  expect(result.sparseHierarchy.gpuAdmissionEvidenceStatus)
+    .toBe('retained-fixed-evidence-no-default-map');
 
   // Live conservation telemetry from the coupled step: the combined coarse
   // grid carries the full two-level mass and momentum.
@@ -14130,7 +14183,29 @@ test('Schroeder orchestrator advances chained authoritative two-level steps with
     if (!navigator.gpu) return { status: 'webgpu-unavailable' };
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
-    const device = await adapter.requestDevice();
+    const deviceLimitsModule = await import('/src/runtime/webgpuDeviceLimits.js');
+    const adapterStorageBuffersPerStage = Number(
+      adapter.limits.maxStorageBuffersPerShaderStage || 0
+    );
+    if (adapterStorageBuffersPerStage < 10) {
+      return {
+        status: 'resident-device-limit-insufficient',
+        adapterStorageBuffersPerStage,
+        requiredStorageBuffersPerStage: 10
+      };
+    }
+    const deviceDescriptor = deviceLimitsModule.webGpuDeviceDescriptorForResidentSph(adapter);
+    const requestedStorageBuffersPerStage = Number(
+      deviceDescriptor?.requiredLimits?.maxStorageBuffersPerShaderStage || 8
+    );
+    const device = await adapter.requestDevice(deviceDescriptor);
+    const deviceLimits = {
+      adapterStorageBuffersPerStage,
+      requestedStorageBuffersPerStage,
+      deviceStorageBuffersPerStage: Number(
+        device.limits.maxStorageBuffersPerShaderStage || 0
+      )
+    };
     const importWithRetry = async (path) => {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
@@ -14210,7 +14285,14 @@ test('Schroeder orchestrator advances chained authoritative two-level steps with
     };
     const assignments = new Float32Array(particleCount * ASSIGNMENT_FLOATS);
     for (let index = 0; index < particleCount; index += 1) {
-      assignments[index * ASSIGNMENT_FLOATS] = levels[index];
+      const offset = index * ASSIGNMENT_FLOATS;
+      assignments[offset] = levels[index];
+      assignments[offset + 1] = baseDx * (2 ** levels[index]);
+      assignments[offset + 2] = levels[index] === 0 ? 0.5 : 1.0;
+      assignments[offset + 10] = 1;
+      assignments[offset + 12] = positions[index][0];
+      assignments[offset + 13] = positions[index][1];
+      assignments[offset + 14] = positions[index][2];
     }
     const levelAssignment = {
       schema: abi.ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
@@ -14236,6 +14318,7 @@ test('Schroeder orchestrator advances chained authoritative two-level steps with
         gravityMPerS2: [0, 0, 0],
         enableTwoLevelMechanics: true,
         twoLevelMechanicsAuthority: 'authoritative',
+        twoLevelConservationSummaryReadback: true,
         twoLevelFineSubstepCount: 2,
         residentStepRunner: async (options) => {
           residentCalls.push(options);
@@ -14295,6 +14378,7 @@ test('Schroeder orchestrator advances chained authoritative two-level steps with
 
     const summary = {
       status: 'ok',
+      deviceLimits,
       residentCallCount: residentCalls.length,
       firstStatus: firstStep.status,
       firstAuthority: first.twoLevelMechanics.authority,
@@ -14314,6 +14398,12 @@ test('Schroeder orchestrator advances chained authoritative two-level steps with
   });
 
   expect(result.status).toBe('ok');
+  expect(result.deviceLimits).toEqual({
+    adapterStorageBuffersPerStage: expect.any(Number),
+    requestedStorageBuffersPerStage: 10,
+    deviceStorageBuffersPerStage: 10
+  });
+  expect(result.deviceLimits.adapterStorageBuffersPerStage).toBeGreaterThanOrEqual(10);
   // The resident mechanics never ran: the two-level step held authority for
   // both scheduled invocations.
   expect(result.residentCallCount).toBe(0);
@@ -14364,7 +14454,10 @@ test('SPH phase mounted scene advances under authoritative two-level SS mechanic
       twoLevelConservationMass:
         twoLevel?.conservation?.coarseMassKg
         ?? execution?.finalStep?.twoLevelConservation?.coarseMassKg
-        ?? null
+        ?? null,
+      conservationEvidenceStatus: twoLevel?.conservationEvidenceStatus ?? null,
+      conservationEvidenceReadbackPerformed:
+        twoLevel?.conservationEvidenceReadbackPerformed ?? null
     };
   });
 
@@ -14390,8 +14483,10 @@ test('SPH phase mounted scene advances under authoritative two-level SS mechanic
     'two-level-authoritative-resident-mechanics-replaced'
   ]).toContain(first.twoLevelAuthority);
   expect(second.simTime).toBeGreaterThan(first.simTime);
-  // Live conservation telemetry is present with a positive combined mass.
-  expect(first.twoLevelConservationMass).toBeGreaterThan(0);
+  // Production retains the fixed GPU conservation row without mapping it.
+  expect(first.conservationEvidenceStatus)
+    .toBe('schroeder-cross-level-grid-conservation-summary-submitted');
+  expect(first.conservationEvidenceReadbackPerformed).toBe(false);
   expect(consoleIssues).toEqual([]);
 });
 

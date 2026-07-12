@@ -117,7 +117,7 @@ async function loadServiceHostImports(serviceAssets) {
     return;
   }
   try {
-    await import(hostImportsUrl);
+    await import(/* @vite-ignore */ hostImportsUrl);
     const api = self.EshkolHostImports;
     const factoryReady = typeof api?.createEshkolHostImportObject === 'function';
     const tensorBindingReady = typeof api?.createEshkolTensorMemoryBinding === 'function';

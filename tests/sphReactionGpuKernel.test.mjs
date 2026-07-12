@@ -10,7 +10,9 @@ import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/
 import {
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
-  buildSphThermalPhaseResponseTable
+  buildSphThermalPhaseResponseTable,
+  destroySphThermalResponseGraphBuffers,
+  uploadSphThermalResponseGraphBuffers
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -21,12 +23,19 @@ import {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+  SPH_REACTION_RESOLVE_STORAGE_BUFFER_REQUIREMENT,
   buildSphReactionTable,
   compareSphReactionStepParity,
+  createSphReactionStepWebGpuEncoderStage,
   resolveReactionParticleBinGrid,
   runSphReactionStepCpu,
   runSphReactionStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphReactionGpuKernel.js';
+import { createSphReactionCoreWorkspaceGpu } from '../src/runtime/sph/sphReactionCoreWorkspaceGpu.js';
+import {
+  createSphReactionStaticTableUploadGpu,
+  destroySphReactionStaticTableUploadGpu
+} from '../src/runtime/sph/sphReactionStaticTableUploadGpu.js';
 import { sphReactionStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 const materialProperties = {
@@ -139,6 +148,103 @@ function multiProductReactionTable() {
     contactRadiusM: 0.1
   });
 }
+
+function fakeReactionEncoderDevice() {
+  const writes = [];
+  const clears = [];
+  const dispatches = [];
+  const createdBuffers = [];
+  const bindGroups = [];
+  const device = {
+    writes,
+    clears,
+    dispatches,
+    createdBuffers,
+    bindGroups,
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength });
+      }
+    },
+    createBuffer({ label, size, usage }) {
+      const buffer = {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        destroy() {
+          this.destroyed = true;
+        }
+      };
+      createdBuffers.push(buffer);
+      return buffer;
+    },
+    createShaderModule({ label, code }) {
+      return { label, code };
+    },
+    createBindGroupLayout(descriptor) {
+      return descriptor;
+    },
+    createPipelineLayout(descriptor) {
+      return descriptor;
+    },
+    createComputePipeline({ label, compute }) {
+      return { label, compute };
+    },
+    createBindGroup(descriptor) {
+      bindGroups.push(descriptor);
+      return descriptor;
+    }
+  };
+  const commandEncoder = {
+    clearBuffer(buffer, offset = 0, size = buffer.size - offset) {
+      clears.push({ label: buffer.label, offset, size });
+    },
+    beginComputePass() {
+      return {
+        setPipeline(pipeline) {
+          this.pipeline = pipeline;
+        },
+        setBindGroup() {},
+        dispatchWorkgroups(count) {
+          dispatches.push({ entryPoint: this.pipeline.compute.entryPoint, count });
+        },
+        end() {}
+      };
+    }
+  };
+  return { device, commandEncoder };
+}
+
+test('SPH reaction resident encoder rejects an under-provisioned device before allocation', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const { device, commandEncoder } = fakeReactionEncoderDevice();
+  device.limits = { maxStorageBuffersPerShaderStage: 10 };
+
+  await assert.rejects(
+    () => createSphReactionStepWebGpuEncoderStage({
+      device,
+      commandEncoder,
+      ...packed,
+      reactionTable: reactionTable(),
+      thermalMaterialTable
+    }),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ULG_SPH_REACTION_DEVICE_STORAGE_BINDING_LIMIT_INSUFFICIENT'
+      );
+      assert.equal(
+        error.requiredStorageBuffersPerShaderStage,
+        SPH_REACTION_RESOLVE_STORAGE_BUFFER_REQUIREMENT
+      );
+      assert.equal(error.deviceStorageBuffersPerShaderStage, 10);
+      return true;
+    }
+  );
+  assert.equal(device.createdBuffers.length, 0);
+});
 
 test('SPH reaction table packs derived reaction and product phase mechanics rows', () => {
   const table = reactionTable();
@@ -344,6 +450,17 @@ test('SPH reaction WGSL places gas products into freed parent slots after conden
   assert.match(sphReactionStepWgsl, /product_term_for_parent_slot\(reaction_index,\s*local_product_slot\)/);
   // Products launch at the consumed pair's COM velocity (momentum-exact).
   assert.match(sphReactionStepWgsl, /product_com_velocity/);
+  assert.match(sphReactionStepWgsl,
+    /@binding\(26\) var<storage, read_write> reaction_admitted_outcomes/);
+  assert.match(sphReactionStepWgsl, /fn\s+publish_reaction_admitted_outcome/);
+  assert.match(sphReactionStepWgsl,
+    /reaction_product_event_prefix_metadata\[18\][\s\S]*?reaction_product_event_prefix_metadata\[2\]/);
+  assert.match(sphReactionStepWgsl,
+    /reaction_product_event_prefix_metadata\[19\] = 0x4f555443u/);
+  assert.match(sphReactionStepWgsl,
+    /publish_reaction_admitted_outcome\([\s\S]*?product_mass_scale,[\s\S]*?source0_consumed,[\s\S]*?source1_consumed/);
+  assert.match(sphReactionStepWgsl,
+    /if \(product_term_count == 1u\)[\s\S]*?particle_index == source1_index[\s\S]*?local_product_slot = 0u/);
 });
 
 test('SPH reaction WGSL preserves visual particle radius while resolving product thermo rows', () => {
@@ -368,6 +485,11 @@ test('SPH reaction WGSL can gate reaction proposals from a Schroeder law queue',
   assert.match(sphReactionStepWgsl, /@binding\(22\)\s+var<storage,\s*read>\s+schroeder_reaction_neighbor_candidate_rows/);
   assert.match(sphReactionStepWgsl, /@binding\(23\)\s+var<uniform>\s+schroeder_reaction_neighbor_candidate_params/);
   assert.match(sphReactionStepWgsl, /@binding\(24\)\s+var<storage,\s*read>\s+schroeder_reaction_source_span_rows/);
+  assert.match(sphReactionStepWgsl,
+    /@binding\(25\)\s+var<storage,\s*read_write>\s+reaction_product_event_prefix_metadata/);
+  assert.match(sphReactionStepWgsl, /fn\s+reaction_product_event_mutation_admitted/);
+  assert.match(sphReactionStepWgsl,
+    /if\s*\(!reaction_product_event_mutation_admitted\(\)\)\s*\{\s*copy_particle\(particle_index\)/);
   assert.match(sphReactionStepWgsl, /fn\s+schroeder_reaction_law_queue_allows_particle/);
   assert.match(sphReactionStepWgsl, /fn\s+schroeder_reaction_neighbor_candidates_enabled/);
   assert.match(sphReactionStepWgsl, /fn\s+schroeder_reaction_source_spans_enabled/);
@@ -422,6 +544,593 @@ test('SPH reaction particle-bin grid falls back without positive reaction radius
   assert.equal(grid.enabled, false);
   assert.equal(grid.neighborMode, 'all-particle-scan-fallback');
   assert.equal(grid.status, 'reaction-particle-bin-grid-disabled');
+});
+
+test('SPH reaction resident encoder initializes transient rows on GPU without host zero uploads', async () => {
+  const packed = packedThreeParticles();
+  const particleCount = 300_000;
+  const residentPacked = {
+    sphParticleState: {
+      ...packed.sphParticleState,
+      particleCount,
+      state: new Float32Array(),
+      thermo: new Float32Array()
+    },
+    mlsMpmParticleState: {
+      ...packed.mlsMpmParticleState,
+      particleCount,
+      mechanics: new Float32Array()
+    }
+  };
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(
+    thermalMaterialTable,
+    thermalClosureGraphSet
+  );
+  const { device, commandEncoder } = fakeReactionEncoderDevice();
+  const sourceStateBuffer = device.createBuffer({
+    label: 'resident-reaction-source-state',
+    size: particleCount * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const sourceThermoBuffer = device.createBuffer({
+    label: 'resident-reaction-source-thermo',
+    size: particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const sourceMechanicsBuffer = device.createBuffer({
+    label: 'resident-reaction-source-mechanics',
+    size: particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+
+  const stage = await createSphReactionStepWebGpuEncoderStage({
+    device,
+    commandEncoder,
+    ...residentPacked,
+    reactionTable: reactionTable(),
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer,
+    boxDimsM: [5, 5, 5],
+    emitResidentProductEvents: false
+  });
+
+  const hostZeroBufferLabels = new Set([
+    'ulg-sph-reaction-packed-source-particles',
+    'ulg-sph-reaction-proposals',
+    'ulg-sph-reaction-packed-output-particles',
+    'ulg-sph-reaction-core-workspace-packed-source',
+    'ulg-sph-reaction-core-workspace-packed-output',
+    'ulg-sph-reaction-core-workspace-proposals',
+    'ulg-sph-reaction-output-state',
+    'ulg-sph-reaction-output-thermo',
+    'ulg-sph-reaction-output-mechanics',
+    'ulg-sph-reaction-particle-bin-counts',
+    'ulg-sph-reaction-particle-bin-indices',
+    'ulg-sph-reaction-particle-bin-metadata',
+    'ulg-sph-reaction-schroeder-law-queue-disabled',
+    'ulg-sph-reaction-schroeder-law-neighbor-candidates-disabled',
+    'ulg-sph-reaction-schroeder-law-neighbor-source-spans-disabled'
+  ]);
+  assert.deepEqual(
+    device.writes.filter(({ label }) => hostZeroBufferLabels.has(label)),
+    []
+  );
+  assert.deepEqual(
+    device.clears.map(({ label }) => label),
+    [
+      'ulg-sph-reaction-particle-bin-counts',
+      'ulg-sph-reaction-particle-bin-metadata'
+    ]
+  );
+  assert.equal(stage.sourceParticlePackInitializationMode, 'direct-resident-soa-source-buffers');
+  assert.equal(stage.outputBufferInitializationMode, 'shader-writes-all-live-particle-rows');
+  assert.equal(stage.particleBinInitializationMode, 'command-encoder-clear-counts-and-metadata');
+  assert.equal(stage.hostZeroInitializationByteLength, 0);
+  assert.equal(stage.shaderInitializedLiveByteLength, 67_200_000);
+  assert.equal(
+    stage.commandEncoderClearByteLength,
+    device.clears.reduce((sum, clear) => sum + clear.size, 0)
+  );
+  assert.deepEqual(
+    device.dispatches.map(({ entryPoint }) => entryPoint),
+    ['bin_particles', 'propose', 'resolve']
+  );
+
+  stage.cleanupSubmittedWork();
+});
+
+test('SPH reaction resident encoder borrows caller output buffers without allocation or destruction', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(
+    thermalMaterialTable,
+    thermalClosureGraphSet
+  );
+  const { device, commandEncoder } = fakeReactionEncoderDevice();
+  const create = (label, size) => device.createBuffer({ label, size, usage: 128 });
+  const sourceStateBuffer = create(
+    'borrowed-source-state',
+    3 * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceThermoBuffer = create(
+    'borrowed-source-thermo',
+    3 * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceMechanicsBuffer = create(
+    'borrowed-source-mechanics',
+    3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const outputStateBuffer = create('borrowed-output-state', sourceStateBuffer.size);
+  const outputThermoBuffer = create('borrowed-output-thermo', sourceThermoBuffer.size);
+  const outputMechanicsBuffer = create('borrowed-output-mechanics', sourceMechanicsBuffer.size);
+  const createdBefore = device.createdBuffers.length;
+  const stage = await createSphReactionStepWebGpuEncoderStage({
+    device,
+    commandEncoder,
+    ...packed,
+    reactionTable: reactionTable(),
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer,
+    outputStateBuffer,
+    outputThermoBuffer,
+    outputMechanicsBuffer,
+    boxDimsM: [5, 5, 5],
+    emitResidentProductEvents: false
+  });
+  assert.deepEqual(stage.outputBufferOwnership, {
+    state: 'caller-borrowed',
+    thermo: 'caller-borrowed',
+    mechanics: 'caller-borrowed'
+  });
+  assert.equal(stage.borrowedOutputBufferCount, 3);
+  assert.equal(stage.outputBufferAllocationAvoidedByteLength,
+    outputStateBuffer.size + outputThermoBuffer.size + outputMechanicsBuffer.size);
+  const createdAfter = device.createdBuffers.slice(createdBefore);
+  assert.equal(createdAfter.some(({ label }) => label === 'ulg-sph-reaction-output-state'), false);
+  assert.equal(createdAfter.some(({ label }) => label === 'ulg-sph-reaction-output-thermo'), false);
+  assert.equal(createdAfter.some(({ label }) => label === 'ulg-sph-reaction-output-mechanics'), false);
+  stage.cleanupSubmittedWork({ destroyOutputs: false });
+  stage.cleanupSubmittedWork({ destroyOutputs: true });
+  assert.equal(outputStateBuffer.destroyed, false);
+  assert.equal(outputThermoBuffer.destroyed, false);
+  assert.equal(outputMechanicsBuffer.destroyed, false);
+
+  await assert.rejects(() => createSphReactionStepWebGpuEncoderStage({
+    device,
+    commandEncoder: fakeReactionEncoderDevice().commandEncoder,
+    ...packed,
+    reactionTable: reactionTable(),
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer,
+    outputStateBuffer: outputMechanicsBuffer,
+    outputThermoBuffer: outputMechanicsBuffer,
+    outputMechanicsBuffer,
+    emitResidentProductEvents: false
+  }), /outputStateBuffer must not alias outputThermoBuffer/);
+  await assert.rejects(() => createSphReactionStepWebGpuEncoderStage({
+    device,
+    commandEncoder: fakeReactionEncoderDevice().commandEncoder,
+    ...packed,
+    reactionTable: reactionTable(),
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer,
+    outputStateBuffer: sourceStateBuffer,
+    outputThermoBuffer,
+    outputMechanicsBuffer,
+    emitResidentProductEvents: false
+  }), /outputStateBuffer must not alias sourceStateBuffer/);
+});
+
+test('SPH reaction resident substeps reuse one borrowed core workspace without uniform aliasing', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(
+    thermalMaterialTable,
+    thermalClosureGraphSet
+  );
+  const table = reactionTable();
+  const { device, commandEncoder } = fakeReactionEncoderDevice();
+  const create = (label, size) => device.createBuffer({ label, size, usage: 128 });
+  const family = (prefix) => ({
+    state: create(
+      `${prefix}-state`,
+      3 * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    ),
+    thermo: create(
+      `${prefix}-thermo`,
+      3 * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    ),
+    mechanics: create(
+      `${prefix}-mechanics`,
+      3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    )
+  });
+  const source = family('reaction-workspace-source');
+  const middle = family('reaction-workspace-middle');
+  const output = family('reaction-workspace-output');
+  const workspace = createSphReactionCoreWorkspaceGpu({
+    device,
+    particleCapacity: 3,
+    sequenceStepCapacity: 2,
+    label: 'shared-reaction-core'
+  });
+  const workspaceAllocationCount = device.createdBuffers.length;
+  const common = {
+    device,
+    commandEncoder,
+    ...packed,
+    reactionTable: table,
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
+    reactionCoreWorkspace: workspace,
+    boxDimsM: [5, 5, 5],
+    emitResidentProductEvents: false
+  };
+
+  const first = await createSphReactionStepWebGpuEncoderStage({
+    ...common,
+    sourceStateBuffer: source.state,
+    sourceThermoBuffer: source.thermo,
+    sourceMechanicsBuffer: source.mechanics,
+    outputStateBuffer: middle.state,
+    outputThermoBuffer: middle.thermo,
+    outputMechanicsBuffer: middle.mechanics,
+    reactionParamsSlotIndex: 0
+  });
+  const second = await createSphReactionStepWebGpuEncoderStage({
+    ...common,
+    sourceStateBuffer: middle.state,
+    sourceThermoBuffer: middle.thermo,
+    sourceMechanicsBuffer: middle.mechanics,
+    outputStateBuffer: output.state,
+    outputThermoBuffer: output.thermo,
+    outputMechanicsBuffer: output.mechanics,
+    reactionParamsSlotIndex: 1
+  });
+
+  assert.equal(first.reactionCoreWorkspace, workspace);
+  assert.equal(second.reactionCoreWorkspace, workspace);
+  assert.equal(first.reactionCoreWorkspaceBorrowed, true);
+  assert.equal(second.reactionCoreWorkspaceBorrowed, true);
+  assert.equal(first.reactionCoreWorkspaceOwned, false);
+  assert.equal(first.reactionCoreWorkspaceAllocationAvoidedByteLength, 48);
+  assert.equal(second.reactionCoreWorkspaceAllocationAvoidedByteLength, 48);
+  assert.equal(first.proposalBuffer, workspace.proposalBuffer);
+  assert.equal(second.proposalBuffer, workspace.proposalBuffer);
+  assert.equal(first.reactionParamsSlotIndex, 0);
+  assert.equal(second.reactionParamsSlotIndex, 1);
+  assert.equal(first.reactionProposeBindGroupCacheHit, false);
+  assert.equal(second.reactionProposeBindGroupCacheHit, false);
+  assert.equal(first.reactionResolveBindGroupCacheHit, false);
+  assert.equal(second.reactionResolveBindGroupCacheHit, false);
+  assert.equal(first.reactionSharedDisabledStorageBindingsUsed, false);
+  assert.equal(second.reactionSharedDisabledStorageBindingsUsed, false);
+  assert.equal(
+    device.createdBuffers.slice(workspaceAllocationCount).some(
+      ({ label }) => label?.startsWith('ulg-sph-reaction-core-workspace-')
+    ),
+    false
+  );
+  const paramsBuffers = device.createdBuffers.filter(
+    ({ label }) => label === 'ulg-sph-reaction-params'
+  );
+  assert.equal(paramsBuffers.length, 0);
+  assert.equal(device.createdBuffers.filter(
+    ({ label }) => label === 'shared-reaction-core-params-arena'
+  ).length, 1);
+  assert.equal(device.createdBuffers.filter(
+    ({ label }) => label === 'shared-reaction-core-disabled-writable-storage-arena'
+  ).length, 1);
+  assert.equal(device.createdBuffers.filter(
+    ({ label }) => label === 'shared-reaction-core-disabled-read-only-storage-arena'
+  ).length, 1);
+  assert.equal(device.createdBuffers.filter(
+    ({ label }) => label === 'ulg-sph-reaction-particle-bin-params'
+  ).length, 0);
+  assert.equal(device.createdBuffers.filter(
+    ({ label }) => label === 'ulg-sph-reaction-schroeder-law-queue-params'
+  ).length, 0);
+  assert.equal(device.createdBuffers.filter(
+    ({ label }) => label === 'ulg-sph-reaction-schroeder-law-neighbor-candidates-params'
+  ).length, 0);
+  assert.deepEqual(
+    device.writes
+      .filter(({ label }) => label === 'shared-reaction-core-params-arena')
+      .map(({ offset }) => offset),
+    [0, 256, 512, 768, 1024, 1280, 1536, 1792]
+  );
+  assert.deepEqual(workspace.usedParamsSlotIndices, [0, 1]);
+  assert.deepEqual(workspace.bindGroupCacheEvidence(), {
+    slotCapacity: 2,
+    proposePopulatedSlotCount: 2,
+    resolvePopulatedSlotCount: 2,
+    proposeHitCount: 0,
+    proposeMissCount: 2,
+    resolveHitCount: 0,
+    resolveMissCount: 2
+  });
+  assert.deepEqual(
+    device.dispatches.map(({ entryPoint }) => entryPoint),
+    [
+      'bin_particles', 'propose', 'resolve',
+      'bin_particles', 'propose', 'resolve'
+    ]
+  );
+
+  first.cleanupSubmittedWork({ destroyOutputs: false });
+  second.cleanupSubmittedWork({ destroyOutputs: false });
+  assert.equal(workspace.destroyed, false);
+  assert.equal(workspace.allocationEntries.every(({ buffer }) => !buffer.destroyed), true);
+  workspace.destroy();
+  assert.equal(workspace.allocationEntries.every(({ buffer }) => buffer.destroyed), true);
+});
+
+test('SPH reaction resident substeps borrow one generation-keyed static table upload', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(
+    thermalMaterialTable,
+    thermalClosureGraphSet
+  );
+  const table = reactionTable();
+  const { device, commandEncoder } = fakeReactionEncoderDevice();
+  const thermalResponseGraphUpload = uploadSphThermalResponseGraphBuffers(device, {
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable
+  });
+  const reactionStaticTableUpload = createSphReactionStaticTableUploadGpu({
+    device,
+    reactionTable: table,
+    reactionTableContentGeneration: 'reaction-content:1',
+    thermalResponseGraphUpload,
+    thermalResponseUploadProvenance: 'thermal-response-upload:1',
+    label: 'shared-reaction-static'
+  });
+  const create = (label, size) => device.createBuffer({ label, size, usage: 128 });
+  const family = (prefix) => ({
+    state: create(
+      `${prefix}-state`,
+      3 * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    ),
+    thermo: create(
+      `${prefix}-thermo`,
+      3 * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    ),
+    mechanics: create(
+      `${prefix}-mechanics`,
+      3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    )
+  });
+  const source = family('static-source');
+  const middle = family('static-middle');
+  const output = family('static-output');
+  const common = {
+    device,
+    commandEncoder,
+    ...packed,
+    reactionTable: table,
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
+    reactionStaticTableUpload,
+    reactionTableContentGeneration: 'reaction-content:1',
+    thermalResponseUploadProvenance: 'thermal-response-upload:1',
+    boxDimsM: [5, 5, 5],
+    emitResidentProductEvents: false
+  };
+  const staticWriteCountBeforeStages = device.writes.filter(
+    ({ label }) => label === reactionStaticTableUpload.reactionRecordBuffer.label
+  ).length;
+
+  const first = await createSphReactionStepWebGpuEncoderStage({
+    ...common,
+    sourceStateBuffer: source.state,
+    sourceThermoBuffer: source.thermo,
+    sourceMechanicsBuffer: source.mechanics,
+    outputStateBuffer: middle.state,
+    outputThermoBuffer: middle.thermo,
+    outputMechanicsBuffer: middle.mechanics
+  });
+  const second = await createSphReactionStepWebGpuEncoderStage({
+    ...common,
+    sourceStateBuffer: middle.state,
+    sourceThermoBuffer: middle.thermo,
+    sourceMechanicsBuffer: middle.mechanics,
+    outputStateBuffer: output.state,
+    outputThermoBuffer: output.thermo,
+    outputMechanicsBuffer: output.mechanics
+  });
+
+  assert.equal(staticWriteCountBeforeStages, 1);
+  assert.equal(device.writes.filter(
+    ({ label }) => label === reactionStaticTableUpload.reactionRecordBuffer.label
+  ).length, 1);
+  assert.equal(device.writes.filter(
+    ({ label }) => label === 'ulg-sph-reaction-records-and-product-phases'
+  ).length, 0);
+  for (const stage of [first, second]) {
+    assert.equal(stage.reactionStaticTableUpload, reactionStaticTableUpload);
+    assert.equal(stage.reactionStaticTableUploadBorrowed, true);
+    assert.equal(stage.reactionRecordBuffer, reactionStaticTableUpload.reactionRecordBuffer);
+    assert.equal(stage.reactionRecordBufferOwnership, 'caller-borrowed');
+    assert.equal(
+      stage.reactionRecordBufferAllocationAvoidedByteLength,
+      table.combinedRecords.byteLength
+    );
+    assert.equal(
+      stage.reactionRecordBufferWriteAvoidedByteLength,
+      table.combinedRecords.byteLength
+    );
+    assert.equal(stage.reactionStaticBindingResourcesBorrowed, 5);
+  }
+  const tableBindGroups = device.bindGroups.filter((bindGroup) => (
+    bindGroup.entries?.some((entry) => entry.binding === 3)
+  ));
+  assert.equal(tableBindGroups.length, 4);
+  assert.equal(tableBindGroups.every((bindGroup) => (
+    bindGroup.entries.find((entry) => entry.binding === 3).resource.buffer
+      === reactionStaticTableUpload.reactionRecordBuffer
+  )), true);
+
+  first.cleanupSubmittedWork({ destroyOutputs: false });
+  second.cleanupSubmittedWork({ destroyOutputs: false });
+  assert.equal(reactionStaticTableUpload.reactionRecordBuffer.destroyed, false);
+  assert.equal(thermalResponseGraphUpload.responseBuffer.destroyed, false);
+  assert.equal(destroySphReactionStaticTableUploadGpu(reactionStaticTableUpload), true);
+  assert.equal(reactionStaticTableUpload.reactionRecordBuffer.destroyed, true);
+  assert.equal(thermalResponseGraphUpload.responseBuffer.destroyed, false);
+  destroySphThermalResponseGraphBuffers(thermalResponseGraphUpload);
+});
+
+test('SPH reaction static table stage rejects generation and thermal provenance drift', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(
+    thermalMaterialTable,
+    thermalClosureGraphSet
+  );
+  const table = reactionTable();
+  const { device, commandEncoder } = fakeReactionEncoderDevice();
+  const thermalResponseGraphUpload = uploadSphThermalResponseGraphBuffers(device, {
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable
+  });
+  const reactionStaticTableUpload = createSphReactionStaticTableUploadGpu({
+    device,
+    reactionTable: table,
+    reactionTableContentGeneration: 4,
+    thermalResponseGraphUpload,
+    thermalResponseUploadProvenance: 8
+  });
+  const common = {
+    device,
+    commandEncoder,
+    ...packed,
+    reactionTable: table,
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
+    reactionStaticTableUpload,
+    reactionTableContentGeneration: 4,
+    thermalResponseUploadProvenance: 8,
+    emitResidentProductEvents: false
+  };
+
+  await assert.rejects(
+    () => createSphReactionStepWebGpuEncoderStage({
+      ...common,
+      reactionTableContentGeneration: 5
+    }),
+    /content generation mismatch/
+  );
+  await assert.rejects(
+    () => createSphReactionStepWebGpuEncoderStage({
+      ...common,
+      thermalResponseUploadProvenance: 9
+    }),
+    /provenance mismatch/
+  );
+  const replacementThermalUpload = uploadSphThermalResponseGraphBuffers(device, {
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable
+  });
+  await assert.rejects(
+    () => createSphReactionStepWebGpuEncoderStage({
+      ...common,
+      thermalResponseGraphUpload: replacementThermalUpload
+    }),
+    /identity conflicts/
+  );
+
+  destroySphReactionStaticTableUploadGpu(reactionStaticTableUpload);
+  destroySphThermalResponseGraphBuffers(thermalResponseGraphUpload);
+  destroySphThermalResponseGraphBuffers(replacementThermalUpload);
+});
+
+test('SPH reaction core workspace must not alias particle source or output buffers', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(
+    thermalMaterialTable,
+    thermalClosureGraphSet
+  );
+  const { device, commandEncoder } = fakeReactionEncoderDevice();
+  const sourceStateBuffer = device.createBuffer({
+    label: 'aliased-source-state',
+    size: 3 * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const sourceThermoBuffer = device.createBuffer({
+    label: 'source-thermo',
+    size: 3 * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const sourceMechanicsBuffer = device.createBuffer({
+    label: 'source-mechanics',
+    size: 3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const workspace = createSphReactionCoreWorkspaceGpu({ device, particleCapacity: 3 });
+  const proposalBuffer = workspace.proposalBuffer;
+  workspace.proposalBuffer = sourceStateBuffer;
+
+  await assert.rejects(
+    () => createSphReactionStepWebGpuEncoderStage({
+      device,
+      commandEncoder,
+      ...packed,
+      reactionTable: reactionTable(),
+      thermalMaterialTable,
+      thermalClosureGraphSet,
+      thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+      thermalPhaseResponseTable,
+      sourceStateBuffer,
+      sourceThermoBuffer,
+      sourceMechanicsBuffer,
+      reactionCoreWorkspace: workspace,
+      emitResidentProductEvents: false
+    }),
+    /reactionCoreWorkspace\.proposalBuffer must not alias sourceStateBuffer/
+  );
+  workspace.proposalBuffer = proposalBuffer;
+  workspace.destroy();
 });
 
 test('SPH reaction CPU reference preserves excess reactant and ledgers unplaced gas products', () => {

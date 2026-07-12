@@ -6,6 +6,23 @@ function readRepoFile(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
 }
 
+test('native WebGPU long-horizon probe defaults to the Vulkan presentation backend', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(probeSource, /const DEFAULT_CHROMIUM_ARGS = \[[\s\S]*?--use-angle=vulkan/);
+  assert.match(probeSource, /--enable-features=Vulkan,UseSkiaRenderer/);
+  assert.match(probeSource, /--enable-unsafe-webgpu/);
+});
+
+test('visual sequence checkpoints include the resident time-zero particle upload', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(probeSource, /scene-time-zero-particle-upload/);
+  assert.match(probeSource, /overlay\.__sphGpuParticleUpload \|\| sceneApi\.getSphGpuParticleUpload/);
+  assert.match(probeSource, /sourceStep:[\s\S]*?currentSphParticleState\?\.step/);
+  assert.match(probeSource, /sourceTimeS:[\s\S]*?currentSphParticleState\?\.time/);
+});
+
 test('native WebGPU probe and benchmark flatten validation scope diagnostics', () => {
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
   const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
@@ -304,6 +321,21 @@ test('resident material interface seeds surface table before full render-row rea
   );
   assert.match(
     sceneSource,
+    /slotCapacity: 2[\s\S]*?candidate\.leased !== true[\s\S]*?owned-spill-required/,
+    'source-field output pooling must never overwrite either of two leased resident generations'
+  );
+  assert.match(
+    sceneSource,
+    /poolLease\?\.release\?\.\([\s\S]*?material-interface-source-field-retired/,
+    'a source-field pool slot must be released by generation retirement rather than refresh-time reuse'
+  );
+  assert.match(
+    sceneSource,
+    /pool\.destroyRequested = true[\s\S]*?slot\.leased === true[\s\S]*?retirement-waiting-for-leases/,
+    'scene disposal and device replacement must leave leased source-field slots alive until their consumers retire'
+  );
+  assert.match(
+    sceneSource,
     /waitForQueueCompletion: false/,
     'material-interface source-field extraction should submit a GPU handoff without an intermediate CPU queue fence'
   );
@@ -344,6 +376,216 @@ test('resident material interface uses compact active-candidate readback', () =>
     sceneSource,
     /buildSphPhysicsMaterialInterfaceFieldWebGpu\(\{[\s\S]*candidateReadbackMode: 'compact-active-readback'/,
     'resident scene should opt into compact active-candidate readback for material-interface refresh'
+  );
+});
+
+test('mounted resident physics retains the source field for same-lane candidate construction', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+
+  assert.match(
+    mountSource,
+    /candidateReadbackMode: 'gpu-resident-source-field'/,
+    'the production mounted scheduler must request a retained source field instead of compact candidate readback'
+  );
+  assert.match(
+    sceneSource,
+    /candidateReadbackMode === SPH_MATERIAL_INTERFACE_GPU_RESIDENT_SOURCE_FIELD_MODE[\s\S]*?gpuResidentMaterialInterfaceSourceField: true/,
+    'the retained source-field branch must publish an explicit GPU-resident input contract'
+  );
+  assert.match(
+    sceneSource,
+    /materialInterfaceSourceField: retainedSourceField/,
+    'the next ComputeManager lane must receive the byte-identical field, surface, and source-index owner'
+  );
+  assert.match(
+    sceneSource,
+    /if \(!interfaceSourceFieldTransferred\) \{[\s\S]*?destroyMaterialInterfaceSourceFieldBuffers/,
+    'transferred source-field buffers must survive post-refresh cleanup and remain owned by the published state'
+  );
+  assert.match(
+    sceneSource,
+    /publishCurrentMaterialInterfaceState\(materialInterfaceField, \{[\s\S]*?deferDevice: resolvedDeviceResult\.device[\s\S]*?source-field-generation-replaced/,
+    'a replaced source-field generation must retire only after prior same-device submissions settle'
+  );
+  assert.match(
+    sceneSource,
+    /deferSubmittedWorkCleanup\(deferDevice, cleanup\)[\s\S]*?retirement-deferred-until-device-queue-fence/,
+    'source-field replacement must use nonblocking queue-fence cleanup instead of immediate destruction'
+  );
+  assert.match(
+    sceneSource,
+    /addMaterialInterfaceSourceFieldConsumerLease[\s\S]*?releaseMaterialInterfaceSourceFieldConsumerLease/,
+    'the retained source field must expose an explicit consumer lease spanning encode through queue submission'
+  );
+  assert.match(
+    sceneSource,
+    /retirementRequested[\s\S]*?consumerLeases\.size > 0[\s\S]*?retirement-waiting-for-consumers/,
+    'source-field retirement must wait for consumers before registering its queue fence'
+  );
+  assert.match(
+    sceneSource,
+    /sourceNeighborhoodGeneration[\s\S]*?sourceNeighborhoodLaneId[\s\S]*?sourceNeighborhoodStateKey[\s\S]*?sourceDeviceId/,
+    'source-field publication must retain position-generation, lane, state, and device provenance'
+  );
+  assert.match(
+    sceneSource,
+    /pressureInterfaceForceRowsUploadForState = gpuResidentSourceFieldReady\s*\? null\s*: uploadPressureInterfaceForceRowsBuffer/,
+    'the production source-field route must not construct or upload host force rows'
+  );
+  assert.match(
+    sceneSource,
+    /pressure-interface-force-solver-gpu-resident-lane-pending/,
+    'scene telemetry should defer authoritative force construction to the next ComputeManager lane'
+  );
+  assert.match(
+    sceneSource,
+    /function materialInterfaceSourceFieldReadyForResidentLane[\s\S]*?sourceField\.sourceStep[\s\S]*?particleState\.step/,
+    'the retained source field must be rejected when its particle generation does not match the resident input state'
+  );
+  assert.match(
+    sceneSource,
+    /pressureInterfaceGridForceApproved = !effectiveMaterialInterfaceSourceField[\s\S]*?legacyPressureInterfaceGridForceApproved/,
+    'a valid GPU source field must take precedence over the legacy host force-row upload route'
+  );
+  assert.match(
+    sceneSource,
+    /const residentStepsOptions = \{[\s\S]*?materialInterfaceSourceField: effectiveMaterialInterfaceSourceField[\s\S]*?pressureInterfaceStageOptions:/,
+    'the authoritative resident task must receive the source field and gas-pressure stage contract'
+  );
+  assert.match(
+    sceneSource,
+    /mlsMpmResidentStepSignatureFor[\s\S]*?materialInterfaceSourceFieldSignature\(materialInterfaceSourceField\)/,
+    'resident cache identity must include the retained material-interface source generation'
+  );
+  assert.match(
+    mountSource,
+    /const normalizedStepCount = pressureSourceCadenceRequired \? 1 : requestedStepCount/,
+    'mounted pressure playback must consume one source generation for exactly one physics step'
+  );
+  assert.match(
+    mountSource,
+    /ensureResidentPressureSourceFieldForSchedule[\s\S]*?before-resident-pressure-step[\s\S]*?Promise\.all\(\[remoteRefreshPreludePromise, pressureSourcePreludePromise\]\)/,
+    'the first and every resumed pressure step must prewarm or reuse a current source field before resident execution'
+  );
+  assert.match(
+    mountSource,
+    /residentExecutionFailureGeneration = generation[\s\S]*?playing = false[\s\S]*?explicit-play-retry-or-generation-reset-required/,
+    'a deterministic resident admission error must halt playback instead of retrying every animation frame'
+  );
+  assert.match(
+    mountSource,
+    /if \(!force && residentExecutionFailureGeneration === generation\) return/,
+    'the failed generation must stay blocked until an explicit retry or reset'
+  );
+  assert.match(
+    mountSource,
+    /let residentExecutionInFlight = false[\s\S]*?if \(residentExecutionInFlight\) return[\s\S]*?residentExecutionInFlight = true[\s\S]*?residentExecutionInFlight = false/,
+    'an unresolved resident task must remain the sole in-flight lane owner through settlement'
+  );
+  assert.match(
+    mountSource,
+    /resident-execution-watchdog-waiting-for-active-task[\s\S]*?wait-for-active-task-settlement-then-explicit-retry/,
+    'the watchdog must halt and retain the active task instead of launching an overlapping retry'
+  );
+  assert.doesNotMatch(
+    mountSource,
+    /resident-execution-watchdog-rescheduled/,
+    'the mounted scheduler must not retain the old overlapping watchdog resubmission policy'
+  );
+});
+
+test('mounted normal playback pipelines stale interface work behind authoritative physics', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+
+  assert.match(
+    mountSource,
+    /function currentResidentInterfaceRefreshMode\(\)[\s\S]*?return 'pipelined';/,
+    'native main-thread playback should default interface refreshes to pipelined'
+  );
+  assert.doesNotMatch(
+    mountSource,
+    /if \(pendingResidentInterfaceRefreshPromise\) \{\s*await pendingResidentInterfaceRefreshPromise;/,
+    'a stale visualization/interface refresh must not stall the next pressure source prelude'
+  );
+  assert.match(
+    mountSource,
+    /staleInterfaceRefreshBypassed = Boolean\(pendingResidentInterfaceRefreshPromise\)/,
+    'the pressure prelude should report when stale interface work was bypassed'
+  );
+  assert.match(
+    mountSource,
+    /resident-interface-refresh-coalesced-pending/,
+    'pipelined visualization refreshes should coalesce while one refresh is pending'
+  );
+  assert.match(
+    mountSource,
+    /resident-interface-refresh-stale-discarded/,
+    'a coalesced refresh from an older schedule must discard its late publication'
+  );
+  assert.match(
+    mountSource,
+    /renderCommitGuard,[\s\S]*?allowLegacyGasProducers: false/,
+    'pipelined interface work must discard stale publications and keep legacy gas producers off'
+  );
+  assert.match(
+    mountSource,
+    /ULG_RESIDENT_PRESSURE_SOURCE_NOT_SAME_ENCODER/,
+    'the authoritative pressure source must fail closed instead of falling back to CPU force rows'
+  );
+  assert.match(
+    mountSource,
+    /computeTaskQueueFencePolicy: computeTaskQueueFencePolicyForSchedule/,
+    'mounted playback must route its explicit queue-fence policy into the ComputeManager task'
+  );
+  assert.match(
+    sceneSource,
+    /renderCommitGuard = null[\s\S]*?publishCurrentMaterialInterfaceState/,
+    'material-interface publication should be guarded against stale schedule commits'
+  );
+  assert.match(
+    sceneSource,
+    /allowLegacyGasProducers !== false[\s\S]*?submitSceneSpatialGasLedgerProducerStageForPressureInterface/,
+    'legacy gas production should remain available only behind an explicit non-production opt-in'
+  );
+});
+
+test('resident render diagnostics cannot replace the authoritative pressure source field', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const renderRefreshStart = sceneSource.indexOf('async function refreshSphResidentRenderState');
+  const renderRefreshEnd = sceneSource.indexOf(
+    'async function debugSphResidentParticleUpload',
+    renderRefreshStart
+  );
+  assert.ok(renderRefreshStart >= 0 && renderRefreshEnd > renderRefreshStart);
+  const renderRefreshSource = sceneSource.slice(renderRefreshStart, renderRefreshEnd);
+
+  assert.match(
+    sceneSource,
+    /let sphResidentMaterialInterfaceState = null;[\s\S]*?let sphResidentRenderMaterialInterfaceState = null;/,
+    'physics and render diagnostics must have independent material-interface owners'
+  );
+  assert.doesNotMatch(
+    renderRefreshSource,
+    /publishSphResidentMaterialInterfaceState\(/,
+    'visual refresh must not replace or retire the authoritative pressure source field'
+  );
+  assert.match(
+    renderRefreshSource,
+    /publishSphResidentRenderMaterialInterfaceState\(materialInterfaceField/,
+    'visual material-interface summaries must publish through the render-only channel'
+  );
+  assert.match(
+    mountSource,
+    /residentExecutionForPressureSource = continueFromResidentState[\s\S]*?residentExecution: residentExecutionForPressureSource/,
+    'the pressure prelude must receive the current resident continuation envelope'
+  );
+  assert.match(
+    mountSource,
+    /residentSteps: residentExecution,[\s\S]*?materialInterfaceSourceField: materialInterfaceSourceFieldForSchedule/,
+    'the prelude must build and submit the exact continuation-owned source field'
   );
 });
 
@@ -604,6 +846,147 @@ test('native WebGPU surface requests retain render-field buffers by default', ()
   );
 });
 
+test('native no-full surface production selects sparse FIELD and retains dense diagnostics', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const signatureStart = sceneSource.indexOf('function sparseRenderFieldRuntimeSignature({');
+  const signatureEnd = sceneSource.indexOf('function createSparseRenderFieldRuntimePlan({', signatureStart);
+  assert.ok(signatureStart >= 0 && signatureEnd > signatureStart);
+  const runtimeSignature = sceneSource.slice(signatureStart, signatureEnd);
+  const selectionStart = sceneSource.indexOf('const shouldUseSparseRenderField = Boolean(');
+  const selectionEnd = sceneSource.indexOf('const timedBuildRenderFieldForRows', selectionStart);
+  assert.ok(selectionStart >= 0 && selectionEnd > selectionStart, 'FIELD production selection block must exist');
+  const selection = sceneSource.slice(selectionStart, selectionEnd);
+
+  assert.match(
+    selection,
+    /shouldRetainRenderFieldBufferHandoff[\s\S]*shouldUseNativeWebGpuSurfaceConsumerBridge[\s\S]*visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE/,
+    'the sparse producer must be limited to the retained same-device native no-full route'
+  );
+  assert.match(
+    selection,
+    /if \(!renderRowsExecution\.renderRowsBuffer\) \{[\s\S]*native sparse render-field construction requires the retained same-device render-row buffer/,
+    'production must fail closed when the resident source buffer is unavailable'
+  );
+  assert.match(selection, /return buildSphSparseRenderFieldForScene\(\{/);
+  assert.match(selection, /return buildSphRenderFieldWebGpu\(\{/);
+  assert.ok(
+    selection.indexOf('return buildSphSparseRenderFieldForScene({')
+      < selection.indexOf('return buildSphRenderFieldWebGpu({'),
+    'native production must choose sparse FIELD before reaching the dense diagnostic builder'
+  );
+  assert.match(
+    selection,
+    /const shouldUseRenderFieldRowsBufferPool = Boolean\(\s*!shouldUseSparseRenderField/,
+    'the dense field allocation pool must be excluded from sparse production'
+  );
+  assert.doesNotMatch(
+    selection,
+    /destroyResident(?:Sparse)?RenderFieldRows?BufferPool/,
+    'transient route changes must not retire a generation still consumed by native extraction'
+  );
+  assert.match(
+    sceneSource,
+    /reserveSphSparseRenderFieldProductEventCapacity\(\{[\s\S]*productEventCount:[\s\S]*currentCapacity:/,
+    'live product-event churn must select a grow-only reserved capacity bucket'
+  );
+  assert.match(
+    sceneSource,
+    /requestedProductEventCapacity = Math\.max\([\s\S]*activeProductEventCount[\s\S]*arenaReservedProductEventCapacity[\s\S]*warmBootstrapProductEventCapacity[\s\S]*productEventCount: requestedProductEventCapacity/,
+    'the first sparse generation must reserve one bounded product-event bucket before a resident arena arrives'
+  );
+  assert.match(
+    sceneSource,
+    /bounded-warm-product-event-reservation/,
+    'warm sparse product capacity must be reported as allocation headroom rather than a fabricated live event count'
+  );
+  assert.match(
+    mountSource,
+    /nativeSurfaceDrawRequested[\s\S]*constrainPeerComputeRenderOwnershipToMainThreadPresenter\([\s\S]*native WebGPU surface presentation owns the main canvas/,
+    'native surface mode must suppress the competing worker-owned point canvas before scene construction'
+  );
+  assert.doesNotMatch(
+    runtimeSignature,
+    /(?:particle|productEvent)(?:Count|Capacity)/,
+    'live particle and product-event counts must not be part of the structural runtime-pool signature'
+  );
+  assert.match(
+    sceneSource,
+    /reserveSphSparseRenderFieldParticleCapacity\(\{[\s\S]*particleCount:[\s\S]*currentCapacity:/,
+    'live particle-count churn must select a grow-only reserved capacity bucket'
+  );
+  assert.match(
+    sceneSource,
+    /currentStructurallyReusable[\s\S]*particleCapacityReservation\.fitsCurrentCapacity[\s\S]*capacityReservation\.fitsCurrentCapacity/,
+    'the sparse runtime must reuse a structurally compatible pool while live particles and events fit their reservations'
+  );
+  assert.match(
+    sceneSource,
+    /particleCapacity: particleCapacityReservation\.reservedParticleCapacity/,
+    'runtime allocation planning must consume reserved particle capacity instead of the exact live count'
+  );
+  assert.match(
+    sceneSource,
+    /productEventCapacity: capacityReservation\.reservedProductEventCapacity/,
+    'runtime allocation planning must consume the reserved capacity rather than the live count'
+  );
+  assert.match(
+    sceneSource,
+    /artifact\.exactProductEventCountPreserved = !pool\.productEventArenaCapacityDescriptor[\s\S]*artifact\.execution\.productEventCount === activeProductEventCount/,
+    'the sparse renderer must not mislabel an arena upper bound as the exact GPU live count'
+  );
+  assert.match(
+    sceneSource,
+    /arenaReservedProductEventCapacity[\s\S]*resident-product-event-arena-capacity-descriptor/,
+    'sparse allocation planning must consume the resident arena capacity descriptor'
+  );
+  assert.match(
+    sceneSource,
+    /productEventMetadataConsumedBySparseEligibility = false[\s\S]*exact metadata-driven sparse dispatch remains future work/,
+    'sparse eligibility must publish its remaining conservative-dispatch limitation honestly'
+  );
+  assert.match(
+    sceneSource,
+    /clearSphResidentSurfaceDrawArtifacts\(\{ clearOverlay \}\);[\s\S]*destroyResidentSparseRenderFieldRuntimePool\(`\$\{reason\}-sparse-render-field-reset`\)/,
+    'particle reset must retire sparse FIELD only after releasing the native draw generation'
+  );
+  assert.match(
+    sceneSource,
+    /artifact\.destroyRenderFieldBuffers = retainPooledSparseRenderFieldBuffers/,
+    'generic extraction cleanup must not destroy the reusable sparse FIELD runtime'
+  );
+  assert.match(
+    sceneSource,
+    /status: 'sparse-render-field-retained-by-runtime-pool'/,
+    'pooled cleanup must publish explicit retained ownership evidence'
+  );
+  assert.match(
+    sceneSource,
+    /encodeSphSparseRenderFieldEvidenceCopy\(encoder,[\s\S]*mapSphSparseRenderFieldEvidenceReadback/,
+    'publication must consume the fixed GPU evidence row before exposing a generation'
+  );
+  assert.match(
+    sceneSource,
+    /artifact\.generationPublicationAllowed = generationAdmitted/,
+    'the scene must derive publication from mapped GPU admission instead of host metadata'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /artifact\.generationPublicationAllowed = true/,
+    'the sparse scene path must not unconditionally publish an unchecked generation'
+  );
+  assert.match(
+    sceneSource,
+    /fixed-144-byte-gpu-validation-record/,
+    'the only FIELD admission readback must remain a compact explicit validation record'
+  );
+  assert.match(
+    sceneSource,
+    /gpuPlan\.byteLayout\.peakAllocatedByteLength[\s\S]*SPH_SPARSE_RENDER_FIELD_TOTAL_BYTE_BUDGET_DEFAULT/,
+    'FIELD admission must include shared primitive persistent and transient allocations'
+  );
+});
+
 test('native WebGPU renderer canvas avoids exact full-viewport compositor capture path', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
@@ -789,28 +1172,30 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   );
 });
 
-test('native WebGPU offscreen validation binds transparent pipeline resources', () => {
+test('native WebGPU offscreen validation uses opaque depth-writing refractive resources', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
   assert.match(
     sceneSource,
-    /beginSphNativeWebGpuSurfaceConsumerOffscreenValidation[\s\S]*?validationPass\.setPipeline\(bridge\.opaquePipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);[\s\S]*?validationPass\.setPipeline\(bridge\.transparentPipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);/,
-    'opaque and transparent offscreen validation must satisfy the shared refraction and environment bind group layout'
+    /beginSphNativeWebGpuSurfaceConsumerOffscreenValidation[\s\S]*?validationPass\.setPipeline\(bridge\.opaquePipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);[\s\S]*?validationPass\.setPipeline\(bridge\.refractivePipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);/,
+    'opaque and refractive offscreen validation must satisfy the shared environment bind group layout'
   );
+  assert.doesNotMatch(sceneSource, /const transparentOitPipeline = createOverlayPipeline/);
+  assert.doesNotMatch(sceneSource, /ensureSphResidentSurfaceDrawOitTargets/);
 });
 
-test('native WebGPU surface consumer uses submit-fence pacing', () => {
+test('native WebGPU surface consumer uses bounded in-flight submit pacing', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
   assert.match(
     sceneSource,
-    /nativeSurfaceConsumerSubmitFencePending/,
-    'native surface RAF scheduling should expose submit-fence pacing state'
+    /nativeSurfaceConsumerFrameAdmission/,
+    'native surface RAF scheduling should use the shared in-flight admission policy'
   );
   assert.match(
     sceneSource,
-    /native-webgpu-surface-consumer-after-submit-fence/,
-    'native surface RAF should resume only after queue completion'
+    /SPH_NATIVE_WEBGPU_SURFACE_MAX_IN_FLIGHT_SUBMITS = 2/,
+    'native surface RAF should permit a bounded second submission instead of serializing every frame'
   );
   assert.match(
     sceneSource,
@@ -820,7 +1205,7 @@ test('native WebGPU surface consumer uses submit-fence pacing', () => {
   assert.match(
     sceneSource,
     /resident-surface-draw-skipped-native-submit-fence-pending/,
-    'main animation rendering should also respect native submit-fence pacing'
+    'main animation rendering should stop only when bounded submit capacity is full'
   );
   assert.match(
     sceneSource,
@@ -839,8 +1224,23 @@ test('native WebGPU surface consumer uses submit-fence pacing', () => {
   );
   assert.match(
     sceneSource,
-    /if \(rendered\) \{\s*renderSphResidentSurfaceDrawOverlay\(\{ reason: 'animation-frame' \}\);/,
-    'native main-canvas WebGPU surfaces must redraw every engine frame because swap-chain contents are not retained'
+    /if \(rendered\) \{[\s\S]*?SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE[\s\S]*?scheduleSphNativeWebGpuSurfaceConsumerFrame\(\{[\s\S]*?native-webgpu-surface-consumer-animation-frame/,
+    'native main-canvas WebGPU redraw requests must be routed through the one native presentation scheduler'
+  );
+  assert.match(
+    sceneSource,
+    /native-webgpu-surface-consumer-single-presentation-owner/,
+    'native presentation should expose its single-owner authority status'
+  );
+  assert.match(
+    sceneSource,
+    /native-webgpu-surface-consumer-direct-render-redirected/,
+    'direct native render attempts must be redirected instead of acquiring a competing swap-chain texture'
+  );
+  assert.match(
+    sceneSource,
+    /nativeSurfaceCurrentTextureAcquisitionsPerPresentation = 1/,
+    'native presentation telemetry should bind one current-texture acquisition to each presentation serial'
   );
   assert.match(
     sceneSource,
@@ -857,6 +1257,33 @@ test('native WebGPU surface consumer uses submit-fence pacing', () => {
     /skipped-native-webgpu-surface-consumer/,
     'native surface draws should no longer bypass submit fencing'
   );
+});
+
+test('native WebGPU surface presentation is not starved by resident compute submissions', () => {
+  const source = readRepoFile('src/visualization/sphPhaseScene.js');
+  assert.match(
+    source,
+    /residentGpuSubmissionPaused\(\)[\s\S]*?bridge\.rendererBridge\s*!==\s*SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE/,
+    'same-device native presentation must rely on queue ordering instead of waiting for a permanently idle physics queue'
+  );
+});
+
+test('native gradient snapshots commit transactionally to surface generations', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(sceneSource, /createNativeSurfaceGradientSnapshotPool\(\{/);
+  assert.match(sceneSource, /gradientSnapshotReservations = \[\]/);
+  assert.match(sceneSource, /reservation\.commit\(\{ ownerGeneration: generation \}\)/);
+  assert.match(
+    sceneSource,
+    /owner\.presentationResources \|\| \[\][\s\S]*?resource\?\.release\?\.\(\)/
+  );
+  assert.match(
+    sceneSource,
+    /additional-native-surface-candidate-commit[\s\S]*?reservation\.commit\(\{ ownerGeneration \}\)/
+  );
+  assert.match(sceneSource, /sphResidentFieldGradientSnapshotPool\.destroy\(\{ force: true \}\)/);
+  assert.doesNotMatch(sceneSource, /sphResidentFieldGradientSnapshotRings/);
 });
 
 test('native WebGPU resident refresh reuses the engine-owned consumer device', () => {

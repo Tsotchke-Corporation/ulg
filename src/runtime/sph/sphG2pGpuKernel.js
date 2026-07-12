@@ -23,6 +23,17 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { resolveResidentNeighborhoodConsumer } from './residentNeighborhoodConsumer.js';
+import {
+  SCHROEDER_SPARSE_GRID_HASH_MAX_PROBES,
+  assertSchroederSparseGridView
+} from './schroederSparseHierarchyGpu.js';
+import {
+  dispatchSchroederParticleWorkgroups,
+  resolveSchroederParticleCountResidency,
+  schroederParticleCountResidencyPublicFields,
+  schroederParticleIterationCapacity
+} from './schroederParticleCountResidencyGpu.js';
 
 export { MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT };
 import { MLS_MPM_GPU_GRID_VELOCITY_FLOATS } from './sphGridUpdateGpuKernel.js';
@@ -65,8 +76,193 @@ export const MLS_MPM_G2P_MAX_VOLUME_RATIO_J = MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATI
 export const ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA =
   'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0';
 const G2P_PARAMS_BYTES = 80;
-const SEPARATION_PARAMS_BYTES = 48;
+const SEPARATION_PARAMS_BYTES = 80;
 const SEPARATION_BIN_MAX_CELLS = 262144;
+
+function requiredSparseG2pReplacement(source, search, replacement, label) {
+  if (!source.includes(search)) {
+    throw new Error(`Unable to build Schroeder sparse G2P shader; missing ${label}`);
+  }
+  return source.replace(search, replacement);
+}
+
+export const mlsMpmG2pSchroederSparseGridWgsl = (() => {
+  let source = mlsMpmG2pReconstructWgsl;
+  source = requiredSparseG2pReplacement(
+    source,
+    `  schroeder_level_filter_enabled: u32,
+};`,
+    `  schroeder_level_filter_enabled: u32,
+  schroeder_sparse_grid_enabled: u32,
+};`,
+    'sparse grid parameter'
+  );
+  source = requiredSparseG2pReplacement(
+    source,
+    '@group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;',
+    `@group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;
+@group(0) @binding(8) var<storage, read> schroeder_sparse_grid_view: array<u32>;
+
+fn g2p_sparse_hash(value: u32) -> u32 {
+  var hash = value;
+  hash = hash ^ (hash >> 16u);
+  hash = hash * 0x7feb352du;
+  hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu;
+  return hash ^ (hash >> 16u);
+}
+
+fn g2p_sparse_lookup(full_index: u32) -> u32 {
+  let hash_capacity = schroeder_sparse_grid_view[13];
+  if (hash_capacity == 0u) {
+    return 0xffffffffu;
+  }
+  let start_slot = g2p_sparse_hash(full_index) & (hash_capacity - 1u);
+  for (var probe = 0u; probe < ${SCHROEDER_SPARSE_GRID_HASH_MAX_PROBES}u; probe = probe + 1u) {
+    let slot = (start_slot + probe) & (hash_capacity - 1u);
+    let key = schroeder_sparse_grid_view[schroeder_sparse_grid_view[10] + slot];
+    if (key == full_index) {
+      return schroeder_sparse_grid_view[schroeder_sparse_grid_view[11] + slot];
+    }
+    if (key == 0xffffffffu) {
+      return 0xffffffffu;
+    }
+  }
+  return 0xffffffffu;
+}`,
+    'sparse grid lookup binding'
+  );
+  source = requiredSparseG2pReplacement(
+    source,
+    `fn g2p_grid_index(i: i32, j: i32, k: i32) -> u32 {
+  return (u32(i + i32(params.shift)) * params.grid_ny + u32(j + i32(params.shift))) * params.grid_nz + u32(k + i32(params.shift));
+}`,
+    `fn g2p_grid_index(i: i32, j: i32, k: i32) -> u32 {
+  let full_index = (u32(i + i32(params.shift)) * params.grid_ny
+    + u32(j + i32(params.shift))) * params.grid_nz + u32(k + i32(params.shift));
+  if (params.schroeder_sparse_grid_enabled == 0u) {
+    return full_index;
+  }
+  return g2p_sparse_lookup(full_index);
+}`,
+    'global-to-compact lookup'
+  );
+  source = requiredSparseG2pReplacement(
+    source,
+    `  return ii >= 0 && jj >= 0 && kk >= 0
+    && ii < i32(params.grid_nx)
+    && jj < i32(params.grid_ny)
+    && kk < i32(params.grid_nz);`,
+    `  let inside = ii >= 0 && jj >= 0 && kk >= 0
+    && ii < i32(params.grid_nx)
+    && jj < i32(params.grid_ny)
+    && kk < i32(params.grid_nz);
+  if (!inside || params.schroeder_sparse_grid_enabled == 0u) {
+    return inside;
+  }
+  if (schroeder_sparse_grid_view[3] == 0u) {
+    return false;
+  }
+  let full_index = (u32(ii) * params.grid_ny + u32(jj)) * params.grid_nz + u32(kk);
+  return g2p_sparse_lookup(full_index)
+    < params.grid_node_count;`,
+    'compact range predicate'
+  );
+  return source;
+})();
+
+export function withSchroederG2pParticleCountResidencyGuard(source) {
+  let guarded = requiredSparseG2pReplacement(
+    source,
+    '@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;',
+    '@group(0) @binding(1) var<storage, read> particle_count_residency_metadata: array<u32>;',
+    'GPU-authored particle-count metadata binding'
+  );
+  guarded = requiredSparseG2pReplacement(
+    guarded,
+    `@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {`,
+    `fn g2p_resident_particle_count() -> u32 {
+  if (arrayLength(&particle_count_residency_metadata) < 16u) {
+    return 0u;
+  }
+  let active_count = particle_count_residency_metadata[4];
+  let capacity = particle_count_residency_metadata[6];
+  let valid = particle_count_residency_metadata[0] == 0x53535052u
+    && particle_count_residency_metadata[1] == 1u
+    && particle_count_residency_metadata[2] == 1u
+    && particle_count_residency_metadata[3] == 2u
+    && particle_count_residency_metadata[9] == 0u
+    && capacity == params.particle_count
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= g2p_resident_particle_count()) {`,
+    'GPU-authored particle-count guard'
+  );
+  return requiredSparseG2pReplacement(
+    guarded,
+    'let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;',
+    'let _thermo_status = 0.0;',
+    'unused thermo diagnostic removal'
+  );
+}
+
+export const mlsMpmG2pParticleCountResidencyWgsl =
+  withSchroederG2pParticleCountResidencyGuard(mlsMpmG2pReconstructWgsl);
+
+function withSchroederSeparationParticleCountResidencyGuard(source, metadataBinding) {
+  let guarded = source.replaceAll(
+    'params.particle_count',
+    'separation_resident_particle_count()'
+  );
+  const computeMarker = '@compute @workgroup_size(64)';
+  if (!guarded.includes(computeMarker)) {
+    throw new Error('Unable to build resident-count separation shader; missing compute entry point');
+  }
+  const residencyGuard = `@group(0) @binding(${metadataBinding}) var<storage, read> particle_count_residency_metadata: array<u32>;
+
+fn separation_resident_particle_count() -> u32 {
+  if (arrayLength(&particle_count_residency_metadata) < 16u) {
+    return 0u;
+  }
+  let active_count = particle_count_residency_metadata[4];
+  let capacity = particle_count_residency_metadata[6];
+  let valid = particle_count_residency_metadata[0] == 0x53535052u
+    && particle_count_residency_metadata[1] == 1u
+    && particle_count_residency_metadata[2] == 1u
+    && particle_count_residency_metadata[3] == 2u
+    && particle_count_residency_metadata[9] == 0u
+    && particle_count_residency_metadata[10] == params._pad0
+    && capacity == params.particle_count
+    && active_count <= capacity;
+  return select(0u, active_count, valid);
+}
+
+`;
+  return guarded.replace(computeMarker, `${residencyGuard}${computeMarker}`);
+}
+
+export const mlsMpmParticleSeparationCountResidencyWgsl = Object.freeze({
+  binFill: withSchroederSeparationParticleCountResidencyGuard(
+    mlsMpmParticleSeparationBinFillWgsl,
+    4
+  ),
+  compute: withSchroederSeparationParticleCountResidencyGuard(
+    mlsMpmParticleSeparationComputeWgsl,
+    5
+  ),
+  apply: withSchroederSeparationParticleCountResidencyGuard(
+    mlsMpmParticleSeparationApplyWgsl,
+    4
+  )
+});
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -751,7 +947,8 @@ function createParamsArray({
   liquidWallDampingDistanceM = 0,
   schroederActiveNodeFilterEnabled = false,
   schroederLevelFilterEnabled = false,
-  schroederSelectedLevel = -1
+  schroederSelectedLevel = -1,
+  schroederSparseGridEnabled = false
 }) {
   const buffer = new ArrayBuffer(G2P_PARAMS_BYTES);
   const view = new DataView(buffer);
@@ -774,6 +971,7 @@ function createParamsArray({
   view.setFloat32(64, Math.max(finiteNumber(liquidWallDampingDistanceM, 0), 0), true);
   view.setUint32(68, SCHROEDER_LEVEL_ASSIGNMENT_FLOATS, true);
   view.setUint32(72, schroederLevelFilterEnabled ? 1 : 0, true);
+  view.setUint32(76, schroederSparseGridEnabled ? 1 : 0, true);
   return buffer;
 }
 
@@ -833,71 +1031,115 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   stateBuffer,
   mechanicsBuffer,
   particleCount,
+  particleCountResidency = null,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   maxPairRestDistanceM = 0,
   minCellSizeM = 0,
   gridSpacingM = 0,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
   scratch = null,
+  paramsSlotIndex = 0,
+  paramsSlotCount = 1,
   timestampProfiler = null,
   timestampMetadata = null
 } = {}) {
   const alpha = finiteNumber(relaxation, 0);
-  if (!(alpha > 0) || !(particleCount > 1) || !stateBuffer || !mechanicsBuffer) {
+  const residentCount = particleCountResidency?.ready === true
+    ? particleCountResidency
+    : null;
+  const particleRowCapacity = residentCount
+    ? residentCount.outputParticleCapacity
+    : Math.max(0, Math.round(finiteNumber(particleCount, 0)));
+  if (particleCountResidency && !residentCount) {
+    throw new TypeError('Particle separation received an invalid GPU-authored count residency');
+  }
+  if (!(alpha > 0) || !(particleRowCapacity > 1) || !stateBuffer || !mechanicsBuffer) {
     return { enabled: false, transientBuffers: scratch?.transientBuffers || [], scratch };
   }
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
-  const binPlan = separationBinPlan({ boxDimsM: dims, maxPairRestDistanceM, minCellSizeM });
-  if (!binPlan) {
+  const residentNeighborhoodAdmission = residentNeighborhood
+    ? resolveResidentNeighborhoodConsumer({
+        residentNeighborhood,
+        device,
+        consumer: 'mechanics',
+        ...(residentCount ? {} : { sourceCount: particleCount }),
+        ...(residentNeighborhoodValidation || {})
+      })
+    : null;
+  if (residentNeighborhood && !residentNeighborhoodAdmission.admitted) {
+    return {
+      enabled: false,
+      failClosed: true,
+      status: residentNeighborhoodAdmission.status,
+      residentNeighborhoodAdmission,
+      transientBuffers: scratch?.transientBuffers || [],
+      scratch
+    };
+  }
+  const residentMode = residentNeighborhoodAdmission?.admitted === true;
+  const binPlan = residentMode
+    ? { cellSizeM: 0, nx: 0, ny: 0, nz: 0, cellCount: 0 }
+    : separationBinPlan({ boxDimsM: dims, maxPairRestDistanceM, minCellSizeM });
+  if (!residentMode && !binPlan) {
     return { enabled: false, transientBuffers: scratch?.transientBuffers || [], scratch };
   }
+  const resolvedParamsSlotCount = Math.max(1, Math.round(finiteNumber(paramsSlotCount, 1)));
+  const resolvedParamsSlotIndex = Math.round(finiteNumber(paramsSlotIndex, 0));
+  if (
+    !Number.isSafeInteger(resolvedParamsSlotIndex)
+    || resolvedParamsSlotIndex < 0
+    || resolvedParamsSlotIndex >= resolvedParamsSlotCount
+  ) {
+    throw new RangeError('particle separation paramsSlotIndex must select a configured slot');
+  }
+  const paramsSlotStrideBytes = Math.max(
+    256,
+    Math.round(finiteNumber(device.limits?.minUniformBufferOffsetAlignment, 256))
+  );
+  const paramsByteOffset = resolvedParamsSlotIndex * paramsSlotStrideBytes;
   let activeScratch = scratch;
   if (!activeScratch
-    || activeScratch.particleCount !== particleCount
-    || activeScratch.cellCount !== binPlan.cellCount) {
+    || activeScratch.particleRowCapacity !== particleRowCapacity
+    || activeScratch.cellCount !== binPlan.cellCount
+    || activeScratch.residentMode !== residentMode
+    || activeScratch.paramsSlotCount < resolvedParamsSlotCount
+    || activeScratch.paramsSlotStrideBytes !== paramsSlotStrideBytes) {
     const paramsBuffer = device.createBuffer({
       label: 'ulg-mls-mpm-separation-params',
-      size: SEPARATION_PARAMS_BYTES,
+      size: resolvedParamsSlotCount * paramsSlotStrideBytes,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
     });
-    const paramsData = new ArrayBuffer(SEPARATION_PARAMS_BYTES);
-    const view = new DataView(paramsData);
-    view.setUint32(0, particleCount >>> 0, true);
-    view.setFloat32(4, alpha, true);
-    view.setFloat32(8, dims[0], true);
-    view.setFloat32(12, dims[1], true);
-    view.setFloat32(16, dims[2], true);
-    view.setUint32(20, 1, true);
-    view.setUint32(24, binPlan.nx >>> 0, true);
-    view.setUint32(28, binPlan.ny >>> 0, true);
-    view.setUint32(32, binPlan.nz >>> 0, true);
-    view.setUint32(36, SEPARATION_BIN_CAPACITY >>> 0, true);
-    view.setFloat32(40, binPlan.cellSizeM, true);
-    // grid_spacing_m: caps the wall clearance at half a cell (matches G2P).
-    view.setFloat32(44, Math.max(finiteNumber(gridSpacingM, 0), 0), true);
-    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
     const correctionsBuffer = device.createBuffer({
       label: 'ulg-mls-mpm-separation-corrections',
-      size: Math.max(4, particleCount * 32),
+      size: Math.max(4, particleRowCapacity * 32),
       usage: GPU_BUFFER_USAGE.STORAGE
     });
     // Combined layout: counts prefix [0, cellCount), then entry slots. One
     // buffer keeps every consumer within the default 10-storage-buffer
     // per-stage device limit.
-    const binsBuffer = device.createBuffer({
-      label: 'ulg-mls-mpm-separation-bins',
-      size: Math.max(4, binPlan.cellCount * (1 + SEPARATION_BIN_CAPACITY) * 4),
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-    });
+    const binsBuffer = residentMode
+      ? residentNeighborhoodAdmission.packedCandidateCsrBuffer
+      : device.createBuffer({
+          label: 'ulg-mls-mpm-separation-bins',
+          size: Math.max(4, binPlan.cellCount * (1 + SEPARATION_BIN_CAPACITY) * 4),
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+        });
     activeScratch = {
       particleCount,
+      particleRowCapacity,
       cellCount: binPlan.cellCount,
+      residentMode,
       paramsBuffer,
+      paramsSlotCount: resolvedParamsSlotCount,
+      paramsSlotStrideBytes,
+      usedParamsSlotIndices: [],
       correctionsBuffer,
       binsBuffer,
       // Shared neighbor-bin contract for sibling consumers (thermal pair
       // conduction) encoded in the same submission after the bin fill.
-      neighborBins: {
+      neighborBins: residentMode ? null : {
         binsBuffer,
         capacity: SEPARATION_BIN_CAPACITY,
         nx: binPlan.nx,
@@ -906,44 +1148,88 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
         cellSizeM: binPlan.cellSizeM,
         cellCount: binPlan.cellCount
       },
-      transientBuffers: [paramsBuffer, correctionsBuffer, binsBuffer]
+      transientBuffers: residentMode
+        ? [paramsBuffer, correctionsBuffer]
+        : [paramsBuffer, correctionsBuffer, binsBuffer]
     };
   }
+  // Packed CSR storage is generation-bound, but the correction and uniform
+  // scratch is not. Rebind the current generation without reallocating those
+  // lane-local buffers on every fused substep.
+  if (residentMode) {
+    activeScratch.binsBuffer = residentNeighborhoodAdmission.packedCandidateCsrBuffer;
+  }
+  const paramsData = new ArrayBuffer(SEPARATION_PARAMS_BYTES);
+  const view = new DataView(paramsData);
+  view.setUint32(0, particleRowCapacity >>> 0, true);
+  view.setFloat32(4, alpha, true);
+  view.setFloat32(8, dims[0], true);
+  view.setFloat32(12, dims[1], true);
+  view.setFloat32(16, dims[2], true);
+  view.setUint32(20, residentMode ? 2 : 1, true);
+  view.setUint32(24, binPlan.nx >>> 0, true);
+  view.setUint32(28, binPlan.ny >>> 0, true);
+  view.setUint32(32, binPlan.nz >>> 0, true);
+  view.setUint32(36, residentMode ? 0 : SEPARATION_BIN_CAPACITY, true);
+  view.setFloat32(40, binPlan.cellSizeM, true);
+  view.setFloat32(44, Math.max(finiteNumber(gridSpacingM, 0), 0), true);
+  const identity = residentNeighborhoodAdmission?.expectedIdentity;
+  view.setUint32(48, identity?.generation ?? 0, true);
+  view.setUint32(52, identity?.leaseTokenLow ?? 0, true);
+  view.setUint32(56, identity?.leaseTokenHigh ?? 0, true);
+  view.setUint32(60, identity?.positionEpoch ?? 0, true);
+  view.setUint32(64, identity?.sourceCount ?? 0, true);
+  view.setUint32(68, identity?.consumerBit ?? 0, true);
+  view.setUint32(72, residentMode ? 1 : 0, true);
+  view.setUint32(76, residentCount?.generationId ?? 0, true);
+  device.queue.writeBuffer(activeScratch.paramsBuffer, paramsByteOffset, paramsData);
+  if (!activeScratch.usedParamsSlotIndices.includes(resolvedParamsSlotIndex)) {
+    activeScratch.usedParamsSlotIndices.push(resolvedParamsSlotIndex);
+  }
   const binFillPipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-bin-fill.v2',
+    cacheKey: `ulg-mls-mpm-particle-separation-bin-fill.${residentCount ? 'resident-count.v1' : 'v3'}`,
     label: 'ulg-mls-mpm-particle-separation-bin-fill',
-    code: mlsMpmParticleSeparationBinFillWgsl,
-    entryPoint: 'main',
-    bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
-      computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
-    ]
-  });
-  const computePipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-compute.v3',
-    label: 'ulg-mls-mpm-particle-separation-compute',
-    code: mlsMpmParticleSeparationComputeWgsl,
+    code: residentCount
+      ? mlsMpmParticleSeparationCountResidencyWgsl.binFill
+      : mlsMpmParticleSeparationBinFillWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'uniform'),
-      computeBufferBinding(4, 'read-only-storage')
+      ...(residentCount ? [computeBufferBinding(4, 'read-only-storage')] : [])
     ]
   });
-  const applyPipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-apply.v2',
-    label: 'ulg-mls-mpm-particle-separation-apply',
-    code: mlsMpmParticleSeparationApplyWgsl,
+  const computePipelineInfo = createCachedExplicitComputePipeline(device, {
+    cacheKey: `ulg-mls-mpm-particle-separation-compute.${residentCount ? 'resident-count.v1' : 'v4'}`,
+    label: 'ulg-mls-mpm-particle-separation-compute',
+    code: residentCount
+      ? mlsMpmParticleSeparationCountResidencyWgsl.compute
+      : mlsMpmParticleSeparationComputeWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      computeBufferBinding(4, 'read-only-storage'),
+      ...(residentCount ? [computeBufferBinding(5, 'read-only-storage')] : [])
+    ]
+  });
+  const applyPipelineInfo = createCachedExplicitComputePipeline(device, {
+    cacheKey: `ulg-mls-mpm-particle-separation-apply.${residentCount ? 'resident-count.v1' : 'v3'}`,
+    label: 'ulg-mls-mpm-particle-separation-apply',
+    code: residentCount
+      ? mlsMpmParticleSeparationCountResidencyWgsl.apply
+      : mlsMpmParticleSeparationApplyWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform'),
+      ...(residentCount ? [computeBufferBinding(4, 'read-only-storage')] : [])
     ]
   });
   const binFillBindGroup = device.createBindGroup({
@@ -952,7 +1238,17 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: mechanicsBuffer } },
       { binding: 2, resource: { buffer: activeScratch.binsBuffer } },
-      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } }
+      {
+        binding: 3,
+        resource: {
+          buffer: activeScratch.paramsBuffer,
+          offset: paramsByteOffset,
+          size: SEPARATION_PARAMS_BYTES
+        }
+      },
+      ...(residentCount
+        ? [{ binding: 4, resource: { buffer: residentCount.metadataBuffer } }]
+        : [])
     ]
   });
   const computeBindGroup = device.createBindGroup({
@@ -961,8 +1257,18 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: mechanicsBuffer } },
       { binding: 2, resource: { buffer: activeScratch.correctionsBuffer } },
-      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } },
-      { binding: 4, resource: { buffer: activeScratch.binsBuffer } }
+      {
+        binding: 3,
+        resource: {
+          buffer: activeScratch.paramsBuffer,
+          offset: paramsByteOffset,
+          size: SEPARATION_PARAMS_BYTES
+        }
+      },
+      { binding: 4, resource: { buffer: activeScratch.binsBuffer } },
+      ...(residentCount
+        ? [{ binding: 5, resource: { buffer: residentCount.metadataBuffer } }]
+        : [])
     ]
   });
   const applyBindGroup = device.createBindGroup({
@@ -971,36 +1277,81 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       { binding: 0, resource: { buffer: activeScratch.correctionsBuffer } },
       { binding: 1, resource: { buffer: mechanicsBuffer } },
       { binding: 2, resource: { buffer: stateBuffer } },
-      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } }
+      {
+        binding: 3,
+        resource: {
+          buffer: activeScratch.paramsBuffer,
+          offset: paramsByteOffset,
+          size: SEPARATION_PARAMS_BYTES
+        }
+      },
+      ...(residentCount
+        ? [{ binding: 4, resource: { buffer: residentCount.metadataBuffer } }]
+        : [])
     ]
   });
-  encoder.clearBuffer(activeScratch.binsBuffer, 0, Math.max(4, activeScratch.cellCount * 4));
-  const workgroups = Math.max(1, Math.ceil(particleCount / 64));
   const profiledPassDescriptor = (label) => timestampProfiler?.beginComputePassDescriptor
     ? timestampProfiler.beginComputePassDescriptor(label, timestampMetadata || {})
     : { label };
-  const binFillPass = encoder.beginComputePass(
-    profiledPassDescriptor('particleSeparationBinFill')
-  );
-  binFillPass.setPipeline(binFillPipelineInfo.pipeline);
-  binFillPass.setBindGroup(0, binFillBindGroup);
-  binFillPass.dispatchWorkgroups(workgroups);
-  binFillPass.end();
+  if (!residentMode) {
+    encoder.clearBuffer(activeScratch.binsBuffer, 0, Math.max(4, activeScratch.cellCount * 4));
+    const binFillPass = encoder.beginComputePass(
+      profiledPassDescriptor('particleSeparationBinFill')
+    );
+    binFillPass.setPipeline(binFillPipelineInfo.pipeline);
+    binFillPass.setBindGroup(0, binFillBindGroup);
+    dispatchSchroederParticleWorkgroups(binFillPass, {
+      residency: residentCount,
+      fallbackParticleCount: particleCount,
+      workgroupSize: 64
+    });
+    binFillPass.end();
+  }
   const computePass = encoder.beginComputePass(
     profiledPassDescriptor('particleSeparationCorrection')
   );
   computePass.setPipeline(computePipelineInfo.pipeline);
   computePass.setBindGroup(0, computeBindGroup);
-  computePass.dispatchWorkgroups(workgroups);
+  dispatchSchroederParticleWorkgroups(computePass, {
+    residency: residentCount,
+    fallbackParticleCount: particleCount,
+    workgroupSize: 64
+  });
   computePass.end();
   const applyPass = encoder.beginComputePass(
     profiledPassDescriptor('particleSeparationApply')
   );
   applyPass.setPipeline(applyPipelineInfo.pipeline);
   applyPass.setBindGroup(0, applyBindGroup);
-  applyPass.dispatchWorkgroups(workgroups);
+  dispatchSchroederParticleWorkgroups(applyPass, {
+    residency: residentCount,
+    fallbackParticleCount: particleCount,
+    workgroupSize: 64
+  });
   applyPass.end();
-  return { enabled: true, transientBuffers: activeScratch.transientBuffers, scratch: activeScratch };
+  return {
+    enabled: true,
+    status: residentMode
+      ? 'resident-neighborhood-mechanics-encoded'
+      : 'fixed-bin-mechanics-compatibility-encoded',
+    neighborhoodMode: residentMode ? 'resident-neighborhood-packed-csr' : 'fixed-bin-compatibility',
+    residentNeighborhoodAdmission,
+    particleCountAuthority: residentCount
+      ? 'gpu-authored-residency-metadata'
+      : 'host-known-particle-count',
+    authoritativeParticleCount: residentCount ? null : particleCount,
+    particleRowCapacity,
+    particleCountDispatchMode: residentCount
+      ? 'gpu-authored-active-count-indirect'
+      : 'host-known-particle-count-direct',
+    residentNeighborhoodGpuParticleCountGuarded: Boolean(residentCount && residentMode),
+    paramsSlotIndex: resolvedParamsSlotIndex,
+    paramsSlotCount: activeScratch.paramsSlotCount,
+    paramsSlotStrideBytes,
+    paramsByteOffset,
+    transientBuffers: activeScratch.transientBuffers,
+    scratch: activeScratch
+  };
 }
 
 export async function runMlsMpmG2pWebGpu({
@@ -1021,8 +1372,10 @@ export async function runMlsMpmG2pWebGpu({
   schroederLevelAssignment = null,
   schroederActiveNodeList = null,
   schroederSelectedLevel = null,
+  schroederSparseGrid = null,
   retainOutputParticleBuffers = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  commandEncoder = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmG2pWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -1035,7 +1388,32 @@ export async function runMlsMpmG2pWebGpu({
       'runMlsMpmG2pWebGpu no longer accepts schroederActiveNodeList; pass schroederLevelAssignment (particle-parallel rows) instead'
     );
   }
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const particleIterationCapacity = schroederParticleIterationCapacity({
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE || callerOwnsEncoder;
+  if (particleCountResidency && !noFullReadback) {
+    throw new RangeError('GPU-authored G2P particle count requires no-full-readback execution');
+  }
+  const resolvedSchroederSparseGrid = schroederSparseGrid || gridUpdate.schroederSparseGrid || null;
+  if (resolvedSchroederSparseGrid) {
+    assertSchroederSparseGridView(resolvedSchroederSparseGrid, {
+      device,
+      selectedLevel: schroederSelectedLevel
+    });
+  }
   const dtSeconds = finiteNumber(dt, 0);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   // Never size GPU output buffers from the CPU arrays alone: under
@@ -1044,17 +1422,23 @@ export async function runMlsMpmG2pWebGpu({
   // downstream binding. particleCount * stride is authoritative.
   const stateByteLength = Math.max(
     sphParticleState.state.byteLength,
-    sphParticleState.particleCount * (sphParticleState.stateStrideBytes
+    particleIterationCapacity * (sphParticleState.stateStrideBytes
       ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
   const mechanicsByteLength = Math.max(
     mlsMpmParticleState.mechanics.byteLength,
-    mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
+    particleIterationCapacity * (mlsMpmParticleState.mechanicsStrideBytes
       ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
   const borrowedStateBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.stateBuffer : null;
   const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null;
   const borrowedMechanicsBuffer = mlsMpmParticleUpload?.status === 'webgpu-uploaded' ? mlsMpmParticleUpload.mechanicsBuffer : null;
+  if (
+    particleCountResidency
+    && (!borrowedStateBuffer || !borrowedThermoBuffer || !borrowedMechanicsBuffer)
+  ) {
+    throw new TypeError('GPU-authored G2P particle count requires complete retained particle buffers');
+  }
   const borrowedGridBuffer = updatedGridBuffer || gridUpdate.gpuResult?.updatedGridBuffer || gridUpdate.updatedGridBuffer || null;
   assertInputs({
     sphParticleState,
@@ -1087,7 +1471,6 @@ export async function runMlsMpmG2pWebGpu({
       : 'ulg-mls-mpm-g2p-schroeder-level-assignments-dummy',
     assignmentRows || new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
   );
-  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const stateReadBuffer = noFullReadback
     ? null
     : device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-readback', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
@@ -1096,10 +1479,11 @@ export async function runMlsMpmG2pWebGpu({
     : device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-readback', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
   let returnedRetainedOutputBuffers = false;
   let separationTransientBuffers = [];
+  let callerOwnedReconstruction = null;
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
-      particleCount: sphParticleState.particleCount,
+      particleCount: particleIterationCapacity,
       gridUpdate,
       dt: dtSeconds,
       boxDimsM: dims,
@@ -1110,12 +1494,21 @@ export async function runMlsMpmG2pWebGpu({
       schroederLevelFilterEnabled,
       schroederSelectedLevel: schroederLevelFilterEnabled
         ? Math.round(Number(schroederSelectedLevel))
-        : -1
+        : -1,
+      schroederSparseGridEnabled: Boolean(resolvedSchroederSparseGrid)
     }));
+    const reconstructionBaseWgsl = resolvedSchroederSparseGrid
+      ? mlsMpmG2pSchroederSparseGridWgsl
+      : mlsMpmG2pReconstructWgsl;
+    const reconstructionWgsl = particleCountResidency
+      ? withSchroederG2pParticleCountResidencyGuard(reconstructionBaseWgsl)
+      : reconstructionBaseWgsl;
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v4',
+      cacheKey: resolvedSchroederSparseGrid
+        ? `ulg-mls-mpm-g2p-reconstruct.schroeder-sparse.${particleCountResidency ? 'resident-count.v1' : 'v0'}`
+        : `ulg-mls-mpm-g2p-reconstruct.${particleCountResidency ? 'resident-count.v1' : 'v4'}`,
       label: 'ulg-mls-mpm-g2p-reconstruct',
-      code: mlsMpmG2pReconstructWgsl,
+      code: reconstructionWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -1125,32 +1518,48 @@ export async function runMlsMpmG2pWebGpu({
         computeBufferBinding(4, 'storage'),
         computeBufferBinding(5, 'storage'),
         computeBufferBinding(6, 'uniform'),
-        computeBufferBinding(7, 'read-only-storage')
+        computeBufferBinding(7, 'read-only-storage'),
+        ...(resolvedSchroederSparseGrid
+          ? [computeBufferBinding(8, 'read-only-storage')]
+          : [])
       ]
     });
     const bindGroup = device.createBindGroup({
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: stateBuffer } },
-        { binding: 1, resource: { buffer: thermoBuffer } },
+        {
+          binding: 1,
+          resource: {
+            buffer: particleCountResidency?.metadataBuffer ?? thermoBuffer
+          }
+        },
         { binding: 2, resource: { buffer: mechanicsBuffer } },
         { binding: 3, resource: { buffer: gridBuffer } },
         { binding: 4, resource: { buffer: outStateBuffer } },
         { binding: 5, resource: { buffer: outMechanicsBuffer } },
         { binding: 6, resource: { buffer: paramsBuffer } },
-        { binding: 7, resource: { buffer: schroederActiveNodeBuffer } }
+        { binding: 7, resource: { buffer: schroederActiveNodeBuffer } },
+        ...(resolvedSchroederSparseGrid
+          ? [{ binding: 8, resource: { buffer: resolvedSchroederSparseGrid.viewBuffer } }]
+          : [])
       ]
     });
-    const encoder = device.createCommandEncoder();
+    const encoder = commandEncoder || device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
+    dispatchSchroederParticleWorkgroups(pass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: sphParticleState.particleCount,
+      workgroupSize: 64
+    });
     pass.end();
     const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
       stateBuffer: outStateBuffer,
       mechanicsBuffer: outMechanicsBuffer,
       particleCount: sphParticleState.particleCount,
+      particleCountResidency,
       boxDimsM: dims,
       relaxation: particleSeparationRelaxation,
       maxPairRestDistanceM: maxSeparationRestDistanceM(
@@ -1160,14 +1569,14 @@ export async function runMlsMpmG2pWebGpu({
       gridSpacingM: gridUpdate.gridSpacingM
     });
     separationTransientBuffers = separation.transientBuffers;
-    if (!noFullReadback) {
+    if (!noFullReadback && !callerOwnsEncoder) {
       encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
       encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
     }
-    device.queue.submit([encoder.finish()]);
+    if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
     let state = new Float32Array();
     let mechanics = new Float32Array();
-    if (!noFullReadback) {
+    if (!noFullReadback && !callerOwnsEncoder) {
       await stateReadBuffer.mapAsync(GPU_MAP_MODE.READ);
       await mechanicsReadBuffer.mapAsync(GPU_MAP_MODE.READ);
       state = new Float32Array(stateReadBuffer.getMappedRange()).slice(0, sphParticleState.state.length);
@@ -1187,6 +1596,39 @@ export async function runMlsMpmG2pWebGpu({
       internalPressureScale,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
+    Object.assign(
+      reconstruction,
+      schroederParticleCountResidencyPublicFields(particleCountResidency)
+    );
+    reconstruction.particleSeparation = separation;
+    if (particleCountResidency) {
+      reconstruction.particleCount = sphParticleState.particleCount;
+      reconstruction.particleCountAuthority = 'gpu-authored-residency-metadata';
+      reconstruction.particleCountCpuDecoded = false;
+      reconstruction.particleIterationCapacity = particleIterationCapacity;
+      reconstruction.particleCountResidencyMetadataBuffer =
+        particleCountResidency.metadataBuffer;
+      reconstruction.particleCountDispatchIndirectBuffer =
+        particleCountResidency.dispatchIndirectBuffer;
+    }
+    if (resolvedSchroederSparseGrid) {
+      reconstruction.fullGridNodeCount = gridUpdate.fullGridNodeCount;
+      reconstruction.gridStorageMode = 'schroeder-byte-bounded-compact-grid';
+      reconstruction.schroederSparseGrid = resolvedSchroederSparseGrid;
+      reconstruction.schroederSparseHierarchyGenerationId =
+        gridUpdate.schroederSparseHierarchyGenerationId;
+    }
+    reconstruction.commandEncoderOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    reconstruction.submissionOwnership = callerOwnsEncoder ? 'caller' : 'local';
+    reconstruction.queueSubmitPerformed = !callerOwnsEncoder;
+    reconstruction.mapPerformed = !noFullReadback && !callerOwnsEncoder;
+    reconstruction.readbackPerformed = !noFullReadback && !callerOwnsEncoder;
+    reconstruction.queueCompletionStatus = callerOwnsEncoder
+      ? 'encoded-awaiting-caller-submit'
+      : (noFullReadback ? 'queue-submitted-cleanup-deferred' : 'readback-map-completed');
+    reconstruction.queueCompletionMethod = callerOwnsEncoder
+      ? 'caller-owned-command-encoder'
+      : (noFullReadback ? 'deferred queue.onSubmittedWorkDone cleanup' : 'mapAsync(readback-buffer)');
     if (retainOutputParticleBuffers) {
       reconstruction.stateBuffer = outStateBuffer;
       reconstruction.mechanicsBuffer = outMechanicsBuffer;
@@ -1199,6 +1641,7 @@ export async function runMlsMpmG2pWebGpu({
       };
       returnedRetainedOutputBuffers = true;
     }
+    if (callerOwnsEncoder) callerOwnedReconstruction = reconstruction;
     return reconstruction;
   } finally {
     const cleanup = () => {
@@ -1216,7 +1659,9 @@ export async function runMlsMpmG2pWebGpu({
       stateReadBuffer?.destroy?.();
       mechanicsReadBuffer?.destroy?.();
     };
-    if (noFullReadback) {
+    if (callerOwnsEncoder) {
+      if (callerOwnedReconstruction) callerOwnedReconstruction.cleanupSubmittedWork = cleanup;
+    } else if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);
     } else {
       cleanup();
@@ -1295,6 +1740,18 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
     readbackMode: reconstruction?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: reconstruction?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: reconstruction?.normalHotLoopReadbackFree ?? false,
+    authoritativeParticleCount: reconstruction?.authoritativeParticleCount ?? null,
+    authoritativeParticleCountAuthority:
+      reconstruction?.authoritativeParticleCountAuthority ?? null,
+    authoritativeParticleCountMetadataWord:
+      reconstruction?.authoritativeParticleCountMetadataWord ?? null,
+    particleRowCapacity: reconstruction?.particleRowCapacity
+      ?? reconstruction?.particleCount
+      ?? 0,
+    particleCountDispatchMode: reconstruction?.particleCountDispatchMode ?? null,
+    particleCountDispatchIndirectByteOffset:
+      reconstruction?.particleCountDispatchIndirectByteOffset ?? null,
+    particleSeparation: reconstruction?.particleSeparation ?? null,
     particleScaleStability: reconstruction?.particleScaleStability ?? null,
     particleScaleStabilitySchema: reconstruction?.particleScaleStabilitySchema ?? null,
     particleScaleStabilityStatus: reconstruction?.particleScaleStabilityStatus ?? null,
@@ -1351,8 +1808,15 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
   let cpuReference = null;
   const getCpuReference = () => {
+    if (particleCountResidency) {
+      throw new Error('GPU-authored G2P particle count cannot fall back to a CPU-owned particle loop');
+    }
     if (!cpuReference) {
       cpuReference = reconstructMlsMpmG2pCpu({
         sphParticleState,
@@ -1439,6 +1903,7 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
     }
     return executionFromReconstruction(gpuResult, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-executed', reason: 'CPU/WebGPU MLS-MPM G2P parity passed' }, webgpuParity });
   } catch (error) {
+    if (particleCountResidency) throw error;
     const reference = getCpuReference();
     return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-error-fallback', reason: error instanceof Error ? error.message : String(error), fallback: 'cpu-reference' } });
   }

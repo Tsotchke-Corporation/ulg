@@ -77,8 +77,10 @@ import {
   summarizeSphRenderFieldSurfacesCpu,
   summarizeSphRenderFieldSurfacesWebGpu,
   summarizeSphRenderFieldSurfacesWithOptionalWebGpu,
+  sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
   sphRenderRowsWgsl
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
+import { createSphPressureInterfaceWorkspaceGpu } from '../src/runtime/sph/sphPressureInterfaceWorkspaceGpu.js';
 
 const GPU_BUFFER_USAGE_VERTEX = 32;
 
@@ -1388,6 +1390,255 @@ test('SPH compact material interface candidate field emits retained source-key s
   assert.equal(compactField.interfaceSourceKeyBuffer.destroyed, true);
 });
 
+test('SPH compact candidate GPU finalizer admits valid counts and fail-closes zero or overflow', async () => {
+  assert.match(
+    sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
+    /candidate_dispatch_indirect\[0\]\s*=\s*0u;[\s\S]*candidate_dispatch_indirect\[1\]\s*=\s*1u;[\s\S]*candidate_dispatch_indirect\[2\]\s*=\s*1u;/
+  );
+  assert.match(
+    sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
+    /let metadata_valid = overflow_count == 0u[\s\S]*active_count <= capacity[\s\S]*capacity == params\.expected_capacity[\s\S]*dense_count == params\.expected_dense_count[\s\S]*dispatch_x <= params\.max_dispatch_workgroups_x;/
+  );
+  assert.match(
+    sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
+    /if \(!metadata_valid \|\| active_count == 0u\) \{[\s\S]*return;[\s\S]*\}/
+  );
+  assert.match(
+    sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
+    /let dispatch_x = \(active_count \+ params\.workgroup_size - 1u\) \/ params\.workgroup_size;[\s\S]*candidate_dispatch_indirect\[0\] = dispatch_x;/
+  );
+
+  const field = twoSurfaceRenderField();
+  const { device, bindGroups } = fakeSurfaceDrawDevice({});
+  const borrowedIndirectBuffer = device.createBuffer({
+    label: 'test-borrowed-pressure-candidate-dispatch-indirect',
+    size: 12,
+    usage: 128 | 256
+  });
+  const result = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+    device,
+    renderField: field,
+    commandEncoder: device.createCommandEncoder(),
+    retainGpuCandidateBuffers: true,
+    targetCandidateDispatchIndirectBuffer: borrowedIndirectBuffer
+  });
+
+  assert.equal(result.candidateDispatchIndirectBuffer, borrowedIndirectBuffer);
+  assert.equal(result.candidateDispatchIndirectBufferOwned, false);
+  assert.equal(bindGroups.at(-1).entries[1].resource.buffer, borrowedIndirectBuffer);
+  result.cleanupSubmittedWork();
+  result.destroyMaterialInterfaceCandidateFieldBuffers();
+  assert.equal(borrowedIndirectBuffer.destroyed, false);
+});
+
+test('SPH compact candidate producer command-orders resets when reusing caller-owned output workspace', async () => {
+  const field = twoSurfaceRenderField();
+  const candidateCount = field.totalFieldCells * 3;
+  const compactCapacity = candidateCount;
+  const { device, bindGroups, queueWrites, copies } = fakeSurfaceDrawDevice({});
+  const targetCandidateRowsBuffer = device.createBuffer({
+    label: 'test-pressure-candidate-workspace-rows',
+    size: compactCapacity * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS * 4,
+    usage: 128
+  });
+  const targetCompactMetadataBuffer = device.createBuffer({
+    label: 'test-pressure-candidate-workspace-metadata',
+    size: 16,
+    usage: 128 | 8
+  });
+  const targetInterfaceSourceKeyBuffer = device.createBuffer({
+    label: 'test-pressure-candidate-workspace-source-keys',
+    size: compactCapacity * SPH_INTERFACE_SOURCE_KEY_FLOATS * 4,
+    usage: 128
+  });
+  const targetCandidateDispatchIndirectBuffer = device.createBuffer({
+    label: 'test-pressure-candidate-workspace-dispatch',
+    size: 12,
+    usage: 128 | 256
+  });
+
+  const commandEncoder = device.createCommandEncoder();
+  const result = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+    device,
+    renderField: field,
+    commandEncoder,
+    retainGpuCandidateBuffers: true,
+    compactCandidateCapacity: compactCapacity,
+    targetCandidateRowsBuffer,
+    targetCompactMetadataBuffer,
+    targetInterfaceSourceKeyBuffer,
+    targetCandidateDispatchIndirectBuffer
+  });
+
+  assert.equal(result.candidateRowsBuffer, targetCandidateRowsBuffer);
+  assert.equal(result.candidateRowsBufferOwned, false);
+  assert.equal(result.compactMetadataBuffer, targetCompactMetadataBuffer);
+  assert.equal(result.compactMetadataBufferOwned, false);
+  assert.equal(result.interfaceSourceKeyBuffer, targetInterfaceSourceKeyBuffer);
+  assert.equal(result.interfaceSourceKeyBufferOwned, false);
+  assert.equal(result.candidateDispatchIndirectBuffer, targetCandidateDispatchIndirectBuffer);
+  assert.equal(result.candidateDispatchIndirectBufferOwned, false);
+  assert.equal(bindGroups.at(-2).entries[2].resource.buffer, targetCandidateRowsBuffer);
+  assert.equal(bindGroups.at(-2).entries[4].resource.buffer, targetCompactMetadataBuffer);
+  assert.equal(bindGroups.at(-2).entries[6].resource.buffer, targetInterfaceSourceKeyBuffer);
+  assert.equal(bindGroups.at(-1).entries[1].resource.buffer, targetCandidateDispatchIndirectBuffer);
+  assert.equal(
+    queueWrites.filter(({ buffer }) => buffer === targetInterfaceSourceKeyBuffer).length,
+    0
+  );
+  assert.equal(
+    queueWrites.filter(({ buffer }) => buffer === targetCompactMetadataBuffer).length,
+    0
+  );
+  assert.equal(result.compactMetadataInitializationMode, 'command-encoded-copy-before-producer');
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0].destination, targetCompactMetadataBuffer);
+  assert.deepEqual(
+    Array.from(new Uint32Array(
+      queueWrites.find(({ buffer }) => buffer === copies[0].source).snapshot
+    )),
+    [0, 0, compactCapacity, candidateCount]
+  );
+
+  const secondResult = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+    device,
+    renderField: field,
+    commandEncoder,
+    retainGpuCandidateBuffers: true,
+    compactCandidateCapacity: compactCapacity,
+    targetCandidateRowsBuffer,
+    targetCompactMetadataBuffer,
+    targetInterfaceSourceKeyBuffer,
+    targetCandidateDispatchIndirectBuffer
+  });
+  assert.equal(copies.length, 2);
+  assert.equal(copies[1].destination, targetCompactMetadataBuffer);
+  assert.notEqual(copies[0].source, copies[1].source);
+  assert.deepEqual(
+    Array.from(new Uint32Array(
+      queueWrites.find(({ buffer }) => buffer === copies[1].source).snapshot
+    )),
+    [0, 0, compactCapacity, candidateCount]
+  );
+
+  result.cleanupSubmittedWork();
+  secondResult.cleanupSubmittedWork();
+  const cleanup = result.destroyMaterialInterfaceCandidateFieldBuffers();
+  secondResult.destroyMaterialInterfaceCandidateFieldBuffers();
+  assert.equal(cleanup.candidateRowsBufferDestroyed, false);
+  assert.equal(cleanup.compactMetadataBufferDestroyed, false);
+  assert.equal(cleanup.interfaceSourceKeyBufferDestroyed, false);
+  assert.equal(cleanup.candidateDispatchIndirectBufferDestroyed, false);
+  assert.equal(targetCandidateRowsBuffer.destroyed, false);
+  assert.equal(targetCompactMetadataBuffer.destroyed, false);
+  assert.equal(targetInterfaceSourceKeyBuffer.destroyed, false);
+  assert.equal(targetCandidateDispatchIndirectBuffer.destroyed, false);
+});
+
+test('SPH compact candidate controls and bind groups stay resident in exact sequence slots', async () => {
+  const field = twoSurfaceRenderField();
+  const candidateCount = field.totalFieldCells * 3;
+  const { device, bindGroups, queueWrites, copies } = fakeSurfaceDrawDevice({});
+  const workspace = createSphPressureInterfaceWorkspaceGpu({
+    device,
+    candidateCapacity: candidateCount,
+    sequenceStepCapacity: 2,
+    labelPrefix: 'test-pressure-candidate-control-workspace'
+  });
+  const workspaceResources = workspace.substepResources(1);
+  const fieldRowsBuffer = device.createBuffer({
+    label: 'test-pressure-candidate-source-field',
+    size: field.fieldRows.byteLength,
+    usage: 128
+  });
+  const surfaceBuffer = device.createBuffer({
+    label: 'test-pressure-candidate-source-surfaces',
+    size: field.surfaceTable.records.byteLength,
+    usage: 128
+  });
+  const sourceIndexFieldBuffer = device.createBuffer({
+    label: 'test-pressure-candidate-source-indices',
+    size: field.totalFieldCells * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const commandEncoder = device.createCommandEncoder();
+  const build = () => buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+    device,
+    renderField: field,
+    fieldRowsBuffer,
+    surfaceBuffer,
+    sourceIndexFieldBuffer,
+    commandEncoder,
+    retainGpuCandidateBuffers: true,
+    compactCandidateCapacity: candidateCount,
+    ...workspace.targetBuffers,
+    workspaceResources
+  });
+
+  const first = await build();
+  const bindGroupCountAfterFirst = bindGroups.length;
+  const second = await build();
+  assert.equal(bindGroupCountAfterFirst, 2);
+  assert.equal(bindGroups.length, bindGroupCountAfterFirst);
+  assert.equal(first.candidateControlWorkspaceBound, true);
+  assert.equal(first.candidateControlSlotIndex, 1);
+  assert.equal(first.candidateBindGroupCacheHit, false);
+  assert.equal(first.candidateFinalizeBindGroupCacheHit, false);
+  assert.equal(second.candidateBindGroupCacheHit, true);
+  assert.equal(second.candidateFinalizeBindGroupCacheHit, true);
+  assert.deepEqual(
+    [
+      bindGroups[0].entries[3].resource.buffer,
+      bindGroups[0].entries[3].resource.offset,
+      bindGroups[0].entries[3].resource.size
+    ],
+    [
+      workspace.controlBuffer,
+      workspaceResources.candidateParamsByteOffset,
+      workspaceResources.candidateParamsByteLength
+    ]
+  );
+  assert.deepEqual(
+    [
+      bindGroups[1].entries[2].resource.buffer,
+      bindGroups[1].entries[2].resource.offset,
+      bindGroups[1].entries[2].resource.size
+    ],
+    [
+      workspace.controlBuffer,
+      workspaceResources.candidateFinalizeParamsByteOffset,
+      workspaceResources.candidateFinalizeParamsByteLength
+    ]
+  );
+  assert.equal(copies[0].source, workspace.controlBuffer);
+  assert.equal(copies[0].sourceOffset, workspaceResources.candidateInitByteOffset);
+  const controlWriteOffsets = queueWrites
+    .filter(({ buffer }) => buffer === workspace.controlBuffer)
+    .map(({ offset }) => offset);
+  assert.deepEqual(controlWriteOffsets, [
+    workspaceResources.candidateParamsByteOffset,
+    workspaceResources.candidateInitByteOffset,
+    workspaceResources.candidateFinalizeParamsByteOffset,
+    workspaceResources.candidateParamsByteOffset,
+    workspaceResources.candidateInitByteOffset,
+    workspaceResources.candidateFinalizeParamsByteOffset
+  ]);
+  assert.equal(
+    workspace.bindGroupCacheEvidence().candidateHitCount,
+    1
+  );
+  assert.equal(
+    workspace.bindGroupCacheEvidence().candidateFinalizeHitCount,
+    1
+  );
+
+  first.cleanupSubmittedWork();
+  second.cleanupSubmittedWork();
+  first.destroyMaterialInterfaceCandidateFieldBuffers();
+  second.destroyMaterialInterfaceCandidateFieldBuffers();
+  workspace.destroy();
+});
+
 test('SPH material interface field derives surface normals and areas from render-field crossings', () => {
   const field = twoSurfaceRenderField();
   const interfaceField = deriveSphMaterialInterfaceField(field);
@@ -1444,7 +1695,6 @@ test('SPH physics material interface WebGPU wrapper consumes retained field buff
     source: 'resident-physics-loop-material-interface-refresh',
     sourceCadence: 'resident-step-completed'
   });
-
   const interfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
     device,
     renderField: sourceField,
@@ -1513,18 +1763,29 @@ test('SPH physics material interface can publish GPU-resident summary without ca
     source: 'resident-physics-loop-material-interface-refresh',
     sourceCadence: 'resident-step-completed'
   });
+  const commandEncoder = device.createCommandEncoder();
+  const residentAuthority = {
+    generation: 41,
+    leaseTokenLow: 0x1234,
+    leaseTokenHigh: 0x5678,
+    positionEpoch: 9,
+    sourceCount: packed.particleCount,
+    sourceFamily: 'sph-particle-state'
+  };
 
   const interfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
     device,
     renderField: sourceField,
     source: 'resident-physics-loop-material-interface-refresh',
     sourceCadence: 'resident-step-completed',
-    candidateReadbackMode: 'gpu-resident-summary'
+    candidateReadbackMode: 'gpu-resident-summary',
+    commandEncoder,
+    residentAuthority
   });
 
   assert.equal(interfaceField.schema, 'peercompute.ulg.sph-material-interface-field.v0');
-  assert.equal(interfaceField.status, 'material-interface-field-gpu-resident-summary-pending');
-  assert.equal(interfaceField.backend, 'webgpu-gpu-resident-summary');
+  assert.equal(interfaceField.status, 'material-interface-compact-candidate-field-encoded-awaiting-caller-submit');
+  assert.equal(interfaceField.backend, 'webgpu-gpu-resident-candidates');
   assert.equal(interfaceField.sourceFieldSchema, 'peercompute.ulg.sph-material-interface-source-field.v0');
   assert.equal(interfaceField.sourceFieldRowsBufferBound, true);
   assert.equal(interfaceField.sourceSurfaceBufferBound, true);
@@ -1532,15 +1793,42 @@ test('SPH physics material interface can publish GPU-resident summary without ca
   assert.equal(interfaceField.candidateReadbackMode, 'gpu-resident-summary');
   assert.equal(interfaceField.candidateMetadataReadback, false);
   assert.equal(interfaceField.activeCandidateCountPending, true);
-  assert.equal(interfaceField.pressureInterfaceProducer, false);
-  assert.equal(interfaceField.forceCouplingStatus, 'blocked-gpu-resident-pressure-interface-consumer-required');
-  assert.equal(interfaceField.elementCount, 0);
-  assert.equal(interfaceField.queueCompletionStatus, 'not-submitted-gpu-resident-summary');
-  assert.equal(bindGroups.length, 1);
+  assert.equal(interfaceField.pressureInterfaceProducer, true);
+  assert.equal(interfaceField.forceCouplingStatus, 'gpu-resident-pressure-interface-consumer-ready');
+  assert.ok(interfaceField.elementCount > 0);
+  assert.equal(interfaceField.elementCountMode, 'gpu-capacity-status-gated');
+  assert.equal(interfaceField.queueCompletionStatus, 'encoded-awaiting-caller-submit');
+  assert.equal(interfaceField.queueSubmitPerformed, false);
+  assert.equal(interfaceField.mapPerformed, false);
+  assert.equal(interfaceField.readbackPerformed, false);
+  assert.equal(interfaceField.candidateRowsBufferRetained, true);
+  assert.equal(interfaceField.compactMetadataBufferRetained, true);
+  assert.equal(interfaceField.compactMetadataBufferByteLength, 16);
+  assert.equal(interfaceField.candidateDispatchIndirectBufferRetained, true);
+  assert.equal(interfaceField.candidateDispatchIndirectBufferByteLength, 12);
+  assert.equal(interfaceField.candidateDispatchIndirectOffsetBytes, 0);
+  assert.equal(
+    interfaceField.candidateDispatchAuthority,
+    'gpu-finalized-active-count-fail-closed-indirect'
+  );
+  assert.deepEqual(interfaceField.compactMetadataLayout, [
+    'activeCandidateCount:u32',
+    'overflowCount:u32',
+    'capacity:u32',
+    'denseCandidateCount:u32'
+  ]);
+  assert.equal(interfaceField.residentAuthority, residentAuthority);
+  assert.equal(interfaceField.residentAuthorityStatus, 'resident-candidate-authority-bound');
+  assert.equal(bindGroups.length, 3);
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [
-    Math.ceil(Math.max(1, field.surfaceTable.maxFieldCellCount) / 64)
+    Math.ceil(Math.max(1, field.surfaceTable.maxFieldCellCount) / 64),
+    Math.ceil(Math.max(1, field.surfaceTable.maxFieldCellCount * 3) / 64),
+    1
   ]);
   assert.equal(copies.length, 0);
+  interfaceField.cleanupSubmittedWork();
+  const cleanup = interfaceField.destroyMaterialInterfaceFieldBuffers();
+  assert.equal(cleanup.status, 'material-interface-candidate-field-buffers-destroyed');
   sourceField.destroyMaterialInterfaceSourceFieldBuffers();
   sourceField.releaseMaterialInterfaceSourceFieldLeases();
   sourceField.destroyMaterialInterfaceSourceFieldBuffers();
@@ -1851,6 +2139,73 @@ test('SPH render field WebGPU no-full handoff can avoid a CPU queue fence', asyn
   assert.equal(paramsBuffer.destroyed, true);
   assert.equal(result.fieldRowsBuffer.destroyed, false);
   assert.equal(result.surfaceBuffer.destroyed, false);
+});
+
+test('empty render topology preserves vec4 storage ABI through compact candidates', async () => {
+  const surfaceTable = buildSphRenderFieldSurfaceTable([]);
+  const { device, bindGroups, createdBuffers } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array(),
+    compactedVertexRows: new Float32Array()
+  });
+  const renderField = await buildSphRenderFieldWebGpu({
+    device,
+    renderRows: new Float32Array(SPH_GPU_RENDER_ROW_FLOATS),
+    surfaceTable,
+    particleCount: 1,
+    readbackMode: 'no-full-readback',
+    retainFieldRowsBuffer: true,
+    retainSurfaceBuffer: true,
+    waitForQueueCompletion: false,
+    deferCleanup: false
+  });
+
+  assert.equal(renderField.surfaceCount, 0);
+  assert.equal(renderField.totalFieldCells, 0);
+  assert.equal(renderField.surfaceBuffer.size, 16);
+  assert.equal(renderField.surfaceBufferByteLength, 16);
+  assert.equal(renderField.surfaceBufferPayloadByteLength, 0);
+  assert.equal(renderField.fieldRowsBuffer.size, 16);
+  assert.equal(renderField.fieldRowsBufferByteLength, 16);
+  assert.equal(renderField.fieldRowsBufferPayloadByteLength, 0);
+  assert.equal(
+    Object.values(renderField.residentBufferLeaseSummary.resources).find(
+      (resource) => resource.resourceKind === 'render-field-surface-table-buffer'
+    )?.byteLength,
+    16
+  );
+
+  const candidateField = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+    device,
+    renderField,
+    fieldRowsBuffer: renderField.fieldRowsBuffer,
+    surfaceBuffer: renderField.surfaceBuffer,
+    commandEncoder: device.createCommandEncoder(),
+    retainGpuCandidateBuffers: true
+  });
+  const candidateBindGroup = bindGroups.find((bindGroup) => (
+    bindGroup.entries.length === 7
+    && bindGroup.entries.find((entry) => entry.binding === 0)?.resource?.buffer
+      === renderField.surfaceBuffer
+    && bindGroup.entries.some((entry) => entry.binding === 6)
+  ));
+  assert.equal(candidateBindGroup.entries.find((entry) => entry.binding === 0).resource.size, 16);
+  assert.equal(candidateBindGroup.entries.find((entry) => entry.binding === 1).resource.size, 16);
+  assert.ok(candidateBindGroup.entries.find((entry) => entry.binding === 2).resource.size >= 16);
+  assert.ok(candidateBindGroup.entries.find((entry) => entry.binding === 6).resource.size >= 16);
+  assert.equal(
+    createdBuffers.find((buffer) => buffer.label === 'ulg-sph-interface-source-index-disabled').size,
+    4
+  );
+  assert.equal(candidateField.candidateRowsBufferByteLength, candidateField.candidateRowsBuffer.size);
+  assert.equal(
+    candidateField.interfaceSourceKeyBufferByteLength,
+    candidateField.interfaceSourceKeyBuffer.size
+  );
+
+  candidateField.cleanupSubmittedWork();
+  candidateField.destroyMaterialInterfaceCandidateFieldBuffers();
+  renderField.releaseRenderFieldBufferLeases();
+  renderField.destroyRenderFieldBuffers({ releaseLeases: true });
 });
 
 test('SPH render field WebGPU can write into a borrowed reusable field buffer', async () => {

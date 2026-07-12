@@ -2,6 +2,60 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "peercompute.ulg.resident-neighborhood-descriptor.v0",
   "title": "ULG GPU-Resident Neighborhood Descriptor v0",
+  "$defs": {
+    "denseUniformChart": {
+      "type": "object",
+      "required": [
+        "schema",
+        "chartId",
+        "level",
+        "cellSizeM",
+        "originM",
+        "minCell",
+        "dimensions",
+        "gridCellCount",
+        "admitted",
+        "admissionReason"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {
+          "const": "peercompute.ulg.resident-neighborhood-dense-uniform-chart.v0"
+        },
+        "chartId": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "level": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "cellSizeM": { "type": "number", "exclusiveMinimum": 0 },
+        "originM": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "number" }
+        },
+        "minCell": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
+        },
+        "dimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+        },
+        "gridCellCount": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "admitted": { "type": "boolean" },
+        "admissionReason": {
+          "enum": [
+            "grid-cell-count-within-source-count",
+            "grid-cell-count-exceeds-source-count",
+            "source-metadata-is-not-uniform-single-chart",
+            "support-classes-require-multichart-or-multilevel-search"
+          ]
+        }
+      }
+    }
+  },
   "type": "object",
   "required": [
     "schema",
@@ -10,6 +64,10 @@
     "generation",
     "lease",
     "supportClasses",
+    "sourceSupportAssignments",
+    "positionValidity",
+    "selfInclusionPolicy",
+    "packedCsr",
     "layouts",
     "capacityEvidence",
     "admission"
@@ -20,7 +78,8 @@
     "status": {
       "enum": [
         "resident-neighborhood-descriptor-ready",
-        "resident-neighborhood-capacity-overflow-fail-closed"
+        "resident-neighborhood-capacity-overflow-fail-closed",
+        "resident-neighborhood-position-validity-fail-closed"
       ]
     },
     "generation": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
@@ -36,14 +95,27 @@
     },
     "lease": {
       "type": "object",
-      "required": ["leaseId", "laneId", "stateKey", "tokenLow", "tokenHigh"],
+      "required": [
+        "leaseId",
+        "laneId",
+        "stateKey",
+        "sourceFamily",
+        "tokenLow",
+        "tokenHigh",
+        "tokenBinding",
+        "authoritative"
+      ],
       "properties": {
         "leaseId": { "type": "string", "minLength": 1 },
         "laneId": { "type": "string", "minLength": 1 },
         "stateKey": { "type": "string", "minLength": 1 },
+        "sourceFamily": { "type": "string", "minLength": 1 },
         "deviceId": { "type": "string" },
         "tokenLow": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "tokenHigh": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        "tokenHigh": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "tokenBinding": { "type": "string", "minLength": 1 },
+        "identitySchema": { "type": ["string", "null"] },
+        "authoritative": { "type": "boolean" }
       }
     },
     "supportClasses": {
@@ -70,9 +142,74 @@
         }
       }
     },
+    "sourceSupportAssignments": {
+      "type": "object",
+      "required": ["rowCount", "rowStrideU32", "rowLayout", "consumerMask", "rows"],
+      "properties": {
+        "rowCount": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "rowStrideU32": { "const": 8 },
+        "consumerMask": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "positionValidity": {
+      "type": "object",
+      "required": [
+        "schema",
+        "positionEpoch",
+        "skinDistanceM",
+        "maxDisplacementM",
+        "displacementBudgetM",
+        "valid",
+        "rebuildRequired"
+      ],
+      "properties": {
+        "schema": { "const": "peercompute.ulg.resident-neighborhood-position-validity.v0" },
+        "positionEpoch": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "skinDistanceM": { "type": "number", "minimum": 0 },
+        "maxDisplacementM": { "type": "number", "minimum": 0 },
+        "displacementBudgetM": { "type": "number", "minimum": 0 },
+        "valid": { "type": "boolean" },
+        "rebuildRequired": { "type": "boolean" }
+      }
+    },
+    "selfInclusionPolicy": {
+      "type": "object",
+      "required": ["includeConsumerMask", "excludeConsumerMask", "coveredConsumerMask", "complete"],
+      "properties": {
+        "includeConsumerMask": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "excludeConsumerMask": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "coveredConsumerMask": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "complete": { "const": true }
+      }
+    },
+    "packedCsr": {
+      "type": "object",
+      "required": [
+        "schema",
+        "singleStorageBinding",
+        "shaderStorageType",
+        "headerU32",
+        "regions",
+        "backingBufferByteLength"
+      ],
+      "properties": {
+        "schema": { "const": "peercompute.ulg.resident-neighborhood-packed-csr.v0" },
+        "singleStorageBinding": { "const": true },
+        "shaderStorageType": { "const": "array<u32>" },
+        "backingBufferByteLength": { "type": "integer", "minimum": 0 }
+      }
+    },
     "layouts": {
       "type": "object",
-      "required": ["cellKey", "supportClass", "sourceSpan", "candidate", "capacityEvidence"]
+      "required": [
+        "cellKey",
+        "supportClass",
+        "sourceSupportAssignment",
+        "sourceSpan",
+        "candidate",
+        "packedCsrHeader",
+        "capacityEvidence"
+      ]
     },
     "capacityEvidence": {
       "type": "object",

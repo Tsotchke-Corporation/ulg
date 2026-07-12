@@ -8,7 +8,9 @@ import {
   nativeSurfaceVisualIntervalExtractionEnabled,
   prepareNativeSurfaceBridgeForForcedDisposal,
   rendererCanvasResizeRequired,
+  retireNativeRefractionTargetSet,
   resolveAdditionalNativeSurfaceGenerationAttempt,
+  resolveNativeRefractionTargetSetAction,
   resolveNativeSurfaceResourceReleaseAction,
   shouldCommitAdditionalNativeSurfaceCandidate,
   shouldExtractNativeSurfaceForProbeBatch,
@@ -60,6 +62,146 @@ test('renderer canvas resize guard preserves an unchanged native canvas', () => 
     pixelRatio: 1,
     currentPixelRatio: 2
   }), true);
+});
+
+test('native refraction target-set policy keeps opaque frames allocation-free', () => {
+  const device = {};
+  assert.deepEqual(resolveNativeRefractionTargetSetAction({
+    required: false,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm'
+  }), {
+    status: 'opaque-no-targets',
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    depthFormat: 'depth32float',
+    retireActive: false,
+    deferRetirement: false,
+    create: false,
+    reuse: false
+  });
+
+  const activeTargetSet = {
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    depthFormat: 'depth32float',
+    copyTexture: {},
+    backfaceTexture: {}
+  };
+  const release = resolveNativeRefractionTargetSetAction({
+    required: false,
+    activeTargetSet,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    inFlightSubmitCount: 2,
+    submitFencePending: true
+  });
+  assert.equal(release.status, 'release-opaque-targets');
+  assert.equal(release.retireActive, true);
+  assert.equal(release.deferRetirement, true);
+});
+
+test('native refraction target-set policy reuses exact generations and fences resize replacement', () => {
+  const device = {};
+  const activeTargetSet = {
+    device,
+    width: 640,
+    height: 360,
+    colorFormat: 'bgra8unorm',
+    depthFormat: 'depth32float',
+    copyTexture: {},
+    backfaceTexture: {}
+  };
+  const reuse = resolveNativeRefractionTargetSetAction({
+    required: true,
+    activeTargetSet,
+    device,
+    width: 640,
+    height: 360,
+    colorFormat: 'bgra8unorm',
+    inFlightSubmitCount: 2,
+    submitFencePending: true
+  });
+  assert.equal(reuse.status, 'reuse-targets');
+  assert.equal(reuse.reuse, true);
+  assert.equal(reuse.retireActive, false);
+
+  for (const inFlightSubmitCount of [2, 1]) {
+    const replace = resolveNativeRefractionTargetSetAction({
+      required: true,
+      activeTargetSet,
+      device,
+      width: 1280,
+      height: 720,
+      colorFormat: 'bgra8unorm',
+      inFlightSubmitCount,
+      submitFencePending: true
+    });
+    assert.equal(replace.status, 'replace-targets');
+    assert.equal(replace.create, true);
+    assert.equal(replace.retireActive, true);
+    assert.equal(replace.deferRetirement, true);
+  }
+
+  const settledReplace = resolveNativeRefractionTargetSetAction({
+    required: true,
+    activeTargetSet,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    inFlightSubmitCount: 0,
+    submitFencePending: false
+  });
+  assert.equal(settledReplace.status, 'replace-targets');
+  assert.equal(settledReplace.deferRetirement, false);
+});
+
+test('native refraction target retirement waits for both in-flight submissions and destroys once', () => {
+  let inFlightSubmitCount = 2;
+  let destroyCount = 0;
+  const deferredRequests = [];
+  const targetSet = { generation: 7 };
+  const retirement = retireNativeRefractionTargetSet({
+    targetSet,
+    status: 'resize-target-set',
+    deferRelease(request) {
+      deferredRequests.push(request);
+      return true;
+    },
+    destroyTargetSet(retired) {
+      assert.equal(retired, targetSet);
+      destroyCount += 1;
+      return true;
+    }
+  });
+  assert.equal(retirement.deferred, true);
+  assert.equal(retirement.released, false);
+  assert.equal(deferredRequests.length, 1);
+  assert.equal(deferredRequests[0].requiresSuccessfulSubmitFence, true);
+  assert.equal(destroyCount, 0);
+
+  const settleOneSubmit = () => {
+    inFlightSubmitCount -= 1;
+    if (inFlightSubmitCount === 0) deferredRequests.shift()?.release();
+  };
+  settleOneSubmit();
+  assert.equal(inFlightSubmitCount, 1);
+  assert.equal(destroyCount, 0);
+  assert.equal(retirement.released, false);
+  settleOneSubmit();
+  assert.equal(inFlightSubmitCount, 0);
+  assert.equal(destroyCount, 1);
+  assert.equal(retirement.released, true);
+  assert.equal(retirement.request.release(), false);
+  assert.equal(destroyCount, 1);
 });
 
 test('native surface lifecycle defers replaced generations until submit and validation settle', () => {
@@ -156,6 +298,19 @@ test('native surface lifecycle retains distinct owners even when they share an e
   installNativeSurfaceResourceOwner(bridge, secondOwner);
   assert.deepEqual(takeNativeSurfaceResourceOwners(bridge), [firstOwner]);
   assert.equal(bridge.activeSurfaceResourceOwner, secondOwner);
+});
+
+test('native surface owners preserve presentation resources with their generation', () => {
+  const execution = { drawIndirectRowsBuffer: {} };
+  const resource = { ownerGeneration: 7, release() {} };
+  const owner = createNativeSurfaceResourceOwner({
+    generation: 7,
+    surfaceDraw: { surfaceDraw: execution },
+    presentationResources: [resource, null]
+  });
+
+  assert.equal(owner.generation, 7);
+  assert.deepEqual(owner.presentationResources, [resource]);
 });
 
 test('native visual probes extract every captured interval while performance probes stay final-only', () => {

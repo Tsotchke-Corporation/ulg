@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://peercompute.dev/schemas/ulg/coherent-solid-contracts.v0.json",
+  "title": "ULG Schroeder coherent-solid contract bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "authority",
+    "frame",
+    "members",
+    "contactProxies",
+    "shapeCarriers",
+    "proxyCompactionEvidence",
+    "chartTransitions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "peercompute.ulg.schroeder-solid-contract-bundle.v0"
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schedulerOwner",
+        "residentBufferOwner",
+        "authoritativeMutationOwner",
+        "submissionOwnership",
+        "readbackPolicy"
+      ],
+      "properties": {
+        "schedulerOwner": { "const": "peercompute-node-kernel-compute-manager" },
+        "residentBufferOwner": { "const": "peercompute-gpu-hub" },
+        "authoritativeMutationOwner": { "const": "peercompute-state-manager" },
+        "submissionOwnership": { "const": "caller-compute-manager-lane" },
+        "readbackPolicy": { "const": "fixed-evidence-only-explicit-validation" }
+      }
+    },
+    "frame": { "$ref": "#/$defs/recordContract" },
+    "members": { "$ref": "#/$defs/recordContract" },
+    "contactProxies": { "$ref": "#/$defs/recordContract" },
+    "shapeCarriers": { "$ref": "#/$defs/recordContract" },
+    "proxyCompactionEvidence": { "$ref": "#/$defs/proxyCompactionEvidenceContract" },
+    "chartTransitions": { "$ref": "#/$defs/chartTransitionContract" },
+    "drawEntries": { "$ref": "#/$defs/drawEntriesContract" }
+  },
+  "$defs": {
+    "recordContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "generationId", "leaseId", "strideWords", "capacity"],
+      "properties": {
+        "schema": { "type": "string", "minLength": 1 },
+        "generationId": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "leaseId": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "strideWords": { "type": "integer", "minimum": 1 },
+        "capacity": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "proxyCompactionEvidenceContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "ordering",
+        "evidenceByteLength",
+        "readbackRequiredForAdmission",
+        "failedCompactionProducesZeroIndirectInstances"
+      ],
+      "properties": {
+        "schema": { "const": "peercompute.ulg.schroeder-solid-proxy-compaction-evidence.v0" },
+        "ordering": { "const": "stable-gpu-radix-unique-body-id-proxy-id" },
+        "evidenceByteLength": { "const": 64 },
+        "readbackRequiredForAdmission": { "const": false },
+        "failedCompactionProducesZeroIndirectInstances": { "const": true }
+      }
+    },
+    "chartTransitionContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "supportedLevels",
+        "thirdLevelHold",
+        "preserveWorldPose",
+        "preserveWorldMomentum",
+        "preserveRestShape",
+        "preserveContactIdentity"
+      ],
+      "properties": {
+        "schema": { "const": "peercompute.ulg.schroeder-solid-chart-transition.v0" },
+        "supportedLevels": {
+          "type": "array",
+          "prefixItems": [{ "const": 0 }, { "const": 1 }],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "thirdLevelHold": { "const": true },
+        "preserveWorldPose": { "const": true },
+        "preserveWorldMomentum": { "const": true },
+        "preserveRestShape": { "const": true },
+        "preserveContactIdentity": { "const": true }
+      }
+    },
+    "drawEntriesContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "entrySchema",
+        "authority",
+        "schedulerOwner",
+        "residentBufferOwner",
+        "consumer",
+        "sameDeviceRequired",
+        "directFrameStorageBinding",
+        "persistentRestMeshBinding",
+        "presentationOwnsPhysicsCadence",
+        "cpuTransformRequired",
+        "densityFieldRequired"
+      ],
+      "properties": {
+        "schema": { "const": "peercompute.ulg.schroeder-solid-draw-entries.v0" },
+        "entrySchema": { "const": "peercompute.ulg.schroeder-solid-draw-entry.v0" },
+        "authority": { "const": "state-manager-admitted-presentation-view" },
+        "schedulerOwner": { "const": "peercompute-node-kernel-compute-manager" },
+        "residentBufferOwner": { "const": "peercompute-gpu-hub" },
+        "consumer": { "const": "native-webgpu-solid-render" },
+        "sameDeviceRequired": { "const": true },
+        "directFrameStorageBinding": { "const": true },
+        "persistentRestMeshBinding": { "const": true },
+        "presentationOwnsPhysicsCadence": { "const": false },
+        "cpuTransformRequired": { "const": false },
+        "densityFieldRequired": { "const": false }
+      }
+    }
+  }
+}

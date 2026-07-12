@@ -65,14 +65,36 @@ pinned to `renderer=native-webgpu` with the
 `native-webgpu-surface-consumer`; captures suppress overlay UI and fail on any
 blank, uniform, stale, wrong-canvas, or fallback interval. Particle spheres
 and offscreen draws are diagnostic-only.
-The `gpu-resident-physics-refactor` branch now keeps native surface generations
-alive through submit/validation retirement and has passed the production
-initial-to-final seven-scene matrix plus mobile DPR-2 validation. This closes
-presentation-resource liveness only; water-cycle, iron/ice, and sodium/water
-behavior gates remain open. Optional same-device GPU timestamp attribution is
-now available with `gpuProfile=1` / `ULG_PROBE_GPU_PROFILE=1`; benchmark GPU
-time is derived only from query spans and never from host enqueue or queue
-fence time. The measured next target is the sparse render field.
+The `gpu-resident-physics-refactor` branch now presents one native WebGPU
+triangle surface with generation-owned packed octahedral normals. The
+production framebuffer path is alpha-one, unblended, and depth writing; the
+selected background image is drawn by the native opaque pass so it is visible
+and included in the scene-color copy. A bounded two-submission presentation
+window restored the measured cadence from about 30 FPS to about 60 FPS without
+weakening submit-fenced resource retirement. Accepted visual checkpoints are
+`/tmp/ulg-background-native-after2.png` and
+`/tmp/ulg-thickness-refraction-live2.png`.
+
+Dielectric refraction now requires an exact, nonblocked, provenance-bearing
+spectral optical-state match with distinct blue, green, and red samples. A
+same-encoder `depth32float` backface pass supplies geometric thickness and is
+cached for a stable camera; it adds no queue submission. Missing authority or
+valid rear geometry fails closed to opaque reflective PBR. The current
+molecular response is a reduced, scientifically unvalidated STO-3G RHF
+occupied/virtual dipole response with Lorentz-Lorenz local-field conversion,
+not a validated first-principles optical solution.
+
+Presentation-resource liveness, sparse FIELD-0 execution, and removal of the
+300k reaction step's 192 MB of host zero uploads are implemented. The overall
+refactor is not accepted: manufactured/metamorphic thickness tests, a fresh
+standard named/random visual matrix, parallel product placement, removal of
+redundant neighborhood generations, exact live-prefix dispatch, thermal
+indexing, and persistent workspaces remain open. New Schroeder WebGPU work is
+validated with GPU manufactured states, invariants, same-device A/B paths, and
+fixed-size reductions, never a CPU mirror/parity acceptance gate. Optional
+same-device timestamps use `gpuProfile=1` /
+`ULG_PROBE_GPU_PROFILE=1`; host enqueue and queue-fence time are reported
+separately from GPU time.
 `window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
 the `ClosureRegistry`, resolves it in range, submits a supervised
 `simulation.step` task to `ulg-runtime`, requests WebGPU with CPU-reference

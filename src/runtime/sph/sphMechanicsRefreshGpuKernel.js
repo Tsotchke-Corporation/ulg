@@ -21,6 +21,10 @@ import {
   MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS,
   ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA
 } from './sphMechanicsMaterialTable.js';
+import {
+  tagWebGpuBufferDevice,
+  webGpuBufferMatchesDevice
+} from './sphGpuDeviceIdentity.js';
 
 export const ULG_MLS_MPM_MECHANICS_REFRESH_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-refresh.v0';
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-material-phase-upload.v0';
@@ -190,11 +194,27 @@ function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
 }
 
 function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
-  return device.createBuffer({
+  return tagWebGpuBufferDevice(device.createBuffer({
     label,
     size: Math.max(4, byteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
-  });
+  }), device);
+}
+
+function assertReusableOutputBuffer(device, buffer, byteLength, role) {
+  if (!buffer || typeof buffer !== 'object') {
+    throw new TypeError(`${role} must be a WebGPU buffer`);
+  }
+  if (Number.isFinite(Number(buffer.size)) && Number(buffer.size) < byteLength) {
+    throw new RangeError(`${role} is smaller than the required ${byteLength} bytes`);
+  }
+  if (buffer.destroyed === true) {
+    throw new Error(`${role} has already been destroyed`);
+  }
+  if (!webGpuBufferMatchesDevice(buffer, device)) {
+    throw new Error(`${role} belongs to a different WebGPU device`);
+  }
+  return buffer;
 }
 
 export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable) {
@@ -329,6 +349,8 @@ function outputEnvelope({
   mechanicsMaterialPhaseUpload = null,
   mechanicsMaterialPhaseUploadReused = false,
   retainedOutputParticleBuffers = false,
+  outputMechanicsBufferBorrowed = false,
+  outputMechanicsBufferOwned = false,
   readbackMode = FULL_READBACK_MODE,
   outputBufferInitializationMode = null,
   destroyOutputParticleBuffers = null,
@@ -365,6 +387,8 @@ function outputEnvelope({
         ?? mechanicsMaterialTable.materialPropertyBankWarmInputMatchedMaterialCount
         ?? 0,
     retainedOutputParticleBuffers,
+    outputMechanicsBufferBorrowed,
+    outputMechanicsBufferOwned,
     readbackMode,
     outputBufferInitializationMode,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
@@ -443,6 +467,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
   sourceMechanicsBuffer = null,
+  outputMechanicsBuffer = null,
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE,
   timestampProfiler = null,
@@ -459,6 +484,27 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-mechanics-refresh-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-mechanics-refresh-source-thermo', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-mechanics-refresh-source-mechanics', mlsMpmParticleState.mechanics);
+  const outMechanicsByteLength = Math.max(
+    mlsMpmParticleState.mechanics.byteLength,
+    mlsMpmParticleState.particleCount
+      * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  if (outputMechanicsBuffer) {
+    assertReusableOutputBuffer(
+      device,
+      outputMechanicsBuffer,
+      outMechanicsByteLength,
+      'mechanics refresh outputMechanicsBuffer'
+    );
+    if (
+      outputMechanicsBuffer === stateBuffer
+      || outputMechanicsBuffer === thermoBuffer
+      || outputMechanicsBuffer === mechanicsBuffer
+    ) {
+      throw new Error('Mechanics refresh output buffer must be distinct from every source buffer');
+    }
+  }
   const borrowedMaterialPhaseUpload = uploadedMechanicsMaterialPhaseRecordsMatch(
     mechanicsMaterialPhaseUpload,
     mechanicsMaterialTable
@@ -479,15 +525,15 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   const outputBufferInitializationMode = 'shader-copies-source-mechanics-rows';
   // Never size GPU outputs from the CPU arrays alone: under GPU-resident
   // continuation the CPU copies can be stale or detached (byteLength 0).
-  const outMechanicsBuffer = createOutputStorageBuffer(
-    device,
-    'ulg-mls-mpm-mechanics-refresh-output-mechanics',
-    Math.max(
-      mlsMpmParticleState.mechanics.byteLength,
-      mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
-    ),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  const outMechanicsBufferOwned = outputMechanicsBuffer == null;
+  const outMechanicsBuffer = outMechanicsBufferOwned
+    ? createOutputStorageBuffer(
+        device,
+        'ulg-mls-mpm-mechanics-refresh-output-mechanics',
+        outMechanicsByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      )
+    : outputMechanicsBuffer;
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-mechanics-refresh-params',
     size: 16,
@@ -533,7 +579,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     if (localMaterialPhaseUpload) destroyMlsMpmMechanicsMaterialPhaseUpload(localMaterialPhaseUpload);
     materialBankWarmInputBinding.destroy?.();
     paramsBuffer.destroy?.();
-    if (!retainOutputParticleBuffers) outMechanicsBuffer.destroy?.();
+    if (!retainOutputParticleBuffers && outMechanicsBufferOwned) outMechanicsBuffer.destroy?.();
   };
   const result = outputEnvelope({
     backend: 'webgpu',
@@ -542,10 +588,12 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     mechanicsMaterialTable,
     mechanics,
     mechanicsBuffer: outMechanicsBuffer,
-    mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
+    mechanicsBufferByteLength: outMechanicsByteLength,
     mechanicsMaterialPhaseUpload: materialPhaseUpload,
     mechanicsMaterialPhaseUploadReused: Boolean(borrowedMaterialPhaseUpload),
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
+    outputMechanicsBufferBorrowed: !outMechanicsBufferOwned,
+    outputMechanicsBufferOwned: outMechanicsBufferOwned,
     readbackMode,
     outputBufferInitializationMode,
     mechanicsMaterialBankWarmInputShaderBinding: {
@@ -555,7 +603,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       bufferSource: materialBankWarmInputBinding.bufferSource
     },
     destroyOutputParticleBuffers() {
-      outMechanicsBuffer.destroy?.();
+      if (outMechanicsBufferOwned) outMechanicsBuffer.destroy?.();
     }
   });
   return {
@@ -565,7 +613,8 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     readbackMode,
     result,
     mechanicsBuffer: outMechanicsBuffer,
-    mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
+    mechanicsBufferByteLength: outMechanicsByteLength,
+    outputMechanicsBufferOwned: outMechanicsBufferOwned,
     encode(encoder) {
       const pass = encoder.beginComputePass(
         profiledComputePassDescriptor(timestampProfiler, 'mechanicsRefresh', timestampMetadata)
@@ -643,7 +692,12 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
   stage.result.gpuTimestampMappedByteLength = gpuTimestampProfile?.mappedByteLength ?? 0;
   stage.result.gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
     ...timestampProfiler.allocationEntries(),
-    { role: 'mechanics-refresh-output', buffer: stage.mechanicsBuffer, owned: true }
+    {
+      role: 'mechanics-refresh-output',
+      buffer: stage.mechanicsBuffer,
+      owned: stage.outputMechanicsBufferOwned,
+      lifetime: stage.outputMechanicsBufferOwned ? 'transient-submission' : 'borrowed'
+    }
   ], { scope: 'mls-mpm-mechanics-refresh' });
   return stage.result;
 }

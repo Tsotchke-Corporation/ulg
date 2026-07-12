@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { access, lstat, mkdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
 import { chromium } from '@playwright/test';
 import {
@@ -19,7 +20,11 @@ const DEFAULT_BASE_PARTICLE_EDGE = 5;
 const CONDENSED_VOLUME_STRAIN_TOLERANCE = 5e-3;
 const CONDENSED_MIN_VOLUME_RATIO_J = 1 - CONDENSED_VOLUME_STRAIN_TOLERANCE;
 const CONDENSED_MAX_VOLUME_RATIO_J = 1 + CONDENSED_VOLUME_STRAIN_TOLERANCE;
-const DEFAULT_CHROMIUM_ARGS = ['--enable-unsafe-webgpu'];
+const DEFAULT_CHROMIUM_ARGS = [
+  '--enable-unsafe-webgpu',
+  '--use-angle=vulkan',
+  '--enable-features=Vulkan,UseSkiaRenderer'
+];
 const BROWSER_CONSOLE_ENTRY_LIMIT = 500;
 const BROWSER_CONSOLE_ISSUE_LIMIT = 200;
 const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
@@ -40,6 +45,7 @@ const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'three'
 ]);
 const NATIVE_SURFACE_DEBUG_MODES = new Set(['none', 'clear-only']);
+const NATIVE_SURFACE_PRESENTATION_MODE = 'native-webgpu-surface-consumer';
 
 const BROWSER_CONSOLE_ISSUE_PATTERNS = [
   {
@@ -1804,6 +1810,7 @@ async function runBrowserProbe({
         queueFenceStatus: { ...(stageTiming.queueFenceStatus || {}) },
         queueFenceMethod: { ...(stageTiming.queueFenceMethod || {}) },
         queueSubmitMs: { ...(stageTiming.queueSubmitMs || {}) },
+        hostTiming: stageTiming.hostTiming ? { ...stageTiming.hostTiming } : null,
         gpuTimestampProfile: stageTiming.gpuTimestampProfile || null,
         gpuTimestampProfiles: { ...(stageTiming.gpuTimestampProfiles || {}) },
         gpuTimestampRequested: stageTiming.gpuTimestampRequested ?? null,
@@ -2499,7 +2506,9 @@ async function runBrowserProbe({
         const uploadCandidates = [
           ['resident-steps-next-particle-uploads', currentSteps?.nextParticleUploads?.sphParticleUpload],
           ['resident-steps-final-step-next-particle-uploads', currentSteps?.finalStep?.nextParticleUploads?.sphParticleUpload],
-          ['resident-step-next-particle-uploads', currentStep?.nextParticleUploads?.sphParticleUpload]
+          ['resident-step-next-particle-uploads', currentStep?.nextParticleUploads?.sphParticleUpload],
+          ['scene-time-zero-particle-upload',
+            overlay.__sphGpuParticleUpload || sceneApi.getSphGpuParticleUpload?.()]
         ];
         const [uploadSource, sphParticleUpload] = uploadCandidates.find(([, upload]) => (
           upload?.stateBuffer && upload?.thermoBuffer
@@ -2514,6 +2523,9 @@ async function runBrowserProbe({
 
         const stateBuffer = sphParticleUpload.stateBuffer;
         const thermoBuffer = sphParticleUpload.thermoBuffer;
+        const currentSphParticleState = sceneApi.getSphGpuParticleState?.()
+          || overlay.__sphPhaseViewState?.sphParticleState
+          || null;
         const stateStrideBytes = Math.max(4, Math.round(Number(sphParticleUpload.stateStrideBytes) || 32));
         const thermoStrideBytes = Math.max(4, Math.round(Number(sphParticleUpload.thermoStrideBytes) || 48));
         const stateCapacity = Math.floor(Number(stateBuffer.size) / stateStrideBytes);
@@ -2579,10 +2591,12 @@ async function runBrowserProbe({
             uploadSource,
             sourceStep: currentStep?.particlePingPong?.nextStep
               ?? currentSteps?.nextSphParticleState?.step
+              ?? currentSphParticleState?.step
               ?? null,
             sourceTimeS: finiteOrNull(
               currentStep?.particlePingPong?.nextTime
               ?? currentSteps?.nextSphParticleState?.time
+              ?? currentSphParticleState?.time
             ),
             sourceBufferLabels: {
               state: stateBuffer.label || null,
@@ -3066,6 +3080,363 @@ async function runBrowserProbe({
             ?? null
         };
       };
+      const nativeSurfacePresentationSnapshot = ({ renderState, surfaceDraw, sceneUserData }) => {
+        const renderBridge = sceneApi.getSphResidentSurfaceDrawRenderBridge?.()
+          || sceneUserData.sphResidentSurfaceDrawRenderBridge
+          || null;
+        const nativeConsumer = sceneUserData.sphNativeWebGpuSurfaceConsumer
+          || renderBridge?.nativeConsumer
+          || null;
+        const connectedCanvases = Array.from(document.querySelectorAll('canvas'))
+          .filter((canvas) => canvas.isConnected === true);
+        const visibleCanvases = connectedCanvases.filter((canvas) => {
+          const rect = canvas.getBoundingClientRect?.();
+          const style = window.getComputedStyle?.(canvas);
+          return Boolean(
+            rect
+            && rect.width > 0
+            && rect.height > 0
+            && style?.display !== 'none'
+            && style?.visibility !== 'hidden'
+            && Number(style?.opacity ?? 1) !== 0
+          );
+        });
+        const nativeCanvas = renderBridge?.canvas || nativeConsumer?.canvas || null;
+        const nativeCanvasConnected = Boolean(
+          nativeCanvas?.isConnected
+          && nativeCanvas?.ownerDocument === document
+        );
+        const objectVisibleFromRoot = (object) => {
+          let current = object;
+          while (current) {
+            if (current.visible === false) return false;
+            current = current.parent || null;
+          }
+          const camera = sceneApi?.camera || null;
+          return !(camera?.layers?.test && object?.layers && !camera.layers.test(object.layers));
+        };
+        const visiblePointObjects = [];
+        sceneApi?.scene?.traverse?.((object) => {
+          if (object?.isPoints === true && objectVisibleFromRoot(object)) {
+            visiblePointObjects.push(object);
+          }
+        });
+        const rendererBridge = renderBridge?.rendererBridge
+          ?? surfaceDraw?.visibleRendererBridge
+          ?? renderState?.surfaceDrawVisibleRendererBridge
+          ?? null;
+        const visibleRenderSource = renderBridge?.visibleRenderSource
+          ?? surfaceDraw?.visibleRenderSource
+          ?? renderState?.surfaceDrawVisibleRenderSource
+          ?? null;
+        const particleRenderMode = renderBridge?.particleRenderMode
+          ?? surfaceDraw?.renderBridgeParticleRenderMode
+          ?? renderState?.surfaceDrawRenderBridgeParticleRenderMode
+          ?? null;
+        const presentationIdentity = [rendererBridge, visibleRenderSource, particleRenderMode]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        const pointPresentationActive = /render-row-points|three-points|webgpu-points|particle-state-producer/.test(
+          presentationIdentity
+        );
+        const activeSurfaceExecution = renderBridge?.drawState?.surfaceDrawExecution || null;
+        const compactPositionVertexCount = Number(
+          renderBridge?.compactPositionDirectInputVertexCount
+            ?? activeSurfaceExecution?.compactPositionRowsVertexCount
+            ?? activeSurfaceExecution?.sourceVertexRowCount
+        );
+        const surfaceTriangleCount = Array.isArray(renderBridge?.drawState?.surfaces)
+          ? renderBridge.drawState.surfaces.reduce((sum, surface) => (
+              sum + Math.max(0, Number(surface?.triangleCount) || 0)
+            ), 0)
+          : null;
+        const triangleCandidates = [
+          activeSurfaceExecution?.triangleCount,
+          surfaceTriangleCount,
+          Number.isFinite(compactPositionVertexCount)
+            ? Math.floor(compactPositionVertexCount / 3)
+            : null
+        ];
+        const triangleCount = triangleCandidates
+          .filter((value) => value !== null && value !== '')
+          .map((value) => Number(value))
+          .find((value) => Number.isFinite(value) && value >= 0) ?? null;
+        const compactPositionSurfaceGeneration =
+          activeSurfaceExecution?.compactPositionRowsSurfaceGenerationId ?? null;
+        const packedNormalSurfaceGeneration =
+          renderBridge?.externalGpuBufferPackedNormalSurfaceGenerationId
+          ?? renderBridge?.drawState?.packedNormalSurfaceGenerationId
+          ?? activeSurfaceExecution?.compactNormalRowsSurfaceGenerationId
+          ?? null;
+        const packedNormalByteLength = Number(
+          renderBridge?.externalGpuBufferPackedNormalByteLength
+            ?? renderBridge?.drawState?.packedNormalBufferByteLength
+            ?? activeSurfaceExecution?.compactNormalRowsBufferByteLength
+            ?? 0
+        );
+        const packedNormalRowCount = Number(
+          renderBridge?.externalGpuBufferPackedNormalRowCount
+            ?? renderBridge?.drawState?.packedNormalRowCount
+            ?? activeSurfaceExecution?.compactNormalRowsBufferRowCount
+            ?? 0
+        );
+        const packedNormalAdditionalSubmitCount = Number(
+          renderBridge?.externalGpuBufferPackedNormalAdditionalSubmitCount
+            ?? activeSurfaceExecution?.compactNormalRowsAdditionalSubmitCount
+            ?? 0
+        );
+        const opticalTable = renderBridge?.opticalGpuTable
+          || sceneApi.getOpticalGpuTable?.()
+          || sceneUserData.opticalGpuTable
+          || null;
+        const opticalRecordLayout = Array.isArray(opticalTable?.recordLayout)
+          ? opticalTable.recordLayout
+          : [];
+        const opticalRecordStride = Math.max(
+          1,
+          Math.round(Number(opticalTable?.recordStrideFloats) || opticalRecordLayout.length || 1)
+        );
+        const opticalStatusOffset = opticalRecordLayout.findIndex((entry) => (
+          String(entry).split(':')[0] === 'status'
+        ));
+        const opticalAuthorityRecords = Array.isArray(opticalTable?.recordMetadata)
+          ? opticalTable.recordMetadata.filter((record) => {
+              const packedStatus = opticalStatusOffset >= 0
+                ? Number(opticalTable?.records?.[
+                    Number(record?.recordIndex) * opticalRecordStride + opticalStatusOffset
+                  ])
+                : null;
+              return packedStatus === 2
+                && record?.refractiveAuthority === true
+                && Number(record?.refractiveSpectralSampleCount) >= 3
+                && typeof record?.refractiveProvenance?.source === 'string'
+                && record.refractiveProvenance.source.length > 0;
+            })
+          : [];
+        const workerPresentation = sceneUserData.sphWorkerOffscreenPresentation || null;
+        const workerStage = sceneUserData.sphWorkerOffscreenResidentStage || null;
+        const workerStageChain = sceneUserData.sphWorkerOffscreenResidentStageChain || null;
+        const workerStageChainAuto = sceneUserData.sphWorkerOffscreenResidentStageChainAuto || null;
+        const inactiveWorkerStatus = (status) => (
+          !status
+          || /not-requested|disabled|unavailable|idle|not-run|blocked/.test(String(status).toLowerCase())
+        );
+        const workerPresentationActive = Boolean(
+          workerPresentation?.requested === true
+          || workerPresentation?.canvasTransferred === true
+          || workerPresentation?.workerReady === true
+          || !inactiveWorkerStatus(workerPresentation?.status)
+        );
+        const workerResidentStageChainActive = Boolean(
+          workerStageChainAuto?.requested === true
+          || Number(workerStageChain?.stageCount ?? workerStageChainAuto?.stageCount ?? 0) > 0
+          || !inactiveWorkerStatus(workerStage?.status)
+          || !inactiveWorkerStatus(workerStageChain?.status)
+          || !inactiveWorkerStatus(workerStageChainAuto?.status)
+        );
+        const sparseRuntimePool = sceneUserData.sphResidentSparseRenderFieldRuntimePool || null;
+        const compactSparseRuntimePool = sparseRuntimePool ? {
+          schema: sparseRuntimePool.schema ?? null,
+          status: sparseRuntimePool.status ?? null,
+          generationId: sparseRuntimePool.generationId ?? null,
+          reused: sparseRuntimePool.reused ?? null,
+          particleCount: sparseRuntimePool.particleCount ?? null,
+          particleCapacity: sparseRuntimePool.particleCapacity ?? null,
+          particleCapacityHeadroom: sparseRuntimePool.particleCapacityHeadroom ?? null,
+          particleCapacityGrowthCount: sparseRuntimePool.particleCapacityGrowthCount ?? null,
+          productEventCount: sparseRuntimePool.productEventCount ?? null,
+          productEventCapacity: sparseRuntimePool.productEventCapacity ?? null,
+          productEventCapacityHeadroom: sparseRuntimePool.productEventCapacityHeadroom ?? null,
+          productEventCapacityGrowthCount: sparseRuntimePool.productEventCapacityGrowthCount ?? null,
+          retainedByteLength: sparseRuntimePool.retainedByteLength ?? null,
+          peakAllocatedByteLength: sparseRuntimePool.peakAllocatedByteLength ?? null,
+          reuseCount: sparseRuntimePool.reuseCount ?? null,
+          createCount: sparseRuntimePool.createCount ?? null,
+          replaceCount: sparseRuntimePool.replaceCount ?? null,
+          lastReason: sparseRuntimePool.lastReason ?? null
+        } : null;
+        const nativeMainThreadBridge = Boolean(
+          rendererBridge === 'native-webgpu-surface-consumer'
+          && renderBridge?.engineIntegration === 'native-webgpu-engine-main-canvas-no-overlay'
+          && nativeCanvasConnected
+          && nativeCanvas === nativeConsumer?.canvas
+        );
+        return {
+          schema: 'peercompute.ulg.sph-native-surface-presentation-interval.v0',
+          status: nativeMainThreadBridge
+            && connectedCanvases.length === 1
+            && visiblePointObjects.length === 0
+            && !pointPresentationActive
+            && Number(triangleCount) > 0
+            && Boolean(renderBridge?.drawState?.drawIndirectRowsBuffer)
+            && !workerPresentationActive
+            && !workerResidentStageChainActive
+            ? 'native-triangle-presentation-ready'
+            : 'native-triangle-presentation-invalid',
+          connectedCanvasCount: connectedCanvases.length,
+          visibleCanvasCount: visibleCanvases.length,
+          nativeCanvasConnected,
+          nativeCanvasIsOnlyConnectedCanvas: Boolean(
+            nativeCanvasConnected
+            && connectedCanvases.length === 1
+            && connectedCanvases[0] === nativeCanvas
+          ),
+          rendererBridge,
+          visibleRenderSource,
+          engineIntegration: renderBridge?.engineIntegration ?? null,
+          nativeMainThreadBridge,
+          visiblePointsObjectCount: visiblePointObjects.length,
+          visiblePointsObjectNames: visiblePointObjects.slice(0, 8).map((object) => object.name || null),
+          pointPresentationActive,
+          particleRenderMode,
+          triangleCount,
+          triangleCountSource: activeSurfaceExecution?.triangleCount != null
+            && Number.isFinite(Number(activeSurfaceExecution.triangleCount))
+            ? 'active-native-surface-execution'
+            : (surfaceTriangleCount != null && Number.isFinite(Number(surfaceTriangleCount))
+                ? 'active-native-surface-draw-state'
+                : 'active-native-compact-position-rows'),
+          indirectDrawBufferBound: Boolean(renderBridge?.drawState?.drawIndirectRowsBuffer),
+          compactPositionBufferBound: Boolean(
+            renderBridge?.drawState?.surfaceInputBuffer
+              || activeSurfaceExecution?.compactPositionRowsBuffer
+          ),
+          compactPositionBufferByteLength: Number(
+            renderBridge?.compactPositionDirectInputByteLength
+              ?? activeSurfaceExecution?.compactPositionRowsBufferByteLength
+              ?? 0
+          ),
+          compactPositionSurfaceGeneration,
+          packedNormalBufferBound: Boolean(
+            renderBridge?.drawState?.packedNormalBuffer
+              || activeSurfaceExecution?.compactNormalRowsBuffer
+          ),
+          packedNormalBufferByteLength: Number.isFinite(packedNormalByteLength)
+            ? packedNormalByteLength
+            : null,
+          packedNormalRowCount: Number.isFinite(packedNormalRowCount)
+            ? packedNormalRowCount
+            : null,
+          packedNormalSurfaceGeneration,
+          packedNormalGenerationMatchesPosition: Boolean(
+            Number.isFinite(Number(compactPositionSurfaceGeneration))
+            && Number.isFinite(Number(packedNormalSurfaceGeneration))
+            && Number(compactPositionSurfaceGeneration) === Number(packedNormalSurfaceGeneration)
+          ),
+          packedNormalAdditionalSubmitCount: Number.isFinite(packedNormalAdditionalSubmitCount)
+            ? packedNormalAdditionalSubmitCount
+            : null,
+          surfaceAlphaMode: renderBridge?.surfaceAlphaMode ?? null,
+          surfaceBlendEnabled: renderBridge?.surfaceBlendEnabled ?? null,
+          surfaceDepthWriteEnabled: renderBridge?.surfaceDepthWriteEnabled ?? null,
+          transparencyCompositeMode: renderBridge?.transparencyCompositeMode ?? null,
+          oitTargetsReady: renderBridge?.oitTargetsReady ?? null,
+          lastOpaqueDrawCount: renderBridge?.lastOpaqueDrawCount ?? null,
+          lastRefractiveDrawCount: renderBridge?.lastRefractiveDrawCount ?? null,
+          lastTransparentDrawCount: renderBridge?.lastTransparentDrawCount ?? null,
+          quantumSpectralRefractionRequired:
+            renderBridge?.quantumSpectralRefractionRequired ?? null,
+          opticalRecordCount: renderBridge?.opticalRecordCount ?? null,
+          opticalSpectralSampleCount: renderBridge?.opticalSpectralSampleCount ?? null,
+          opticalQuantumRefractiveAuthorityRecordCount: opticalAuthorityRecords.length,
+          opticalQuantumRefractiveSpectralSampleCount: opticalAuthorityRecords.reduce((sum, record) => (
+            sum + Math.max(0, Number(record.refractiveSpectralSampleCount) || 0)
+          ), 0),
+          opticalQuantumRefractiveProvenanceSources: [...new Set(opticalAuthorityRecords
+            .map((record) => record.refractiveProvenance?.source)
+            .filter(Boolean))],
+          refractionBackfaceStatus: renderBridge?.refractionBackfaceStatus ?? null,
+          refractionBackfaceDepthFormat: renderBridge?.refractionBackfaceDepthFormat ?? null,
+          refractionBackfaceByteLength: renderBridge?.refractionBackfaceByteLength ?? null,
+          refractionBackfaceCacheHit: renderBridge?.lastRefractionBackfaceCacheHit ?? null,
+          refractionBackfacePassDrawCount:
+            renderBridge?.lastRefractionBackfacePassDrawCount ?? null,
+          refractionBackfaceAdditionalSubmitCount:
+            renderBridge?.refractionBackfaceAdditionalSubmitCount ?? null,
+          refractionTargetSetActive: Boolean(renderBridge?.refractionTargetSet),
+          refractionTargetGeneration: renderBridge?.refractionTargetGeneration ?? null,
+          refractionTargetWidth: renderBridge?.refractionTargetSet?.width ?? 0,
+          refractionTargetHeight: renderBridge?.refractionTargetSet?.height ?? 0,
+          refractionTargetLifecycleStatus: renderBridge?.refractionTargetLifecycleStatus ?? null,
+          refractionTargetRetirementPendingCount:
+            renderBridge?.refractionTargetRetirementPendingCount ?? 0,
+          refractionTargetRetirementCount: renderBridge?.refractionTargetRetirementCount ?? 0,
+          sceneBackgroundImageUrl: sceneUserData.sphSceneBackgroundImage?.url ?? null,
+          backgroundImageGpuStatus: renderBridge?.backgroundImageGpuStatus ?? null,
+          backgroundImageDrawn: renderBridge?.lastBackgroundImageDrawn ?? null,
+          backgroundImageDrawCount: renderBridge?.backgroundImageDrawCount ?? null,
+          backgroundImageTextureWidth: renderBridge?.backgroundImageTextureWidth ?? null,
+          backgroundImageTextureHeight: renderBridge?.backgroundImageTextureHeight ?? null,
+          nativeSurfaceConsumerFramePacing:
+            renderBridge?.nativeSurfaceConsumerFramePacing ?? null,
+          nativeSurfaceConsumerInFlightSubmitCount:
+            renderBridge?.nativeSurfaceConsumerInFlightSubmitCount ?? null,
+          nativeSurfaceConsumerInFlightSubmitPeak:
+            renderBridge?.nativeSurfaceConsumerInFlightSubmitPeak ?? null,
+          nativeSurfaceConsumerMaxInFlightSubmits:
+            renderBridge?.nativeSurfaceConsumerMaxInFlightSubmits ?? null,
+          nativeSurfacePresentationOwner:
+            renderBridge?.nativeSurfacePresentationOwner ?? null,
+          nativeSurfacePresentationSerial:
+            renderBridge?.nativeSurfacePresentationSerial ?? null,
+          nativeSurfaceFrameCount:
+            renderBridge?.frameCount ?? null,
+          nativeSurfaceCurrentTextureAcquisitionSerial:
+            renderBridge?.nativeSurfaceCurrentTextureAcquisitionSerial ?? null,
+          nativeSurfaceCurrentTexturePresentationSerial:
+            renderBridge?.lastNativeSurfaceCurrentTexturePresentationSerial ?? null,
+          nativeSurfaceCurrentTextureOwner:
+            renderBridge?.lastNativeSurfaceCurrentTextureOwner ?? null,
+          nativeSurfaceCurrentTextureAcquisitionsPerPresentation:
+            renderBridge?.nativeSurfaceCurrentTextureAcquisitionsPerPresentation ?? null,
+          nativeSurfaceResourceGeneration:
+            renderBridge?.activeSurfaceResourceOwner?.generation
+            ?? renderBridge?.nativeSurfaceResourceGeneration
+            ?? null,
+          sourceResidentExecutionGeneration:
+            renderBridge?.sourceResidentExecutionGeneration
+            ?? surfaceDraw?.sourceResidentExecutionGeneration
+            ?? renderState?.sourceResidentExecutionGeneration
+            ?? null,
+          sourceResidentNextStep:
+            renderBridge?.sourceResidentNextStep
+            ?? surfaceDraw?.sourceResidentNextStep
+            ?? renderState?.sourceResidentNextStep
+            ?? null,
+          sourceResidentNextTimeS:
+            finiteOrNull(
+              renderBridge?.sourceResidentNextTimeS
+              ?? surfaceDraw?.sourceResidentNextTimeS
+              ?? renderState?.sourceResidentNextTimeS
+            ),
+          workerPresentationAbsent: !workerPresentationActive,
+          workerPresentationStatus: workerPresentation?.status ?? null,
+          workerPresentationRequested: workerPresentation?.requested ?? null,
+          workerPresentationCanvasTransferred: workerPresentation?.canvasTransferred ?? null,
+          workerResidentStageChainAbsent: !workerResidentStageChainActive,
+          workerResidentStageStatus: workerStage?.status ?? null,
+          workerResidentStageChainStatus: workerStageChain?.status ?? null,
+          workerResidentStageChainAutoStatus: workerStageChainAuto?.status ?? null,
+          sparseRuntimePool: compactSparseRuntimePool,
+          marchingCubes: {
+            extractionAllowed: renderState?.surfaceDrawNativeMarchingCubesExtractionAllowed ?? null,
+            extractionStatus: renderState?.surfaceDrawNativeMarchingCubesExtractionStatus ?? null,
+            extractionReason: renderState?.surfaceDrawNativeMarchingCubesExtractionReason ?? null,
+            extractionElapsedMs: renderState?.surfaceDrawNativeMarchingCubesExtractionElapsedMs ?? null,
+            extensionExecutionElapsedMs:
+              renderState?.surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs ?? null,
+            totalElapsedMs: renderState?.surfaceDrawNativeMarchingCubesTotalElapsedMs ?? null,
+            cacheStatus: renderState?.surfaceDrawNativeMarchingCubesAdapterCacheStatus ?? null,
+            cacheReason: renderState?.surfaceDrawNativeMarchingCubesAdapterCacheReason ?? null,
+            cacheHit: renderState?.surfaceDrawNativeMarchingCubesAdapterCacheHit ?? null,
+            cacheEntryCount: renderState?.surfaceDrawNativeMarchingCubesAdapterCacheEntryCount ?? null,
+            cacheHitCount: renderState?.surfaceDrawNativeMarchingCubesAdapterCacheHitCount ?? null,
+            cacheMissCount: renderState?.surfaceDrawNativeMarchingCubesAdapterCacheMissCount ?? null,
+            cacheReleaseCount: renderState?.surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount ?? null
+          }
+        };
+      };
       const sample = (batchIndex, phase, batchMs = null) => {
         const steps = sceneApi.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || execution || null;
         const residentStep = sceneApi.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || steps?.finalStep || null;
@@ -3155,8 +3526,13 @@ async function runBrowserProbe({
             workerOffscreenRetainedCompactSnapshot:
               sceneUserData.sphWorkerOffscreenRetainedCompactSnapshot || null,
 		        residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
-        residentWebGpuDeviceTextureReadbackSmoke:
-          sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
+          residentWebGpuDeviceTextureReadbackSmoke:
+            sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
+        nativeSurfacePresentation: nativeSurfacePresentationSnapshot({
+          renderState,
+          surfaceDraw,
+          sceneUserData
+        }),
         nativeSurfaceValidation: nativeSurfaceValidationSnapshot(),
         schroederTelemetry: compactSchroederTelemetry({
           steps,
@@ -3651,6 +4027,12 @@ async function runBrowserProbe({
               renderState.surfaceDrawNativeMarchingCubesAdapterCacheMissCount ?? null,
             surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount:
               renderState.surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount ?? null,
+            surfaceDrawAdditionalNativeSurfaceExtractionMode:
+              renderState.surfaceDrawAdditionalNativeSurfaceExtractionMode ?? null,
+            surfaceDrawAdditionalNativeSurfaceExtractionJobCount:
+              renderState.surfaceDrawAdditionalNativeSurfaceExtractionJobCount ?? 0,
+            surfaceDrawAdditionalNativeSurfaceDrawCount:
+              renderState.surfaceDrawAdditionalNativeSurfaceDrawCount ?? 0,
             surfaceDrawExtensionSurfaceTranslationElapsedMs:
               renderState.surfaceDrawExtensionSurfaceTranslationElapsedMs ?? null,
             surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus:
@@ -6757,7 +7139,359 @@ async function runDirectResidentProbe({
   }
 }
 
-function analyzeTimeline(timeline, {
+export function nativeSurfacePresentationSequenceGate(timeline) {
+  const finiteEvidenceNumber = (value) => (
+    value !== null
+    && value !== ''
+    && Number.isFinite(Number(value))
+  );
+  const requestedMode = String(timeline?.surfaceDrawDiagnosticMode || '').toLowerCase();
+  if (requestedMode !== NATIVE_SURFACE_PRESENTATION_MODE) {
+    return {
+      schema: 'peercompute.ulg.sph-native-surface-presentation-sequence-gate.v0',
+      status: 'not-requested',
+      requestedMode,
+      intervalCount: 0,
+      extractionIntervalCount: 0,
+      blockers: [],
+      intervals: []
+    };
+  }
+
+  const metrics = Array.isArray(timeline?.metrics) ? timeline.metrics : [];
+  const intervals = metrics.map((metric, sampleIndex) => ({
+    sampleIndex,
+    batchIndex: metric?.batchIndex ?? null,
+    phase: metric?.phase ?? null,
+    ...(metric?.nativeSurfacePresentation || {})
+  }));
+  const blockers = new Set();
+  if (intervals.length < 2) blockers.add('native-surface-interval-evidence-insufficient');
+
+  const completeIntervals = intervals.filter((interval) => (
+    interval?.schema === 'peercompute.ulg.sph-native-surface-presentation-interval.v0'
+  ));
+  if (completeIntervals.length !== intervals.length || intervals.length === 0) {
+    blockers.add('native-surface-presentation-evidence-incomplete');
+  }
+
+  for (const interval of completeIntervals) {
+    if (Number(interval.connectedCanvasCount) !== 1 || interval.nativeCanvasIsOnlyConnectedCanvas !== true) {
+      blockers.add('native-surface-connected-canvas-count-not-one');
+    }
+    if (
+      Number(interval.visiblePointsObjectCount) !== 0
+      || interval.pointPresentationActive !== false
+    ) {
+      blockers.add('native-surface-points-visible');
+    }
+    if (
+      interval.rendererBridge !== NATIVE_SURFACE_PRESENTATION_MODE
+      || interval.nativeMainThreadBridge !== true
+      || interval.nativeCanvasConnected !== true
+    ) {
+      blockers.add('native-surface-main-thread-bridge-not-active');
+    }
+    if (!(Number(interval.triangleCount) > 0) || interval.indirectDrawBufferBound !== true) {
+      blockers.add('native-surface-triangle-presentation-missing');
+    }
+    if (
+      interval.compactPositionBufferBound !== true
+      || !(Number(interval.compactPositionBufferByteLength) > 0)
+      || interval.packedNormalBufferBound !== true
+      || !(Number(interval.packedNormalBufferByteLength) > 0)
+      || Number(interval.packedNormalRowCount) < Number(interval.triangleCount) * 3
+    ) {
+      blockers.add('native-surface-packed-normal-prefix-missing');
+    }
+    if (
+      interval.packedNormalGenerationMatchesPosition !== true
+      || Number(interval.packedNormalAdditionalSubmitCount) !== 0
+    ) {
+      blockers.add('native-surface-packed-normal-generation-invalid');
+    }
+    if (
+      interval.surfaceAlphaMode !== 'opaque'
+      || interval.surfaceBlendEnabled !== false
+      || interval.surfaceDepthWriteEnabled !== true
+      || interval.transparencyCompositeMode !== 'disabled-opaque-pbr'
+      || interval.oitTargetsReady !== false
+      || Number(interval.lastTransparentDrawCount) !== 0
+    ) {
+      blockers.add('native-surface-opaque-pbr-contract-invalid');
+    }
+    if (
+      Number(interval.lastRefractiveDrawCount) > 0
+      && (
+        interval.quantumSpectralRefractionRequired !== true
+        || !(Number(interval.opticalQuantumRefractiveAuthorityRecordCount) > 0)
+        || !(Number(interval.opticalQuantumRefractiveSpectralSampleCount) >= 3)
+        || !Array.isArray(interval.opticalQuantumRefractiveProvenanceSources)
+        || interval.opticalQuantumRefractiveProvenanceSources.length === 0
+      )
+    ) {
+      blockers.add('native-surface-quantum-refraction-authority-missing');
+    }
+    if (
+      Number(interval.lastRefractiveDrawCount) > 0
+      && (
+        ![
+          'native-refractive-backface-depth-rendered',
+          'native-refractive-backface-depth-cache-hit'
+        ].includes(interval.refractionBackfaceStatus)
+        || interval.refractionBackfaceDepthFormat !== 'depth32float'
+        || !(Number(interval.refractionBackfaceByteLength) > 0)
+        || interval.refractionTargetSetActive !== true
+        || !(Number(interval.refractionTargetWidth) > 1)
+        || !(Number(interval.refractionTargetHeight) > 1)
+        || (
+          interval.refractionBackfaceCacheHit !== true
+          && !(Number(interval.refractionBackfacePassDrawCount) > 0)
+        )
+        || Number(interval.refractionBackfaceAdditionalSubmitCount) !== 0
+      )
+    ) {
+      blockers.add('native-surface-geometric-refraction-thickness-missing');
+    }
+    if (
+      Number(interval.lastRefractiveDrawCount) === 0
+      && (
+        interval.refractionBackfaceStatus
+          !== 'native-refractive-backface-depth-not-required'
+        || Number(interval.refractionBackfaceByteLength) !== 0
+        || interval.refractionBackfaceCacheHit !== false
+        || Number(interval.refractionBackfacePassDrawCount) !== 0
+        || interval.refractionTargetSetActive !== false
+        || Number(interval.refractionTargetWidth) !== 0
+        || Number(interval.refractionTargetHeight) !== 0
+      )
+    ) {
+      blockers.add('native-surface-opaque-refraction-target-allocation');
+    }
+    if (
+      interval.nativeSurfaceConsumerFramePacing !== 'bounded-in-flight-submissions'
+      || !(Number(interval.nativeSurfaceConsumerMaxInFlightSubmits) >= 2)
+      || Number(interval.nativeSurfaceConsumerInFlightSubmitCount)
+        > Number(interval.nativeSurfaceConsumerMaxInFlightSubmits)
+      || Number(interval.nativeSurfaceConsumerInFlightSubmitPeak)
+        > Number(interval.nativeSurfaceConsumerMaxInFlightSubmits)
+    ) {
+      blockers.add('native-surface-frame-pacing-invalid');
+    }
+    if (
+      interval.sceneBackgroundImageUrl
+      && (
+        interval.backgroundImageGpuStatus !== 'native-opaque-background-image-rendered'
+        || interval.backgroundImageDrawn !== true
+        || !(Number(interval.backgroundImageDrawCount) > 0)
+        || !(Number(interval.backgroundImageTextureWidth) > 0)
+        || !(Number(interval.backgroundImageTextureHeight) > 0)
+      )
+    ) {
+      blockers.add('native-surface-opaque-background-image-missing');
+    }
+    if (interval.workerPresentationAbsent !== true) {
+      blockers.add('native-surface-worker-presentation-active');
+    }
+    if (interval.workerResidentStageChainAbsent !== true) {
+      blockers.add('native-surface-worker-stage-chain-active');
+    }
+
+    const pool = interval.sparseRuntimePool;
+    if (
+      !pool
+      || !finiteEvidenceNumber(pool.generationId)
+      || typeof pool.status !== 'string'
+      || typeof pool.reused !== 'boolean'
+      || !finiteEvidenceNumber(pool.createCount)
+      || !finiteEvidenceNumber(pool.replaceCount)
+      || !finiteEvidenceNumber(pool.reuseCount)
+    ) {
+      blockers.add('native-surface-sparse-runtime-pool-evidence-incomplete');
+    }
+  }
+
+  const poolRows = completeIntervals
+    .map((interval) => interval.sparseRuntimePool)
+    .filter(Boolean);
+  const poolGenerationIds = [...new Set(poolRows
+    .map((pool) => pool.generationId)
+    .filter(finiteEvidenceNumber)
+    .map(Number))];
+  const maxPoolReplaceCount = poolRows.length
+    ? Math.max(...poolRows.map((pool) => Number(pool.replaceCount) || 0))
+    : null;
+  const poolReuseObserved = poolRows.some((pool) => pool.reused === true);
+  if (poolGenerationIds.length > 1 || Number(maxPoolReplaceCount) > 0) {
+    blockers.add('native-surface-sparse-runtime-pool-replaced');
+  }
+  if (completeIntervals.length > 1 && !poolReuseObserved) {
+    blockers.add('native-surface-sparse-runtime-pool-reuse-missing');
+  }
+
+  const extractionIntervals = completeIntervals.filter((interval) => (
+    interval.marchingCubes?.extractionAllowed === true
+  ));
+  if (extractionIntervals.length < 2) {
+    blockers.add('native-surface-marching-cubes-interval-evidence-insufficient');
+  }
+  for (const interval of extractionIntervals) {
+    const marchingCubes = interval.marchingCubes || {};
+    if (
+      typeof marchingCubes.extractionStatus !== 'string'
+      || !finiteEvidenceNumber(marchingCubes.extractionElapsedMs)
+      || !finiteEvidenceNumber(marchingCubes.totalElapsedMs)
+      || typeof marchingCubes.cacheStatus !== 'string'
+      || typeof marchingCubes.cacheHit !== 'boolean'
+      || !finiteEvidenceNumber(marchingCubes.cacheHitCount)
+      || !finiteEvidenceNumber(marchingCubes.cacheMissCount)
+      || !finiteEvidenceNumber(marchingCubes.cacheReleaseCount)
+    ) {
+      blockers.add('native-surface-marching-cubes-evidence-incomplete');
+    }
+  }
+
+  const firstExtraction = extractionIntervals[0]?.marchingCubes || null;
+  const finalExtraction = extractionIntervals.at(-1)?.marchingCubes || null;
+  const cacheMissDelta = firstExtraction && finalExtraction
+    && finiteEvidenceNumber(firstExtraction.cacheMissCount)
+    && finiteEvidenceNumber(finalExtraction.cacheMissCount)
+    ? Number(finalExtraction.cacheMissCount) - Number(firstExtraction.cacheMissCount)
+    : null;
+  const cacheReleaseDelta = firstExtraction && finalExtraction
+    && finiteEvidenceNumber(firstExtraction.cacheReleaseCount)
+    && finiteEvidenceNumber(finalExtraction.cacheReleaseCount)
+    ? Number(finalExtraction.cacheReleaseCount) - Number(firstExtraction.cacheReleaseCount)
+    : null;
+  if (Number.isFinite(cacheMissDelta) && cacheMissDelta > 0) {
+    blockers.add('native-surface-marching-cubes-cache-miss-increased');
+  }
+  if (Number.isFinite(cacheReleaseDelta) && cacheReleaseDelta > 0) {
+    blockers.add('native-surface-marching-cubes-cache-release-increased');
+  }
+  if (finalExtraction && finalExtraction.cacheHit !== true) {
+    blockers.add('native-surface-final-marching-cubes-cache-hit-missing');
+  }
+
+  const frameCaptureEnabled = timeline?.visualFrameCapture?.enabled === true;
+  const visualFrames = Array.isArray(timeline?.visualFrames) ? timeline.visualFrames : [];
+  const capturedFrames = visualFrames.filter((frame) => frame?.status === 'captured');
+  const frameContributionFailures = [];
+  if (frameCaptureEnabled && capturedFrames.length === 0) {
+    blockers.add('native-surface-captured-frame-evidence-missing');
+  }
+  if (frameCaptureEnabled && visualFrames.some((frame) => frame?.status !== 'captured')) {
+    blockers.add('native-surface-frame-capture-incomplete');
+  }
+  if (frameCaptureEnabled) {
+    for (const frame of capturedFrames) {
+      const sampleIndex = Number(frame?.sampleIndex);
+      const interval = Number.isInteger(sampleIndex) && sampleIndex >= 0
+        ? intervals[sampleIndex]
+        : null;
+      const reasons = [];
+      if (interval?.schema !== 'peercompute.ulg.sph-native-surface-presentation-interval.v0') {
+        reasons.push('native-interval-telemetry-missing');
+      } else {
+        const surfaceDrawCount = Math.max(0, Number(interval.lastOpaqueDrawCount) || 0)
+          + Math.max(0, Number(interval.lastRefractiveDrawCount) || 0);
+        if (
+          interval.status !== 'native-triangle-presentation-ready'
+          || interval.rendererBridge !== NATIVE_SURFACE_PRESENTATION_MODE
+          || !(Number(interval.triangleCount) > 0)
+          || surfaceDrawCount <= 0
+          || interval.indirectDrawBufferBound !== true
+        ) {
+          reasons.push('native-surface-contribution-missing');
+        }
+        if (
+          interval.packedNormalGenerationMatchesPosition !== true
+          || !finiteEvidenceNumber(interval.nativeSurfaceResourceGeneration)
+        ) {
+          reasons.push('native-surface-generation-or-normal-evidence-missing');
+        }
+        if (
+          interval.nativeSurfacePresentationOwner
+            !== 'native-webgpu-surface-consumer-scheduler'
+          || !(Number(interval.nativeSurfacePresentationSerial) > 0)
+          || !(Number(interval.nativeSurfaceFrameCount) > 0)
+          || Number(interval.nativeSurfaceCurrentTexturePresentationSerial)
+            !== Number(interval.nativeSurfacePresentationSerial)
+          || interval.nativeSurfaceCurrentTextureOwner
+            !== 'native-webgpu-surface-consumer-scheduler'
+          || Number(interval.nativeSurfaceCurrentTextureAcquisitionsPerPresentation) !== 1
+        ) {
+          reasons.push('native-surface-presentation-ownership-mismatch');
+        }
+      }
+      if (
+        frame?.png?.status !== 'ready'
+        || frame?.png?.hasVisiblePixels !== true
+        || frame?.png?.hasSurfaceLikeVariation !== true
+      ) {
+        reasons.push('captured-frame-surface-variation-missing');
+      }
+      if (reasons.length > 0) {
+        frameContributionFailures.push({
+          frameIndex: frame?.index ?? null,
+          sampleIndex: Number.isInteger(sampleIndex) ? sampleIndex : null,
+          batchIndex: frame?.batchIndex ?? null,
+          phase: frame?.phase ?? null,
+          captureSource: frame?.captureSource ?? null,
+          reasons
+        });
+      }
+    }
+    if (frameContributionFailures.some((failure) => (
+      failure.reasons.includes('native-interval-telemetry-missing')
+    ))) blockers.add('native-surface-captured-frame-telemetry-missing');
+    if (frameContributionFailures.some((failure) => (
+      failure.reasons.includes('native-surface-contribution-missing')
+    ))) blockers.add('native-surface-captured-frame-contribution-missing');
+    if (frameContributionFailures.some((failure) => (
+      failure.reasons.includes('native-surface-generation-or-normal-evidence-missing')
+    ))) blockers.add('native-surface-captured-frame-generation-invalid');
+    if (frameContributionFailures.some((failure) => (
+      failure.reasons.includes('native-surface-presentation-ownership-mismatch')
+    ))) blockers.add('native-surface-captured-frame-presentation-mismatch');
+    if (frameContributionFailures.some((failure) => (
+      failure.reasons.includes('captured-frame-surface-variation-missing')
+    ))) blockers.add('native-surface-captured-frame-variation-missing');
+  }
+
+  return {
+    schema: 'peercompute.ulg.sph-native-surface-presentation-sequence-gate.v0',
+    status: blockers.size === 0 ? 'pass' : 'fail',
+    requestedMode,
+    intervalCount: intervals.length,
+    completeIntervalCount: completeIntervals.length,
+    extractionIntervalCount: extractionIntervals.length,
+    frameCaptureEnabled,
+    visualFrameCount: visualFrames.length,
+    capturedFrameCount: capturedFrames.length,
+    frameContributionFailureCount: frameContributionFailures.length,
+    frameContributionFailures,
+    poolGenerationIds,
+    maxPoolReplaceCount,
+    poolReuseObserved,
+    cacheMissDelta: Number.isFinite(cacheMissDelta) ? cacheMissDelta : null,
+    cacheReleaseDelta: Number.isFinite(cacheReleaseDelta) ? cacheReleaseDelta : null,
+    extractionElapsedMsSeries: extractionIntervals.map((interval) => (
+      finiteEvidenceNumber(interval.marchingCubes?.extractionElapsedMs)
+        ? Number(interval.marchingCubes.extractionElapsedMs)
+        : null
+    )),
+    totalExtractionElapsedMsSeries: extractionIntervals.map((interval) => (
+      finiteEvidenceNumber(interval.marchingCubes?.totalElapsedMs)
+        ? Number(interval.marchingCubes.totalElapsedMs)
+        : null
+    )),
+    blockers: [...blockers],
+    intervals
+  };
+}
+
+export function analyzeTimeline(timeline, {
   maxSpeedMPerS,
   minVolumeRatioJ,
   maxVolumeRatioJ,
@@ -7752,8 +8486,8 @@ function analyzeTimeline(timeline, {
   let lastH2oLiquidSurfaceTallnessRatio = null;
   let lastH2oLiquidSurfaceFootprintFillRatio = null;
   if (!directResident && !residentSurfaceBufferHandoffAccepted) {
-    const alphaTransparentRenderLayers = new Set(['vapor-surface', 'alpha-surface']);
-    const knownSurfaceRenderLayers = new Set(['opaque-surface', 'transmissive-surface', ...alphaTransparentRenderLayers]);
+    const forbiddenAlphaRenderLayers = new Set(['vapor-surface', 'alpha-surface']);
+    const knownSurfaceRenderLayers = new Set(['opaque-surface', 'refractive-surface']);
     const pushRenderVisualIssue = (issue, metricIndex, surface, extra = {}) => {
       visualSurfaceIssues.push({
         issue,
@@ -7969,24 +8703,12 @@ function analyzeTimeline(timeline, {
         if (surface.materialDepthTest === false) {
           pushRenderVisualIssue('render-surface-depth-test-disabled', metricIndex, surface);
         }
-        const alphaTransparentSurface = alphaTransparentRenderLayers.has(renderLayer)
+        const alphaTransparentSurface = forbiddenAlphaRenderLayers.has(renderLayer)
           || surface.materialDepthWrite === false
           || surface.materialTransparent === true;
         if (alphaTransparentSurface) {
-          if (surface.materialDepthWrite !== false) {
-            pushRenderVisualIssue('render-transparent-surface-depth-write-enabled', metricIndex, surface);
-          }
-          if (surface.renderOrderPolicy !== 'three-transparent-depth-sort-within-layer') {
-            pushRenderVisualIssue('render-transparent-surface-not-depth-sortable', metricIndex, surface);
-          }
-          if (
-            Number.isFinite(renderOrder)
-            && Number.isFinite(renderOrderBase)
-            && Math.abs(renderOrder - renderOrderBase) > 1e-9
-          ) {
-            pushRenderVisualIssue('render-transparent-surface-hashed-render-order', metricIndex, surface);
-          }
-        } else if (renderLayer === 'opaque-surface' || renderLayer === 'transmissive-surface') {
+          pushRenderVisualIssue('render-alpha-transparency-enabled', metricIndex, surface);
+        } else if (knownSurfaceRenderLayers.has(renderLayer)) {
           if (surface.materialDepthWrite !== true) {
             pushRenderVisualIssue('render-opaque-surface-depth-write-disabled', metricIndex, surface);
           }
@@ -8086,6 +8808,10 @@ function analyzeTimeline(timeline, {
     });
   }
   const issues = [];
+  const nativeSurfacePresentationGate = nativeSurfacePresentationSequenceGate(timeline);
+  if (nativeSurfacePresentationGate.status === 'fail') {
+    issues.push(...nativeSurfacePresentationGate.blockers);
+  }
   if (timeline?.status !== 'complete') issues.push(`probe-status:${timeline?.status || 'missing'}`);
   if (authoritativeGpuCheckpointCapacityOverflowCount > 0) {
     issues.push('authoritative-gpu-checkpoint-capacity-overflow');
@@ -8379,6 +9105,7 @@ function analyzeTimeline(timeline, {
     browserConsoleWarningCounts,
     browserConsoleIssueCount: Object.values(browserConsoleIssueCounts).reduce((sum, count) => sum + Number(count || 0), 0),
     browserConsoleWarningCount: Object.values(browserConsoleWarningCounts).reduce((sum, count) => sum + Number(count || 0), 0),
+    nativeSurfacePresentationGate,
     initialPreflightStatus: initialPreflight?.status ?? null,
     initialPreflightBlockers,
     maxSpeedObservedMPerS,
@@ -8860,7 +9587,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exitCode = 2;
-});
+const invokedAsScript = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (invokedAsScript) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exitCode = 2;
+  });
+}

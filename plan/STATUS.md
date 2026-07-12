@@ -1,4 +1,40 @@
-# Audit status - 2026-07-10 18:13 AKDT
+# Audit Status - 2026-07-11 GPU-Resident Refactor
+
+Branch `gpu-resident-physics-refactor`, committed HEAD `b4d1a38` plus the
+current worktree. The branch is materially improved but not complete.
+
+- Native presentation is one triangle-surface canvas with packed generation-
+  owned normals, zero visible point fallback, alpha-one unblended depth-writing
+  PBR, and a restored native opaque background pass.
+- A bounded two-in-flight presentation window replaced the per-frame whole-
+  queue fence. The accepted thickness-aware route measures 60.296 FPS; the
+  pre-fix path measured about 29.5 FPS.
+- Refraction requires an exact, nonblocked, provenance-bearing blue/green/red
+  spectral record. A same-encoder `depth32float` backface pass supplies
+  geometric thickness and adds no submit; invalid rear geometry fails closed.
+- The current molecular response is reduced and scientifically unvalidated:
+  STO-3G RHF independent-particle dipole response plus Lorentz-Lorenz, not a
+  complete first-principles dielectric solution.
+- Accepted visual checkpoints are `/tmp/ulg-background-native-after2.png` and
+  `/tmp/ulg-thickness-refraction-live2.png`. They do not substitute for the
+  still-missing manufactured thickness/metamorphic and fresh standard matrix
+  gates.
+- The 300k resident reaction path removed 192,000,000 bytes/substep of host
+  zero initialization/upload. Warm reactive physics remains about 48-52
+  ms/substep.
+- P0 remains parallel product carrier/placement work and elimination of
+  redundant 40-radix-pass neighborhood generations. P1 remains exact live-
+  prefix indirect dispatch, retained thermal indexes, and persistent stage
+  workspaces.
+- Do not introduce a CPU mirror/reference solver or CPU parity gate. Final
+  acceptance uses GPU manufactured states, invariants, metamorphic same-device
+  executions, fixed-size reductions, and close-spaced native visual sequences.
+
+`SURF-4`, `OPTICS-0`, `OPTICS-1`, `NEIGH-0`, `LANE-0`, `SS-0`, and the overall
+refactor remain open until their declared validation and production-integration
+gates pass.
+
+## Historical Audit Status - 2026-07-10 18:13 AKDT
 
 Branch `SS`, reviewed at `d5319c2` plus the standard-scenario audit slice.
 

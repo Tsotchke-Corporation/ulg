@@ -5,11 +5,10 @@ import {
   SPH_PHASE_RENDER_MODE,
   SPH_PHASE_RENDER_ORDER,
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
+  SPH_NATIVE_WEBGPU_BACKGROUND_WGSL,
+  SPH_NATIVE_WEBGPU_SURFACE_MAX_IN_FLIGHT_SUBMITS,
   SPH_SCENE_MAX_DEVICE_PIXEL_RATIO,
   SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-  SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-  SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL,
-  SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH,
   SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL,
@@ -63,6 +62,8 @@ import {
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphSceneBackgroundColorHex,
+  nativeSurfaceBackgroundCoverScale,
+  nativeSurfaceConsumerFrameAdmission,
   normalizeSphRendererBackend,
   resolveThreeWebGpuPresentationPolicy,
   createThreeWebGpuExternalInterleavedBufferAttribute,
@@ -82,10 +83,13 @@ import {
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
   submitSceneGasCellEosProducerStageForPressureInterface,
   residentSurfaceBatchIdentitySignature,
+  renderDomainPositionBoundsFromPositions,
+  opticalParamsFromGpuTableRecord,
   residentRenderFieldReadbackModeForSurfaceOverlay,
   resolveResidentSurfaceDrawOverlayPolicy,
   renderAlphaFromOpticalResponse,
   renderDepthWriteFromOpticalResponse,
+  hasAdmittedQuantumRefraction,
   renderLayerFromOpticalResponse,
   renderOrderFromOpticalResponse,
   resolveSphSurfaceRendererMaterialPolicy,
@@ -112,16 +116,80 @@ import {
   stabilizeSurfaceMeshMaterialForRenderer,
   createThreeWebGpuResidentBridgeMaterialProxy,
   estimateNativeMarchingCubesVertexRowsByteLengthForResolution,
+  nativeMarchingCubesDescriptorResourceBuffers,
+  nativeMarchingCubesDescriptorSignature,
+  extractNativeMarchingCubesSurfaceBatch,
+  settleNativeMarchingCubesExtractionJobs,
   nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget,
   nativeMarchingCubesVertexRowsBudgetPerSurface,
+  packedNormalRowsCoverCompactPositionPrefix,
+  createSphReactionStaticTableSceneUploadOwner,
+  sphReactionStaticTableStepOptions,
+  residentStepsPublicationFreshness,
   workerResidentParticleStateProducerSourceCacheDescriptor
 } from '../src/visualization/sphPhaseScene.js';
+
+test('render-domain position bounds account for reserved product slots', () => {
+  const positionsM = new Float32Array(171 * 3);
+  for (let index = 0; index < 171; index += 1) {
+    positionsM[index * 3] = index;
+    positionsM[index * 3 + 1] = 1;
+    positionsM[index * 3 + 2] = 2;
+  }
+  const result = renderDomainPositionBoundsFromPositions(positionsM, {
+    base: 125,
+    drop: 27,
+    spareProductSlots: 19,
+    total: 171
+  });
+  assert.equal(result.status, 'render-domain-position-bounds-ready');
+  assert.equal(result.expectedTotal, 171);
+  assert.equal(result.base.count, 125);
+  assert.equal(result.drop.count, 27);
+  assert.equal(result.renderDomainCounts.spareProductSlots, 19);
+});
+
+test('resident steps publication compares one complete submitted signature', () => {
+  assert.deepEqual(residentStepsPublicationFreshness({
+    running: true,
+    executionGeneration: 7,
+    currentExecutionGeneration: 7,
+    submittedSignature: 'queue-fence=none|authority=9',
+    currentSignature: 'queue-fence=none|authority=9'
+  }), {
+    fresh: true,
+    reason: 'resident-execution-publication-current'
+  });
+  assert.equal(residentStepsPublicationFreshness({
+    running: true,
+    executionGeneration: 7,
+    currentExecutionGeneration: 7,
+    submittedSignature: 'queue-fence=same-device|authority=9',
+    currentSignature: 'queue-fence=legacy|authority=9'
+  }).reason, 'resident-execution-input-signature-changed');
+  assert.equal(residentStepsPublicationFreshness({
+    running: true,
+    executionGeneration: 7,
+    currentExecutionGeneration: 8,
+    submittedSignature: 'stable',
+    currentSignature: 'stable'
+  }).reason, 'resident-execution-generation-advanced');
+});
 import {
   GPU_PHASE_IDS,
   OPTICAL_GPU_RECORD_LAYOUT,
   stableOpticalMaterialId
 } from '../src/runtime/material/opticalGpuBuffers.js';
-import { residentMotionDiagnostic } from '../src/visualization/sphPhaseDemoMount.js';
+import {
+  residentCompactMotionProofWarningRequired,
+  residentHotLoopReadbackWarningRequired,
+  residentPressureSingleStepCadenceReasonForCapability,
+  residentSequenceAuthorityEpochForSchedule,
+  residentStaleExecutionRetryDecision,
+  residentMotionDiagnostic,
+  residentPressureSourceFieldReadyForParticleState,
+  residentPressureSourceParticleState
+} from '../src/visualization/sphPhaseDemoMount.js';
 import { createMlsMpmGridSpec } from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
@@ -147,6 +215,105 @@ function opticalRecordField(table, record, fieldName) {
   assert.ok(fieldIndex >= 0, `missing optical record field ${fieldName}`);
   return table.records[(record.recordIndex * table.recordStrideFloats) + fieldIndex];
 }
+
+test('scene reaction static table owner reuses exact keys and destroys before thermal replacement', () => {
+  const events = [];
+  let nextUploadId = 1;
+  const owner = createSphReactionStaticTableSceneUploadOwner({
+    createUpload(args) {
+      const upload = {
+        id: nextUploadId,
+        device: args.device,
+        reactionTableContentGeneration: args.reactionTableContentGeneration,
+        thermalResponseUploadProvenance: args.thermalResponseUploadProvenance,
+        thermalResponseGraphUpload: args.thermalResponseGraphUpload
+      };
+      nextUploadId += 1;
+      events.push(`create:${upload.id}`);
+      return upload;
+    },
+    validateUpload(device, upload, args) {
+      assert.equal(device, upload.device);
+      assert.equal(upload.reactionTableContentGeneration, args.reactionTableContentGeneration);
+      assert.equal(upload.thermalResponseGraphUpload, args.thermalResponseGraphUpload);
+      events.push(`validate:${upload.id}`);
+      return upload;
+    },
+    destroyUpload(upload) {
+      events.push(`destroy-static:${upload.id}`);
+      upload.destroyed = true;
+      return true;
+    }
+  });
+  const deviceA = { label: 'device-a' };
+  const deviceB = { label: 'device-b' };
+  const reactionTable = { schema: 'reaction-table' };
+  const thermalA = { status: 'webgpu-uploaded', signature: 'thermal:1' };
+  const thermalB = { status: 'webgpu-uploaded', signature: 'thermal:2' };
+
+  const first = owner.refresh({
+    device: deviceA,
+    reactionTable,
+    reactionTableContentGeneration: 'reaction:1',
+    thermalResponseGraphUpload: thermalA,
+    thermalResponseUploadProvenance: thermalA.signature
+  });
+  const reused = owner.refresh({
+    device: deviceA,
+    reactionTable,
+    reactionTableContentGeneration: 'reaction:1',
+    thermalResponseGraphUpload: thermalA,
+    thermalResponseUploadProvenance: thermalA.signature
+  });
+  assert.equal(reused, first);
+  assert.deepEqual(sphReactionStaticTableStepOptions(reused), {
+    reactionStaticTableUpload: reused,
+    reactionTableContentGeneration: 'reaction:1',
+    thermalResponseUploadProvenance: 'thermal:1'
+  });
+  assert.deepEqual(sphReactionStaticTableStepOptions(null), {
+    reactionStaticTableUpload: null,
+    reactionTableContentGeneration: null,
+    thermalResponseUploadProvenance: null
+  });
+  assert.equal(owner.snapshot().reuseCount, 1);
+  assert.deepEqual(events, ['create:1', 'validate:1']);
+
+  assert.throws(() => owner.refresh({
+    device: deviceA,
+    reactionTable,
+    reactionTableContentGeneration: 'reaction:1',
+    thermalResponseGraphUpload: thermalA,
+    thermalResponseUploadProvenance: 'thermal:stale'
+  }), /thermal provenance mismatch/);
+  assert.equal(owner.upload, first);
+
+  const reactionReplacement = owner.refresh({
+    device: deviceA,
+    reactionTable,
+    reactionTableContentGeneration: 'reaction:2',
+    thermalResponseGraphUpload: thermalA,
+    thermalResponseUploadProvenance: thermalA.signature
+  });
+  assert.notEqual(reactionReplacement, first);
+  assert.deepEqual(events.slice(-2), ['destroy-static:1', 'create:2']);
+  assert.equal(owner.clearBeforeThermalUploadDestroyed(thermalB), false);
+  assert.equal(owner.clearBeforeThermalUploadDestroyed(thermalA, 'thermal-a-replaced'), true);
+  events.push('destroy-thermal:a');
+  assert.deepEqual(events.slice(-2), ['destroy-static:2', 'destroy-thermal:a']);
+
+  const deviceReplacement = owner.refresh({
+    device: deviceB,
+    reactionTable,
+    reactionTableContentGeneration: 'reaction:2',
+    thermalResponseGraphUpload: thermalB,
+    thermalResponseUploadProvenance: thermalB.signature
+  });
+  assert.equal(deviceReplacement.id, 3);
+  assert.equal(owner.clear('scene-dispose'), true);
+  assert.equal(owner.upload, null);
+  assert.equal(deviceReplacement.destroyed, true);
+});
 
 function schroederPortableSummaryFixture(overrides = {}) {
   const renderLod = {
@@ -313,6 +480,42 @@ test('SPH scene background color defaults to dark navy and normalizes URL hex va
   assert.equal(normalizeSphSceneBackgroundColorHex('87CEEB'), '#87ceeb');
   assert.equal(normalizeSphSceneBackgroundColorHex('#8ce'), '#88ccee');
   assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');
+});
+
+test('native WebGPU background image uses opaque cover rendering', () => {
+  assert.deepEqual(nativeSurfaceBackgroundCoverScale({
+    imageWidth: 200,
+    imageHeight: 100,
+    canvasWidth: 100,
+    canvasHeight: 100
+  }), [0.5, 1]);
+  assert.deepEqual(nativeSurfaceBackgroundCoverScale({
+    imageWidth: 100,
+    imageHeight: 200,
+    canvasWidth: 200,
+    canvasHeight: 100
+  }), [1, 0.25]);
+  assert.match(SPH_NATIVE_WEBGPU_BACKGROUND_WGSL, /textureSample\(background_image/);
+  assert.match(SPH_NATIVE_WEBGPU_BACKGROUND_WGSL, /vec4<f32>\([^;]*, 1\.0\)/);
+});
+
+test('native WebGPU presentation admits a bounded number of in-flight submits', () => {
+  assert.equal(SPH_NATIVE_WEBGPU_SURFACE_MAX_IN_FLIGHT_SUBMITS, 2);
+  assert.equal(nativeSurfaceConsumerFrameAdmission({
+    nativeSurfaceConsumerInFlightSubmitCount: 0
+  }).accepted, true);
+  assert.equal(nativeSurfaceConsumerFrameAdmission({
+    nativeSurfaceConsumerInFlightSubmitCount: 1
+  }).accepted, true);
+  const full = nativeSurfaceConsumerFrameAdmission({
+    nativeSurfaceConsumerInFlightSubmitCount: 2
+  });
+  assert.equal(full.accepted, false);
+  assert.equal(full.status, 'blocked-native-submit-capacity-full');
+  assert.equal(nativeSurfaceConsumerFrameAdmission({
+    nativeSurfaceConsumerInFlightSubmitCount: 0,
+    nativeSurfaceConsumerSubmitFenceFailed: true
+  }).status, 'blocked-native-submit-fence-error');
 });
 
 test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-to-steam status', () => {
@@ -713,7 +916,7 @@ test('SPH Three WebGPU renderer required limits are resident-mode opt-in', () =>
   assert.deepEqual(resolveThreeWebGpuRendererRequiredLimits({
     rendererWebGpuResidentDevice: true
   }), {
-    maxStorageBuffersPerShaderStage: 10,
+    maxStorageBuffersPerShaderStage: 14,
     maxBufferSize: 512 * 1024 * 1024,
     maxStorageBufferBindingSize: 512 * 1024 * 1024
   });
@@ -1291,6 +1494,173 @@ test('resident motion diagnostic treats batch-visible motion as a refresh trigge
   assert.equal(diagnostic.fullPhysicsValidation, false);
 });
 
+test('resident hot-loop warning requires completed evidence that explicitly reports a readback', () => {
+  assert.equal(residentHotLoopReadbackWarningRequired(null, null), false);
+  assert.equal(residentHotLoopReadbackWarningRequired({}, {}), false);
+  assert.equal(
+    residentHotLoopReadbackWarningRequired(
+      { status: 'resident-steps-pending' },
+      { status: 'resident-step-pending' }
+    ),
+    false
+  );
+  assert.equal(
+    residentHotLoopReadbackWarningRequired(
+      { normalHotLoopReadbackFree: true },
+      { normalHotLoopReadbackFree: false }
+    ),
+    false
+  );
+  assert.equal(
+    residentHotLoopReadbackWarningRequired(
+      { normalHotLoopReadbackFree: false },
+      { normalHotLoopReadbackFree: true }
+    ),
+    true
+  );
+  assert.equal(
+    residentHotLoopReadbackWarningRequired(null, { normalHotLoopReadbackFree: false }),
+    true
+  );
+});
+
+test('resident stale execution retries only when the particle generation advanced', () => {
+  assert.deepEqual(residentStaleExecutionRetryDecision({
+    executionStale: true,
+    requestedGeneration: 7,
+    currentGeneration: 7
+  }), {
+    scheduleLatestGeneration: false,
+    haltCurrentGeneration: true,
+    reason: 'stale-result-for-current-generation-fails-closed'
+  });
+  assert.deepEqual(residentStaleExecutionRetryDecision({
+    executionStale: true,
+    requestedGeneration: 7,
+    currentGeneration: 8
+  }), {
+    scheduleLatestGeneration: true,
+    haltCurrentGeneration: false,
+    reason: 'particle-generation-advanced'
+  });
+  assert.deepEqual(residentStaleExecutionRetryDecision({
+    executionStale: false,
+    requestedGeneration: 7,
+    currentGeneration: 7
+  }), {
+    scheduleLatestGeneration: false,
+    haltCurrentGeneration: false,
+    reason: 'no-stale-retry-required'
+  });
+});
+
+test('resident pressure cadence is capability-gated instead of globally reaction-gated', () => {
+  assert.equal(residentPressureSingleStepCadenceReasonForCapability({
+    pressureEnabled: false,
+    reactionCount: 4,
+    residentProductMass: { status: 'resident-products' }
+  }), null);
+  assert.equal(residentPressureSingleStepCadenceReasonForCapability({
+    pressureEnabled: true,
+    reactionCount: 4,
+    fusedPerSubstepSourceRegeneration: true
+  }), null);
+  assert.equal(residentPressureSingleStepCadenceReasonForCapability({
+    pressureEnabled: true,
+    residentProductMass: { status: 'resident-products' },
+    fusedPerSubstepSourceRegeneration: true
+  }), null);
+  assert.equal(residentPressureSingleStepCadenceReasonForCapability({
+    pressureEnabled: true,
+    reactionCount: 4
+  }), 'reactive-product-carrier-chain-requires-fused-per-substep');
+  assert.equal(residentPressureSingleStepCadenceReasonForCapability({
+    pressureEnabled: true,
+    residentProductMass: { status: 'resident-products' }
+  }), 'resident-product-gas-eos-chain-requires-fused-per-substep');
+});
+
+test('mounted resident authority advances for root retries and persists only through continuation', () => {
+  assert.equal(residentSequenceAuthorityEpochForSchedule(0), 1);
+  assert.equal(residentSequenceAuthorityEpochForSchedule(1), 2);
+  assert.equal(residentSequenceAuthorityEpochForSchedule(2, {
+    continueFromResidentState: true
+  }), 2);
+  assert.equal(residentSequenceAuthorityEpochForSchedule(0, {
+    continueFromResidentState: true
+  }), 1);
+  assert.throws(() => residentSequenceAuthorityEpochForSchedule(-1), /non-negative/);
+  assert.throws(
+    () => residentSequenceAuthorityEpochForSchedule(Number.MAX_SAFE_INTEGER),
+    /exhausted/
+  );
+});
+
+test('resident pressure source selection follows the GPU continuation instead of stale packed state', () => {
+  const stalePackedState = { step: 0 };
+  const continuationState = { step: 7 };
+  const residentExecution = {
+    nextSphParticleState: continuationState,
+    finalStep: { nextSphParticleState: { step: 6 } }
+  };
+  const materialInterfaceState = {
+    status: 'material-interface-gpu-resident-source-field-ready',
+    materialInterfaceSourceField: {
+      schema: 'peercompute.ulg.sph-material-interface-source-field.v0',
+      status: 'material-interface-source-field-ready',
+      sourceStep: 7,
+      normalHotLoopReadbackFree: true,
+      fieldRowsBufferRetained: true,
+      surfaceBufferRetained: true,
+      sourceIndexFieldBufferRetained: true
+    }
+  };
+
+  const selected = residentPressureSourceParticleState({
+    residentExecution,
+    fallbackParticleState: stalePackedState
+  });
+
+  assert.equal(selected, continuationState);
+  assert.equal(
+    residentPressureSourceFieldReadyForParticleState(materialInterfaceState, selected),
+    true
+  );
+  assert.equal(
+    residentPressureSourceFieldReadyForParticleState(materialInterfaceState, stalePackedState),
+    false
+  );
+  assert.equal(
+    residentPressureSourceParticleState({ fallbackParticleState: stalePackedState }),
+    stalePackedState
+  );
+});
+
+test('resident compact-motion warning stays off when the readback diagnostic is disabled', () => {
+  assert.equal(residentCompactMotionProofWarningRequired(), false);
+  assert.equal(residentCompactMotionProofWarningRequired({
+    motionStatus: 'motion-unknown-no-compact-summary',
+    residentSteps: { compactSummaryMode: 'none' }
+  }), false);
+  assert.equal(residentCompactMotionProofWarningRequired({
+    motionStatus: 'motion-unknown-no-compact-summary',
+    residentSteps: { compactSummaryMode: 'plan-only' }
+  }), false);
+  assert.equal(residentCompactMotionProofWarningRequired({
+    motionStatus: 'motion-unknown-no-compact-summary',
+    residentSteps: { compactSummaryMode: 'final-only' }
+  }), true);
+  assert.equal(residentCompactMotionProofWarningRequired({
+    motionStatus: 'motion-unknown',
+    residentStep: { compactSummaryMode: 'every-step' },
+    particleBridgeLiveReadback: true
+  }), false);
+  assert.equal(residentCompactMotionProofWarningRequired({
+    motionStatus: 'motion-below-visible-threshold',
+    residentSteps: { compactSummaryMode: 'final-only' }
+  }), false);
+});
+
 test('SPH phase renderer preserves material and phase descriptors for optical closures', () => {
   const batches = createContinuousSurfaceBatches({
     boxEdgeM: 10,
@@ -1841,9 +2211,9 @@ test('SPH phase renderer keeps clear vapor and droplet steam optical states sepa
   assert.equal(table.recordCount, 2);
   assert.deepEqual(
     table.recordMetadata.map((record) => record.renderModel).sort(),
-    ['molecular-condensed-droplet-scattering-pbr', 'molecular-vapor-transparent-spectrum']
+    ['molecular-condensed-droplet-scattering-pbr', 'molecular-vapor-volume-spectrum']
   );
-  const clearRecord = table.recordMetadata.find((record) => record.renderModel === 'molecular-vapor-transparent-spectrum');
+  const clearRecord = table.recordMetadata.find((record) => record.renderModel === 'molecular-vapor-volume-spectrum');
   const dropletRecord = table.recordMetadata.find((record) => record.renderModel === 'molecular-condensed-droplet-scattering-pbr');
   const clearOffset = clearRecord.recordIndex * table.recordStrideFloats;
   const dropletOffset = dropletRecord.recordIndex * table.recordStrideFloats;
@@ -1978,7 +2348,7 @@ test('SPH phase renderer feeds material-bank display PBR into surface optical ro
   assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'roughness') - 0.32) < 1e-6);
 });
 
-test('SPH renderer keeps condensed transmissive H2O geometrically visible', () => {
+test('SPH renderer keeps every surface alpha-one and depth-writing', () => {
   const waterOptics = {
     material: 'h2o',
     phase: 'liquid',
@@ -1996,7 +2366,8 @@ test('SPH renderer keeps condensed transmissive H2O geometrically visible', () =
 
   assert.equal(renderAlphaFromOpticalResponse(waterOptics, waterOptics), 1);
   assert.equal(renderDepthWriteFromOpticalResponse(waterOptics, waterOptics), true);
-  assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), vaporOptics.opacity);
+  assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), 1);
+  assert.equal(renderDepthWriteFromOpticalResponse(vaporOptics, vaporOptics), true);
 });
 
 test('SPH renderer gates vapor geometry from derived optical depth and scattering', () => {
@@ -2159,30 +2530,26 @@ test('SPH renderer gives surfaces stable intra-layer render order', () => {
   assert.ok(waterOrder < baseOrder + 0.01);
 });
 
-test('SPH renderer leaves transparent same-layer meshes depth-sortable', () => {
+test('SPH renderer gives all depth-writing surfaces stable intra-layer order', () => {
   const baseOrder = SPH_PHASE_RENDER_ORDER.transmissiveSurface;
 
-  assert.equal(
+  assert.notEqual(
     surfaceObjectRenderOrder(baseOrder, 'front-water', {
-      renderLayer: 'transmissive-surface',
+      renderLayer: 'refractive-surface',
       depthWrite: false
     }),
-    baseOrder
-  );
-  assert.equal(
     surfaceObjectRenderOrder(baseOrder, 'back-water', {
-      renderLayer: 'transmissive-surface',
+      renderLayer: 'refractive-surface',
       depthWrite: false
-    }),
-    baseOrder
+    })
   );
   assert.notEqual(
     surfaceObjectRenderOrder(baseOrder, 'depth-writing-water-a', {
-      renderLayer: 'transmissive-surface',
+      renderLayer: 'refractive-surface',
       depthWrite: true
     }),
     surfaceObjectRenderOrder(baseOrder, 'depth-writing-water-b', {
-      renderLayer: 'transmissive-surface',
+      renderLayer: 'refractive-surface',
       depthWrite: true
     })
   );
@@ -2202,12 +2569,19 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   const order = residentSurfaceDrawOrder([
     { surfaceIndex: 0, renderOrder: 300, transparencyClassId: 3, depthWriteFlag: 0 },
     { surfaceIndex: 1, renderOrder: 100, transparencyClassId: 0, depthWriteFlag: 1 },
-    { surfaceIndex: 2, renderOrder: 200, transparencyClassId: 2, depthWriteFlag: 0 }
+    {
+      surfaceIndex: 2,
+      renderOrder: 200,
+      renderLayer: 'refractive-surface',
+      transparencyClassId: 2,
+      depthWriteFlag: 0
+    }
   ], { indirectStrideBytes: 16 });
 
   assert.deepEqual(order.map((row) => row.surfaceIndex), [1, 2, 0]);
   assert.deepEqual(order.map((row) => row.indirectOffsetBytes), [16, 32, 0]);
   assert.deepEqual(order.map((row) => row.renderOrder), [100, 200, 300]);
+  assert.deepEqual(order.map((row) => row.depthWriteFlag), [1, 1, 1]);
   const extensionOrder = residentSurfaceDrawOrder([
     {
       surfaceIndex: 5,
@@ -2222,10 +2596,10 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   assert.deepEqual(extensionOrder.map((row) => row.indirectRowIndex), [0]);
   assert.deepEqual(extensionOrder.map((row) => row.indirectOffsetBytes), [0]);
   assert.equal(residentSurfaceDrawPipelineKey(order[0]), 'opaque-depth-write');
-  assert.equal(residentSurfaceDrawPipelineKey(order[1]), 'transparent-depth-test');
+  assert.equal(residentSurfaceDrawPipelineKey(order[1]), 'refractive-depth-write');
+  assert.equal(residentSurfaceDrawPipelineKey(order[2]), 'opaque-depth-write');
+  assert.equal(residentSurfaceDrawPipelineKey({ transparencyClassId: 2 }), 'refractive-depth-write');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT, 'depth24plus');
-  assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT, 'rgba16float');
-  assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT, 'rgba8unorm');
 });
 
 test('SPH render-row sphere bridge contract uses variable-size closure PBR', () => {
@@ -2522,34 +2896,81 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /base_color_linear/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /transmissive_surface/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /clip\.z = clip\.z \* 0\.5 \+ clip\.w \* 0\.5/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn fs_oit_main/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /struct OitFragmentOut/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn fs_oit_main/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /struct OitFragmentOut/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /attenuation_linear/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /optical_depth/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /dielectric_f0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn spectral_complex_index_rgb/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /abs\(optical\.status - 2\.0\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /optical\.found > 0\.5/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /optical\.blocked < 0\.5/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /wavelength_nm >= 600\.0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /wavelength_nm >= 500\.0 && wavelength_nm < 600\.0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /wavelength_nm < 500\.0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /spectral_index\.n_rgb\.r/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /spectral_index\.n_rgb\.g/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /spectral_index\.n_rgb\.b/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /return vec4<f32>\(display_lit, 1\.0\)/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /1\.0 \/ ior/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /scattering_coefficient_per_m/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /accum_texture/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /reveal_texture/);
 });
 
-test('SPH resident compact-position native shader keeps PBR optics and derives triangle normals', () => {
-  // 208 -> 240: eight field-gradient sampling fields (dims, strides, offset,
-  // enable flag) for smooth normals from the retained render field.
+test('SPH native compact normals may cover a triangle-aligned prefix with trailing atomic rows', () => {
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 1_398_099,
+    normalRowCount: 1_398_101,
+    normalBufferByteLength: 1_398_101 * Uint32Array.BYTES_PER_ELEMENT
+  }), true);
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 12,
+    normalRowCount: 12,
+    normalBufferByteLength: 12 * Uint32Array.BYTES_PER_ELEMENT
+  }), true);
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 12,
+    normalRowCount: 11,
+    normalBufferByteLength: 12 * Uint32Array.BYTES_PER_ELEMENT
+  }), false);
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 12,
+    normalRowCount: 12,
+    normalBufferByteLength: 11 * Uint32Array.BYTES_PER_ELEMENT
+  }), false);
+});
+
+test('SPH resident compact-position native shader keeps PBR optics and decodes generation normals', () => {
+  // 208 -> 240: retained ABI slots from the retired draw-time field-gradient path.
   // 240 -> 256: camera world position (real view direction for fresnel and
   // specular) and the closure-derived emissive temperature (blackbody glow).
-  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 256);
+  // 256 -> 320: inverse view-projection for GPU backface-depth unprojection.
+  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 320);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /compact_position_rows: array<f32>/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_world_position/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_normal/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /cross\(p1 - p0, p2 - p0\)/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /render_field_scalars: array<f32>/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn field_gradient_normal/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /field_gradient_enabled/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /compact_packed_normals: array<u32>/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_packed_normal/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /unpack2x16snorm/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /0x80008000u/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /render_field_scalars: array<f32>/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn field_gradient_normal/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /out\.material_id = camera_data\.material_id/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /@binding\(2\).*optical_records/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn find_optical_material/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /dielectric_f0/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn fs_oit_main/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn spectral_complex_index_rgb/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /transparency_class_id - 2\.0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /inverse_view_projection/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /refractive_back_depth: texture_depth_2d/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn resident_refractive_backface/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn refracted_path_to_back_plane/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /path_m_rgb/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /path_m \* 0\.35/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /vec2<f32>\(-0\.15\)/);
+  assert.doesNotMatch(
+    SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
+    /let path_m = clamp\(optical\.attenuation_distance_m/
+  );
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn fs_oit_main/);
 });
 
 test('SPH resident render-row overlay shader draws directly from retained GPU rows', () => {
@@ -2559,6 +2980,8 @@ test('SPH resident render-row overlay shader draws directly from retained GPU ro
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /RENDER_ROW_VEC4_STRIDE/);
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /clip\.z = clip\.z \* 0\.5 \+ clip\.w \* 0\.5/);
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /pass\.draw|fn fs_main/);
+  assert.doesNotMatch(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /smoothstep/);
+  assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /return vec4<f32>\(in\.color\.rgb \* light, 1\.0\)/);
 });
 
 test('SPH render-row sphere bridge stabilizes transmissive PBR for mobile proxy geometry', () => {
@@ -2613,7 +3036,10 @@ test('SPH render-row sphere bridge preserves valid dark transmissive PBR materia
 
   assert.equal(material.transmission, 0.92);
   assert.ok(material.thickness > 0);
-  assert.equal(material.transparent, true);
+  assert.equal(material.transparent, false);
+  assert.equal(material.opacity, 1);
+  assert.equal(material.depthWrite, true);
+  assert.equal(material.userData.alphaTransparencyDisabled, true);
   assert.ok(material.color.r + material.color.g + material.color.b > 0.04);
   assert.equal(material.userData.renderRowSphereTransmissionProxy, false);
   assert.equal(material.userData.renderRowSpherePreservedTransmission, true);
@@ -2650,7 +3076,10 @@ test('SPH render-row sphere bridge preserves pale liquid transmissive PBR', () =
 
   assert.equal(material.transmission, 0.88);
   assert.ok(material.thickness > 0);
-  assert.equal(material.transparent, true);
+  assert.equal(material.transparent, false);
+  assert.equal(material.opacity, 1);
+  assert.equal(material.depthWrite, true);
+  assert.equal(material.userData.alphaTransparencyDisabled, true);
   assert.equal(material.userData.renderRowSphereTransmissionProxy, false);
   assert.equal(material.userData.renderRowSpherePreservedTransmission, true);
   assert.equal(material.userData.renderRowSphereFallbackReason, undefined);
@@ -2837,7 +3266,7 @@ test('SPH render-row sphere bridge leaves non-metal particle PBR out of metallic
   assert.equal(material.metalness, 0);
 });
 
-test('SPH render-row sphere bridge preserves transparent air particle PBR without metallic fallback', () => {
+test('SPH render-row sphere bridge preserves air optical PBR while disabling alpha transparency', () => {
   const material = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color(0.94, 0.97, 1),
     metalness: 0,
@@ -2866,17 +3295,16 @@ test('SPH render-row sphere bridge preserves transparent air particle PBR withou
   });
 
   assert.equal(material.userData.renderRowSphereMetallicVisibilityProxy, undefined);
-  // Gas parcels keep closure PBR but get the labeled sphere-bridge display
-  // opacity floor so the explicit particle diagnostic view stays visible.
-  assert.equal(material.userData.renderRowSphereFallbackReason, 'gas-display-opacity-floor');
-  assert.equal(material.userData.renderRowSphereGasDisplayOpacityFloor, true);
+  assert.equal(material.userData.renderRowSphereFallbackReason, 'gas-opaque-pbr-alpha-disabled');
   assert.equal(material.userData.renderRowSphereOriginalOpacity, 0.0006);
   assert.equal(material.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
   assert.equal(material.metalness, 0);
   assert.equal(material.transmission, 0.9995);
   assert.ok(material.thickness > 0);
-  assert.equal(material.transparent, true);
-  assert.equal(material.opacity, 0.18);
+  assert.equal(material.transparent, false);
+  assert.equal(material.opacity, 1);
+  assert.equal(material.depthWrite, true);
+  assert.equal(material.userData.alphaTransparencyDisabled, true);
   assert.equal(material.userData.renderRowSpherePreservedTransmission, true);
   assert.ok(material.color.r + material.color.g + material.color.b > 2.4);
 });
@@ -2916,6 +3344,9 @@ test('SPH surface mesh material proxies transmissive PBR on mobile WebGL paths',
   assert.equal(material.userData.surfaceMaterialRendererProxyReason, 'mobile-webgl-transmissive-surface-proxy');
   assert.deepEqual(material.userData.surfaceMaterialFallbackColor, [0.44, 0.76, 0.91]);
   assert.ok(material.color.b > material.color.r);
+  assert.equal(material.transparent, false);
+  assert.equal(material.opacity, 1);
+  assert.equal(material.depthWrite, true);
 });
 
 test('SPH surface mesh material proxies transmissive PBR for Three WebGPU external buffers', () => {
@@ -3004,9 +3435,13 @@ test('SPH Three WebGPU resident bridge material proxy uses a basic pipeline mate
   });
 
   assert.equal(proxy.type, 'MeshBasicMaterial');
-  assert.equal(proxy.transparent, true);
-  assert.equal(proxy.opacity, 0.72);
-  assert.equal(proxy.depthWrite, false);
+  assert.equal(proxy.transparent, false);
+  assert.equal(proxy.opacity, 1);
+  assert.equal(proxy.depthWrite, true);
+  assert.equal(proxy.userData.alphaTransparencyDisabled, true);
+  assert.equal(proxy.userData.alphaTransparencyOriginalOpacity, 0.72);
+  assert.equal(proxy.userData.alphaTransparencyOriginalTransparent, true);
+  assert.equal(proxy.userData.alphaTransparencyOriginalDepthWrite, false);
   assert.equal(proxy.userData.surfaceMaterialRendererProxy, true);
   assert.equal(
     proxy.userData.surfaceMaterialRendererProxyReason,
@@ -3066,7 +3501,7 @@ test('SPH Three WebGPU render-row sphere proxy keeps sodium closure PBR visible'
   assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 0.6);
 });
 
-test('SPH Three WebGPU render-row sphere proxy preserves transparent air closure metadata', () => {
+test('SPH Three WebGPU render-row sphere proxy preserves air closure metadata without alpha transparency', () => {
   const material = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color(0.94, 0.97, 1),
     metalness: 0,
@@ -3102,16 +3537,15 @@ test('SPH Three WebGPU render-row sphere proxy preserves transparent air closure
   });
 
   assert.equal(proxy.type, 'MeshBasicMaterial');
-  assert.equal(proxy.transparent, true);
-  // The sphere-bridge gas display opacity floor is applied before the Three
-  // WebGPU proxy clones the material, so the proxy inherits the floored
-  // opacity and its labeled diagnostic instead of the physical near-zero.
-  assert.equal(proxy.opacity, 0.18);
+  assert.equal(proxy.transparent, false);
+  assert.equal(proxy.opacity, 1);
+  assert.equal(proxy.depthWrite, true);
+  assert.equal(proxy.userData.alphaTransparencyDisabled, true);
   assert.equal(proxy.userData.renderRowSphereMaterialRendererProxy, true);
   assert.equal(proxy.userData.renderRowSpherePbrMaterialSource, 'closure-derived-pbr-proxied-for-renderer');
   assert.equal(proxy.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
   assert.equal(proxy.userData.renderRowSphereMetallicVisibilityProxy, undefined);
-  assert.equal(proxy.userData.renderRowSphereFallbackReason, 'gas-display-opacity-floor');
+  assert.equal(proxy.userData.renderRowSphereFallbackReason, 'gas-opaque-pbr-alpha-disabled');
   assert.equal(proxy.userData.renderRowSpherePreservedTransmission, true);
   assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 2.4);
 });
@@ -3361,11 +3795,18 @@ test('SPH resident render source metadata keeps stale retained surfaces visible'
   assert.equal(metadata.nextTimeS, 0.02);
   assert.equal(metadata.particleCount, 128);
 
-  const currentSurfaceDraw = {};
+  const currentSurfaceDraw = {
+    residentRenderSourceStaleAfterPublish: true,
+    residentRenderSourceStaleReason: 'older publication',
+    residentRenderSourceStaleAgainst: { residentExecutionGeneration: 6 }
+  };
   applyResidentRenderSourceMetadata(currentSurfaceDraw, metadata);
   assert.equal(currentSurfaceDraw.sourceResidentExecutionGeneration, 7);
   assert.equal(currentSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent, true);
   assert.equal(currentSurfaceDraw.sourceResidentRetainedPrevious, false);
+  assert.equal(currentSurfaceDraw.residentRenderSourceStaleAfterPublish, false);
+  assert.equal(currentSurfaceDraw.residentRenderSourceStaleReason, null);
+  assert.equal(currentSurfaceDraw.residentRenderSourceStaleAgainst, null);
 
   const staleMetadata = createResidentRenderSourceMetadata({
     residentSteps: {
@@ -3386,6 +3827,9 @@ test('SPH resident render source metadata keeps stale retained surfaces visible'
   assert.equal(retainedSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent, false);
   assert.equal(retainedSurfaceDraw.sourceResidentRetainedPrevious, true);
   assert.match(retainedSurfaceDraw.sourceResidentRetentionReason, /previous native surface/);
+  assert.equal(retainedSurfaceDraw.residentRenderSourceStaleAfterPublish, true);
+  assert.match(retainedSurfaceDraw.residentRenderSourceStaleReason, /previous native surface/);
+  assert.equal(retainedSurfaceDraw.residentRenderSourceStaleAgainst, staleMetadata);
 });
 
 test('SPH scene materializes admitted Schroeder render LOD summaries as render source metadata', () => {
@@ -3878,7 +4322,11 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
   assert.equal(calls.pipelineLayouts.length, 1);
   assert.equal(calls.pipelines.length, 1);
   assert.equal(calls.pipelines[0].depthStencil.format, SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT);
-  assert.equal(calls.pipelines[0].depthStencil.depthWriteEnabled, false);
+  assert.equal(calls.pipelines[0].depthStencil.depthWriteEnabled, true);
+  assert.equal(calls.pipelines[0].fragment.targets[0].blend, undefined);
+  assert.doesNotMatch(SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL, /0\.82/);
+  assert.doesNotMatch(SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL, /smoothstep/);
+  assert.match(SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL, /return vec4<f32>\(in\.color\.rgb \* light, 1\.0\)/);
   assert.equal(calls.bindGroups.length, 2);
   assert.equal(calls.writes.length, 2);
   assert.equal(calls.writes[0].data[0], 12);
@@ -4647,7 +5095,17 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(pending.status, 'native-webgpu-surface-validation-pending');
 });
 
-test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {
+test('SPH renderer admits only provenance-bearing spectral refraction and never alpha transparency', () => {
+  const quantumRefraction = {
+    refractiveAuthority: true,
+    refractiveStatus: 'quantum-refractive-response-derived-reduced-unvalidated',
+    refractiveProvenance: { source: 'rhf-dipole-response-plus-lorentz-lorenz-local-field' },
+    spectralSamples: [
+      { wavelengthNm: 480, n: 1.07, k: 0 },
+      { wavelengthNm: 530, n: 1.069, k: 0 },
+      { wavelengthNm: 630, n: 1.068, k: 0 }
+    ]
+  };
   const opaqueMetal = {
     material: 'fe',
     phase: 'solid',
@@ -4656,6 +5114,7 @@ test('SPH renderer depth policy separates transmissive glass from alpha transpar
     metalness: 1
   };
   const condensedWater = {
+    ...quantumRefraction,
     material: 'h2o',
     phase: 'liquid',
     opacity: 0.0028,
@@ -4689,20 +5148,76 @@ test('SPH renderer depth policy separates transmissive glass from alpha transpar
   assert.equal(renderOrderFromOpticalResponse(opaqueMetal, opaqueMetal), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 
   assert.equal(renderDepthWriteFromOpticalResponse(condensedWater, condensedWater), true);
-  assert.equal(renderLayerFromOpticalResponse(condensedWater, condensedWater), 'transmissive-surface');
+  assert.equal(hasAdmittedQuantumRefraction(condensedWater, condensedWater), true);
+  assert.equal(renderLayerFromOpticalResponse(condensedWater, condensedWater), 'refractive-surface');
   assert.equal(renderOrderFromOpticalResponse(condensedWater, condensedWater), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
 
-  assert.equal(renderDepthWriteFromOpticalResponse(vapor, vapor), false);
-  assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'vapor-surface');
-  assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.vaporSurface);
+  assert.equal(renderDepthWriteFromOpticalResponse(vapor, vapor), true);
+  assert.equal(renderAlphaFromOpticalResponse(vapor, vapor), 1);
+  assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'opaque-surface');
+  assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 
   assert.equal(renderDepthWriteFromOpticalResponse(transparentSolid, transparentSolid), true);
-  assert.equal(renderLayerFromOpticalResponse(transparentSolid, transparentSolid), 'transmissive-surface');
-  assert.equal(renderOrderFromOpticalResponse(transparentSolid, transparentSolid), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
+  assert.equal(hasAdmittedQuantumRefraction(transparentSolid, transparentSolid), false);
+  assert.equal(renderLayerFromOpticalResponse(transparentSolid, transparentSolid), 'opaque-surface');
+  assert.equal(renderOrderFromOpticalResponse(transparentSolid, transparentSolid), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 
-  assert.equal(renderDepthWriteFromOpticalResponse(alphaSurface, alphaSurface), false);
-  assert.equal(renderLayerFromOpticalResponse(alphaSurface, alphaSurface), 'alpha-surface');
-  assert.equal(renderOrderFromOpticalResponse(alphaSurface, alphaSurface), SPH_PHASE_RENDER_ORDER.alphaSurface);
+  assert.equal(renderDepthWriteFromOpticalResponse(alphaSurface, alphaSurface), true);
+  assert.equal(renderAlphaFromOpticalResponse(alphaSurface, alphaSurface), 1);
+  assert.equal(renderLayerFromOpticalResponse(alphaSurface, alphaSurface), 'opaque-surface');
+  assert.equal(renderOrderFromOpticalResponse(alphaSurface, alphaSurface), SPH_PHASE_RENDER_ORDER.opaqueSurface);
+});
+
+test('SPH renderer reconstructs quantum refraction authority from packed optical GPU rows', () => {
+  const descriptor = { material: 'h2o', phase: 'liquid' };
+  const table = createOpticalGpuTableForSurfaceBatches([{
+    material: descriptor.material,
+    phase: descriptor.phase,
+    descriptor
+  }], {
+    materialProperties: {
+      h2o: {
+        formula: 'H2O',
+        molarMassKgPerMol: 0.01801528,
+        phases: [
+          { name: 'solid', densityKgPerM3: 917 },
+          { name: 'liquid', densityKgPerM3: 997 },
+          { name: 'gas', densityKgPerM3: 0.598 }
+        ]
+      }
+    }
+  });
+  const optics = opticalParamsFromGpuTableRecord(table, descriptor);
+
+  assert.equal(optics.source, 'optical-gpu-table-row');
+  assert.equal(optics.refractiveAuthority, true);
+  assert.match(optics.refractiveStatus, /^quantum-refractive-response-derived/);
+  assert.equal(
+    optics.refractiveProvenance.source,
+    'rhf-dipole-response-plus-lorentz-lorenz-local-field'
+  );
+  assert.ok(optics.spectralSamples.length >= 3);
+  assert.ok(optics.spectralSamples.every((sample) => (
+    Number.isFinite(sample.wavelengthNm)
+      && Number.isFinite(sample.n)
+      && sample.n >= 1
+      && Number.isFinite(sample.k)
+      && sample.k >= 0
+  )));
+  assert.equal(hasAdmittedQuantumRefraction(optics, descriptor), true);
+  assert.equal(renderLayerFromOpticalResponse(optics, descriptor), 'refractive-surface');
+
+  const mismatchedTable = {
+    ...table,
+    recordMetadata: table.recordMetadata.map((record) => ({
+      ...record,
+      spectralCount: record.spectralCount + 1
+    }))
+  };
+  const mismatchedOptics = opticalParamsFromGpuTableRecord(mismatchedTable, descriptor);
+  assert.equal(mismatchedOptics.refractiveAuthority, false);
+  assert.equal(hasAdmittedQuantumRefraction(mismatchedOptics, descriptor), false);
+  assert.equal(renderLayerFromOpticalResponse(mismatchedOptics, descriptor), 'opaque-surface');
 });
 
 test('SPH resident pressure interface state owns retained force rows outside render cadence', () => {
@@ -5697,6 +6212,286 @@ test('extraction-enforced vertex budget uncaps field resolution and yields per-s
   // Per-surface rows: 256MB / 4 surfaces / 64B rows (16-float surface vertex rows).
   const rows = nativeMarchingCubesVertexRowsBudgetPerSurface(4, {});
   assert.equal(rows, Math.floor(256 * 1024 * 1024 / 4 / 64));
+});
+
+test('native marching-cubes cache signature covers every baked sparse-volume field', () => {
+  const descriptor = {
+    surfaceIndex: 2,
+    surfaceKey: 'h2o|liquid',
+    dims: [64, 64, 64],
+    scalarStrides: [1, 64, 4096],
+    scalarOffset: 3,
+    scalarBufferByteLength: 4096,
+    brickSize: 8,
+    directoryOffset: 4,
+    directoryCount: 512,
+    directorySentinel: 0xffffffff,
+    activeBrickCount: 96,
+    activeBrickCapacity: 512,
+    activeBrickRowStrideU32: 16,
+    activeBrickAtlasCellOffsetLane: 7,
+    atlasCellCount: 49152,
+    atlasCellCapacity: 262144,
+    atlasCellStrideFloats: 8,
+    atlasScalarLane: 0,
+    candidateVoxelOffset: 32,
+    candidateVoxelOffsetBytes: 128,
+    candidateVoxelCount: 9000,
+    candidateVoxelCapacity: 250047,
+    candidateDispatchIndirectOffsetBytes: 24,
+    generationId: 17,
+    backgroundValue: -1,
+    normalSign: -1,
+    scalarType: 'f32',
+    sourceType: 'sparse-brick-atlas',
+    source: 'test-sparse-field'
+  };
+  const baseline = nativeMarchingCubesDescriptorSignature(descriptor);
+  for (const [field, value] of [
+    ['directorySentinel', 123],
+    ['activeBrickCapacity', 513],
+    ['activeBrickRowStrideU32', 20],
+    ['activeBrickAtlasCellOffsetLane', 8],
+    ['atlasCellCapacity', 262145],
+    ['atlasCellStrideFloats', 12],
+    ['atlasScalarLane', 1],
+    ['candidateVoxelOffsetBytes', 132],
+    ['candidateVoxelCapacity', 250048],
+    ['candidateDispatchIndirectOffsetBytes', 36],
+    ['generationId', 18],
+    ['backgroundValue', -2],
+    ['normalSign', 1],
+    ['sourceType', 'scalar-buffer']
+  ]) {
+    assert.notEqual(
+      nativeMarchingCubesDescriptorSignature({ ...descriptor, [field]: value }),
+      baseline,
+      field
+    );
+  }
+  const resources = {
+    directoryBuffer: {},
+    activeBrickRowsBuffer: {},
+    atlasBuffer: {},
+    candidateVoxelIdsBuffer: {},
+    candidateDispatchIndirectBuffer: {}
+  };
+  assert.deepEqual(
+    nativeMarchingCubesDescriptorResourceBuffers({
+      ...descriptor,
+      ...resources
+    }),
+    Object.values(resources)
+  );
+});
+
+test('native marching-cubes extraction jobs start together and settle in descriptor order', async () => {
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const pending = settleNativeMarchingCubesExtractionJobs(
+    ['water', 'steam', 'ice'],
+    async (job) => {
+      started.push(job);
+      await gate;
+      if (job === 'steam') throw new Error('manufactured extraction failure');
+      return `${job}:surface`;
+    }
+  );
+  await Promise.resolve();
+  assert.deepEqual(started, ['water', 'steam', 'ice']);
+  release();
+  const settled = await pending;
+  assert.deepEqual(settled.map((entry) => entry.job), ['water', 'steam', 'ice']);
+  assert.deepEqual(
+    settled.map((entry) => entry.settlement.status),
+    ['fulfilled', 'rejected', 'fulfilled']
+  );
+  assert.equal(settled[0].settlement.value, 'water:surface');
+  assert.match(settled[1].settlement.reason.message, /manufactured extraction failure/);
+  assert.equal(settled[2].settlement.value, 'ice:surface');
+});
+
+test('native marching-cubes surface batch records every surface into one caller submission', async () => {
+  let submitCount = 0;
+  let finishCount = 0;
+  const commandEncoder = {
+    finish() {
+      finishCount += 1;
+      return { label: 'shared-native-surface-command-buffer' };
+    }
+  };
+  const device = {
+    createCommandEncoder() {
+      return commandEncoder;
+    },
+    queue: {
+      submit(commandBuffers) {
+        assert.equal(commandBuffers.length, 1);
+        assert.equal(finishCount, 1);
+        submitCount += 1;
+      }
+    }
+  };
+  const outputs = [];
+  const temporaries = [];
+  const seenEncoders = [];
+  const batch = await extractNativeMarchingCubesSurfaceBatch({
+    device,
+    jobs: ['water', 'steam', 'ice'],
+    async extractJob(job, index, options) {
+      assert.equal(submitCount, 0, 'caller submission must wait for every surface record');
+      assert.equal(options.measureGpuTimestamps, false);
+      assert.equal(options.sharedCommandEncoder, true);
+      seenEncoders.push(options.commandEncoder);
+      const output = {
+        label: `${job}-position-output`,
+        destroyed: false,
+        destroy() {
+          this.destroyed = true;
+        }
+      };
+      const temporary = {
+        label: `${job}-vertex-offsets`,
+        destroyed: false,
+        destroy() {
+          assert.equal(submitCount, 1, 'temporary retirement must happen after submit');
+          this.destroyed = true;
+        }
+      };
+      outputs.push(output);
+      temporaries.push(temporary);
+      return {
+        extensionExecution: {
+          extensionExecution: {
+            ok: true,
+            result: {
+              buffer: output,
+              readbackMode: 'gpu-conservative-no-readback',
+              commandEncodingMode: 'external-command-encoder',
+              internalSubmitCount: 0,
+              requiresExternalSubmit: true,
+              temporaryResourceCount: 1,
+              encodingRetirement: { temporaryResources: [temporary] },
+              retireTemporaryResourcesAfterSubmit() {
+                temporary.destroy();
+                return {
+                  status: 'encoding-resources-retired',
+                  destroyedResourceCount: 1
+                };
+              },
+              surfaceIndex: index
+            }
+          }
+        }
+      };
+    }
+  });
+
+  assert.equal(seenEncoders.length, 3);
+  assert.equal(seenEncoders.every((encoder) => encoder === commandEncoder), true);
+  assert.equal(submitCount, 1);
+  assert.equal(finishCount, 1);
+  assert.equal(batch.mode, 'external-command-encoder-one-submit');
+  assert.equal(batch.sharedCommandEncoder, true);
+  assert.equal(batch.callerSubmitCount, 1);
+  assert.equal(batch.internalSubmitCount, 0);
+  assert.equal(batch.cpuSurfaceReadback, false);
+  assert.equal(batch.pointFallback, false);
+  assert.equal(batch.temporaryResourceCount, 3);
+  assert.equal(batch.retiredTemporaryResourceCount, 3);
+  assert.equal(temporaries.every((resource) => resource.destroyed), true);
+  assert.equal(outputs.every((resource) => resource.destroyed === false), true);
+});
+
+test('profiled native marching-cubes extraction retains isolated per-surface encoding', async () => {
+  let sharedEncoderCreateCount = 0;
+  let callerSubmitCount = 0;
+  const calls = [];
+  const batch = await extractNativeMarchingCubesSurfaceBatch({
+    device: {
+      createCommandEncoder() {
+        sharedEncoderCreateCount += 1;
+        return { finish() { return {}; } };
+      },
+      queue: {
+        submit() {
+          callerSubmitCount += 1;
+        }
+      }
+    },
+    jobs: ['water', 'steam'],
+    measureGpuTimestamps: true,
+    async extractJob(job, index, options) {
+      calls.push({ job, index, ...options });
+      return { result: null };
+    }
+  });
+
+  assert.equal(sharedEncoderCreateCount, 0);
+  assert.equal(callerSubmitCount, 0);
+  assert.deepEqual(calls.map(({ job }) => job), ['water', 'steam']);
+  assert.equal(calls.every(({ commandEncoder }) => commandEncoder == null), true);
+  assert.equal(calls.every(({ measureGpuTimestamps }) => measureGpuTimestamps), true);
+  assert.equal(batch.mode, 'timestamp-attributed-per-surface-submissions');
+  assert.equal(batch.sharedCommandEncoder, false);
+});
+
+test('failed native marching-cubes batch submit abandons temporaries without releasing outputs', async () => {
+  let retirementHookCalled = false;
+  const output = {
+    destroyed: false,
+    destroy() {
+      this.destroyed = true;
+    }
+  };
+  const temporary = {
+    destroyed: false,
+    destroy() {
+      this.destroyed = true;
+    }
+  };
+  await assert.rejects(
+    () => extractNativeMarchingCubesSurfaceBatch({
+      device: {
+        createCommandEncoder() {
+          return { finish() { return {}; } };
+        },
+        queue: {
+          submit() {
+            throw new Error('manufactured queue submit failure');
+          }
+        }
+      },
+      jobs: ['water'],
+      async extractJob() {
+        return {
+          result: {
+            buffer: output,
+            readbackMode: 'gpu-conservative-no-readback',
+            commandEncodingMode: 'external-command-encoder',
+            internalSubmitCount: 0,
+            requiresExternalSubmit: true,
+            temporaryResourceCount: 1,
+            encodingRetirement: { temporaryResources: [temporary] },
+            retireTemporaryResourcesAfterSubmit() {
+              retirementHookCalled = true;
+            }
+          }
+        };
+      }
+    }),
+    (error) => {
+      assert.equal(error.status, 'native-marching-cubes-batch-submit-failed');
+      assert.equal(error.nativeMarchingCubesBatch.abandonedTemporaryResourceCount, 1);
+      return true;
+    }
+  );
+  assert.equal(retirementHookCalled, false);
+  assert.equal(temporary.destroyed, true);
+  assert.equal(output.destroyed, false);
 });
 
 test('sphere-lane emissive intensity follows the surface Stefan-Boltzmann law above the anchor', async () => {

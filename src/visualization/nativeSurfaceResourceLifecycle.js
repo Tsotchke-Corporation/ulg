@@ -62,7 +62,8 @@ export function createNativeSurfaceResourceOwner({
   surfaceDrawExecution = surfaceDraw?.surfaceDraw ?? null,
   surfaceVerticesExecution = surfaceDraw?.surfaceVertices ?? null,
   translation = surfaceDraw?.extensionSurfaceTranslation ?? null,
-  extensionSurfaceResult = surfaceDraw?.extensionSurfaceResult ?? null
+  extensionSurfaceResult = surfaceDraw?.extensionSurfaceResult ?? null,
+  presentationResources = []
 } = {}) {
   if (!surfaceDrawExecution) return null;
   return {
@@ -71,7 +72,10 @@ export function createNativeSurfaceResourceOwner({
     surfaceDrawExecution,
     surfaceVerticesExecution,
     translation,
-    extensionSurfaceResult
+    extensionSurfaceResult,
+    presentationResources: Array.isArray(presentationResources)
+      ? [...presentationResources].filter(Boolean)
+      : []
   };
 }
 
@@ -140,6 +144,127 @@ export function rendererCanvasResizeRequired({
     || Math.round(Number(canvasWidth) || 0) !== expectedWidth
     || Math.round(Number(canvasHeight) || 0) !== expectedHeight
   );
+}
+
+export function resolveNativeRefractionTargetSetAction({
+  required = false,
+  activeTargetSet = null,
+  device = null,
+  width = 0,
+  height = 0,
+  colorFormat = null,
+  depthFormat = 'depth32float',
+  inFlightSubmitCount = 0,
+  submitFencePending = false,
+  submitFenceTimedOut = false,
+  submitFenceFailed = false
+} = {}) {
+  const normalizedWidth = Math.max(0, Math.round(Number(width) || 0));
+  const normalizedHeight = Math.max(0, Math.round(Number(height) || 0));
+  const normalizedInFlightSubmitCount = Math.max(
+    0,
+    Math.round(Number(inFlightSubmitCount) || 0)
+  );
+  const active = Boolean(activeTargetSet);
+  const retirementBlocked = Boolean(
+    normalizedInFlightSubmitCount > 0
+    || submitFencePending
+    || submitFenceTimedOut
+    || submitFenceFailed
+  );
+  const base = {
+    width: normalizedWidth,
+    height: normalizedHeight,
+    colorFormat: colorFormat || null,
+    depthFormat: depthFormat || null,
+    retireActive: false,
+    deferRetirement: false,
+    create: false,
+    reuse: false
+  };
+  if (!required) {
+    return active
+      ? {
+          ...base,
+          status: 'release-opaque-targets',
+          retireActive: true,
+          deferRetirement: retirementBlocked
+        }
+      : { ...base, status: 'opaque-no-targets' };
+  }
+  if (
+    !device
+    || normalizedWidth <= 1
+    || normalizedHeight <= 1
+    || !colorFormat
+    || !depthFormat
+  ) {
+    return {
+      ...base,
+      status: 'required-targets-unavailable',
+      retireActive: active,
+      deferRetirement: active && retirementBlocked
+    };
+  }
+  const exactMatch = Boolean(
+    activeTargetSet?.device === device
+    && activeTargetSet.width === normalizedWidth
+    && activeTargetSet.height === normalizedHeight
+    && activeTargetSet.colorFormat === colorFormat
+    && activeTargetSet.depthFormat === depthFormat
+    && activeTargetSet.copyTexture
+    && activeTargetSet.backfaceTexture
+  );
+  if (exactMatch) {
+    return { ...base, status: 'reuse-targets', reuse: true };
+  }
+  return {
+    ...base,
+    status: active ? 'replace-targets' : 'create-targets',
+    retireActive: active,
+    deferRetirement: active && retirementBlocked,
+    create: true
+  };
+}
+
+export function retireNativeRefractionTargetSet({
+  targetSet = null,
+  status = 'native-refraction-target-set-retired',
+  deferRelease = null,
+  destroyTargetSet = null,
+  onRelease = null
+} = {}) {
+  if (!targetSet || typeof destroyTargetSet !== 'function') {
+    return {
+      status: 'retirement-unavailable',
+      deferred: false,
+      released: false,
+      request: null
+    };
+  }
+  let released = false;
+  const release = () => {
+    if (released) return false;
+    released = Boolean(destroyTargetSet(targetSet));
+    onRelease?.({ targetSet, released });
+    return released;
+  };
+  const request = {
+    status,
+    requiresSuccessfulSubmitFence: true,
+    release
+  };
+  const deferred = Boolean(
+    typeof deferRelease === 'function'
+    && deferRelease(request) === true
+  );
+  if (!deferred) release();
+  return {
+    status: deferred ? 'retirement-submit-fence-pending' : 'retired-without-pending-submit',
+    deferred,
+    get released() { return released; },
+    request
+  };
 }
 
 export function nativeSurfaceDrawStateUsesExecution(drawState, surfaceDrawExecution) {

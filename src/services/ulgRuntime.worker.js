@@ -13,8 +13,8 @@ import {
   summarizeSphStaticTableCacheSnapshot
 } from '../runtime/sph/sphColdStartCache.js';
 import {
+  residentSurfaceDescriptorsFromViewState,
   sphStaticTableInputsFromViewState,
-  surfaceDescriptorsFromMaterials
 } from '../runtime/sph/sphStaticTableInputs.js';
 import {
   applySphLocalCacheLookupToOptions,
@@ -115,7 +115,9 @@ export function staticTableBundleCoversViewState(bundle, viewState = {}) {
   }
 
   const availableOptics = new Set((bundle.opticalGpuTable?.recordMetadata || []).map(opticalCoverageKey));
-  return surfaceDescriptorsFromMaterials(viewState.materials || []).every((descriptor) => availableOptics.has(opticalCoverageKey({
+  return residentSurfaceDescriptorsFromViewState(viewState, {
+    reactionTable: bundle.reactionTable
+  }).every((descriptor) => availableOptics.has(opticalCoverageKey({
     material: descriptor.material,
     phase: descriptor.phase,
     opticalStateKey: descriptor.opticalStateKey

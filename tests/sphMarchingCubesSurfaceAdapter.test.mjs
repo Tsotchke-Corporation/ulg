@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
@@ -15,9 +17,16 @@ import {
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA,
+  ULG_SPH_WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_DESCRIPTOR_SCHEMA,
   WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME,
   WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE,
+  WEBGPU_MARCHING_CUBES_SPARSE_BRICK_LAYOUT_NAME,
+  WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_SOURCE,
   WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
+  WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA,
+  WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING,
+  WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME,
+  WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_DRAW_ROWS_SCHEMA,
@@ -26,7 +35,9 @@ import {
   WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
+  createUlgEffectiveRenderFieldSurfaceTable,
   createUlgRenderFieldBufferVolumeDescriptor,
+  createUlgSparseRenderFieldVolumeDescriptor,
   createUlgWebGpuMarchingCubesExtensionAdapter,
   summarizeWebGpuMarchingCubesExtensionExecution,
   translateWebGpuMarchingCubesSurfaceToUlgRows,
@@ -52,9 +63,16 @@ function extensionExecution({
   actualVertexCounterBuffer = null,
   actualVertexCounterBufferByteLength = 0,
   drawIndirectBuffer = null,
-  drawIndirectBufferByteLength = drawIndirectBuffer?.size ?? 0
+  drawIndirectBufferByteLength = drawIndirectBuffer?.size ?? 0,
+  includePackedNormals = false,
+  surfaceGenerationId = 7,
+  volumeGenerationId = 42,
+  normalSign = -1
 } = {}) {
   const buffer = bufferRetained ? { label: 'surface-buffer', size: vertexCount * vertexStrideFloats * 4 } : null;
+  const normalBuffer = includePackedNormals && bufferRetained
+    ? { label: 'packed-normal-buffer', size: vertexCount * Uint32Array.BYTES_PER_ELEMENT }
+    : null;
   const resourceOwnership = {
     ok: resourceOwnershipStatus !== 'cross-device-resource',
     status: resourceOwnershipStatus
@@ -81,7 +99,54 @@ function extensionExecution({
       resourceOwnership,
       readback: false
     },
-    normal: {
+    normal: includePackedNormals ? {
+      schema: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA,
+      status: 'normal-rows-resident',
+      available: true,
+      buffer: normalBuffer,
+      bufferRetained: true,
+      bufferByteLength: normalBuffer.size,
+      rowCount: vertexCount,
+      rowStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+      layoutName: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME,
+      encoding: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING,
+      semantic: 'oriented-scalar-gradient',
+      sourceSemantic: 'scalar-gradient',
+      normalSign,
+      resourceOwnership,
+      normalBufferDescriptor: {
+        schema: WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA,
+        status: 'normal-rows-resident',
+        available: true,
+        buffer: normalBuffer,
+        bufferRetained: true,
+        bufferByteLength: normalBuffer.size,
+        rowCount: vertexCount,
+        rowStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+        layoutName: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME,
+        rowSchema: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA,
+        encoding: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING,
+        semantic: 'oriented-scalar-gradient',
+        sourceSemantic: 'scalar-gradient',
+        normalSign,
+        resourceOwnership,
+        generation: {
+          surfaceGenerationId,
+          pairedPositionSurfaceGenerationId: surfaceGenerationId,
+          volumeGenerationId,
+          sameSubmitAsPosition: true
+        },
+        lifetime: {
+          owner: 'surface-result',
+          pairedWithPositionBuffer: true
+        },
+        producer: {
+          stage: 'marchingCubesVertexEmit',
+          timestampSpanLabel: 'marchingCubesVertexEmit',
+          additionalSubmitCount: 0
+        }
+      }
+    } : {
       status: 'normal-rows-not-produced',
       available: false
     },
@@ -97,7 +162,8 @@ function extensionExecution({
     readback: false,
     fullReadback: false,
     retainedBuffers: {
-      position: buffer
+      position: buffer,
+      normal: normalBuffer
     },
     rows: {
       position: {
@@ -116,7 +182,7 @@ function extensionExecution({
         resourceOwnership,
         readback: false
       },
-      normal: {
+      normal: includePackedNormals ? rowMetadata.normal : {
         status: 'normal-rows-not-produced',
         available: false
       },
@@ -174,6 +240,17 @@ function extensionExecution({
       bufferByteLength: vertexCount * vertexStrideFloats * 4,
       bufferRetained: topLevelBuffer ? bufferRetained : false,
       resourceOwnership: topLevelBuffer ? resourceOwnership : null,
+      surfaceGenerationId,
+      volumeGenerationId,
+      normalBuffer,
+      normalBufferByteLength: normalBuffer?.size ?? 0,
+      normalEncoding: includePackedNormals ? WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING : null,
+      normalSemantic: includePackedNormals ? 'oriented-scalar-gradient' : null,
+      normalSourceSemantic: includePackedNormals ? 'scalar-gradient' : null,
+      normalSign,
+      normalProducerStage: includePackedNormals ? 'marchingCubesVertexEmit' : null,
+      normalTimestampSpanLabel: includePackedNormals ? 'marchingCubesVertexEmit' : null,
+      normalAdditionalSubmitCount: includePackedNormals ? 0 : null,
       rowMetadata,
       outputDescriptors
     }
@@ -381,6 +458,7 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
           phase: 'liquid',
           isovalue: 0.65,
           isovaluePolicy: 'density-kernel-half-occupancy',
+          rendererAuthority: 'renderer-authoritative-surface-policy-row',
           smoothingRadiusM: 0.3,
           voxelSizeM: 0.15,
           normalScaleM: 0.3
@@ -392,6 +470,7 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
           phase: 'liquid',
           isovalue: 0.5,
           isovaluePolicy: 'density-kernel-half-occupancy',
+          rendererAuthority: 'renderer-authoritative-surface-policy-row',
           smoothingRadiusM: 0.2,
           voxelSizeM: 0.1,
           normalScaleM: 0.2
@@ -435,6 +514,260 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
   assert.equal(crossDevice.ok, false);
   assert.equal(crossDevice.status, 'ulg-render-field-buffer-volume-blocked-cross-device');
   assert.equal(crossDevice.sameDeviceStatus, 'cross-device-resource');
+});
+
+test('ULG exposes admitted sparse generations as aligned native sparse-brick volumes', () => {
+  const device = {
+    label: 'ulg-sparse-render-device',
+    limits: { minStorageBufferOffsetAlignment: 256 }
+  };
+  const buffer = (label, size) => ({ label, size, device });
+  const directoryBuffer = buffer('sparse-directory', 8 * 4);
+  const activeBrickRowsBuffer = buffer('sparse-active-bricks', 16 * 4);
+  const atlasBuffer = buffer('sparse-atlas', 512 * 8 * 4);
+  const candidateVoxelIdsBuffer = buffer('sparse-candidates', (64 + 512) * 4);
+  const candidateDispatchIndirectBuffer = buffer('sparse-candidate-indirect', 12);
+  const surfaceRecord = {
+    surfaceKey: 'h2o|liquid|domain:base',
+    material: 'h2o',
+    phase: 'liquid',
+    renderKey: 'h2o',
+    resolution: 9,
+    isolation: 0.5
+  };
+  const surfacePlan = {
+    surfaceIndex: 0,
+    dimensions: [9, 9, 9],
+    brickSize: 8,
+    directoryOffset: 0,
+    directoryCount: 8,
+    logicalSampleCount: 9 ** 3,
+    generationId: 21
+  };
+  const sparseField = {
+    schema: ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA,
+    backend: 'webgpu',
+    generationId: 21,
+    generationPublicationAllowed: true,
+    failClosed: false,
+    admission: { admitted: true, overflowFlags: 0 },
+    surfaceCount: 1,
+    surfaceTable: { surfaceCount: 1, metadata: [surfaceRecord] },
+    plan: { surfaceTable: { surfaces: [surfacePlan] } },
+    directoryBuffer,
+    activeBrickRowsBuffer,
+    atlasBuffer,
+    candidateVoxelIdsBuffer,
+    candidateDispatchIndirectBuffer,
+    candidateDispatchIndirectBufferByteLength: 12,
+    candidateDispatchWorkgroupSize: 32,
+    activeBrickCount: 1,
+    atlasCellCount: 512,
+    candidateVoxelSlices: [{
+      offsetU32: 64,
+      count: 512,
+      capacity: 512,
+      candidateDispatchIndirectBuffer,
+      candidateDispatchIndirectOffsetBytes: 0,
+      candidateDispatchWorkgroupSize: 32
+    }],
+    fieldPadding: 0.22,
+    refEdgeM: 5,
+    backgroundValue: 0
+  };
+
+  const descriptor = createUlgSparseRenderFieldVolumeDescriptor({
+    device,
+    renderField: sparseField,
+    surfaceIndex: 0
+  });
+
+  assert.equal(descriptor.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_DESCRIPTOR_SCHEMA);
+  assert.equal(descriptor.ok, true);
+  assert.equal(descriptor.status, 'ulg-sparse-render-field-volume-descriptor-ready');
+  assert.equal(descriptor.extensionDescriptorFactory, 'createSparseBrickVolumeDescriptor');
+  assert.equal(descriptor.sourceType, WEBGPU_MARCHING_CUBES_SPARSE_BRICK_VOLUME_SOURCE);
+  assert.equal(descriptor.scalarLayoutName, WEBGPU_MARCHING_CUBES_SPARSE_BRICK_LAYOUT_NAME);
+  assert.deepEqual(descriptor.dims, [9, 9, 9]);
+  assert.deepEqual(descriptor.brickCounts, [2, 2, 2]);
+  assert.equal(descriptor.directoryCount, 8);
+  assert.equal(descriptor.activeBrickCount, 1);
+  assert.equal(descriptor.atlasCellCount, 512);
+  assert.equal(descriptor.candidateVoxelOffset, 64);
+  assert.equal(descriptor.candidateVoxelOffsetBytes, 256);
+  assert.equal(descriptor.candidateVoxelCount, 512);
+  assert.equal(descriptor.candidateDispatchIndirectBuffer, candidateDispatchIndirectBuffer);
+  assert.equal(descriptor.candidateDispatchIndirectOffsetBytes, 0);
+  assert.equal(descriptor.candidateDispatchWorkgroupSize, 32);
+  assert.equal(descriptor.generationId, 21);
+  assert.equal(descriptor.sameDeviceStatus, 'same-device');
+  assert.equal(descriptor.positionTransform.enabled, true);
+  assert.equal(descriptor.isovalue, 0.5);
+
+  const overflowed = createUlgSparseRenderFieldVolumeDescriptor({
+    device,
+    renderField: {
+      ...sparseField,
+      generationPublicationAllowed: false,
+      failClosed: true,
+      admission: { admitted: false, overflowFlags: 4 }
+    }
+  });
+  assert.equal(overflowed.ok, false);
+  assert.equal(overflowed.status, 'ulg-sparse-render-field-volume-blocked-generation-admission');
+
+  const unaligned = createUlgSparseRenderFieldVolumeDescriptor({
+    device,
+    renderField: {
+      ...sparseField,
+      candidateVoxelSlices: [{ offsetU32: 1, count: 512, capacity: 512 }]
+    }
+  });
+  assert.equal(unaligned.ok, false);
+  assert.equal(unaligned.status, 'ulg-sparse-render-field-volume-blocked-candidate-offset-alignment');
+});
+
+test('effective extraction policy is resolved before sparse FIELD production and reused by MC', () => {
+  const device = {
+    label: 'ulg-effective-isovalue-device',
+    limits: { minStorageBufferOffsetAlignment: 256 }
+  };
+  const buffer = (label, size) => ({ label, size, device });
+  const sourceRecords = new Float32Array(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length);
+  sourceRecords[0] = 1;
+  sourceRecords[1] = 2;
+  sourceRecords[4] = 9;
+  sourceRecords[5] = 80;
+  const sourceSurface = {
+    surfaceKey: 'h2o|liquid|domain:drop',
+    role: 'drop',
+    material: 'h2o',
+    phase: 'liquid',
+    materialId: 1,
+    phaseId: 2,
+    renderDomainId: 2,
+    renderDomainKey: 'drop',
+    resolution: 9,
+    isolation: 80
+  };
+  const sourceSurfaceTable = {
+    schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+    status: 'render-field-surface-table-built',
+    surfaceCount: 1,
+    rowStrideFloats: SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length,
+    records: sourceRecords,
+    metadata: [sourceSurface]
+  };
+  const policyRows = {
+    schema: 'peercompute.ulg.algorithm-material-surface-extraction-rows.v0',
+    status: 'algorithm-derived-surface-extraction-rows-ready',
+    rowCount: 1,
+    rows: [{
+      schema: 'peercompute.ulg.algorithm-material-surface-extraction-row.v0',
+      role: 'drop',
+      material: 'h2o',
+      phase: 'liquid',
+      isovalue: 0.5,
+      isovaluePolicy: 'density-kernel-half-occupancy',
+      strictSourceOfTruth: false,
+      rendererAuthority: 'not-renderer-authoritative-surface-policy-row'
+    }]
+  };
+  const advisorySurfaceTable = createUlgEffectiveRenderFieldSurfaceTable({
+    surfaceTable: sourceSurfaceTable,
+    algorithmMaterialSurfaceExtractionRows: policyRows
+  });
+  assert.notEqual(advisorySurfaceTable, sourceSurfaceTable);
+  assert.notEqual(advisorySurfaceTable.records, sourceSurfaceTable.records);
+  assert.equal(sourceSurfaceTable.records[5], 80);
+  assert.equal(sourceSurfaceTable.metadata[0].isolation, 80);
+  assert.equal(advisorySurfaceTable.records[5], 80);
+  assert.equal(advisorySurfaceTable.metadata[0].effectiveExtractionIsovalue, 80);
+  assert.equal(advisorySurfaceTable.metadata[0].effectiveExtractionPolicyIsovalueApplied, false);
+
+  const authoritativePolicyRows = {
+    ...policyRows,
+    rows: policyRows.rows.map((row) => ({
+      ...row,
+      rendererAuthority: 'renderer-authoritative-surface-policy-row'
+    }))
+  };
+  const effectiveSurfaceTable = createUlgEffectiveRenderFieldSurfaceTable({
+    surfaceTable: sourceSurfaceTable,
+    algorithmMaterialSurfaceExtractionRows: authoritativePolicyRows
+  });
+  assert.equal(effectiveSurfaceTable.records[5], 0.5);
+  assert.equal(effectiveSurfaceTable.metadata[0].sourceIsolation, 80);
+  assert.equal(effectiveSurfaceTable.metadata[0].effectiveExtractionIsovalue, 0.5);
+  assert.equal(effectiveSurfaceTable.effectiveExtractionPolicyResolved, true);
+
+  const surfacePlan = {
+    surfaceIndex: 0,
+    dimensions: [9, 9, 9],
+    brickSize: 8,
+    directoryOffset: 0,
+    directoryCount: 8,
+    logicalSampleCount: 9 ** 3,
+    generationId: 22
+  };
+  const sparseField = (surfaceTable) => ({
+    schema: ULG_SPH_GPU_SPARSE_RENDER_FIELD_SCHEMA,
+    backend: 'webgpu',
+    generationId: 22,
+    generationPublicationAllowed: true,
+    failClosed: false,
+    admission: { admitted: true, overflowFlags: 0 },
+    surfaceCount: 1,
+    surfaceTable,
+    plan: { surfaceTable: { surfaces: [surfacePlan] } },
+    directoryBuffer: buffer('directory', 8 * 4),
+    activeBrickRowsBuffer: buffer('active-bricks', 16 * 4),
+    atlasBuffer: buffer('atlas', 512 * 8 * 4),
+    candidateVoxelIdsBuffer: buffer('candidates', 512 * 4),
+    candidateDispatchIndirectBuffer: buffer('candidate-indirect', 12),
+    candidateDispatchIndirectBufferByteLength: 12,
+    candidateDispatchWorkgroupSize: 32,
+    activeBrickCount: 1,
+    atlasCellCount: 512,
+    candidateVoxelSlices: [{
+      offsetU32: 0,
+      count: 512,
+      capacity: 512,
+      candidateDispatchIndirectOffsetBytes: 0,
+      candidateDispatchWorkgroupSize: 32
+    }],
+    fieldPadding: 0.22,
+    refEdgeM: 5,
+    backgroundValue: 0
+  });
+
+  const advisory = createUlgSparseRenderFieldVolumeDescriptor({
+    device,
+    renderField: sparseField(advisorySurfaceTable),
+    algorithmMaterialSurfaceExtractionRows: policyRows
+  });
+  assert.equal(advisory.ok, true);
+  assert.equal(advisory.isovalue, 80);
+  assert.equal(advisory.surfaceExtractionPolicyIsovalueApplied, false);
+
+  const unresolved = createUlgSparseRenderFieldVolumeDescriptor({
+    device,
+    renderField: sparseField(sourceSurfaceTable),
+    algorithmMaterialSurfaceExtractionRows: authoritativePolicyRows
+  });
+  assert.equal(unresolved.ok, false);
+  assert.equal(unresolved.status, 'ulg-sparse-render-field-volume-blocked-isovalue-mismatch');
+  assert.equal(unresolved.producerIsovalue, 80);
+  assert.equal(unresolved.resolvedIsovalue, 0.5);
+
+  const resolved = createUlgSparseRenderFieldVolumeDescriptor({
+    device,
+    renderField: sparseField(effectiveSurfaceTable),
+    algorithmMaterialSurfaceExtractionRows: authoritativePolicyRows
+  });
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.isovalue, 0.5);
+  assert.equal(resolved.isolation, effectiveSurfaceTable.records[5]);
 });
 
 test('ULG summarizes extension compact position buffers as translation-ready but not direct row-compatible', () => {
@@ -1085,7 +1418,9 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   };
   const execution = extensionExecution({
     vertexCount: 9,
+    includeRowMetadata: true,
     includeOutputDescriptors: true,
+    includePackedNormals: true,
     vertexCountMode: 'gpu-counter',
     drawIndirectBuffer: extensionDrawIndirectBuffer
   });
@@ -1109,6 +1444,14 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   assert.equal(result.compactPositionRowsBufferByteLength, 9 * 4 * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(result.compactPositionRowsVertexCount, 9);
   assert.equal(result.compactPositionRowsStrideFloats, 4);
+  assert.equal(result.compactNormalRowsBufferRetained, true);
+  assert.equal(result.compactNormalRowsBuffer, execution.result.normalBuffer);
+  assert.equal(result.compactNormalRowsBufferByteLength, 9 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.compactNormalRowsBufferRowCount, 9);
+  assert.equal(result.compactNormalRowsEncoding, WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING);
+  assert.equal(result.compactNormalRowsSurfaceGenerationId, 7);
+  assert.equal(result.compactPositionRowsSurfaceGenerationId, 7);
+  assert.equal(result.compactNormalRowsAdditionalSubmitCount, 0);
 
   assert.equal(result.surfaceVertices.status, 'surface-vertices-resident-extension-compact-position-direct');
   assert.equal(result.surfaceVertices.directCompactPositionDraw, true);
@@ -1143,8 +1486,8 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params'), true);
-  assert.equal(result.residentBufferLeaseResourceCount, 2);
-  assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);
+  assert.equal(result.residentBufferLeaseResourceCount, 4);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 4);
 
   const retainedBuffers = [
     result.surfaceDraw.drawRowsBuffer,
@@ -1156,13 +1499,118 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
   assert.equal(extensionDrawIndirectBuffer.destroyed, false);
   assert.equal(execution.result.buffer.destroyed, undefined);
+  assert.equal(execution.result.normalBuffer.destroyed, undefined);
+});
+
+test('ULG GPU builder borrows the extension exact indirect draw without a translation submit when admitted', async () => {
+  const { device, shaderModules, bindGroups, dispatches, createdBuffers } =
+    fakeExtensionSurfaceDevice();
+  const extensionDrawIndirectBuffer = {
+    label: 'extension-draw-indirect',
+    size: SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length * Uint32Array.BYTES_PER_ELEMENT,
+    destroyed: false,
+    destroy() {
+      this.destroyed = true;
+    }
+  };
+  const execution = extensionExecution({
+    vertexCount: 9,
+    includeRowMetadata: true,
+    includeOutputDescriptors: true,
+    includePackedNormals: true,
+    vertexCountMode: 'gpu-counter',
+    drawIndirectBuffer: extensionDrawIndirectBuffer
+  });
+
+  const result = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: execution,
+    readbackMode: 'no-full-readback',
+    translateVertexRows: false,
+    allowExtensionDrawIndirectBuffer: true,
+    waitForQueueCompletion: false
+  });
+
+  assert.equal(result.directCompactPositionDraw, true);
+  assert.equal(result.translationPipelineCacheStatus, 'skipped-extension-draw-indirect-buffer');
+  assert.equal(
+    result.directCompactPositionDrawIndirectSource,
+    'webgpu-marching-cubes-extension-draw-indirect-buffer'
+  );
+  assert.equal(result.surfaceDraw.drawIndirectRowsBuffer, extensionDrawIndirectBuffer);
+  assert.equal(result.surfaceDraw.drawIndirectRowsOwnership, 'extension-owned-retained-buffer');
+  assert.equal(
+    createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-draw-indirect'),
+    false
+  );
+  assert.equal(
+    createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'),
+    false
+  );
+  assert.equal(shaderModules.length, 0);
+  assert.equal(bindGroups.length, 0);
+  assert.equal(dispatches.length, 0);
+  assert.equal(device.queue.submitted, undefined);
+
+  result.releaseExtensionSurfaceBufferLeases();
+  result.destroyExtensionSurfaceBuffers();
+  assert.equal(extensionDrawIndirectBuffer.destroyed, false);
+});
+
+test('ULG GPU builder fails closed when compact draw has no packed normal generation', async () => {
+  const { device } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({
+    vertexCount: 9,
+    includeRowMetadata: true,
+    includeOutputDescriptors: true,
+    includePackedNormals: false,
+    vertexCountMode: 'gpu-counter'
+  });
+
+  await assert.rejects(
+    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution: execution,
+      readbackMode: 'no-full-readback',
+      translateVertexRows: false,
+      waitForQueueCompletion: false
+    }),
+    /generation-coupled packed normals \(packed-normal-buffer-unavailable\)/
+  );
+});
+
+test('ULG GPU builder fails closed when packed normals do not match the position generation', async () => {
+  const { device } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({
+    vertexCount: 9,
+    includeRowMetadata: true,
+    includeOutputDescriptors: true,
+    includePackedNormals: true,
+    vertexCountMode: 'gpu-counter',
+    surfaceGenerationId: 11
+  });
+  execution.result.outputDescriptors.rows.normal.normalBufferDescriptor
+    .generation.surfaceGenerationId = 10;
+
+  await assert.rejects(
+    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution: execution,
+      readbackMode: 'no-full-readback',
+      translateVertexRows: false,
+      waitForQueueCompletion: false
+    }),
+    /generation-coupled packed normals \(packed-normal-generation-mismatch\)/
+  );
 });
 
 test('ULG GPU builder falls back to compact draw metadata when extension indirect output is absent', async () => {
   const { device, shaderModules, bindGroups, dispatches, createdBuffers, queueWrites } = fakeExtensionSurfaceDevice();
   const execution = extensionExecution({
     vertexCount: 9,
+    includeRowMetadata: true,
     includeOutputDescriptors: true,
+    includePackedNormals: true,
     vertexCountMode: 'gpu-counter'
   });
 
@@ -1192,8 +1640,8 @@ test('ULG GPU builder falls back to compact draw metadata when extension indirec
   assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-extension-surface-source-vertex-count');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
-  assert.equal(result.residentBufferLeaseResourceCount, 2);
-  assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);
+  assert.equal(result.residentBufferLeaseResourceCount, 4);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 4);
 
   const retainedBuffers = [
     result.surfaceDraw.drawRowsBuffer,

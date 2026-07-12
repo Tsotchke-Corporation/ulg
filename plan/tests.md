@@ -1,5 +1,223 @@
 # ULG Test Plan
 
+## Trajectory-Pause Stabilization Gate - 2026-07-12
+
+The current restart authority is `plan/todo/sol-handoff.md`. No additional
+refactor slice may be enabled until a fresh standard native WebGPU surface
+matrix has been captured and inspected across time.
+
+Stabilization evidence from the paused checkout:
+
+- focused lane/ABI/layout/native-surface/optics suite: `252/252` passed;
+- mutation-certificate lane suite: `17/17` passed, but the capability remains
+  default-off and has no native GPU execution evidence;
+- split reaction timestamp-hook assertions: `3/3` passed after replacing the
+  stale monolithic `reactionStep` expectation with required
+  `reactionStepPropose` and `reactionStepResolve` passes;
+- `npm run build`: passed with Vite 8.0.16 and 187 transformed modules;
+- fresh main-app and mounted-SPH browser smokes: zero console errors, page
+  errors, failed requests, or HTTP errors;
+- `/tmp/ulg-handoff-sph-smoke.png` is mount-only evidence captured during
+  closure derivation, not a native surface visual acceptance frame;
+- full `npm test`: `1471` tests, `1468` passed, `0` failed, `3` skipped in
+  `279162.421954 ms` under Node `v24.17.0`; the skipped tests are the existing
+  opt-in long-horizon liquid gates.
+
+The mandatory next visual gate remains the water-cycle, iron/ice,
+sodium/water, cesium/fluorine, and deterministic random-pair matrix using the
+production `native-webgpu-surface-consumer`. Inspect time-zero, early, middle,
+and final frames; do not replace this with source assertions or one screenshot.
+
+## Opaque Native PBR, Thickness, And Performance Gate - 2026-07-11
+
+This is the current acceptance contract for the active
+`gpu-resident-physics-refactor` branch. Source assertions and one attractive
+frame are necessary but not sufficient; the full gate requires mounted native
+WebGPU evidence across time.
+
+Implemented evidence that every fresh production run must continue to prove:
+
+- exactly one connected native canvas, positive triangle count, zero visible
+  `THREE.Points`, and no worker particle presenter;
+- one packed octahedral normal u32 per emitted vertex, matching the exact
+  marching-cubes generation and adding zero queue submissions;
+- alpha exactly `1`, no blend target or weighted OIT, and depth writes enabled
+  for every native surface and proxy draw;
+- the selected background is uploaded and drawn by the native opaque pass
+  before surfaces, with nonzero texture dimensions and cover-scale evidence,
+  so it is also present in the refraction scene-color copy;
+- refractive authority requires an exact optical-state match, nonblocked ready
+  status, provenance, and distinct visible blue/green/red spectral coverage;
+  state-zero/display rows cannot bend rays;
+- every refractive draw has a same-encoder `depth32float` backface target,
+  positive byte accounting, either a current pass draw or a valid stable-camera
+  cache hit, and zero additional queue submissions;
+- missing, open, behind-camera, offscreen, or out-of-bounds rear geometry fails
+  closed to alpha-one non-transmissive PBR;
+- native presentation admits at most two in-flight submissions and sustains
+  near-browser-RAF cadence without using a per-frame whole-queue fence;
+- the resident reaction kernel reports
+  `hostZeroInitializationByteLength=0`; the 300k manufactured case accounts for
+  192,000,000 live bytes initialized by ordered shaders and no host zero upload.
+
+Accepted live presentation artifacts from the current tree:
+
+- `/tmp/ulg-background-native-after2.png`: corrected native background upload,
+  opaque PBR surface, and container with no browser/WebGPU error;
+- `/tmp/ulg-thickness-refraction-live2.png`: 960x640 thickness-aware spectral
+  refraction at 60.296 FPS, one refractive draw, zero transparent draws,
+  2,457,600 backface-depth bytes, peak two in-flight submissions, and no issue;
+- a stable-camera follow-up reports
+  `native-refractive-backface-depth-cache-hit` with zero repeat backface draws.
+
+The following gates remain **open** and must pass before checking SURF-4,
+OPTICS-0, OPTICS-1, or the complete refactor:
+
+- [x] GPU manufactured slab: doubling thickness doubles optical path length
+  and the expected lateral displacement within tolerance.
+- [x] GPU metamorphic translation: moving the same slab and camera together
+  leaves thickness and attenuation invariant.
+- [x] Unit-index limit: `n=1` produces no bending; increasing `k` monotonically
+  reduces transmitted radiance; RGB dispersion follows the admitted spectral
+  ordering.
+- [x] Projection/unprojection compact reduction: front and reconstructed rear
+  positions round-trip within declared error, including resize/DPR changes.
+- [x] Rear-depth fail-close: open meshes, missing depth, camera-inside cases,
+  and invalid bounds cannot sample transmitted scene color.
+- [x] Opaque-only scenes allocate no unnecessary backface target; resize while
+  two submissions are in flight retires replaced targets only after their
+  fences.
+- [ ] Fresh close-spaced native matrix for water-cycle, iron/ice,
+  sodium/water, cesium/fluorine, and deterministic random pairs. Capture
+  time-zero, early, middle, and final compositor frames plus compact physics
+  atomics and GPU timestamp spans.
+- [ ] Inspect and quantify expected time ordering: water flows/boils and later
+  descends after cooling; molten iron emission decays while ice forms
+  water/steam and the vapor rises; sodium/water heats and expands products with
+  physically derived color; cesium/fluorine spreads a strongly exothermic
+  reaction; random pairs obey admitted reaction/no-reaction evidence.
+- [ ] Timestamp and allocation gate proves serial product carrier search and
+  placement are removed, redundant neighborhood generations are absent, exact
+  live-prefix indirect work is used, and persistent workspaces eliminate
+  avoidable per-substep allocation.
+
+The first six refraction gates above are accepted by the 2026-07-12 Vulkan
+artifact `/tmp/ulg-native-refraction-science-probe.json` and focused lifecycle
+tests. The probe passes all 52 checks with one submission and one fixed 512-byte
+diagnostic map, compiles the production compact surface WGSL, exercises
+perspective plus DPR 1/DPR 2/aspect-changing projection, and proves invalid
+rear geometry fails closed. The target-set lifecycle tests prove exact
+device/size/format reuse, zero active targets for opaque intervals, and exactly
+once destruction only after both simulated in-flight submissions settle. The
+fresh scenario matrix and full performance timestamp gates remain open.
+
+Do not create or use a CPU mirror/reference solver or CPU parity threshold for
+these gates. Use manufactured GPU states, mathematical invariants, metamorphic
+same-device executions, GPU A/B paths, and fixed-size evidence reductions.
+
+## Native Surface Versus Particle Presentation Gate - 2026-07-11
+
+Every native-surface visual or performance run must prove the composed route,
+not merely nonblank pixels or successful extraction counters. Required checks:
+
+- selected mode and visible bridge are `native-webgpu-surface-consumer`;
+- renderer delegates the frame to the native same-device main-thread import;
+- exactly one connected scene canvas is present and no visible `THREE.Points`
+  object exists;
+- native triangle count is positive and the presentation serial advances;
+- worker offscreen presentation and its resident stage chain are not requested
+  for native mode;
+- sparse runtime generation/reuse/replacement reason and native MC cache
+  hit/miss/release counts are recorded at every interval;
+- an incomplete or `bad` inner probe fails the enclosing benchmark scenario.
+
+Current accepted evidence:
+
+- `/tmp/ulg-default-native-owner-postfix.png`: default paused water route, one
+  canvas, zero Points, 466,033 native triangles.
+- `/tmp/ulg-sparse-pool-diagnostic.json`: three water batches reuse sparse
+  generation 1; MC release count 0 and extraction 1.4-1.7 ms.
+- `/tmp/ulg-reactive-resident-live-2026-07-11.json` and
+  `/tmp/ulg-reactive-resident-live-montage.png`: three Sodium/H2O intervals,
+  one submission per four-step batch, no map/readback, one native canvas, zero
+  Points, and clean composed surfaces.
+
+`/tmp/ulg-native-surface-owner-cache-postfix-bench.json` is explicitly rejected
+because its inner probe is `bad`, reports `initial-preflight-blocked`, and
+completed only 4/12 requested steps even though the old outer gate said pass.
+
+## SOL-0/SOL-1 Authoritative Checkpoint - 2026-07-11
+
+The coherent-solid production gate is
+`npm run probe:coherent-solid-production`. It mounts one asymmetric body
+through the browser's real ComputeManager/GPUHub/StateManager authority path,
+advances 120 sequential resident generations, draws its persistent rest mesh
+with GPU-compacted indexed-indirect work on the production
+`native-webgpu-surface-consumer`, and maps only fixed-size validation evidence.
+`npm run probe:coherent-solid-visual` is the same authoritative gate with a
+separate output path; it is intentionally not an independent manufactured
+renderer.
+
+Required SOL production checks:
+
+- bootstrap and every frame result must carry the exact ComputeManager-returned
+  object identity and authoritative resident-lane lease identity;
+- StateManager admission must match task, lane, state, generation, lease,
+  same-device evidence buffer, and global fail-close descriptor;
+- one caller-owned GPU submission per generation, zero full-state readback,
+  no raw GPU-buffer transfer through the warm delta, and no CPU mirror oracle;
+- ten shared pipelines and twenty retained buffers in a two-slot ping-pong
+  arena, with zero per-generation pipeline or retained-buffer allocation;
+- previous publications and hot records retire after their queue fence, with
+  at most two live generations and one live generation after rollover;
+- global invariant rejection clears indirect instance count for both the
+  rejected candidate and any later task that consumes it;
+- the native scheduler is the only canvas presentation owner, the recorded
+  current-texture owner and presentation serial match, and each presentation
+  acquires `getCurrentTexture()` exactly once;
+- paired native compositor frames at steps 0, 1, 30, 60, and 120 retain the
+  container/background and coherent solid, while separated checkpoints show
+  objective translation/rotation.
+
+Accepted artifacts:
+
+- `/tmp/ulg-coherent-solid-production-bridge.json`: `passed`, all 26 checks
+  green, 121 task submissions, one submit per step, ten cached pipelines,
+  twenty retained buffers totaling 5,296 bytes, and zero per-generation
+  allocation. Fixed checkpoint mapping was 388 bytes and full-frame readback
+  was zero.
+- `/tmp/ulg-coherent-solid-production-bridge/`: baseline plus paired step
+  images. Every paired image had near-black ratio `0` and pair delta `0`;
+  separated motion checks changed more than 18,000 pixels. The inspected
+  contact sheet is
+  `/tmp/ulg-coherent-solid-production-bridge/contact-sheet.png`.
+- `/tmp/ulg-coherent-solid-visual-sequence.json`: independent command rerun,
+  `passed` with the same 26 checks and no browser, console, or WebGPU errors.
+- `/tmp/ulg-coherent-solid-frame.json`: `pass` for driven, translated by 100
+  cells, permuted membership, and torque-free GPU cases. Translation residual
+  was `3.5762786865234375e-6`; member permutation changed none of position,
+  orientation, linear momentum, or angular momentum.
+
+Production physics evidence after 120 steps: relative kinetic-energy drift
+`4.6623120671959056e-5`, linear- and angular-momentum drift `0`, center
+displacement `1.1029109211857835 m`, and maximum quaternion-norm error
+`1.1920928955078125e-7`. The timestep-split metamorphic case stayed within its
+declared center, orientation, and kinetic-energy tolerances.
+
+Focused authority/frame/native/rest-shape tests passed `23/23`. The first
+`npm run probe:coherent-solid-frame` attempt failed before GPU execution when a
+Vite dynamic import transiently returned `Failed to fetch dynamically imported
+module`. A direct HTTPS fetch immediately returned HTTP 200, syntax passed,
+and the unchanged command passed on retry. This is recorded as infrastructure
+noise, not hidden as a first-try pass.
+
+The top-level SOL-0/SOL-1 acceptance boxes remain open. The current checkpoint
+does not yet vary contact-proxy ordering, workgroup size/dispatch partition, or
+admitted SS-level/chart transitions. Those GPU metamorphic and continuity
+gates must land before full slice closure; the production authority, resident
+lifecycle, direct shape render, fail-close, and close-spaced visual blockers
+from the 2026-07-11 audit are resolved.
+
 ## Standard Material-Interaction Sequence - 2026-07-10
 
 `npm run test:sph-standard-visual` is the standard GPU visual/behavior matrix
@@ -13957,7 +14175,7 @@ GPU timestamp attribution (`PROF-0`), 2026-07-11 11:29 AKDT:
   - Passed: `20/20` on dependency branch
     `gpu-resident-physics-refactor`, commit `dca2457`.
 - Native water timestamp/surface probe:
-  `ULG_PROBE_SCENARIO=water-cycle ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_TIMESTAMPS=1 ULG_PROBE_OUTPUT=/tmp/ulg-prof0-thermal-native.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
+  `ULG_PROBE_URL='/?scenario=water-cycle&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_GPU_PROFILE=1 ULG_PROBE_OUTPUT=/tmp/ulg-prof0-thermal-native.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
   - Passed: status `good`; four of four native frames were nonblank and
     surface-varying; browser/WebGPU issue count was zero.
   - Timestamp-query evidence was valid for eight mechanics/separation spans
@@ -13967,7 +14185,7 @@ GPU timestamp attribution (`PROF-0`), 2026-07-11 11:29 AKDT:
   - The allocation evidence reports the dense field source as `84,934,656`
     bytes and marching-cubes position output as `22,369,616` bytes.
 - Native reaction timestamp/surface probe:
-  `ULG_PROBE_SCENARIO=cesium-fluorine ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_TIMESTAMPS=1 ULG_PROBE_OUTPUT=/tmp/ulg-prof0-reaction-native2.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
+  `ULG_PROBE_URL='/?scenario=cesium-fluorine&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_GPU_PROFILE=1 ULG_PROBE_OUTPUT=/tmp/ulg-prof0-reaction-native2.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
   - Presentation passed: four of four native frames were nonblank and
     surface-varying with zero browser issues. GPU spans measured mechanics
     `0.646144 ms`, thermal `1.327104 ms`, reaction `0.496640 ms`, dense field
@@ -14001,3 +14219,283 @@ GPU timestamp attribution (`PROF-0`), 2026-07-11 11:29 AKDT:
 - Production build: `npm run build`
   - Passed with Vite `8.0.16`, `140` modules transformed, and only the existing
     large-chunk warning (`index` `5,314.95 kB`, gzip `1,158.75 kB`).
+
+Shared WebGPU parallel primitives (`FIELD/NEIGH/SS` backbone), 2026-07-11
+11:55 AKDT:
+
+- Focused ABI/orchestration tests:
+  `node --test tests/webgpuRadixScanUnique.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs`
+  - Passed: `28/28` after the 2D dispatch and device-capacity gates were added.
+- Hardened resident-neighborhood contracts:
+  `node --test tests/residentNeighborhoodGpu.test.mjs tests/residentBufferLease.test.mjs tests/contract-fixtures.test.mjs`
+  - Passed: `20/20`.
+- Live WebGPU manufactured probe:
+  `ULG_PRIMITIVES_OUTPUT=/tmp/ulg-webgpu-parallel-primitives.json npm run probe:webgpu-primitives`
+  - Passed both cases with zero validation errors.
+  - `small-exact`: seven two-word keys, exact stable order
+    `[3,1,5,6,0,2,4]`, five unique runs, monotone offsets, and CSR sentinel
+    `7`.
+  - `large-hierarchical-2d`: `10,003` deterministic two-word keys, forced
+    maximum dispatch dimension `8`, exact ordering/stability/permutation,
+    `9,955` unique runs, monotone offsets, and CSR sentinel `10,003`.
+- Scale characterizations use the same manufactured diagnostic, not a physics
+  oracle:
+  - `ULG_PRIMITIVES_ELEMENT_COUNT=300000 ULG_PRIMITIVES_OUTPUT=/tmp/ulg-webgpu-parallel-primitives-300k.json npm run probe:webgpu-primitives`
+    passed exact order, stability, permutation, `261,218` unique runs, and the
+    `300,000` sentinel for two-word keys; host-visible fresh-runtime queue
+    completion was `26.2 ms`.
+  - Adding `ULG_PRIMITIVES_KEY_WORD_COUNT=5` wrote
+    `/tmp/ulg-webgpu-parallel-primitives-300k-5w.json` and passed all gates
+    with `300,000` unique runs and `40.9 ms` host-visible queue completion.
+  - These are queue-fenced characterization values that include fresh runtime/
+    pipeline effects. They are not labeled GPU kernel timestamps.
+- The probe maps only manufactured sort/CSR diagnostics. Production primitive
+  APIs encode into a caller-owned command encoder and perform no submit, map,
+  fence, scheduler action, or state mutation.
+
+Sparse native marching-cubes source (`FIELD-0` dependency), 2026-07-11
+12:20 AKDT:
+
+- Live native WebGPU manufactured extraction from
+  `/home/cos/projects/webgpu-marching-cubes`:
+  `/tmp/webgpu-mc-sparse-probe.mjs`
+  - Passed and wrote `/tmp/webgpu-mc-sparse-probe.json`.
+  - Input was a `9x9x9` logical field, one active `8x8x8` brick, sphere SDF
+    in atlas lane zero, directory entry zero, active-row atlas offset lane
+    seven, candidate IDs `0..511` at aligned u32 offset `64` / byte offset
+    `256`, and generation `21`.
+  - Exact GPU counter was `564`; 24 sampled positions were finite and varying;
+    validation, out-of-memory, and internal error scopes were clean; no
+    uncaptured/page error occurred.
+- Dependency regression at commit `7e1f589`:
+  - `npm test` passed `26/26`.
+  - `npm run build` passed with only the existing bundle-size warning.
+  - `git diff --check` passed.
+- ULG sparse descriptor regression:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - The first run failed `20/21` because the manufactured directory buffer
+    contained one u32 for a `2x2x2` brick grid. This was a valid fail-closed
+    undersized-buffer result, not a runtime extraction failure.
+  - After allocating all eight directory entries, the rerun passed `21/21`,
+    including admitted, overflow-blocked, and unaligned-slice cases.
+
+FIELD-0 production sparse path, 2026-07-11 12:52 AKDT:
+
+- Focused FIELD/native integration:
+  `node --test tests/sphSparseRenderFieldGpu.test.mjs tests/sphSparseRenderFieldPlan.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/nativeSurfaceHarness.test.mjs tests/webgpuRadixScanUnique.test.mjs`
+  - Passed `65/65` before the pool-lifecycle hardening.
+- Final FIELD/native lifecycle regression:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/sphSparseRenderFieldGpu.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed `49/49`. Coverage pins the native no-full sparse selector, retained
+    source-buffer requirement, dense diagnostic route, and pool-owned cleanup.
+- Build: `npm run build`
+  - Passed with Vite `8.0.16`, `151` modules, and only the existing chunk-size
+    warning.
+- Repeated native no-full smoke:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=native-webgpu-surface-consumer ULG_PROBE_OUTPUT=/tmp/ulg-field0-native-smoke4.json npm run probe:sph-long-horizon`
+  - Passed `good`: sparse render-field schema on every accepted draw, native
+    visible consumer accepted, five of five nonblank frames, browser-frame
+    validation passed, and zero browser/WebGPU issues.
+- Timestamp-query sparse FIELD run:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_PROBE_GPU_PROFILE=1 ULG_PROBE_INITIAL_RESIDENT_WAIT_MS=20000 ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=native-webgpu-surface-consumer ULG_PROBE_OUTPUT=/tmp/ulg-field0-profile-small2.json npm run probe:sph-long-horizon`
+  - Passed `good`; three 40-span sparse FIELD profiles measured `3.232768`,
+    `2.961408`, and `4.016128 ms`. Route radix accounted for about
+    `1.34-1.37 ms`, atlas gather `0.378-0.484 ms`, and candidate compaction
+    about `0.10 ms`.
+  - Allocation evidence was `95,734,092` bytes including retained, scratch,
+    borrowed source, and profiler resources. This is bounded evidence, not a
+    claim that sparse capacity is smaller than every dense case.
+  - Native marching-cubes timestamp profiles remained valid and the final
+    visible consumer stayed accepted with zero issues.
+- Failure-path evidence retained in the log: the first external HTTPS probe
+  omitted `NODE_TLS_REJECT_UNAUTHORIZED=0`; one smoke requested the wrong
+  renderer route; the first real sparse refresh destroyed its reusable runtime
+  through generic artifact cleanup; and initial profiling attempts used the
+  five-second startup window. Each was corrected generally and rerun.
+
+FIELD-0 corrected acceptance, 2026-07-11 13:44 AKDT:
+
+- The earlier smoke/timestamp evidence above is retained as provisional history.
+  Acceptance additionally requires the planner-owned exact-capacity proof,
+  declared support-radius proof, single-flight peak-allocation enforcement,
+  one effective producer/consumer isovalue, and GPU candidate indirect
+  fail-closed behavior.
+- Manufactured GPU probes:
+  `node scripts/sph-sparse-render-field-probe.mjs` and
+  `ULG_SPARSE_FIELD_AUTHORITATIVE_ISOVALUE=1 node scripts/sph-sparse-render-field-probe.mjs`
+  - Advisory policy passed with isolation `80` and `26` candidates.
+  - Explicit renderer-authoritative policy passed with isolation `0.5` and
+    `146` candidates.
+  - Both injected an under-capacity candidate generation. GPU evidence set
+    overflow flag `16`, candidate indirect was `[0,1,1]`, capacity proof was
+    rejected, and no scoped/uncaptured WebGPU error occurred.
+- Final delegated regression: full `npm test` passed `1108`, skipped three
+  opt-in cases, and failed zero; the production scene/native/FIELD set passed
+  `151/151`; `npm run build` and `git diff --check` passed.
+- Production native WebGPU sequence:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=native-webgpu-surface-consumer ULG_PROBE_OUTPUT=/tmp/ulg-field0-vulkan-native.json npm run probe:sph-long-horizon`
+  - Passed `good`; actual native indirect args were `[10968,1,0,0]`.
+  - All four captured frames were surface-varying with `1165-1518` distinct
+    RGB colors and channel span `153`; resident execution completed and
+    browser/WebGPU issue count was zero.
+  - The long-horizon probe now defaults to Vulkan ANGLE, matching the standard
+    visual matrix, focused native probes, and Playwright WebGPU configuration.
+- Diagnostic-only evidence maps remain allowed for these manufactured and
+  visual-validation probes. Normal FIELD production maps neither the hot field
+  nor the 144-byte admission row; it uses the exact declared-bound proof plus
+  the GPU indirect gate.
+
+SS-0 exact sparse hierarchy, 2026-07-11 12:45 AKDT:
+
+- Combined hierarchy/primitive/coupling regression:
+  `node --test tests/schroederSparseHierarchyGpu.test.mjs tests/schroederHierarchyGpu.test.mjs tests/schroederCrossLevelCouplingGpu.test.mjs tests/webgpuRadixScanUnique.test.mjs`
+  - Passed `156/156` after concurrent NEIGH syntax settled.
+- Live manufactured probe: `npm run probe:schroeder-sparse-hierarchy`
+  - `/tmp/ulg-schroeder-sparse-hierarchy-final.json` passed with six exact
+    routes compacted to four unique nodes and CSR offsets `[0,1,3,4,6]`.
+  - A four-route arena failed closed with overflow `1`.
+  - The 300,000-route plan admitted 200,000 unique nodes in `28,800,124`
+    retained plus `12,172,532` scratch bytes; validation, OOM, internal, and
+    uncaptured error counts were zero.
+- Reusable runtime owns no submit, map, fence, or scheduler action; the caller
+  encoder and PeerCompute/StateManager admission remain explicit. The third
+  grid level is rejected.
+
+NEIGH-0/LANE-0 remediation checkpoint, 2026-07-11 14:09 AKDT:
+
+- Focused resident-neighborhood builder:
+  `node --test tests/residentNeighborhoodGpuBuilder.test.mjs`
+  - Passed `5/5`, including exact equality between the planned peak and the
+    sum of unique live GPU-buffer allocations across two generations sharing
+    one arena.
+- Persistent lane and external source metadata:
+  `node --test tests/residentNeighborhoodGpuLane.test.mjs`
+  - Passed `4/4`, including multiple charts, levels, support classes,
+    cross-level assignments, pooled reuse across leases, and single-flight
+    acquisition.
+- Authority descriptor and consumer guards:
+  `node --test tests/residentNeighborhoodGpu.test.mjs tests/residentNeighborhoodConsumer.test.mjs`
+  - Passed `17/17`. Production authority is derived from an actual
+    `peercompute.compute.gpu-resident-lane-lease-identity.v0` record and binds
+    lease, lane, state key, and source family into the GPU token; stale or
+    mismatched handles fail closed.
+- Fused MLS-MPM sequence:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed `86/86`. The two-substep case admits four generations, rebuilding
+    immediately after both separation mutations, while sharing one submit and
+    exposing all default consumers.
+- PeerCompute focused and complete unit suites, run from
+  `/home/cos/projects/peercompute`:
+  `node --test tests/unit/gpuResidentLaneManager.test.js` passed `10/10`;
+  `npm run test:unit` passed `187/187`.
+- Live native WebGPU consumer chain:
+  `npm run probe:resident-neighborhood`
+  - Passed and wrote
+    `/tmp/ulg-resident-neighborhood-consumer-chain.json`. One caller-owned
+    encoder built an authoritative pressure neighborhood, encoded one retained
+    force row, and admitted that row to grid application. No stage submitted,
+    mapped, or read back locally; stale generation rejection passed and shader
+    compilation/validation errors were empty.
+- Production build: `npm run build` passed with Vite `8.0.16`, `162` modules,
+  and only the existing large-chunk warning.
+- Full ULG regression: `npm test` completed `816` tests with `808` passes,
+  three documented opt-in skips, and five failures in `281,673.994 ms`. Every
+  failure was import-time fallout from the concurrent SS implementation:
+  `schroederCrossLevelCouplingGpu.js` could not find its prolongation compact
+  invocation mapping. The directly failed files were
+  `schroederCrossLevelCouplingGpu`, `schroederHierarchyGpu`,
+  `sphPhaseDemoMountRemoteRefresh`, `sphPhaseRenderer`, and
+  `sphRenderGpuKernel`. This run is not recorded as a branch-wide pass.
+- Remaining production acceptance: remove the scene's CPU-created pressure
+  force rows and prove StateManager admission for the same-device mutation.
+  Reaction has a same-encoder stage contract but is not claimed fused until
+  its resident product/gas summary state is carried by the fused lane.
+- Final combined focused regression across builder, descriptor, consumer,
+  consumer-stage, lane, and MLS-MPM files passed `115/115`; scoped ULG and
+  PeerCompute `git diff --check`, untracked-file whitespace scans, and
+  `node --check` over every touched JavaScript module passed.
+
+GPU-native spatial gas-cell EOS gate, 2026-07-11 16:09 AKDT:
+
+- Focused contract and pressure-consumer regression:
+  `node --test tests/sphSpatialGasCellEosGpu.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs`
+  - Passed `26/26`.
+  - Covers retained product/compact source admission, exact ComputeManager
+    lease identity, source epoch/generation rejection, device and capacity
+    fail-close, two leased generations, rejected source leases, pre-submit
+    abort, persistent lane/pipeline reuse across differing active row counts,
+    and the pressure shader's GPU metadata/lookup bindings.
+- Durable native Vulkan proof: `npm run probe:sph-gas-cell-eos`
+  - Passed `12/12` and wrote
+    `/tmp/ulg-sph-spatial-gas-cell-eos-gpu.json`.
+  - Time-zero metadata admitted two cells at epoch/generation `0/1`; the
+    permuted, doubled-temperature continuation admitted two at `1/2` and
+    doubled both pressures and gradients. A stale epoch was rejected.
+  - The pressure force consumer reports `rowCount=0` and
+    `rowCountSource=gpu-metadata-word-9`: active work comes from the GPU's
+    `admittedActiveCellCount`, while host capacity is only a bound.
+  - The production force pipeline uses nine storage bindings under the
+    requested limit of ten. Browser and validation errors were empty.
+- Normal production execution performs no gas-field map, CPU decode, or CPU
+  row reupload. The probe reads only fixed metadata, two manufactured pressure
+  rows, and two force rows after execution as explicit validation evidence.
+
+Sparse smooth-normal and quantum-optical PBR gates, added 2026-07-11 21:27
+AKDT:
+
+- These gates correct an earlier validation gap. Nonblank, changing native
+  triangles and zero `THREE.Points` do not prove smooth normals. The FIELD-0
+  sparse descriptor currently disables the retained dense-gradient branch and
+  therefore fails this section until SURF-4 lands.
+- GPU manufactured normal evidence, using the production sparse extraction
+  and normal kernel:
+  - read back only a fixed-size reduction, never position/field/normal arrays;
+  - at least 99% of emitted normals are finite and unit length within the
+    declared tolerance;
+  - at least 99% of nondegenerate sphere vertices point outward;
+  - more than 90% of nondegenerate triangles have differing packed vertex
+    normals, proving the path is not one face normal copied three times;
+  - dense/sparse same-device manufactured A/B gradient residual is within a
+    declared tolerance without a CPU geometry oracle.
+- Generation and residency evidence:
+  - packed normal source is `sparse-atlas-post-extraction-gradient`;
+  - normal and compact-position buffers carry the same device and MC
+    generation token;
+  - superseded normal buffers retire only after the native submit fence;
+  - stale/cross-device descriptors fail closed;
+  - normal mode maps zero particle, field, position, or normal bytes and adds
+    no queue submit/fence;
+  - packed normal storage is at most 4 bytes per admitted vertex; no dense
+    field reconstruction or approximately 85 MB sparse snapshot copy occurs.
+- Native opaque-PBR evidence:
+  - every surface fragment returns alpha exactly `1`;
+  - production native surface targets have no blend state;
+  - every native surface draw writes depth;
+  - transparent and weighted-OIT draw counts remain exactly zero;
+  - scene-color copy occurs after non-refractive opaque geometry and before an
+    unblended depth-writing dielectric pass;
+  - a front/rear occlusion manufacture proves the rear object is refracted,
+    not alpha-faded through the front object.
+- Quantum optical authority evidence:
+  - material-bank warm rows cannot change closure spectral index or scalar
+    display IOR;
+  - each refractive GPU record exposes an admitted quantum-response status,
+    provenance reference, validity domain, and nonzero spectral `n,k` count;
+  - fixed `1.333`, `1.309`, `1.00025`, `1.0005`, and `1.4` values do not
+    authorize refraction;
+  - invalid/missing/out-of-domain quantum response produces opaque
+    non-refractive PBR plus a blocked/pending status;
+  - an admitted dispersive manufactured closure yields ordered, channel-
+    separated RGB refraction offsets from its spectral samples; conductors
+    remain conductor Fresnel and never enter dielectric transmission.
+- Visual sequence acceptance uses the production
+  `native-webgpu-surface-consumer` for water cycle, Fe/ice, Na/H2O, Cs/F2, and
+  seeded random pairs. Inspect close-spaced fixed-camera frames and contact
+  sheets at initial, refresh-1, refresh-2, intermediate, and final intervals.
+  Each interval must report one native canvas, zero visible points, smooth
+  gradient-normal use, matching field/surface/normal generations, alpha-one
+  opaque PBR, no faceting/flicker/striping, and zero browser/WebGPU warnings.
+- Timestamp MC extraction, packed-normal generation, scene-color copy, and
+  dielectric draw separately. The warm packed-normal target is at most 10% of
+  extraction GPU time. Report the result rather than weakening correctness if
+  the target is missed.

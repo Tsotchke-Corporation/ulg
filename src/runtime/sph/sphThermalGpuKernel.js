@@ -22,7 +22,6 @@ import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
 import {
-  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT,
   MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
 } from '../material/materialPropertyBank.js';
 import {
@@ -30,7 +29,11 @@ import {
   segmentEnergyAbove,
   segmentTemperatureFromEnergyAbove
 } from '../material/thermoState.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  computeBufferBinding,
+  createCachedExplicitComputePipelineFamily,
+  deferSubmittedWorkCleanup
+} from '../webgpuComputeLayout.js';
 import {
   createWebGpuTimestampProfiler,
   summarizeWebGpuBufferAllocations
@@ -39,6 +42,18 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { RESIDENT_NEIGHBORHOOD_CONSUMER } from './residentNeighborhoodGpu.js';
+import { resolveResidentNeighborhoodConsumer } from './residentNeighborhoodConsumer.js';
+import {
+  tagWebGpuBufferDevice,
+  webGpuBufferMatchesDevice
+} from './sphGpuDeviceIdentity.js';
+import {
+  SPH_THERMAL_PARAMS_BYTE_LENGTH,
+  ULG_SPH_THERMAL_WORKSPACE_GPU_SCHEMA,
+  assertSphThermalWorkspaceGpu,
+  createSphThermalWorkspaceGpu
+} from './sphThermalWorkspaceGpu.js';
 
 export {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
@@ -1120,9 +1135,28 @@ function outputEnvelope({
   stateBufferByteLength = state.byteLength,
   thermoBufferByteLength = thermo.byteLength,
   retainedOutputParticleBuffers = false,
+  outputParticleBuffersBorrowed = false,
+  outputStateBufferOwned = false,
+  outputThermoBufferOwned = false,
   destroyOutputParticleBuffers = null,
   readbackMode = FULL_READBACK_MODE,
   outputBufferInitializationMode = null,
+  thermalParticlePropertiesBufferByteLength = 0,
+  thermalParticlePropertiesInitializationMode = null,
+  thermalParticlePropertiesHostUploadByteLength = 0,
+  thermalPropertyPrepassDispatchCount = 0,
+  thermalPairPassMaterialGraphLookupMode = null,
+  thermalPipelineCacheStatus = null,
+  thermalWorkspaceSchema = null,
+  thermalWorkspaceStatus = null,
+  thermalWorkspaceBorrowed = false,
+  thermalWorkspaceOwned = false,
+  thermalWorkspaceParticleCapacity = 0,
+  thermalWorkspaceSequenceStepCapacity = 0,
+  thermalParamsSlotIndex = null,
+  thermalParamsByteOffset = null,
+  thermalParamsSlotStrideBytes = 0,
+  thermalBindGroupCacheHit = false,
   materialPropertyBankWarmInputShaderBinding = null
 }) {
   const materialPropertyBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
@@ -1177,9 +1211,28 @@ function outputEnvelope({
     stateBufferByteLength,
     thermoBufferByteLength,
     retainedOutputParticleBuffers,
+    outputParticleBuffersBorrowed,
+    outputStateBufferOwned,
+    outputThermoBufferOwned,
     destroyOutputParticleBuffers,
     readbackMode,
     outputBufferInitializationMode,
+    thermalParticlePropertiesBufferByteLength,
+    thermalParticlePropertiesInitializationMode,
+    thermalParticlePropertiesHostUploadByteLength,
+    thermalPropertyPrepassDispatchCount,
+    thermalPairPassMaterialGraphLookupMode,
+    thermalPipelineCacheStatus,
+    thermalWorkspaceSchema,
+    thermalWorkspaceStatus,
+    thermalWorkspaceBorrowed,
+    thermalWorkspaceOwned,
+    thermalWorkspaceParticleCapacity,
+    thermalWorkspaceSequenceStepCapacity,
+    thermalParamsSlotIndex,
+    thermalParamsByteOffset,
+    thermalParamsSlotStrideBytes,
+    thermalBindGroupCacheHit,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     wallHeatJ: { ...wallHeatJ },
@@ -1382,67 +1435,28 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
-function resolveMaterialBankWarmInputShaderBinding(device, {
-  sphParticleState = null,
-  sphParticleUpload = null
-} = {}) {
-  const borrowedBuffer = sphParticleUpload?.materialPropertyBankWarmInputBuffer || null;
-  const borrowedRowCount = Math.max(0, Math.round(finiteNumber(
-    sphParticleUpload?.materialPropertyBankWarmInputRowCount,
-    0
-  )));
-  if (borrowedBuffer && borrowedRowCount > 0) {
-    return {
-      buffer: borrowedBuffer,
-      rowCount: borrowedRowCount,
-      bufferSource: 'sph-particle-upload',
-      borrowed: true,
-      destroy() {}
-    };
-  }
-  const packedRows = sphParticleState?.materialPropertyBankWarmInputTable?.rows;
-  const packedRowCount = Math.max(0, Math.round(finiteNumber(
-    sphParticleState?.materialPropertyBankWarmInputTable?.rowCount,
-    0
-  )));
-  if (packedRows?.byteLength > 0 && packedRowCount > 0) {
-    const buffer = writeStorageBuffer(
-      device,
-      'ulg-sph-thermal-material-bank-warm-input-rows',
-      packedRows
-    );
-    return {
-      buffer,
-      rowCount: packedRowCount,
-      bufferSource: 'sph-particle-state',
-      borrowed: false,
-      destroy() {
-        buffer.destroy?.();
-      }
-    };
-  }
-  const emptyBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-thermal-material-bank-warm-input-rows-empty',
-    new Float32Array(MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length)
-  );
-  return {
-    buffer: emptyBuffer,
-    rowCount: 0,
-    bufferSource: 'empty',
-    borrowed: false,
-    destroy() {
-      emptyBuffer.destroy?.();
-    }
-  };
-}
-
 function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
-  return device.createBuffer({
+  return tagWebGpuBufferDevice(device.createBuffer({
     label,
     size: Math.max(4, byteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
-  });
+  }), device);
+}
+
+function assertReusableOutputBuffer(device, buffer, byteLength, role) {
+  if (!buffer || typeof buffer !== 'object') {
+    throw new TypeError(`${role} must be a WebGPU buffer`);
+  }
+  if (Number.isFinite(Number(buffer.size)) && Number(buffer.size) < byteLength) {
+    throw new RangeError(`${role} is smaller than the required ${byteLength} bytes`);
+  }
+  if (buffer.destroyed === true) {
+    throw new Error(`${role} has already been destroyed`);
+  }
+  if (!webGpuBufferMatchesDevice(buffer, device)) {
+    throw new Error(`${role} belongs to a different WebGPU device`);
+  }
+  return buffer;
 }
 
 function resolveThermalResponseGraphArtifacts({
@@ -1606,10 +1620,11 @@ function createParamsArray({
   wallTemperaturesK,
   materialBankWarmInputRowCount = 0,
   neighborBins = null,
+  residentNeighborhoodAdmission = null,
   maxPairSupportM = 0,
   ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT
 }) {
-  const buffer = new ArrayBuffer(112);
+  const buffer = new ArrayBuffer(SPH_THERMAL_PARAMS_BYTE_LENGTH);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, materialCount, true);
@@ -1629,7 +1644,8 @@ function createParamsArray({
   view.setFloat32(60, wallTemp(wallTemperaturesK, 'yMax'), true);
   view.setFloat32(64, wallTemp(wallTemperaturesK, 'zMin'), true);
   view.setFloat32(68, wallTemp(wallTemperaturesK, 'zMax'), true);
-  const binsEnabled = Boolean(
+  const residentEnabled = residentNeighborhoodAdmission?.admitted === true;
+  const binsEnabled = !residentEnabled && Boolean(
     neighborBins?.binsBuffer
     && Number(neighborBins?.capacity) > 0
     && Number(neighborBins?.nx) > 0
@@ -1637,7 +1653,7 @@ function createParamsArray({
     && Number(neighborBins?.nz) > 0
     && Number(neighborBins?.cellSizeM) > 0
   );
-  view.setUint32(72, binsEnabled ? 1 : 0, true);
+  view.setUint32(72, residentEnabled ? 2 : (binsEnabled ? 1 : 0), true);
   view.setUint32(76, binsEnabled ? Math.round(neighborBins.capacity) : 0, true);
   view.setUint32(80, binsEnabled ? Math.round(neighborBins.nx) : 0, true);
   view.setUint32(84, binsEnabled ? Math.round(neighborBins.ny) : 0, true);
@@ -1645,6 +1661,21 @@ function createParamsArray({
   view.setFloat32(92, binsEnabled ? Number(neighborBins.cellSizeM) : 0, true);
   view.setFloat32(96, Math.max(0, finiteNumber(maxPairSupportM, 0)), true);
   view.setFloat32(100, Math.max(0, finiteNumber(ambientTemperatureK, SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT)), true);
+  const identity = residentNeighborhoodAdmission?.expectedIdentity;
+  view.setUint32(112, identity?.generation ?? 0, true);
+  view.setUint32(116, identity?.leaseTokenLow ?? 0, true);
+  view.setUint32(120, identity?.leaseTokenHigh ?? 0, true);
+  view.setUint32(124, identity?.positionEpoch ?? 0, true);
+  view.setUint32(128, identity?.sourceCount ?? 0, true);
+  view.setUint32(
+    132,
+    residentEnabled
+      ? residentNeighborhoodAdmission.descriptor.consumerMask
+        & (RESIDENT_NEIGHBORHOOD_CONSUMER.THERMAL | RESIDENT_NEIGHBORHOOD_CONSUMER.RADIATION)
+      : 0,
+    true
+  );
+  view.setUint32(136, residentEnabled ? 1 : 0, true);
   return buffer;
 }
 
@@ -1672,9 +1703,13 @@ export function createSphThermalStepWebGpuEncoderStage({
   thermalClosureGraphBank = null,
   thermalPhaseResponseTable = null,
   thermalResponseGraphUpload = null,
+  thermalWorkspace = null,
+  thermalParamsSlotIndex = 0,
   sphParticleUpload = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
+  outputStateBuffer = null,
+  outputThermoBuffer = null,
   wallTemperaturesK = {},
   boxDimsM = [5, 5, 5],
   dtS = 0,
@@ -1688,6 +1723,8 @@ export function createSphThermalStepWebGpuEncoderStage({
   // { countsBuffer, entriesBuffer, capacity, nx, ny, nz, cellSizeM }.
   // Absent bins fall back to the exhaustive pair scan.
   neighborBins = null,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
   timestampProfiler = null,
   timestampMetadata = null
 } = {}) {
@@ -1699,10 +1736,49 @@ export function createSphThermalStepWebGpuEncoderStage({
   const dims = finiteVector3(boxDimsM, [5, 5, 5]);
   const layer = finiteNumber(wallLayerM, sphParticleState.smoothingLengthM);
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const residentNeighborhoodAdmission = residentNeighborhood
+    ? resolveResidentNeighborhoodConsumer({
+        residentNeighborhood,
+        device,
+        consumer: 'thermal',
+        sourceCount: sphParticleState.particleCount,
+        ...(residentNeighborhoodValidation || {})
+      })
+    : null;
+  if (residentNeighborhood && !residentNeighborhoodAdmission.admitted) {
+    throw new Error(
+      `thermal resident neighborhood rejected: ${residentNeighborhoodAdmission.reasonCodes.join(', ')}`
+    );
+  }
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-thermal-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-thermal-source-thermo', sphParticleState.thermo);
+  // Validate caller-owned destinations before allocating any closure/runtime
+  // resources so an invalid ping-pong binding fails without leaking buffers.
+  const outStateByteLength = Math.max(
+    sphParticleState.state.byteLength,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const outThermoByteLength = Math.max(
+    sphParticleState.thermo.byteLength,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  if (outputStateBuffer) {
+    assertReusableOutputBuffer(device, outputStateBuffer, outStateByteLength, 'thermal outputStateBuffer');
+  }
+  if (outputThermoBuffer) {
+    assertReusableOutputBuffer(device, outputThermoBuffer, outThermoByteLength, 'thermal outputThermoBuffer');
+  }
+  if (
+    outputStateBuffer === stateBuffer
+    || outputStateBuffer === thermoBuffer
+    || outputThermoBuffer === stateBuffer
+    || outputThermoBuffer === thermoBuffer
+    || (outputStateBuffer && outputStateBuffer === outputThermoBuffer)
+  ) {
+    throw new Error('Thermal output buffers must be distinct from every source and from each other');
+  }
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
   const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
@@ -1722,58 +1798,72 @@ export function createSphThermalStepWebGpuEncoderStage({
   const responseBuffer = responseGraphUpload.responseBuffer;
   const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
   const graphSampleBuffer = responseGraphUpload.graphSampleBuffer;
-  const materialBankWarmInputBinding = resolveMaterialBankWarmInputShaderBinding(device, {
-    sphParticleState,
-    sphParticleUpload
-  });
+  const materialBankWarmInputRowCount = Math.max(0, Math.round(finiteNumber(
+    thermalMaterialTable?.materialPropertyBankWarmInputRowCount,
+    0
+  )));
   const outputBufferInitializationMode = 'shader-writes-all-particle-rows';
   // Never size GPU outputs from the CPU arrays alone: under GPU-resident
   // continuation the CPU copies can be stale or detached (byteLength 0).
-  const outStateByteLength = Math.max(
-    sphParticleState.state.byteLength,
-    sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  const outStateBufferOwned = outputStateBuffer == null;
+  const outThermoBufferOwned = outputThermoBuffer == null;
+  const outStateBuffer = outStateBufferOwned
+    ? createOutputStorageBuffer(
+        device,
+        'ulg-sph-thermal-output-state',
+        outStateByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      )
+    : outputStateBuffer;
+  const outThermoBuffer = outThermoBufferOwned
+    ? createOutputStorageBuffer(
+        device,
+        'ulg-sph-thermal-output-thermo',
+        outThermoByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      )
+    : outputThermoBuffer;
+  const thermalParticlePropertiesByteLength = Math.max(
+    16,
+    sphParticleState.particleCount * 4 * Float32Array.BYTES_PER_ELEMENT
   );
-  const outThermoByteLength = Math.max(
-    sphParticleState.thermo.byteLength,
-    sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  const resolvedThermalWorkspace = thermalWorkspace
+    ? assertSphThermalWorkspaceGpu(device, thermalWorkspace, sphParticleState.particleCount)
+    : createSphThermalWorkspaceGpu({
+        device,
+        particleCapacity: Math.max(1, sphParticleState.particleCount),
+        sequenceStepCapacity: Math.max(1, Number(thermalParamsSlotIndex) + 1),
+        label: 'ulg-sph-thermal'
+      });
+  const thermalWorkspaceOwned = thermalWorkspace == null;
+  const thermalParticlePropertiesBuffer = resolvedThermalWorkspace.propertyBuffer;
+  const thermalParamsSlot = resolvedThermalWorkspace.writeParamsSlot(
+    thermalParamsSlotIndex,
+    createParamsArray({
+      particleCount: sphParticleState.particleCount,
+      materialCount: resolvedPhaseResponseTable.materialCount,
+      segmentCount: resolvedPhaseResponseTable.responseCount,
+      dtS: finiteNumber(dtS, 0),
+      smoothingLengthM: finiteNumber(sphParticleState.smoothingLengthM, 0),
+      conductionRate,
+      wallRate,
+      wallLayerM: layer,
+      boxDimsM: dims,
+      wallTemperaturesK,
+      materialBankWarmInputRowCount,
+      neighborBins,
+      residentNeighborhoodAdmission,
+      maxPairSupportM: residentNeighborhoodAdmission
+        ? 0
+        : resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
+      ambientTemperatureK
+    })
   );
-  const outStateBuffer = createOutputStorageBuffer(
-    device,
-    'ulg-sph-thermal-output-state',
-    outStateByteLength,
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
-  const outThermoBuffer = createOutputStorageBuffer(
-    device,
-    'ulg-sph-thermal-output-thermo',
-    outThermoByteLength,
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-sph-thermal-params',
-    size: 112,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
-    particleCount: sphParticleState.particleCount,
-    materialCount: resolvedPhaseResponseTable.materialCount,
-    segmentCount: resolvedPhaseResponseTable.responseCount,
-    dtS: finiteNumber(dtS, 0),
-    smoothingLengthM: finiteNumber(sphParticleState.smoothingLengthM, 0),
-    conductionRate,
-    wallRate,
-    wallLayerM: layer,
-    boxDimsM: dims,
-    wallTemperaturesK,
-    materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount,
-    neighborBins,
-    maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
-    ambientTemperatureK
-  }));
-  const neighborBinsBound = Boolean(neighborBins?.binsBuffer);
+  const residentNeighborhoodBound = residentNeighborhoodAdmission?.admitted === true;
+  const neighborBinsBound = !residentNeighborhoodBound && Boolean(neighborBins?.binsBuffer);
   // Binding 10 must always be present in the layout; a tiny placeholder
   // satisfies it when the exhaustive fallback runs (bins_enabled=0).
-  const binPlaceholderBuffer = neighborBinsBound
+  const binPlaceholderBuffer = residentNeighborhoodBound || neighborBinsBound
     ? null
     : device.createBuffer({
       label: 'ulg-sph-thermal-bin-placeholder',
@@ -1781,11 +1871,15 @@ export function createSphThermalStepWebGpuEncoderStage({
       usage: GPU_BUFFER_USAGE.STORAGE
     });
 
-  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-thermal-step.v3',
+  const {
+    pipelines,
+    bindGroupLayout,
+    cacheStatus: thermalPipelineCacheStatus
+  } = createCachedExplicitComputePipelineFamily(device, {
+    cacheKey: 'ulg-sph-thermal-step.v5',
     label: 'ulg-sph-thermal-step',
     code: sphThermalStepWgsl,
-    entryPoint: 'main',
+    entryPoints: ['prepare_particle_thermal_properties', 'main'],
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
@@ -1796,37 +1890,65 @@ export function createSphThermalStepWebGpuEncoderStage({
       computeBufferBinding(6, 'storage'),
       computeBufferBinding(7, 'storage'),
       computeBufferBinding(8, 'uniform'),
-      computeBufferBinding(9, 'read-only-storage'),
+      computeBufferBinding(9, 'storage'),
       computeBufferBinding(10, 'read-only-storage')
     ]
   });
-  const bindGroup = device.createBindGroup({
-    layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: stateBuffer } },
-      { binding: 1, resource: { buffer: thermoBuffer } },
-      { binding: 2, resource: { buffer: responseRecordBuffer } },
-      { binding: 3, resource: { buffer: responseBuffer } },
-      { binding: 4, resource: { buffer: graphNodeBuffer } },
-      { binding: 5, resource: { buffer: graphSampleBuffer } },
-      { binding: 6, resource: { buffer: outStateBuffer } },
-      { binding: 7, resource: { buffer: outThermoBuffer } },
-      { binding: 8, resource: { buffer: paramsBuffer } },
-      { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } },
-      { binding: 10, resource: { buffer: neighborBinsBound ? neighborBins.binsBuffer : binPlaceholderBuffer } }
-    ]
-  });
+  const neighborhoodBuffer = residentNeighborhoodBound
+    ? residentNeighborhoodAdmission.packedCandidateCsrBuffer
+    : (neighborBinsBound ? neighborBins.binsBuffer : binPlaceholderBuffer);
+  const thermalBindGroupCache = resolvedThermalWorkspace.bindGroupForSlot(
+    thermalParamsSlot.slotIndex,
+    [
+      bindGroupLayout,
+      stateBuffer,
+      thermoBuffer,
+      responseRecordBuffer,
+      responseBuffer,
+      graphNodeBuffer,
+      graphSampleBuffer,
+      outStateBuffer,
+      outThermoBuffer,
+      thermalParticlePropertiesBuffer,
+      neighborhoodBuffer
+    ],
+    (slot) => device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: stateBuffer } },
+        { binding: 1, resource: { buffer: thermoBuffer } },
+        { binding: 2, resource: { buffer: responseRecordBuffer } },
+        { binding: 3, resource: { buffer: responseBuffer } },
+        { binding: 4, resource: { buffer: graphNodeBuffer } },
+        { binding: 5, resource: { buffer: graphSampleBuffer } },
+        { binding: 6, resource: { buffer: outStateBuffer } },
+        { binding: 7, resource: { buffer: outThermoBuffer } },
+        {
+          binding: 8,
+          resource: {
+            buffer: slot.buffer,
+            offset: slot.byteOffset,
+            size: slot.byteLength
+          }
+        },
+        { binding: 9, resource: { buffer: thermalParticlePropertiesBuffer } },
+        { binding: 10, resource: { buffer: neighborhoodBuffer } }
+      ]
+    })
+  );
+  const bindGroup = thermalBindGroupCache.bindGroup;
   const state = new Float32Array();
   const thermo = new Float32Array();
   const cleanup = () => {
     if (!borrowedStateBuffer) stateBuffer.destroy?.();
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
     if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
-    if (!materialBankWarmInputBinding.borrowed) materialBankWarmInputBinding.destroy();
-    paramsBuffer.destroy?.();
     binPlaceholderBuffer?.destroy?.();
-    if (!retainOutputParticleBuffers) {
+    if (thermalWorkspaceOwned) resolvedThermalWorkspace.destroy();
+    if (!retainOutputParticleBuffers && outStateBufferOwned) {
       outStateBuffer.destroy?.();
+    }
+    if (!retainOutputParticleBuffers && outThermoBufferOwned) {
       outThermoBuffer.destroy?.();
     }
   };
@@ -1836,8 +1958,8 @@ export function createSphThermalStepWebGpuEncoderStage({
       if (outputParticleBuffersDestroyed) return;
       outputParticleBuffersDestroyed = true;
       deferSubmittedWorkCleanup(device, () => {
-        outStateBuffer.destroy?.();
-        outThermoBuffer.destroy?.();
+        if (outStateBufferOwned) outStateBuffer.destroy?.();
+        if (outThermoBufferOwned) outThermoBuffer.destroy?.();
       });
     }
     : null;
@@ -1862,32 +1984,76 @@ export function createSphThermalStepWebGpuEncoderStage({
     stateBufferByteLength: outStateByteLength,
     thermoBufferByteLength: outThermoByteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
+    outputParticleBuffersBorrowed: !outStateBufferOwned || !outThermoBufferOwned,
+    outputStateBufferOwned: outStateBufferOwned,
+    outputThermoBufferOwned: outThermoBufferOwned,
     destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
     outputBufferInitializationMode,
+    thermalParticlePropertiesBufferByteLength: thermalParticlePropertiesByteLength,
+    thermalParticlePropertiesInitializationMode: 'gpu-prepass-writes-all-live-particle-rows',
+    thermalParticlePropertiesHostUploadByteLength: 0,
+    thermalPropertyPrepassDispatchCount: 1,
+    thermalPairPassMaterialGraphLookupMode: 'gpu-precomputed-per-particle-properties',
+    thermalPipelineCacheStatus,
+    thermalWorkspaceSchema: ULG_SPH_THERMAL_WORKSPACE_GPU_SCHEMA,
+    thermalWorkspaceStatus: resolvedThermalWorkspace.status,
+    thermalWorkspaceBorrowed: !thermalWorkspaceOwned,
+    thermalWorkspaceOwned,
+    thermalWorkspaceParticleCapacity: resolvedThermalWorkspace.particleCapacity,
+    thermalWorkspaceSequenceStepCapacity: resolvedThermalWorkspace.sequenceStepCapacity,
+    thermalParamsSlotIndex: thermalParamsSlot.slotIndex,
+    thermalParamsByteOffset: thermalParamsSlot.byteOffset,
+    thermalParamsSlotStrideBytes: thermalParamsSlot.slotStrideBytes,
+    thermalBindGroupCacheHit: thermalBindGroupCache.cacheHit,
     materialPropertyBankWarmInputShaderBinding: {
-      shaderBound: materialBankWarmInputBinding.rowCount > 0,
-      shaderBinding: 9,
-      shaderRowCount: materialBankWarmInputBinding.rowCount,
-      bufferSource: materialBankWarmInputBinding.bufferSource
+      shaderBound: false,
+      shaderBinding: null,
+      shaderRowCount: 0,
+      sourceRowCount: materialBankWarmInputRowCount,
+      bufferSource: 'closure-table-compilation-only',
+      reason: 'zero-valued-hot-loop-shadow-binding-removed'
     },
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
   });
+  result.thermalWorkspace = resolvedThermalWorkspace;
+  result.residentNeighborhood = residentNeighborhoodAdmission
+    ? {
+        status: residentNeighborhoodAdmission.status,
+        mode: residentNeighborhoodAdmission.mode,
+        consumerMask: residentNeighborhoodAdmission.expectedIdentity.consumerBit,
+        mapPerformed: false,
+        readbackPerformed: false
+      }
+    : {
+        status: 'legacy-neighborhood-compatibility-path',
+        mode: neighborBinsBound ? 'fixed-bin-compatibility' : 'all-particle-diagnostic-fallback',
+        mapPerformed: false,
+        readbackPerformed: false
+      };
   return {
     schema: 'peercompute.ulg.sph-thermal-encoder-stage.v0',
     status: 'thermal-encoder-stage-ready',
     backend: 'webgpu',
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     result,
+    thermalWorkspace: resolvedThermalWorkspace,
+    thermalWorkspaceBorrowed: !thermalWorkspaceOwned,
+    thermalParamsSlotIndex: thermalParamsSlot.slotIndex,
+    thermalBindGroupCacheHit: thermalBindGroupCache.cacheHit,
     stateBuffer: outStateBuffer,
     thermoBuffer: outThermoBuffer,
     stateBufferByteLength: outStateByteLength,
     thermoBufferByteLength: outThermoByteLength,
+    outputStateBufferOwned: outStateBufferOwned,
+    outputThermoBufferOwned: outThermoBufferOwned,
     encode(encoder) {
       const pass = encoder.beginComputePass(
         profiledComputePassDescriptor(timestampProfiler, 'thermalStep', timestampMetadata)
       );
-      pass.setPipeline(pipeline);
       pass.setBindGroup(0, bindGroup);
+      pass.setPipeline(pipelines.prepare_particle_thermal_properties);
+      pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+      pass.setPipeline(pipelines.main);
       pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
       pass.end();
     },
@@ -1963,8 +2129,26 @@ export async function runSphThermalStepWebGpu(args = {}) {
   stage.result.gpuTimestampMappedByteLength = gpuTimestampProfile?.mappedByteLength ?? 0;
   stage.result.gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
     ...timestampProfiler.allocationEntries(),
-    { role: 'thermal-state-output', buffer: stage.stateBuffer, owned: true },
-    { role: 'thermal-thermo-output', buffer: stage.thermoBuffer, owned: true }
+    {
+      role: 'thermal-state-output',
+      buffer: stage.stateBuffer,
+      owned: stage.outputStateBufferOwned,
+      lifetime: stage.outputStateBufferOwned ? 'transient-submission' : 'borrowed'
+    },
+    {
+      role: 'thermal-thermo-output',
+      buffer: stage.thermoBuffer,
+      owned: stage.outputThermoBufferOwned,
+      lifetime: stage.outputThermoBufferOwned ? 'transient-submission' : 'borrowed'
+    },
+    {
+      role: 'thermal-particle-property-workspace',
+      byteLength: stage.result.thermalParticlePropertiesBufferByteLength,
+      owned: stage.result.thermalWorkspaceOwned,
+      lifetime: stage.result.thermalWorkspaceBorrowed
+        ? 'borrowed'
+        : 'transient-submission'
+    }
   ], { scope: 'sph-thermal-step' });
   return stage.result;
 }

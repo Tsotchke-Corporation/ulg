@@ -1,6 +1,18 @@
 export * from './sphPhaseContracts.js';
 export * from './sparseRenderField.js';
+export * from './sparseRenderFieldGpuWgsl.js';
 export * from './residentNeighborhood.js';
+export * from './residentNeighborhoodMutationCertificate.js';
+export * from './residentNeighborhoodMutationCertificateWgsl.js';
+export * from './residentNeighborhoodBuilderWgsl.js';
+export * from './parallelPrimitives.js';
+export * from './schroederSparseHierarchy.js';
+export * from './schroederSparseGridView.js';
+export * from './schroederSparseGridViewWgsl.js';
+export * from './coherentSolid.js';
+export * from './coherentSolidWgsl.js';
+export * from './coherentSolidRenderWgsl.js';
+export * from './coherentSolidResidentWgsl.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';
@@ -1818,6 +1830,100 @@ export const SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT = Object.freeze([
   'mechanicsStatus:f32',
   'pad1:f32'
 ]);
+export const ULG_SPH_GPU_REACTION_ADMITTED_OUTCOME_SCHEMA =
+  'peercompute.ulg.sph-reaction-admitted-outcome.v0';
+export const SPH_GPU_REACTION_ADMITTED_OUTCOME_U32_LAYOUT = Object.freeze([
+  'partnerParticleIndex:u32',
+  'reactionIndex:u32',
+  'productTermOffset:u32',
+  'productTermCount:u32',
+  'extentMol:bitcast-f32',
+  'productMassScale:bitcast-f32',
+  'source0ConsumedMassKg:bitcast-f32',
+  'source1ConsumedMassKg:bitcast-f32'
+]);
+export const SPH_GPU_REACTION_ADMITTED_OUTCOME_STRIDE_WORDS =
+  SPH_GPU_REACTION_ADMITTED_OUTCOME_U32_LAYOUT.length;
+export const SPH_GPU_REACTION_ADMITTED_OUTCOME_INVALID_PARTNER = 0xffff_ffff;
+export const SPH_GPU_REACTION_ADMITTED_OUTCOME_READY_MAGIC = 0x4f555443;
+export const SPH_GPU_REACTION_ADMITTED_OUTCOME_ABI = Object.freeze({
+  schema: ULG_SPH_GPU_REACTION_ADMITTED_OUTCOME_SCHEMA,
+  scalarEncoding: 'u32-with-bitcast-f32-kinetic-lanes',
+  layout: SPH_GPU_REACTION_ADMITTED_OUTCOME_U32_LAYOUT,
+  strideWords: SPH_GPU_REACTION_ADMITTED_OUTCOME_STRIDE_WORDS,
+  invalidPartner: SPH_GPU_REACTION_ADMITTED_OUTCOME_INVALID_PARTNER,
+  readyMagic: SPH_GPU_REACTION_ADMITTED_OUTCOME_READY_MAGIC,
+  ownerPolicy: 'canonical-lower-particle-index-of-mutual-pair',
+  producer: 'reaction-resolve-after-fail-closed-admission',
+  consumer: 'exact-product-event-count-and-emission',
+  ordering: 'ascending-source-particle-then-global-product-term',
+  residency: 'same-device-same-command-encoder',
+  readbackPolicy: 'fixed-size-diagnostic-evidence-only'
+});
+export const ULG_SPH_GPU_REACTION_PRODUCT_EVENT_PLACEMENT_WORKSPACE_SCHEMA =
+  'peercompute.ulg.sph-reaction-product-event-placement-workspace.v1';
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PLACEMENT_WORKSPACE_WORDS_PER_EVENT = 2;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PLACEMENT_SPARE_PROBE_LIMIT = 64;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PLACEMENT_WORKSPACE_ABI = Object.freeze({
+  schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_PLACEMENT_WORKSPACE_SCHEMA,
+  protocol: 'parallel-deterministic-exact-prefix-atomic-claims-v3',
+  scalarEncoding: 'u32',
+  allocationWordFormula: 'eventCapacityRows+particleCapacity',
+  legacyAllocationWordsPerEventCapacityUpperBound:
+    SPH_GPU_REACTION_PRODUCT_EVENT_PLACEMENT_WORKSPACE_WORDS_PER_EVENT,
+  targetRegion: '[0,eventCapacityRows)',
+  claimRegion: '[eventCapacityRows,eventCapacityRows+particleCapacity)',
+  noCarrierEncoding: 0,
+  ownershipPolicy: 'atomic-max-inverted-event-key-lowest-event-index',
+  conflictPolicy: 'loser-event-remains-live',
+  mutationPolicy: 'one-winning-event-per-particle-per-dispatch',
+  reactionOutcomeSchema: ULG_SPH_GPU_REACTION_ADMITTED_OUTCOME_SCHEMA,
+  reactionOutcomeAllocationWordFormula:
+    'particleCapacity*reactionAdmittedOutcomeStrideWords',
+  readbackPolicy: 'none-in-hot-loop'
+});
+export const ULG_SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_SCHEMA =
+  'peercompute.ulg.sph-reaction-product-event-prefix.v0';
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_METADATA_U32_LAYOUT = Object.freeze([
+  'magic:u32',
+  'version:u32',
+  'generationId:u32',
+  'particleCount:u32',
+  'eventCapacityRows:u32',
+  'potentialEventUpperBound:u32',
+  'exactLiveEventCount:u32',
+  'overflowFlags:u32',
+  'reactionMutationAdmitted:u32',
+  'exactPrefixReady:u32',
+  'emittedEventCount:u32',
+  'eventStrideFloats:u32',
+  'dispatchWorkgroupCountX:u32',
+  'dispatchWorkgroupCountY:u32',
+  'dispatchWorkgroupCountZ:u32',
+  'productTermCount:u32',
+  'sourceCount:u32',
+  'status:u32',
+  'resolveOutcomeGenerationId:u32',
+  'resolveOutcomeReadyMagic:u32'
+]);
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_METADATA_MAGIC = 0x554c4752;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_METADATA_VERSION = 0;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_OVERFLOW_CAPACITY = 1 << 0;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_OVERFLOW_EXACT_COUNT = 1 << 1;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_OVERFLOW_EMISSION = 1 << 2;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_ABI = Object.freeze({
+  schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_SCHEMA,
+  metadataLayout: SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_METADATA_U32_LAYOUT,
+  metadataMagic: SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_METADATA_MAGIC,
+  metadataVersion: SPH_GPU_REACTION_PRODUCT_EVENT_PREFIX_METADATA_VERSION,
+  sourceCountDomain: 'particle-count',
+  sourceOrdering: 'ascending-source-particle-then-global-product-term',
+  countAuthority: 'gpu-exclusive-scan-finalize',
+  dispatchAuthority: 'gpu-authored-exact-live-count',
+  overflowPolicy: 'pre-resolve-upper-bound-rejects-reaction-mutation',
+  readbackPolicy: 'fixed-metadata-diagnostic-only',
+  outputSemantics: 'dense-prefix-of-status-ready-positive-unplaced-mass-rows'
+});
 export const SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT = Object.freeze([
   'reactionIndex:f32',
   'atomicNumberZ:f32',

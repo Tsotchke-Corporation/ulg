@@ -288,6 +288,7 @@ import {
   runSchroederPhaseVolumeSplitMergeProposalWebGpu,
   runSchroederPhaseVolumeTargetAggregateWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
+  schroederHierarchyParticleCountResidencyWgsl,
   schroederParticleStorageAllocatorAdmissionAllowsApplication,
   schroederParticleStorageMaterializationAdmissionAllowsApplication,
   schroederParticleStorageSlotAssignmentAdmissionAllowsApplication,
@@ -355,6 +356,7 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
   const dispatches = [];
   const submitted = [];
   const bindGroups = [];
+  const copies = [];
   return {
     createdBuffers,
     writes,
@@ -362,6 +364,7 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
     dispatches,
     submitted,
     bindGroups,
+    copies,
     createBuffer({ label, size, usage }) {
       const buffer = {
         label,
@@ -402,6 +405,7 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
     },
     createCommandEncoder() {
       return {
+        clearBuffer() {},
         beginComputePass() {
           return {
             setPipeline() {},
@@ -409,13 +413,18 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
             dispatchWorkgroups(x, y = 1, z = 1) {
               dispatches.push([x, y, z]);
             },
+            dispatchWorkgroupsIndirect(buffer, offset) {
+              dispatches.push({ indirect: true, buffer, offset });
+            },
             end() {}
           };
         },
-        copyBufferToBuffer() {
-          if (!allowReadbackCopies) {
+        copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, byteLength) {
+          const readbackCopy = String(destination?.label || '').includes('readback');
+          if (readbackCopy && !allowReadbackCopies) {
             throw new Error('Schroeder no-full-readback test should not copy to a readback buffer');
           }
+          copies.push({ source, sourceOffset, destination, destinationOffset, byteLength });
         },
         finish() {
           return { label: 'fake-schroeder-command-buffer' };
@@ -435,6 +444,249 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
     }
   };
 }
+
+function residentCountUploads({ sourceCount = 1, capacity = 4, generationId = 5 } = {}) {
+  const metadataBuffer = { label: 'particle-count-metadata' };
+  const dispatchIndirectBuffer = { label: 'particle-count-dispatch' };
+  const common = {
+    status: 'webgpu-uploaded',
+    particleCount: sourceCount,
+    particleCapacity: capacity,
+    authoritativeParticleCount: null,
+    particleCountAuthority: 'gpu-authored-residency-metadata',
+    particleCountMetadataWord: 4,
+    particleCountResidencyGenerationId: generationId,
+    particleCountResidencyMetadataBuffer: metadataBuffer,
+    particleCountDispatchIndirectBuffer: dispatchIndirectBuffer,
+    particleCountDispatchIndirectByteOffset: 0,
+    particleCountSelectionIndirectByteOffset: 12,
+    normalHotLoopReadbackFree: true
+  };
+  return {
+    metadataBuffer,
+    dispatchIndirectBuffer,
+    sphParticleUpload: {
+      ...common,
+      stateBuffer: { label: 'resident-state' },
+      thermoBuffer: { label: 'resident-thermo' }
+    },
+    mlsMpmParticleUpload: {
+      ...common,
+      mechanicsBuffer: { label: 'resident-mechanics' }
+    }
+  };
+}
+
+test('resident-count hierarchy shaders fail closed on invalid and overflowing metadata', () => {
+  for (const source of Object.values(schroederHierarchyParticleCountResidencyWgsl)) {
+    assert.match(source, /\[9\] == 0u/);
+    assert.match(source, /active_count <= capacity/);
+    assert.match(source, /return select\(0u, active_count, valid\)/);
+  }
+  assert.match(
+    schroederHierarchyParticleCountResidencyWgsl.lawNeighborCandidate,
+    /fn schroeder_neighbor_process_candidate/
+  );
+  assert.match(
+    schroederHierarchyParticleCountResidencyWgsl.lawNeighborCandidate,
+    /queue_row_index >= active_count/
+  );
+  assert.doesNotMatch(
+    schroederHierarchyParticleCountResidencyWgsl.lawNeighborCandidate,
+    /&& !ss_neighbor_sorted_index_contains/
+  );
+  assert.match(
+    schroederHierarchyParticleCountResidencyWgsl.hierarchyAggregateNode,
+    /capacity == params\.row_count/
+  );
+  assert.doesNotMatch(
+    schroederHierarchyParticleCountResidencyWgsl.hierarchyAggregateNode,
+    /capacity == schroeder_aggregate_node_active_count\(\)/
+  );
+});
+
+test('resident-count hierarchy default chain keeps source count separate and dispatches indirectly', async () => {
+  const device = createFakeWebGpuDevice();
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers({ particleCount: 1 });
+  const resident = residentCountUploads({ sourceCount: 1, capacity: 4 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload: resident.sphParticleUpload,
+    mlsMpmParticleUpload: resident.mlsMpmParticleUpload,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const activeNodeList = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const lawQueue = await runSchroederLawQueueWebGpu({
+    device,
+    activeNodeList,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const lawNeighbors = await runSchroederLawNeighborCandidateWebGpu({
+    device,
+    lawQueue,
+    activeNodeList,
+    sphParticleState,
+    sphParticleUpload: resident.sphParticleUpload,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const crossLevel = await runSchroederCrossLevelCouplingWebGpu({
+    device,
+    levelAssignment,
+    activeNodeList,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const conservation = await runSchroederConservationSummaryWebGpu({
+    device,
+    crossLevelCoupling: crossLevel,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const transfer = await runSchroederCrossLevelTransferWebGpu({
+    device,
+    sphParticleState,
+    sphParticleUpload: resident.sphParticleUpload,
+    crossLevelCoupling: crossLevel,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const stateDelta = await runSchroederCrossLevelStateDeltaWebGpu({
+    device,
+    crossLevelTransfer: transfer,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const phaseVolumeTargetAggregate = await runSchroederPhaseVolumeTargetAggregateWebGpu({
+    device,
+    levelAssignment,
+    sphParticleState,
+    sphParticleUpload: resident.sphParticleUpload,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const phaseVolumeAggregateNode =
+    await runSchroederHierarchyAggregateNodeReductionWebGpu({
+      device,
+      hierarchyAggregate: phaseVolumeTargetAggregate,
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+    });
+  const phaseVolumeMigration = await runSchroederPhaseVolumeMigrationWebGpu({
+    device,
+    levelAssignment,
+    hierarchyAggregateNode: phaseVolumeAggregateNode,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+
+  for (const artifact of [
+    levelAssignment,
+    activeNodeList,
+    lawQueue,
+    lawNeighbors,
+    crossLevel,
+    conservation,
+    transfer,
+    stateDelta,
+    phaseVolumeTargetAggregate,
+    phaseVolumeAggregateNode,
+    phaseVolumeMigration
+  ]) {
+    assert.equal(artifact.authoritativeParticleCount, null);
+    assert.equal(artifact.particleRowCapacity, 4);
+    assert.equal(artifact.particleCountDispatchMode, 'gpu-authored-active-count-indirect');
+  }
+  assert.equal(levelAssignment.particleCount, 1);
+  assert.equal(activeNodeList.particleCount, 1);
+  assert.equal(lawQueue.activeNodeCount, 1);
+  assert.equal(crossLevel.crossLevelCandidateCount, 1);
+  assert.equal(lawNeighbors.neighborCandidateRowCapacity, 4 * lawQueue.candidateBudget);
+  assert.equal(phaseVolumeTargetAggregate.sourceParticleCount, 1);
+  assert.equal(phaseVolumeTargetAggregate.aggregateRowCount, 4);
+  assert.equal(phaseVolumeAggregateNode.aggregateRowCount, 4);
+  assert.equal(phaseVolumeMigration.particleCount, 1);
+  assert.equal(phaseVolumeMigration.particleRowCapacity, 4);
+  assert.equal(device.dispatches.length, 11);
+  assert.equal(device.dispatches.every((dispatch) => (
+    dispatch.indirect === true
+    && dispatch.buffer === resident.dispatchIndirectBuffer
+    && dispatch.offset === 0
+  )), true);
+  const neighborBindGroup = device.bindGroups.find((group) => (
+    group.entries.length === 8
+    && group.entries.some((entry) => entry.binding === 7)
+    && group.entries.find((entry) => entry.binding === 6)?.resource.buffer
+      === resident.metadataBuffer
+  ));
+  assert.ok(neighborBindGroup);
+  assert.equal(neighborBindGroup.entries.some((entry) => entry.binding >= 8), false);
+});
+
+test('resident-count hierarchy optional capacity-shaped stages fail closed', async () => {
+  const device = createFakeWebGpuDevice();
+  const resident = residentCountUploads({ sourceCount: 1, capacity: 4 });
+  const countResidentArtifact = {
+    ...resident.sphParticleUpload,
+    activeNodeBuffer: { label: 'resident-active-nodes' },
+    stateDeltaBuffer: { label: 'resident-state-deltas' },
+    migrationBuffer: { label: 'resident-phase-volume-migration' },
+    proposalBuffer: { label: 'resident-split-merge-proposals' },
+    applyBuffer: { label: 'resident-split-merge-apply' },
+    allocationBuffer: { label: 'resident-storage-allocation' },
+    slotAssignmentBuffer: { label: 'resident-slot-assignment' }
+  };
+  const unsupportedStages = [
+    ['active-node bucket index', () => runSchroederActiveNodeIndexWebGpu({
+      device,
+      activeNodeList: countResidentArtifact
+    })],
+    ['sorted active-node radix index', () => runSchroederActiveNodeSortedIndexWebGpu({
+      device,
+      activeNodeList: countResidentArtifact
+    })],
+    ['cross-level state-delta merge', () => runSchroederCrossLevelStateDeltaMergeWebGpu({
+      device,
+      crossLevelStateDelta: countResidentArtifact
+    })],
+    ['far-aggregate candidate topology', () => runSchroederFarAggregateCandidateWebGpu({
+      device,
+      activeNodeList: countResidentArtifact
+    })],
+    ['phase-volume split/merge proposal', () => runSchroederPhaseVolumeSplitMergeProposalWebGpu({
+      device,
+      phaseVolumeMigration: countResidentArtifact
+    })],
+    ['phase-volume split/merge apply', () => runSchroederPhaseVolumeSplitMergeApplyWebGpu({
+      device,
+      phaseVolumeSplitMergeProposal: countResidentArtifact
+    })],
+    ['particle-storage allocation', () => runSchroederParticleStorageAllocationWebGpu({
+      device,
+      phaseVolumeSplitMergeApply: countResidentArtifact
+    })],
+    ['particle-storage slot assignment', () => runSchroederParticleStorageSlotAssignmentWebGpu({
+      device,
+      particleStorageAllocation: countResidentArtifact
+    })],
+    ['particle-storage materialization', () => runSchroederParticleStorageMaterializationWebGpu({
+      device,
+      particleStorageSlotAssignment: countResidentArtifact
+    })],
+    ['phase-volume level update', () => runSchroederPhaseVolumeLevelUpdateWebGpu({
+      device,
+      phaseVolumeMigration: countResidentArtifact
+    })]
+  ];
+
+  for (const [stage, run] of unsupportedStages) {
+    await assert.rejects(run(), (error) => (
+      error?.code === 'ULG_SCHROEDER_PARTICLE_COUNT_RESIDENCY_STAGE_UNSUPPORTED'
+      && error.message.includes(stage)
+      && error.message.includes('does not accept GPU-authored particle counts')
+    ));
+  }
+  assert.equal(device.createdBuffers.length, 0);
+  assert.equal(device.submitted.length, 0);
+});
 
 function approvedStateDeltaMergeAdmission({
   rowCount = 130,
@@ -6336,6 +6588,26 @@ test('Schroeder particle-storage materialization writes retained particle buffer
   assert.equal(materialization.mechanicsBufferByteLength, 8 * 32 * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(materialization.materializationBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(materialization.materializationRows.length, 0);
+  assert.equal(materialization.outputHostInitializationByteLength, 0);
+  assert.equal(materialization.bulkHostUploadByteLength, 0);
+  assert.equal(materialization.gpuInitializationCopyCount, 3);
+  assert.equal(materialization.gpuInitializationCopyByteLength, 3 * (8 + 12 + 32) * 4);
+  assert.equal(
+    device.writes.some(({ label }) => [
+      'ulg-schroeder-particle-storage-materialization-state-out',
+      'ulg-schroeder-particle-storage-materialization-thermo-out',
+      'ulg-schroeder-particle-storage-materialization-mechanics-out'
+    ].includes(label)),
+    false
+  );
+  assert.deepEqual(
+    device.copies.map(({ destination, byteLength }) => [destination.label, byteLength]),
+    [
+      ['ulg-schroeder-particle-storage-materialization-state-out', 3 * 8 * 4],
+      ['ulg-schroeder-particle-storage-materialization-thermo-out', 3 * 12 * 4],
+      ['ulg-schroeder-particle-storage-materialization-mechanics-out', 3 * 32 * 4]
+    ]
+  );
   assert.equal(materialization.materializationMode, 'state-manager-admitted-particle-buffer-materialization');
   assert.equal(materialization.replacementPolicy, 'retained-output-buffers-await-state-manager-swap');
   assert.equal(
@@ -6352,6 +6624,68 @@ test('Schroeder particle-storage materialization writes retained particle buffer
   )));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('materialization-readback')),
+    false
+  );
+});
+
+test('Schroeder particle-storage materialization initializes from retained GPU authority when CPU rows are stale', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  buffers.sphParticleState = {
+    ...buffers.sphParticleState,
+    state: new Float32Array(),
+    thermo: new Float32Array()
+  };
+  buffers.mlsMpmParticleState = {
+    ...buffers.mlsMpmParticleState,
+    mechanics: new Float32Array()
+  };
+  const sourceStateBuffer = { label: 'retained-authoritative-state', size: 3 * 8 * 4 };
+  const sourceThermoBuffer = { label: 'retained-authoritative-thermo', size: 3 * 12 * 4 };
+  const sourceMechanicsBuffer = { label: 'retained-authoritative-mechanics', size: 3 * 32 * 4 };
+  const materialization = await runSchroederParticleStorageMaterializationWebGpu({
+    device,
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: sourceStateBuffer,
+      thermoBuffer: sourceThermoBuffer
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: sourceMechanicsBuffer
+    },
+    particleStorageSlotAssignment: {
+      schema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
+      status: 'schroeder-particle-storage-slot-assignment-submitted',
+      allocationRowCount: 2,
+      slotAssignmentStrideFloats: SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
+      slotAssignmentBuffer: { label: 'retained-slot-assignments' }
+    },
+    particleStorageMaterializationAdmission: approvedParticleStorageMaterializationAdmission({
+      rowCount: 2,
+      requiredParticleCapacity: 4
+    }),
+    outputParticleCapacity: 4
+  });
+
+  assert.equal(materialization.status, 'schroeder-particle-storage-materialization-submitted');
+  assert.equal(materialization.outputHostInitializationByteLength, 0);
+  assert.equal(materialization.bulkHostUploadByteLength, 0);
+  assert.deepEqual(
+    device.copies.map(({ source }) => source),
+    [sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer]
+  );
+  assert.equal(
+    device.writes.some(({ label }) => String(label).includes('materialization-state-in')),
+    false
+  );
+  assert.equal(
+    device.writes.some(({ label }) => String(label).includes('materialization-thermo-in')),
+    false
+  );
+  assert.equal(
+    device.writes.some(({ label }) => String(label).includes('materialization-mechanics-in')),
     false
   );
 });
@@ -8750,28 +9084,49 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
     residentStepRunner
   });
 
-  // The two-level stage received the orchestrated level assignment plus
-  // BOTH active-node lists: the selected level's retained list and a
-  // coarse list produced at selectedLevel + 1.
+  // The two-level stage receives one particle-range source plus the exact
+  // compact hierarchy. It no longer allocates a redundant particle-sized
+  // coarse active-node candidate list.
   assert.equal(twoLevelCalls.length, 1);
   const call = twoLevelCalls[0];
   assert.equal(call.fineLevel, 2);
   assert.equal(call.fineSubstepCount, 2);
   assert.ok(call.levelAssignment.assignmentBuffer);
   assert.ok(call.fineActiveNodeList.activeNodeBuffer);
-  assert.ok(call.coarseActiveNodeList.activeNodeBuffer);
   assert.equal(call.fineActiveNodeList.selectedLevel, 2);
-  assert.equal(call.coarseActiveNodeList.selectedLevel, 3);
+  assert.equal(call.coarseActiveNodeList, null);
+  assert.equal(
+    call.sparseHierarchy.schema,
+    'peercompute.ulg.schroeder-sparse-hierarchy-execution.v0'
+  );
+  assert.equal(call.sparseHierarchy.fineLevel, 2);
+  assert.equal(call.sparseHierarchy.coarseLevel, 3);
+  assert.equal(call.sparseHierarchy.levelCount, 2);
+  assert.equal(call.sparseHierarchy.thirdLevelHold, true);
+  assert.equal(call.sparseHierarchy.compaction, 'exact-stable-u32-radix-unique-csr');
+  assert.ok(call.sparseHierarchy.compactNodeBuffer);
+  assert.ok(call.sparseHierarchy.evidenceBuffer);
   // Observation mode: outputs are released, telemetry only, and the
   // resident authority path still runs.
   assert.equal(call.retainOutputParticleBuffers, false);
-  assert.equal(call.conservationSummaryReadback, true);
+  assert.equal(call.conservationSummaryReadback, false);
   assert.equal(residentCalls.length, 1);
 
   assert.equal(result.twoLevelMechanics.status, 'schroeder-two-level-mechanics-step-submitted');
   assert.equal(result.twoLevelMechanics.authority, 'observation-only-resident-step-remains-authoritative');
   assert.equal(result.twoLevelMechanics.fineSubstepCount, 2);
   assert.equal(result.twoLevelMechanics.coarseLevel, 3);
+  assert.equal(result.sparseHierarchy.status, 'schroeder-sparse-two-level-hierarchy-encoded');
+  assert.equal(result.sparseHierarchy.thirdLevelHold, true);
+  assert.equal(result.sparseHierarchy.retainedCompactNodeBuffer, true);
+  assert.equal(result.sparseHierarchy.retainedSourceMembershipBuffers, true);
+  assert.equal(result.sparseHierarchy.readbackMode, 'no-full-readback');
+  assert.equal(result.sparseHierarchy.fullParticleReadbackPerformed, false);
+  assert.equal(typeof result.destroySparseHierarchyBuffers, 'function');
+  assert.equal(call.sparseHierarchy.compactNodeBuffer.destroyed, false);
+  result.destroySparseHierarchyBuffers();
+  result.destroySparseHierarchyBuffers();
+  assert.equal(call.sparseHierarchy.compactNodeBuffer.destroyed, true);
 });
 
 test('Schroeder same-level mechanics leaves two-level mode off by default', async () => {
@@ -8793,6 +9148,32 @@ test('Schroeder same-level mechanics leaves two-level mode off by default', asyn
   assert.equal(result.twoLevelMechanics, null);
 });
 
+function createEncodedTwoLevelAuthorityStub(fields = {}) {
+  const authoritySequence = {
+    schema: 'peercompute.ulg.schroeder-two-level-authority-sequence.v0',
+    status: 'encoded-awaiting-caller-submit',
+    commandEncoderOwnership: 'caller-owned',
+    sharedCommandEncoder: true,
+    commandSubmissionCount: 0,
+    normalPathMapCount: 0,
+    normalPathReadbackBytes: 0
+  };
+  return {
+    ...fields,
+    authoritySequence,
+    markAuthoritySequenceSubmitted({
+      queueCompletionStatus = 'queue-work-completed',
+      queueCompletionMethod = 'queue.onSubmittedWorkDone'
+    } = {}) {
+      authoritySequence.status = 'complete';
+      authoritySequence.commandSubmissionCount = 1;
+      authoritySequence.queueCompletionStatus = queueCompletionStatus;
+      authoritySequence.queueCompletionMethod = queueCompletionMethod;
+    },
+    cleanupSubmittedWork() {}
+  };
+}
+
 test('Schroeder same-level mechanics can make the two-level step authoritative', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -8812,7 +9193,7 @@ test('Schroeder same-level mechanics can make the two-level step authoritative',
       slot: 0
     }
   };
-  const twoLevelMechanicsRunner = async (options) => ({
+  const twoLevelMechanicsRunner = async (options) => createEncodedTwoLevelAuthorityStub({
     schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
     status: 'schroeder-two-level-mechanics-step-submitted',
     couplingMode: 'composite-grid-subcycled-delta-prolongation',
@@ -8885,7 +9266,7 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
     }
   };
   let twoLevelOutputsDestroyed = 0;
-  const twoLevelMechanicsRunner = async (options) => ({
+  const twoLevelMechanicsRunner = async (options) => createEncodedTwoLevelAuthorityStub({
     schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
     status: 'schroeder-two-level-mechanics-step-submitted',
     couplingMode: 'composite-grid-subcycled-delta-prolongation',
@@ -8989,7 +9370,7 @@ test('Schroeder two-level authoritative mode runs the thermal sidecar sequential
     enableTwoLevelMechanics: true,
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
-    twoLevelMechanicsRunner: async (options) => ({
+    twoLevelMechanicsRunner: async (options) => createEncodedTwoLevelAuthorityStub({
       schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
       status: 'schroeder-two-level-mechanics-step-submitted',
       fineLevel: options.fineLevel,
@@ -9069,7 +9450,7 @@ test('Schroeder two-level authoritative mode chains the reaction sidecar after t
     enableTwoLevelMechanics: true,
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
-    twoLevelMechanicsRunner: async (options) => ({
+    twoLevelMechanicsRunner: async (options) => createEncodedTwoLevelAuthorityStub({
       schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
       status: 'schroeder-two-level-mechanics-step-submitted',
       fineLevel: options.fineLevel,

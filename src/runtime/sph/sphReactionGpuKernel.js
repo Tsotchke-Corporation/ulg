@@ -53,6 +53,24 @@ import {
   createResidentProductMassHandle,
   runSphReactionSummaryWebGpu
 } from './sphReactionGpuSummary.js';
+import {
+  SPH_REACTION_PRODUCT_EVENT_PREFIX_METADATA_BYTES,
+  createSphReactionProductEventAdmissionWebGpuEncoderStage,
+  createSphReactionProductEventWebGpuEncoderStage,
+  sphReactionProductEventCapacityRows
+} from './sphReactionProductEventGpu.js';
+import { resolveResidentNeighborhoodConsumer } from './residentNeighborhoodConsumer.js';
+import { webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
+import {
+  SPH_REACTION_PROPOSAL_FLOATS,
+  ULG_SPH_REACTION_CORE_WORKSPACE_GPU_SCHEMA,
+  assertSphReactionCoreWorkspaceGpu,
+  createSphReactionCoreWorkspaceGpu
+} from './sphReactionCoreWorkspaceGpu.js';
+import {
+  ULG_SPH_REACTION_STATIC_TABLE_UPLOAD_GPU_SCHEMA,
+  assertSphReactionStaticTableUploadGpu
+} from './sphReactionStaticTableUploadGpu.js';
 
 export {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
@@ -69,9 +87,7 @@ export const SPH_REACTION_PRODUCT_TERM_FLOATS = SPH_GPU_REACTION_PRODUCT_TERM_RO
 export const SPH_REACTION_GAS_PRODUCT_FLOATS = SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.length;
 export const SPH_REACTION_ATOM_TERM_FLOATS = SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length;
 export const SPH_REACTION_PRODUCT_PHASE_FLOATS = SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length;
-const SPH_REACTION_PACKED_PARTICLE_VEC4S = 13;
-const SPH_REACTION_PACKED_PARTICLE_FLOATS = SPH_REACTION_PACKED_PARTICLE_VEC4S * 4;
-
+export const SPH_REACTION_RESOLVE_STORAGE_BUFFER_REQUIREMENT = 14;
 const REACTION_SCOPE = 'sph-reaction-mutual-contact-derived-network';
 const REACTION_STATUS = Object.freeze({ ready: 1, missingProductMaterial: 255, invalidReaction: 254 });
 const PRODUCT_PHASE_STATUS = Object.freeze({ ready: 1, missingPhase: 255 });
@@ -1587,6 +1603,21 @@ function outputEnvelope({
   stateBuffer = null,
   thermoBuffer = null,
   mechanicsBuffer = null,
+  outputBufferOwnership = null,
+  outputBufferAllocationAvoidedByteLength = 0,
+  reactionCoreWorkspace = null,
+  reactionCoreWorkspaceBorrowed = false,
+  reactionCoreWorkspaceOwned = false,
+  reactionCoreWorkspaceAllocationAvoidedByteLength = 0,
+  reactionParamsSlotIndex = null,
+  reactionParamsSlotStrideBytes = 0,
+  reactionParamsByteOffsets = null,
+  reactionProposeBindGroupCacheHit = false,
+  reactionResolveBindGroupCacheHit = false,
+  reactionSharedDisabledStorageBindingsUsed = false,
+  reactionStaticTableUpload = null,
+  reactionTableContentGeneration = null,
+  thermalResponseUploadProvenance = null,
   stateBufferByteLength = state.byteLength,
   thermoBufferByteLength = thermo.byteLength,
   mechanicsBufferByteLength = mechanics.byteLength,
@@ -1611,7 +1642,17 @@ function outputEnvelope({
   gpuTimestampRequested = false,
   gpuTimestampStatus = null,
   gpuTimestampMappedByteLength = 0,
-  gpuAllocationEvidence = null
+  gpuAllocationEvidence = null,
+  sourceParticlePackInitializationMode = null,
+  outputBufferInitializationMode = null,
+  particleBinInitializationMode = null,
+  hostZeroInitializationByteLength = null,
+  shaderInitializedLiveByteLength = null,
+  commandEncoderClearByteLength = null,
+  mapPerformed = false,
+  readbackPerformed = mapPerformed,
+  normalHotLoopReadbackFree = readbackMode === NO_FULL_READBACK_MODE && !mapPerformed,
+  mappedReadbackKinds = []
 }) {
   return {
     schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
@@ -1689,6 +1730,41 @@ function outputEnvelope({
     stateBuffer,
     thermoBuffer,
     mechanicsBuffer,
+    outputBufferOwnership,
+    outputBufferAllocationAvoidedByteLength,
+    reactionCoreWorkspace,
+    reactionCoreWorkspaceSchema: reactionCoreWorkspace?.schema ?? null,
+    reactionCoreWorkspaceStatus: reactionCoreWorkspace?.status ?? null,
+    reactionCoreWorkspaceBorrowed,
+    reactionCoreWorkspaceOwned,
+    reactionCoreWorkspaceParticleCapacity: reactionCoreWorkspace?.particleCapacity ?? 0,
+    reactionCoreWorkspaceBufferCount: reactionCoreWorkspace?.allocationEntries?.length ?? 0,
+    reactionCoreWorkspaceByteLength: reactionCoreWorkspace?.totalByteLength ?? 0,
+    reactionCoreWorkspaceAllocationAvoidedByteLength,
+    reactionCoreWorkspaceSequenceStepCapacity:
+      reactionCoreWorkspace?.sequenceStepCapacity ?? 0,
+    reactionParamsSlotIndex,
+    reactionParamsSlotStrideBytes,
+    reactionParamsByteOffsets,
+    reactionProposeBindGroupCacheHit,
+    reactionResolveBindGroupCacheHit,
+    reactionSharedDisabledStorageBindingsUsed,
+    reactionStaticTableUpload,
+    reactionStaticTableUploadSchema: reactionStaticTableUpload?.schema ?? null,
+    reactionStaticTableUploadStatus: reactionStaticTableUpload?.status ?? null,
+    reactionStaticTableUploadBorrowed: Boolean(reactionStaticTableUpload),
+    reactionStaticTableUploadMode: reactionStaticTableUpload
+      ? 'caller-borrowed-static-upload'
+      : (backend === 'webgpu' ? 'temporary-reaction-record-upload' : null),
+    reactionTableContentGeneration,
+    thermalResponseUploadProvenance,
+    reactionRecordBufferAllocationAvoidedByteLength: reactionStaticTableUpload
+      ? reactionStaticTableUpload.reactionRecordBufferByteLength
+      : 0,
+    reactionRecordBufferWriteAvoidedByteLength: reactionStaticTableUpload
+      ? reactionStaticTableUpload.reactionRecordUploadWriteByteLength
+      : 0,
+    staticBindingResourceCount: reactionStaticTableUpload?.staticBindingResourceCount ?? 0,
     stateBufferByteLength,
     thermoBufferByteLength,
     mechanicsBufferByteLength,
@@ -1705,6 +1781,12 @@ function outputEnvelope({
     gpuTimestampStatus,
     gpuTimestampMappedByteLength,
     gpuAllocationEvidence,
+    sourceParticlePackInitializationMode,
+    outputBufferInitializationMode,
+    particleBinInitializationMode,
+    hostZeroInitializationByteLength,
+    shaderInitializedLiveByteLength,
+    commandEncoderClearByteLength,
     readbackMode,
     sourceParticlePackMode,
     reactionProposalNeighborMode,
@@ -1754,7 +1836,10 @@ function outputEnvelope({
     reactionParticleBinOverflowCount,
     reactionParticleBinOverflowMetadataReadbackRequested: reactionParticleBins?.overflowMetadataReadbackRequested === true,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
-    normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    mapPerformed,
+    readbackPerformed,
+    mappedReadbackKinds: [...mappedReadbackKinds],
+    normalHotLoopReadbackFree,
     scientificValidation: false,
     materialValidation: false,
     chemistryValidation: false,
@@ -1920,6 +2005,109 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+function createStorageBuffer(device, label, byteLength, extraUsage = 0) {
+  return device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
+  });
+}
+
+function bufferBindingResource(resource) {
+  const buffer = resource?.buffer || resource;
+  if (!buffer) throw new TypeError('reaction binding requires a GPUBuffer-like resource');
+  const byteOffset = Number(resource?.byteOffset ?? 0);
+  const byteLength = Number(resource?.byteLength);
+  return {
+    buffer,
+    ...(byteOffset > 0 ? { offset: byteOffset } : {}),
+    ...(Number.isFinite(byteLength) && byteLength > 0 ? { size: byteLength } : {})
+  };
+}
+
+function bindingTupleSignature(layout, entries) {
+  return [
+    layout,
+    ...entries.flatMap(({ binding, resource }) => [
+      binding,
+      resource.buffer,
+      resource.offset ?? 0,
+      resource.size ?? null
+    ])
+  ];
+}
+
+function assertBorrowedReactionOutputBuffer(device, buffer, label, requiredByteLength) {
+  if (!buffer) return;
+  if (!webGpuBufferMatchesDevice(buffer, device)) {
+    throw new Error(`${label} device mismatch`);
+  }
+  const available = Number(buffer.size ?? 0);
+  if (!Number.isFinite(available) || available < requiredByteLength) {
+    throw new RangeError(`${label} is smaller than ${requiredByteLength} bytes`);
+  }
+  if (Number.isFinite(Number(buffer.usage))
+    && (Number(buffer.usage) & GPU_BUFFER_USAGE.STORAGE) === 0) {
+    throw new RangeError(`${label} requires GPUBufferUsage.STORAGE`);
+  }
+}
+
+function assertReactionOutputAliases({
+  outputStateBuffer,
+  outputThermoBuffer,
+  outputMechanicsBuffer,
+  sourceStateBuffer,
+  sourceThermoBuffer,
+  sourceMechanicsBuffer
+}) {
+  const outputs = [
+    ['outputStateBuffer', outputStateBuffer],
+    ['outputThermoBuffer', outputThermoBuffer],
+    ['outputMechanicsBuffer', outputMechanicsBuffer]
+  ].filter(([, buffer]) => buffer);
+  for (let left = 0; left < outputs.length; left += 1) {
+    for (let right = left + 1; right < outputs.length; right += 1) {
+      if (outputs[left][1] === outputs[right][1]) {
+        throw new RangeError(`${outputs[left][0]} must not alias ${outputs[right][0]}`);
+      }
+    }
+  }
+  const sources = [
+    ['sourceStateBuffer', sourceStateBuffer],
+    ['sourceThermoBuffer', sourceThermoBuffer],
+    ['sourceMechanicsBuffer', sourceMechanicsBuffer]
+  ].filter(([, buffer]) => buffer);
+  for (const [outputLabel, output] of outputs) {
+    for (const [sourceLabel, source] of sources) {
+      if (output === source) {
+        throw new RangeError(`${outputLabel} must not alias ${sourceLabel}`);
+      }
+    }
+  }
+}
+
+function assertReactionCoreWorkspaceAliases(workspace, namedBuffers) {
+  const scratch = [
+    ['reactionCoreWorkspace.proposalBuffer', workspace.proposalBuffer],
+    ['reactionCoreWorkspace.paramsBuffer', workspace.paramsBuffer],
+    [
+      'reactionCoreWorkspace.disabledWritableStorageBuffer',
+      workspace.disabledWritableStorageBuffer
+    ],
+    [
+      'reactionCoreWorkspace.disabledReadOnlyStorageBuffer',
+      workspace.disabledReadOnlyStorageBuffer
+    ]
+  ];
+  for (const [scratchLabel, scratchBuffer] of scratch) {
+    for (const [bufferLabel, buffer] of namedBuffers) {
+      if (buffer && scratchBuffer === buffer) {
+        throw new RangeError(`${scratchLabel} must not alias ${bufferLabel}`);
+      }
+    }
+  }
+}
+
 function resolveSchroederReactionLawQueue(schroederLawQueue = null, { particleCount = 0 } = {}) {
   const base = {
     sourceSchema: schroederLawQueue?.schema ?? null,
@@ -2034,16 +2222,26 @@ function createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue) {
   return buffer;
 }
 
-function createSchroederReactionLawNeighborCandidateParamsArray(schroederReactionLawNeighborCandidates) {
-  const buffer = new ArrayBuffer(32);
+function createSchroederReactionLawNeighborCandidateParamsArray(
+  schroederReactionLawNeighborCandidates,
+  residentNeighborhoodAdmission = null
+) {
+  const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
-  view.setUint32(0, schroederReactionLawNeighborCandidates?.neighborCandidateBufferConsumed ? 1 : 0, true);
+  const residentEnabled = residentNeighborhoodAdmission?.admitted === true;
+  view.setUint32(
+    0,
+    residentEnabled ? 2 : (schroederReactionLawNeighborCandidates?.neighborCandidateBufferConsumed ? 1 : 0),
+    true
+  );
   view.setUint32(4, Math.max(0, Math.round(finiteNumber(
-    schroederReactionLawNeighborCandidates?.neighborCandidateCount,
+    residentEnabled
+      ? residentNeighborhoodAdmission.descriptor.capacityEvidence.capacity.candidateCount
+      : schroederReactionLawNeighborCandidates?.neighborCandidateCount,
     0
   ))), true);
   view.setUint32(8, Math.max(1, Math.round(finiteNumber(
-    schroederReactionLawNeighborCandidates?.neighborCandidateStrideFloats,
+    residentEnabled ? 2 : schroederReactionLawNeighborCandidates?.neighborCandidateStrideFloats,
     SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS
   ))), true);
   view.setUint32(12, Math.max(1, Math.round(finiteNumber(
@@ -2051,18 +2249,35 @@ function createSchroederReactionLawNeighborCandidateParamsArray(schroederReactio
     1
   ))), true);
   view.setUint32(16, Math.max(0, Math.round(finiteNumber(
-    schroederReactionLawNeighborCandidates?.reactionMask,
+    residentEnabled
+      ? residentNeighborhoodAdmission.expectedIdentity.consumerBit
+      : schroederReactionLawNeighborCandidates?.reactionMask,
     SCHROEDER_REACTION_LAW_MASK
   ))), true);
   view.setUint32(20, Math.max(0, Math.round(finiteNumber(
-    schroederReactionLawNeighborCandidates?.sourceCandidateSpanCount,
+    residentEnabled
+      ? residentNeighborhoodAdmission.expectedIdentity.sourceCount
+      : schroederReactionLawNeighborCandidates?.sourceCandidateSpanCount,
     0
   ))), true);
   view.setUint32(24, Math.max(1, Math.round(finiteNumber(
-    schroederReactionLawNeighborCandidates?.sourceCandidateSpanStrideFloats,
+    residentEnabled ? 1 : schroederReactionLawNeighborCandidates?.sourceCandidateSpanStrideFloats,
     SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS
   ))), true);
-  view.setUint32(28, schroederReactionLawNeighborCandidates?.sourceCandidateSpanBufferConsumed ? 1 : 0, true);
+  view.setUint32(
+    28,
+    residentEnabled ? 1 : (schroederReactionLawNeighborCandidates?.sourceCandidateSpanBufferConsumed ? 1 : 0),
+    true
+  );
+  const identity = residentNeighborhoodAdmission?.expectedIdentity;
+  view.setUint32(32, residentEnabled ? 2 : 0, true);
+  view.setUint32(36, identity?.generation ?? 0, true);
+  view.setUint32(40, identity?.leaseTokenLow ?? 0, true);
+  view.setUint32(44, identity?.leaseTokenHigh ?? 0, true);
+  view.setUint32(48, identity?.positionEpoch ?? 0, true);
+  view.setUint32(52, identity?.sourceCount ?? 0, true);
+  view.setUint32(56, identity?.consumerBit ?? 0, true);
+  view.setUint32(60, residentEnabled ? 1 : 0, true);
   return buffer;
 }
 
@@ -2213,9 +2428,19 @@ function createReactionParticleBinBuffers({
   reactionTable,
   boxDimsM = null,
   binCapacity = DEFAULT_REACTION_PARTICLE_BIN_CAPACITY,
-  readbackMetadata = false
+  readbackMetadata = false,
+  forceDisabled = false,
+  paramsResource = null,
+  disabledStorageBindings = null
 } = {}) {
-  const particleBinGrid = resolveReactionParticleBinGrid({
+  const particleBinGrid = forceDisabled
+    ? {
+        enabled: false,
+        status: 'resident-neighborhood-authority-bypasses-reaction-bins',
+        reason: 'Packed resident-neighborhood CSR is the admitted reaction candidate authority',
+        neighborMode: 'resident-neighborhood-packed-csr'
+      }
+    : resolveReactionParticleBinGrid({
     boxDimsM,
     sphParticleState,
     reactionTable,
@@ -2223,26 +2448,56 @@ function createReactionParticleBinBuffers({
     binCapacity
   });
   const disabled = particleBinGrid.enabled !== true;
+  const useSharedDisabledBindings = Boolean(disabled
+    && forceDisabled
+    && disabledStorageBindings?.binCounts
+    && disabledStorageBindings?.binIndices
+    && disabledStorageBindings?.binMetadata);
   const cellCount = disabled ? 1 : Math.max(1, Math.round(finiteNumber(particleBinGrid.cellCount, 0)));
   const capacity = disabled ? 1 : Math.max(1, Math.round(finiteNumber(particleBinGrid.binCapacity, DEFAULT_REACTION_PARTICLE_BIN_CAPACITY)));
-  const countsBuffer = writeStorageBuffer(
-    device,
-    disabled ? 'ulg-sph-reaction-particle-bin-counts-disabled' : 'ulg-sph-reaction-particle-bin-counts',
-    new Uint32Array(cellCount)
-  );
-  const indices = new Uint32Array(cellCount * capacity);
-  indices.fill(0xffffffff);
-  const indicesBuffer = writeStorageBuffer(
-    device,
-    disabled ? 'ulg-sph-reaction-particle-bin-indices-disabled' : 'ulg-sph-reaction-particle-bin-indices',
-    indices
-  );
-  const metadataBuffer = writeStorageBuffer(
-    device,
-    disabled ? 'ulg-sph-reaction-particle-bin-metadata-disabled' : 'ulg-sph-reaction-particle-bin-metadata',
-    new Uint32Array(4),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  const localCountsBuffer = useSharedDisabledBindings
+    ? null
+    : createStorageBuffer(
+        device,
+        disabled
+          ? 'ulg-sph-reaction-particle-bin-counts-disabled'
+          : 'ulg-sph-reaction-particle-bin-counts',
+        cellCount * Uint32Array.BYTES_PER_ELEMENT,
+        disabled ? 0 : GPU_BUFFER_USAGE.COPY_DST
+      );
+  const countsResource = useSharedDisabledBindings
+    ? disabledStorageBindings.binCounts
+    : { buffer: localCountsBuffer, byteOffset: 0, byteLength: localCountsBuffer.size };
+  const countsBuffer = countsResource.buffer;
+  // The bin dispatch writes every count-admitted index before proposal reads it.
+  const indexBufferByteLength = cellCount * capacity * Uint32Array.BYTES_PER_ELEMENT;
+  const localIndicesBuffer = useSharedDisabledBindings
+    ? null
+    : createStorageBuffer(
+        device,
+        disabled
+          ? 'ulg-sph-reaction-particle-bin-indices-disabled'
+          : 'ulg-sph-reaction-particle-bin-indices',
+        indexBufferByteLength
+      );
+  const indicesResource = useSharedDisabledBindings
+    ? disabledStorageBindings.binIndices
+    : { buffer: localIndicesBuffer, byteOffset: 0, byteLength: localIndicesBuffer.size };
+  const indicesBuffer = indicesResource.buffer;
+  const localMetadataBuffer = useSharedDisabledBindings
+    ? null
+    : createStorageBuffer(
+        device,
+        disabled
+          ? 'ulg-sph-reaction-particle-bin-metadata-disabled'
+          : 'ulg-sph-reaction-particle-bin-metadata',
+        4 * Uint32Array.BYTES_PER_ELEMENT,
+        disabled ? GPU_BUFFER_USAGE.COPY_SRC : GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+      );
+  const metadataResource = useSharedDisabledBindings
+    ? disabledStorageBindings.binMetadata
+    : { buffer: localMetadataBuffer, byteOffset: 0, byteLength: localMetadataBuffer.size };
+  const metadataBuffer = metadataResource.buffer;
   const metadataReadbackBuffer = readbackMetadata === true && !disabled
     ? device.createBuffer({
         label: 'ulg-sph-reaction-particle-bin-metadata-readback',
@@ -2250,15 +2505,25 @@ function createReactionParticleBinBuffers({
         usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
       })
     : null;
-  const paramsBuffer = device.createBuffer({
-    label: disabled ? 'ulg-sph-reaction-particle-bin-params-disabled' : 'ulg-sph-reaction-particle-bin-params',
-    size: 64,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(paramsBuffer, 0, createReactionParticleBinParamsArray({
+  const localParamsBuffer = paramsResource
+    ? null
+    : device.createBuffer({
+        label: disabled
+          ? 'ulg-sph-reaction-particle-bin-params-disabled'
+          : 'ulg-sph-reaction-particle-bin-params',
+        size: 64,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      });
+  const resolvedParamsResource = paramsResource || {
+    buffer: localParamsBuffer,
+    byteOffset: 0,
+    byteLength: 64
+  };
+  const paramsData = createReactionParticleBinParamsArray({
     particleCount: sphParticleState?.particleCount ?? 0,
     particleBinGrid
-  }));
+  });
+  if (localParamsBuffer) device.queue.writeBuffer(localParamsBuffer, 0, paramsData);
   return {
     schema: 'peercompute.ulg.sph-reaction-particle-bin-grid.v0',
     status: disabled ? particleBinGrid.status : 'reaction-particle-bin-grid-prepared',
@@ -2267,50 +2532,37 @@ function createReactionParticleBinBuffers({
     neighborMode: particleBinGrid.neighborMode,
     particleBinGrid,
     countsBuffer,
+    countsResource,
     indicesBuffer,
+    indicesResource,
     metadataBuffer,
+    metadataResource,
     metadataReadbackBuffer,
-    paramsBuffer,
+    paramsBuffer: resolvedParamsResource.buffer,
+    paramsResource: resolvedParamsResource,
+    paramsData,
+    sharedDisabledBindings: useSharedDisabledBindings,
     cellCount: disabled ? 0 : particleBinGrid.cellCount,
     binCapacity: disabled ? 0 : particleBinGrid.binCapacity,
     averageOccupancy: particleBinGrid.averageOccupancy || 0,
     estimatedOverflowRisk: particleBinGrid.estimatedOverflowRisk === true,
-    indexBufferByteLength: disabled ? 0 : indices.byteLength,
+    indexBufferByteLength: disabled ? 0 : indexBufferByteLength,
+    gpuInitializationClearBuffers: disabled ? [] : [countsBuffer, metadataBuffer],
+    initializationMode: disabled
+      ? 'disabled-bindings-unused'
+      : 'command-encoder-clear-counts-and-metadata',
     overflowMetadataStatus: metadataReadbackBuffer
       ? 'particle-bin-overflow-readback-requested'
       : (disabled ? null : 'particle-bin-overflow-metadata-unread'),
     overflowMetadataReadbackRequested: metadataReadbackBuffer != null,
-    cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, metadataReadbackBuffer, paramsBuffer].filter(Boolean)
+    cleanupBuffers: [
+      localCountsBuffer,
+      localIndicesBuffer,
+      localMetadataBuffer,
+      metadataReadbackBuffer,
+      localParamsBuffer
+    ].filter(Boolean)
   };
-}
-
-function packReactionParticleRecords(sphParticleState, mlsMpmParticleState) {
-  const packed = new Float32Array(sphParticleState.particleCount * SPH_REACTION_PACKED_PARTICLE_FLOATS);
-  for (let index = 0; index < sphParticleState.particleCount; index += 1) {
-    const out = index * SPH_REACTION_PACKED_PARTICLE_FLOATS;
-    packed.set(
-      sphParticleState.state.slice(
-        index * SPH_GPU_PARTICLE_STATE_FLOATS,
-        index * SPH_GPU_PARTICLE_STATE_FLOATS + SPH_GPU_PARTICLE_STATE_FLOATS
-      ),
-      out
-    );
-    packed.set(
-      sphParticleState.thermo.slice(
-        index * SPH_GPU_PARTICLE_THERMO_FLOATS,
-        index * SPH_GPU_PARTICLE_THERMO_FLOATS + SPH_GPU_PARTICLE_THERMO_FLOATS
-      ),
-      out + SPH_GPU_PARTICLE_STATE_FLOATS
-    );
-    packed.set(
-      mlsMpmParticleState.mechanics.slice(
-        index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
-        index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
-      ),
-      out + SPH_GPU_PARTICLE_STATE_FLOATS + SPH_GPU_PARTICLE_THERMO_FLOATS
-    );
-  }
-  return packed;
 }
 
 function createParamsArray({
@@ -2323,7 +2575,8 @@ function createParamsArray({
   materialCount,
   segmentCount,
   resetMechanics,
-  dtSeconds = 0
+  dtSeconds = 0,
+  productEventAdmissionRequired = false
 }) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
@@ -2339,7 +2592,7 @@ function createParamsArray({
   // Interface-flux extent law substep duration (f32 in the _pad0 lane);
   // 0 keeps the legacy availability-only extent bound.
   view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
-  view.setUint32(40, 0, true);
+  view.setUint32(40, productEventAdmissionRequired ? 1 : 0, true);
   view.setUint32(44, 0, true);
   return buffer;
 }
@@ -2371,6 +2624,9 @@ export async function runSphReactionStepWebGpu({
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
   sourceMechanicsBuffer = null,
+  outputStateBuffer = null,
+  outputThermoBuffer = null,
+  outputMechanicsBuffer = null,
   thermalClosureGraphSet = null,
   thermalClosureGraphBank = null,
   thermalPhaseResponseTable = null,
@@ -2384,39 +2640,123 @@ export async function runSphReactionStepWebGpu({
   // legacy availability-only extent so callers without a dt stay well-defined.
   dtSeconds = 0,
   readbackMode = FULL_READBACK_MODE,
-  readCompactReactionSummary = true,
-  readReactionGasSpeciesSummary = true,
-  readReactionProductInventory = true,
-  readReactionAtomResidual = true,
+  readCompactReactionSummary = null,
+  readReactionGasSpeciesSummary = null,
+  readReactionProductInventory = null,
+  readReactionAtomResidual = null,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
+  commandEncoder = null,
   measureGpuTimestamps = false,
   timestampProfiler = null,
-  timestampMetadata = null
+  timestampMetadata = null,
+  emitResidentProductEvents = true,
+  placeReactionProductEvents = true,
+  productEventPlacementWorkspace = null,
+  reactionCoreWorkspace = null,
+  reactionParamsSlotIndex = 0,
+  reactionStaticTableUpload = null,
+  reactionTableContentGeneration = null,
+  thermalResponseUploadProvenance = null
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
-  assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
+  const bundledThermalResponseGraphUpload =
+    reactionStaticTableUpload?.thermalResponseGraphUpload ?? null;
+  if (thermalResponseGraphUpload
+    && bundledThermalResponseGraphUpload
+    && thermalResponseGraphUpload !== bundledThermalResponseGraphUpload) {
+    throw new Error(
+      'reactionStaticTableUpload thermal response upload identity conflicts with thermalResponseGraphUpload'
+    );
+  }
+  const requestedThermalResponseGraphUpload =
+    thermalResponseGraphUpload || bundledThermalResponseGraphUpload;
+  assertOptionalThermalResponseGraphUpload(requestedThermalResponseGraphUpload);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionStepWebGpu requires a WebGPU-like device');
   }
+  const maxStorageBuffersPerShaderStage = Number(
+    device.limits?.maxStorageBuffersPerShaderStage
+  );
+  if (
+    Number.isFinite(maxStorageBuffersPerShaderStage)
+    && maxStorageBuffersPerShaderStage > 0
+    && maxStorageBuffersPerShaderStage < SPH_REACTION_RESOLVE_STORAGE_BUFFER_REQUIREMENT
+  ) {
+    const error = new RangeError(
+      `SPH reaction resolve requires ${SPH_REACTION_RESOLVE_STORAGE_BUFFER_REQUIREMENT} storage buffers per shader stage; device exposes ${maxStorageBuffersPerShaderStage}`
+    );
+    error.code = 'ULG_SPH_REACTION_DEVICE_STORAGE_BINDING_LIMIT_INSUFFICIENT';
+    error.requiredStorageBuffersPerShaderStage =
+      SPH_REACTION_RESOLVE_STORAGE_BUFFER_REQUIREMENT;
+    error.deviceStorageBuffersPerShaderStage = maxStorageBuffersPerShaderStage;
+    throw error;
+  }
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const resolvedReadCompactReactionSummary = readCompactReactionSummary == null
+    ? !noFullReadback
+    : readCompactReactionSummary === true;
+  const resolvedReadReactionGasSpeciesSummary = readReactionGasSpeciesSummary == null
+    ? !noFullReadback
+    : readReactionGasSpeciesSummary === true;
+  const resolvedReadReactionProductInventory = readReactionProductInventory == null
+    ? !noFullReadback
+    : readReactionProductInventory === true;
+  const resolvedReadReactionAtomResidual = readReactionAtomResidual == null
+    ? !noFullReadback
+    : readReactionAtomResidual === true;
+  const residentNeighborhoodAdmission = residentNeighborhood
+    ? resolveResidentNeighborhoodConsumer({
+        residentNeighborhood,
+        device,
+        consumer: 'reaction',
+        sourceCount: sphParticleState.particleCount,
+        ...(residentNeighborhoodValidation || {})
+      })
+    : null;
+  if (residentNeighborhood && !residentNeighborhoodAdmission.admitted) {
+    throw new Error(
+      `reaction resident neighborhood rejected: ${residentNeighborhoodAdmission.reasonCodes.join(', ')}`
+    );
+  }
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const borrowedMechanicsBuffer = sourceMechanicsBuffer || mlsMpmParticleUpload?.mechanicsBuffer || null;
-  const sourceUsesBorrowedGpuBuffers = Boolean(borrowedStateBuffer || borrowedThermoBuffer || borrowedMechanicsBuffer);
-  const packedParticleRecords = sourceUsesBorrowedGpuBuffers
-    ? new Float32Array(sphParticleState.particleCount * SPH_REACTION_PACKED_PARTICLE_FLOATS)
-    : packReactionParticleRecords(sphParticleState, mlsMpmParticleState);
-  const packedParticleRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-packed-source-particles', packedParticleRecords);
-  const localSourceStateBuffer = sourceUsesBorrowedGpuBuffers && !borrowedStateBuffer
-    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-state-fallback', sphParticleState.state)
+  const borrowedSourceBufferCount = [
+    borrowedStateBuffer,
+    borrowedThermoBuffer,
+    borrowedMechanicsBuffer
+  ].filter(Boolean).length;
+  const sourceUsesFullyBorrowedGpuBuffers = borrowedSourceBufferCount === 3;
+  const resolvedReactionCoreWorkspace = reactionCoreWorkspace
+    ? assertSphReactionCoreWorkspaceGpu(
+        device,
+        reactionCoreWorkspace,
+        sphParticleState.particleCount
+      )
+    : createSphReactionCoreWorkspaceGpu({
+        device,
+        particleCapacity: Math.max(1, sphParticleState.particleCount),
+        sequenceStepCapacity: Math.max(1, Number(reactionParamsSlotIndex) + 1),
+        label: 'ulg-sph-reaction-core-workspace'
+      });
+  const reactionCoreWorkspaceOwned = reactionCoreWorkspace == null;
+  const reactionParamsSlot = resolvedReactionCoreWorkspace.paramsSlot(reactionParamsSlotIndex);
+  const localSourceStateBuffer = !borrowedStateBuffer
+    ? writeStorageBuffer(device, 'ulg-sph-reaction-direct-source-state', sphParticleState.state)
     : null;
-  const localSourceThermoBuffer = sourceUsesBorrowedGpuBuffers && !borrowedThermoBuffer
-    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-thermo-fallback', sphParticleState.thermo)
+  const localSourceThermoBuffer = !borrowedThermoBuffer
+    ? writeStorageBuffer(device, 'ulg-sph-reaction-direct-source-thermo', sphParticleState.thermo)
     : null;
-  const localSourceMechanicsBuffer = sourceUsesBorrowedGpuBuffers && !borrowedMechanicsBuffer
-    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-mechanics-fallback', mlsMpmParticleState.mechanics)
+  const localSourceMechanicsBuffer = !borrowedMechanicsBuffer
+    ? writeStorageBuffer(device, 'ulg-sph-reaction-direct-source-mechanics', mlsMpmParticleState.mechanics)
     : null;
   const packSourceStateBuffer = borrowedStateBuffer || localSourceStateBuffer;
   const packSourceThermoBuffer = borrowedThermoBuffer || localSourceThermoBuffer;
@@ -2424,8 +2764,16 @@ export async function runSphReactionStepWebGpu({
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
   const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
-  const borrowedResponseGraphUpload = thermalResponseGraphUpload?.status === 'webgpu-uploaded'
-    ? { ...thermalResponseGraphUpload, borrowed: true }
+  const resolvedReactionStaticTableUpload = reactionStaticTableUpload
+    ? assertSphReactionStaticTableUploadGpu(device, reactionStaticTableUpload, {
+        reactionTable,
+        reactionTableContentGeneration,
+        thermalResponseGraphUpload: requestedThermalResponseGraphUpload,
+        thermalResponseUploadProvenance
+      })
+    : null;
+  const borrowedResponseGraphUpload = requestedThermalResponseGraphUpload?.status === 'webgpu-uploaded'
+    ? { ...requestedThermalResponseGraphUpload, borrowed: true }
     : null;
   const localResponseGraphUpload = borrowedResponseGraphUpload
     ? null
@@ -2436,11 +2784,24 @@ export async function runSphReactionStepWebGpu({
       thermalPhaseResponseTable: resolvedPhaseResponseTable
     });
   const responseGraphUpload = borrowedResponseGraphUpload || localResponseGraphUpload;
-  const reactionRecordBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-reaction-records-and-product-phases',
-    reactionTable.combinedRecords || new Float32Array([...reactionTable.records, ...reactionTable.productPhaseRecords])
-  );
+  const reactionRecordData = reactionTable.combinedRecords
+    || new Float32Array([...reactionTable.records, ...reactionTable.productPhaseRecords]);
+  const localReactionRecordBuffer = resolvedReactionStaticTableUpload
+    ? null
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-reaction-records-and-product-phases',
+        reactionRecordData
+      );
+  const reactionRecordBuffer =
+    resolvedReactionStaticTableUpload?.reactionRecordBuffer || localReactionRecordBuffer;
+  const reactionRecordBufferByteLength = Math.max(4, reactionRecordData.byteLength);
+  const reactionRecordBufferAllocationAvoidedByteLength = resolvedReactionStaticTableUpload
+    ? reactionRecordBufferByteLength
+    : 0;
+  const reactionRecordBufferWriteAvoidedByteLength = resolvedReactionStaticTableUpload
+    ? reactionRecordData.byteLength
+    : 0;
   const phaseResponseRecordBuffer = responseGraphUpload.responseRecordBuffer;
   const phaseResponseBuffer = responseGraphUpload.responseBuffer;
   const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
@@ -2451,7 +2812,12 @@ export async function runSphReactionStepWebGpu({
     reactionTable,
     boxDimsM,
     binCapacity: reactionParticleBinCapacity,
-    readbackMetadata: reactionParticleBinMetadataReadback
+    readbackMetadata: callerOwnsEncoder ? false : reactionParticleBinMetadataReadback,
+    forceDisabled: residentNeighborhoodAdmission?.admitted === true,
+    paramsResource: reactionParamsSlot.resources.bin,
+    disabledStorageBindings: residentNeighborhoodAdmission?.admitted === true
+      ? resolvedReactionCoreWorkspace.disabledStorageBindings
+      : null
   });
   const schroederReactionLawQueue = resolveSchroederReactionLawQueue(schroederLawQueue, {
     particleCount: sphParticleState.particleCount
@@ -2462,112 +2828,217 @@ export async function runSphReactionStepWebGpu({
   const borrowedSchroederLawQueueBuffer = schroederReactionLawQueue.enabled
     ? schroederReactionLawQueue.lawQueueBuffer
     : null;
+  const sharedDisabledSchroederLawQueueResource = !borrowedSchroederLawQueueBuffer
+    && residentNeighborhoodAdmission?.admitted === true
+    ? resolvedReactionCoreWorkspace.disabledStorageBindings.lawQueue
+    : null;
   const localSchroederLawQueueBuffer = borrowedSchroederLawQueueBuffer
+    || sharedDisabledSchroederLawQueueResource
     ? null
-    : writeStorageBuffer(
+    : createStorageBuffer(
       device,
       'ulg-sph-reaction-schroeder-law-queue-disabled',
-      new Float32Array(SCHROEDER_REACTION_LAW_QUEUE_FLOATS)
+      SCHROEDER_REACTION_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT
     );
-  const schroederReactionLawQueueBuffer = borrowedSchroederLawQueueBuffer || localSchroederLawQueueBuffer;
-  const schroederReactionLawQueueParamsBuffer = device.createBuffer({
-    label: 'ulg-sph-reaction-schroeder-law-queue-params',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(
-    schroederReactionLawQueueParamsBuffer,
-    0,
-    createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue)
-  );
-  const borrowedSchroederLawNeighborCandidateBuffer = schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
-    ? schroederReactionLawNeighborCandidates.neighborCandidateBuffer
-    : null;
+  const schroederReactionLawQueueResource = borrowedSchroederLawQueueBuffer
+    ? { buffer: borrowedSchroederLawQueueBuffer }
+    : (sharedDisabledSchroederLawQueueResource || { buffer: localSchroederLawQueueBuffer });
+  const schroederReactionLawQueueBuffer = schroederReactionLawQueueResource.buffer;
+  const borrowedSchroederLawNeighborCandidateBuffer = residentNeighborhoodAdmission?.admitted
+    ? residentNeighborhoodAdmission.packedCandidateCsrBuffer
+    : (schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
+      ? schroederReactionLawNeighborCandidates.neighborCandidateBuffer
+      : null);
   const localSchroederLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
     ? null
-    : writeStorageBuffer(
+    : createStorageBuffer(
       device,
       'ulg-sph-reaction-schroeder-law-neighbor-candidates-disabled',
-      new Float32Array(SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS)
+      SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
     );
   const schroederReactionLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
     || localSchroederLawNeighborCandidateBuffer;
+  const schroederReactionLawNeighborCandidateResource = {
+    buffer: schroederReactionLawNeighborCandidateBuffer
+  };
   const borrowedSchroederLawNeighborSourceSpanBuffer = schroederReactionLawNeighborCandidates.sourceCandidateSpanBufferConsumed
-    ? schroederReactionLawNeighborCandidates.sourceCandidateSpanBuffer
-    : null;
+    && !residentNeighborhoodAdmission?.admitted
+      ? schroederReactionLawNeighborCandidates.sourceCandidateSpanBuffer
+      : null;
+  const sharedDisabledSchroederLawNeighborSourceSpanResource =
+    !borrowedSchroederLawNeighborSourceSpanBuffer
+    && residentNeighborhoodAdmission?.admitted === true
+      ? resolvedReactionCoreWorkspace.disabledStorageBindings.lawNeighborSourceSpans
+      : null;
   const localSchroederLawNeighborSourceSpanBuffer = borrowedSchroederLawNeighborSourceSpanBuffer
+    || sharedDisabledSchroederLawNeighborSourceSpanResource
     ? null
-    : writeStorageBuffer(
+    : createStorageBuffer(
       device,
       'ulg-sph-reaction-schroeder-law-neighbor-source-spans-disabled',
-      new Float32Array(SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS)
+      SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS * Float32Array.BYTES_PER_ELEMENT
     );
-  const schroederReactionLawNeighborSourceSpanBuffer = borrowedSchroederLawNeighborSourceSpanBuffer
-    || localSchroederLawNeighborSourceSpanBuffer;
-  const schroederReactionLawNeighborCandidateParamsBuffer = device.createBuffer({
-    label: 'ulg-sph-reaction-schroeder-law-neighbor-candidates-params',
-    size: 32,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(
-    schroederReactionLawNeighborCandidateParamsBuffer,
-    0,
-    createSchroederReactionLawNeighborCandidateParamsArray(schroederReactionLawNeighborCandidates)
-  );
-  const proposalBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-reaction-proposals',
-    new Float32Array(sphParticleState.particleCount * 4),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
-  const outPackedParticleRecordBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-reaction-packed-output-particles',
-    new Float32Array(packedParticleRecords.length),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  const schroederReactionLawNeighborSourceSpanResource =
+    borrowedSchroederLawNeighborSourceSpanBuffer
+      ? { buffer: borrowedSchroederLawNeighborSourceSpanBuffer }
+      : (sharedDisabledSchroederLawNeighborSourceSpanResource
+        || { buffer: localSchroederLawNeighborSourceSpanBuffer });
+  const schroederReactionLawNeighborSourceSpanBuffer =
+    schroederReactionLawNeighborSourceSpanResource.buffer;
+  const proposalByteLength = sphParticleState.particleCount
+    * SPH_REACTION_PROPOSAL_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  // Propose overwrites every live proposal row before resolve consumes it.
+  const proposalBuffer = resolvedReactionCoreWorkspace.proposalBuffer;
   // Never size GPU outputs from the CPU arrays alone: under GPU-resident
   // continuation the CPU copies can be stale or detached (length 0).
-  const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(Math.max(
-    sphParticleState.state.length,
-    sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC);
-  const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(Math.max(
-    sphParticleState.thermo.length,
-    sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC);
-  const outMechanicsBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(Math.max(
-    mlsMpmParticleState.mechanics.length,
-    mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC);
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-sph-reaction-params',
-    size: 48,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  const outStateByteLength = Math.max(
+    sphParticleState.state.byteLength,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const outThermoByteLength = Math.max(
+    sphParticleState.thermo.byteLength,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const outMechanicsByteLength = Math.max(
+    mlsMpmParticleState.mechanics.byteLength,
+    mlsMpmParticleState.particleCount
+      * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  assertBorrowedReactionOutputBuffer(
+    device,
+    outputStateBuffer,
+    'outputStateBuffer',
+    outStateByteLength
+  );
+  assertBorrowedReactionOutputBuffer(
+    device,
+    outputThermoBuffer,
+    'outputThermoBuffer',
+    outThermoByteLength
+  );
+  assertBorrowedReactionOutputBuffer(
+    device,
+    outputMechanicsBuffer,
+    'outputMechanicsBuffer',
+    outMechanicsByteLength
+  );
+  assertReactionOutputAliases({
+    outputStateBuffer,
+    outputThermoBuffer,
+    outputMechanicsBuffer,
+    sourceStateBuffer: packSourceStateBuffer,
+    sourceThermoBuffer: packSourceThermoBuffer,
+    sourceMechanicsBuffer: packSourceMechanicsBuffer
   });
-  device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
-    particleCount: sphParticleState.particleCount,
-    reactionCount: reactionTable.reactionCount,
-    productPhaseCount: reactionTable.productPhaseCount,
-    reactantTermCount: reactionTable.reactantTermCount ?? 0,
-    productTermCount: reactionTable.productTermCount ?? 0,
-    gasProductCount: reactionTable.gasProductCount ?? 0,
-    materialCount: resolvedPhaseResponseTable.materialCount,
-    segmentCount: resolvedPhaseResponseTable.responseCount,
-    resetMechanics,
-    dtSeconds
-  }));
+  const outStateBuffer = outputStateBuffer || createStorageBuffer(
+    device,
+    'ulg-sph-reaction-output-state',
+    outStateByteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const outThermoBuffer = outputThermoBuffer || createStorageBuffer(
+    device,
+    'ulg-sph-reaction-output-thermo',
+    outThermoByteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const outMechanicsBuffer = outputMechanicsBuffer || createStorageBuffer(
+    device,
+    'ulg-sph-reaction-output-mechanics',
+    outMechanicsByteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  assertReactionOutputAliases({
+    outputStateBuffer: outStateBuffer,
+    outputThermoBuffer: outThermoBuffer,
+    outputMechanicsBuffer: outMechanicsBuffer,
+    sourceStateBuffer: packSourceStateBuffer,
+    sourceThermoBuffer: packSourceThermoBuffer,
+    sourceMechanicsBuffer: packSourceMechanicsBuffer
+  });
+  assertReactionCoreWorkspaceAliases(resolvedReactionCoreWorkspace, [
+    ['sourceStateBuffer', packSourceStateBuffer],
+    ['sourceThermoBuffer', packSourceThermoBuffer],
+    ['sourceMechanicsBuffer', packSourceMechanicsBuffer],
+    ['outputStateBuffer', outStateBuffer],
+    ['outputThermoBuffer', outThermoBuffer],
+    ['outputMechanicsBuffer', outMechanicsBuffer]
+  ]);
+  const outputBufferOwnership = Object.freeze({
+    state: outputStateBuffer ? 'caller-borrowed' : 'stage-owned',
+    thermo: outputThermoBuffer ? 'caller-borrowed' : 'stage-owned',
+    mechanics: outputMechanicsBuffer ? 'caller-borrowed' : 'stage-owned'
+  });
+  const ownedOutputBuffers = [
+    outputStateBuffer ? null : outStateBuffer,
+    outputThermoBuffer ? null : outThermoBuffer,
+    outputMechanicsBuffer ? null : outMechanicsBuffer
+  ].filter(Boolean);
+  const sourceParticlePackInitializationMode = sourceUsesFullyBorrowedGpuBuffers
+    ? 'direct-resident-soa-source-buffers'
+    : (borrowedSourceBufferCount === 0
+      ? 'host-uploads-direct-soa-source-buffers'
+      : 'mixed-resident-and-host-uploaded-direct-soa-source-buffers');
+  const outputBufferInitializationMode = outputStateBuffer
+    || outputThermoBuffer
+    || outputMechanicsBuffer
+    ? 'shader-overwrites-all-live-particle-rows-in-borrowed-or-owned-outputs'
+    : 'shader-writes-all-live-particle-rows';
+  const hostZeroInitializationByteLength = 0;
+  const commandEncoderClearByteLength = reactionParticleBins.enabled
+    ? reactionParticleBins.countsBuffer.size + reactionParticleBins.metadataBuffer.size
+    : 0;
+  const residentProductEventCapacityRows = callerOwnsEncoder
+    && emitResidentProductEvents
+    && reactionTable.productTermCount > 0
+    ? sphReactionProductEventCapacityRows({
+        particleCount: sphParticleState.particleCount,
+        reactionTable
+      })
+    : 0;
+  const productEventAdmissionRequired = residentProductEventCapacityRows > 0;
+  const shaderInitializedLiveByteLength = (
+    SPH_REACTION_PROPOSAL_FLOATS
+      + SPH_GPU_PARTICLE_STATE_FLOATS
+      + SPH_GPU_PARTICLE_THERMO_FLOATS
+      + MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+      + (productEventAdmissionRequired ? 8 : 0)
+  ) * sphParticleState.particleCount * Float32Array.BYTES_PER_ELEMENT;
+  const writtenReactionParamsSlot = resolvedReactionCoreWorkspace.writeParamsSlot(
+    reactionParamsSlot.slotIndex,
+    {
+      main: createParamsArray({
+        particleCount: sphParticleState.particleCount,
+        reactionCount: reactionTable.reactionCount,
+        productPhaseCount: reactionTable.productPhaseCount,
+        reactantTermCount: reactionTable.reactantTermCount ?? 0,
+        productTermCount: reactionTable.productTermCount ?? 0,
+        gasProductCount: reactionTable.gasProductCount ?? 0,
+        materialCount: resolvedPhaseResponseTable.materialCount,
+        segmentCount: resolvedPhaseResponseTable.responseCount,
+        resetMechanics,
+        dtSeconds,
+        productEventAdmissionRequired
+      }),
+      bin: reactionParticleBins.paramsData,
+      lawQueue: createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue),
+      neighbor: createSchroederReactionLawNeighborCandidateParamsArray(
+        schroederReactionLawNeighborCandidates,
+        residentNeighborhoodAdmission
+      )
+    }
+  );
+  const paramsResource = writtenReactionParamsSlot.resources.main;
+  const schroederReactionLawQueueParamsResource =
+    writtenReactionParamsSlot.resources.lawQueue;
+  const schroederReactionLawNeighborCandidateParamsResource =
+    writtenReactionParamsSlot.resources.neighbor;
 
-  const packBindings = [
-    computeBufferBinding(1, 'read-only-storage'),
-    computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(14, 'storage'),
-    computeBufferBinding(15, 'read-only-storage')
-  ];
   const reactionBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
     computeBufferBinding(7, 'storage'),
     computeBufferBinding(11, 'uniform'),
     computeBufferBinding(16, 'storage'),
@@ -2580,7 +3051,7 @@ export async function runSphReactionStepWebGpu({
     computeBufferBinding(24, 'read-only-storage')
   ];
   const reactionParticleBinBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(11, 'uniform'),
     computeBufferBinding(16, 'storage'),
     computeBufferBinding(17, 'storage'),
@@ -2588,35 +3059,25 @@ export async function runSphReactionStepWebGpu({
     computeBufferBinding(19, 'uniform')
   ];
   const reactionResolveBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
     computeBufferBinding(5, 'read-only-storage'),
     computeBufferBinding(6, 'read-only-storage'),
     computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'read-only-storage'),
-    computeBufferBinding(13, 'read-only-storage')
-  ];
-  const unpackBindings = [
-    computeBufferBinding(2, 'storage'),
-    computeBufferBinding(8, 'storage'),
     computeBufferBinding(9, 'storage'),
     computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform')
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'read-only-storage'),
+    computeBufferBinding(13, 'read-only-storage'),
+    computeBufferBinding(15, 'read-only-storage'),
+    computeBufferBinding(25, 'storage'),
+    computeBufferBinding(26, 'storage')
   ];
-  const packPipelineInfo = sourceUsesBorrowedGpuBuffers
-    ? createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-reaction-step',
-      label: 'ulg-sph-reaction-pack-source',
-      code: sphReactionStepWgsl,
-      entryPoint: 'pack_source',
-      bindings: packBindings
-    })
-    : null;
   const reactionParticleBinPipelineInfo = reactionParticleBins.enabled
     ? createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-reaction-step',
+      cacheKey: 'ulg-sph-reaction-step.v5',
       label: 'ulg-sph-reaction-particle-bins',
       code: sphReactionStepWgsl,
       entryPoint: 'bin_particles',
@@ -2624,110 +3085,112 @@ export async function runSphReactionStepWebGpu({
     })
     : null;
   const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-reaction-step',
+    cacheKey: 'ulg-sph-reaction-step.v5',
     label: 'ulg-sph-reaction-propose',
     code: sphReactionStepWgsl,
     entryPoint: 'propose',
     bindings: reactionBindings
   });
   const { pipeline: resolvePipeline, bindGroupLayout: resolveBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-reaction-step',
+    cacheKey: 'ulg-sph-reaction-step.v5',
     label: 'ulg-sph-reaction-resolve',
     code: sphReactionStepWgsl,
     entryPoint: 'resolve',
     bindings: reactionResolveBindings
   });
-  const { pipeline: unpackPipeline, bindGroupLayout: unpackBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-reaction-step',
-    label: 'ulg-sph-reaction-unpack',
-    code: sphReactionStepWgsl,
-    entryPoint: 'unpack',
-    bindings: unpackBindings
-  });
   const proposeBindEntries = (layout) => ({
     layout,
     entries: [
-      { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
+      { binding: 1, resource: { buffer: packSourceStateBuffer } },
       { binding: 3, resource: { buffer: reactionRecordBuffer } },
+      { binding: 4, resource: { buffer: packSourceThermoBuffer } },
       { binding: 7, resource: { buffer: proposalBuffer } },
-      { binding: 11, resource: { buffer: paramsBuffer } },
-      { binding: 16, resource: { buffer: reactionParticleBins.countsBuffer } },
-      { binding: 17, resource: { buffer: reactionParticleBins.indicesBuffer } },
-      { binding: 19, resource: { buffer: reactionParticleBins.paramsBuffer } },
-      { binding: 20, resource: { buffer: schroederReactionLawQueueBuffer } },
-      { binding: 21, resource: { buffer: schroederReactionLawQueueParamsBuffer } },
-      { binding: 22, resource: { buffer: schroederReactionLawNeighborCandidateBuffer } },
-      { binding: 23, resource: { buffer: schroederReactionLawNeighborCandidateParamsBuffer } },
-      { binding: 24, resource: { buffer: schroederReactionLawNeighborSourceSpanBuffer } }
+      { binding: 11, resource: bufferBindingResource(paramsResource) },
+      { binding: 16, resource: bufferBindingResource(reactionParticleBins.countsResource) },
+      { binding: 17, resource: bufferBindingResource(reactionParticleBins.indicesResource) },
+      { binding: 19, resource: bufferBindingResource(reactionParticleBins.paramsResource) },
+      { binding: 20, resource: bufferBindingResource(schroederReactionLawQueueResource) },
+      { binding: 21, resource: bufferBindingResource(schroederReactionLawQueueParamsResource) },
+      {
+        binding: 22,
+        resource: bufferBindingResource(schroederReactionLawNeighborCandidateResource)
+      },
+      {
+        binding: 23,
+        resource: bufferBindingResource(schroederReactionLawNeighborCandidateParamsResource)
+      },
+      {
+        binding: 24,
+        resource: bufferBindingResource(schroederReactionLawNeighborSourceSpanResource)
+      }
     ]
   });
-  const resolveBindEntries = (layout) => ({
+  const resolveBindEntries = (
+    layout,
+    productEventPrefixMetadataBuffer,
+    reactionOutcomeBuffer
+  ) => ({
     layout,
     entries: [
-      { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
+      { binding: 1, resource: { buffer: packSourceStateBuffer } },
+      { binding: 2, resource: { buffer: outMechanicsBuffer } },
       { binding: 3, resource: { buffer: reactionRecordBuffer } },
+      { binding: 4, resource: { buffer: packSourceThermoBuffer } },
       { binding: 5, resource: { buffer: phaseResponseRecordBuffer } },
       { binding: 6, resource: { buffer: phaseResponseBuffer } },
       { binding: 7, resource: { buffer: proposalBuffer } },
-      { binding: 8, resource: { buffer: outPackedParticleRecordBuffer } },
-      { binding: 11, resource: { buffer: paramsBuffer } },
-      { binding: 12, resource: { buffer: graphNodeBuffer } },
-      { binding: 13, resource: { buffer: graphSampleBuffer } }
-    ]
-  });
-  const unpackBindEntries = (layout) => ({
-    layout,
-    entries: [
-      { binding: 2, resource: { buffer: outMechanicsBuffer } },
-      { binding: 8, resource: { buffer: outPackedParticleRecordBuffer } },
       { binding: 9, resource: { buffer: outStateBuffer } },
       { binding: 10, resource: { buffer: outThermoBuffer } },
-      { binding: 11, resource: { buffer: paramsBuffer } }
+      { binding: 11, resource: bufferBindingResource(paramsResource) },
+      { binding: 12, resource: { buffer: graphNodeBuffer } },
+      { binding: 13, resource: { buffer: graphSampleBuffer } },
+      { binding: 15, resource: { buffer: packSourceMechanicsBuffer } },
+      { binding: 25, resource: { buffer: productEventPrefixMetadataBuffer } },
+      { binding: 26, resource: { buffer: reactionOutcomeBuffer } }
     ]
   });
-  const packBindGroup = packPipelineInfo
-    ? device.createBindGroup({
-      layout: packPipelineInfo.bindGroupLayout,
-      entries: [
-        { binding: 1, resource: { buffer: packSourceStateBuffer } },
-        { binding: 4, resource: { buffer: packSourceThermoBuffer } },
-        { binding: 11, resource: { buffer: paramsBuffer } },
-        { binding: 14, resource: { buffer: packedParticleRecordBuffer } },
-        { binding: 15, resource: { buffer: packSourceMechanicsBuffer } }
-      ]
-    })
-    : null;
   const reactionParticleBinBindGroup = reactionParticleBinPipelineInfo
     ? device.createBindGroup({
       layout: reactionParticleBinPipelineInfo.bindGroupLayout,
       entries: [
-        { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
-        { binding: 11, resource: { buffer: paramsBuffer } },
-        { binding: 16, resource: { buffer: reactionParticleBins.countsBuffer } },
-        { binding: 17, resource: { buffer: reactionParticleBins.indicesBuffer } },
-        { binding: 18, resource: { buffer: reactionParticleBins.metadataBuffer } },
-        { binding: 19, resource: { buffer: reactionParticleBins.paramsBuffer } }
+        { binding: 1, resource: { buffer: packSourceStateBuffer } },
+        { binding: 11, resource: bufferBindingResource(paramsResource) },
+        { binding: 16, resource: bufferBindingResource(reactionParticleBins.countsResource) },
+        { binding: 17, resource: bufferBindingResource(reactionParticleBins.indicesResource) },
+        { binding: 18, resource: bufferBindingResource(reactionParticleBins.metadataResource) },
+        { binding: 19, resource: bufferBindingResource(reactionParticleBins.paramsResource) }
       ]
     })
     : null;
-  const proposeBindGroup = device.createBindGroup(proposeBindEntries(proposeBindGroupLayout));
-  const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
-  const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
+  const proposeBindGroupDescriptor = proposeBindEntries(proposeBindGroupLayout);
+  const proposeBindGroupCache = resolvedReactionCoreWorkspace.bindGroupForSlot(
+    'propose',
+    writtenReactionParamsSlot.slotIndex,
+    bindingTupleSignature(
+      proposeBindGroupDescriptor.layout,
+      proposeBindGroupDescriptor.entries
+    ),
+    () => device.createBindGroup(proposeBindGroupDescriptor)
+  );
+  const proposeBindGroup = proposeBindGroupCache.bindGroup;
   const ownsTimestampProfiler = timestampProfiler == null;
   const resolvedTimestampProfiler = timestampProfiler || createWebGpuTimestampProfiler(device, {
     requested: Boolean(measureGpuTimestamps),
     label: 'ulg-sph-reaction-step',
-    maxSpans: 1
+    maxSpans: productEventAdmissionRequired ? 32 : 2
   });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass(
-    profiledComputePassDescriptor(resolvedTimestampProfiler, 'reactionStep', timestampMetadata)
-  );
-  if (packPipelineInfo && packBindGroup) {
-    pass.setPipeline(packPipelineInfo.pipeline);
-    pass.setBindGroup(0, packBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  const encoder = commandEncoder || device.createCommandEncoder();
+  if (reactionParticleBins.gpuInitializationClearBuffers.length > 0) {
+    if (typeof encoder.clearBuffer !== 'function') {
+      throw new TypeError('reaction particle-bin initialization requires commandEncoder.clearBuffer');
+    }
+    for (const buffer of reactionParticleBins.gpuInitializationClearBuffers) {
+      encoder.clearBuffer(buffer);
+    }
   }
+  let pass = encoder.beginComputePass(
+    profiledComputePassDescriptor(resolvedTimestampProfiler, 'reactionStepPropose', timestampMetadata)
+  );
   if (reactionParticleBinPipelineInfo && reactionParticleBinBindGroup) {
     pass.setPipeline(reactionParticleBinPipelineInfo.pipeline);
     pass.setBindGroup(0, reactionParticleBinBindGroup);
@@ -2736,13 +3199,244 @@ export async function runSphReactionStepWebGpu({
   pass.setPipeline(proposePipeline);
   pass.setBindGroup(0, proposeBindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  pass.end();
+  const reactionProductEventAdmissionStage = productEventAdmissionRequired
+    ? createSphReactionProductEventAdmissionWebGpuEncoderStage({
+        device,
+        commandEncoder: encoder,
+        sphParticleState,
+        reactionTable,
+        reactionRecordBuffer,
+        proposalBuffer,
+        productEventPlacementWorkspace,
+        productEventCapacityRows: residentProductEventCapacityRows,
+        paramsSlotIndex: writtenReactionParamsSlot.slotIndex,
+        dtSeconds,
+        timestampProfiler: resolvedTimestampProfiler,
+        timestampMetadata,
+        label: 'ulg-sph-reaction-product-event-admission'
+      })
+    : null;
+  const localDisabledProductEventPrefixMetadataBuffer = reactionProductEventAdmissionStage
+    ? null
+    : createStorageBuffer(
+        device,
+        'ulg-sph-reaction-product-event-admission-disabled',
+        SPH_REACTION_PRODUCT_EVENT_PREFIX_METADATA_BYTES
+      );
+  const reactionProductEventPrefixMetadataBuffer =
+    reactionProductEventAdmissionStage?.prefixMetadataBuffer
+    || localDisabledProductEventPrefixMetadataBuffer;
+  const localDisabledReactionOutcomeBuffer = reactionProductEventAdmissionStage
+    ? null
+    : createStorageBuffer(
+        device,
+        'ulg-sph-reaction-admitted-outcome-disabled',
+        8 * Uint32Array.BYTES_PER_ELEMENT
+      );
+  const reactionOutcomeBuffer = reactionProductEventAdmissionStage?.reactionOutcomeBuffer
+    || localDisabledReactionOutcomeBuffer;
+  const resolveBindGroupDescriptor = resolveBindEntries(
+    resolveBindGroupLayout,
+    reactionProductEventPrefixMetadataBuffer,
+    reactionOutcomeBuffer
+  );
+  const resolveBindGroupCache = resolvedReactionCoreWorkspace.bindGroupForSlot(
+    'resolve',
+    writtenReactionParamsSlot.slotIndex,
+    bindingTupleSignature(
+      resolveBindGroupDescriptor.layout,
+      resolveBindGroupDescriptor.entries
+    ),
+    () => device.createBindGroup(resolveBindGroupDescriptor)
+  );
+  const resolveBindGroup = resolveBindGroupCache.bindGroup;
+  pass = encoder.beginComputePass(
+    profiledComputePassDescriptor(resolvedTimestampProfiler, 'reactionStepResolve', timestampMetadata)
+  );
   pass.setPipeline(resolvePipeline);
   pass.setBindGroup(0, resolveBindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
-  pass.setPipeline(unpackPipeline);
-  pass.setBindGroup(0, unpackBindGroup);
-  pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
   pass.end();
+  if (callerOwnsEncoder) {
+    const productEventStage = emitResidentProductEvents && reactionTable.productTermCount > 0
+      ? createSphReactionProductEventWebGpuEncoderStage({
+          device,
+          commandEncoder: encoder,
+          sphParticleState,
+          reactionTable,
+          sourceStateBuffer: packSourceStateBuffer,
+          sourceThermoBuffer: packSourceThermoBuffer,
+          nextStateBuffer: outStateBuffer,
+          nextThermoBuffer: outThermoBuffer,
+          nextMechanicsBuffer: outMechanicsBuffer,
+          reactionRecordBuffer,
+          proposalBuffer,
+          productEventAdmissionStage: reactionProductEventAdmissionStage,
+          paramsSlotIndex: writtenReactionParamsSlot.slotIndex,
+          dtSeconds,
+          placeProductEvents: placeReactionProductEvents,
+          productEventPlacementWorkspace,
+          residentNeighborhoodAdmission,
+          timestampProfiler: resolvedTimestampProfiler,
+          timestampMetadata
+        })
+      : null;
+    let scratchReleased = false;
+    let ownedOutputsReleased = false;
+    const scratchBuffers = [
+      localReactionRecordBuffer,
+      localSchroederLawQueueBuffer,
+      localSchroederLawNeighborCandidateBuffer,
+      localSchroederLawNeighborSourceSpanBuffer,
+      ...reactionParticleBins.cleanupBuffers,
+      localSourceStateBuffer,
+      localSourceThermoBuffer,
+      localSourceMechanicsBuffer,
+      localDisabledProductEventPrefixMetadataBuffer,
+      localDisabledReactionOutcomeBuffer
+    ].filter(Boolean);
+    return {
+      schema: 'peercompute.ulg.sph-reaction-encoder-stage.v0',
+      status: residentNeighborhoodAdmission
+        ? 'reaction-resident-neighborhood-encoded'
+        : 'reaction-compatibility-neighborhood-encoded',
+      backend: 'webgpu',
+      commandEncoderOwnership: 'caller',
+      submissionOwnership: 'caller',
+      queueSubmitPerformed: false,
+      mapPerformed: false,
+      readbackPerformed: false,
+      readbackMode: NO_FULL_READBACK_MODE,
+      normalHotLoopReadbackFree: true,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      sourceParticlePackInitializationMode,
+      outputBufferInitializationMode,
+      particleBinInitializationMode: reactionParticleBins.initializationMode,
+      hostZeroInitializationByteLength,
+      shaderInitializedLiveByteLength,
+      commandEncoderClearByteLength,
+      reactionStaticTableUpload: resolvedReactionStaticTableUpload,
+      reactionStaticTableUploadSchema:
+        resolvedReactionStaticTableUpload
+          ? ULG_SPH_REACTION_STATIC_TABLE_UPLOAD_GPU_SCHEMA
+          : null,
+      reactionStaticTableUploadStatus:
+        resolvedReactionStaticTableUpload?.status ?? null,
+      reactionStaticTableUploadBorrowed: Boolean(resolvedReactionStaticTableUpload),
+      reactionStaticTableUploadMode: resolvedReactionStaticTableUpload
+        ? 'caller-borrowed-static-upload'
+        : 'temporary-reaction-record-upload',
+      reactionTableContentGeneration: resolvedReactionStaticTableUpload
+        ? reactionTableContentGeneration
+        : null,
+      thermalResponseUploadProvenance: resolvedReactionStaticTableUpload
+        ? thermalResponseUploadProvenance
+        : null,
+      reactionRecordBuffer,
+      reactionRecordBufferOwnership: resolvedReactionStaticTableUpload
+        ? 'caller-borrowed'
+        : 'stage-owned',
+      reactionRecordBufferByteLength,
+      reactionRecordBufferAllocationAvoidedByteLength,
+      reactionRecordBufferWriteAvoidedByteLength,
+      reactionStaticBindingResourceCount:
+        resolvedReactionStaticTableUpload?.staticBindingResourceCount ?? 0,
+      reactionStaticBindingResourcesBorrowed:
+        resolvedReactionStaticTableUpload?.staticBindingResourceCount ?? 0,
+      residentNeighborhoodAdmission,
+      neighborhoodMode: residentNeighborhoodAdmission
+        ? 'resident-neighborhood-packed-csr'
+        : (reactionParticleBins.enabled
+          ? 'fixed-capacity-particle-bin-compatibility'
+          : 'all-particle-diagnostic-fallback'),
+      stateBuffer: outStateBuffer,
+      thermoBuffer: outThermoBuffer,
+      mechanicsBuffer: outMechanicsBuffer,
+      outputBufferOwnership,
+      borrowedOutputBufferCount: Object.values(outputBufferOwnership)
+        .filter((ownership) => ownership === 'caller-borrowed').length,
+      outputBufferAllocationAvoidedByteLength:
+        (outputStateBuffer ? outStateByteLength : 0)
+        + (outputThermoBuffer ? outThermoByteLength : 0)
+        + (outputMechanicsBuffer ? outMechanicsByteLength : 0),
+      reactionCoreWorkspace: resolvedReactionCoreWorkspace,
+      reactionCoreWorkspaceSchema: ULG_SPH_REACTION_CORE_WORKSPACE_GPU_SCHEMA,
+      reactionCoreWorkspaceStatus: resolvedReactionCoreWorkspace.status,
+      reactionCoreWorkspaceBorrowed: !reactionCoreWorkspaceOwned,
+      reactionCoreWorkspaceOwned,
+      reactionCoreWorkspaceParticleCapacity: resolvedReactionCoreWorkspace.particleCapacity,
+      reactionCoreWorkspaceSequenceStepCapacity:
+        resolvedReactionCoreWorkspace.sequenceStepCapacity,
+      reactionCoreWorkspaceBufferCount:
+        resolvedReactionCoreWorkspace.allocationEntries.length,
+      reactionCoreWorkspaceByteLength: resolvedReactionCoreWorkspace.totalByteLength,
+      reactionCoreWorkspaceAllocationAvoidedByteLength: reactionCoreWorkspaceOwned
+        ? 0
+        : proposalByteLength,
+      reactionParamsSlotIndex: writtenReactionParamsSlot.slotIndex,
+      reactionParamsSlotStrideBytes: resolvedReactionCoreWorkspace.paramsSlotStrideBytes,
+      reactionParamsByteOffsets: Object.freeze(Object.fromEntries(
+        Object.entries(writtenReactionParamsSlot.resources).map(([kind, resource]) => (
+          [kind, resource.byteOffset]
+        ))
+      )),
+      reactionProposeBindGroupCacheHit: proposeBindGroupCache.cacheHit,
+      reactionResolveBindGroupCacheHit: resolveBindGroupCache.cacheHit,
+      reactionSharedDisabledStorageBindingsUsed:
+        reactionParticleBins.sharedDisabledBindings === true,
+      proposalBuffer,
+      productEventAdmissionRequired,
+      productEventAdmissionStatus:
+        reactionProductEventAdmissionStage?.status ?? 'reaction-product-event-admission-not-required',
+      productEventCapacityRows: residentProductEventCapacityRows,
+      productEventPrefixMetadataBuffer: reactionProductEventPrefixMetadataBuffer,
+      reactionOutcomeBuffer,
+      reactionOutcomeBufferByteLength:
+        reactionProductEventAdmissionStage?.reactionOutcomeBufferByteLength ?? 0,
+      reactionOutcomeAuthority: productEventAdmissionRequired
+        ? 'reaction-resolve-canonical-pair-owner-with-generation-ready-stamp'
+        : 'disabled',
+      productEventStage,
+      residentProductMass: productEventStage?.residentProductMass ?? null,
+      residentProductMassStatus: productEventStage?.residentProductMass?.status ?? null,
+      residentProductMassBufferRetained:
+        productEventStage?.residentProductMass?.productEventBufferRetained === true,
+      residentProductMassProductEventRowCount:
+        productEventStage?.residentProductMass?.productEventRowCount ?? 0,
+      productEventEmissionStatus:
+        productEventStage?.status ?? 'reaction-product-event-emission-not-run',
+      productEventEmissionSameEncoder: Boolean(productEventStage),
+      productCarrierPlacementEncoded: productEventStage?.carrierPlacementEncoded === true,
+      productEventParamsSlotIndex: productEventStage?.productEventParamsSlotIndex ?? null,
+      productEventParamsByteOffset: productEventStage?.productEventParamsByteOffset ?? null,
+      productEventParamsByteStride: productEventStage?.productEventParamsByteStride ?? 0,
+      productEventBindGroupCacheHits: productEventStage?.productEventBindGroupCacheHits ?? null,
+      productEventBindGroupCacheEvidence:
+        productEventStage?.productEventBindGroupCacheEvidence ?? null,
+      stateBufferByteLength: outStateByteLength,
+      thermoBufferByteLength: outThermoByteLength,
+      mechanicsBufferByteLength: outMechanicsByteLength,
+      cleanupSubmittedWork({ destroyOutputs = true } = {}) {
+        if (!scratchReleased) {
+          scratchReleased = true;
+          for (const buffer of scratchBuffers) buffer.destroy?.();
+          if (reactionCoreWorkspaceOwned) resolvedReactionCoreWorkspace.destroy();
+          if (localResponseGraphUpload) {
+            destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
+          }
+        }
+        productEventStage?.cleanupSubmittedWork?.({
+          destroyProductEvents: destroyOutputs
+        });
+        if (destroyOutputs && !ownedOutputsReleased) {
+          ownedOutputsReleased = true;
+          for (const buffer of ownedOutputBuffers) buffer.destroy?.();
+        }
+      }
+    };
+  }
   if (reactionParticleBins.metadataReadbackBuffer) {
     encoder.copyBufferToBuffer(reactionParticleBins.metadataBuffer, 0, reactionParticleBins.metadataReadbackBuffer, 0, 16);
   }
@@ -2767,12 +3461,21 @@ export async function runSphReactionStepWebGpu({
     : null;
   const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
     ...resolvedTimestampProfiler.allocationEntries(),
-    { role: 'reaction-packed-source', buffer: packedParticleRecordBuffer, owned: true },
-    { role: 'reaction-packed-output', buffer: outPackedParticleRecordBuffer, owned: true },
-    { role: 'reaction-proposals', buffer: proposalBuffer, owned: true },
-    { role: 'reaction-state-output', buffer: outStateBuffer, owned: true },
-    { role: 'reaction-thermo-output', buffer: outThermoBuffer, owned: true },
-    { role: 'reaction-mechanics-output', buffer: outMechanicsBuffer, owned: true }
+    {
+      role: 'reaction-proposals',
+      buffer: proposalBuffer,
+      owned: reactionCoreWorkspaceOwned,
+      lifetime: reactionCoreWorkspaceOwned ? 'transient-submission' : 'borrowed'
+    },
+    {
+      role: 'reaction-static-records-and-product-phases',
+      buffer: reactionRecordBuffer,
+      owned: Boolean(localReactionRecordBuffer),
+      lifetime: localReactionRecordBuffer ? 'transient-submission' : 'borrowed-static-upload'
+    },
+    { role: 'reaction-state-output', buffer: outStateBuffer, owned: !outputStateBuffer },
+    { role: 'reaction-thermo-output', buffer: outThermoBuffer, owned: !outputThermoBuffer },
+    { role: 'reaction-mechanics-output', buffer: outMechanicsBuffer, owned: !outputMechanicsBuffer }
   ], { scope: 'sph-reaction-step' });
 
   let reactionParticleBinOverflowStatus = reactionParticleBins.overflowMetadataStatus ?? null;
@@ -2808,10 +3511,10 @@ export async function runSphReactionStepWebGpu({
         proposalBuffer,
         readProductEvents: false,
         retainProductEventBuffer: retainOutputParticleBuffers,
-        readCompactSummary: readCompactReactionSummary,
-        readGasSpeciesSummary: readReactionGasSpeciesSummary,
-        readProductInventory: readReactionProductInventory,
-        readAtomResidual: readReactionAtomResidual,
+        readCompactSummary: resolvedReadCompactReactionSummary,
+        readGasSpeciesSummary: resolvedReadReactionGasSpeciesSummary,
+        readProductInventory: resolvedReadReactionProductInventory,
+        readAtomResidual: resolvedReadReactionAtomResidual,
         dtSeconds
       });
     } catch (error) {
@@ -2845,7 +3548,14 @@ export async function runSphReactionStepWebGpu({
       readBuffer(device, outStateBuffer, sphParticleState.state.byteLength, 'ulg-sph-reaction-state-readback'),
       readBuffer(device, outThermoBuffer, sphParticleState.thermo.byteLength, 'ulg-sph-reaction-thermo-readback'),
       readBuffer(device, outMechanicsBuffer, mlsMpmParticleState.mechanics.byteLength, 'ulg-sph-reaction-mechanics-readback'),
-      readBuffer(device, proposalBuffer, sphParticleState.particleCount * 4 * Float32Array.BYTES_PER_ELEMENT, 'ulg-sph-reaction-proposal-readback')
+      readBuffer(
+        device,
+        proposalBuffer,
+        sphParticleState.particleCount
+          * SPH_REACTION_PROPOSAL_FLOATS
+          * Float32Array.BYTES_PER_ELEMENT,
+        'ulg-sph-reaction-proposal-readback'
+      )
     ]);
     state = new Float32Array(stateBytes);
     thermo = new Float32Array(thermoBytes);
@@ -2857,22 +3567,18 @@ export async function runSphReactionStepWebGpu({
 
   const nonRetainedOutputBuffers = retainOutputParticleBuffers
     ? []
-    : [outStateBuffer, outThermoBuffer, outMechanicsBuffer];
+    : ownedOutputBuffers;
   const scratchBuffers = [
-    packedParticleRecordBuffer,
-    outPackedParticleRecordBuffer,
-    reactionRecordBuffer,
-    proposalBuffer,
-    paramsBuffer,
+    localReactionRecordBuffer,
     localSchroederLawQueueBuffer,
-    schroederReactionLawQueueParamsBuffer,
     localSchroederLawNeighborCandidateBuffer,
     localSchroederLawNeighborSourceSpanBuffer,
-    schroederReactionLawNeighborCandidateParamsBuffer,
     ...reactionParticleBins.cleanupBuffers,
     localSourceStateBuffer,
     localSourceThermoBuffer,
     localSourceMechanicsBuffer,
+    localDisabledProductEventPrefixMetadataBuffer,
+    localDisabledReactionOutcomeBuffer,
     ...(noFullReadback ? nonRetainedOutputBuffers : [])
   ];
   let scratchBuffersDestroyed = false;
@@ -2880,6 +3586,7 @@ export async function runSphReactionStepWebGpu({
     if (scratchBuffersDestroyed) return;
     scratchBuffersDestroyed = true;
     for (const buffer of scratchBuffers) buffer?.destroy?.();
+    if (reactionCoreWorkspaceOwned) resolvedReactionCoreWorkspace.destroy();
     if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
   };
   if (noFullReadback) {
@@ -2901,24 +3608,40 @@ export async function runSphReactionStepWebGpu({
     scratchBufferCleanupStatus = 'destroyed-after-readback';
   }
   if (!retainOutputParticleBuffers && !noFullReadback) {
-    outStateBuffer.destroy?.();
-    outThermoBuffer.destroy?.();
-    outMechanicsBuffer.destroy?.();
+    for (const buffer of ownedOutputBuffers) buffer.destroy?.();
   }
 
-	  const residentProductMass = createResidentProductMassHandle(reactionSummary);
-	  let outputParticleBuffersDestroyed = false;
-	  const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
-	    ? () => {
-	      if (outputParticleBuffersDestroyed) return;
-	      outputParticleBuffersDestroyed = true;
-	      outStateBuffer.destroy?.();
-	      outThermoBuffer.destroy?.();
-	      outMechanicsBuffer.destroy?.();
-	      residentProductMass?.destroyResidentProductMassBuffers?.();
-	    }
-	    : null;
-	  return outputEnvelope({
+  const residentProductMass = createResidentProductMassHandle(reactionSummary);
+  const reactionSummaryMapRequested = Boolean(
+    noFullReadback
+    && reactionTable.productTermCount > 0
+    && (
+      resolvedReadCompactReactionSummary
+      || (resolvedReadReactionGasSpeciesSummary && (reactionTable.gasProductCount ?? 0) > 0)
+      || (resolvedReadReactionProductInventory && (reactionTable.productTermCount ?? 0) > 0)
+      || (resolvedReadReactionAtomResidual && (reactionTable.atomTermCount ?? 0) > 0)
+    )
+  );
+  const mappedReadbackKinds = [
+    !noFullReadback ? 'full-particle-output' : null,
+    reactionParticleBins.metadataReadbackBuffer ? 'reaction-particle-bin-metadata' : null,
+    ...(reactionSummary?.mappedReadbackKinds || []),
+    reactionSummaryMapRequested && !(reactionSummary?.mappedReadbackKinds?.length > 0)
+      ? 'reaction-summary-requested'
+      : null,
+    (gpuTimestampProfile?.mappedByteLength ?? 0) > 0 ? 'gpu-timestamp-profile' : null
+  ].filter(Boolean);
+  const mapPerformed = mappedReadbackKinds.length > 0;
+  let outputParticleBuffersDestroyed = false;
+  const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
+    ? () => {
+      if (outputParticleBuffersDestroyed) return;
+      outputParticleBuffersDestroyed = true;
+      for (const buffer of ownedOutputBuffers) buffer.destroy?.();
+      residentProductMass?.destroyResidentProductMassBuffers?.();
+    }
+    : null;
+  return outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
     mlsMpmParticleState,
@@ -2939,11 +3662,40 @@ export async function runSphReactionStepWebGpu({
     stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
     thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
     mechanicsBuffer: retainOutputParticleBuffers ? outMechanicsBuffer : null,
-    stateBufferByteLength: sphParticleState.state.byteLength,
-    thermoBufferByteLength: sphParticleState.thermo.byteLength,
-    mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
+    outputBufferOwnership,
+    outputBufferAllocationAvoidedByteLength:
+      (outputStateBuffer ? outStateByteLength : 0)
+      + (outputThermoBuffer ? outThermoByteLength : 0)
+      + (outputMechanicsBuffer ? outMechanicsByteLength : 0),
+    reactionCoreWorkspace: resolvedReactionCoreWorkspace,
+    reactionCoreWorkspaceBorrowed: !reactionCoreWorkspaceOwned,
+    reactionCoreWorkspaceOwned,
+    reactionCoreWorkspaceAllocationAvoidedByteLength: reactionCoreWorkspaceOwned
+      ? 0
+      : proposalByteLength,
+    reactionParamsSlotIndex: writtenReactionParamsSlot.slotIndex,
+    reactionParamsSlotStrideBytes: resolvedReactionCoreWorkspace.paramsSlotStrideBytes,
+    reactionParamsByteOffsets: Object.freeze(Object.fromEntries(
+      Object.entries(writtenReactionParamsSlot.resources).map(([kind, resource]) => (
+        [kind, resource.byteOffset]
+      ))
+    )),
+    reactionProposeBindGroupCacheHit: proposeBindGroupCache.cacheHit,
+    reactionResolveBindGroupCacheHit: resolveBindGroupCache.cacheHit,
+    reactionSharedDisabledStorageBindingsUsed:
+      reactionParticleBins.sharedDisabledBindings === true,
+    reactionStaticTableUpload: resolvedReactionStaticTableUpload,
+    reactionTableContentGeneration: resolvedReactionStaticTableUpload
+      ? reactionTableContentGeneration
+      : null,
+    thermalResponseUploadProvenance: resolvedReactionStaticTableUpload
+      ? thermalResponseUploadProvenance
+      : null,
+    stateBufferByteLength: outStateByteLength,
+    thermoBufferByteLength: outThermoByteLength,
+    mechanicsBufferByteLength: outMechanicsByteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
-	    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
+    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
     queueCompletionStatus,
     queueCompletionMethod,
     queueSubmitMs,
@@ -2956,9 +3708,19 @@ export async function runSphReactionStepWebGpu({
       : 'shared-profiler-deferred',
     gpuTimestampMappedByteLength: gpuTimestampProfile?.mappedByteLength ?? 0,
     gpuAllocationEvidence,
+    sourceParticlePackInitializationMode,
+    outputBufferInitializationMode,
+    particleBinInitializationMode: reactionParticleBins.initializationMode,
+    hostZeroInitializationByteLength,
+    shaderInitializedLiveByteLength,
+    commandEncoderClearByteLength,
+    mapPerformed,
+    readbackPerformed: mapPerformed,
+    normalHotLoopReadbackFree: noFullReadback && !mapPerformed,
+    mappedReadbackKinds,
     scratchBufferCleanupStatus,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
-    sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
+    sourceParticlePackMode: sourceParticlePackInitializationMode,
     reactionProposalNeighborMode: [
       schroederReactionLawQueue.enabled ? 'schroeder-law-queue-gated' : null,
       schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
@@ -2977,6 +3739,21 @@ export async function runSphReactionStepWebGpu({
     schroederReactionLawNeighborCandidates,
     reactionParticleBinOverflowStatus,
     reactionParticleBinOverflowCount
+  });
+}
+
+export function createSphReactionStepWebGpuEncoderStage(args = {}) {
+  if (!args.commandEncoder) {
+    throw new TypeError('reaction encoder stage requires a caller-owned commandEncoder');
+  }
+  return runSphReactionStepWebGpu({
+    ...args,
+    readbackMode: NO_FULL_READBACK_MODE,
+    reactionParticleBinMetadataReadback: false,
+    readCompactReactionSummary: false,
+    readReactionGasSpeciesSummary: false,
+    readReactionProductInventory: false,
+    readReactionAtomResidual: false
   });
 }
 

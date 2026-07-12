@@ -52,6 +52,7 @@ import {
   ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA,
   resolvePeerComputeRenderOwnershipPolicy
 } from './peercomputeRenderOwnershipPolicy.js';
+import { createCoherentSolidAuthorityController } from './solid/coherentSolidAuthority.js';
 
 export const ULG_PEERCOMPUTE_RESIDENT_AUTHORITY_HOST_SCHEMA = 'peercompute.ulg.browser-resident-authority-host.v0';
 export const ULG_PEERCOMPUTE_NODEKERNEL_FACADE_SCHEMA = 'peercompute.ulg.nodekernel-facade.v0';
@@ -7567,7 +7568,7 @@ export async function createPeerComputeResidentAuthorityHost({
   enableWorkers = true,
   enableWebGPU = true,
   gpuDeviceId = 'gpu-device:ulg-browser-resident-host',
-  acceptedScopes = ['ulg-sph-resident-pass-dag'],
+  acceptedScopes = ['ulg-sph-resident-pass-dag', 'ulg-coherent-solid-frame'],
   requireFenceSatisfied = true,
   renderOwnershipPolicy = null,
   initialState = null,
@@ -7853,6 +7854,11 @@ export async function createPeerComputeResidentAuthorityHost({
     requireFenceSatisfied,
     onAdmission
   });
+  const coherentSolidAuthority = createCoherentSolidAuthorityController({
+    computeManager,
+    stateManager,
+    nodeKernel
+  });
   const hostId = `ulg-peercompute-resident-host:${shortId()}`;
   if (nodeKernel?.schema === ULG_PEERCOMPUTE_NODEKERNEL_FACADE_SCHEMA) {
     nodeKernel.hostId = hostId;
@@ -7901,6 +7907,7 @@ export async function createPeerComputeResidentAuthorityHost({
     gpuHub,
     nodeKernel,
     bridge,
+    coherentSolidAuthority,
     schroederAdoptedParticleStorageLocalRetainedBufferResolverRegistryStatus:
       'host-local-same-device-only',
     createdAtMs: nowMs(),
@@ -7961,6 +7968,33 @@ export async function createPeerComputeResidentAuthorityHost({
     },
     submitGasCellEosProducerStageTask(request = {}) {
       return computeManager.submitUlgGasCellEosProducerStageTask(request);
+    },
+    submitCoherentSolidFrameTask(request = {}) {
+      return coherentSolidAuthority.submitFrameTask(request);
+    },
+    admitInitialCoherentSolidState(request = {}) {
+      return coherentSolidAuthority.admitInitialState(request);
+    },
+    admitCoherentSolidFrameTaskResult(result, options = {}) {
+      return coherentSolidAuthority.admitTaskResult(result, options);
+    },
+    validateCoherentSolidDrawPublication(publication) {
+      return coherentSolidAuthority.validateDrawPublication(publication);
+    },
+    acquireCoherentSolidDrawPublicationPresentationLease(publication, options = {}) {
+      return coherentSolidAuthority.acquireDrawPublicationPresentationLease(publication, options);
+    },
+    validateCoherentSolidDrawPublicationPresentationLease(publication, lease) {
+      return coherentSolidAuthority.validateDrawPublicationPresentationLease(publication, lease);
+    },
+    getCoherentSolidDrawPublicationPresentationLeaseState(publication) {
+      return coherentSolidAuthority.getDrawPublicationPresentationLeaseState(publication);
+    },
+    getCoherentSolidDrawPublication(stateKey) {
+      return coherentSolidAuthority.getPublication(stateKey);
+    },
+    retireCoherentSolidDrawPublication(publication) {
+      return coherentSolidAuthority.retirePublication(publication);
     },
     runMechanicsStageTaskChain(request = {}) {
       return computeManager.runUlgMechanicsStageTaskChain(request);
@@ -8673,6 +8707,9 @@ export async function createPeerComputeResidentAuthorityHost({
           nodeKernel?._unregisterBrowserKernelHandle?.();
         }
       }
+      const coherentSolidDestroy = coherentSolidAuthority.destroy({
+        reason: 'peercompute-browser-resident-host-destroy'
+      });
       await stateManager.destroy?.();
       host.status = 'destroyed';
       host.nodeKernelAuthority = {
@@ -8685,7 +8722,8 @@ export async function createPeerComputeResidentAuthorityHost({
       return {
         schema: ULG_PEERCOMPUTE_RESIDENT_AUTHORITY_HOST_SCHEMA,
         status: 'destroyed',
-        hostId
+        hostId,
+        coherentSolidDestroy
       };
     }
   };

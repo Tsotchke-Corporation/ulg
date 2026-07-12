@@ -83,6 +83,8 @@ function diatomicGasProperties(key) {
   });
   const cv = (5 / 2) * (8.314462618 / molarMassKgPerMol);
   return withPropertyProvenance({
+    formula: key === 'h2' ? 'H2' : 'O2',
+    atomCounts: { ...d.atomCounts },
     molarMassKgPerMol,
     idealGas: true,
     heatCapacityModel: { gas: 'equipartition' },
@@ -91,7 +93,7 @@ function diatomicGasProperties(key) {
   }, {
     entries: [
       propertyProvenanceEntry({
-        paths: ['molarMassKgPerMol'],
+        paths: ['formula', 'atomCounts', 'molarMassKgPerMol'],
         status: DS.EXACT_CONSTANT,
         source: 'periodic-table-atomic-masses',
         method: 'formula molar mass from atomic masses',
@@ -114,6 +116,8 @@ function materialProperties(materialKey) {
   const m = REFERENCE_MATERIALS[materialKey];
   if (materialKey === 'h2o') {
     return withPropertyProvenance({
+      formula: 'H2O',
+      atomCounts: { 1: 2, 8: 1 },
       molarMassKgPerMol: formulaMolarMassKgPerMol({ 1: 2, 8: 1 }),
       // Elastic moduli (Pa): bulk modulus K sets the sound speed c=√(K/ρ) and the EOS stiffness;
       // shear modulus μ sets a solid's rigidity (a liquid has μ=0 → no shear → flows). Measured
@@ -131,7 +135,7 @@ function materialProperties(materialKey) {
     }, {
       entries: [
         propertyProvenanceEntry({
-          paths: ['molarMassKgPerMol'],
+          paths: ['formula', 'atomCounts', 'molarMassKgPerMol'],
           status: DS.EXACT_CONSTANT,
           source: 'periodic-table-atomic-masses',
           method: 'H2O formula molar mass from atomic masses',

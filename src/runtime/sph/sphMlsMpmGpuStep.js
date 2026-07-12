@@ -31,12 +31,12 @@ import {
 import {
   mlsMpmG2pReconstructWgsl,
   mlsMpmGridUpdateWgsl,
-  mlsMpmP2gGridProjectionWgsl,
-  sphReactionProductEventCompactWgsl
+  mlsMpmP2gGridProjectionWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
+  WEBGPU_TIMESTAMP_PROFILE_MAX_SPANS,
   createWebGpuTimestampProfiler,
   summarizeWebGpuBufferAllocations
 } from '../webgpuTimestampProfiler.js';
@@ -51,20 +51,32 @@ import {
   createMlsMpmGridSpec,
   MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   MLS_MPM_GPU_GRID_NODE_FLOATS,
+  mlsMpmP2gSchroederSparseGridWgsl,
   resolveMlsMpmP2gBackendPolicy,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+  withSchroederParticleCountResidencyGuard,
   runMlsMpmP2gGridProjectionWithOptionalWebGpu
 } from './sphGridGpuKernel.js';
 import {
+  createMlsMpmGridUpdateWebGpuEncoderStage,
   MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
+  pressureInterfaceForceSolverAllowsGridApplication,
+  pressureInterfaceGridForceAdmissionAllowsApplication,
   SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
   runMlsMpmGridUpdateWithOptionalWebGpu
 } from './sphGridUpdateGpuKernel.js';
 import {
+  createSphPressureInterfaceForceRowsWebGpuEncoderStage,
+  SPH_PRESSURE_INTERFACE_SCATTER_PARAMS_BYTE_LENGTH,
   SPH_GAS_PRESSURE_CELL_FLOATS,
   packGasPressureCellRows,
   runSphPressureInterfaceForceRowsWebGpu
 } from './sphPressureInterfaceGpuKernel.js';
+import {
+  buildSphMaterialInterfaceCompactCandidateFieldWebGpu,
+  compactMaterialInterfaceCandidateCapacity
+} from './sphRenderGpuKernel.js';
+import { createSphPressureInterfaceWorkspaceGpu } from './sphPressureInterfaceWorkspaceGpu.js';
 import {
   MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
   MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
@@ -72,8 +84,34 @@ import {
   ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
   encodeMlsMpmParticleSeparationPasses,
   maxSeparationRestDistanceM,
+  mlsMpmG2pSchroederSparseGridWgsl,
+  withSchroederG2pParticleCountResidencyGuard,
   runMlsMpmG2pWithOptionalWebGpu
 } from './sphG2pGpuKernel.js';
+import {
+  createSchroederSparseGridViewGpu,
+  createSchroederSparseGridViewPlan
+} from './schroederSparseHierarchyGpu.js';
+import {
+  attachSchroederParticleCountResidencyToUpload,
+  createSchroederParticleCountResidencyDescriptor,
+  dispatchSchroederParticleWorkgroups,
+  resolveSchroederParticleCountResidency,
+  schroederParticleCountResidencyPublicFields,
+  schroederParticleIterationCapacity
+} from './schroederParticleCountResidencyGpu.js';
+import {
+  validateSchroederParticleStorageResidencyAdoptionToken
+} from './schroederParticleStorageAdoptionGpu.js';
+import {
+  encodeSchroederParticleStorageContinuationSelectionWebGpu
+} from './schroederParticleStorageContinuationGpu.js';
+import {
+  createSphSpatialGasCellEosGpuLaneCapacityPlan,
+  getOrCreateSphSpatialGasCellEosGpuLane,
+  runSphSpatialGasCellEosGpu,
+  ULG_SPH_SPATIAL_GAS_CELL_EOS_GPU_RESULT_SCHEMA
+} from './sphSpatialGasCellEosGpu.js';
 import {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
@@ -86,10 +124,21 @@ import {
   runSphThermalStepWithOptionalWebGpu,
   runSphThermalStepWebGpu
 } from './sphThermalGpuKernel.js';
+import { createSphThermalWorkspaceGpu } from './sphThermalWorkspaceGpu.js';
 import {
+  acquireSphResidentSequenceWorkspaceGpu,
+  isSphResidentSequenceWorkspaceBufferGpu
+} from './sphResidentSequenceWorkspaceGpu.js';
+import {
+  createSphReactionStepWebGpuEncoderStage,
   runSphReactionStepWebGpu,
   runSphReactionStepWithOptionalWebGpu
 } from './sphReactionGpuKernel.js';
+import { createSphReactionCoreWorkspaceGpu } from './sphReactionCoreWorkspaceGpu.js';
+import {
+  createSphReactionProductEventPlacementWorkspaceGpu,
+  sphReactionProductEventCapacityRows
+} from './sphReactionProductEventGpu.js';
 import {
   createMlsMpmMechanicsRefreshWebGpuEncoderStage,
   runMlsMpmMechanicsRefreshWithOptionalWebGpu
@@ -98,6 +147,28 @@ import {
   createResidentProductMassHandle,
   mergeResidentGasSpeciesLedgers
 } from './sphReactionGpuSummary.js';
+import {
+  acquireResidentNeighborhoodGpuLane,
+  residentNeighborhoodGenerationReuseAdmission,
+  residentNeighborhoodMutationEpochsForStep,
+  resolveResidentNeighborhoodGpuLaneCapacity,
+  ULG_RESIDENT_NEIGHBORHOOD_GPU_LANE_SCHEMA
+} from './residentNeighborhoodGpuLane.js';
+import {
+  normalizeResidentNeighborhoodDenseUniformChart,
+  planResidentNeighborhoodGpuBuilderStrategy
+} from './residentNeighborhoodGpuBuilder.js';
+import { resolveResidentNeighborhoodConsumer } from './residentNeighborhoodConsumer.js';
+import {
+  acquireSphMaterialInterfaceSourceFieldLocalGpuLane,
+  summarizeSphMaterialInterfaceSourceFieldLocalGpuLanePool
+} from './sphMaterialInterfaceSourceFieldLocalGpu.js';
+import {
+  appendResidentProductEventArenaGpu,
+  createResidentProductEventArenaCapacityDescriptor,
+  prepareResidentProductEventArenaGpuEncoderSequence,
+  ULG_SPH_RESIDENT_PRODUCT_EVENT_ARENA_SCHEMA
+} from './residentProductEventArenaGpu.js';
 import {
   residentProductMassMatchesDevice,
   tagResidentProductMassDevice,
@@ -148,10 +219,61 @@ export const SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS =
 export const SCHROEDER_FAR_FORCE_DELTA_FUSION_WORKGROUP_SIZE = 64;
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+
+export function fusedResidentSequenceTimestampSpanCapacity(stepCount = 1) {
+  const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  return Math.min(WEBGPU_TIMESTAMP_PROFILE_MAX_SPANS, 512 + count * 768);
+}
+
+export function resolveResidentNeighborhoodSkinPlan({
+  supportDistanceM,
+  gridSpacingM,
+  dtS,
+  stepCount,
+  cflFactor
+} = {}) {
+  const support = Math.max(0, finiteNumber(supportDistanceM, 0));
+  const dx = Math.max(0, finiteNumber(gridSpacingM, 0));
+  const dt = Math.abs(finiteNumber(dtS, 0));
+  const steps = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  const cfl = Math.max(0, Math.abs(finiteNumber(cflFactor, DEFAULT_CFL_FACTOR)));
+  const perStepStabilityDisplacementM = dt > 0 ? cfl * dx : 0;
+  const declaredBatchHorizonDisplacementM = perStepStabilityDisplacementM * steps;
+  const displacementBudgetM = Math.min(
+    declaredBatchHorizonDisplacementM,
+    0.25 * support
+  );
+  const skinDistanceM = 2 * displacementBudgetM;
+  return Object.freeze({
+    schema: 'peercompute.ulg.resident-neighborhood-skin-plan.v0',
+    status: skinDistanceM > 0
+      ? 'resident-neighborhood-skin-plan-ready'
+      : 'resident-neighborhood-skin-plan-disabled-zero-motion-bound',
+    skinDistanceM,
+    displacementBudgetM,
+    supportDistanceM: support,
+    gridSpacingM: dx,
+    dtS: dt,
+    stepCount: steps,
+    cflFactor: cfl,
+    perStepStabilityDisplacementM,
+    declaredBatchHorizonDisplacementM,
+    supportFractionBudget: 0.25,
+    derivation:
+      'two-times-minimum-of-cfl-batch-horizon-displacement-and-quarter-support-distance',
+    materialPairSpecific: false,
+    scenarioSpecific: false
+  });
+}
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP = 'every-step';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY = 'final-only';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_PLAN_ONLY = 'plan-only';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE = 'none';
+export const MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY =
+  'queue.onSubmittedWorkDone-before-admission';
+export const MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED =
+  'same-device-queue-order-before-admission';
+export const MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS = 2;
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP = 'every-step';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY = 'final-only';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE = 'none';
@@ -159,6 +281,8 @@ const P2G_ACCUMULATOR_COMPONENTS = 4;
 const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA = 'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
+const ULG_MLS_MPM_FUSED_RESIDENT_HOST_TIMING_SCHEMA =
+  'peercompute.ulg.mls-mpm-fused-resident-host-timing.v0';
 const ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA = 'peercompute.ulg.mls-mpm-resident-dispatch-topology.v0';
 const ULG_MLS_MPM_RESIDENT_GPU_LANE_ADAPTER_SCHEMA = 'peercompute.ulg.mls-mpm-resident-gpu-lane-adapter.v0';
 const ULG_MLS_MPM_FUSED_ACTIVE_GRID_DISPATCH_SCHEMA = 'peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0';
@@ -292,6 +416,10 @@ const ULG_LAW_GRAPH_NODE_TASK_REF_SCHEMA = 'peercompute.ulg.law-graph-node-task-
 const PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA = 'peercompute.compute.gpu-fence-report.v0';
 const PEERCOMPUTE_GPU_FENCE_REQUIREMENT_SCHEMA = 'peercompute.compute.gpu-fence-requirement.v0';
 const PEERCOMPUTE_GPU_RESIDENT_LANE_TASK_SCHEMA = 'peercompute.compute.gpu-resident-lane-task.v0';
+const PEERCOMPUTE_GPU_RESIDENT_LANE_LEASE_IDENTITY_SCHEMA =
+  'peercompute.compute.gpu-resident-lane-lease-identity.v0';
+const ULG_MLS_MPM_RESIDENT_COMPUTE_QUEUE_PACING_SCHEMA =
+  'peercompute.ulg.mls-mpm-resident-compute-queue-pacing.v0';
 const COMPACT_SUMMARY_READBACK_BYTES = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -309,6 +437,7 @@ const COMPUTE_DISPATCH_INDIRECT_UINTS = 3;
 const MECHANICS_STAGE_ORDER = Object.freeze(['p2g', 'gridUpdate', 'g2p']);
 const SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID = 'spatialGasLedgerProducer';
 const GAS_CELL_EOS_PRODUCER_STAGE_ID = 'gasCellEosProducer';
+const residentComputeTaskQueueWindows = new WeakMap();
 const PRESSURE_INTERFACE_STAGE_ID = 'pressureInterface';
 const THERMAL_PHASE_STAGE_ID = 'thermalPhase';
 const REACTION_PRODUCT_STAGE_ID = 'reactionProduct';
@@ -1276,24 +1405,33 @@ function noFullReadbackG2pParticleScaleStability({
 
 function createResidentDispatchTopology({
   particleCount = 0,
+  particleCountResidency = null,
   gridSpec = null,
   activeGridDispatch = null,
+  schroederSparseGridPlan = null,
   substepCount = 1,
   fusedResidentMechanics = false,
   fusedResidentSequence = false,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 } = {}) {
   const boundedParticleCount = Math.max(0, Math.floor(finiteNumber(particleCount, 0)));
+  const gpuAuthoredParticleCount = particleCountResidency?.ready === true;
   const workgroupSize = 64;
   const gridNodeCount = Math.max(0, Math.floor(finiteNumber(gridSpec?.gridNodeCount, 0)));
   const useActiveGrid = activeGridDispatch?.useActiveGrid === true;
-  const activeGridNodeCount = useActiveGrid
-    ? Math.max(0, Math.floor(finiteNumber(activeGridDispatch?.activeNodeCount, 0)))
-    : gridNodeCount;
+  const useSchroederSparseGrid = schroederSparseGridPlan?.admitted === true;
+  const useCompactGridDispatch = useActiveGrid || useSchroederSparseGrid;
+  const activeGridNodeCount = useSchroederSparseGrid
+    ? Math.max(0, Math.floor(finiteNumber(schroederSparseGridPlan?.gridNodeCapacity, 0)))
+    : (useActiveGrid
+        ? Math.max(0, Math.floor(finiteNumber(activeGridDispatch?.activeNodeCount, 0)))
+        : gridNodeCount);
   const boundedSubstepCount = Math.max(1, Math.floor(finiteNumber(substepCount, 1)));
   const particleWorkgroups = Math.max(1, Math.ceil(boundedParticleCount / workgroupSize));
   const gridWorkgroups = Math.max(1, Math.ceil(activeGridNodeCount / workgroupSize));
-  const activeGridAxis = useActiveGrid ? 'active-grid-node' : 'grid-node';
+  const activeGridAxis = useSchroederSparseGrid
+    ? 'schroeder-compact-grid-node'
+    : (useActiveGrid ? 'active-grid-node' : 'grid-node');
   const p2gBackendPolicy = resolveMlsMpmP2gBackendPolicy({
     requestedBackend: p2gBackend,
     supportsOceanTiledKernel: false
@@ -1312,6 +1450,15 @@ function createResidentDispatchTopology({
     invocationLimitPerSubstep: boundedParticleCount,
     workgroupSize,
     particleCount: boundedParticleCount,
+    authoritativeParticleCount: gpuAuthoredParticleCount ? null : boundedParticleCount,
+    particleRowCapacity: boundedParticleCount,
+    particleCountAuthority: gpuAuthoredParticleCount
+      ? 'gpu-authored-residency-metadata'
+      : 'host-known-particle-count',
+    dispatchSubmissionMode: gpuAuthoredParticleCount
+      ? 'dispatchWorkgroupsIndirect'
+      : 'dispatchWorkgroups',
+    exactActivePrefixDispatch: gpuAuthoredParticleCount,
     particleLoopInShader: false,
     perParticleLocalStencil: 'quadratic-3x3x3-grid-stencil',
     perParticleLocalStencilNodeCount: 27,
@@ -1329,21 +1476,39 @@ function createResidentDispatchTopology({
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
     activeGridEnabled: useActiveGrid,
+    schroederSparseGridEnabled: useSchroederSparseGrid,
+    dispatchSubmissionMode: useSchroederSparseGrid
+      ? 'dispatchWorkgroupsIndirect'
+      : 'dispatchWorkgroups',
+    activeNodeCountAuthority: useSchroederSparseGrid
+      ? 'gpu-authored-sparse-grid-header-word-1'
+      : 'host-planned-grid-node-count',
     particleLoopInShader: false
   };
   const p2gAccumulatorClear = {
     stageId: 'p2gAccumulatorClear',
-    topology: useActiveGrid ? 'active-grid-node-parallel-accumulator-clear' : 'encoder-full-buffer-clear',
-    entryPoint: useActiveGrid ? 'clear_accumulators' : 'GPUCommandEncoder.clearBuffer',
-    dispatchAxis: useActiveGrid ? activeGridAxis : 'full-grid-buffer',
-    dispatchWorkgroupsPerSubstep: useActiveGrid ? gridWorkgroups : 0,
-    invocationLimitPerSubstep: useActiveGrid ? activeGridNodeCount : gridNodeCount,
+    topology: useSchroederSparseGrid
+      ? 'schroeder-compact-grid-node-parallel-accumulator-clear'
+      : (useActiveGrid ? 'active-grid-node-parallel-accumulator-clear' : 'encoder-full-buffer-clear'),
+    entryPoint: useCompactGridDispatch ? 'clear_accumulators' : 'GPUCommandEncoder.clearBuffer',
+    dispatchAxis: useCompactGridDispatch ? activeGridAxis : 'full-grid-buffer',
+    dispatchWorkgroupsPerSubstep: useCompactGridDispatch ? gridWorkgroups : 0,
+    invocationLimitPerSubstep: useCompactGridDispatch ? activeGridNodeCount : gridNodeCount,
     workgroupSize,
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
     activeGridEnabled: useActiveGrid,
+    schroederSparseGridEnabled: useSchroederSparseGrid,
+    dispatchSubmissionMode: useSchroederSparseGrid
+      ? 'dispatchWorkgroupsIndirect'
+      : (useActiveGrid ? 'active-grid-dispatch' : 'GPUCommandEncoder.clearBuffer'),
+    activeNodeCountAuthority: useSchroederSparseGrid
+      ? 'gpu-authored-sparse-grid-header-word-1'
+      : 'host-planned-grid-node-count',
     particleLoopInShader: false,
-    bufferClearMode: useActiveGrid ? 'active-grid-compute-clear' : 'full-accumulator-clearBuffer'
+    bufferClearMode: useSchroederSparseGrid
+      ? 'schroeder-compact-indirect-compute-clear'
+      : (useActiveGrid ? 'active-grid-compute-clear' : 'full-accumulator-clearBuffer')
   };
   const gridUpdate = {
     stageId: 'gridUpdate',
@@ -1356,6 +1521,13 @@ function createResidentDispatchTopology({
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
     activeGridEnabled: useActiveGrid,
+    schroederSparseGridEnabled: useSchroederSparseGrid,
+    dispatchSubmissionMode: useSchroederSparseGrid
+      ? 'dispatchWorkgroupsIndirect'
+      : 'dispatchWorkgroups',
+    activeNodeCountAuthority: useSchroederSparseGrid
+      ? 'gpu-authored-sparse-grid-header-word-1'
+      : 'host-planned-grid-node-count',
     particleLoopInShader: false
   };
   const g2p = {
@@ -1367,6 +1539,15 @@ function createResidentDispatchTopology({
     invocationLimitPerSubstep: boundedParticleCount,
     workgroupSize,
     particleCount: boundedParticleCount,
+    authoritativeParticleCount: gpuAuthoredParticleCount ? null : boundedParticleCount,
+    particleRowCapacity: boundedParticleCount,
+    particleCountAuthority: gpuAuthoredParticleCount
+      ? 'gpu-authored-residency-metadata'
+      : 'host-known-particle-count',
+    dispatchSubmissionMode: gpuAuthoredParticleCount
+      ? 'dispatchWorkgroupsIndirect'
+      : 'dispatchWorkgroups',
+    exactActivePrefixDispatch: gpuAuthoredParticleCount,
     particleLoopInShader: false,
     perParticleLocalStencil: 'quadratic-3x3x3-grid-stencil',
     perParticleLocalStencilNodeCount: 27,
@@ -1381,9 +1562,18 @@ function createResidentDispatchTopology({
     substepCount: boundedSubstepCount,
     workgroupSize,
     particleCount: boundedParticleCount,
+    authoritativeParticleCount: gpuAuthoredParticleCount ? null : boundedParticleCount,
+    particleRowCapacity: boundedParticleCount,
+    particleCountAuthority: gpuAuthoredParticleCount
+      ? 'gpu-authored-residency-metadata'
+      : 'host-known-particle-count',
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
     activeGridEnabled: useActiveGrid,
+    schroederSparseGridEnabled: useSchroederSparseGrid,
+    schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+    schroederSparseGridPeakAllocatedByteLength:
+      schroederSparseGridPlan?.peakAllocatedByteLength ?? 0,
     activeGridDispatchStatus: activeGridDispatch?.status || null,
     p2gBackendPolicy,
     p2gBackendPolicyStatus: p2gBackendPolicy.status,
@@ -1391,7 +1581,7 @@ function createResidentDispatchTopology({
     p2gBackendEffective: p2gBackendPolicy.effectiveBackend,
     p2gBackendFallbackReason: p2gBackendPolicy.fallbackReason,
     particleParallelStages: ['p2g', 'g2p'],
-    gridParallelStages: useActiveGrid
+    gridParallelStages: useCompactGridDispatch
       ? ['p2gAccumulatorClear', 'p2gFinalize', 'gridUpdate']
       : ['p2gFinalize', 'gridUpdate'],
     cpuParticleLoopInHotPath: false,
@@ -1400,20 +1590,68 @@ function createResidentDispatchTopology({
     p2gFinalize,
     gridUpdate,
     g2p,
-    dispatchesPerSubstep: useActiveGrid ? 5 : 4,
-    totalDispatches: boundedSubstepCount * (useActiveGrid ? 5 : 4),
+    dispatchesPerSubstep: useCompactGridDispatch ? 5 : 4,
+    totalDispatches: boundedSubstepCount * (useCompactGridDispatch ? 5 : 4),
     workgroupsPerSubstep: particleWorkgroups
-      + (useActiveGrid ? gridWorkgroups : 0)
+      + (useCompactGridDispatch ? gridWorkgroups : 0)
       + gridWorkgroups
       + gridWorkgroups
       + particleWorkgroups,
     totalWorkgroups: boundedSubstepCount * (
       particleWorkgroups
-      + (useActiveGrid ? gridWorkgroups : 0)
+      + (useCompactGridDispatch ? gridWorkgroups : 0)
       + gridWorkgroups
       + gridWorkgroups
       + particleWorkgroups
     )
+  };
+}
+
+function schroederSparseGridProductionTelemetry({
+  plan = null,
+  executions = []
+} = {}) {
+  const encoded = executions.filter(Boolean);
+  const latest = encoded.at(-1) ?? null;
+  const hostSourceFailClosed = encoded.some((execution) => (
+    String(execution.status || '').includes('fail-closed')
+  ));
+  return {
+    schroederSparseGridPlanStatus: plan?.status ?? null,
+    schroederSparseGridExecutionStatus: latest?.status ?? null,
+    schroederSparseGridExecutionCount: encoded.length,
+    schroederSparseGridSourceAdmissionStatus: latest?.sourceIntegrationAdmission ?? null,
+    schroederSparseGridHostSourceFailClosed: hostSourceFailClosed,
+    schroederSparseGridConsumerDispatchStatus: plan
+      ? (hostSourceFailClosed
+          ? 'gpu-zero-indirect-required-by-host-source-fail-closed'
+          : 'gpu-authored-after-actual-node-admission')
+      : null,
+    schroederSparseGridActualNodeCountAuthority: plan
+      ? 'gpu-authored-sparse-grid-header-word-1'
+      : null,
+    schroederSparseGridActualNodeCountCpuDecoded: false,
+    schroederSparseGridParticleCapacity: plan?.sourceParticleCapacity ?? 0,
+    schroederSparseGridDeclaredBuildInvocationCapacity:
+      plan?.declaredBuildInvocationCapacity ?? 0,
+    schroederSparseGridNodeCapacity: plan?.gridNodeCapacity ?? 0,
+    schroederSparseGridFullGridNodeCount: plan?.fullGridNodeCount ?? 0,
+    schroederSparseGridCapacityLessThanDense: Boolean(
+      plan && plan.gridNodeCapacity < plan.fullGridNodeCount
+    ),
+    schroederSparseGridGridSpacingM: plan?.gridSpacingM ?? null,
+    schroederSparseGridGridSpacingAuthority: plan?.gridSpacingAuthority ?? null,
+    schroederSparseGridCandidateGenerationMode: plan?.candidateGenerationMode ?? null,
+    schroederSparseGridReactionProductEventSourceStatus:
+      latest?.reactionProductEventSourceStatus ?? null,
+    schroederSparseGridPressureForceSourceStatus:
+      latest?.pressureForceSourceStatus ?? null,
+    schroederSparseGridPressureCentroidOrderStatus:
+      latest?.pressureCentroidOrderStatus ?? null,
+    schroederSparseGridNormalHotLoopReadbackFree:
+      encoded.length > 0 && encoded.every((execution) => (
+        execution.normalHotLoopReadbackFree === true
+      ))
   };
 }
 
@@ -2630,6 +2868,73 @@ function createActiveGridUpdateWgsl() {
 }
 
 const mlsMpmP2gGridProjectionActiveGridWgsl = createActiveGridP2gProjectionWgsl();
+const mlsMpmPressureForceRowScatterEntryWgsl = /* wgsl */ `
+@compute @workgroup_size(64)
+fn scatter_pressure_force_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let force_row_index = global_id.x;
+  if (force_row_index >= params.resident_product_event_count || !p2g_pressure_grid_admitted()) {
+    return;
+  }
+  let force_row1 = product_events[force_row_index * 4u + 1u];
+  let force_row2 = product_events[force_row_index * 4u + 2u];
+  let force_row3 = product_events[force_row_index * 4u + 3u];
+  if (force_row3.w <= 0.0) {
+    return;
+  }
+  let force_grid = force_row1.xyz / max(params.grid_spacing_m, 1.0e-12);
+  let base_x = i32(floor(force_grid.x - 0.5));
+  let base_y = i32(floor(force_grid.y - 0.5));
+  let base_z = i32(floor(force_grid.z - 0.5));
+  let wx = quadratic_weights(force_grid.x - f32(base_x));
+  let wy = quadratic_weights(force_grid.y - f32(base_y));
+  let wz = quadratic_weights(force_grid.z - f32(base_z));
+  for (var ox = 0; ox < 3; ox = ox + 1) {
+    for (var oy = 0; oy < 3; oy = oy + 1) {
+      for (var oz = 0; oz < 3; oz = oz + 1) {
+        let compact_index = p2g_try_storage_index(base_x + ox, base_y + oy, base_z + oz);
+        if (compact_index >= params.grid_node_count) {
+          continue;
+        }
+        let weight = p2g_weight_at(wx, ox) * p2g_weight_at(wy, oy) * p2g_weight_at(wz, oz);
+        let impulse = params.dt * weight * force_row2.xyz;
+        let accumulator_base = compact_index * 4u;
+        atomicAdd(&grid_accumulators[accumulator_base + 1u], p2g_quantize(impulse.x));
+        atomicAdd(&grid_accumulators[accumulator_base + 2u], p2g_quantize(impulse.y));
+        atomicAdd(&grid_accumulators[accumulator_base + 3u], p2g_quantize(impulse.z));
+      }
+    }
+  }
+}
+`;
+const mlsMpmP2gPressureScatterWgsl = `${mlsMpmP2gGridProjectionWgsl}
+
+fn p2g_pressure_grid_admitted() -> bool {
+  return true;
+}
+
+${mlsMpmPressureForceRowScatterEntryWgsl}
+`;
+const mlsMpmP2gSchroederSparseGridFusedWgsl = `${mlsMpmP2gSchroederSparseGridWgsl}
+
+fn p2g_pressure_grid_admitted() -> bool {
+  return p2g_sparse_grid_admitted();
+}
+
+@compute @workgroup_size(64)
+fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let node_index = p2g_finalize_node_index(global_id.x);
+  if (node_index >= params.grid_node_count) {
+    return;
+  }
+  let accumulator_base = node_index * 4u;
+  atomicStore(&grid_accumulators[accumulator_base], 0);
+  atomicStore(&grid_accumulators[accumulator_base + 1u], 0);
+  atomicStore(&grid_accumulators[accumulator_base + 2u], 0);
+  atomicStore(&grid_accumulators[accumulator_base + 3u], 0);
+}
+
+${mlsMpmPressureForceRowScatterEntryWgsl}
+`;
 // Spatial (grid-measured) density term for the liquid EOS. DISABLED: with
 // particle lattices coarser than the grid, the estimator aliases above rest
 // density inside perfectly packed blocks and the Tait ^7 stiffness turns the
@@ -2646,14 +2951,16 @@ function createFusedP2gParamsArray(
   schroederLevelFilter = null,
   schroederActiveNodeFilter = null,
   gridDensityPressureEnabled = false,
-  ambientPressurePa = 0
+  ambientPressurePa = 0,
+  schroederSparseGridPlan = null,
+  residentProductEventCount = 0
 ) {
   const filterEnabled = schroederLevelFilter?.enabled === true;
   const activeNodeFilterEnabled = schroederActiveNodeFilter?.enabled === true;
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
-  view.setUint32(4, gridSpec.gridNodeCount, true);
+  view.setUint32(4, schroederSparseGridPlan?.gridNodeCapacity ?? gridSpec.gridNodeCount, true);
   view.setUint32(8, gridSpec.gridDims[0], true);
   view.setUint32(12, gridSpec.gridDims[1], true);
   view.setUint32(16, gridSpec.gridDims[2], true);
@@ -2661,7 +2968,10 @@ function createFusedP2gParamsArray(
   view.setFloat32(24, gridSpec.gridSpacingM, true);
   view.setFloat32(28, gridSpec.invGridSpacingM, true);
   view.setFloat32(32, finiteNumber(dt, 0), true);
-  view.setUint32(36, 0, true);
+  view.setUint32(36, Math.max(0, Math.round(finiteNumber(
+    residentProductEventCount,
+    0
+  ))), true);
   view.setFloat32(40, finiteNumber(internalPressureScale, 1), true);
   view.setUint32(44, filterEnabled ? 1 : 0, true);
   view.setInt32(48, filterEnabled ? Math.round(finiteNumber(schroederLevelFilter.selectedLevel, 0)) : 0, true);
@@ -2678,6 +2988,28 @@ function createFusedP2gParamsArray(
   // ambient_pressure_pa: gauge reference for the ideal-gas partial pressure
   // (0 = vacuum box). See P2gProjectionParams in ulg-gpu-abi/src/wgsl.js.
   view.setFloat32(68, Number.isFinite(ambientPressurePa) ? ambientPressurePa : 0, true);
+  view.setUint32(72, schroederSparseGridPlan ? 1 : 0, true);
+  return buffer;
+}
+
+function createFusedSparsePressureScatterParamsArray({
+  gridSpec,
+  forceRowCapacity,
+  dt,
+  schroederSparseGridPlan
+}) {
+  const buffer = createFusedP2gParamsArray(
+    gridSpec,
+    0,
+    dt,
+    1,
+    null,
+    null,
+    false,
+    0,
+    schroederSparseGridPlan
+  );
+  new DataView(buffer).setUint32(36, forceRowCapacity, true);
   return buffer;
 }
 
@@ -2689,7 +3021,9 @@ function createFusedActiveP2gParamsArray(
   activeGridDispatch,
   schroederLevelFilter = null,
   schroederActiveNodeFilter = null,
-  gridDensityPressureEnabled = false
+  gridDensityPressureEnabled = false,
+  schroederSparseGridPlan = null,
+  residentProductEventCount = 0
 ) {
   const buffer = new ArrayBuffer(112);
   new Uint8Array(buffer).set(new Uint8Array(createFusedP2gParamsArray(
@@ -2699,7 +3033,10 @@ function createFusedActiveP2gParamsArray(
     internalPressureScale,
     schroederLevelFilter,
     schroederActiveNodeFilter,
-    gridDensityPressureEnabled
+    gridDensityPressureEnabled,
+    0,
+    schroederSparseGridPlan,
+    residentProductEventCount
   )));
   const view = new DataView(buffer);
   view.setUint32(80, activeGridDispatch.activeStart[0], true);
@@ -2717,6 +3054,7 @@ function createFusedSchroederLevelAssignmentBinding({
   device,
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
+  emptyAssignmentBuffer = null,
   labelPrefix = 'ulg-mls-mpm-fused'
 } = {}) {
   const selectedLevel = Math.round(finiteNumber(
@@ -2731,21 +3069,23 @@ function createFusedSchroederLevelAssignmentBinding({
     throw new RangeError('Fused resident mechanics Schroeder filtering requires the current level-assignment row layout');
   }
   if (!schroederLevelAssignment) {
-    const buffer = writeGpuBuffer(
-      device,
-      `${labelPrefix}-empty-schroeder-level-assignments`,
-      new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS),
-      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-    );
+    const buffer = emptyAssignmentBuffer || writeGpuBuffer(
+        device,
+        `${labelPrefix}-empty-schroeder-level-assignments`,
+        new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS),
+        GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      );
     return {
       enabled: false,
       selectedLevel: 0,
       assignmentStrideFloats,
       assignmentBuffer: buffer,
-      ownsAssignmentBuffer: true,
+      ownsAssignmentBuffer: !emptyAssignmentBuffer,
       retainedAssignmentBuffer: false,
       assignmentBufferByteLength: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS * Float32Array.BYTES_PER_ELEMENT,
-      assignmentBufferSource: 'dummy-schroeder-level-assignment-row'
+      assignmentBufferSource: emptyAssignmentBuffer
+        ? 'resident-workspace-dummy-schroeder-level-assignment-row'
+        : 'dummy-schroeder-level-assignment-row'
     };
   }
   const retainedBuffer = schroederLevelAssignment.assignmentBuffer ?? schroederLevelAssignment.buffer ?? null;
@@ -2801,6 +3141,7 @@ function fusedSchroederLevelFilterMetadata(filter = null) {
 function createFusedSchroederActiveNodeBinding({
   device,
   schroederActiveNodeList = null,
+  emptyActiveNodeBuffer = null,
   labelPrefix = 'ulg-mls-mpm-fused'
 } = {}) {
   const activeNodeStrideFloats = Math.max(1, Math.round(finiteNumber(
@@ -2811,20 +3152,22 @@ function createFusedSchroederActiveNodeBinding({
     throw new RangeError('Fused resident mechanics Schroeder active-node filtering requires the current active-node row layout');
   }
   if (!schroederActiveNodeList) {
-    const buffer = writeGpuBuffer(
-      device,
-      `${labelPrefix}-empty-schroeder-active-nodes`,
-      new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS),
-      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-    );
+    const buffer = emptyActiveNodeBuffer || writeGpuBuffer(
+        device,
+        `${labelPrefix}-empty-schroeder-active-nodes`,
+        new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS),
+        GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      );
     return {
       enabled: false,
       activeNodeStrideFloats,
       activeNodeBuffer: buffer,
-      ownsActiveNodeBuffer: true,
+      ownsActiveNodeBuffer: !emptyActiveNodeBuffer,
       retainedActiveNodeBuffer: false,
       activeNodeBufferByteLength: SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
-      activeNodeBufferSource: 'dummy-schroeder-active-node-row'
+      activeNodeBufferSource: emptyActiveNodeBuffer
+        ? 'resident-workspace-dummy-schroeder-active-node-row'
+        : 'dummy-schroeder-active-node-row'
     };
   }
   const retainedBuffer = schroederActiveNodeList.activeNodeBuffer
@@ -2878,6 +3221,7 @@ function fusedSchroederActiveNodeFilterMetadata(filter = null) {
 
 function createFusedGridUpdateParamsArray({
   gridSpec,
+  gridNodeCount = gridSpec.gridNodeCount,
   dt,
   gravityMPerS2,
   boxDimsM,
@@ -2886,7 +3230,7 @@ function createFusedGridUpdateParamsArray({
 }) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
-  view.setUint32(0, gridSpec.gridNodeCount, true);
+  view.setUint32(0, gridNodeCount, true);
   view.setUint32(4, gridSpec.gridDims[0], true);
   view.setUint32(8, gridSpec.gridDims[1], true);
   view.setUint32(12, gridSpec.gridDims[2], true);
@@ -2909,6 +3253,7 @@ function createFusedGridUpdateParamsArray({
 
 function createFusedActiveGridUpdateParamsArray({
   gridSpec,
+  gridNodeCount = gridSpec.gridNodeCount,
   dt,
   gravityMPerS2,
   boxDimsM,
@@ -2919,6 +3264,7 @@ function createFusedActiveGridUpdateParamsArray({
   const buffer = new ArrayBuffer(112);
   new Uint8Array(buffer).set(new Uint8Array(createFusedGridUpdateParamsArray({
     gridSpec,
+    gridNodeCount,
     dt,
     gravityMPerS2,
     boxDimsM,
@@ -2939,12 +3285,14 @@ function createFusedActiveGridUpdateParamsArray({
 function createFusedG2pParamsArray({
   particleCount,
   gridSpec,
+  gridNodeCount = gridSpec.gridNodeCount,
   dt,
   boxDimsM,
   internalPressureScale,
   liquidWallDampingAlpha = 0,
   liquidWallDampingDistanceM = 0,
-  schroederLevelFilter = null
+  schroederLevelFilter = null,
+  schroederSparseGridPlan = null
 }) {
   // G2P particle filtering reads particle-parallel LEVEL ASSIGNMENT rows.
   // The compacted active-node list must never gate particles here: its rows
@@ -2954,7 +3302,7 @@ function createFusedG2pParamsArray({
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
-  view.setUint32(4, gridSpec.gridNodeCount, true);
+  view.setUint32(4, gridNodeCount, true);
   view.setUint32(8, gridSpec.gridDims[0], true);
   view.setUint32(12, gridSpec.gridDims[1], true);
   view.setUint32(16, gridSpec.gridDims[2], true);
@@ -2975,6 +3323,7 @@ function createFusedG2pParamsArray({
     SCHROEDER_LEVEL_ASSIGNMENT_FLOATS
   ))), true);
   view.setUint32(72, levelFilterEnabled ? 1 : 0, true);
+  view.setUint32(76, schroederSparseGridPlan ? 1 : 0, true);
   return buffer;
 }
 
@@ -3242,6 +3591,640 @@ function pressureInterfaceGridForceBlockedFields() {
   };
 }
 
+function pressureInterfaceForceRowScatterFields(scatter, {
+  sparseGrid = false,
+  sparseGridSourceFailClosed = false
+} = {}) {
+  if (!scatter?.requested) return pressureInterfaceGridForceBlockedFields();
+  if (sparseGrid && sparseGridSourceFailClosed) {
+    return {
+      pressureInterfaceForceSolverSchema: scatter.solver?.schema ?? null,
+      pressureInterfaceForceSolverStatus: scatter.solver?.status ?? null,
+      pressureInterfaceForceCouplingStatus:
+        'pressure-interface-sparse-grid-source-fail-closed',
+      pressureInterfaceForceApplicationStatus:
+        'blocked-sparse-grid-actual-node-source-not-admitted',
+      pressureInterfaceForceRowCount: scatter.forceRowCapacity,
+      pressureInterfaceForceRowCapacity: scatter.forceRowCapacity,
+      pressureInterfaceForceRowStrideFloats: scatter.forceRowStrideFloats,
+      pressureInterfaceForceRowsBufferByteLength: scatter.forceRowByteLength,
+      pressureInterfaceForceRowsBufferSubmitted: true,
+      pressureInterfaceForceRowActiveCountPending:
+        scatter.solver?.forceRowActiveCountPending === true,
+      pressureInterfaceForceRowStatusGate: scatter.solver?.forceRowStatusGate ?? null,
+      pressureInterfaceAppliedImpulseNSeconds: [0, 0, 0],
+      pressureInterfaceAppliedImpulseMagnitudeNSeconds: 0,
+      pressureInterfaceAppliedImpulseSource: 'none-sparse-grid-zero-indirect',
+      pressureInterfaceImpulseProofStatus:
+        'gpu-zero-indirect-required-by-actual-node-source-fail-closed',
+      pressureInterfaceForceConsumerStatus:
+        'blocked-sparse-grid-zero-indirect-no-stale-centroid-consumption',
+      pressureInterfaceForceApplicationApproved: false,
+      pressureInterfaceGridForceAdmissionStatus: scatter.admission?.status ?? null,
+      pressureInterfaceForceScatterStatus:
+        'pressure-interface-sparse-p2g-source-fail-closed-zero-indirect',
+      pressureInterfaceForceScatterTopology:
+        'force-row-source-rejected-before-sparse-grid-consumer-admission',
+      pressureInterfaceForceScatterOuterGridNodeLoop: false,
+      pressureInterfaceForceScatterDispatchWorkgroups: 0,
+      pressureInterfaceForceScatterDispatchMode: 'gpu-zero-indirect',
+      pressureInterfaceForceScatterDispatchAuthority:
+        'schroeder-sparse-grid-source-admission'
+    };
+  }
+  return {
+    pressureInterfaceForceSolverSchema: scatter.solver?.schema ?? null,
+    pressureInterfaceForceSolverStatus: scatter.solver?.status ?? null,
+    pressureInterfaceForceCouplingStatus: sparseGrid
+      ? 'pressure-interface-force-rows-scattered-into-sparse-p2g-accumulator'
+      : 'pressure-interface-force-rows-scattered-into-direct-p2g-accumulator',
+    pressureInterfaceForceApplicationStatus:
+      'pressure-interface-grid-force-consumer-submitted-unverified',
+    pressureInterfaceForceRowCount: scatter.forceRowCapacity,
+    pressureInterfaceForceRowCapacity: scatter.forceRowCapacity,
+    pressureInterfaceForceRowStrideFloats: scatter.forceRowStrideFloats,
+    pressureInterfaceForceRowsBufferByteLength: scatter.forceRowByteLength,
+    pressureInterfaceForceRowsBufferSubmitted: true,
+    pressureInterfaceForceRowActiveCountPending:
+      scatter.solver?.forceRowActiveCountPending === true,
+    pressureInterfaceForceRowStatusGate: scatter.solver?.forceRowStatusGate ?? null,
+    pressureInterfaceAppliedImpulseNSeconds: [0, 0, 0],
+    pressureInterfaceAppliedImpulseMagnitudeNSeconds: 0,
+    pressureInterfaceAppliedImpulseSource: sparseGrid
+      ? 'gpu-resident-status-gated-sparse-force-row-scatter'
+      : 'gpu-resident-status-gated-direct-force-row-scatter',
+    pressureInterfaceImpulseProofStatus:
+      'submitted-status-gated-no-full-readback',
+    pressureInterfaceForceConsumerStatus:
+      'grid-momentum-impulse-submitted-unverified-no-full-readback',
+    pressureInterfaceForceApplicationApproved: true,
+    pressureInterfaceForceScatterStatus:
+      'pressure-interface-p2g-accumulator-scatter-submitted',
+    pressureInterfaceGridForceAdmissionStatus: scatter.admission?.status ?? null,
+    pressureInterfaceForceScatterTopology:
+      sparseGrid
+        ? 'force-row-parallel-27-node-quadratic-stencil-sparse-hash-scatter'
+        : 'force-row-parallel-27-node-quadratic-stencil-direct-grid-scatter',
+    pressureInterfaceForceScatterOuterGridNodeLoop: false,
+    pressureInterfaceForceScatterDispatchWorkgroups: Math.max(
+      1,
+      Math.ceil(scatter.forceRowCapacity / 64)
+    ),
+    pressureInterfaceForceScatterDispatchMode: scatter.candidateDispatchIndirectBuffer
+      ? 'dispatchWorkgroupsIndirect'
+      : 'dispatchWorkgroups',
+    pressureInterfaceForceScatterDispatchAuthority:
+      scatter.candidateDispatchAuthority ?? null
+  };
+}
+
+const SPARSE_PRESSURE_FORCE_ROW_STATUS_GATE =
+  'row3.w-positive-after-gpu-candidate-metadata-and-resident-neighborhood-header-guard';
+
+function resolveFusedPressureScatter({
+  device,
+  pressureInterfaceForceRowsBuffer,
+  pressureInterfaceForceSolver,
+  pressureInterfaceGridForceAdmission
+} = {}) {
+  const solverEnvelope = pressureInterfaceForceSolver ?? null;
+  const solver = pressureInterfaceForceSolver?.pressureInterfaceForceSolver
+    || pressureInterfaceForceSolver
+    || null;
+  const requested = Boolean(
+    pressureInterfaceForceRowsBuffer
+    || solver
+    || pressureInterfaceGridForceAdmission
+  );
+  if (!requested) {
+    return {
+      requested: false,
+      eligible: true,
+      blocker: null,
+      solver: null,
+      forceRowsBuffer: null,
+      forceRowCapacity: 0,
+      forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
+      forceRowByteLength: 0,
+      admission: null,
+      deviceMismatch: null
+    };
+  }
+  const forceRowCapacity = Math.max(0, Math.round(finiteNumber(
+    solver?.forceRowCapacity ?? solver?.forceRowCount,
+    0
+  )));
+  const forceRowStrideFloats = Math.max(0, Math.round(finiteNumber(
+    solver?.forceRowStrideFloats,
+    SPH_PRESSURE_INTERFACE_FORCE_FLOATS
+  )));
+  const requiredForceRowByteLength = forceRowCapacity
+    * forceRowStrideFloats
+    * Float32Array.BYTES_PER_ELEMENT;
+  const forceRowByteLength = Math.max(0, Math.round(finiteNumber(
+    solver?.forceRowByteLength
+      ?? solver?.forceRowsBufferByteLength
+      ?? pressureInterfaceForceRowsBuffer?.size,
+    requiredForceRowByteLength
+  )));
+  const deviceMismatch = webGpuDeviceMismatchInfo({
+    buffer: pressureInterfaceForceRowsBuffer,
+    device
+  });
+  const candidateDispatchIndirectBuffer =
+    solver?.candidateDispatchIndirectBuffer ?? null;
+  const candidateMetadataBuffer = solverEnvelope?.candidateMetadataBuffer
+    ?? solver?.candidateMetadataBuffer
+    ?? null;
+  const candidateDispatchIndirectOffsetBytes = Math.max(0, Math.round(finiteNumber(
+    solver?.candidateDispatchIndirectOffsetBytes,
+    0
+  )));
+  const candidateDispatchIndirectBufferByteLength = Math.max(0, Math.round(finiteNumber(
+    solver?.candidateDispatchIndirectBufferByteLength
+      ?? candidateDispatchIndirectBuffer?.size,
+    0
+  )));
+  const candidateDispatchMismatch = webGpuDeviceMismatchInfo({
+    buffer: candidateDispatchIndirectBuffer,
+    device
+  });
+  const admission = pressureInterfaceGridForceAdmissionAllowsApplication({
+    pressureInterfaceGridForceAdmission,
+    pressureInterfaceForceSolver: solver,
+    forceRowCount: forceRowCapacity
+  });
+  let blocker = null;
+  if (!pressureInterfaceForceRowsBuffer) blocker = 'retained-force-row-buffer-required';
+  else if (deviceMismatch.mismatch) blocker = 'cross-device-force-row-buffer';
+  else if (solver?.materialInterfaceInputAuthoritative === true
+    && !candidateDispatchIndirectBuffer) {
+    blocker = 'gpu-candidate-dispatch-indirect-buffer-required';
+  } else if (candidateDispatchIndirectBuffer && candidateDispatchMismatch.mismatch) {
+    blocker = 'cross-device-candidate-dispatch-indirect-buffer';
+  } else if (candidateDispatchIndirectBuffer
+    && candidateDispatchIndirectOffsetBytes + 12
+      > candidateDispatchIndirectBufferByteLength) {
+    blocker = 'candidate-dispatch-indirect-buffer-too-small';
+  } else if (candidateDispatchIndirectBuffer
+    && candidateDispatchIndirectOffsetBytes % 4 !== 0) {
+    blocker = 'candidate-dispatch-indirect-offset-misaligned';
+  } else if (candidateDispatchIndirectBuffer
+    && solver?.candidateDispatchAuthority
+      !== 'gpu-finalized-active-count-fail-closed-indirect') {
+    blocker = 'gpu-candidate-dispatch-authority-required';
+  } else if (!pressureInterfaceForceSolverAllowsGridApplication(solver)) {
+    blocker = 'pressure-force-solver-not-approved';
+  } else if (admission.approved !== true) blocker = 'pressure-force-admission-not-approved';
+  else if (solver?.backend !== 'webgpu') blocker = 'webgpu-pressure-force-solver-required';
+  else if (forceRowCapacity <= 0) blocker = 'positive-force-row-capacity-required';
+  else if (forceRowStrideFloats !== SPH_PRESSURE_INTERFACE_FORCE_FLOATS) {
+    blocker = 'unsupported-force-row-stride';
+  } else if (forceRowByteLength < requiredForceRowByteLength) blocker = 'force-row-buffer-too-small';
+  else if (solver?.forceRowStatusGate !== SPARSE_PRESSURE_FORCE_ROW_STATUS_GATE) {
+    blocker = 'gpu-force-row-status-gate-required';
+  }
+  return {
+    requested,
+    eligible: blocker == null,
+    blocker,
+    solver,
+    forceRowsBuffer: pressureInterfaceForceRowsBuffer,
+    forceRowCapacity,
+    forceRowStrideFloats,
+    forceRowByteLength,
+    requiredForceRowByteLength,
+    candidateDispatchIndirectBuffer,
+    candidateMetadataBuffer,
+    candidateDispatchIndirectOffsetBytes,
+    candidateDispatchIndirectBufferByteLength,
+    candidateDispatchAuthority: solver?.candidateDispatchAuthority ?? null,
+    candidateDispatchMismatch,
+    admission,
+    deviceMismatch
+  };
+}
+
+function schroederSparseGridSourceIdentityFromAdmission(admission) {
+  const identity = admission?.expectedIdentity ?? null;
+  const lease = admission?.descriptor?.lease ?? null;
+  const identityEvidenceBuffer = admission?.packedCandidateCsrBuffer ?? null;
+  if (!identity || !lease || !identityEvidenceBuffer) return null;
+  const leaseIdentity = {
+    schema: lease.identitySchema,
+    authoritative: lease.authoritative === true,
+    leaseId: lease.leaseId,
+    laneId: lease.laneId,
+    stateKey: lease.stateKey,
+    sourceFamily: lease.sourceFamily
+  };
+  return {
+    identity: {
+      generation: identity.generation,
+      positionEpoch: identity.positionEpoch,
+      leaseTokenLow: identity.leaseTokenLow,
+      leaseTokenHigh: identity.leaseTokenHigh,
+      sourceCount: identity.sourceCount,
+      consumerBit: identity.consumerBit
+    },
+    expectedIdentity: {
+      generation: identity.generation,
+      positionEpoch: identity.positionEpoch,
+      leaseTokenLow: identity.leaseTokenLow,
+      leaseTokenHigh: identity.leaseTokenHigh,
+      sourceCount: identity.sourceCount,
+      consumerBit: identity.consumerBit
+    },
+    leaseIdentity,
+    expectedLeaseIdentity: { ...leaseIdentity },
+    identityEvidenceBuffer
+  };
+}
+
+function schroederSparseGridPressureSource({
+  scatter,
+  pressureStage,
+  status,
+  centroidOrderStatus
+} = {}) {
+  if (!scatter?.requested) return null;
+  const admission = pressureStage?.residentNeighborhoodAdmission ?? null;
+  const sourceIdentity = schroederSparseGridSourceIdentityFromAdmission(admission);
+  return {
+    status,
+    centroidOrderStatus,
+    sourcePositionPolicy:
+      'same-encoder-current-position-epoch-never-consume-prior-centroids',
+    forceRowsBuffer: scatter.forceRowsBuffer,
+    candidateMetadataBuffer:
+      pressureStage?.candidateMetadataBuffer
+      ?? scatter.candidateMetadataBuffer
+      ?? scatter.solver?.candidateMetadataBuffer
+      ?? null,
+    candidateDispatchIndirectBuffer: scatter.candidateDispatchIndirectBuffer,
+    dispatchIndirectByteOffset: scatter.candidateDispatchIndirectOffsetBytes,
+    forceRowCapacity: scatter.forceRowCapacity,
+    generationId: sourceIdentity?.identity.generation ?? 0,
+    ...(sourceIdentity || {})
+  };
+}
+
+function schroederSparseGridProductEventSource({
+  residentProductMass,
+  productEventBuffer,
+  sourceIdentity,
+  generationId = null,
+  productEventCapacity = null,
+  status = 'current-product-event-positions-encoded-before-compaction'
+} = {}) {
+  if (!residentProductMass || !productEventBuffer) return null;
+  const arena = residentProductMass.productEventArena ?? null;
+  return {
+    status,
+    productEventBuffer,
+    productEventMetadataBuffer:
+      residentProductMass.productEventMetadataBuffer
+      ?? arena?.metadataBuffer
+      ?? null,
+    productEventDispatchIndirectBuffer:
+      residentProductMass.productEventDispatchIndirectBuffer
+      ?? arena?.dispatchIndirectBuffer
+      ?? null,
+    dispatchIndirectByteOffset: 0,
+    productEventCapacity:
+      productEventCapacity
+      ?? arena?.capacityRows
+      ?? residentProductMass.productEventArenaCapacityDescriptor?.capacityRows
+      ?? residentProductMass.productEventRowCapacity
+      ?? residentProductMass.productEventRowCount,
+    generationId:
+      generationId
+      ?? arena?.generationId
+      ?? residentProductMass.productEventArenaGeneration
+      ?? residentProductMass.productEventGeneration
+      ?? 0,
+    ...(sourceIdentity || {})
+  };
+}
+
+function normalizeRetainedPressureGasCellImport({
+  device,
+  pressureInterfaceStageOptions = {}
+} = {}) {
+  const importDescriptor = pressureInterfaceStageOptions.pressureInterfaceGasCellFieldImport
+    ?? pressureInterfaceStageOptions.retainedGasPressureCellImport
+    ?? null;
+  if (!importDescriptor) return null;
+  const admission = pressureInterfaceStageOptions.pressureInterfaceGasCellFieldAdmission
+    ?? importDescriptor.pressureInterfaceGasCellFieldAdmission
+    ?? importDescriptor.gasCellFieldAdmission
+    ?? importDescriptor.admission
+    ?? null;
+  const retainedGasPressureCellsBuffer =
+    pressureInterfaceStageOptions.retainedGasPressureCellsBuffer
+    ?? importDescriptor.gasPressureCellsBuffer
+    ?? importDescriptor.pressureInterfaceGasPressureCellsBuffer
+    ?? importDescriptor.retainedGasPressureCellsBuffer
+    ?? null;
+  const retainedGasPressureCellRowCount = Math.max(0, Math.trunc(finiteNumber(
+    pressureInterfaceStageOptions.retainedGasPressureCellRowCount
+      ?? importDescriptor.pressureInterfaceGasPressureCellRowCount
+      ?? importDescriptor.gasPressureCellRowCount,
+    0
+  )));
+  const retainedGasPressureCellRowStrideFloats = Math.max(0, Math.trunc(finiteNumber(
+    pressureInterfaceStageOptions.retainedGasPressureCellRowStrideFloats
+      ?? importDescriptor.pressureInterfaceGasPressureCellRowStrideFloats
+      ?? importDescriptor.gasPressureCellRowStrideFloats,
+    SPH_GAS_PRESSURE_CELL_FLOATS
+  )));
+  const retainedGasPressureCellRowByteLength = Math.max(0, Math.trunc(finiteNumber(
+    pressureInterfaceStageOptions.retainedGasPressureCellRowByteLength
+      ?? importDescriptor.pressureInterfaceGasPressureCellRowByteLength
+      ?? importDescriptor.gasPressureCellRowByteLength,
+    retainedGasPressureCellRowCount
+      * retainedGasPressureCellRowStrideFloats
+      * Float32Array.BYTES_PER_ELEMENT
+  )));
+  const requiredByteLength = retainedGasPressureCellRowCount
+    * SPH_GAS_PRESSURE_CELL_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const importReady = importDescriptor.status === 'pressure-interface-gas-cell-field-import-ready'
+    || importDescriptor.pressureInterfaceImportReady === true;
+  const admissionApproved = admission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
+    && admission?.gasCellFieldConsumptionApproved === true;
+  const retainedRows = importDescriptor.pressureInterfaceGasPressureCellRowsBufferRetained === true
+    || importDescriptor.gasPressureCellRowsBufferRetained === true
+    || importDescriptor.retainedGasCellFieldSource
+      ?.pressureInterfaceGasPressureCellRowsBufferRetained === true;
+  const deviceMismatch = webGpuDeviceMismatchInfo({
+    buffer: retainedGasPressureCellsBuffer,
+    device
+  });
+  const blockers = [
+    !importReady ? 'retained-gas-pressure-import-not-ready' : null,
+    !admissionApproved ? 'retained-gas-pressure-import-not-admitted' : null,
+    !retainedRows ? 'retained-gas-pressure-rows-not-retained' : null,
+    !retainedGasPressureCellsBuffer ? 'retained-gas-pressure-buffer-missing' : null,
+    deviceMismatch.mismatch ? 'retained-gas-pressure-buffer-device-mismatch' : null,
+    retainedGasPressureCellRowCount <= 0 ? 'retained-gas-pressure-row-count-invalid' : null,
+    retainedGasPressureCellRowStrideFloats !== SPH_GAS_PRESSURE_CELL_FLOATS
+      ? 'retained-gas-pressure-row-stride-invalid'
+      : null,
+    retainedGasPressureCellRowByteLength < requiredByteLength
+      ? 'retained-gas-pressure-buffer-too-small'
+      : null
+  ].filter(Boolean);
+  if (blockers.length > 0) {
+    throw new Error(`Fused pressure retained gas-cell import rejected: ${blockers.join(', ')}`);
+  }
+  return {
+    importDescriptor,
+    admission,
+    retainedGasPressureCellsBuffer,
+    retainedGasPressureCellRowCount,
+    retainedGasPressureCellRowStrideFloats,
+    retainedGasPressureCellRowByteLength,
+    retainedPressureFieldMode:
+      importDescriptor.pressureFieldMode ?? 'local-gas-cell-pressure-gradient',
+    retainedPressureFieldResolution:
+      importDescriptor.pressureFieldResolution ?? 'structured-gas-cell-grid',
+    retainedLocalPressureGradientStatus:
+      importDescriptor.localPressureGradientStatus
+        ?? 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+    retainedGasPressureCellImport: importDescriptor
+  };
+}
+
+async function encodeResidentMaterialInterfacePressureRowsWebGpu({
+  device,
+  commandEncoder,
+  materialInterfaceSourceField,
+  materialInterfaceCompactCandidateCapacity = null,
+  residentNeighborhood,
+  residentNeighborhoodValidation = null,
+  pressureFeedback = null,
+  pressureInterfaceCoupling = null,
+  pressureInterfaceForcePreview = null,
+  pressureInterfaceStageOptions = {},
+  pressureInterfaceWorkspace = null,
+  pressureInterfaceWorkspaceSubstepIndex = 0,
+  sphParticleState,
+  sphParticleUpload,
+  particleCount,
+  boxDimsM
+}) {
+  const pressureNeighborhoodAdmission = resolveResidentNeighborhoodConsumer({
+    residentNeighborhood,
+    device,
+    consumer: 'pressureInterface',
+    sourceCount: particleCount,
+    ...(residentNeighborhoodValidation || {})
+  });
+  if (!pressureNeighborhoodAdmission.admitted) {
+    throw new Error(
+      `Fused pressure neighborhood rejected: ${pressureNeighborhoodAdmission.reasonCodes.join(', ')}`
+    );
+  }
+  const sourceRenderField = materialInterfaceSourceField.sourceRenderField
+    || materialInterfaceSourceField;
+  const retainedGpuGasCellImport =
+    pressureInterfaceStageOptions.retainedGasPressureCellImport?.schema
+      === ULG_SPH_SPATIAL_GAS_CELL_EOS_GPU_RESULT_SCHEMA
+      && pressureInterfaceStageOptions.retainedGasPressureCellImport.ready === true
+      ? pressureInterfaceStageOptions.retainedGasPressureCellImport
+      : null;
+  const retainedGasCellImport = retainedGpuGasCellImport
+    ? null
+    : normalizeRetainedPressureGasCellImport({
+        device,
+        pressureInterfaceStageOptions
+      });
+  const pressureWorkspaceResources =
+    pressureInterfaceWorkspace?.substepResources?.(
+      pressureInterfaceWorkspaceSubstepIndex
+    ) ?? null;
+  const materialInterfaceCandidates = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+    device,
+    renderField: sourceRenderField,
+    fieldRowsBuffer: materialInterfaceSourceField.fieldRowsBuffer || null,
+    surfaceBuffer: materialInterfaceSourceField.surfaceBuffer || null,
+    sourceIndexFieldBuffer: materialInterfaceSourceField.sourceIndexFieldBuffer
+      || sourceRenderField.sourceIndexFieldBuffer
+      || null,
+    compactCandidateCapacity: materialInterfaceCompactCandidateCapacity,
+    commandEncoder,
+    retainGpuCandidateBuffers: true,
+    residentAuthority: pressureNeighborhoodAdmission.expectedIdentity,
+    targetCandidateRowsBuffer:
+      pressureInterfaceWorkspace?.targetBuffers?.targetCandidateRowsBuffer ?? null,
+    targetCompactMetadataBuffer:
+      pressureInterfaceWorkspace?.targetBuffers?.targetCompactMetadataBuffer ?? null,
+    targetInterfaceSourceKeyBuffer:
+      pressureInterfaceWorkspace?.targetBuffers?.targetInterfaceSourceKeyBuffer ?? null,
+    targetCandidateDispatchIndirectBuffer:
+      pressureInterfaceWorkspace?.targetBuffers?.targetCandidateDispatchIndirectBuffer ?? null,
+    workspaceResources: pressureWorkspaceResources
+  });
+  materialInterfaceCandidates.sourceFieldProvenance = {
+    schema: 'peercompute.ulg.sph-material-interface-source-field-provenance.v0',
+    sourceStep: materialInterfaceSourceField.sourceStep,
+    sourcePositionEpoch: materialInterfaceSourceField.sourcePositionEpoch,
+    sourceNeighborhoodGeneration:
+      materialInterfaceSourceField.sourceNeighborhoodGeneration,
+    sourceNeighborhoodLaneId:
+      materialInterfaceSourceField.sourceNeighborhoodLaneId ?? null,
+    sourceNeighborhoodStateKey:
+      materialInterfaceSourceField.sourceNeighborhoodStateKey ?? null,
+    sourceDeviceId: materialInterfaceSourceField.sourceDeviceId,
+    candidateNeighborhoodGeneration:
+      pressureNeighborhoodAdmission.expectedIdentity.generation,
+    candidateNeighborhoodPositionEpoch:
+      pressureNeighborhoodAdmission.expectedIdentity.positionEpoch,
+    sourceProvenancePreserved: true
+  };
+  let pressureInterfaceStage = null;
+  try {
+    const effectivePressureFeedback = retainedGasCellImport
+      ? {
+          ...(pressureFeedback || {}),
+          schema: pressureFeedback?.schema
+            ?? 'peercompute.ulg.sph-pressure-feedback-from-retained-gas-cells.v0',
+          status: pressureFeedback?.status === 'wall-pressure-ledger-ready'
+            ? pressureFeedback.status
+            : 'wall-pressure-ledger-ready',
+          strictReactionGateStatus:
+            pressureFeedback?.strictReactionGateStatus ?? 'strict-reaction-gate-pass',
+          gasCellField: {
+            ...(pressureFeedback?.gasCellField || {}),
+            schema: pressureFeedback?.gasCellField?.schema
+              ?? 'peercompute.ulg.sph-retained-gas-cell-pressure-field.v0',
+            status: 'gas-cell-pressure-field-ready',
+            pressureFieldMode: retainedGasCellImport.retainedPressureFieldMode,
+            pressureFieldResolution: retainedGasCellImport.retainedPressureFieldResolution,
+            localPressureGradientReady: true,
+            localPressureGradientStatus:
+              retainedGasCellImport.retainedLocalPressureGradientStatus
+          }
+        }
+      : pressureFeedback;
+    const derivedPressureInterfaceCoupling = gasPressureInterfaceCouplingSummary({
+      pressureFeedback: effectivePressureFeedback,
+      materialInterfaceField: materialInterfaceCandidates
+    });
+    const derivedPressureInterfaceForcePreview = gasPressureInterfaceForcePreview({
+      pressureFeedback: effectivePressureFeedback,
+      materialInterfaceField: materialInterfaceCandidates,
+      pressureInterfaceCoupling: derivedPressureInterfaceCoupling,
+      algorithmMaterialContactRows:
+        pressureInterfaceStageOptions.algorithmMaterialContactRows ?? null,
+      algorithmContactPairResponseScale:
+        pressureInterfaceStageOptions.algorithmContactPairResponseScale,
+      algorithmContactMaxPressurePa:
+        pressureInterfaceStageOptions.algorithmContactMaxPressurePa
+    });
+    pressureInterfaceStage = await createSphPressureInterfaceForceRowsWebGpuEncoderStage({
+      ...pressureInterfaceStageOptions,
+      device,
+      commandEncoder,
+      materialInterfaceField: materialInterfaceCandidates,
+      pressureFeedback: effectivePressureFeedback,
+      pressureInterfaceCoupling: derivedPressureInterfaceCoupling,
+      pressureInterfaceForcePreview: derivedPressureInterfaceForcePreview,
+      ...(retainedGasCellImport || {}),
+      retainedGasPressureCellImport: retainedGpuGasCellImport
+        ?? pressureInterfaceStageOptions.retainedGasPressureCellImport
+        ?? null,
+      targetContactKinematicsBuffer:
+        pressureInterfaceWorkspace?.targetBuffers?.targetContactKinematicsBuffer ?? null,
+      targetForceRowsBuffer:
+        pressureInterfaceWorkspace?.targetBuffers?.targetForceRowsBuffer ?? null,
+      pressureInterfaceWorkspace,
+      pressureInterfaceWorkspaceSubstepIndex,
+      residentNeighborhood,
+      residentNeighborhoodValidation,
+      sphParticleState,
+      sphParticleUpload,
+      particleStateBuffer: sphParticleUpload.stateBuffer,
+      particleThermoBuffer: sphParticleUpload.thermoBuffer,
+      particleCount,
+      boxDimsM
+    });
+    const pressureInterfaceForceSolver = {
+      ...pressureInterfaceStage.pressureInterfaceForceSolver,
+      forceApplicationStatus: 'pressure-interface-grid-force-consumer-approved',
+      gridForceApplicationApproved: true
+    };
+    const neighborhoodLease = pressureNeighborhoodAdmission.descriptor?.lease ?? null;
+    const injectedLaneIdentity = pressureInterfaceStageOptions.laneExecutionIdentity
+      ?? pressureInterfaceStageOptions.gpuResidentLaneLeaseIdentity
+      ?? null;
+    if (neighborhoodLease?.authoritative === true && (
+      !injectedLaneIdentity
+      || injectedLaneIdentity.leaseId !== neighborhoodLease.leaseId
+      || injectedLaneIdentity.laneId !== neighborhoodLease.laneId
+      || injectedLaneIdentity.stateKey !== neighborhoodLease.stateKey
+      || injectedLaneIdentity.sourceFamily !== neighborhoodLease.sourceFamily
+      || typeof injectedLaneIdentity.taskId !== 'string'
+      || injectedLaneIdentity.taskId.length === 0
+    )) {
+      throw new Error(
+        'Authoritative fused pressure stage requires an injected task identity matching the resident neighborhood lease'
+      );
+    }
+    const laneLocalExecutionToken = {
+      schema: 'peercompute.ulg.pressure-interface-lane-local-execution-token.v0',
+      status: 'pressure-interface-lane-local-execution-token-valid',
+      leaseId: neighborhoodLease?.leaseId ?? null,
+      laneId: neighborhoodLease?.laneId ?? null,
+      stateKey: neighborhoodLease?.stateKey ?? null,
+      sourceFamily: neighborhoodLease?.sourceFamily ?? null,
+      taskId: injectedLaneIdentity?.taskId ?? 'local-inline-pressure-sequence',
+      authoritative: neighborhoodLease?.authoritative === true,
+      generation: pressureNeighborhoodAdmission.expectedIdentity.generation,
+      positionEpoch: pressureNeighborhoodAdmission.expectedIdentity.positionEpoch,
+      sourceCount: pressureNeighborhoodAdmission.expectedIdentity.sourceCount,
+      commandEncoderOwnership: 'caller',
+      queueSubmitPerformed: false,
+      stateManagerCommitted: false
+    };
+    const pressureInterfaceGridForceAdmission = {
+      schema: 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0',
+      status: 'pressure-interface-lane-local-force-consumption-approved',
+      gridForceApplicationApproved: true,
+      committed: false,
+      stateManagerCommitted: false,
+      outputFamilies: ['pressure-interface-force-rows'],
+      pressureInterfaceForceRowCount: pressureInterfaceStage.forceRowCapacity,
+      admissionAuthority: 'same-encoder-lane-local-execution-token',
+      laneLocalExecutionToken,
+      residentNeighborhoodGeneration: pressureNeighborhoodAdmission.expectedIdentity.generation,
+      residentNeighborhoodPositionEpoch:
+        pressureNeighborhoodAdmission.expectedIdentity.positionEpoch
+    };
+    return {
+      materialInterfaceCandidates,
+      pressureInterfaceStage,
+      pressureInterfaceForceRowsBuffer: pressureInterfaceStage.forceRowsBuffer,
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      pressureNeighborhoodAdmission,
+      laneLocalExecutionToken,
+      pressureInterfaceCoupling: derivedPressureInterfaceCoupling,
+      pressureInterfaceForcePreview: derivedPressureInterfaceForcePreview,
+      retainedGasCellImport: retainedGpuGasCellImport ?? retainedGasCellImport
+    };
+  } catch (error) {
+    pressureInterfaceStage?.cleanupSubmittedWork?.();
+    pressureInterfaceStage?.destroyForceRowsBuffer?.();
+    materialInterfaceCandidates.cleanupSubmittedWork?.();
+    materialInterfaceCandidates.destroyMaterialInterfaceCandidateFieldBuffers?.({
+      reason: 'fused-pressure-stage-error'
+    });
+    throw error;
+  }
+}
+
 function canUseFusedNoFullMechanicsPath({
   requestedReadbackMode,
   preferWebGpu,
@@ -3254,8 +4237,23 @@ function canUseFusedNoFullMechanicsPath({
   pressureInterfaceForceRowsBuffer,
   pressureInterfaceForceSolver,
   pressureInterfaceGridForceAdmission,
+  materialInterfaceSourceField,
+  residentNeighborhood,
+  schroederSparseHierarchy,
   residentProductMass
 }) {
+  const sourceFieldPressureRequested = Boolean(materialInterfaceSourceField);
+  const sourceFieldPressureEligible = sourceFieldPressureRequested
+    && Boolean(residentNeighborhood)
+    && !pressureInterfaceForceRowsBuffer
+    && !pressureInterfaceForceSolver
+    && !pressureInterfaceGridForceAdmission;
+  const sparsePressureScatter = resolveFusedPressureScatter({
+    device: resolvedDevice,
+    pressureInterfaceForceRowsBuffer,
+    pressureInterfaceForceSolver,
+    pressureInterfaceGridForceAdmission
+  });
   return requestedReadbackMode === NO_FULL_READBACK_MODE
     && preferWebGpu
     && Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer)
@@ -3264,9 +4262,9 @@ function canUseFusedNoFullMechanicsPath({
     && !p2gRunner
     && !gridUpdateRunner
     && !g2pRunner
-    && !pressureInterfaceForceRowsBuffer
-    && !pressureInterfaceForceSolver
-    && !pressureInterfaceGridForceAdmission
+    && (sourceFieldPressureRequested
+      ? sourceFieldPressureEligible
+      : sparsePressureScatter.eligible)
     && !residentProductMass;
 }
 
@@ -3288,33 +4286,154 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
   schroederActiveNodeList = null,
+  schroederSparseHierarchy = null,
+  schroederSparseGridArenaByteBudget = null,
+  pressureInterfaceForceRowsBuffer = null,
+  pressureInterfaceForceSolver = null,
+  pressureInterfaceGridForceAdmission = null,
+  materialInterfaceSourceField = null,
+  materialInterfaceCompactCandidateCapacity = null,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
+  pressureFeedback = null,
+  pressureInterfaceCoupling = null,
+  pressureInterfaceForcePreview = null,
+  pressureInterfaceStageOptions = {},
   measureGpuTimestamps = false
 }) {
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
   const particleCount = sphParticleState.particleCount;
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const particleIterationCapacity = schroederParticleIterationCapacity({
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  if (
+    particleCountResidency
+    && (!sphParticleUpload?.stateBuffer
+      || !sphParticleUpload?.thermoBuffer
+      || !mlsMpmParticleUpload?.mechanicsBuffer)
+  ) {
+    throw new TypeError(
+      'GPU-authored fused mechanics particle count requires complete retained particle buffers'
+    );
+  }
   const gridSpec = createMlsMpmGridSpec({ boxDimsM: dims, gridSpacingM });
-  const gridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const p2gAccumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
+  const schroederSparseGridPlan = !schroederSparseHierarchy
+    ? null
+    : createSchroederSparseGridViewPlan({
+        gridDims: gridSpec.gridDims,
+        gridShift: gridSpec.shift,
+        gridSpacingM: gridSpec.gridSpacingM,
+        selectedLevel: schroederSelectedLevel,
+        chartId: 0,
+        particleCapacity: particleIterationCapacity,
+        particleStateStrideVec4: SPH_GPU_PARTICLE_STATE_FLOATS / 4,
+        levelAssignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+        arenaByteBudget: schroederSparseGridArenaByteBudget
+          ?? schroederSparseHierarchy.sparseGridArenaByteBudget
+          ?? undefined,
+        maxBufferSize: device.limits?.maxBufferSize ?? Number.POSITIVE_INFINITY,
+        maxStorageBufferBindingSize:
+          device.limits?.maxStorageBufferBindingSize ?? Number.POSITIVE_INFINITY,
+        minUniformBufferOffsetAlignment:
+          device.limits?.minUniformBufferOffsetAlignment ?? 256,
+        maxComputeWorkgroupsPerDimension:
+          device.limits?.maxComputeWorkgroupsPerDimension ?? 65535
+      });
+  const schroederSparseGridRuntime = !schroederSparseGridPlan
+    ? null
+    : createSchroederSparseGridViewGpu(device, {
+        hierarchy: schroederSparseHierarchy,
+        plan: schroederSparseGridPlan,
+        label: 'ulg-mls-mpm-fused-schroeder-sparse-grid'
+      });
+  const encoder = device.createCommandEncoder();
+  if (typeof encoder.clearBuffer !== 'function') {
+    throw new Error('Fused resident mechanics requires GPUCommandEncoder.clearBuffer');
+  }
+  let derivedMaterialInterfaceCandidates = null;
+  let derivedPressureInterfaceStage = null;
+  let resolvedPressureForceRowsBuffer = pressureInterfaceForceRowsBuffer;
+  let resolvedPressureForceSolver = pressureInterfaceForceSolver;
+  let resolvedPressureGridForceAdmission = pressureInterfaceGridForceAdmission;
+  if (materialInterfaceSourceField) {
+    if (
+      pressureInterfaceForceRowsBuffer
+      || pressureInterfaceForceSolver
+      || pressureInterfaceGridForceAdmission
+    ) {
+      throw new Error(
+        'Fused pressure accepts either a material-interface source field or prebuilt force rows, not both'
+      );
+    }
+    const pressureChain = await encodeResidentMaterialInterfacePressureRowsWebGpu({
+      device,
+      commandEncoder: encoder,
+      materialInterfaceSourceField,
+      materialInterfaceCompactCandidateCapacity,
+      residentNeighborhood,
+      residentNeighborhoodValidation,
+      pressureFeedback,
+      pressureInterfaceCoupling,
+      pressureInterfaceForcePreview,
+      pressureInterfaceStageOptions,
+      sphParticleState,
+      sphParticleUpload,
+      particleCount,
+      boxDimsM: dims
+    });
+    derivedMaterialInterfaceCandidates = pressureChain.materialInterfaceCandidates;
+    derivedPressureInterfaceStage = pressureChain.pressureInterfaceStage;
+    resolvedPressureForceRowsBuffer = pressureChain.pressureInterfaceForceRowsBuffer;
+    resolvedPressureForceSolver = pressureChain.pressureInterfaceForceSolver;
+    resolvedPressureGridForceAdmission = pressureChain.pressureInterfaceGridForceAdmission;
+  }
+  const sparsePressureScatter = resolveFusedPressureScatter({
+    device,
+    pressureInterfaceForceRowsBuffer: resolvedPressureForceRowsBuffer,
+    pressureInterfaceForceSolver: resolvedPressureForceSolver,
+    pressureInterfaceGridForceAdmission: resolvedPressureGridForceAdmission
+  });
+  if (sparsePressureScatter.requested && !sparsePressureScatter.eligible) {
+    throw new Error(`Fused pressure scatter blocked: ${sparsePressureScatter.blocker}`);
+  }
+  const gridArenaNodeCount = schroederSparseGridPlan?.gridNodeCapacity ?? gridSpec.gridNodeCount;
+  const gridByteLength = gridArenaNodeCount
+    * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const p2gAccumulatorElementCount = Math.max(1, gridArenaNodeCount * P2G_ACCUMULATOR_COMPONENTS);
   const p2gAccumulatorByteLength = p2gAccumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
-  const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const updatedGridByteLength = gridArenaNodeCount
+    * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   // Never size GPU output buffers from the CPU arrays alone: under
   // GPU-resident continuation the CPU copies can be stale or detached
   // (byteLength 0), which would allocate 4-byte outputs and fail every
-  // downstream binding. particleCount * stride is authoritative.
+  // downstream binding. The retained capacity sizes storage; metadata word 4
+  // remains the only authoritative live count.
   const stateByteLength = Math.max(
     sphParticleState.state.byteLength,
-    sphParticleState.particleCount * (sphParticleState.stateStrideBytes
+    particleIterationCapacity * (sphParticleState.stateStrideBytes
       ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const thermoByteLength = Math.max(
+    sphParticleState.thermo.byteLength,
+    particleIterationCapacity * (sphParticleState.thermoStrideBytes
+      ?? SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
   const mechanicsByteLength = Math.max(
     mlsMpmParticleState.mechanics.byteLength,
-    mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
+    particleIterationCapacity * (mlsMpmParticleState.mechanicsStrideBytes
       ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
   const activeGridDispatch = resolveFusedActiveGridDispatch({
-    requested: fuseActiveGrid,
+    requested: fuseActiveGrid && !schroederSparseGridPlan,
     sphParticleState,
     gridSpec,
     dt: dtSeconds,
@@ -3322,11 +4441,13 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     gravityMPerS2: gravity,
     safetyCells: activeGridSafetyCells
   });
-  const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
+  const activeGridNodeDispatchCount = schroederSparseGridPlan
+    ? gridArenaNodeCount
+    : activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
   const activeGridDispatchPlanHint = sphParticleState?.residentActiveGridDispatchPlanHint ?? null;
-  const activeGridIndirectDispatchArgs = createActiveGridComputeDispatchArgsBuffer(
+  const activeGridIndirectDispatchArgs = schroederSparseGridPlan ? null : createActiveGridComputeDispatchArgsBuffer(
     device,
     activeGridDispatch,
     Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
@@ -3338,13 +4459,40 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     }
   );
   const dispatchTopology = createResidentDispatchTopology({
-    particleCount,
+    particleCount: particleIterationCapacity,
+    particleCountResidency,
     gridSpec,
     activeGridDispatch,
+    schroederSparseGridPlan,
     substepCount: 1,
     fusedResidentMechanics: true,
     p2gBackend
   });
+  if (sparsePressureScatter.requested) {
+    const pressureWorkgroups = Math.max(
+      1,
+      Math.ceil(sparsePressureScatter.forceRowCapacity / 64)
+    );
+    dispatchTopology.pressureInterfaceScatter = {
+      stageId: 'pressureInterfaceScatter',
+      topology: 'force-row-parallel-sparse-quadratic-stencil-scatter',
+      entryPoint: 'scatter_pressure_force_rows',
+      dispatchAxis: 'retained-pressure-force-row-capacity',
+      dispatchWorkgroupsPerSubstep: pressureWorkgroups,
+      invocationLimitPerSubstep: sparsePressureScatter.forceRowCapacity,
+      stencilNodeCountPerInvocation: 27,
+      sparseHashLookup: Boolean(schroederSparseGridPlan),
+      directGridLookup: !schroederSparseGridPlan,
+      workgroupSize: 64,
+      gridNodeOuterLoop: false,
+      forceRowStatusGate: sparsePressureScatter.solver.forceRowStatusGate
+    };
+    dispatchTopology.pressureRowParallelStages = ['pressureInterfaceScatter'];
+    dispatchTopology.dispatchesPerSubstep += 1;
+    dispatchTopology.totalDispatches += 1;
+    dispatchTopology.workgroupsPerSubstep += pressureWorkgroups;
+    dispatchTopology.totalWorkgroups += pressureWorkgroups;
+  }
   const schroederLevelFilter = createFusedSchroederLevelAssignmentBinding({
     device,
     schroederLevelAssignment,
@@ -3359,7 +4507,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-p2g-grid-out',
     size: Math.max(4, gridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const p2gAccumulatorBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-p2g-grid-accumulators',
@@ -3387,25 +4536,41 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     activeGridDispatch.useActiveGrid
       ? createFusedActiveP2gParamsArray(
           gridSpec,
-          particleCount,
+          particleIterationCapacity,
           dtSeconds,
           internalPressureScale,
           activeGridDispatch,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          schroederSparseGridPlan
         )
       : createFusedP2gParamsArray(
           gridSpec,
-          particleCount,
+          particleIterationCapacity,
           dtSeconds,
           internalPressureScale,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          0,
+          schroederSparseGridPlan
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
+  const pressureScatterParamsBuffer = sparsePressureScatter.requested
+    ? writeGpuBuffer(
+        device,
+        'ulg-mls-mpm-fused-sparse-pressure-scatter-params',
+        createFusedSparsePressureScatterParamsArray({
+          gridSpec,
+          forceRowCapacity: sparsePressureScatter.forceRowCapacity,
+          dt: dtSeconds,
+          schroederSparseGridPlan
+        }),
+        GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      )
+    : null;
   const gridUpdateParamsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-grid-update-params',
@@ -3421,6 +4586,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         })
       : createFusedGridUpdateParamsArray({
           gridSpec,
+          gridNodeCount: gridArenaNodeCount,
           dt: dtSeconds,
           gravityMPerS2: gravity,
           boxDimsM: dims,
@@ -3433,14 +4599,16 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     device,
     'ulg-mls-mpm-fused-g2p-params',
     createFusedG2pParamsArray({
-      particleCount,
+      particleCount: particleIterationCapacity,
       gridSpec,
+      gridNodeCount: gridArenaNodeCount,
       dt: dtSeconds,
       boxDimsM: dims,
       internalPressureScale,
       liquidWallDampingAlpha: mlsMpmParticleState.liquidWallDampingAlpha,
       liquidWallDampingDistanceM: mlsMpmParticleState.liquidWallDampingDistanceM,
-      schroederLevelFilter
+      schroederLevelFilter,
+      schroederSparseGridPlan
     }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -3459,6 +4627,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const tempBuffers = [
     p2gAccumulatorBuffer,
     p2gParamsBuffer,
+    ...[pressureScatterParamsBuffer].filter(Boolean),
     gridUpdateParamsBuffer,
     g2pParamsBuffer,
     productEventBuffer,
@@ -3470,10 +4639,19 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const gpuTimestampProfiler = createWebGpuTimestampProfiler(device, {
     requested: Boolean(measureGpuTimestamps),
     label: 'ulg-mls-mpm-fused-resident-step',
-    maxSpans: activeGridDispatch.useActiveGrid ? 8 : 7
+    maxSpans: schroederSparseGridPlan ? 20 : (activeGridDispatch.useActiveGrid ? 10 : 8)
   });
   let retained = false;
+  let schroederSparseGrid = null;
   try {
+    const p2gProjectionBaseWgsl = schroederSparseGridPlan
+      ? mlsMpmP2gSchroederSparseGridFusedWgsl
+      : activeGridDispatch.useActiveGrid
+      ? mlsMpmP2gGridProjectionActiveGridWgsl
+      : mlsMpmP2gGridProjectionWgsl;
+    const p2gProjectionWgsl = particleCountResidency
+      ? withSchroederParticleCountResidencyGuard(p2gProjectionBaseWgsl)
+      : p2gProjectionBaseWgsl;
     const p2gBindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
@@ -3486,39 +4664,73 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       computeBufferBinding(8, 'read-only-storage')
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v5'
-        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v5',
-      label: activeGridDispatch.useActiveGrid
+      cacheKey: schroederSparseGridPlan
+        ? `ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused.scatter.${particleCountResidency ? 'resident-count.v1' : 'v0'}`
+        : activeGridDispatch.useActiveGrid
+        ? `ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.${particleCountResidency ? 'resident-count.v1' : 'v5'}`
+        : `ulg-mls-mpm-p2g-grid-projection.scatter.${particleCountResidency ? 'resident-count.v1' : 'v5'}`,
+      label: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-projection-schroeder-sparse-fused'
+        : activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection-active-grid'
         : 'ulg-mls-mpm-p2g-grid-projection',
-      code: activeGridDispatch.useActiveGrid
-        ? mlsMpmP2gGridProjectionActiveGridWgsl
-        : mlsMpmP2gGridProjectionWgsl,
+      code: p2gProjectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: activeGridDispatch.useActiveGrid
+      cacheKey: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused.finalize.v0'
+        : activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v5'
         : 'ulg-mls-mpm-p2g-grid-projection.finalize.v5',
-      label: activeGridDispatch.useActiveGrid
+      label: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-finalize-schroeder-sparse-fused'
+        : activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-finalize-active-grid'
         : 'ulg-mls-mpm-p2g-grid-finalize',
-      code: activeGridDispatch.useActiveGrid
-        ? mlsMpmP2gGridProjectionActiveGridWgsl
-        : mlsMpmP2gGridProjectionWgsl,
+      code: p2gProjectionBaseWgsl,
       entryPoint: 'finalize_grid',
       bindings: p2gBindings
     });
-    const activeAccumulatorClearPipelineInfo = activeGridDispatch.useActiveGrid
+    const activeAccumulatorClearPipelineInfo = schroederSparseGridPlan
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v5',
-        label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-active-grid',
-        code: mlsMpmP2gGridProjectionActiveGridWgsl,
+        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused.clear.v0',
+        label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-schroeder-sparse-fused',
+        code: p2gProjectionBaseWgsl,
         entryPoint: 'clear_accumulators',
         bindings: p2gBindings
       })
+      : activeGridDispatch.useActiveGrid
+      ? createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v5',
+        label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-active-grid',
+        code: p2gProjectionBaseWgsl,
+        entryPoint: 'clear_accumulators',
+        bindings: p2gBindings
+      })
+      : null;
+    const pressureScatterPipelineInfo = sparsePressureScatter.requested
+      ? createCachedExplicitComputePipeline(device, {
+          cacheKey: schroederSparseGridPlan
+            ? 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.pressure-scatter.v0'
+            : 'ulg-mls-mpm-p2g-grid-projection.direct.pressure-scatter.v0',
+          label: schroederSparseGridPlan
+            ? 'ulg-mls-mpm-p2g-grid-pressure-scatter-schroeder-sparse'
+            : 'ulg-mls-mpm-p2g-grid-pressure-scatter-direct',
+          code: schroederSparseGridPlan
+            ? mlsMpmP2gSchroederSparseGridFusedWgsl
+            : mlsMpmP2gPressureScatterWgsl,
+          entryPoint: 'scatter_pressure_force_rows',
+          bindings: [
+            computeBufferBinding(3, 'storage'),
+            computeBufferBinding(4, 'uniform'),
+            computeBufferBinding(5, 'read-only-storage'),
+            ...(schroederSparseGridPlan
+              ? [computeBufferBinding(8, 'read-only-storage')]
+              : [])
+          ]
+        })
       : null;
     const p2gEntries = [
         { binding: 0, resource: { buffer: sphParticleUpload.stateBuffer } },
@@ -3526,10 +4738,16 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         { binding: 2, resource: { buffer: mlsMpmParticleUpload.mechanicsBuffer } },
         { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
         { binding: 4, resource: { buffer: p2gParamsBuffer } },
-        { binding: 5, resource: { buffer: productEventBuffer } },
+        {
+          binding: 5,
+          resource: {
+            buffer: particleCountResidency?.metadataBuffer ?? productEventBuffer
+          }
+        },
         { binding: 6, resource: { buffer: gridBuffer } },
         { binding: 7, resource: { buffer: schroederLevelFilter.assignmentBuffer } },
-        { binding: 8, resource: { buffer: schroederActiveNodeFilter.activeNodeBuffer } }
+        { binding: 8, resource: { buffer: schroederSparseGridRuntime?.viewBuffer
+          ?? schroederActiveNodeFilter.activeNodeBuffer } }
       ];
     const p2gBindGroup = device.createBindGroup({ layout: p2gBindGroupLayout, entries: p2gEntries });
     const p2gFinalizeBindGroup = device.createBindGroup({ layout: p2gFinalizeBindGroupLayout, entries: p2gEntries });
@@ -3538,6 +4756,19 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         layout: activeAccumulatorClearPipelineInfo.bindGroupLayout,
         entries: p2gEntries
       })
+      : null;
+    const pressureScatterBindGroup = pressureScatterPipelineInfo
+      ? device.createBindGroup({
+          layout: pressureScatterPipelineInfo.bindGroupLayout,
+          entries: [
+            { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
+            { binding: 4, resource: { buffer: pressureScatterParamsBuffer } },
+            { binding: 5, resource: { buffer: sparsePressureScatter.forceRowsBuffer } },
+            ...(schroederSparseGridPlan
+              ? [{ binding: 8, resource: { buffer: schroederSparseGridRuntime.viewBuffer } }]
+              : [])
+          ]
+        })
       : null;
     const { pipeline: gridUpdatePipeline, bindGroupLayout: gridUpdateBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
@@ -3566,10 +4797,20 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         { binding: 3, resource: { buffer: pressureRowsBuffer } }
       ]
     });
+    const g2pBaseWgsl = schroederSparseGridPlan
+      ? mlsMpmG2pSchroederSparseGridWgsl
+      : mlsMpmG2pReconstructWgsl;
+    const g2pWgsl = particleCountResidency
+      ? withSchroederG2pParticleCountResidencyGuard(g2pBaseWgsl)
+      : g2pBaseWgsl;
     const { pipeline: g2pPipeline, bindGroupLayout: g2pBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v3',
-      label: 'ulg-mls-mpm-g2p-reconstruct',
-      code: mlsMpmG2pReconstructWgsl,
+      cacheKey: schroederSparseGridPlan
+        ? `ulg-mls-mpm-g2p-reconstruct.schroeder-sparse.fused.${particleCountResidency ? 'resident-count.v1' : 'v0'}`
+        : `ulg-mls-mpm-g2p-reconstruct.${particleCountResidency ? 'resident-count.v1' : 'v3'}`,
+      label: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-g2p-reconstruct-schroeder-sparse-fused'
+        : 'ulg-mls-mpm-g2p-reconstruct',
+      code: g2pWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -3579,14 +4820,21 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         computeBufferBinding(4, 'storage'),
         computeBufferBinding(5, 'storage'),
         computeBufferBinding(6, 'uniform'),
-        computeBufferBinding(7, 'read-only-storage')
+        computeBufferBinding(7, 'read-only-storage'),
+        ...(schroederSparseGridPlan ? [computeBufferBinding(8, 'read-only-storage')] : [])
       ]
     });
     const g2pBindGroup = device.createBindGroup({
       layout: g2pBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sphParticleUpload.stateBuffer } },
-        { binding: 1, resource: { buffer: sphParticleUpload.thermoBuffer } },
+        {
+          binding: 1,
+          resource: {
+            buffer: particleCountResidency?.metadataBuffer
+              ?? sphParticleUpload.thermoBuffer
+          }
+        },
         { binding: 2, resource: { buffer: mlsMpmParticleUpload.mechanicsBuffer } },
         { binding: 3, resource: { buffer: updatedGridBuffer } },
         { binding: 4, resource: { buffer: outStateBuffer } },
@@ -3594,14 +4842,48 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         { binding: 6, resource: { buffer: g2pParamsBuffer } },
         // G2P filters by particle-parallel level-assignment rows (never the
         // compacted active-node list, whose rows are not particle-aligned).
-        { binding: 7, resource: { buffer: schroederLevelFilter.assignmentBuffer } }
+        { binding: 7, resource: { buffer: schroederLevelFilter.assignmentBuffer } },
+        ...(schroederSparseGridPlan
+          ? [{ binding: 8, resource: { buffer: schroederSparseGridRuntime.viewBuffer } }]
+          : [])
       ]
     });
-    const encoder = device.createCommandEncoder();
-    if (typeof encoder.clearBuffer !== 'function') {
-      throw new Error('Fused resident mechanics requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
+    if (schroederSparseGridRuntime) {
+      schroederSparseGrid = schroederSparseGridRuntime.encode(encoder, {
+        generationId: schroederSparseHierarchy.generationId,
+        particleStateBuffer: sphParticleUpload.stateBuffer,
+        particleLevelAssignmentBuffer: schroederLevelFilter.enabled
+          ? schroederLevelFilter.assignmentBuffer
+          : null,
+        particleCountResidency,
+        pressureForceSource: schroederSparseGridPressureSource({
+          scatter: sparsePressureScatter,
+          pressureStage: derivedPressureInterfaceStage
+            ?? pressureInterfaceForceSolver,
+          status: 'current-pressure-force-centroids-encoded-before-compaction',
+          centroidOrderStatus: derivedPressureInterfaceStage
+            ? 'same-encoder-current-pressure-centroids-built-before-actual-node-compaction'
+            : 'caller-admitted-pressure-force-rows-available-before-actual-node-compaction'
+        }),
+        timestampProfiler: gpuTimestampProfiler,
+        timestampMetadata: { substepIndex: 0, stage: 'schroeder-sparse-grid-view' }
+      });
     }
-    if (activeGridDispatch.useActiveGrid) {
+    if (schroederSparseGrid) {
+      const accumulatorClearPass = encoder.beginComputePass(
+        gpuTimestampProfiler.beginComputePassDescriptor('schroederSparseGridAccumulatorClear', {
+          substepIndex: 0,
+          hierarchyGenerationId: schroederSparseGrid.hierarchyGenerationId
+        })
+      );
+      accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
+      accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
+      accumulatorClearPass.dispatchWorkgroupsIndirect(
+        schroederSparseGrid.dispatchIndirectBuffer,
+        schroederSparseGrid.dispatchIndirectByteOffset ?? 0
+      );
+      accumulatorClearPass.end();
+    } else if (activeGridDispatch.useActiveGrid) {
       const accumulatorClearPass = encoder.beginComputePass(
         gpuTimestampProfiler.beginComputePassDescriptor('activeGridAccumulatorClear', {
           substepIndex: 0
@@ -3625,8 +4907,35 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     );
     p2gPass.setPipeline(p2gPipeline);
     p2gPass.setBindGroup(0, p2gBindGroup);
-    p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+    dispatchSchroederParticleWorkgroups(p2gPass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: particleCount,
+      workgroupSize: 64
+    });
     p2gPass.end();
+    if (pressureScatterPipelineInfo) {
+      const pressureScatterPass = encoder.beginComputePass(
+        gpuTimestampProfiler.beginComputePassDescriptor('pressureInterfaceSparseScatter', {
+          substepIndex: 0,
+          forceRowCapacity: sparsePressureScatter.forceRowCapacity,
+          forceRowStatusGate: sparsePressureScatter.solver.forceRowStatusGate
+        })
+      );
+      pressureScatterPass.setPipeline(pressureScatterPipelineInfo.pipeline);
+      pressureScatterPass.setBindGroup(0, pressureScatterBindGroup);
+      if (sparsePressureScatter.candidateDispatchIndirectBuffer) {
+        pressureScatterPass.dispatchWorkgroupsIndirect(
+          sparsePressureScatter.candidateDispatchIndirectBuffer,
+          sparsePressureScatter.candidateDispatchIndirectOffsetBytes
+        );
+      } else {
+        pressureScatterPass.dispatchWorkgroups(Math.max(
+          1,
+          Math.ceil(sparsePressureScatter.forceRowCapacity / 64)
+        ));
+      }
+      pressureScatterPass.end();
+    }
     const p2gFinalizePass = encoder.beginComputePass(
       gpuTimestampProfiler.beginComputePassDescriptor('p2gGridFinalize', {
         substepIndex: 0
@@ -3634,11 +4943,18 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     );
     p2gFinalizePass.setPipeline(p2gFinalizePipeline);
     p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
-    dispatchActiveGridComputePass(
-      p2gFinalizePass,
-      Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-      activeGridIndirectDispatchArgs
-    );
+    if (schroederSparseGrid) {
+      p2gFinalizePass.dispatchWorkgroupsIndirect(
+        schroederSparseGrid.dispatchIndirectBuffer,
+        schroederSparseGrid.dispatchIndirectByteOffset ?? 0
+      );
+    } else {
+      dispatchActiveGridComputePass(
+        p2gFinalizePass,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridIndirectDispatchArgs
+      );
+    }
     p2gFinalizePass.end();
     const gridUpdatePass = encoder.beginComputePass(
       gpuTimestampProfiler.beginComputePassDescriptor('gridUpdate', {
@@ -3647,11 +4963,18 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     );
     gridUpdatePass.setPipeline(gridUpdatePipeline);
     gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
-    dispatchActiveGridComputePass(
-      gridUpdatePass,
-      Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-      activeGridIndirectDispatchArgs
-    );
+    if (schroederSparseGrid) {
+      gridUpdatePass.dispatchWorkgroupsIndirect(
+        schroederSparseGrid.dispatchIndirectBuffer,
+        schroederSparseGrid.dispatchIndirectByteOffset ?? 0
+      );
+    } else {
+      dispatchActiveGridComputePass(
+        gridUpdatePass,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridIndirectDispatchArgs
+      );
+    }
     gridUpdatePass.end();
     const g2pPass = encoder.beginComputePass(
       gpuTimestampProfiler.beginComputePassDescriptor('g2pReconstruction', {
@@ -3660,16 +4983,22 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     );
     g2pPass.setPipeline(g2pPipeline);
     g2pPass.setBindGroup(0, g2pBindGroup);
-    g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+    dispatchSchroederParticleWorkgroups(g2pPass, {
+      residency: particleCountResidency,
+      fallbackParticleCount: particleCount,
+      workgroupSize: 64
+    });
     g2pPass.end();
     const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
       stateBuffer: outStateBuffer,
       mechanicsBuffer: outMechanicsBuffer,
       particleCount,
+      particleCountResidency,
       boxDimsM: dims,
       relaxation: mlsMpmParticleState?.particleSeparationRelaxation
         ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
       maxPairRestDistanceM: maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount),
+      minCellSizeM: particleCountResidency ? gridSpec.gridSpacingM : 0,
       gridSpacingM: gridSpec.gridSpacingM,
       timestampProfiler: gpuTimestampProfiler,
       timestampMetadata: { substepIndex: 0 }
@@ -3684,6 +5013,45 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       { role: 'updated-grid-output', buffer: updatedGridBuffer, owned: true },
       { role: 'particle-state-output', buffer: outStateBuffer, owned: true },
       { role: 'particle-mechanics-output', buffer: outMechanicsBuffer, owned: true },
+      ...(schroederSparseGridRuntime
+        ? schroederSparseGridRuntime.allocationEntries().map((entry) => ({
+            ...entry,
+            role: `schroeder-sparse-grid-${entry.role}`,
+            owned: true
+          }))
+        : []),
+      ...(schroederSparseGrid?.transientBuffers || []).map((buffer) => ({
+        role: 'schroeder-sparse-grid-encoding-transient',
+        buffer,
+        owned: true
+      })),
+      ...(derivedMaterialInterfaceCandidates ? [
+        {
+          role: 'pressure-interface-compact-candidate-rows',
+          buffer: derivedMaterialInterfaceCandidates.candidateRowsBuffer,
+          owned: true
+        },
+        {
+          role: 'pressure-interface-compact-candidate-metadata',
+          buffer: derivedMaterialInterfaceCandidates.compactMetadataBuffer,
+          owned: true
+        },
+        {
+          role: 'pressure-interface-candidate-dispatch-indirect',
+          buffer: derivedMaterialInterfaceCandidates.candidateDispatchIndirectBuffer,
+          owned: derivedMaterialInterfaceCandidates.candidateDispatchIndirectBufferOwned !== false
+        },
+        {
+          role: 'pressure-interface-source-keys',
+          buffer: derivedMaterialInterfaceCandidates.interfaceSourceKeyBuffer,
+          owned: true
+        }
+      ] : []),
+      ...(derivedPressureInterfaceStage?.forceRowsBuffer ? [{
+        role: 'pressure-interface-force-rows',
+        buffer: derivedPressureInterfaceStage.forceRowsBuffer,
+        owned: true
+      }] : []),
       ...separation.transientBuffers.map((buffer) => ({ buffer, owned: true })),
       ...gpuTimestampProfiler.allocationEntries(),
       { role: 'source-particle-state', buffer: sphParticleUpload.stateBuffer, owned: false },
@@ -3712,11 +5080,29 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     retained = true;
-    const webgpuStatus = {
-      status: 'webgpu-executed-no-full-readback',
-      reason: 'Fused WebGPU MLS-MPM P2G/grid-update/G2P executed without full readback'
+    let schroederSparseGridDestroyed = false;
+    const destroySchroederSparseGridBuffers = () => {
+      if (schroederSparseGridDestroyed) return;
+      schroederSparseGridDestroyed = true;
+      schroederSparseGridRuntime?.destroy();
     };
-    const pressureFields = pressureInterfaceGridForceBlockedFields();
+    const sparseGridTelemetry = schroederSparseGridProductionTelemetry({
+      plan: schroederSparseGridPlan,
+      executions: [schroederSparseGrid]
+    });
+    const webgpuStatus = {
+      status: sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+        ? 'webgpu-sparse-grid-source-fail-closed-no-full-readback'
+        : 'webgpu-executed-no-full-readback',
+      reason: sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+        ? 'Fused WebGPU MLS-MPM sparse-grid consumers were zero-indirect fail-closed by source admission'
+        : 'Fused WebGPU MLS-MPM P2G/grid-update/G2P executed without full readback'
+    };
+    const pressureFields = pressureInterfaceForceRowScatterFields(sparsePressureScatter, {
+      sparseGrid: Boolean(schroederSparseGridPlan),
+      sparseGridSourceFailClosed:
+        sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+    });
     const p2gGridProjection = {
       schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
       projectionSchema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
@@ -3724,9 +5110,20 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       status: webgpuStatus.status,
       kernelScope: 'particle-parallel-scatter-p2g-stress-momentum-projection',
       particleCount,
+      particleIterationCapacity,
+      particleCountAuthority: particleCountResidency
+        ? 'gpu-authored-residency-metadata'
+        : 'host-known-particle-count',
+      particleCountCpuDecoded: !particleCountResidency,
+      ...schroederParticleCountResidencyPublicFields(particleCountResidency),
+      ...(particleCountResidency ? {
+        particleCountResidencyMetadataBuffer: particleCountResidency.metadataBuffer,
+        particleCountDispatchIndirectBuffer: particleCountResidency.dispatchIndirectBuffer
+      } : {}),
       gridSpacingM: gridSpec.gridSpacingM,
       gridDims: [...gridSpec.gridDims],
-      gridNodeCount: gridSpec.gridNodeCount,
+      gridNodeCount: gridArenaNodeCount,
+      fullGridNodeCount: gridSpec.gridNodeCount,
       gridShift: gridSpec.shift,
       dt: dtSeconds,
       internalPressureScale,
@@ -3749,6 +5146,14 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       schroederSelectedLevel: schroederLevelFilter.enabled ? schroederLevelFilter.selectedLevel : null,
       schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
       schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true,
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      schroederSparseGridPeakAllocatedByteLength:
+        schroederSparseGridPlan?.peakAllocatedByteLength ?? 0,
+      ...sparseGridTelemetry,
+      ...pressureFields,
+      destroySchroederSparseGridBuffers,
       activeGridDispatch,
       activeGridIndirectDispatch
     };
@@ -3761,7 +5166,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       particleCount,
       gridSpacingM: gridSpec.gridSpacingM,
       gridDims: [...gridSpec.gridDims],
-      gridNodeCount: gridSpec.gridNodeCount,
+      gridNodeCount: gridArenaNodeCount,
+      fullGridNodeCount: gridSpec.gridNodeCount,
       gridShift: gridSpec.shift,
       dt: dtSeconds,
       gravityMPerS2: [...gravity],
@@ -3784,6 +5190,10 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       dispatchTopology: dispatchTopology.gridUpdate,
       residentDispatchTopology: dispatchTopology,
       fusedResidentMechanics: true,
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      ...sparseGridTelemetry,
       activeGridDispatch,
       activeGridIndirectDispatch
     };
@@ -3798,7 +5208,18 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       status: 'reconstructed',
       kernelScope: 'mls-mpm-g2p-velocity-affine-deformation-reconstruction',
       particleCount,
-      gridNodeCount: gridSpec.gridNodeCount,
+      particleIterationCapacity,
+      particleCountAuthority: particleCountResidency
+        ? 'gpu-authored-residency-metadata'
+        : 'host-known-particle-count',
+      particleCountCpuDecoded: !particleCountResidency,
+      ...schroederParticleCountResidencyPublicFields(particleCountResidency),
+      ...(particleCountResidency ? {
+        particleCountResidencyMetadataBuffer: particleCountResidency.metadataBuffer,
+        particleCountDispatchIndirectBuffer: particleCountResidency.dispatchIndirectBuffer
+      } : {}),
+      gridNodeCount: gridArenaNodeCount,
+      fullGridNodeCount: gridSpec.gridNodeCount,
       gridSpacingM: gridSpec.gridSpacingM,
       gridDims: [...gridSpec.gridDims],
       gridShift: gridSpec.shift,
@@ -3823,6 +5244,10 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       particleScaleMaxRadiusGrowthRatioAllowed: g2pParticleScaleStability.maxRadiusGrowthRatioAllowed,
       schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
       schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true,
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      ...sparseGridTelemetry,
       webgpuStatus,
       webgpuParity: {
         status: 'not-run-no-full-readback',
@@ -3854,10 +5279,21 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     return {
       schema: 'peercompute.ulg.mls-mpm-fused-mechanics-step.v0',
       backend: 'webgpu',
-      status: 'fused-mechanics-webgpu-executed-no-full-readback',
+      status: sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+        ? 'fused-mechanics-webgpu-sparse-grid-source-fail-closed'
+        : 'fused-mechanics-webgpu-executed-no-full-readback',
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      ...sparseGridTelemetry,
       activeGridDispatch,
       activeGridIndirectDispatch,
       dispatchTopology,
+      particleIterationCapacity,
+      particleCountAuthority: particleCountResidency
+        ? 'gpu-authored-residency-metadata'
+        : 'host-known-particle-count',
+      ...schroederParticleCountResidencyPublicFields(particleCountResidency),
       queueSubmitMs,
       queueFenceMs,
       queueFenceStatus,
@@ -3867,6 +5303,46 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       gpuTimestampStatus: gpuTimestampProfile.status,
       gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
       gpuAllocationEvidence,
+      pressureInterfaceForceRowScatter: sparsePressureScatter.requested
+        ? {
+            status: schroederSparseGridPlan
+              ? (sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+                  ? 'pressure-interface-sparse-p2g-source-fail-closed-zero-indirect'
+                  : 'pressure-interface-sparse-p2g-accumulator-scatter-submitted')
+              : 'pressure-interface-direct-p2g-accumulator-scatter-submitted',
+            forceRowCapacity: sparsePressureScatter.forceRowCapacity,
+            forceRowStrideFloats: sparsePressureScatter.forceRowStrideFloats,
+            forceRowByteLength: sparsePressureScatter.forceRowByteLength,
+            forceRowStatusGate: sparsePressureScatter.solver.forceRowStatusGate,
+            dispatchMode: sparsePressureScatter.candidateDispatchIndirectBuffer
+              ? 'dispatchWorkgroupsIndirect'
+              : 'dispatchWorkgroups',
+            dispatchAuthority: sparsePressureScatter.candidateDispatchAuthority,
+            dispatchWorkgroups: sparsePressureScatter.candidateDispatchIndirectBuffer
+              ? null
+              : Math.max(
+              1,
+              Math.ceil(sparsePressureScatter.forceRowCapacity / 64)
+            ),
+            dispatchWorkgroupCapacityCeiling: Math.max(
+              1,
+              Math.ceil(sparsePressureScatter.forceRowCapacity / 64)
+            ),
+            gridNodeOuterLoop: false,
+            sparseHashLookup: Boolean(schroederSparseGridPlan),
+            directGridLookup: !schroederSparseGridPlan,
+            readbackPerformed: false,
+            sourceMode: derivedPressureInterfaceStage
+              ? 'same-encoder-source-field-candidate-force-chain'
+              : 'caller-retained-force-rows',
+            candidateStageStatus: derivedMaterialInterfaceCandidates?.status ?? null,
+            pressureStageStatus: derivedPressureInterfaceStage?.status ?? null,
+            candidateReadbackPerformed:
+              derivedMaterialInterfaceCandidates?.readbackPerformed === true,
+            pressureReadbackPerformed:
+              derivedPressureInterfaceStage?.readbackPerformed === true
+          }
+        : null,
       p2gGridProjection,
       gridUpdate,
       g2pReconstruction
@@ -3875,7 +5351,15 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     gpuTimestampProfiler.destroy();
     const cleanup = () => {
       for (const buffer of tempBuffers) buffer.destroy?.();
+      derivedPressureInterfaceStage?.cleanupSubmittedWork?.();
+      derivedPressureInterfaceStage?.destroyForceRowsBuffer?.();
+      derivedMaterialInterfaceCandidates?.cleanupSubmittedWork?.();
+      derivedMaterialInterfaceCandidates?.destroyMaterialInterfaceCandidateFieldBuffers?.({
+        reason: 'fused-sparse-pressure-stage-complete'
+      });
+      schroederSparseGrid?.releaseTransientBuffers?.();
       if (!retained) {
+        schroederSparseGridRuntime?.destroy();
         gridBuffer.destroy?.();
         updatedGridBuffer.destroy?.();
         outStateBuffer.destroy?.();
@@ -3884,6 +5368,113 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     };
     deferSubmittedWorkCleanup(device, cleanup);
   }
+}
+
+export async function encodeResidentNeighborhoodPressureGridStagesWebGpu({
+  device,
+  commandEncoder,
+  residentNeighborhood,
+  residentNeighborhoodValidation = null,
+  pressureStageOptions = {},
+  gridUpdateOptions = {},
+  pressureInterfaceGridForceAdmission = null,
+  approvePressureInterfaceForceSolver = null
+} = {}) {
+  if (!device || !commandEncoder?.beginComputePass) {
+    throw new TypeError('resident pressure/grid stages require a device and caller-owned commandEncoder');
+  }
+  if (!residentNeighborhood) {
+    throw new TypeError('resident pressure/grid stages require an admitted residentNeighborhood build');
+  }
+  const pressureStage = await createSphPressureInterfaceForceRowsWebGpuEncoderStage({
+    ...pressureStageOptions,
+    device,
+    commandEncoder,
+    residentNeighborhood,
+    residentNeighborhoodValidation
+  });
+  let gridStage = null;
+  try {
+    const pressureInterfaceForceSolver = typeof approvePressureInterfaceForceSolver === 'function'
+      ? await approvePressureInterfaceForceSolver(
+          pressureStage.pressureInterfaceForceSolver,
+          pressureInterfaceGridForceAdmission
+        )
+      : pressureStage.pressureInterfaceForceSolver;
+    gridStage = await createMlsMpmGridUpdateWebGpuEncoderStage({
+      ...gridUpdateOptions,
+      device,
+      commandEncoder,
+      pressureInterfaceForceRowsBuffer: pressureStage.forceRowsBuffer,
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission
+    });
+    return {
+      schema: 'peercompute.ulg.resident-neighborhood-pressure-grid-encoder-chain.v0',
+      status: gridStage.pressureInterfaceGridForceAdmissionApproved === true
+        ? 'resident-neighborhood-pressure-grid-chain-encoded'
+        : 'resident-neighborhood-pressure-grid-chain-encoded-force-application-blocked',
+      commandEncoderOwnership: 'caller',
+      submissionOwnership: 'caller',
+      queueSubmitPerformed: false,
+      mapPerformed: false,
+      readbackPerformed: false,
+      residentNeighborhoodAdmission: pressureStage.residentNeighborhoodAdmission,
+      pressureStage,
+      gridStage,
+      cleanupSubmittedWork() {
+        gridStage.cleanupSubmittedWork?.();
+        pressureStage.cleanupSubmittedWork?.();
+      }
+    };
+  } catch (error) {
+    pressureStage.cleanupSubmittedWork?.();
+    throw error;
+  }
+}
+
+function residentSequencePredecessorPublicationTokenFromUploads({
+  sphParticleUpload,
+  mlsMpmParticleUpload
+} = {}) {
+  const sphToken = sphParticleUpload?.residentSequencePredecessorPublicationToken ?? null;
+  const mechanicsToken =
+    mlsMpmParticleUpload?.residentSequencePredecessorPublicationToken ?? null;
+  if (!sphToken && !mechanicsToken) return null;
+  const tokenFields = [
+    'schema',
+    'deviceId',
+    'laneId',
+    'stateKey',
+    'sourceFamily',
+    'authorityEpoch',
+    'workspaceGeneration',
+    'acquisitionId',
+    'submissionVersion'
+  ];
+  if (!sphToken || !mechanicsToken || tokenFields.some(
+    (field) => sphToken[field] !== mechanicsToken[field]
+  )) {
+    const error = new Error(
+      'resident sequence continuation uploads carry a torn predecessor publication token'
+    );
+    error.code = 'ULG_SPH_RESIDENT_SEQUENCE_PREDECESSOR_TOKEN_TORN';
+    throw error;
+  }
+  return sphToken;
+}
+
+export function completeResidentGasCellEosResultsAtSharedOuterFence(results = []) {
+  let completedCount = 0;
+  for (const result of results || []) {
+    if (result?.ready !== true || typeof result.markSubmitted !== 'function') continue;
+    result.markSubmitted({
+      queueCompletionStatus: 'queue-work-completed',
+      queueCompletionMethod: 'shared-outer-submitted-work-cleanup'
+    });
+    completedCount += 1;
+  }
+  return completedCount;
 }
 
 async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
@@ -3910,48 +5501,635 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
   schroederActiveNodeList = null,
+  schroederSparseHierarchy = null,
+  schroederSparseGridArenaByteBudget = null,
   measureQueueFence = false,
   measureGpuTimestamps = false,
+  includeGpuAllocationRows = false,
   sidecarFusionPlan = null,
   thermalMaterialTable = null,
   thermalStepOptions = {},
+  reactionTable = null,
+  reactionStepOptions = {},
   mechanicsMaterialTable = null,
-  mechanicsRefreshOptions = {}
+  mechanicsRefreshOptions = {},
+  residentProductMass = null,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
+  residentNeighborhoodLaneOptions = null,
+  materialInterfaceSourceField = null,
+  materialInterfaceCompactCandidateCapacity = null,
+  pressureFeedback = null,
+  pressureInterfaceCoupling = null,
+  pressureInterfaceForcePreview = null,
+  pressureInterfaceStageOptions = {},
+  residentSequenceAuthorityEpoch = 0
 }) {
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
   const particleCount = sphParticleState.particleCount;
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const particleIterationCapacity = schroederParticleIterationCapacity({
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  if (
+    particleCountResidency
+    && (!sphParticleUpload?.stateBuffer
+      || !sphParticleUpload?.thermoBuffer
+      || !mlsMpmParticleUpload?.mechanicsBuffer)
+  ) {
+    throw new TypeError(
+      'GPU-authored fused mechanics sequence particle count requires complete retained particle buffers'
+    );
+  }
+  const inputResidentProductEventCount = Math.max(0, Math.round(finiteNumber(
+    residentProductMass?.productEventRowCount,
+    0
+  )));
+  let residentProductEventCount = inputResidentProductEventCount;
+  let residentProductEventDispatchIndirectBuffer =
+    residentProductMass?.productEventDispatchIndirectBuffer
+      || residentProductMass?.productEventArenaCapacityDescriptor?.dispatchIndirectBuffer
+      || null;
+  let residentProductEventCountAuthority = residentProductEventDispatchIndirectBuffer
+    ? 'gpu-authored-arena-active-count-indirect'
+    : 'host-product-event-row-count';
+  const residentProductEventStrideFloats = Math.max(0, Math.round(finiteNumber(
+    residentProductMass?.productEventStrideFloats,
+    SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+  )));
+  const residentProductEventRequiredByteLength = residentProductEventCount
+    * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  if (residentProductMass) {
+    const residentProductMassBlockers = [
+      residentProductMass.productEventBufferRetained !== true
+        ? 'product-event-buffer-not-retained'
+        : null,
+      !residentProductMass.productEventBuffer ? 'product-event-buffer-missing' : null,
+      !residentProductMassMatchesDevice(residentProductMass, device)
+        ? 'product-event-buffer-device-mismatch'
+        : null,
+      residentProductEventCount <= 0 ? 'product-event-row-count-invalid' : null,
+      residentProductEventStrideFloats !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+        ? 'product-event-row-stride-invalid'
+        : null,
+      Math.max(0, Math.round(finiteNumber(
+        residentProductMass.productEventBufferByteLength
+          ?? residentProductMass.productEventBuffer?.size,
+        0
+      ))) < residentProductEventRequiredByteLength
+        ? 'product-event-buffer-too-small'
+        : null
+    ].filter(Boolean);
+    if (residentProductMassBlockers.length > 0) {
+      const error = new Error(
+        `Fused resident product-mass continuation rejected: ${residentProductMassBlockers.join(', ')}`
+      );
+      error.code = 'ULG_RESIDENT_PRODUCT_MASS_CONTINUATION_REJECTED';
+      error.residentProductMassBlockers = residentProductMassBlockers;
+      throw error;
+    }
+  }
+  if (residentNeighborhood && count > 1) {
+    throw new RangeError(
+      'a resident neighborhood is position-epoch bound; fused reuse requires one substep or an explicit rebuild between substeps'
+    );
+  }
   const gridSpec = createMlsMpmGridSpec({ boxDimsM: dims, gridSpacingM });
-  const gridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const p2gAccumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
+  const schroederSparseGridPlan = !schroederSparseHierarchy
+    ? null
+    : createSchroederSparseGridViewPlan({
+        gridDims: gridSpec.gridDims,
+        gridShift: gridSpec.shift,
+        gridSpacingM: gridSpec.gridSpacingM,
+        selectedLevel: schroederSelectedLevel,
+        chartId: 0,
+        particleCapacity: particleIterationCapacity,
+        particleStateStrideVec4: SPH_GPU_PARTICLE_STATE_FLOATS / 4,
+        levelAssignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+        arenaByteBudget: schroederSparseGridArenaByteBudget
+          ?? schroederSparseHierarchy.sparseGridArenaByteBudget
+          ?? undefined,
+        maxBufferSize: device.limits?.maxBufferSize ?? Number.POSITIVE_INFINITY,
+        maxStorageBufferBindingSize:
+          device.limits?.maxStorageBufferBindingSize ?? Number.POSITIVE_INFINITY,
+        minUniformBufferOffsetAlignment:
+          device.limits?.minUniformBufferOffsetAlignment ?? 256,
+        maxComputeWorkgroupsPerDimension:
+          device.limits?.maxComputeWorkgroupsPerDimension ?? 65535
+      });
+  const schroederSparseGridRuntime = !schroederSparseGridPlan
+    ? null
+    : createSchroederSparseGridViewGpu(device, {
+        hierarchy: schroederSparseHierarchy,
+        plan: schroederSparseGridPlan,
+        label: 'ulg-mls-mpm-fused-sequence-schroeder-sparse-grid'
+      });
+  const gridArenaNodeCount = schroederSparseGridPlan?.gridNodeCapacity
+    ?? gridSpec.gridNodeCount;
+  const gridByteLength = gridArenaNodeCount
+    * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const p2gAccumulatorElementCount = Math.max(
+    1,
+    gridArenaNodeCount * P2G_ACCUMULATOR_COMPONENTS
+  );
   const p2gAccumulatorByteLength = p2gAccumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
-  const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const updatedGridByteLength = gridArenaNodeCount
+    * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   // Never size GPU output buffers from the CPU arrays alone: under
   // GPU-resident continuation the CPU copies can be stale or detached
   // (byteLength 0), which would allocate 4-byte outputs and fail every
-  // downstream binding. particleCount * stride is authoritative.
+  // downstream binding. The retained capacity sizes storage; metadata word 4
+  // remains the only authoritative live count.
   const stateByteLength = Math.max(
     sphParticleState.state.byteLength,
-    sphParticleState.particleCount * (sphParticleState.stateStrideBytes
+    particleIterationCapacity * (sphParticleState.stateStrideBytes
       ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const thermoByteLength = Math.max(
+    sphParticleState.thermo.byteLength,
+    particleIterationCapacity * (sphParticleState.thermoStrideBytes
+      ?? SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
   const mechanicsByteLength = Math.max(
     mlsMpmParticleState.mechanics.byteLength,
-    mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
+    particleIterationCapacity * (mlsMpmParticleState.mechanicsStrideBytes
       ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
-  const useThermalSidecarFusion = Boolean(
+  const sidecarEncoderFusionAdmitted = Boolean(
     sidecarFusionPlan?.sequenceRunnableWithSidecars === true
-    && sidecarFusionPlan?.sidecarBlockers?.length === 1
-    && sidecarFusionPlan.sidecarBlockers[0] === 'thermal-sidecar'
+    || sidecarFusionPlan?.sidecarBlockers?.length === 0
+  );
+  const useThermalSidecarFusion = Boolean(
+    sidecarEncoderFusionAdmitted
     && thermalMaterialTable
     && mechanicsMaterialTable
   );
-  const sidecarFusionDispatchCount = useThermalSidecarFusion ? count * 2 : 0;
+  const useReactionSidecarFusion = Boolean(
+    sidecarEncoderFusionAdmitted
+    && reactionTable?.reactionCount > 0
+    && thermalMaterialTable
+  );
+  const useMechanicsRefreshSidecarFusion = Boolean(
+    useThermalSidecarFusion && !useReactionSidecarFusion
+  );
+  const reactiveProductEventRowsPerSubstep = useReactionSidecarFusion
+    ? sphReactionProductEventCapacityRows({
+        particleCount: sphParticleState.particleCount,
+        reactionTable
+      })
+    : 0;
+  const reactiveMultiStepResidentSequence = Boolean(
+    count > 1
+    && useReactionSidecarFusion
+    && reactiveProductEventRowsPerSubstep > 0
+  );
+  const inputProductEventArena = residentProductMass?.productEventArena?.schema
+      === ULG_SPH_RESIDENT_PRODUCT_EVENT_ARENA_SCHEMA
+    ? residentProductMass.productEventArena
+    : null;
+  if (
+    reactiveMultiStepResidentSequence
+    && residentProductMass
+    && !inputProductEventArena
+  ) {
+    const error = new RangeError(
+      'Multi-step reactive residency requires carried product events in the GPU-authored arena ABI'
+    );
+    error.code = 'ULG_REACTIVE_SEQUENCE_CARRIED_PRODUCT_ARENA_REQUIRED';
+    throw error;
+  }
+  let residentProductEventEncoderSequence = null;
+  let sequenceResidentProductMass = residentProductMass;
+  if (reactiveMultiStepResidentSequence) {
+    residentProductEventEncoderSequence = prepareResidentProductEventArenaGpuEncoderSequence(
+      device,
+      {
+        arena: inputProductEventArena,
+        strideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+        sourceRowCount: reactiveProductEventRowsPerSubstep,
+        appendCount: count,
+        label: 'ulg-mls-mpm-reactive-resident-product-events'
+      }
+    );
+    const productArena = residentProductEventEncoderSequence.arena;
+    const plannedProductEventRowCount =
+      residentProductEventEncoderSequence.reservation.requiredRowCount;
+    residentProductEventCount = plannedProductEventRowCount;
+    residentProductEventDispatchIndirectBuffer = productArena.dispatchIndirectBuffer;
+    residentProductEventCountAuthority = 'gpu-authored-arena-active-count-indirect';
+    let productArenaDestroyed = false;
+    const productArenaOwnerToken = {};
+    productArena.ownerToken = productArenaOwnerToken;
+    sequenceResidentProductMass = tagResidentProductMassDevice({
+      schema: residentProductMass?.schema || 'peercompute.ulg.sph-resident-product-mass.v0',
+      status: 'resident-product-mass-reactive-sequence-encoded',
+      source: 'caller-encoder-reaction-product-event-arena-sequence',
+      productEventBuffer: productArena.buffer,
+      productEventBufferRetained: true,
+      productEventBufferByteLength: productArena.buffer.size,
+      productEventRowCount: plannedProductEventRowCount,
+      productEventRowCountExact: null,
+      productEventRowCountAuthority: 'gpu-authored-metadata-word-2',
+      productEventActiveEventCount: null,
+      productEventActiveEventCountAuthority: 'gpu-authored-metadata-word-3',
+      productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+      productEventStrideBytes:
+        SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+      productEventGenerationCount:
+        (residentProductMass?.productEventGenerationCount ?? 0) + count,
+      productEventArena: productArena,
+      productEventArenaCapacityDescriptor:
+        residentProductEventEncoderSequence.capacityDescriptor(),
+      productEventMetadataBuffer: productArena.metadataBuffer,
+      productEventDispatchIndirectBuffer: productArena.dispatchIndirectBuffer,
+      productEventDispatchMode: 'gpu-authored-exact-live-prefix-indirect',
+      consumeMassPolicy: 'unplaced-product-mass-only',
+      visibleMassAlreadyInParticleBuffers: true,
+      eosCouplingStatus: 'same-encoder-per-substep-spatial-gas-eos',
+      normalHotLoopReadbackFree: true,
+      mapPerformed: false,
+      readbackPerformed: false,
+      destroyResidentProductMassBuffers() {
+        if (productArenaDestroyed) return;
+        productArenaDestroyed = true;
+        if (productArena.ownerToken === productArenaOwnerToken) productArena.destroy();
+      },
+      scientificValidation: false,
+      chemistryValidation: false,
+      fullPhysicsValidation: false
+    }, device);
+  }
+  const laneOptions = residentNeighborhoodLaneOptions === false
+    ? { enabled: false }
+    : (residentNeighborhoodLaneOptions || {});
+  const neighborhoodSourceStep = Math.max(
+    0,
+    Math.round(finiteNumber(sphParticleState?.step ?? mlsMpmParticleState?.step, 0))
+  );
+  const materialInterfaceSourceStep = Number(materialInterfaceSourceField?.sourceStep);
+  if (
+    materialInterfaceSourceField
+    && Number.isFinite(materialInterfaceSourceStep)
+    && Math.round(materialInterfaceSourceStep) !== neighborhoodSourceStep
+  ) {
+    const error = new Error(
+      `Material-interface source field step ${Math.round(materialInterfaceSourceStep)} does not match resident source step ${neighborhoodSourceStep}`
+    );
+    error.code = 'ULG_PRESSURE_SOURCE_FIELD_POSITION_EPOCH_STALE';
+    throw error;
+  }
+  const sourceStepMutationEpochs = residentNeighborhoodMutationEpochsForStep(
+    neighborhoodSourceStep
+  );
+  const defaultInitialNeighborhoodEpoch = sourceStepMutationEpochs.preStep;
+  const absoluteNeighborhoodGenerationBase = Math.max(
+    0,
+    Math.round(finiteNumber(
+      materialInterfaceSourceField ? defaultInitialNeighborhoodEpoch : laneOptions.generationBase,
+      defaultInitialNeighborhoodEpoch
+    ))
+  );
+  const absoluteNeighborhoodPositionEpochBase = Math.max(
+    0,
+    Math.round(finiteNumber(
+      materialInterfaceSourceField ? defaultInitialNeighborhoodEpoch : laneOptions.positionEpochBase,
+      defaultInitialNeighborhoodEpoch
+    ))
+  );
+  const neighborhoodGenerationEpochOffset =
+    absoluteNeighborhoodGenerationBase - defaultInitialNeighborhoodEpoch;
+  const neighborhoodPositionEpochOffset =
+    absoluteNeighborhoodPositionEpochBase - defaultInitialNeighborhoodEpoch;
+  if (materialInterfaceSourceField) {
+    const sourcePositionEpoch = Number(materialInterfaceSourceField.sourcePositionEpoch);
+    const sourceNeighborhoodGeneration = Number(
+      materialInterfaceSourceField.sourceNeighborhoodGeneration
+    );
+    const topologyOnlySource =
+      materialInterfaceSourceField.sourceFieldGenerationMode
+        === 'same-encoder-state-thermo-direct';
+    const sourceDeviceId = materialInterfaceSourceField.sourceDeviceId;
+    const consumerDeviceId = webGpuDeviceId(device);
+    const sourceLaneId = materialInterfaceSourceField.sourceNeighborhoodLaneId ?? null;
+    const sourceStateKey = materialInterfaceSourceField.sourceNeighborhoodStateKey ?? null;
+    const expectedLaneId = laneOptions.laneId
+      ?? 'compute-manager-resident-mechanics-lane';
+    const expectedStateKey = laneOptions.stateKey
+      ?? `sph-particle-hot-state:${sourceSlot}`;
+    const blockers = [
+      !Number.isInteger(materialInterfaceSourceStep) || materialInterfaceSourceStep < 0
+        ? 'source-step-invalid'
+        : null,
+      !Number.isInteger(sourcePositionEpoch) || sourcePositionEpoch < 0
+        ? 'source-position-epoch-invalid'
+        : null,
+      sourcePositionEpoch !== absoluteNeighborhoodPositionEpochBase
+        ? 'source-position-epoch-starting-neighborhood-mismatch'
+        : null,
+      !Number.isInteger(sourceNeighborhoodGeneration) || sourceNeighborhoodGeneration < 0
+        ? 'source-neighborhood-generation-invalid'
+        : null,
+      sourceNeighborhoodGeneration !== absoluteNeighborhoodGenerationBase
+        ? 'source-neighborhood-generation-mismatch'
+        : null,
+      typeof sourceDeviceId !== 'string' || sourceDeviceId.length === 0
+        ? 'source-device-identity-missing'
+        : null,
+      sourceDeviceId && consumerDeviceId && sourceDeviceId !== consumerDeviceId
+        ? 'source-device-identity-mismatch'
+        : null,
+      topologyOnlySource
+        && materialInterfaceSourceField.sourceNeighborhoodAuthorityBinding
+          !== 'deferred-to-consuming-compute-manager-lane'
+        ? 'source-topology-authority-binding-invalid'
+        : null,
+      topologyOnlySource && sourceLaneId !== null
+        ? 'source-topology-lane-must-be-deferred'
+        : null,
+      topologyOnlySource && sourceStateKey !== null
+        ? 'source-topology-state-key-must-be-deferred'
+        : null,
+      !topologyOnlySource && sourceLaneId !== null && sourceLaneId !== expectedLaneId
+        ? 'source-neighborhood-lane-mismatch'
+        : null,
+      !topologyOnlySource && sourceStateKey !== null && sourceStateKey !== expectedStateKey
+        ? 'source-neighborhood-state-key-mismatch'
+        : null,
+      ...[
+        materialInterfaceSourceField.fieldRowsBuffer,
+        materialInterfaceSourceField.surfaceBuffer,
+        materialInterfaceSourceField.sourceIndexFieldBuffer
+      ].map((buffer) => webGpuDeviceMismatchInfo({ buffer, device }))
+        .filter((identity) => identity.mismatch)
+        .map(() => 'source-buffer-device-mismatch')
+    ].filter(Boolean);
+    if (blockers.length > 0) {
+      const error = new Error(
+        `Material-interface source provenance rejected: ${[...new Set(blockers)].join(', ')}`
+      );
+      error.code = 'ULG_PRESSURE_SOURCE_FIELD_PROVENANCE_REJECTED';
+      error.pressureInterfaceBlockers = [...new Set(blockers)];
+      throw error;
+    }
+  }
+  let materialInterfaceSourceFieldLaneAcquisition = null;
+  let materialInterfaceSourceFieldLane = null;
+  let materialInterfaceSourceFieldLaneOptions = null;
+  if (materialInterfaceSourceField) {
+    const surfaceTable = materialInterfaceSourceField.surfaceTable
+      ?? materialInterfaceSourceField.sourceRenderField?.surfaceTable
+      ?? null;
+    if (!surfaceTable?.schema || !(surfaceTable.records instanceof Float32Array)) {
+      const error = new Error(
+        'Material-interface source-field pressure requires a reusable surface topology table'
+      );
+      error.code = 'ULG_PRESSURE_SOURCE_FIELD_SURFACE_TOPOLOGY_REQUIRED';
+      throw error;
+    }
+    materialInterfaceSourceFieldLaneOptions = {
+      surfaceTable,
+      particleCapacity: particleCount,
+      productEventCapacity: Math.max(
+        residentProductEventCount,
+        Math.round(finiteNumber(
+          residentProductMass?.productEventRowCapacity
+            ?? residentProductMass?.productEventArenaCapacityDescriptor?.rowCapacity,
+          residentProductEventCount
+        ))
+      ),
+      fieldPadding: materialInterfaceSourceField.fieldPadding
+        ?? materialInterfaceSourceField.sourceRenderField?.fieldPadding
+        ?? 0.22,
+      refEdgeM: materialInterfaceSourceField.refEdgeM
+        ?? materialInterfaceSourceField.sourceRenderField?.refEdgeM
+        ?? Math.max(...dims),
+      renderDomainBaseCount: Math.max(0, Math.round(finiteNumber(
+        materialInterfaceSourceField.renderDomainBaseCount
+          ?? materialInterfaceSourceField.sourceRenderField?.renderDomainBaseCount
+          ?? cohortRanges?.base?.count,
+        0
+      ))),
+      renderDomainDropCount: Math.max(0, Math.round(finiteNumber(
+        materialInterfaceSourceField.renderDomainDropCount
+          ?? materialInterfaceSourceField.sourceRenderField?.renderDomainDropCount
+          ?? cohortRanges?.drop?.count,
+        0
+      ))),
+      paramsSlotCount: count,
+      generationBase: Math.max(1, Math.round(finiteNumber(
+        materialInterfaceSourceField.sourceFieldGeneration,
+        1
+      ))),
+      laneId: laneOptions.laneId ?? 'compute-manager-resident-mechanics-lane',
+      stateKey: laneOptions.stateKey ?? `sph-particle-hot-state:${sourceSlot}`,
+      sourceFamily: laneOptions.sourceFamily ?? 'sph-particle-state',
+      label: 'ulg-mls-mpm-fused-material-interface-source-field'
+    };
+  }
+  const residentNeighborhoodLaneRequested = !residentNeighborhood
+    && particleCount > (materialInterfaceSourceField ? 0 : 1)
+    && laneOptions.enabled !== false;
+  const requestedNeighborhoodBuilderStrategy = laneOptions.builderStrategy ?? 'auto';
+  const defaultNeighborhoodSupportDistanceM = Math.max(
+    2 * Math.max(0, finiteNumber(sphParticleState?.smoothingLengthM, 0)),
+    4 * Math.max(0, finiteNumber(gridSpec.gridSpacingM, 0))
+  );
+  const resolvedNeighborhoodSupportDistanceM = Math.max(
+    Number.EPSILON,
+    finiteNumber(laneOptions.supportDistanceM, defaultNeighborhoodSupportDistanceM)
+  );
+  const resolvedNeighborhoodCellSizeM = Math.max(
+    Number.EPSILON,
+    finiteNumber(
+      laneOptions.cellSizeM,
+      laneOptions.supportDistanceM ?? defaultNeighborhoodSupportDistanceM
+    )
+  );
+  const resolvedNeighborhoodOriginM = laneOptions.originM
+    ?? dims.map((extent) => -0.5 * extent);
+  const derivedNeighborhoodSkinPlan = resolveResidentNeighborhoodSkinPlan({
+    supportDistanceM: resolvedNeighborhoodSupportDistanceM,
+    gridSpacingM: gridSpec.gridSpacingM,
+    dtS: dtSeconds,
+    stepCount: count,
+    cflFactor
+  });
+  const configuredNeighborhoodSkinDistanceM = laneOptions.skinDistanceM === undefined
+    ? derivedNeighborhoodSkinPlan.skinDistanceM
+    : Math.max(0, finiteNumber(laneOptions.skinDistanceM, 0));
+  const residentNeighborhoodSkinPlan = Object.freeze({
+    ...derivedNeighborhoodSkinPlan,
+    status: configuredNeighborhoodSkinDistanceM > 0
+      ? 'resident-neighborhood-skin-plan-ready'
+      : 'resident-neighborhood-skin-plan-disabled',
+    skinDistanceM: configuredNeighborhoodSkinDistanceM,
+    displacementBudgetM: configuredNeighborhoodSkinDistanceM * 0.5,
+    source: laneOptions.skinDistanceM === undefined
+      ? 'solver-stability-derived'
+      : 'caller-declared-general-lane-policy'
+  });
+  const configuredNeighborhoodSupportClasses = Array.isArray(laneOptions.supportClasses)
+    ? laneOptions.supportClasses
+    : [];
+  const defaultNeighborhoodCellRadius = Math.ceil(
+    resolvedNeighborhoodSupportDistanceM / resolvedNeighborhoodCellSizeM
+  );
+  const maxConfiguredNeighborhoodCellRadius = Math.max(
+    defaultNeighborhoodCellRadius,
+    ...configuredNeighborhoodSupportClasses.map((entry) => Math.max(
+      0,
+      Math.round(finiteNumber(entry?.cellRadius, defaultNeighborhoodCellRadius))
+    ))
+  );
+  const maxNeighborhoodCellRadius = maxConfiguredNeighborhoodCellRadius
+    + Math.ceil(configuredNeighborhoodSkinDistanceM / resolvedNeighborhoodCellSizeM);
+  const defaultDenseUniformChart = {
+    minCell: [0, 0, 0],
+    dimensions: dims.map((extent) => (
+      Math.max(1, Math.floor(extent / resolvedNeighborhoodCellSizeM) + 1)
+    ))
+  };
+  const requestedDenseUniformChart = laneOptions.denseUniformChart === false
+    ? null
+    : (laneOptions.denseUniformChart ?? defaultDenseUniformChart);
+  const resolvedNeighborhoodDenseUniformChart = requestedDenseUniformChart == null
+    ? null
+    : normalizeResidentNeighborhoodDenseUniformChart({
+        ...requestedDenseUniformChart,
+        chartId: laneOptions.chartId ?? 0,
+        level: laneOptions.level ?? 0,
+        cellSizeM: resolvedNeighborhoodCellSizeM,
+        originM: resolvedNeighborhoodOriginM
+      }, {
+        sourceCount: particleCount,
+        maxCellRadius: maxNeighborhoodCellRadius,
+        sourceMetadataMode: laneOptions.sourceMetadataMode ?? 'uniform-gpu-expanded',
+        supportClasses: configuredNeighborhoodSupportClasses
+      });
+  const residentNeighborhoodBuilderStrategyPlan = planResidentNeighborhoodGpuBuilderStrategy({
+    sourceCount: particleCount,
+    requestedStrategy: requestedNeighborhoodBuilderStrategy,
+    denseUniformChart: resolvedNeighborhoodDenseUniformChart,
+    maxComputeWorkgroupsPerDimension:
+      device.limits?.maxComputeWorkgroupsPerDimension ?? 65535
+  });
+  const explicitNeighborhoodCandidateLimit = laneOptions.maxCandidatesPerSource !== undefined;
+  const defaultNeighborhoodCandidatesPerSource =
+    requestedNeighborhoodBuilderStrategy === 'auto'
+      && residentNeighborhoodBuilderStrategyPlan.strategy === 'direct'
+      ? particleCount
+      : 32;
+  const requestedNeighborhoodCandidatesPerSource = Math.max(
+    1,
+    Math.round(finiteNumber(
+      laneOptions.maxCandidatesPerSource,
+      defaultNeighborhoodCandidatesPerSource
+    ))
+  );
+  const resolvedResidentNeighborhoodLaneCapacity = residentNeighborhoodLaneRequested
+    ? resolveResidentNeighborhoodGpuLaneCapacity({
+        device,
+        sourceCount: particleCount,
+        requestedMaxCandidatesPerSource: requestedNeighborhoodCandidatesPerSource
+      })
+    : {
+        status: residentNeighborhood
+          ? 'external-resident-neighborhood-provided'
+          : 'resident-neighborhood-production-lane-not-requested',
+        admitted: false,
+        reason: residentNeighborhood
+          ? 'external-generation-owned-by-caller'
+          : 'production-lane-disabled'
+      };
+  const residentNeighborhoodLaneCapacity = Object.freeze({
+    ...resolvedResidentNeighborhoodLaneCapacity,
+    defaultPolicy: explicitNeighborhoodCandidateLimit
+      ? 'caller-declared-per-source-cap'
+      : (requestedNeighborhoodBuilderStrategy === 'auto'
+          && residentNeighborhoodBuilderStrategyPlan.strategy === 'direct'
+          ? 'exact-all-pairs-auto-direct'
+          : 'bounded-default-per-source-cap'),
+    builderStrategyPlan: residentNeighborhoodBuilderStrategyPlan
+  });
+  const residentNeighborhoodDirectSegmentedMasked = Boolean(
+    requestedNeighborhoodBuilderStrategy === 'auto'
+    && residentNeighborhoodBuilderStrategyPlan.strategy === 'direct'
+    && Number.isSafeInteger(particleCount * particleCount)
+    && residentNeighborhoodLaneCapacity.candidateCapacity >= particleCount * particleCount
+    && residentNeighborhoodLaneCapacity.maxCandidatesPerSource >= particleCount
+  );
+  let residentNeighborhoodLane = null;
+  let residentNeighborhoodLaneAcquisition = null;
+  let residentNeighborhoodLaneReason = residentNeighborhoodLaneCapacity.reason || null;
+  if (residentNeighborhoodLaneRequested && residentNeighborhoodLaneCapacity.admitted) {
+    const neighborhoodConsumers = laneOptions.consumers || [
+      'mechanics',
+      'contact',
+      'thermal',
+      'radiation',
+      'reaction',
+      'pressureInterface',
+      'solidKinematics',
+      'ssUniqueNodeCompaction'
+    ];
+    try {
+      residentNeighborhoodLaneAcquisition = acquireResidentNeighborhoodGpuLane(device, {
+        sourceCount: particleCount,
+        supportDistanceM: resolvedNeighborhoodSupportDistanceM,
+        cellSizeM: resolvedNeighborhoodCellSizeM,
+        originM: resolvedNeighborhoodOriginM,
+        chartId: laneOptions.chartId ?? 0,
+        level: laneOptions.level ?? 0,
+        consumers: neighborhoodConsumers,
+        supportClasses: laneOptions.supportClasses ?? null,
+        sourceSupportAssignments: laneOptions.sourceSupportAssignments ?? null,
+        sourceMetadataMode: laneOptions.sourceMetadataMode ?? 'uniform-gpu-expanded',
+        denseUniformChart: requestedDenseUniformChart,
+        maxCandidatesPerSource: residentNeighborhoodLaneCapacity.maxCandidatesPerSource,
+        candidateCapacity: residentNeighborhoodLaneCapacity.candidateCapacity,
+        builderStrategy: requestedNeighborhoodBuilderStrategy,
+        directSegmentedMasked: residentNeighborhoodDirectSegmentedMasked,
+        generationBase: absoluteNeighborhoodGenerationBase,
+        positionEpochBase: absoluteNeighborhoodPositionEpochBase,
+        leaseIdPrefix: laneOptions.leaseIdPrefix
+          ?? `mls-mpm-fused-neighborhood-slot-${sourceSlot}`,
+        laneId: laneOptions.laneId ?? 'compute-manager-resident-mechanics-lane',
+        stateKey: laneOptions.stateKey ?? `sph-particle-hot-state:${sourceSlot}`,
+        sourceFamily: laneOptions.sourceFamily ?? 'sph-particle-state',
+        leaseAuthorityIdentity: laneOptions.leaseAuthorityIdentity ?? null,
+        authoritative: laneOptions.authoritative !== false,
+        skinDistanceM: configuredNeighborhoodSkinDistanceM,
+        maxDisplacementM: laneOptions.maxDisplacementM ?? 0,
+        label: laneOptions.label ?? 'ulg-mls-mpm-fused-resident-neighborhood'
+      });
+      residentNeighborhoodLane = residentNeighborhoodLaneAcquisition.lane;
+      residentNeighborhoodLaneReason = null;
+    } catch (error) {
+      residentNeighborhoodLaneReason = !laneOptions.leaseAuthorityIdentity
+        && laneOptions.authoritative !== false
+        ? 'compute-manager-lease-identity-required'
+        : (error instanceof Error ? error.message : String(error));
+      residentNeighborhoodLane = null;
+      residentNeighborhoodLaneAcquisition = null;
+    }
+  }
+  const sidecarFusionDispatchCount = count * (
+    (useThermalSidecarFusion ? 1 : 0)
+    + (useReactionSidecarFusion ? 1 : 0)
+    + (useMechanicsRefreshSidecarFusion ? 1 : 0)
+  );
   const activeGridDispatch = resolveFusedActiveGridDispatch({
-    requested: fuseActiveGrid,
+    requested: fuseActiveGrid && !schroederSparseGridPlan,
     sphParticleState,
     gridSpec,
     dt: dtSeconds,
@@ -3959,11 +6137,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     gravityMPerS2: gravity,
     safetyCells: activeGridSafetyCells
   });
-  const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
+  const activeGridNodeDispatchCount = schroederSparseGridPlan
+    ? gridArenaNodeCount
+    : activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
   const activeGridDispatchPlanHint = sphParticleState?.residentActiveGridDispatchPlanHint ?? null;
-  const activeGridIndirectDispatchArgs = createActiveGridComputeDispatchArgsBuffer(
+  const activeGridIndirectDispatchArgs = schroederSparseGridPlan ? null : createActiveGridComputeDispatchArgsBuffer(
     device,
     activeGridDispatch,
     Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
@@ -3975,24 +6155,43 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     }
   );
   const dispatchTopology = createResidentDispatchTopology({
-    particleCount,
+    particleCount: particleIterationCapacity,
+    particleCountResidency,
     gridSpec,
     activeGridDispatch,
+    schroederSparseGridPlan,
     substepCount: count,
     fusedResidentSequence: true,
     p2gBackend
   });
-  const schroederLevelFilter = createFusedSchroederLevelAssignmentBinding({
-    device,
-    schroederLevelAssignment,
-    schroederSelectedLevel,
-    labelPrefix: 'ulg-mls-mpm-fused-sequence'
-  });
-  const schroederActiveNodeFilter = createFusedSchroederActiveNodeBinding({
-    device,
-    schroederActiveNodeList,
-    labelPrefix: 'ulg-mls-mpm-fused-sequence'
-  });
+  if (residentProductEventCount > 0) {
+    const workgroupsPerSubstep = Math.max(
+      1,
+      Math.ceil(residentProductEventCount / 64)
+    );
+    dispatchTopology.residentProductMassScatter = {
+      stageId: 'residentProductMassScatter',
+      topology: 'resident-product-event-row-parallel-p2g-scatter',
+      entryPoint: 'scatter_product_events',
+      dispatchAxis: 'resident-product-event-row',
+      productEventRowCount: residentProductEventCount,
+      productEventStrideFloats: residentProductEventStrideFloats,
+      dispatchWorkgroupsPerSubstep: workgroupsPerSubstep,
+      dispatchWorkgroupsPerSequence: workgroupsPerSubstep * count,
+      invocationLimitPerSequence: residentProductEventCount * count,
+      dispatchSubmissionMode: residentProductEventDispatchIndirectBuffer
+        ? 'dispatchWorkgroupsIndirect'
+        : 'dispatchWorkgroups',
+      productEventCountAuthority: residentProductEventCountAuthority,
+      exactActivePrefixDispatch: Boolean(residentProductEventDispatchIndirectBuffer),
+      gridNodeOuterLoop: false,
+      workgroupSize: 64
+    };
+    dispatchTopology.totalDispatches += count;
+    dispatchTopology.totalWorkgroups += workgroupsPerSubstep * count;
+  }
+  let schroederLevelFilter = null;
+  let schroederActiveNodeFilter = null;
   const stageTimingStartMs = nowMs();
   const stageMs = {
     deviceAcquire: 0,
@@ -4006,77 +6205,251 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     compactSummary: 0
   };
   const sequenceEncodeStartMs = nowMs();
-  const gridBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-fused-sequence-p2g-grid-out',
-    size: Math.max(4, gridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
+  const fusedMechanicsSequenceHostTiming = {
+    schema: ULG_MLS_MPM_FUSED_RESIDENT_HOST_TIMING_SCHEMA,
+    workspaceEligible: false,
+    preWorkspaceSetupMs: 0,
+    workspaceAcquireMs: 0,
+    postWorkspaceSetupMs: 0,
+    commandRecordingMs: 0,
+    queueSubmitCallMs: 0,
+    postSubmitBookkeepingMs: 0,
+    allocationEvidenceMs: 0,
+    postAllocationFinalizeMs: 0,
+    classifiedMs: 0,
+    unclassifiedMs: 0,
+    totalMs: 0
+  };
+  const pressureInterfaceWorkspaceCandidateCapacity = materialInterfaceSourceField
+    ? compactMaterialInterfaceCandidateCapacity({
+        candidateCount: Math.max(
+          0,
+          Math.round(finiteNumber(
+            materialInterfaceSourceField.sourceRenderField?.totalFieldCells
+              ?? materialInterfaceSourceField.totalFieldCells,
+            0
+          )) * 3
+        ),
+        surfaceCount: Math.max(
+          0,
+          Math.round(finiteNumber(
+            materialInterfaceSourceField.sourceRenderField?.surfaceTable?.surfaceCount
+              ?? materialInterfaceSourceField.sourceRenderField?.surfaceCount
+              ?? materialInterfaceSourceField.surfaceTable?.surfaceCount
+              ?? materialInterfaceSourceField.surfaceCount,
+            0
+          ))
+        ),
+        compactCandidateCapacity: materialInterfaceCompactCandidateCapacity
+      })
+    : 0;
+  const residentSequenceWorkspaceLeaseIdentity = laneOptions.leaseAuthorityIdentity ?? null;
+  const residentSequenceWorkspaceEligible = Boolean(
+    residentSequenceWorkspaceLeaseIdentity?.schema
+      === 'peercompute.compute.gpu-resident-lane-lease-identity.v0'
+    && residentSequenceWorkspaceLeaseIdentity.authoritative === true
+  );
+  fusedMechanicsSequenceHostTiming.workspaceEligible = residentSequenceWorkspaceEligible;
+  const residentSequencePredecessorPublicationToken = residentSequenceWorkspaceEligible
+    ? residentSequencePredecessorPublicationTokenFromUploads({
+        sphParticleUpload,
+        mlsMpmParticleUpload
+      })
+    : null;
+  const residentSequenceWorkspaceAcquireStartMs = nowMs();
+  fusedMechanicsSequenceHostTiming.preWorkspaceSetupMs = Math.max(
+    0,
+    residentSequenceWorkspaceAcquireStartMs - sequenceEncodeStartMs
+  );
+  const residentSequenceWorkspaceAcquisition = residentSequenceWorkspaceEligible
+    ? await acquireSphResidentSequenceWorkspaceGpu({
+        device,
+        leaseIdentity: residentSequenceWorkspaceLeaseIdentity,
+        laneId: laneOptions.laneId ?? 'compute-manager-resident-mechanics-lane',
+        stateKey: laneOptions.stateKey ?? `sph-particle-hot-state:${sourceSlot}`,
+        sourceFamily: laneOptions.sourceFamily ?? 'sph-particle-state',
+        authorityEpoch: residentSequenceAuthorityEpoch,
+        particleCapacity: particleIterationCapacity,
+        gridNodeCapacity: gridArenaNodeCount,
+        stateByteLength,
+        thermoByteLength,
+        mechanicsByteLength,
+        gridByteLength,
+        p2gAccumulatorByteLength,
+        updatedGridByteLength,
+        thermalParticleCapacity: useThermalSidecarFusion
+          ? Math.max(1, sphParticleState.particleCount)
+          : 0,
+        reactionProductEventCapacityRows: reactiveProductEventRowsPerSubstep,
+        reactionCoreParticleCapacity: useReactionSidecarFusion
+          ? Math.max(1, particleIterationCapacity)
+          : 0,
+        reactionParticleCapacity: reactiveProductEventRowsPerSubstep > 0
+          ? Math.max(1, sphParticleState.particleCount)
+          : 0,
+        pressureCandidateCapacity: pressureInterfaceWorkspaceCandidateCapacity,
+        sequenceStepCapacity: count,
+        layoutKey: JSON.stringify({
+          stateStrideBytes: sphParticleState.stateStrideBytes,
+          thermoStrideBytes: sphParticleState.thermoStrideBytes,
+          mechanicsStrideBytes: mlsMpmParticleState.mechanicsStrideBytes,
+          gridNodeFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
+          p2gAccumulatorComponents: P2G_ACCUMULATOR_COMPONENTS,
+          updatedGridNodeFloats: MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
+          p2gBackend,
+          sparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null
+        }),
+        labelPrefix: 'ulg-mls-mpm-fused-sequence'
+      })
+    : null;
+  fusedMechanicsSequenceHostTiming.workspaceAcquireMs = Math.max(
+    0,
+    nowMs() - residentSequenceWorkspaceAcquireStartMs
+  );
+  let fusedMechanicsSequenceHostPhaseStartMs = nowMs();
+  schroederLevelFilter = createFusedSchroederLevelAssignmentBinding({
+    device,
+    schroederLevelAssignment,
+    schroederSelectedLevel,
+    emptyAssignmentBuffer:
+      residentSequenceWorkspaceAcquisition?.emptySchroederLevelAssignmentsBuffer ?? null,
+    labelPrefix: 'ulg-mls-mpm-fused-sequence'
   });
+  schroederActiveNodeFilter = createFusedSchroederActiveNodeBinding({
+    device,
+    schroederActiveNodeList,
+    emptyActiveNodeBuffer:
+      residentSequenceWorkspaceAcquisition?.emptySchroederActiveNodesBuffer ?? null,
+    labelPrefix: 'ulg-mls-mpm-fused-sequence'
+  });
+  try {
+    residentSequenceWorkspaceAcquisition?.assertAuthoritativeSourceBuffers({
+      stateBuffer: sphParticleUpload.stateBuffer,
+      thermoBuffer: sphParticleUpload.thermoBuffer,
+      mechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer,
+      predecessorPublicationToken: residentSequencePredecessorPublicationToken
+    });
+  } catch (error) {
+    residentSequenceWorkspaceAcquisition?.cancelBeforeSubmit(
+      `source-continuity-rejected:${error instanceof Error ? error.message : String(error)}`
+    );
+    throw error;
+  }
+  const gridBuffer = residentSequenceWorkspaceAcquisition?.gridBuffer
+    ?? device.createBuffer({
+      label: 'ulg-mls-mpm-fused-sequence-p2g-grid-out',
+      size: Math.max(4, gridByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
+    });
   // Previous-substep finalized grid ([mass, momentum] rows): the spatial
   // density source for the liquid EOS. Zeroed at sequence start, refreshed by
   // a copy after every substep's finalize pass.
-  const p2gAccumulatorBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-fused-sequence-p2g-grid-accumulators',
-    size: Math.max(4, p2gAccumulatorByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const updatedGridBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-fused-sequence-grid-update-out',
-    size: Math.max(4, updatedGridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  });
-  const statePingBuffers = [
-    device.createBuffer({
-      label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
-      size: Math.max(4, stateByteLength),
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }),
-    device.createBuffer({
-      label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b',
-      size: Math.max(4, stateByteLength),
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    })
-  ];
-  const mechanicsPingBuffers = [
-    device.createBuffer({
-      label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a',
-      size: Math.max(4, mechanicsByteLength),
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }),
-    device.createBuffer({
-      label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b',
-      size: Math.max(4, mechanicsByteLength),
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    })
-  ];
-  const p2gParamsBuffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-fused-sequence-p2g-params',
-    activeGridDispatch.useActiveGrid
+  const p2gAccumulatorBuffer = residentSequenceWorkspaceAcquisition?.p2gAccumulatorBuffer
+    ?? device.createBuffer({
+      label: 'ulg-mls-mpm-fused-sequence-p2g-grid-accumulators',
+      size: Math.max(4, p2gAccumulatorByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    });
+  const updatedGridBuffer = residentSequenceWorkspaceAcquisition?.updatedGridBuffer
+    ?? device.createBuffer({
+      label: 'ulg-mls-mpm-fused-sequence-grid-update-out',
+      size: Math.max(4, updatedGridByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
+    });
+  const statePingBuffers = residentSequenceWorkspaceAcquisition?.statePingBuffers
+    ?? [
+      device.createBuffer({
+        label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
+        size: Math.max(4, stateByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      }),
+      device.createBuffer({
+        label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b',
+        size: Math.max(4, stateByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      })
+    ];
+  const mechanicsPingBuffers = residentSequenceWorkspaceAcquisition?.mechanicsPingBuffers
+    ?? [
+      device.createBuffer({
+        label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a',
+        size: Math.max(4, mechanicsByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      }),
+      device.createBuffer({
+        label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b',
+        size: Math.max(4, mechanicsByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      })
+    ];
+  const thermoPingBuffers = useThermalSidecarFusion || useReactionSidecarFusion
+    ? (residentSequenceWorkspaceAcquisition?.thermoPingBuffers
+      ?? [
+        device.createBuffer({
+          label: 'ulg-mls-mpm-fused-sequence-thermo-ping-a',
+          size: Math.max(4, thermoByteLength),
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+        }),
+        device.createBuffer({
+          label: 'ulg-mls-mpm-fused-sequence-thermo-ping-b',
+          size: Math.max(4, thermoByteLength),
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+        })
+      ])
+    : [];
+  const alternateParticleFamilyBuffer = (buffers, source, family) => {
+    if (buffers.length !== 2) {
+      throw new Error(`${family} output reuse requires exactly two ping buffers`);
+    }
+    const destination = residentSequenceWorkspaceAcquisition
+      ? residentSequenceWorkspaceAcquisition.selectDestination(
+          family.includes('thermo') ? 'thermo'
+            : family.includes('mechanics') ? 'mechanics'
+            : 'state',
+          source
+        )
+      : (source === buffers[0] ? buffers[1] : buffers[0]);
+    if (!destination || destination === source) {
+      throw new Error(`${family} output reuse produced a source/destination alias`);
+    }
+    return destination;
+  };
+  const p2gParamsData = activeGridDispatch.useActiveGrid
       ? createFusedActiveP2gParamsArray(
           gridSpec,
-          particleCount,
+          particleIterationCapacity,
           dtSeconds,
           internalPressureScale,
           activeGridDispatch,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          schroederSparseGridPlan,
+          residentProductEventCount
         )
       : createFusedP2gParamsArray(
           gridSpec,
-          particleCount,
+          particleIterationCapacity,
           dtSeconds,
           internalPressureScale,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
-        ),
-    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  );
-  const gridUpdateParamsBuffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-fused-sequence-grid-update-params',
-    activeGridDispatch.useActiveGrid
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          0,
+          schroederSparseGridPlan,
+          residentProductEventCount
+        );
+  const p2gParamsBuffer = residentSequenceWorkspaceAcquisition?.p2gParamsBuffer
+    ?? writeGpuBuffer(
+      device,
+      'ulg-mls-mpm-fused-sequence-p2g-params',
+      p2gParamsData,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    );
+  if (residentSequenceWorkspaceAcquisition?.p2gParamsBuffer) {
+    device.queue.writeBuffer(p2gParamsBuffer, 0, p2gParamsData);
+  }
+  const gridUpdateParamsData = activeGridDispatch.useActiveGrid
       ? createFusedActiveGridUpdateParamsArray({
           gridSpec,
           dt: dtSeconds,
@@ -4088,65 +6461,143 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         })
       : createFusedGridUpdateParamsArray({
           gridSpec,
+          gridNodeCount: gridArenaNodeCount,
           dt: dtSeconds,
           gravityMPerS2: gravity,
           boxDimsM: dims,
           cflFactor,
           pressureInterfaceForceRowCount: 0
-        }),
-    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  );
-  const g2pParamsBuffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-fused-sequence-g2p-params',
-    createFusedG2pParamsArray({
-      particleCount,
+        });
+  const gridUpdateParamsBuffer = residentSequenceWorkspaceAcquisition?.gridUpdateParamsBuffer
+    ?? writeGpuBuffer(
+      device,
+      'ulg-mls-mpm-fused-sequence-grid-update-params',
+      gridUpdateParamsData,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    );
+  if (residentSequenceWorkspaceAcquisition?.gridUpdateParamsBuffer) {
+    device.queue.writeBuffer(gridUpdateParamsBuffer, 0, gridUpdateParamsData);
+  }
+  const g2pParamsData = createFusedG2pParamsArray({
+      particleCount: particleIterationCapacity,
       gridSpec,
+      gridNodeCount: gridArenaNodeCount,
       dt: dtSeconds,
       boxDimsM: dims,
       internalPressureScale,
       liquidWallDampingAlpha: mlsMpmParticleState.liquidWallDampingAlpha,
       liquidWallDampingDistanceM: mlsMpmParticleState.liquidWallDampingDistanceM,
-      schroederLevelFilter
-    }),
-    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      schroederLevelFilter,
+      schroederSparseGridPlan
+    });
+  const g2pParamsBuffer = residentSequenceWorkspaceAcquisition?.g2pParamsBuffer
+    ?? writeGpuBuffer(
+      device,
+      'ulg-mls-mpm-fused-sequence-g2p-params',
+      g2pParamsData,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    );
+  if (residentSequenceWorkspaceAcquisition?.g2pParamsBuffer) {
+    device.queue.writeBuffer(g2pParamsBuffer, 0, g2pParamsData);
+  }
+  const ownsProductEventBuffer = !sequenceResidentProductMass?.productEventBuffer
+    && !residentSequenceWorkspaceAcquisition?.emptyProductEventsBuffer;
+  const productEventBuffer = sequenceResidentProductMass?.productEventBuffer
+    || residentSequenceWorkspaceAcquisition?.emptyProductEventsBuffer
+    || writeGpuBuffer(
+      device,
+      'ulg-mls-mpm-fused-sequence-empty-product-events',
+      new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
+      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    );
+  const ownsProductEventMetadataBuffer = Boolean(
+    residentProductEventCount > 0 && !sequenceResidentProductMass?.productEventMetadataBuffer
   );
-  const productEventBuffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-fused-sequence-empty-product-events',
-    new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
-    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  );
+  const productEventMetadataBuffer = sequenceResidentProductMass?.productEventMetadataBuffer
+    || (residentProductEventCount > 0
+      ? writeGpuBuffer(
+        device,
+        'ulg-mls-mpm-fused-sequence-invalid-product-event-arena-metadata',
+        new Uint32Array(16),
+        GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      )
+      : productEventBuffer);
   const schroederAssignmentBuffer = schroederLevelFilter.assignmentBuffer;
   const schroederActiveNodeBuffer = schroederActiveNodeFilter.activeNodeBuffer;
-  const pressureRowsBuffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-fused-sequence-empty-pressure-force-rows',
-    new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
-    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  );
+  const ownsPressureRowsBuffer =
+    !residentSequenceWorkspaceAcquisition?.emptyPressureForceRowsBuffer;
+  const pressureRowsBuffer = residentSequenceWorkspaceAcquisition?.emptyPressureForceRowsBuffer
+    || writeGpuBuffer(
+      device,
+      'ulg-mls-mpm-fused-sequence-empty-pressure-force-rows',
+      new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
+      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    );
+  const pressureInterfaceWorkspace = materialInterfaceSourceField
+    ? (residentSequenceWorkspaceAcquisition?.pressureInterfaceWorkspace
+      ?? createSphPressureInterfaceWorkspaceGpu({
+        device,
+        candidateCapacity: pressureInterfaceWorkspaceCandidateCapacity,
+        sequenceStepCapacity: count,
+        labelPrefix: 'ulg-mls-mpm-fused-sequence-pressure-workspace'
+      }))
+    : null;
+  const reactionCoreWorkspace = useReactionSidecarFusion
+    ? (residentSequenceWorkspaceAcquisition?.reactionCoreWorkspace
+      ?? createSphReactionCoreWorkspaceGpu({
+        device,
+        particleCapacity: Math.max(1, particleIterationCapacity),
+        sequenceStepCapacity: count,
+        label: 'ulg-mls-mpm-fused-sequence-reaction-core-workspace'
+      }))
+    : null;
+  const reactionProductEventPlacementWorkspace = reactiveProductEventRowsPerSubstep > 0
+      ? (residentSequenceWorkspaceAcquisition?.reactionProductEventPlacementWorkspace
+        ?? createSphReactionProductEventPlacementWorkspaceGpu(device, {
+        eventCapacityRows: reactiveProductEventRowsPerSubstep,
+        particleCapacity: Math.max(1, sphParticleState.particleCount),
+        sequenceStepCapacity: count,
+        label: 'ulg-mls-mpm-fused-sequence-reaction-product-placement-workspace'
+      }))
+    : null;
+  const thermalWorkspace = useThermalSidecarFusion
+    ? (residentSequenceWorkspaceAcquisition?.thermalWorkspace
+      ?? createSphThermalWorkspaceGpu({
+        device,
+        particleCapacity: Math.max(1, sphParticleState.particleCount),
+        sequenceStepCapacity: count,
+        label: 'ulg-mls-mpm-fused-sequence-thermal-workspace'
+      }))
+    : null;
   const allCreatedBuffers = [
-    gridBuffer,
-    p2gAccumulatorBuffer,
-    updatedGridBuffer,
-    ...statePingBuffers,
-    ...mechanicsPingBuffers,
-    p2gParamsBuffer,
-    gridUpdateParamsBuffer,
-    g2pParamsBuffer,
-    productEventBuffer,
+    ...(residentSequenceWorkspaceAcquisition ? [] : [
+      gridBuffer,
+      p2gAccumulatorBuffer,
+      updatedGridBuffer,
+      ...statePingBuffers,
+      ...thermoPingBuffers,
+      ...mechanicsPingBuffers
+    ]),
+    ...(residentSequenceWorkspaceAcquisition ? [] : [
+      p2gParamsBuffer,
+      gridUpdateParamsBuffer,
+      g2pParamsBuffer
+    ]),
+    ...(ownsProductEventBuffer ? [productEventBuffer] : []),
+    ...(ownsProductEventMetadataBuffer ? [productEventMetadataBuffer] : []),
     ...(schroederLevelFilter.ownsAssignmentBuffer ? [schroederAssignmentBuffer] : []),
     ...(schroederActiveNodeFilter.ownsActiveNodeBuffer ? [schroederActiveNodeBuffer] : []),
-    pressureRowsBuffer,
+    ...(ownsPressureRowsBuffer ? [pressureRowsBuffer] : []),
     ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
   const gpuTimestampProfiler = createWebGpuTimestampProfiler(device, {
     requested: Boolean(measureGpuTimestamps),
     label: 'ulg-mls-mpm-fused-resident-sequence',
-    maxSpans: count * (
-      (activeGridDispatch.useActiveGrid ? 8 : 7)
-      + (useThermalSidecarFusion ? 2 : 0)
-    )
+    // A five-word stable radix generation can emit hundreds of nested
+    // histogram/scan/scatter spans. Reserve for the initial generation,
+    // post-G2P/post-separation rebuilds, gas EOS radix work, and mechanics
+    // without silently truncating the required profile.
+    maxSpans: fusedResidentSequenceTimestampSpanCapacity(count)
   });
   let finalStateBuffer = null;
   let finalThermoBuffer = sphParticleUpload.thermoBuffer;
@@ -4155,11 +6606,90 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   let finalSourceThermoBuffer = sphParticleUpload.thermoBuffer;
   let finalSourceMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
   let finalThermalStep = null;
+  let finalReactionStep = null;
   let finalMechanicsRefreshStep = null;
   const sidecarEncoderStages = [];
   const sidecarOutputBuffers = [];
+  const reactiveProductEventAppendEvidence = [];
+  const reactiveProductEventStages = [];
+  const residentNeighborhoodGenerations = [];
+  const materialInterfaceSourceFieldGenerations = [];
+  let materialInterfaceSourceFieldLaneSubmit = null;
+  let materialInterfaceSourceFieldLaneReleased = false;
+  let separationPositionMutationCount = 0;
+  const residentNeighborhoodGenerationReuseAdmissions = [];
+  const sequencePressureChains = [];
+  const sequencePressureScatters = [];
+  const sequencePressureTemporaryBuffers = [];
+  let sequencePressureScatter = resolveFusedPressureScatter({ device });
+  let residentGasCellEosResult = null;
+  let residentGasCellEosLane = null;
+  let residentGasCellEosEncodedInSequence = false;
+  const residentGasCellEosResults = [];
+  const residentGasCellEosSourceRowCountUpperBounds = [];
+  let residentGasCellEosSkippedEmptyGenerationCount = 0;
+  const materialInterfaceProductEventRowCountUpperBounds = [];
+  let residentGasCellEosLaneIdentity = null;
+  let residentGasCellEosGridDims = null;
+  let residentGasCellEosSourceCapacity = 0;
+  let residentGasCellEosGasCellCapacity = 0;
+  let residentGasCellEosMaxGridCellCount = 0;
+  let residentGasCellEosLaneCapacityPlan = null;
+  let residentGasCellEosRequested = false;
+  let effectivePressureInterfaceStageOptions = pressureInterfaceStageOptions;
+  let materialInterfaceSourceFieldConsumerLease = null;
+  let materialInterfaceSourceFieldConsumerLeaseRelease = null;
+  let sequenceSubmitted = false;
+  let residentSequenceSubmissionSeal = null;
+  let residentSequenceSubmissionCommit = null;
+  let residentSequencePublicationToken = null;
   let returned = false;
+  let schroederSparseGrid = null;
+  const schroederSparseGridExecutions = [];
   try {
+    if (materialInterfaceSourceField) {
+      materialInterfaceSourceFieldLaneAcquisition =
+        acquireSphMaterialInterfaceSourceFieldLocalGpuLane(
+          device,
+          materialInterfaceSourceFieldLaneOptions
+        );
+      materialInterfaceSourceFieldLane = materialInterfaceSourceFieldLaneAcquisition.lane;
+      if (
+        typeof materialInterfaceSourceField.addMaterialInterfaceSourceFieldConsumerLease
+          !== 'function'
+        || typeof materialInterfaceSourceField.releaseMaterialInterfaceSourceFieldConsumerLease
+          !== 'function'
+      ) {
+        const error = new Error(
+          'Fused pressure source field requires an explicit consumer lease lifecycle'
+        );
+        error.code = 'ULG_PRESSURE_SOURCE_FIELD_CONSUMER_LEASE_REQUIRED';
+        throw error;
+      }
+      materialInterfaceSourceFieldConsumerLease =
+        materialInterfaceSourceField.addMaterialInterfaceSourceFieldConsumerLease({
+          consumerStage: 'mls-mpm-fused-resident-pressure-sequence',
+          reason: 'same-encoder-material-interface-pressure-candidate-force-scatter'
+        });
+      if (
+        typeof materialInterfaceSourceFieldConsumerLease?.leaseId !== 'string'
+        || materialInterfaceSourceFieldConsumerLease.leaseId.length === 0
+      ) {
+        const error = new Error(
+          'Fused pressure source field consumer lease acquisition failed closed'
+        );
+        error.code = 'ULG_PRESSURE_SOURCE_FIELD_CONSUMER_LEASE_REJECTED';
+        throw error;
+      }
+    }
+    const p2gProjectionBaseWgsl = schroederSparseGridPlan
+      ? mlsMpmP2gSchroederSparseGridFusedWgsl
+      : activeGridDispatch.useActiveGrid
+      ? mlsMpmP2gGridProjectionActiveGridWgsl
+      : mlsMpmP2gGridProjectionWgsl;
+    const p2gProjectionWgsl = particleCountResidency
+      ? withSchroederParticleCountResidencyGuard(p2gProjectionBaseWgsl)
+      : p2gProjectionBaseWgsl;
     const p2gBindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
@@ -4171,37 +6701,73 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       computeBufferBinding(7, 'read-only-storage'),
       computeBufferBinding(8, 'read-only-storage')
     ];
+    const productEventP2gBindings = [
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform'),
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(8, 'read-only-storage'),
+      computeBufferBinding(9, 'read-only-storage')
+    ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v5'
-        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v5',
-      label: activeGridDispatch.useActiveGrid
+      cacheKey: schroederSparseGridPlan
+        ? `ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused-sequence.scatter.${particleCountResidency ? 'resident-count.v1' : 'v0'}`
+        : activeGridDispatch.useActiveGrid
+        ? `ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.${particleCountResidency ? 'resident-count.v1' : 'v5'}`
+        : `ulg-mls-mpm-p2g-grid-projection.scatter.${particleCountResidency ? 'resident-count.v1' : 'v5'}`,
+      label: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-projection-schroeder-sparse-fused-sequence'
+        : activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection-active-grid'
         : 'ulg-mls-mpm-p2g-grid-projection',
-      code: activeGridDispatch.useActiveGrid
-        ? mlsMpmP2gGridProjectionActiveGridWgsl
-        : mlsMpmP2gGridProjectionWgsl,
+      code: p2gProjectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: activeGridDispatch.useActiveGrid
+      cacheKey: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused-sequence.finalize.v0'
+        : activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v5'
         : 'ulg-mls-mpm-p2g-grid-projection.finalize.v5',
-      label: activeGridDispatch.useActiveGrid
+      label: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-p2g-grid-finalize-schroeder-sparse-fused-sequence'
+        : activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-finalize-active-grid'
         : 'ulg-mls-mpm-p2g-grid-finalize',
-      code: activeGridDispatch.useActiveGrid
-        ? mlsMpmP2gGridProjectionActiveGridWgsl
-        : mlsMpmP2gGridProjectionWgsl,
+      code: p2gProjectionBaseWgsl,
       entryPoint: 'finalize_grid',
       bindings: p2gBindings
     });
-    const activeAccumulatorClearPipelineInfo = activeGridDispatch.useActiveGrid
+    const productEventScatterPipelineInfo = residentProductEventCount > 0
+      ? createCachedExplicitComputePipeline(device, {
+          cacheKey: schroederSparseGridPlan
+            ? 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused-sequence.product-events.v0'
+            : activeGridDispatch.useActiveGrid
+            ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.product-events.v5'
+            : 'ulg-mls-mpm-p2g-grid-projection.product-events.v5',
+          label: schroederSparseGridPlan
+            ? 'ulg-mls-mpm-p2g-product-events-schroeder-sparse-fused-sequence'
+            : activeGridDispatch.useActiveGrid
+            ? 'ulg-mls-mpm-p2g-product-events-active-grid'
+            : 'ulg-mls-mpm-p2g-product-events',
+          code: p2gProjectionBaseWgsl,
+          entryPoint: 'scatter_product_events',
+          bindings: productEventP2gBindings
+        })
+      : null;
+    const activeAccumulatorClearPipelineInfo = schroederSparseGridPlan
+      ? createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused-sequence.clear.v0',
+        label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-schroeder-sparse-fused-sequence',
+        code: p2gProjectionBaseWgsl,
+        entryPoint: 'clear_accumulators',
+        bindings: p2gBindings
+      })
+      : activeGridDispatch.useActiveGrid
       ? createCachedExplicitComputePipeline(device, {
         cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v5',
         label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-active-grid',
-        code: mlsMpmP2gGridProjectionActiveGridWgsl,
+        code: p2gProjectionBaseWgsl,
         entryPoint: 'clear_accumulators',
         bindings: p2gBindings
       })
@@ -4224,10 +6790,20 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         computeBufferBinding(3, 'read-only-storage')
       ]
     });
+    const g2pBaseWgsl = schroederSparseGridPlan
+      ? mlsMpmG2pSchroederSparseGridWgsl
+      : mlsMpmG2pReconstructWgsl;
+    const g2pWgsl = particleCountResidency
+      ? withSchroederG2pParticleCountResidencyGuard(g2pBaseWgsl)
+      : g2pBaseWgsl;
     const { pipeline: g2pPipeline, bindGroupLayout: g2pBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v3',
-      label: 'ulg-mls-mpm-g2p-reconstruct',
-      code: mlsMpmG2pReconstructWgsl,
+      cacheKey: schroederSparseGridPlan
+        ? `ulg-mls-mpm-g2p-reconstruct.schroeder-sparse.fused-sequence.${particleCountResidency ? 'resident-count.v1' : 'v0'}`
+        : `ulg-mls-mpm-g2p-reconstruct.${particleCountResidency ? 'resident-count.v1' : 'v3'}`,
+      label: schroederSparseGridPlan
+        ? 'ulg-mls-mpm-g2p-reconstruct-schroeder-sparse-fused-sequence'
+        : 'ulg-mls-mpm-g2p-reconstruct',
+      code: g2pWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -4237,31 +6813,673 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         computeBufferBinding(4, 'storage'),
         computeBufferBinding(5, 'storage'),
         computeBufferBinding(6, 'uniform'),
-        computeBufferBinding(7, 'read-only-storage')
+        computeBufferBinding(7, 'read-only-storage'),
+        ...(schroederSparseGridPlan
+          ? [computeBufferBinding(8, 'read-only-storage')]
+          : [])
       ]
     });
+    fusedMechanicsSequenceHostTiming.postWorkspaceSetupMs = Math.max(
+      0,
+      nowMs() - fusedMechanicsSequenceHostPhaseStartMs
+    );
+    fusedMechanicsSequenceHostPhaseStartMs = nowMs();
     const encoder = device.createCommandEncoder();
     if (typeof encoder.clearBuffer !== 'function') {
       throw new Error('Fused resident mechanics sequence requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
+    residentSequenceWorkspaceAcquisition?.bindCommandEncoder(encoder);
+    residentProductEventEncoderSequence?.encodeInitialization(encoder);
     let currentStateBuffer = sphParticleUpload.stateBuffer;
     let currentThermoBuffer = sphParticleUpload.thermoBuffer;
     let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
-    let separationScratch = null;
-    const separationMaxPairRestDistanceM = maxSeparationRestDistanceM(
-      mlsMpmParticleState?.mechanics,
-      particleCount
+    let currentResidentNeighborhood = residentNeighborhood;
+    let currentResidentNeighborhoodValidation = residentNeighborhoodValidation;
+    if (residentNeighborhoodLane && materialInterfaceSourceField) {
+      const initialGeneration = residentNeighborhoodLaneAcquisition.encodeGeneration(encoder, {
+        positionBuffer: currentStateBuffer,
+        positionStrideU32: SPH_GPU_PARTICLE_STATE_FLOATS,
+        positionOffsetU32: 0,
+        chartLevelBuffer: laneOptions.chartLevelBuffer ?? null,
+        chartLevelByteOffset: laneOptions.chartLevelByteOffset ?? 0,
+        supportClassBuffer: laneOptions.supportClassBuffer ?? null,
+        supportClassByteOffset: laneOptions.supportClassByteOffset ?? 0,
+        sourceSupportAssignmentBuffer: laneOptions.sourceSupportAssignmentBuffer ?? null,
+        sourceSupportAssignmentByteOffset:
+          laneOptions.sourceSupportAssignmentByteOffset ?? 0,
+        encodeSourceMetadata: laneOptions.encodeSourceMetadata ?? null,
+        generation: absoluteNeighborhoodGenerationBase,
+        positionEpoch: absoluteNeighborhoodPositionEpochBase,
+        mutationPhase: 'pre-p2g-initial',
+        substepIndex: 0,
+        timestampProfiler: gpuTimestampProfiler,
+        timestampMetadata: {
+          residentSequenceStage: 'initial-neighborhood-generation',
+          substepIndex: 0
+        }
+      });
+      residentNeighborhoodGenerations.push(initialGeneration);
+      if (initialGeneration.hostAdmission === true && initialGeneration.encoded === true) {
+        currentResidentNeighborhood = initialGeneration;
+        currentResidentNeighborhoodValidation = initialGeneration.productionLaneValidation;
+      } else {
+        currentResidentNeighborhood = null;
+        currentResidentNeighborhoodValidation = null;
+      }
+    }
+    const existingGpuGasCellImport = !reactiveMultiStepResidentSequence
+      && pressureInterfaceStageOptions.retainedGasPressureCellImport?.schema
+        === ULG_SPH_SPATIAL_GAS_CELL_EOS_GPU_RESULT_SCHEMA
+      && pressureInterfaceStageOptions.retainedGasPressureCellImport.ready === true
+      ? pressureInterfaceStageOptions.retainedGasPressureCellImport
+      : null;
+    const gasCellEosSource = pressureInterfaceStageOptions.spatialGasCellEosSource ?? null;
+    residentGasCellEosRequested = Boolean(
+      materialInterfaceSourceField
+      && pressureInterfaceStageOptions.spatialGasCellEosEnabled !== false
+      && (
+        existingGpuGasCellImport
+        || gasCellEosSource
+        || sequenceResidentProductMass
+      )
     );
+    if (residentGasCellEosRequested) {
+      residentGasCellEosLaneIdentity = pressureInterfaceStageOptions.laneExecutionIdentity
+        ?? pressureInterfaceStageOptions.gpuResidentLaneLeaseIdentity
+        ?? laneOptions.leaseAuthorityIdentity
+        ?? null;
+      const configuredGasSource = reactiveMultiStepResidentSequence
+        ? null
+        : gasCellEosSource;
+      const configuredProductMass = reactiveMultiStepResidentSequence
+        ? sequenceResidentProductMass
+        : residentProductMass;
+      if (existingGpuGasCellImport) {
+        residentGasCellEosResult = existingGpuGasCellImport;
+        residentGasCellEosLane = existingGpuGasCellImport.residentGasCellEosLane ?? null;
+      } else {
+        const sourceStrideFloats = Math.max(1, Math.trunc(finiteNumber(
+          configuredGasSource?.compactSpatialGasRowStrideFloats
+            ?? configuredGasSource?.spatialGasLedgerRowStrideFloats
+            ?? configuredProductMass?.productEventStrideFloats,
+          configuredProductMass ? SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : 12
+        )));
+        const reactiveGasSourceRowCountUpperBound = reactiveMultiStepResidentSequence
+          ? Math.min(
+              residentProductEventEncoderSequence.arena.capacityRows,
+              residentProductEventEncoderSequence.occupiedRowCountUpperBound
+                + reactiveProductEventRowsPerSubstep * Math.max(0, count - 1)
+            )
+          : null;
+        const sourceRowCount = Math.max(1, Math.trunc(finiteNumber(
+          reactiveGasSourceRowCountUpperBound
+            ?? configuredGasSource?.compactSpatialGasRowCount
+            ?? configuredGasSource?.spatialGasLedgerRowCount
+            ?? configuredProductMass?.productEventRowCount,
+          1
+        )));
+        const sourceBufferByteLength = Math.max(0, Math.trunc(finiteNumber(
+          configuredGasSource?.compactSpatialGasRowsBuffer?.size
+            ?? configuredGasSource?.spatialGasLedgerRowsBuffer?.size
+            ?? configuredProductMass?.productEventBufferByteLength
+            ?? configuredProductMass?.productEventBuffer?.size,
+          sourceRowCount * sourceStrideFloats * Float32Array.BYTES_PER_ELEMENT
+        )));
+        residentGasCellEosSourceCapacity = Math.max(
+          sourceRowCount,
+          reactiveMultiStepResidentSequence
+            ? 0
+            : Math.trunc(sourceBufferByteLength
+                / (sourceStrideFloats * Float32Array.BYTES_PER_ELEMENT)),
+          Math.trunc(finiteNumber(
+            pressureInterfaceStageOptions.spatialGasCellEosSourceCapacity
+              ?? configuredGasSource?.sourceCapacity
+              ?? (reactiveMultiStepResidentSequence
+                ? null
+                : configuredProductMass?.productEventRowCapacity)
+              ?? (reactiveMultiStepResidentSequence
+                ? null
+                : configuredProductMass?.productEventBufferCapacityRows),
+            0
+          ))
+        );
+        residentGasCellEosGridDims = finiteVector3(
+          pressureInterfaceStageOptions.spatialGasCellEosGridDims,
+          gridSpec.gridDims
+        ).map((value) => Math.max(1, Math.trunc(value)));
+        residentGasCellEosMaxGridCellCount = Math.max(
+          residentGasCellEosGridDims[0]
+            * residentGasCellEosGridDims[1]
+            * residentGasCellEosGridDims[2],
+          Math.trunc(finiteNumber(
+            pressureInterfaceStageOptions.spatialGasCellEosMaxGridCellCount,
+            0
+          ))
+        );
+        residentGasCellEosLaneCapacityPlan =
+          createSphSpatialGasCellEosGpuLaneCapacityPlan({
+            sourceCapacity: residentGasCellEosSourceCapacity,
+            maxGridCellCount: residentGasCellEosMaxGridCellCount,
+            minimumGasCellCapacity:
+              pressureInterfaceStageOptions.spatialGasCellEosGasCellCapacity ?? 0
+          });
+        residentGasCellEosSourceCapacity =
+          residentGasCellEosLaneCapacityPlan.sourceCapacityClass;
+        residentGasCellEosGasCellCapacity =
+          residentGasCellEosLaneCapacityPlan.gasCellCapacity;
+        residentGasCellEosLane = getOrCreateSphSpatialGasCellEosGpuLane(device, {
+          sourceCapacity: residentGasCellEosSourceCapacity,
+          gasCellCapacity: residentGasCellEosGasCellCapacity,
+          maxGridCellCount: residentGasCellEosMaxGridCellCount,
+          outputSlotCount: reactiveMultiStepResidentSequence ? count : 2,
+          requireLaneIdentity: true,
+          laneId: residentGasCellEosLaneIdentity?.laneId ?? null,
+          stateKey: residentGasCellEosLaneIdentity?.stateKey ?? null,
+          sourceFamily: residentGasCellEosLaneIdentity?.sourceFamily ?? null
+        });
+        if (!reactiveMultiStepResidentSequence) {
+          const gasSourceEpoch = Math.max(0, Math.trunc(finiteNumber(
+            materialInterfaceSourceField.sourcePositionEpoch,
+            0
+          )));
+          const gasSourceGeneration = Math.max(0, Math.trunc(finiteNumber(
+            materialInterfaceSourceField.sourceNeighborhoodGeneration,
+            gasSourceEpoch
+          )));
+          residentGasCellEosResult = await runSphSpatialGasCellEosGpu({
+            device,
+            lane: residentGasCellEosLane,
+            commandEncoder: encoder,
+            source: configuredGasSource,
+            residentProductMass: configuredProductMass,
+            sourceEpoch: gasSourceEpoch,
+            sourceGeneration: gasSourceGeneration,
+            sourceTaskId: residentGasCellEosLaneIdentity?.taskId ?? null,
+            gpuResidentLaneLeaseIdentity: residentGasCellEosLaneIdentity,
+            gridDims: residentGasCellEosGridDims,
+            boxDimsM: dims,
+            sourceCapacity: residentGasCellEosSourceCapacity,
+            gasCellCapacity: residentGasCellEosGasCellCapacity,
+            maxGridCellCount: residentGasCellEosMaxGridCellCount,
+            fallbackSupportVolumeM3:
+              pressureInterfaceStageOptions.spatialGasCellEosFallbackSupportVolumeM3 ?? 0,
+            fallbackTemperatureK:
+              pressureInterfaceStageOptions.spatialGasCellEosFallbackTemperatureK ?? 293.15,
+            minVolumeM3:
+              pressureInterfaceStageOptions.spatialGasCellEosMinVolumeM3 ?? 1e-12,
+            requireLaneIdentity: true,
+            laneId: residentGasCellEosLaneIdentity?.laneId ?? null,
+            stateKey: residentGasCellEosLaneIdentity?.stateKey ?? null,
+            sourceFamily: residentGasCellEosLaneIdentity?.sourceFamily ?? null,
+            timestampProfiler: gpuTimestampProfiler,
+            timestampMetadata: {
+              residentSequenceStage: 'spatial-gas-cell-eos',
+              sourceEpoch: gasSourceEpoch,
+              sourceGeneration: gasSourceGeneration
+            },
+            awaitQueueFence: false
+          });
+          residentGasCellEosResults.push(residentGasCellEosResult);
+          residentGasCellEosEncodedInSequence = residentGasCellEosResult?.ready === true;
+          if (residentGasCellEosResult?.ready !== true) {
+            const error = new Error(
+              `Resident GPU gas-cell EOS failed closed: ${residentGasCellEosResult?.blocker ?? 'unknown'}`
+            );
+            error.code = 'ULG_RESIDENT_GAS_CELL_EOS_REJECTED';
+            error.residentGasCellEosResult = residentGasCellEosResult;
+            throw error;
+          }
+          effectivePressureInterfaceStageOptions = {
+            ...pressureInterfaceStageOptions,
+            retainedGasPressureCellImport: residentGasCellEosResult,
+            gpuResidentLaneLeaseIdentity: residentGasCellEosLaneIdentity,
+            expectedGasPressureCellSourceEpoch: gasSourceEpoch,
+            expectedGasPressureCellSourceGeneration: gasSourceGeneration
+          };
+        }
+      }
+    }
+    let pressureScatterPipelineInfo = null;
+    if (materialInterfaceSourceField) {
+      if (!currentResidentNeighborhood) {
+        throw new Error('Fused pressure source field requires an initial resident neighborhood generation');
+      }
+      pressureScatterPipelineInfo = createCachedExplicitComputePipeline(device, {
+        cacheKey: schroederSparseGridPlan
+          ? 'ulg-mls-mpm-p2g-grid-projection.schroeder-sparse.fused-sequence.pressure-scatter.v0'
+          : 'ulg-mls-mpm-p2g-grid-projection.direct.pressure-scatter.v0',
+        label: schroederSparseGridPlan
+          ? 'ulg-mls-mpm-fused-sequence-p2g-pressure-scatter-schroeder-sparse'
+          : 'ulg-mls-mpm-fused-sequence-p2g-pressure-scatter-direct',
+        code: schroederSparseGridPlan
+          ? mlsMpmP2gSchroederSparseGridFusedWgsl
+          : mlsMpmP2gPressureScatterWgsl,
+        entryPoint: 'scatter_pressure_force_rows',
+        bindings: [
+          computeBufferBinding(3, 'storage'),
+          computeBufferBinding(4, 'uniform'),
+          computeBufferBinding(5, 'read-only-storage'),
+          ...(schroederSparseGridPlan
+            ? [computeBufferBinding(8, 'read-only-storage')]
+            : [])
+        ]
+      });
+      dispatchTopology.pressureInterfaceScatter = {
+        stageId: 'pressureInterfaceScatter',
+        topology: schroederSparseGridPlan
+          ? 'force-row-parallel-sparse-quadratic-stencil-scatter'
+          : 'force-row-parallel-direct-quadratic-stencil-scatter',
+        entryPoint: 'scatter_pressure_force_rows',
+        dispatchAxis: 'retained-pressure-force-row-capacity',
+        dispatchSubmissionMode: 'dispatchWorkgroupsIndirect',
+        dispatchWorkgroupsPerSequence: null,
+        dispatchWorkgroupCountSource: 'gpu-authored-active-count-not-read-back',
+        dispatchWorkgroupCapacityCeilingPerSequence: 0,
+        indirectDispatchesPerSequence: 0,
+        invocationLimitPerSequence: 0,
+        stencilNodeCountPerInvocation: 27,
+        sparseHashLookup: Boolean(schroederSparseGridPlan),
+        directGridLookup: !schroederSparseGridPlan,
+        gridNodeOuterLoop: false,
+        workgroupSize: 64,
+        applicationPolicy: 'source-field-candidates-and-force-rows-rebuilt-per-current-position-epoch'
+      };
+      dispatchTopology.pressureRowParallelStages = ['pressureInterfaceScatter'];
+      dispatchTopology.pressureDispatchesPerSequence = 0;
+    }
+    const encodeCurrentPressureRowsBeforeCompaction = async ({
+      index,
+      currentStateBuffer,
+      currentThermoBuffer,
+      currentResidentNeighborhood,
+      currentResidentNeighborhoodValidation
+    }) => {
+      if (!pressureScatterPipelineInfo) return null;
+      if (!currentResidentNeighborhood) {
+        throw new Error(
+          `Fused pressure source field lacks a current resident neighborhood at substep ${index}`
+        );
+      }
+      const currentProductEventRowCountUpperBound = reactiveMultiStepResidentSequence
+        ? residentProductEventEncoderSequence.occupiedRowCountUpperBound
+        : residentProductEventCount;
+      materialInterfaceProductEventRowCountUpperBounds.push(
+        currentProductEventRowCountUpperBound
+      );
+      const currentMaterialInterfaceSourceField =
+        materialInterfaceSourceFieldLaneAcquisition.encodeGeneration(encoder, {
+          particleStateBuffer: currentStateBuffer,
+          particleThermoBuffer: currentThermoBuffer,
+          productEventBuffer: currentProductEventRowCountUpperBound > 0
+            ? productEventBuffer
+            : null,
+          productEventMetadataBuffer: currentProductEventRowCountUpperBound > 0
+            && residentProductEventDispatchIndirectBuffer
+            ? productEventMetadataBuffer
+            : null,
+          productEventDispatchIndirectBuffer: currentProductEventRowCountUpperBound > 0
+            ? residentProductEventDispatchIndirectBuffer
+            : null,
+          particleCount,
+          productEventCount: currentProductEventRowCountUpperBound,
+          sourceStep: neighborhoodSourceStep + index,
+          sourceTime: Number.isFinite(Number(sphParticleState?.time))
+            ? Number(sphParticleState.time) + index * dtSeconds
+            : null,
+          sourceSlot,
+          substepIndex: index,
+          residentNeighborhoodIdentity: currentResidentNeighborhood,
+          laneExecutionIdentity:
+            effectivePressureInterfaceStageOptions.laneExecutionIdentity
+            ?? effectivePressureInterfaceStageOptions.gpuResidentLaneLeaseIdentity
+            ?? laneOptions.leaseAuthorityIdentity
+            ?? null,
+          productEventGeneration:
+            sequenceResidentProductMass?.productEventArena?.generationId
+            ?? sequenceResidentProductMass?.productEventArenaGeneration
+            ?? sequenceResidentProductMass?.productEventGeneration
+            ?? null,
+          productEventCountAuthority: residentProductEventCountAuthority,
+          timestampProfiler: gpuTimestampProfiler,
+          timestampMetadata: {
+            residentSequenceStage: 'material-interface-source-field-generation',
+            substepIndex: index
+          }
+        });
+      materialInterfaceSourceFieldGenerations.push(
+        currentMaterialInterfaceSourceField.generationToken
+      );
+      const currentSphParticleUpload = {
+        ...sphParticleUpload,
+        stateBuffer: currentStateBuffer,
+        thermoBuffer: currentThermoBuffer,
+        ownsStateBuffer: false,
+        ownsThermoBuffer: false
+      };
+      if (reactiveMultiStepResidentSequence && residentGasCellEosRequested) {
+        // This sequence owns gas-pressure authority. An empty current prefix
+        // means no gas import for this generation, never reuse a caller's
+        // older retained field.
+        effectivePressureInterfaceStageOptions = {
+          ...effectivePressureInterfaceStageOptions,
+          retainedGasPressureCellImport: null,
+          expectedGasPressureCellSourceEpoch: null,
+          expectedGasPressureCellSourceGeneration: null
+        };
+        const gasSourceRowCountUpperBound =
+          residentProductEventEncoderSequence.occupiedRowCountUpperBound;
+        residentGasCellEosSourceRowCountUpperBounds.push(gasSourceRowCountUpperBound);
+        if (gasSourceRowCountUpperBound === 0) {
+          residentGasCellEosSkippedEmptyGenerationCount += 1;
+        } else {
+        const gasSourceEpoch = Math.max(0, Math.trunc(finiteNumber(
+          currentMaterialInterfaceSourceField.sourcePositionEpoch,
+          0
+        )));
+        const gasSourceGeneration = Math.max(
+          1,
+          residentProductEventEncoderSequence.arena.generationId
+            + residentProductEventEncoderSequence.encodedAppendCount
+        );
+        residentGasCellEosResult = await runSphSpatialGasCellEosGpu({
+          device,
+          lane: residentGasCellEosLane,
+          commandEncoder: encoder,
+          source: {
+            sourceKind: 'product-event',
+            productEventBuffer: sequenceResidentProductMass.productEventBuffer,
+            productEventBufferRetained: true,
+            productEventRowCount: gasSourceRowCountUpperBound,
+            productEventStrideFloats: sequenceResidentProductMass.productEventStrideFloats,
+            productEventArena: sequenceResidentProductMass.productEventArena,
+            productEventMetadataBuffer:
+              sequenceResidentProductMass.productEventMetadataBuffer,
+            productEventDispatchIndirectBuffer:
+              sequenceResidentProductMass.productEventDispatchIndirectBuffer,
+            productEventArenaCapacityRows:
+              sequenceResidentProductMass.productEventArena?.capacityRows,
+            productEventArenaGeneration:
+              sequenceResidentProductMass.productEventArena?.generationId,
+            productEventArenaStrideFloats:
+              sequenceResidentProductMass.productEventArena?.strideFloats,
+            sourceEpoch: gasSourceEpoch,
+            sourceGeneration: gasSourceGeneration,
+            sourceTaskId: residentGasCellEosLaneIdentity?.taskId ?? null
+          },
+          residentProductMass: sequenceResidentProductMass,
+          sourceEpoch: gasSourceEpoch,
+          sourceGeneration: gasSourceGeneration,
+          sourceTaskId: residentGasCellEosLaneIdentity?.taskId ?? null,
+          gpuResidentLaneLeaseIdentity: residentGasCellEosLaneIdentity,
+          gridDims: residentGasCellEosGridDims,
+          boxDimsM: dims,
+          sourceCapacity: residentGasCellEosSourceCapacity,
+          gasCellCapacity: residentGasCellEosGasCellCapacity,
+          maxGridCellCount: residentGasCellEosMaxGridCellCount,
+          fallbackSupportVolumeM3:
+            pressureInterfaceStageOptions.spatialGasCellEosFallbackSupportVolumeM3 ?? 0,
+          fallbackTemperatureK:
+            pressureInterfaceStageOptions.spatialGasCellEosFallbackTemperatureK ?? 293.15,
+          minVolumeM3:
+            pressureInterfaceStageOptions.spatialGasCellEosMinVolumeM3 ?? 1e-12,
+          requireLaneIdentity: true,
+          laneId: residentGasCellEosLaneIdentity?.laneId ?? null,
+          stateKey: residentGasCellEosLaneIdentity?.stateKey ?? null,
+          sourceFamily: residentGasCellEosLaneIdentity?.sourceFamily ?? null,
+          outputSlotCount: count,
+          timestampProfiler: gpuTimestampProfiler,
+          timestampMetadata: {
+            residentSequenceStage: 'spatial-gas-cell-eos',
+            substepIndex: index,
+            sourceEpoch: gasSourceEpoch,
+            sourceGeneration: gasSourceGeneration
+          },
+          awaitQueueFence: false
+        });
+        residentGasCellEosResults.push(residentGasCellEosResult);
+        if (residentGasCellEosResult?.ready !== true) {
+          const error = new Error(
+            `Resident GPU gas-cell EOS failed closed at substep ${index}: ${residentGasCellEosResult?.blocker ?? 'unknown'}`
+          );
+          error.code = 'ULG_REACTIVE_RESIDENT_GAS_CELL_EOS_REJECTED';
+          error.residentGasCellEosResult = residentGasCellEosResult;
+          throw error;
+        }
+        residentGasCellEosEncodedInSequence = true;
+        effectivePressureInterfaceStageOptions = {
+          ...pressureInterfaceStageOptions,
+          retainedGasPressureCellImport: residentGasCellEosResult,
+          gpuResidentLaneLeaseIdentity: residentGasCellEosLaneIdentity,
+          expectedGasPressureCellSourceEpoch: gasSourceEpoch,
+          expectedGasPressureCellSourceGeneration: gasSourceGeneration
+        };
+        }
+      }
+      const pressureChain = await encodeResidentMaterialInterfacePressureRowsWebGpu({
+        device,
+        commandEncoder: encoder,
+        materialInterfaceSourceField: currentMaterialInterfaceSourceField,
+        materialInterfaceCompactCandidateCapacity,
+        residentNeighborhood: currentResidentNeighborhood,
+        residentNeighborhoodValidation: currentResidentNeighborhoodValidation,
+        pressureFeedback,
+        pressureInterfaceCoupling,
+        pressureInterfaceForcePreview,
+        pressureInterfaceStageOptions: effectivePressureInterfaceStageOptions,
+        pressureInterfaceWorkspace,
+        pressureInterfaceWorkspaceSubstepIndex: index,
+        sphParticleState,
+        sphParticleUpload: currentSphParticleUpload,
+        particleCount,
+        boxDimsM: dims
+      });
+      const scatter = resolveFusedPressureScatter({
+        device,
+        pressureInterfaceForceRowsBuffer: pressureChain.pressureInterfaceForceRowsBuffer,
+        pressureInterfaceForceSolver: pressureChain.pressureInterfaceForceSolver,
+        pressureInterfaceGridForceAdmission:
+          pressureChain.pressureInterfaceGridForceAdmission
+      });
+      sequencePressureChains.push(pressureChain);
+      sequencePressureScatters.push(scatter);
+      sequencePressureScatter = scatter;
+      if (!scatter.eligible) {
+        throw new Error(
+          `Fused sequence pressure scatter blocked at substep ${index}: ${scatter.blocker}`
+        );
+      }
+      const pressureWorkspaceSubstep = pressureInterfaceWorkspace?.substepResources?.(index);
+      const pressureScatterParamsBuffer = pressureWorkspaceSubstep?.scatterParamsBuffer
+        || writeGpuBuffer(
+          device,
+          `ulg-mls-mpm-fused-sequence-pressure-scatter-params-${index}`,
+          createFusedSparsePressureScatterParamsArray({
+            gridSpec,
+            forceRowCapacity: scatter.forceRowCapacity,
+            dt: dtSeconds,
+            schroederSparseGridPlan
+          }),
+          GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        );
+      if (pressureWorkspaceSubstep?.scatterParamsBuffer) {
+        device.queue.writeBuffer(
+          pressureScatterParamsBuffer,
+          pressureWorkspaceSubstep.scatterParamsByteOffset,
+          createFusedSparsePressureScatterParamsArray({
+            gridSpec,
+            forceRowCapacity: scatter.forceRowCapacity,
+            dt: dtSeconds,
+            schroederSparseGridPlan
+          })
+        );
+      } else {
+        allCreatedBuffers.push(pressureScatterParamsBuffer);
+        sequencePressureTemporaryBuffers.push(pressureScatterParamsBuffer);
+      }
+      const pressureScatterParamsResource = {
+        buffer: pressureScatterParamsBuffer,
+        offset: pressureWorkspaceSubstep?.scatterParamsByteOffset ?? 0,
+        size: pressureWorkspaceSubstep?.scatterParamsByteLength
+          ?? SPH_PRESSURE_INTERFACE_SCATTER_PARAMS_BYTE_LENGTH
+      };
+      const pressureScatterBindGroupDescriptor = {
+        layout: pressureScatterPipelineInfo.bindGroupLayout,
+        entries: [
+          { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
+          { binding: 4, resource: pressureScatterParamsResource },
+          { binding: 5, resource: { buffer: scatter.forceRowsBuffer } },
+          ...(schroederSparseGridPlan
+            ? [{ binding: 8, resource: { buffer: schroederSparseGridRuntime.viewBuffer } }]
+            : [])
+        ]
+      };
+      const pressureScatterSignature = [
+        pressureScatterBindGroupDescriptor.layout,
+        ...pressureScatterBindGroupDescriptor.entries.flatMap((entry) => [
+          entry.binding,
+          entry.resource?.buffer ?? entry.resource,
+          entry.resource?.offset ?? 0,
+          entry.resource?.size ?? 0
+        ])
+      ];
+      const pressureScatterBindGroupCache = pressureWorkspaceSubstep?.bindGroupForKind?.(
+        'pressureScatter',
+        pressureScatterSignature,
+        () => device.createBindGroup(pressureScatterBindGroupDescriptor)
+      ) ?? null;
+      const pressureScatterBindGroup = pressureScatterBindGroupCache?.bindGroup
+        ?? device.createBindGroup(pressureScatterBindGroupDescriptor);
+      pressureChain.pressureScatterBindGroupCacheHit =
+        pressureScatterBindGroupCache?.cacheHit === true;
+      return {
+        currentMaterialInterfaceSourceField,
+        pressureChain,
+        scatter,
+        pressureScatterBindGroup,
+        pressureScatterBindGroupCacheHit:
+          pressureScatterBindGroupCache?.cacheHit === true,
+        pressureWorkgroups: Math.max(1, Math.ceil(scatter.forceRowCapacity / 64))
+      };
+    };
+    let separationScratch = residentSequenceWorkspaceAcquisition?.separationScratch ?? null;
+    const separationMaxPairRestDistanceM = residentNeighborhood || residentNeighborhoodLane
+      ? 0
+      : Math.max(
+          defaultNeighborhoodSupportDistanceM,
+          finiteNumber(laneOptions.legacyMaxPairRestDistanceM, 0)
+        );
+    const fusedMechanicsBindGroupCache = new Map();
+    let fusedMechanicsBindGroupCreationCount = 0;
+    let fusedMechanicsBindGroupReuseCount = 0;
+    const cachedFusedMechanicsBindGroup = (kind, { layout, entries }) => {
+      const signature = [
+        layout,
+        ...entries.flatMap((entry) => [
+          entry.binding,
+          entry.resource?.buffer ?? entry.resource,
+          entry.resource?.offset ?? 0,
+          entry.resource?.size ?? 0
+        ])
+      ];
+      const candidates = fusedMechanicsBindGroupCache.get(kind) || [];
+      const cached = candidates.find((candidate) => (
+        candidate.signature.length === signature.length
+        && candidate.signature.every((value, index) => Object.is(value, signature[index]))
+      ));
+      if (cached) {
+        fusedMechanicsBindGroupReuseCount += 1;
+        return cached.bindGroup;
+      }
+      const bindGroup = device.createBindGroup({ layout, entries });
+      candidates.push({ signature, bindGroup });
+      fusedMechanicsBindGroupCache.set(kind, candidates);
+      fusedMechanicsBindGroupCreationCount += 1;
+      return bindGroup;
+    };
     for (let index = 0; index < count; index += 1) {
       if (index === count - 1) {
         finalSourceStateBuffer = currentStateBuffer;
         finalSourceThermoBuffer = currentThermoBuffer;
         finalSourceMechanicsBuffer = currentMechanicsBuffer;
       }
-      const pingIndex = index % 2;
-      const outStateBuffer = statePingBuffers[pingIndex];
-      const outMechanicsBuffer = mechanicsPingBuffers[pingIndex];
-      const p2gBindGroup = device.createBindGroup({
+      const outStateBuffer = alternateParticleFamilyBuffer(
+        statePingBuffers,
+        currentStateBuffer,
+        'G2P state'
+      );
+      const outMechanicsBuffer = alternateParticleFamilyBuffer(
+        mechanicsPingBuffers,
+        currentMechanicsBuffer,
+        'G2P mechanics'
+      );
+      const preparedPressure = await encodeCurrentPressureRowsBeforeCompaction({
+        index,
+        currentStateBuffer,
+        currentThermoBuffer,
+        currentResidentNeighborhood,
+        currentResidentNeighborhoodValidation
+      });
+      const sparseSourceAdmission = schroederSparseGridRuntime
+        ? resolveResidentNeighborhoodConsumer({
+            residentNeighborhood: currentResidentNeighborhood,
+            device,
+            consumer: 'ssUniqueNodeCompaction',
+            sourceCount: particleCount,
+            ...(currentResidentNeighborhoodValidation || {})
+          })
+        : null;
+      const currentSparseSourceIdentity =
+        schroederSparseGridSourceIdentityFromAdmission(sparseSourceAdmission);
+      const productSourceIdentity = index === 0 && inputResidentProductEventCount > 0
+        ? {
+            ...(currentSparseSourceIdentity || {}),
+            identity: residentProductMass?.productEventSourceIdentity ?? null,
+            leaseIdentity: residentProductMass?.productEventSourceLeaseIdentity ?? null
+          }
+        : currentSparseSourceIdentity;
+      const currentProductEventSource = residentProductEventCount > 0
+        ? schroederSparseGridProductEventSource({
+            residentProductMass: sequenceResidentProductMass,
+            productEventBuffer,
+            sourceIdentity: productSourceIdentity,
+            generationId: residentProductEventEncoderSequence?.encodedAppendCount === 0
+              && residentProductEventEncoderSequence.retiredArena
+              ? residentProductEventEncoderSequence.retiredArena.generationId
+              : sequenceResidentProductMass?.productEventArena?.generationId,
+            productEventCapacity:
+              residentProductEventEncoderSequence?.encodedAppendCount === 0
+                && residentProductEventEncoderSequence.retiredArena
+                ? residentProductEventEncoderSequence.retiredArena.capacityRows
+                : sequenceResidentProductMass?.productEventArena?.capacityRows
+          })
+        : null;
+      const currentPressureForceSource = schroederSparseGridPressureSource({
+        scatter: preparedPressure?.scatter,
+        pressureStage: preparedPressure?.pressureChain?.pressureInterfaceStage,
+        status: 'current-pressure-force-centroids-encoded-before-compaction',
+        centroidOrderStatus:
+          'same-encoder-current-pressure-centroids-built-before-actual-node-compaction'
+      });
+      if (schroederSparseGridRuntime) {
+        schroederSparseGrid = schroederSparseGridRuntime.encode(encoder, {
+          generationId: schroederSparseHierarchy.generationId,
+          particleStateBuffer: currentStateBuffer,
+          particleLevelAssignmentBuffer: schroederLevelFilter.enabled
+            ? schroederAssignmentBuffer
+            : null,
+          particleCountResidency,
+          productEventSource: currentProductEventSource,
+          pressureForceSource: currentPressureForceSource,
+          timestampProfiler: gpuTimestampProfiler,
+          timestampMetadata: {
+            stage: 'schroeder-sparse-grid-view',
+            substepIndex: index,
+            particlePositionSource: 'current-substep-state-buffer'
+          }
+        });
+        schroederSparseGridExecutions.push(schroederSparseGrid);
+      }
+      const p2gBindGroup = cachedFusedMechanicsBindGroup('p2g', {
         layout: p2gBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: currentStateBuffer } },
@@ -4269,13 +7487,19 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 2, resource: { buffer: currentMechanicsBuffer } },
           { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
           { binding: 4, resource: { buffer: p2gParamsBuffer } },
-          { binding: 5, resource: { buffer: productEventBuffer } },
+          {
+            binding: 5,
+            resource: {
+              buffer: particleCountResidency?.metadataBuffer ?? productEventBuffer
+            }
+          },
           { binding: 6, resource: { buffer: gridBuffer } },
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-          { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
+          { binding: 8, resource: { buffer: schroederSparseGridRuntime?.viewBuffer
+            ?? schroederActiveNodeBuffer } }
         ]
       });
-      const p2gFinalizeBindGroup = device.createBindGroup({
+      const p2gFinalizeBindGroup = cachedFusedMechanicsBindGroup('p2g-finalize', {
         layout: p2gFinalizeBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: currentStateBuffer } },
@@ -4286,11 +7510,25 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 5, resource: { buffer: productEventBuffer } },
           { binding: 6, resource: { buffer: gridBuffer } },
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-          { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
+          { binding: 8, resource: { buffer: schroederSparseGridRuntime?.viewBuffer
+            ?? schroederActiveNodeBuffer } }
         ]
       });
+      const productEventScatterBindGroup = productEventScatterPipelineInfo
+        ? cachedFusedMechanicsBindGroup('product-event-scatter', {
+            layout: productEventScatterPipelineInfo.bindGroupLayout,
+            entries: [
+              { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
+              { binding: 4, resource: { buffer: p2gParamsBuffer } },
+              { binding: 5, resource: { buffer: productEventBuffer } },
+              { binding: 8, resource: { buffer: schroederSparseGridRuntime?.viewBuffer
+                ?? schroederActiveNodeBuffer } },
+              { binding: 9, resource: { buffer: productEventMetadataBuffer } }
+            ]
+          })
+        : null;
       const activeAccumulatorClearBindGroup = activeAccumulatorClearPipelineInfo
-        ? device.createBindGroup({
+        ? cachedFusedMechanicsBindGroup('active-accumulator-clear', {
           layout: activeAccumulatorClearPipelineInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: currentStateBuffer } },
@@ -4301,11 +7539,26 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
             { binding: 5, resource: { buffer: productEventBuffer } },
             { binding: 6, resource: { buffer: gridBuffer } },
             { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-            { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
+            { binding: 8, resource: { buffer: schroederSparseGridRuntime?.viewBuffer
+              ?? schroederActiveNodeBuffer } }
           ]
         })
         : null;
-      if (activeGridDispatch.useActiveGrid) {
+      if (schroederSparseGrid) {
+        const accumulatorClearPass = encoder.beginComputePass(
+          gpuTimestampProfiler.beginComputePassDescriptor('schroederSparseGridAccumulatorClear', {
+            substepIndex: index,
+            hierarchyGenerationId: schroederSparseGrid.hierarchyGenerationId
+          })
+        );
+        accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
+        accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
+        accumulatorClearPass.dispatchWorkgroupsIndirect(
+          schroederSparseGrid.dispatchIndirectBuffer,
+          schroederSparseGrid.dispatchIndirectByteOffset ?? 0
+        );
+        accumulatorClearPass.end();
+      } else if (activeGridDispatch.useActiveGrid) {
         const accumulatorClearPass = encoder.beginComputePass(
           gpuTimestampProfiler.beginComputePassDescriptor('activeGridAccumulatorClear', {
             substepIndex: index
@@ -4322,30 +7575,97 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       } else {
         encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
       }
-      const p2gPass = encoder.beginComputePass(
-        gpuTimestampProfiler.beginComputePassDescriptor('p2gGridProjection', {
-          substepIndex: index
-        })
-      );
+      const groupedMechanicsPass = gpuTimestampProfiler.active
+        ? null
+        : encoder.beginComputePass({
+            label: `ulg-mls-mpm-fused-mechanics-substep-${index}`
+          });
+      const mechanicsStagePass = (label, metadata = {}) => groupedMechanicsPass
+        ?? encoder.beginComputePass(
+          gpuTimestampProfiler.beginComputePassDescriptor(label, metadata)
+        );
+      const endMechanicsStagePass = (pass) => {
+        if (pass !== groupedMechanicsPass) pass.end();
+      };
+      const p2gPass = mechanicsStagePass('p2gGridProjection', {
+        substepIndex: index
+      });
       p2gPass.setPipeline(p2gPipeline);
       p2gPass.setBindGroup(0, p2gBindGroup);
-      p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
-      p2gPass.end();
-      const p2gFinalizePass = encoder.beginComputePass(
-        gpuTimestampProfiler.beginComputePassDescriptor('p2gGridFinalize', {
-          substepIndex: index
-        })
-      );
+      dispatchSchroederParticleWorkgroups(p2gPass, {
+        residency: particleCountResidency,
+        fallbackParticleCount: particleCount,
+        workgroupSize: 64
+      });
+      endMechanicsStagePass(p2gPass);
+      if (productEventScatterPipelineInfo) {
+        const productEventScatterPass = mechanicsStagePass('residentProductMassScatter', {
+          substepIndex: index,
+          productEventRowCount: residentProductEventCount
+        });
+        productEventScatterPass.setPipeline(productEventScatterPipelineInfo.pipeline);
+        productEventScatterPass.setBindGroup(0, productEventScatterBindGroup);
+        if (
+          residentProductEventDispatchIndirectBuffer
+          && typeof productEventScatterPass.dispatchWorkgroupsIndirect === 'function'
+        ) {
+          productEventScatterPass.dispatchWorkgroupsIndirect(
+            residentProductEventDispatchIndirectBuffer,
+            0
+          );
+        } else {
+          productEventScatterPass.dispatchWorkgroups(
+            Math.max(1, Math.ceil(residentProductEventCount / 64))
+          );
+        }
+        endMechanicsStagePass(productEventScatterPass);
+      }
+      if (preparedPressure) {
+        const substepPressureScatter = preparedPressure.scatter;
+        const pressureScatterPass = mechanicsStagePass('pressureInterfaceForceRowScatter', {
+          substepIndex: index,
+          forceRowCapacity: substepPressureScatter.forceRowCapacity,
+          applicationPolicy:
+            'source-field-candidates-and-force-rows-built-before-sparse-compaction'
+        });
+        pressureScatterPass.setPipeline(pressureScatterPipelineInfo.pipeline);
+        pressureScatterPass.setBindGroup(
+          0,
+          preparedPressure.pressureScatterBindGroup
+        );
+        pressureScatterPass.dispatchWorkgroupsIndirect(
+          substepPressureScatter.candidateDispatchIndirectBuffer,
+          substepPressureScatter.candidateDispatchIndirectOffsetBytes
+        );
+        endMechanicsStagePass(pressureScatterPass);
+        dispatchTopology.pressureInterfaceScatter.dispatchWorkgroupCapacityCeilingPerSequence +=
+          preparedPressure.pressureWorkgroups;
+        dispatchTopology.pressureInterfaceScatter.indirectDispatchesPerSequence += 1;
+        dispatchTopology.pressureInterfaceScatter.invocationLimitPerSequence +=
+          substepPressureScatter.forceRowCapacity;
+        dispatchTopology.pressureDispatchesPerSequence += 1;
+        dispatchTopology.totalDispatches += 1;
+      }
+      const p2gFinalizePass = mechanicsStagePass('p2gGridFinalize', {
+        substepIndex: index
+      });
       p2gFinalizePass.setPipeline(p2gFinalizePipeline);
       p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
-      dispatchActiveGridComputePass(
-        p2gFinalizePass,
-        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-        activeGridIndirectDispatchArgs
-      );
-      p2gFinalizePass.end();
+      if (schroederSparseGrid) {
+        p2gFinalizePass.dispatchWorkgroupsIndirect(
+          schroederSparseGrid.dispatchIndirectBuffer,
+          schroederSparseGrid.dispatchIndirectByteOffset ?? 0
+        );
+      } else {
+        dispatchActiveGridComputePass(
+          p2gFinalizePass,
+          Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+          activeGridIndirectDispatchArgs
+        );
+      }
+      endMechanicsStagePass(p2gFinalizePass);
 
-      const gridUpdateBindGroup = device.createBindGroup({
+      const gridUpdateBindGroup = cachedFusedMechanicsBindGroup('grid-update', {
         layout: gridUpdateBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: gridBuffer } },
@@ -4354,25 +7674,35 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 3, resource: { buffer: pressureRowsBuffer } }
         ]
       });
-      const gridUpdatePass = encoder.beginComputePass(
-        gpuTimestampProfiler.beginComputePassDescriptor('gridUpdate', {
-          substepIndex: index
-        })
-      );
+      const gridUpdatePass = mechanicsStagePass('gridUpdate', {
+        substepIndex: index
+      });
       gridUpdatePass.setPipeline(gridUpdatePipeline);
       gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
-      dispatchActiveGridComputePass(
-        gridUpdatePass,
-        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-        activeGridIndirectDispatchArgs
-      );
-      gridUpdatePass.end();
+      if (schroederSparseGrid) {
+        gridUpdatePass.dispatchWorkgroupsIndirect(
+          schroederSparseGrid.dispatchIndirectBuffer,
+          schroederSparseGrid.dispatchIndirectByteOffset ?? 0
+        );
+      } else {
+        dispatchActiveGridComputePass(
+          gridUpdatePass,
+          Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+          activeGridIndirectDispatchArgs
+        );
+      }
+      endMechanicsStagePass(gridUpdatePass);
 
-      const g2pBindGroup = device.createBindGroup({
+      const g2pBindGroup = cachedFusedMechanicsBindGroup('g2p', {
         layout: g2pBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: currentStateBuffer } },
-          { binding: 1, resource: { buffer: currentThermoBuffer } },
+          {
+            binding: 1,
+            resource: {
+              buffer: particleCountResidency?.metadataBuffer ?? currentThermoBuffer
+            }
+          },
           { binding: 2, resource: { buffer: currentMechanicsBuffer } },
           { binding: 3, resource: { buffer: updatedGridBuffer } },
           { binding: 4, resource: { buffer: outStateBuffer } },
@@ -4380,22 +7710,67 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 6, resource: { buffer: g2pParamsBuffer } },
           // G2P filters by particle-parallel level-assignment rows (never
           // the compacted active-node list).
-          { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
+          { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
+          ...(schroederSparseGridPlan
+            ? [{ binding: 8, resource: { buffer: schroederSparseGridRuntime.viewBuffer } }]
+            : [])
         ]
       });
-      const g2pPass = encoder.beginComputePass(
-        gpuTimestampProfiler.beginComputePassDescriptor('g2pReconstruction', {
-          substepIndex: index
-        })
-      );
+      const g2pPass = mechanicsStagePass('g2pReconstruction', {
+        substepIndex: index
+      });
       g2pPass.setPipeline(g2pPipeline);
       g2pPass.setBindGroup(0, g2pBindGroup);
-      g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
-      g2pPass.end();
+      dispatchSchroederParticleWorkgroups(g2pPass, {
+        residency: particleCountResidency,
+        fallbackParticleCount: particleCount,
+        workgroupSize: 64
+      });
+      endMechanicsStagePass(g2pPass);
+      groupedMechanicsPass?.end();
+      let substepResidentNeighborhood = currentResidentNeighborhood;
+      let substepResidentNeighborhoodValidation = currentResidentNeighborhoodValidation;
+      if (residentNeighborhoodLane) {
+        const generation = residentNeighborhoodLaneAcquisition.encodeGeneration(encoder, {
+          positionBuffer: outStateBuffer,
+          positionStrideU32: SPH_GPU_PARTICLE_STATE_FLOATS,
+          positionOffsetU32: 0,
+          chartLevelBuffer: laneOptions.chartLevelBuffer ?? null,
+          chartLevelByteOffset: laneOptions.chartLevelByteOffset ?? 0,
+          supportClassBuffer: laneOptions.supportClassBuffer ?? null,
+          supportClassByteOffset: laneOptions.supportClassByteOffset ?? 0,
+          sourceSupportAssignmentBuffer: laneOptions.sourceSupportAssignmentBuffer ?? null,
+          sourceSupportAssignmentByteOffset:
+            laneOptions.sourceSupportAssignmentByteOffset ?? 0,
+          encodeSourceMetadata: laneOptions.encodeSourceMetadata ?? null,
+          generation: residentNeighborhoodMutationEpochsForStep(
+            neighborhoodSourceStep + index
+          ).postG2p + neighborhoodGenerationEpochOffset,
+          positionEpoch: residentNeighborhoodMutationEpochsForStep(
+            neighborhoodSourceStep + index
+          ).postG2p + neighborhoodPositionEpochOffset,
+          mutationPhase: 'post-g2p',
+          substepIndex: index,
+          timestampProfiler: gpuTimestampProfiler,
+          timestampMetadata: {
+            residentSequenceStage: 'post-g2p-neighborhood-generation',
+            substepIndex: index
+          }
+        });
+        residentNeighborhoodGenerations.push(generation);
+        if (generation.hostAdmission === true && generation.encoded === true) {
+          substepResidentNeighborhood = generation;
+          substepResidentNeighborhoodValidation = generation.productionLaneValidation;
+        } else {
+          substepResidentNeighborhood = null;
+          substepResidentNeighborhoodValidation = null;
+        }
+      }
       const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
         stateBuffer: outStateBuffer,
         mechanicsBuffer: outMechanicsBuffer,
         particleCount,
+        particleCountResidency,
         boxDimsM: dims,
         relaxation: mlsMpmParticleState?.particleSeparationRelaxation
           ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
@@ -4404,17 +7779,89 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         // must cover the 2h support, so cells are at least 2h/3.
         minCellSizeM: (2 / 3) * Math.max(finiteNumber(sphParticleState?.smoothingLengthM, 0), 0),
         gridSpacingM: gridSpec.gridSpacingM,
+        residentNeighborhood: substepResidentNeighborhood,
+        residentNeighborhoodValidation: substepResidentNeighborhoodValidation,
         scratch: separationScratch,
+        paramsSlotIndex: index,
+        paramsSlotCount: count,
         timestampProfiler: gpuTimestampProfiler,
         timestampMetadata: { substepIndex: index }
       });
       separationScratch = separation.scratch;
+      if (residentNeighborhoodLane) {
+        const separationPositionMutationApplied = separation.enabled === true;
+        if (separationPositionMutationApplied) separationPositionMutationCount += 1;
+        const reuseAdmission = residentNeighborhoodGenerationReuseAdmission({
+          lane: residentNeighborhoodLane,
+          generation: substepResidentNeighborhood,
+          positionMutationApplied: separationPositionMutationApplied
+        });
+        residentNeighborhoodGenerationReuseAdmissions.push({
+          ...reuseAdmission,
+          substepIndex: index,
+          stage: 'post-separation'
+        });
+        if (!reuseAdmission.reusable) {
+          const postSeparationGeneration = residentNeighborhoodLaneAcquisition.encodeGeneration(
+            encoder,
+            {
+              positionBuffer: outStateBuffer,
+              positionStrideU32: SPH_GPU_PARTICLE_STATE_FLOATS,
+              positionOffsetU32: 0,
+              chartLevelBuffer: laneOptions.chartLevelBuffer ?? null,
+              chartLevelByteOffset: laneOptions.chartLevelByteOffset ?? 0,
+              supportClassBuffer: laneOptions.supportClassBuffer ?? null,
+              supportClassByteOffset: laneOptions.supportClassByteOffset ?? 0,
+              sourceSupportAssignmentBuffer: laneOptions.sourceSupportAssignmentBuffer ?? null,
+              sourceSupportAssignmentByteOffset:
+                laneOptions.sourceSupportAssignmentByteOffset ?? 0,
+              encodeSourceMetadata: laneOptions.encodeSourceMetadata ?? null,
+              generation: residentNeighborhoodMutationEpochsForStep(
+                neighborhoodSourceStep + index
+              ).postSeparation + neighborhoodGenerationEpochOffset,
+              positionEpoch: residentNeighborhoodMutationEpochsForStep(
+                neighborhoodSourceStep + index
+              ).postSeparation + neighborhoodPositionEpochOffset,
+              mutationPhase: 'post-separation',
+              substepIndex: index,
+              timestampProfiler: gpuTimestampProfiler,
+              timestampMetadata: {
+                residentSequenceStage: 'post-separation-neighborhood-generation',
+                substepIndex: index,
+                separationPositionMutationApplied
+              }
+            }
+          );
+          residentNeighborhoodGenerations.push(postSeparationGeneration);
+          if (postSeparationGeneration.hostAdmission === true
+            && postSeparationGeneration.encoded === true) {
+            substepResidentNeighborhood = postSeparationGeneration;
+            substepResidentNeighborhoodValidation =
+              postSeparationGeneration.productionLaneValidation;
+          } else {
+            substepResidentNeighborhood = null;
+            substepResidentNeighborhoodValidation = null;
+          }
+        }
+      }
+      currentResidentNeighborhood = substepResidentNeighborhood;
+      currentResidentNeighborhoodValidation = substepResidentNeighborhoodValidation;
       currentStateBuffer = outStateBuffer;
       currentMechanicsBuffer = outMechanicsBuffer;
       finalStateBuffer = outStateBuffer;
       finalMechanicsBuffer = outMechanicsBuffer;
       if (useThermalSidecarFusion) {
         const thermalStartMs = nowMs();
+        const thermalOutputStateBuffer = alternateParticleFamilyBuffer(
+          statePingBuffers,
+          currentStateBuffer,
+          'thermal state'
+        );
+        const thermalOutputThermoBuffer = alternateParticleFamilyBuffer(
+          thermoPingBuffers,
+          currentThermoBuffer,
+          'thermal thermo'
+        );
         const thermalStage = createSphThermalStepWebGpuEncoderStage({
           device,
           sphParticleState,
@@ -4422,27 +7869,200 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           sphParticleUpload,
           sourceStateBuffer: outStateBuffer,
           sourceThermoBuffer: currentThermoBuffer,
+          outputStateBuffer: thermalOutputStateBuffer,
+          outputThermoBuffer: thermalOutputThermoBuffer,
           boxDimsM: dims,
           dtS: dtSeconds,
           retainOutputParticleBuffers: true,
           readbackMode: NO_FULL_READBACK_MODE,
+          residentNeighborhood: substepResidentNeighborhood,
+          residentNeighborhoodValidation: substepResidentNeighborhoodValidation,
           // Reuse the separation pass's per-substep neighbor bins for pair
           // conduction instead of the exhaustive particle scan.
           neighborBins: separation.enabled ? separation.scratch?.neighborBins ?? null : null,
           ...thermalStepOptions,
+          thermalWorkspace,
+          thermalParamsSlotIndex: index,
           timestampProfiler: gpuTimestampProfiler,
           timestampMetadata: { substepIndex: index }
         });
         thermalStage.encode(encoder);
         stageMs.thermalStep += Math.max(0, nowMs() - thermalStartMs);
         sidecarEncoderStages.push(thermalStage);
-        sidecarOutputBuffers.push(thermalStage.stateBuffer, thermalStage.thermoBuffer);
+        if (thermalStage.outputStateBufferOwned) sidecarOutputBuffers.push(thermalStage.stateBuffer);
+        if (thermalStage.outputThermoBufferOwned) sidecarOutputBuffers.push(thermalStage.thermoBuffer);
         finalThermalStep = thermalStage.result;
         currentStateBuffer = thermalStage.stateBuffer;
         currentThermoBuffer = thermalStage.thermoBuffer;
         finalThermoBuffer = thermalStage.thermoBuffer;
-
+      }
+      if (useReactionSidecarFusion) {
+        const reactionStartMs = nowMs();
+        const reactionOutputStateBuffer = alternateParticleFamilyBuffer(
+          statePingBuffers,
+          currentStateBuffer,
+          'reaction state'
+        );
+        const reactionOutputThermoBuffer = alternateParticleFamilyBuffer(
+          thermoPingBuffers,
+          currentThermoBuffer,
+          'reaction thermo'
+        );
+        const reactionOutputMechanicsBuffer = alternateParticleFamilyBuffer(
+          mechanicsPingBuffers,
+          currentMechanicsBuffer,
+          'reaction mechanics'
+        );
+        const reactionStage = await createSphReactionStepWebGpuEncoderStage({
+          device,
+          commandEncoder: encoder,
+          sphParticleState,
+          mlsMpmParticleState,
+          reactionTable,
+          thermalMaterialTable,
+          sphParticleUpload: {
+            ...sphParticleUpload,
+            stateBuffer: currentStateBuffer,
+            thermoBuffer: currentThermoBuffer,
+            ownsStateBuffer: false,
+            ownsThermoBuffer: false
+          },
+          mlsMpmParticleUpload: {
+            ...mlsMpmParticleUpload,
+            mechanicsBuffer: currentMechanicsBuffer,
+            ownsMechanicsBuffer: false
+          },
+          sourceStateBuffer: currentStateBuffer,
+          sourceThermoBuffer: currentThermoBuffer,
+          sourceMechanicsBuffer: currentMechanicsBuffer,
+          outputStateBuffer: reactionOutputStateBuffer,
+          outputThermoBuffer: reactionOutputThermoBuffer,
+          outputMechanicsBuffer: reactionOutputMechanicsBuffer,
+          boxDimsM: dims,
+          dtSeconds,
+          retainOutputParticleBuffers: true,
+          residentNeighborhood: substepResidentNeighborhood,
+          residentNeighborhoodValidation: substepResidentNeighborhoodValidation,
+          ...reactionStepOptions,
+          reactionCoreWorkspace,
+          reactionParamsSlotIndex: index,
+          productEventPlacementWorkspace: reactionProductEventPlacementWorkspace,
+          timestampProfiler: gpuTimestampProfiler,
+          timestampMetadata: { substepIndex: index }
+        });
+        stageMs.reactionStep += Math.max(0, nowMs() - reactionStartMs);
+        sidecarEncoderStages.push(reactionStage);
+        for (const [owned, buffer] of [
+          [reactionStage.outputBufferOwnership?.state === 'stage-owned', reactionStage.stateBuffer],
+          [reactionStage.outputBufferOwnership?.thermo === 'stage-owned', reactionStage.thermoBuffer],
+          [reactionStage.outputBufferOwnership?.mechanics === 'stage-owned', reactionStage.mechanicsBuffer]
+        ]) {
+          if (owned) sidecarOutputBuffers.push(buffer);
+        }
+        finalReactionStep = reactionStage;
+        currentStateBuffer = reactionStage.stateBuffer;
+        currentThermoBuffer = reactionStage.thermoBuffer;
+        currentMechanicsBuffer = reactionStage.mechanicsBuffer;
+        finalThermoBuffer = reactionStage.thermoBuffer;
+        if (reactiveMultiStepResidentSequence) {
+          const emittedProductMass = reactionStage.residentProductMass;
+          if (
+            emittedProductMass?.productEventBufferRetained !== true
+            || !emittedProductMass.productEventBuffer
+            || emittedProductMass.productEventRowCount
+              !== reactiveProductEventRowsPerSubstep
+          ) {
+            const error = new Error(
+              `Reactive product-event emission failed closed at substep ${index}`
+            );
+            error.code = 'ULG_REACTIVE_PRODUCT_EVENT_EMISSION_REJECTED';
+            error.reactionStage = reactionStage;
+            throw error;
+          }
+          const reactionMutationEpochs = residentNeighborhoodMutationEpochsForStep(
+            neighborhoodSourceStep + index
+          );
+          const reactionSourceEpoch = Number(
+            substepResidentNeighborhoodValidation?.positionEpoch
+              ?? substepResidentNeighborhood?.descriptor?.positionValidity?.positionEpoch
+          );
+          if (!Number.isInteger(reactionSourceEpoch) || reactionSourceEpoch < 0) {
+            throw new Error(
+              `Reactive product-event source lacks an admitted neighborhood epoch at substep ${index}`
+            );
+          }
+          const postReactionGenerationEpoch = reactionMutationEpochs.postReaction
+            + neighborhoodGenerationEpochOffset;
+          const postReactionPositionEpoch = reactionMutationEpochs.postReaction
+            + neighborhoodPositionEpochOffset;
+          const appendEvidence = residentProductEventEncoderSequence.encodeAppend(encoder, {
+            source: {
+              buffer: emittedProductMass.productEventBuffer,
+              rowCount: emittedProductMass.productEventRowCount,
+              byteLength: emittedProductMass.productEventBufferByteLength,
+              productEventPrefixMetadataBuffer:
+                emittedProductMass.productEventPrefixMetadataBuffer,
+              productEventDispatchIndirectBuffer:
+                emittedProductMass.productEventDispatchIndirectBuffer
+            },
+            sourceEpoch: reactionSourceEpoch,
+            sourceGeneration:
+              residentProductEventEncoderSequence.arena.generationId + index + 1,
+            timestampProfiler: gpuTimestampProfiler,
+            timestampMetadata: {
+              residentSequenceStage: 'reaction-product-event-arena-append',
+              substepIndex: index
+            }
+          });
+          reactiveProductEventAppendEvidence.push(appendEvidence);
+          reactiveProductEventStages.push(reactionStage.productEventStage);
+          if (residentNeighborhoodLane) {
+            const postReactionGeneration =
+              residentNeighborhoodLaneAcquisition.encodeGeneration(encoder, {
+                positionBuffer: currentStateBuffer,
+                positionStrideU32: SPH_GPU_PARTICLE_STATE_FLOATS,
+                positionOffsetU32: 0,
+                chartLevelBuffer: laneOptions.chartLevelBuffer ?? null,
+                chartLevelByteOffset: laneOptions.chartLevelByteOffset ?? 0,
+                supportClassBuffer: laneOptions.supportClassBuffer ?? null,
+                supportClassByteOffset: laneOptions.supportClassByteOffset ?? 0,
+                sourceSupportAssignmentBuffer:
+                  laneOptions.sourceSupportAssignmentBuffer ?? null,
+                sourceSupportAssignmentByteOffset:
+                  laneOptions.sourceSupportAssignmentByteOffset ?? 0,
+                encodeSourceMetadata: laneOptions.encodeSourceMetadata ?? null,
+                generation: postReactionGenerationEpoch,
+                positionEpoch: postReactionPositionEpoch,
+                mutationPhase: 'post-reaction-product-carrier-placement',
+                substepIndex: index,
+                timestampProfiler: gpuTimestampProfiler,
+                timestampMetadata: {
+                  residentSequenceStage: 'post-reaction-neighborhood-generation',
+                  substepIndex: index
+                }
+              });
+            residentNeighborhoodGenerations.push(postReactionGeneration);
+            if (
+              postReactionGeneration.hostAdmission === true
+              && postReactionGeneration.encoded === true
+            ) {
+              currentResidentNeighborhood = postReactionGeneration;
+              currentResidentNeighborhoodValidation =
+                postReactionGeneration.productionLaneValidation;
+            } else {
+              currentResidentNeighborhood = null;
+              currentResidentNeighborhoodValidation = null;
+            }
+          }
+        }
+      }
+      if (useMechanicsRefreshSidecarFusion) {
         const mechanicsRefreshStartMs = nowMs();
+        const mechanicsRefreshOutputBuffer = alternateParticleFamilyBuffer(
+          mechanicsPingBuffers,
+          currentMechanicsBuffer,
+          'mechanics refresh'
+        );
         const mechanicsRefreshStage = createMlsMpmMechanicsRefreshWebGpuEncoderStage({
           device,
           sphParticleState,
@@ -4452,7 +8072,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           mlsMpmParticleUpload,
           sourceStateBuffer: currentStateBuffer,
           sourceThermoBuffer: currentThermoBuffer,
-          sourceMechanicsBuffer: outMechanicsBuffer,
+          sourceMechanicsBuffer: currentMechanicsBuffer,
+          outputMechanicsBuffer: mechanicsRefreshOutputBuffer,
           retainOutputParticleBuffers: true,
           readbackMode: NO_FULL_READBACK_MODE,
           ...mechanicsRefreshOptions,
@@ -4462,30 +8083,353 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         mechanicsRefreshStage.encode(encoder);
         stageMs.mechanicsRefresh += Math.max(0, nowMs() - mechanicsRefreshStartMs);
         sidecarEncoderStages.push(mechanicsRefreshStage);
-        sidecarOutputBuffers.push(mechanicsRefreshStage.mechanicsBuffer);
+        if (mechanicsRefreshStage.outputMechanicsBufferOwned) {
+          sidecarOutputBuffers.push(mechanicsRefreshStage.mechanicsBuffer);
+        }
         finalMechanicsRefreshStep = mechanicsRefreshStage.result;
         currentMechanicsBuffer = mechanicsRefreshStage.mechanicsBuffer;
       }
+      finalStateBuffer = currentStateBuffer;
+      finalThermoBuffer = currentThermoBuffer;
+      finalMechanicsBuffer = currentMechanicsBuffer;
+    }
+    if (
+      schroederSparseGridRuntime
+      && sequenceResidentProductMass
+      && residentProductEventCount > 0
+    ) {
+      const finalProductSourceAdmission = resolveResidentNeighborhoodConsumer({
+        residentNeighborhood: currentResidentNeighborhood,
+        device,
+        consumer: 'ssUniqueNodeCompaction',
+        sourceCount: particleCount,
+        ...(currentResidentNeighborhoodValidation || {})
+      });
+      const finalProductSourceIdentity =
+        schroederSparseGridSourceIdentityFromAdmission(finalProductSourceAdmission);
+      sequenceResidentProductMass.productEventSourceIdentity =
+        finalProductSourceIdentity?.identity ?? null;
+      sequenceResidentProductMass.productEventSourceLeaseIdentity =
+        finalProductSourceIdentity?.leaseIdentity ?? null;
+      sequenceResidentProductMass.productEventSourcePositionEpoch =
+        finalProductSourceIdentity?.identity.positionEpoch ?? null;
+      sequenceResidentProductMass.productEventSourceGeneration =
+        sequenceResidentProductMass.productEventArena?.generationId
+        ?? sequenceResidentProductMass.productEventArenaGeneration
+        ?? null;
+      sequenceResidentProductMass.productEventSourceIdentityStatus =
+        finalProductSourceIdentity
+          ? 'current-resident-product-event-source-identity-preserved'
+          : 'product-event-source-identity-fail-closed';
     }
     gpuTimestampProfiler.encodeResolve(encoder);
+    residentSequenceSubmissionSeal = residentSequenceWorkspaceAcquisition?.sealForSubmission({
+      commandEncoder: encoder,
+      finalStateBuffer,
+      finalThermoBuffer,
+      finalMechanicsBuffer,
+      mutatedFamilies: [
+        'state',
+        'mechanics',
+        ...(useThermalSidecarFusion ? ['thermo'] : [])
+      ]
+    }) ?? null;
+    if (residentProductEventEncoderSequence
+      && residentProductEventEncoderSequence.encodedAppendCount
+        !== residentProductEventEncoderSequence.appendCount) {
+      throw new Error(
+        `resident product-event sequence encoded ${residentProductEventEncoderSequence.encodedAppendCount}/${residentProductEventEncoderSequence.appendCount} appends before submission`
+      );
+    }
+    fusedMechanicsSequenceHostTiming.commandRecordingMs = Math.max(
+      0,
+      nowMs() - fusedMechanicsSequenceHostPhaseStartMs
+    );
     const queueSubmitStartMs = nowMs();
-    device.queue.submit([encoder.finish()]);
-    const fusedMechanicsSequenceQueueSubmitMs = Math.max(0, nowMs() - queueSubmitStartMs);
+    try {
+      device.queue.submit([encoder.finish()]);
+    } catch (error) {
+      residentSequenceWorkspaceAcquisition?.cancelBeforeSubmit(
+        `queue-submit-threw:${error instanceof Error ? error.message : String(error)}`
+      );
+      throw error;
+    }
+    fusedMechanicsSequenceHostTiming.queueSubmitCallMs = Math.max(
+      0,
+      nowMs() - queueSubmitStartMs
+    );
+    fusedMechanicsSequenceHostPhaseStartMs = nowMs();
+    sequenceSubmitted = true;
+    const postSubmitFailures = [];
+    const settlePostSubmit = (stage, operation) => {
+      try {
+        return operation();
+      } catch (error) {
+        postSubmitFailures.push({ stage, error });
+        return null;
+      }
+    };
+    if (materialInterfaceSourceFieldLaneAcquisition) {
+      materialInterfaceSourceFieldLaneSubmit = settlePostSubmit(
+        'material-interface-source-field-mark-submitted',
+        () => materialInterfaceSourceFieldLaneAcquisition.markSubmitted({
+          queueCompletionStatus: 'queue-submitted',
+          queueCompletionMethod: 'queue.submit'
+        })
+      );
+      materialInterfaceSourceFieldLaneReleased = settlePostSubmit(
+        'material-interface-source-field-release',
+        () => materialInterfaceSourceFieldLaneAcquisition.release({
+          reason: 'pressure-source-field-generations-submitted-on-shared-queue'
+        })
+      );
+    }
+    for (const [gasIndex, gasCellEosResult] of residentGasCellEosResults.entries()) {
+      if (gasCellEosResult?.ready === true) {
+        settlePostSubmit(`gas-cell-eos-${gasIndex}-mark-submitted`, () => (
+          gasCellEosResult.markSubmitted?.({
+            queueCompletionStatus: 'queue-submitted',
+            queueCompletionMethod: 'queue.submit'
+          })
+        ));
+      }
+      settlePostSubmit(`gas-cell-eos-${gasIndex}-retire`, () => (
+        gasCellEosResult?.retire?.({
+          reason: 'pressure-interface-consumer-submitted'
+        })
+      ));
+    }
+    settlePostSubmit('product-event-sequence-mark-submitted', () => (
+      residentProductEventEncoderSequence?.markSubmitted({
+        queueCompletionStatus: 'queue-submitted',
+        queueCompletionMethod: 'queue.submit'
+      })
+    ));
+    residentSequenceSubmissionCommit = settlePostSubmit(
+      'resident-sequence-workspace-commit',
+      () => residentSequenceWorkspaceAcquisition?.commitSubmitted({
+        commandEncoder: encoder
+      }) ?? null
+    );
+    residentSequencePublicationToken =
+      residentSequenceSubmissionCommit?.publicationToken ?? null;
+    if (residentSequenceSubmissionCommit
+      && residentSequenceSubmissionCommit.accepted !== true) {
+      const error = new Error(
+        `resident sequence submission publication failed closed: ${residentSequenceSubmissionCommit.status}`
+      );
+      error.code = 'ULG_SPH_RESIDENT_SEQUENCE_SUBMISSION_PUBLICATION_REJECTED';
+      error.submissionCommit = residentSequenceSubmissionCommit;
+      postSubmitFailures.push({ stage: 'resident-sequence-workspace-publication', error });
+    }
+    if (materialInterfaceSourceFieldConsumerLease?.leaseId) {
+      materialInterfaceSourceFieldConsumerLeaseRelease = settlePostSubmit(
+        'pressure-source-field-consumer-lease-release',
+        () => materialInterfaceSourceField.releaseMaterialInterfaceSourceFieldConsumerLease(
+          materialInterfaceSourceFieldConsumerLease.leaseId,
+          {
+            device,
+            status: 'released-after-pressure-sequence-submit',
+            reason: 'pressure-sequence-consumer-submit-ordered-before-source-retirement'
+          }
+        ) ?? null
+      );
+      if (
+        materialInterfaceSourceFieldConsumerLeaseRelease?.leaseId
+          !== materialInterfaceSourceFieldConsumerLease.leaseId
+        || typeof materialInterfaceSourceFieldConsumerLeaseRelease?.status !== 'string'
+        || materialInterfaceSourceFieldConsumerLeaseRelease.status.length === 0
+      ) {
+        const error = new Error(
+          'Fused pressure source field consumer lease release was not acknowledged'
+        );
+        error.code = 'ULG_PRESSURE_SOURCE_FIELD_CONSUMER_LEASE_RELEASE_REJECTED';
+        postSubmitFailures.push({ stage: 'pressure-source-field-consumer-lease-ack', error });
+      }
+    }
+    if (postSubmitFailures.length > 0) {
+      const firstFailure = postSubmitFailures[0].error;
+      const error = new AggregateError(
+        postSubmitFailures.map((failure) => failure.error),
+        `resident sequence submitted but post-submit settlement failed at ${postSubmitFailures.map((failure) => failure.stage).join(', ')}`,
+        { cause: firstFailure }
+      );
+      error.code = firstFailure?.code ?? 'ULG_SPH_RESIDENT_SEQUENCE_POST_SUBMIT_SETTLEMENT_FAILED';
+      error.postSubmitFailures = postSubmitFailures;
+      error.submissionCommittedToQueue = true;
+      throw error;
+    }
+    fusedMechanicsSequenceHostTiming.postSubmitBookkeepingMs = Math.max(
+      0,
+      nowMs() - fusedMechanicsSequenceHostPhaseStartMs
+    );
+    const fusedMechanicsSequenceQueueSubmitMs =
+      fusedMechanicsSequenceHostTiming.queueSubmitCallMs;
+    fusedMechanicsSequenceHostPhaseStartMs = nowMs();
     const fusedMechanicsSequenceAllocationEvidence = summarizeWebGpuBufferAllocations([
-      ...allCreatedBuffers.map((buffer) => ({ buffer, owned: true })),
-      ...(separationScratch?.transientBuffers || []).map((buffer) => ({ buffer, owned: true })),
-      ...sidecarOutputBuffers.map((buffer) => ({ buffer, owned: true })),
+      ...(residentSequenceWorkspaceAcquisition?.allocationEntries || []),
+      ...allCreatedBuffers.map((buffer) => ({
+        buffer,
+        owned: true,
+        lifetime: 'transient-submission',
+        createdThisSubmission: true
+      })),
+      ...(separationScratch?.transientBuffers || []).map((buffer) => ({
+        buffer,
+        owned: true,
+        lifetime: 'transient-submission',
+        createdThisSubmission: true
+      })),
+      ...sidecarOutputBuffers.map((buffer) => ({
+        buffer,
+        owned: true,
+        lifetime: 'transient-submission',
+        createdThisSubmission: true
+      })),
+      ...(schroederSparseGridRuntime
+        ? schroederSparseGridRuntime.allocationEntries().map((entry) => ({
+            ...entry,
+            role: `schroeder-sparse-grid-${entry.role}`,
+            owned: true
+          }))
+        : []),
+      ...schroederSparseGridExecutions.flatMap((execution, substepIndex) => (
+        execution.transientBuffers.map((buffer) => ({
+          role: `schroeder-sparse-grid-encoding-${substepIndex}-transient`,
+          buffer,
+          owned: true
+        }))
+      )),
+      ...(!residentSequenceWorkspaceAcquisition
+        ? (thermalWorkspace?.allocationEntries || [])
+        : []),
+      ...(!residentSequenceWorkspaceAcquisition
+        ? (reactionCoreWorkspace?.allocationEntries || [])
+        : []),
+      ...(!residentSequenceWorkspaceAcquisition
+        ? (pressureInterfaceWorkspace?.allocationEntries || [])
+        : []),
+      ...(!residentSequenceWorkspaceAcquisition
+        ? (reactionProductEventPlacementWorkspace?.allocationEntries || [])
+        : []).map((entry) => ({
+        role: entry.role === 'product-event-target-claims'
+          ? 'reaction-product-event-placement-candidates'
+          : `reaction-${entry.role}`,
+        buffer: entry.buffer,
+        owned: true,
+        lifetime: 'persistent-workspace',
+        createdThisSubmission: true
+      })),
+      ...sequencePressureChains.flatMap((chain, index) => [
+        {
+          role: `pressure-interface-compact-candidate-rows-${index}`,
+          buffer: chain.materialInterfaceCandidates.candidateRowsBuffer,
+          owned: chain.materialInterfaceCandidates.candidateRowsBufferOwned !== false
+        },
+        {
+          role: `pressure-interface-compact-candidate-metadata-${index}`,
+          buffer: chain.materialInterfaceCandidates.compactMetadataBuffer,
+          owned: chain.materialInterfaceCandidates.compactMetadataBufferOwned !== false
+        },
+        {
+          role: `pressure-interface-candidate-dispatch-indirect-${index}`,
+          buffer: chain.materialInterfaceCandidates.candidateDispatchIndirectBuffer,
+          owned: chain.materialInterfaceCandidates.candidateDispatchIndirectBufferOwned !== false
+        },
+        {
+          role: `pressure-interface-source-keys-${index}`,
+          buffer: chain.materialInterfaceCandidates.interfaceSourceKeyBuffer,
+          owned: chain.materialInterfaceCandidates.interfaceSourceKeyBufferOwned !== false
+        },
+        {
+          role: `pressure-interface-force-rows-${index}`,
+          buffer: chain.pressureInterfaceStage.forceRowsBuffer,
+          owned: chain.pressureInterfaceStage.forceRowsBufferOwned !== false
+        }
+      ]),
+      ...(materialInterfaceSourceField ? [
+        {
+          role: 'material-interface-source-field-rows',
+          buffer: materialInterfaceSourceField.fieldRowsBuffer,
+          owned: false,
+          lifetime: 'borrowed'
+        },
+        {
+          role: 'material-interface-source-surface-table',
+          buffer: materialInterfaceSourceField.surfaceBuffer,
+          owned: false,
+          lifetime: 'borrowed'
+        },
+        {
+          role: 'material-interface-source-index-field',
+          buffer: materialInterfaceSourceField.sourceIndexFieldBuffer,
+          owned: false,
+          lifetime: 'borrowed'
+        }
+      ] : []),
+      ...(materialInterfaceSourceFieldLane?.allocationEntries?.() || []).map(
+        (entry, index) => ({
+          ...entry,
+          role: `material-interface-source-field-lane-buffer-${index}`,
+          owned: true,
+          lifetime: 'persistent-workspace',
+          createdThisSubmission: Boolean(
+            materialInterfaceSourceFieldLaneAcquisition?.reused !== true
+            || materialInterfaceSourceFieldLaneAcquisition?.grown === true
+          )
+        })
+      ),
+      ...(residentProductMass ? [{
+        role: 'resident-product-mass-product-events',
+        buffer: residentProductMass.productEventBuffer,
+        owned: false
+      }] : []),
+      ...(residentNeighborhoodLane?.allocationEntries() || []).map((entry) => ({
+        ...entry,
+        createdThisSubmission: entry.lifetime === 'persistent-workspace'
+          ? residentNeighborhoodLaneAcquisition?.reused !== true
+          : true
+      })),
+      ...sequencePressureChains.flatMap((chain) => (
+        chain.pressureInterfaceStage?.gpuAllocationEntries || []
+      )),
       ...gpuTimestampProfiler.allocationEntries(),
       { role: 'source-particle-state', buffer: sphParticleUpload.stateBuffer, owned: false },
       { role: 'source-particle-thermo', buffer: sphParticleUpload.thermoBuffer, owned: false },
       { role: 'source-particle-mechanics', buffer: mlsMpmParticleUpload.mechanicsBuffer, owned: false }
     ], {
-      scope: 'mls-mpm-fused-resident-sequence'
+      scope: 'mls-mpm-fused-resident-sequence',
+      includeBufferRows: includeGpuAllocationRows || gpuTimestampProfiler.active
     });
+    fusedMechanicsSequenceHostTiming.allocationEvidenceMs = Math.max(
+      0,
+      nowMs() - fusedMechanicsSequenceHostPhaseStartMs
+    );
+    fusedMechanicsSequenceHostPhaseStartMs = nowMs();
     for (const transientBuffer of separationScratch?.transientBuffers || []) transientBuffer.destroy?.();
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
+    fusedMechanicsSequenceHostTiming.postAllocationFinalizeMs = Math.max(
+      0,
+      nowMs() - fusedMechanicsSequenceHostPhaseStartMs
+    );
     stageMs.fusedMechanicsSequence = Math.max(0, nowMs() - sequenceEncodeStartMs);
+    fusedMechanicsSequenceHostTiming.totalMs = stageMs.fusedMechanicsSequence;
+    fusedMechanicsSequenceHostTiming.classifiedMs = [
+      fusedMechanicsSequenceHostTiming.preWorkspaceSetupMs,
+      fusedMechanicsSequenceHostTiming.workspaceAcquireMs,
+      fusedMechanicsSequenceHostTiming.postWorkspaceSetupMs,
+      fusedMechanicsSequenceHostTiming.commandRecordingMs,
+      fusedMechanicsSequenceHostTiming.queueSubmitCallMs,
+      fusedMechanicsSequenceHostTiming.postSubmitBookkeepingMs,
+      fusedMechanicsSequenceHostTiming.allocationEvidenceMs,
+      fusedMechanicsSequenceHostTiming.postAllocationFinalizeMs
+    ].reduce((sum, value) => sum + value, 0);
+    fusedMechanicsSequenceHostTiming.unclassifiedMs = Math.max(
+      0,
+      fusedMechanicsSequenceHostTiming.totalMs
+        - fusedMechanicsSequenceHostTiming.classifiedMs
+    );
     let fusedMechanicsSequenceQueueFenceMs = null;
     const timestampReadbackRequiresFence = gpuTimestampProfiler.active;
     const shouldMeasureQueueFence = measureQueueFence || timestampReadbackRequiresFence;
@@ -4498,16 +8442,271 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         fusedMechanicsSequenceQueueFenceMs = Math.max(0, nowMs() - queueFenceStartMs);
         fusedMechanicsSequenceQueueFenceStatus = 'complete';
         fusedMechanicsSequenceQueueFenceMethod = 'queue.onSubmittedWorkDone';
+        for (const gasCellEosResult of residentGasCellEosResults) {
+          gasCellEosResult?.markSubmitted?.({
+            queueCompletionStatus: 'queue-work-completed',
+            queueCompletionMethod: 'queue.onSubmittedWorkDone'
+          });
+        }
       } else {
         fusedMechanicsSequenceQueueFenceStatus = 'unavailable';
       }
     }
     const gpuTimestampProfile = await gpuTimestampProfiler.read();
-    const webgpuStatus = {
-      status: 'webgpu-executed-no-full-readback',
-      reason: `Fused WebGPU MLS-MPM mechanics sequence executed ${count} substeps without full readback`
+    const hostAdmittedNeighborhoodGenerationCount = residentNeighborhoodGenerations
+      .filter((generation) => generation.hostAdmission === true && generation.encoded === true)
+      .length;
+    const preSeparationNeighborhoodGenerationCount = residentNeighborhoodGenerations
+      .filter((generation) => generation.productionLane?.mutationPhase === 'post-g2p')
+      .length;
+    const postSeparationNeighborhoodGenerationCount = residentNeighborhoodGenerations
+      .filter((generation) => generation.productionLane?.mutationPhase === 'post-separation')
+      .length;
+    const postSeparationNeighborhoodGenerationReuseCount =
+      residentNeighborhoodGenerationReuseAdmissions
+        .filter((admission) => admission.reusable === true)
+        .length;
+    const initialNeighborhoodGenerationEvidenceCount = residentNeighborhoodGenerations
+      .filter((generation) => generation.productionLane?.mutationPhase === 'pre-p2g-initial')
+      .length;
+    const admittedPreSeparationNeighborhoodGenerationCount = residentNeighborhoodGenerations
+      .filter((generation) => generation.productionLane?.mutationPhase === 'post-g2p'
+        && generation.hostAdmission === true
+        && generation.encoded === true)
+      .length;
+    const conditionalNeighborhoodGenerations = residentNeighborhoodGenerations
+      .filter((generation) => generation.productionLane?.skinReuse?.gpuProofEncoded === true);
+    const unconditionalNeighborhoodRebuildCount = residentNeighborhoodGenerations.length
+      - conditionalNeighborhoodGenerations.length;
+    const neighborhoodEncodedDispatchCount = residentNeighborhoodGenerations.reduce(
+      (sum, generation) => sum
+        + Math.max(0, Math.round(finiteNumber(
+          generation.productionLane?.encodingTelemetry?.encodedDispatchCount,
+          0
+        ))),
+      0
+    );
+    const neighborhoodEncodedComputePassCount = residentNeighborhoodGenerations.reduce(
+      (sum, generation) => sum
+        + Math.max(0, Math.round(finiteNumber(
+          generation.productionLane?.encodingTelemetry?.encodedComputePassCount,
+          0
+        ))),
+      0
+    );
+    const neighborhoodBindGroupCreationCount = residentNeighborhoodGenerations.reduce(
+      (sum, generation) => sum
+        + Math.max(0, Math.round(finiteNumber(
+          generation.productionLane?.encodingTelemetry?.bindGroupCreationCount,
+          0
+        ))),
+      0
+    );
+    const neighborhoodProofPassCount = conditionalNeighborhoodGenerations.reduce(
+      (sum, generation) => sum
+        + Math.max(0, Math.round(finiteNumber(
+          generation.productionLane?.skinReuse?.encodedProofPassCount,
+          0
+        ))),
+      0
+    );
+    const neighborhoodProofCountersBuffer = conditionalNeighborhoodGenerations[0]
+      ?.productionLaneValidation?.gpuSkinReuseProof?.countersBuffer ?? null;
+    const directNeighborhoodGenerationCount = residentNeighborhoodGenerations
+      .filter((generation) => generation.productionLane?.builderStrategy === 'direct')
+      .length;
+    const directSegmentedMaskedGenerationCount = residentNeighborhoodGenerations
+      .filter((generation) => generation.productionLane?.directSegmentedMasked === true)
+      .length;
+    const radixNeighborhoodGenerationCount = residentNeighborhoodGenerations.length
+      - directNeighborhoodGenerationCount;
+    const residentNeighborhoodAllocationPlan = residentNeighborhoodLane
+      ? residentNeighborhoodLane.allocationPlan(
+          Math.max(1, residentNeighborhoodGenerations.length)
+        )
+      : null;
+    const residentNeighborhoodLaneEvidence = {
+      schema: ULG_RESIDENT_NEIGHBORHOOD_GPU_LANE_SCHEMA,
+      status: residentNeighborhoodLane
+        ? (hostAdmittedNeighborhoodGenerationCount === residentNeighborhoodGenerations.length
+            && preSeparationNeighborhoodGenerationCount === count
+            ? 'resident-neighborhood-production-generations-encoded'
+            : 'resident-neighborhood-production-generation-fallback')
+        : (residentNeighborhood
+            ? 'external-resident-neighborhood-generation-consumed'
+            : 'resident-neighborhood-production-lane-unavailable-legacy-fallback'),
+      requested: residentNeighborhoodLaneRequested,
+      laneOwnedGeneration: Boolean(residentNeighborhoodLane),
+      externalGeneration: Boolean(residentNeighborhood),
+      generationCount: residentNeighborhoodGenerations.length,
+      requestedGenerationCount: residentNeighborhoodGenerations.length,
+      unconditionalExecutedRebuildCount: unconditionalNeighborhoodRebuildCount,
+      conditionalGpuDecisionCount: conditionalNeighborhoodGenerations.length,
+      directGenerationCount: directNeighborhoodGenerationCount,
+      directSegmentedMaskedGenerationCount,
+      radixGenerationCount: radixNeighborhoodGenerationCount,
+      builderStrategy: residentNeighborhoodLane?.builderStrategy ?? null,
+      builderStrategyPlan: residentNeighborhoodLane?.builderStrategyPlan ?? null,
+      directSegmentedMasked: residentNeighborhoodLane?.directSegmentedMasked === true,
+      executedConditionalRebuildCount: null,
+      gpuProvenReuseCount: null,
+      gpuDecisionCountersBuffer: neighborhoodProofCountersBuffer,
+      gpuDecisionCountersLayout: neighborhoodProofCountersBuffer
+        ? ['conditionalDecisionCount', 'gpuProvenReuseCount', 'executedConditionalRebuildCount', 'reserved0']
+        : null,
+      executedRebuildCountAuthority: neighborhoodProofCountersBuffer
+        ? 'gpu-resident-fixed-u32-counter-row-plus-unconditional-host-count'
+        : 'unconditional-host-count',
+      gpuProvenReuseCountAuthority: neighborhoodProofCountersBuffer
+        ? 'gpu-resident-fixed-u32-counter-row'
+        : null,
+      encodedDispatchCount: neighborhoodEncodedDispatchCount,
+      encodedComputePassCount: neighborhoodEncodedComputePassCount,
+      bindGroupCreationCount: neighborhoodBindGroupCreationCount,
+      proofOverheadPassCount: neighborhoodProofPassCount,
+      encodedCommandProportionalityResolved: directNeighborhoodGenerationCount
+        === residentNeighborhoodGenerations.length,
+      encodedCommandProportionalityStatus: directNeighborhoodGenerationCount
+        === residentNeighborhoodGenerations.length
+        ? (directSegmentedMaskedGenerationCount === residentNeighborhoodGenerations.length
+            ? (conditionalNeighborhoodGenerations.length > 0
+                ? 'small-source-direct-segmented-masked-gpu-skin-gated-single-build-dispatch-per-generation'
+                : 'small-source-direct-segmented-masked-single-build-dispatch-per-generation')
+            : (conditionalNeighborhoodGenerations.length > 0
+                ? 'small-source-direct-gpu-skin-gated-rebuild-per-generation'
+                : 'small-source-direct-four-dispatch-rebuild-per-generation'))
+        : (conditionalNeighborhoodGenerations.length > 0
+            ? 'shader-work-gated-but-encoded-commands-still-scale-with-requested-generations'
+            : 'radix-rebuild-command-topology'),
+      skinPlan: residentNeighborhoodLane
+        ? {
+            ...residentNeighborhoodSkinPlan,
+            requestedSkinDistanceM: residentNeighborhoodSkinPlan.skinDistanceM,
+            effectiveSkinDistanceM: residentNeighborhoodLane.skinDistanceM,
+            effectiveDisplacementBudgetM:
+              residentNeighborhoodLane.skinDisplacementBudgetM,
+            bypassedByDirectBuilder: residentNeighborhoodLane.builderStrategy === 'direct'
+              && residentNeighborhoodLane.skinReuseEnabled !== true
+          }
+        : null,
+      initialGenerationCount: initialNeighborhoodGenerationEvidenceCount,
+      initialGenerationRequired: Boolean(materialInterfaceSourceField),
+      initialGenerationEncodedBeforeFirstP2g:
+        !materialInterfaceSourceField || initialNeighborhoodGenerationEvidenceCount === 1,
+      preSeparationGenerationCount: preSeparationNeighborhoodGenerationCount,
+      postSeparationGenerationCount: postSeparationNeighborhoodGenerationCount,
+      postSeparationGenerationReuseCount: postSeparationNeighborhoodGenerationReuseCount,
+      postSeparationGenerationDecisionCount:
+        residentNeighborhoodGenerationReuseAdmissions.length,
+      postSeparationGenerationPolicy:
+        residentNeighborhoodLane?.skinReuseEnabled
+          ? 'gpu-prove-skin-envelope-then-reuse-or-indirect-rebuild-after-position-mutation'
+          : 'rebuild-after-position-mutation-otherwise-reuse-current-requirements-match',
+      postSeparationGenerationAdmissions:
+        residentNeighborhoodGenerationReuseAdmissions,
+      rebuiltAfterEverySeparationMutation:
+        separationPositionMutationCount === 0
+          ? true
+          : residentNeighborhoodLane?.skinReuseEnabled
+          ? null
+          : postSeparationNeighborhoodGenerationCount === separationPositionMutationCount,
+      gpuDecisionEncodedAfterEverySeparationMutation:
+        separationPositionMutationCount === 0
+          ? false
+          : residentNeighborhoodLane?.skinReuseEnabled
+          ? postSeparationNeighborhoodGenerationCount === separationPositionMutationCount
+          : false,
+      reusedAfterEveryNonMutation:
+        postSeparationNeighborhoodGenerationReuseCount
+          === count - separationPositionMutationCount,
+      separationPositionMutationCount,
+      separationParamsSlotCount: separationScratch?.paramsSlotCount ?? 0,
+      separationParamsSlotStrideBytes: separationScratch?.paramsSlotStrideBytes ?? 0,
+      separationParamsUsedSlotIndices: [
+        ...(separationScratch?.usedParamsSlotIndices || [])
+      ],
+      separationParamsDistinctPerSubstep: Boolean(
+        separationPositionMutationCount === 0
+        || separationScratch?.usedParamsSlotIndices?.length === count
+      ),
+      hostAdmittedGenerationCount: hostAdmittedNeighborhoodGenerationCount,
+      legacyFallbackSubstepCount: residentNeighborhoodLane
+        ? count - admittedPreSeparationNeighborhoodGenerationCount
+        : (residentNeighborhood ? 0 : count),
+      generationGpuHeaderAdmission: residentNeighborhoodLane
+        ? 'same-encoder-packed-header-guard'
+        : null,
+      capacity: residentNeighborhoodLaneCapacity,
+      reason: residentNeighborhoodLaneReason,
+      laneId: residentNeighborhoodLane?.laneId ?? residentNeighborhood?.descriptor?.lease?.laneId ?? null,
+      stateKey: residentNeighborhoodLane?.stateKey ?? residentNeighborhood?.descriptor?.lease?.stateKey ?? null,
+      sourceFamily: residentNeighborhoodLane?.sourceFamily
+        ?? residentNeighborhood?.descriptor?.lease?.sourceFamily
+        ?? null,
+      authoritative: residentNeighborhoodLane?.authoritative
+        ?? residentNeighborhood?.descriptor?.lease?.authoritative
+        ?? false,
+      leaseId: residentNeighborhoodLaneAcquisition?.leaseId
+        ?? residentNeighborhood?.descriptor?.lease?.leaseId
+        ?? null,
+      pooledLaneReused: residentNeighborhoodLaneAcquisition?.reused ?? false,
+      laneAcquisitionOrdinal: residentNeighborhoodLaneAcquisition?.acquisitionOrdinal ?? null,
+      singleFlight: residentNeighborhoodLaneAcquisition?.singleFlight ?? false,
+      orderedReuseWindow:
+        residentNeighborhoodLaneAcquisition?.orderedReuseWindow ?? false,
+      inFlightSubmissionCountAtAcquire:
+        residentNeighborhoodLaneAcquisition?.inFlightSubmissionCountAtAcquire ?? null,
+      maxInFlightSubmissions:
+        residentNeighborhoodLaneAcquisition?.maxInFlightSubmissions ?? 1,
+      generationBase: residentNeighborhoodLane
+        ? absoluteNeighborhoodGenerationBase
+        : (residentNeighborhood?.descriptor?.generation ?? null),
+      positionEpochBase: residentNeighborhoodLane
+        ? absoluteNeighborhoodPositionEpochBase
+        : (residentNeighborhood?.descriptor?.positionValidity?.positionEpoch ?? null),
+      absoluteMutationEpochs: Boolean(residentNeighborhoodLane),
+      creationTimeGenerationBaseUsed: false,
+      consumers: residentNeighborhoodLane?.consumers
+        ?? (residentNeighborhood ? ['caller-declared'] : []),
+      supportDistanceM: residentNeighborhoodLane?.supportDistanceM ?? null,
+      maxCandidatesPerSource: residentNeighborhoodLane?.maxCandidatesPerSource ?? null,
+      candidateCapacity: residentNeighborhoodLane?.candidateCapacity ?? null,
+      sourceMetadataInitialization: residentNeighborhoodLane
+        ? residentNeighborhoodLane.sourceMetadataMode
+        : null,
+      supportClassCount: residentNeighborhoodLane?.supportClassCount ?? null,
+      allocationPlan: residentNeighborhoodAllocationPlan,
+      peakAllocatedByteLength:
+        residentNeighborhoodAllocationPlan?.peakAllocatedByteLength ?? null,
+      commandSubmissionCount: residentNeighborhoodLane ? 1 : 0,
+      queueSubmitPerformedByLane: false,
+      mapPerformed: false,
+      readbackPerformed: false,
+      schedulerCreated: false
     };
-    const pressureFields = pressureInterfaceGridForceBlockedFields();
+    let schroederSparseGridDestroyed = false;
+    const destroySchroederSparseGridBuffers = () => {
+      if (schroederSparseGridDestroyed) return;
+      schroederSparseGridDestroyed = true;
+      schroederSparseGridRuntime?.destroy();
+    };
+    const sparseGridTelemetry = schroederSparseGridProductionTelemetry({
+      plan: schroederSparseGridPlan,
+      executions: schroederSparseGridExecutions
+    });
+    const webgpuStatus = {
+      status: sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+        ? 'webgpu-sparse-grid-source-fail-closed-no-full-readback'
+        : 'webgpu-executed-no-full-readback',
+      reason: sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+        ? `Fused WebGPU MLS-MPM sparse-grid sequence zero-indirect fail-closed ${count} substeps by source admission`
+        : `Fused WebGPU MLS-MPM mechanics sequence executed ${count} substeps without full readback`
+    };
+    const pressureFields = pressureInterfaceForceRowScatterFields(sequencePressureScatter, {
+      sparseGrid: Boolean(schroederSparseGridPlan),
+      sparseGridSourceFailClosed:
+        sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+    });
     const p2gGridProjection = {
       schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
       projectionSchema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
@@ -4515,9 +8714,20 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       status: webgpuStatus.status,
       kernelScope: 'particle-parallel-scatter-p2g-stress-momentum-projection',
       particleCount,
+      particleIterationCapacity,
+      particleCountAuthority: particleCountResidency
+        ? 'gpu-authored-residency-metadata'
+        : 'host-known-particle-count',
+      particleCountCpuDecoded: !particleCountResidency,
+      ...schroederParticleCountResidencyPublicFields(particleCountResidency),
+      ...(particleCountResidency ? {
+        particleCountResidencyMetadataBuffer: particleCountResidency.metadataBuffer,
+        particleCountDispatchIndirectBuffer: particleCountResidency.dispatchIndirectBuffer
+      } : {}),
       gridSpacingM: gridSpec.gridSpacingM,
       gridDims: [...gridSpec.gridDims],
-      gridNodeCount: gridSpec.gridNodeCount,
+      gridNodeCount: gridArenaNodeCount,
+      fullGridNodeCount: gridSpec.gridNodeCount,
       gridShift: gridSpec.shift,
       gridNodeStrideFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
       dt: dtSeconds,
@@ -4543,7 +8753,25 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       schroederLevelFilterEnabled: schroederLevelFilter.enabled === true,
       schroederSelectedLevel: schroederLevelFilter.enabled === true ? schroederLevelFilter.selectedLevel : null,
       schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
-      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true
+      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true,
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      ...sparseGridTelemetry,
+      schroederSparseGridPeakAllocatedByteLength:
+        schroederSparseGridPlan?.peakAllocatedByteLength ?? 0,
+      destroySchroederSparseGridBuffers,
+      residentProductMass: sequenceResidentProductMass,
+      residentProductMassStatus: sequenceResidentProductMass?.status ?? null,
+      residentProductMassGridCouplingStatus: sequenceResidentProductMass
+        ? 'resident-product-mass-p2g-scatter-submitted'
+        : 'resident-product-mass-not-requested',
+      residentProductMassInputProductEventCount: residentProductEventCount,
+      residentProductMassInputProductEventStrideFloats:
+        residentProductEventStrideFloats,
+      residentProductMassInputBufferRetained: Boolean(sequenceResidentProductMass),
+      residentProductMassInputBufferBorrowed: Boolean(sequenceResidentProductMass),
+      ...pressureFields
     };
     const gridUpdate = {
       schema: ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -4554,7 +8782,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       particleCount,
       gridSpacingM: gridSpec.gridSpacingM,
       gridDims: [...gridSpec.gridDims],
-      gridNodeCount: gridSpec.gridNodeCount,
+      gridNodeCount: gridArenaNodeCount,
+      fullGridNodeCount: gridSpec.gridNodeCount,
       gridShift: gridSpec.shift,
       gridNodeStrideFloats: MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
       dt: dtSeconds,
@@ -4579,6 +8808,10 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       residentDispatchTopology: dispatchTopology,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      ...sparseGridTelemetry,
       activeGridDispatch,
       activeGridIndirectDispatch
     };
@@ -4593,7 +8826,18 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       status: 'reconstructed',
       kernelScope: 'mls-mpm-g2p-velocity-affine-deformation-reconstruction',
       particleCount,
-      gridNodeCount: gridSpec.gridNodeCount,
+      particleIterationCapacity,
+      particleCountAuthority: particleCountResidency
+        ? 'gpu-authored-residency-metadata'
+        : 'host-known-particle-count',
+      particleCountCpuDecoded: !particleCountResidency,
+      ...schroederParticleCountResidencyPublicFields(particleCountResidency),
+      ...(particleCountResidency ? {
+        particleCountResidencyMetadataBuffer: particleCountResidency.metadataBuffer,
+        particleCountDispatchIndirectBuffer: particleCountResidency.dispatchIndirectBuffer
+      } : {}),
+      gridNodeCount: gridArenaNodeCount,
+      fullGridNodeCount: gridSpec.gridNodeCount,
       gridSpacingM: gridSpec.gridSpacingM,
       gridDims: [...gridSpec.gridDims],
       gridShift: gridSpec.shift,
@@ -4648,7 +8892,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       schroederLevelFilterEnabled: schroederLevelFilter.enabled === true,
       schroederSelectedLevel: schroederLevelFilter.enabled === true ? schroederLevelFilter.selectedLevel : null,
       schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
-      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true
+      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true,
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      ...sparseGridTelemetry
     };
     const sourceStep = finiteNumber(sphParticleState.step ?? mlsMpmParticleState.step, 0);
     const sourceTime = finiteNumber(sphParticleState.time ?? mlsMpmParticleState.time, 0);
@@ -4688,7 +8936,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       sourceSlot: finalSourceSlot,
       nextSlot: finalSourceSlot,
       step: finalSourceStep,
-      time: finalSourceTime
+      time: finalSourceTime,
+      ...(residentSequencePublicationToken ? {
+        residentSequencePredecessorPublicationToken:
+          residentSequencePublicationToken
+      } : {})
     };
     const finalSourceMlsMpmParticleUpload = {
       ...mlsMpmParticleUpload,
@@ -4698,7 +8950,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       sourceSlot: finalSourceSlot,
       nextSlot: finalSourceSlot,
       step: finalSourceStep,
-      time: finalSourceTime
+      time: finalSourceTime,
+      ...(residentSequencePublicationToken ? {
+        residentSequencePredecessorPublicationToken:
+          residentSequencePublicationToken
+      } : {})
     };
     let compactGpuSummary = null;
     if (typeof summaryRunner === 'function') {
@@ -4713,7 +8969,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           gridUpdate,
           g2pReconstruction,
           thermalStep: finalThermalStep,
-          reactionStep: null,
+          reactionStep: finalReactionStep,
           mechanicsRefreshStep: finalMechanicsRefreshStep,
           cohortRanges,
           summaryScope: compactSummaryScope,
@@ -4753,7 +9009,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           gridUpdate,
           g2pReconstruction,
           thermalStep: finalThermalStep,
-          reactionStep: null,
+          reactionStep: finalReactionStep,
           mechanicsRefreshStep: finalMechanicsRefreshStep,
           cohortRanges,
           summaryScope: compactSummaryScope,
@@ -4798,6 +9054,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       queueSubmitMs: {
         fusedMechanicsSequence: fusedMechanicsSequenceQueueSubmitMs
       },
+      hostTiming: { ...fusedMechanicsSequenceHostTiming },
+      fusedMechanicsBindGroupCacheEntryCount: [...fusedMechanicsBindGroupCache.values()]
+        .reduce((sum, entries) => sum + entries.length, 0),
+      fusedMechanicsBindGroupCreationCount,
+      fusedMechanicsBindGroupReuseCount,
       gpuTimestampProfile,
       gpuTimestampProfiles: {
         residentSequence: gpuTimestampProfile
@@ -4806,6 +9067,115 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       gpuTimestampStatus: gpuTimestampProfile.status,
       gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
       gpuAllocationEvidence: fusedMechanicsSequenceAllocationEvidence,
+      thermalWorkspaceSchema: thermalWorkspace?.schema ?? null,
+      thermalWorkspaceStatus: thermalWorkspace?.status ?? null,
+      thermalWorkspaceParticleCapacity: thermalWorkspace?.particleCapacity ?? 0,
+      thermalWorkspaceBufferCount: thermalWorkspace?.allocationEntries?.length ?? 0,
+      thermalWorkspaceByteLength: thermalWorkspace?.propertyBufferByteLength ?? 0,
+      thermalWorkspaceReusedSubstepCount: thermalWorkspace ? Math.max(0, count - 1) : 0,
+      reactionCoreWorkspaceSchema: reactionCoreWorkspace?.schema ?? null,
+      reactionCoreWorkspaceStatus: reactionCoreWorkspace?.status ?? null,
+      reactionCoreWorkspaceParticleCapacity:
+        reactionCoreWorkspace?.particleCapacity ?? 0,
+      reactionCoreWorkspaceBufferCount:
+        reactionCoreWorkspace?.allocationEntries?.length ?? 0,
+      reactionCoreWorkspaceByteLength:
+        reactionCoreWorkspace?.totalByteLength ?? 0,
+      reactionCoreWorkspaceReusedSubstepCount:
+        reactionCoreWorkspace ? Math.max(0, count - 1) : 0,
+      pressureInterfaceWorkspaceSchema: pressureInterfaceWorkspace?.schema ?? null,
+      pressureInterfaceWorkspaceStatus: pressureInterfaceWorkspace?.status ?? null,
+      pressureInterfaceWorkspaceCandidateCapacity:
+        pressureInterfaceWorkspace?.candidateCapacity ?? 0,
+      pressureInterfaceWorkspaceBufferCount:
+        pressureInterfaceWorkspace?.allocationEntries?.length ?? 0,
+      pressureInterfaceWorkspaceByteLength:
+        pressureInterfaceWorkspace?.totalByteLength ?? 0,
+      pressureInterfaceWorkspaceSequenceStepCapacity:
+        pressureInterfaceWorkspace?.sequenceStepCapacity ?? 0,
+      pressureInterfaceWorkspaceControlBufferByteLength:
+        pressureInterfaceWorkspace?.controlBufferByteLength ?? 0,
+      pressureInterfaceWorkspaceUsedControlSlotIndices: [
+        ...(pressureInterfaceWorkspace?.usedControlSlotIndices || [])
+      ],
+      pressureInterfaceWorkspaceBindGroupCacheEvidence:
+        pressureInterfaceWorkspace?.bindGroupCacheEvidence?.() ?? null,
+      pressureInterfaceScatterBindGroupCacheHitCount:
+        sequencePressureChains.filter(
+          (chain) => chain.pressureScatterBindGroupCacheHit === true
+        ).length,
+      pressureInterfaceWorkspaceReusedSubstepCount: pressureInterfaceWorkspace
+        ? Math.max(0, sequencePressureChains.length - 1)
+        : 0,
+      reactionProductEventPlacementWorkspaceStatus:
+        reactionProductEventPlacementWorkspace?.status ?? null,
+      reactionProductEventPlacementWorkspaceCapacityRows:
+        reactionProductEventPlacementWorkspace?.eventCapacityRows ?? 0,
+      reactionProductEventPlacementWorkspaceBufferCount:
+        reactionProductEventPlacementWorkspace?.allocationEntries?.length ?? 0,
+      reactionProductEventPlacementWorkspaceByteLength:
+        reactionProductEventPlacementWorkspace?.totalByteLength ?? 0,
+      reactionProductEventPlacementWorkspaceSequenceStepCapacity:
+        reactionProductEventPlacementWorkspace?.sequenceStepCapacity ?? 0,
+      reactionProductEventPlacementParamsSlotStrideBytes:
+        reactionProductEventPlacementWorkspace?.paramsSlotStrideBytes ?? 0,
+      reactionProductEventPlacementBindGroupCacheEvidence:
+        reactionProductEventPlacementWorkspace?.bindGroupCacheEvidence?.() ?? null,
+      reactionProductEventPlacementWorkspaceReusedSubstepCount:
+        reactionProductEventPlacementWorkspace ? Math.max(0, count - 1) : 0,
+      residentSequenceWorkspace: residentSequenceWorkspaceAcquisition
+        ? residentSequenceWorkspaceAcquisition.snapshot()
+        : {
+            schema: 'peercompute.ulg.sph-resident-sequence-workspace-lane-evidence.v0',
+            status: residentSequenceWorkspaceEligible
+              ? 'sph-resident-sequence-workspace-not-acquired'
+              : 'sph-resident-sequence-workspace-authoritative-lease-unavailable',
+            mutableArenaPolicy:
+              'same-device-same-queue-read-before-write-two-family-pings',
+            priorConsumersMustBeCommandSubmittedBeforeReuse: true,
+            immutableSnapshotBuffers: false,
+            createdThisAcquisition: false,
+            reused: false
+          },
+      particleFamilyPingReuse: {
+        schema: 'peercompute.ulg.sph-resident-particle-family-ping-reuse.v0',
+        status: residentSequenceWorkspaceAcquisition
+          ? 'compute-manager-lane-owned-particle-family-pings-used-by-sidecars'
+          : 'caller-owned-particle-family-pings-used-by-sidecars',
+        stateBufferCount: statePingBuffers.length,
+        thermoBufferCount: residentSequenceWorkspaceAcquisition
+          ? residentSequenceWorkspaceAcquisition.thermoPingBuffers.length
+          : thermoPingBuffers.length,
+        mechanicsBufferCount: mechanicsPingBuffers.length,
+        stateBufferByteLength: statePingBuffers.length * stateByteLength,
+        thermoBufferByteLength: (residentSequenceWorkspaceAcquisition
+          ? residentSequenceWorkspaceAcquisition.thermoPingBuffers.length
+          : thermoPingBuffers.length) * thermoByteLength,
+        mechanicsBufferByteLength: mechanicsPingBuffers.length * mechanicsByteLength,
+        sidecarOwnedOutputBufferCount: sidecarOutputBuffers.length,
+        sidecarOutputAllocationAvoidedByteLength: count * (
+          (useThermalSidecarFusion ? stateByteLength + thermoByteLength : 0)
+          + (useReactionSidecarFusion
+              ? stateByteLength + thermoByteLength + mechanicsByteLength
+              : 0)
+          + (useMechanicsRefreshSidecarFusion ? mechanicsByteLength : 0)
+        ),
+        sourceDestinationAliasAllowed: false,
+        commandOrderingAuthority: residentSequenceWorkspaceAcquisition
+          ? 'same-device-compute-manager-lane-queue-order'
+          : 'single-caller-encoder-pass-order',
+        workspaceCreatedThisAcquisition:
+          residentSequenceWorkspaceAcquisition?.createdThisAcquisition ?? false,
+        workspaceReused:
+          residentSequenceWorkspaceAcquisition?.reused ?? false,
+        workspaceGeneration:
+          residentSequenceWorkspaceAcquisition?.workspaceGeneration ?? null,
+        workspaceTotalByteLength:
+          residentSequenceWorkspaceAcquisition?.totalByteLength ?? 0,
+        workspaceParticleFamilyByteLength:
+          residentSequenceWorkspaceAcquisition?.particleFamilyByteLength ?? 0,
+        immutableSnapshotBuffers: false
+      },
       compactSummaryTiming: compactGpuSummary?.timing ?? null,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
@@ -4822,14 +9192,17 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       schroederSelectedLevel: schroederLevelFilter.enabled === true ? schroederLevelFilter.selectedLevel : null,
       schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
       schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true,
-      mechanicsRefreshRequested: useThermalSidecarFusion,
+      mechanicsRefreshRequested: useMechanicsRefreshSidecarFusion,
       thermalRequested: useThermalSidecarFusion,
-      reactionRequested: false,
-      sidecarFusionSequence: useThermalSidecarFusion,
-      sidecarFusionPromotesFusedSequence: useThermalSidecarFusion,
-      sidecarFusionStepCount: useThermalSidecarFusion ? count : 0,
+      reactionRequested: useReactionSidecarFusion,
+      sidecarFusionSequence: useThermalSidecarFusion || useReactionSidecarFusion,
+      sidecarFusionPromotesFusedSequence:
+        useThermalSidecarFusion || useReactionSidecarFusion,
+      sidecarFusionStepCount:
+        useThermalSidecarFusion || useReactionSidecarFusion ? count : 0,
       sidecarFusionDispatchCount,
       sidecarFusionPlan: sidecarFusionPlan || null,
+      residentNeighborhoodLane: residentNeighborhoodLaneEvidence,
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,
@@ -4842,9 +9215,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       gridUpdate,
       g2pReconstruction,
       thermalStep: finalThermalStep,
-      reactionStep: null,
+      reactionStep: finalReactionStep,
       mechanicsRefreshStep: finalMechanicsRefreshStep,
-      inputResidentProductMass: null,
+      inputResidentProductMass: residentProductMass,
+      residentProductMassOverride: reactiveMultiStepResidentSequence
+        ? sequenceResidentProductMass
+        : null,
       compactGpuSummary,
       dt: dtSeconds,
       gravityMPerS2: gravity,
@@ -4855,11 +9231,21 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       sphParticleUpload: finalSourceSphParticleUpload,
       mlsMpmParticleUpload: finalSourceMlsMpmParticleUpload,
       sourceSlot: finalSourceSlot,
-      pressureInterfaceForceSolver: null,
+      pressureInterfaceForceSolver:
+        sequencePressureChains.at(-1)?.pressureInterfaceForceSolver ?? null,
       internalPressureScale,
       sidecarFusionPlan,
       stageTiming
     });
+    if (residentSequencePublicationToken && finalStep.nextParticleUploads) {
+      finalStep.nextParticleUploads.residentSequencePredecessorPublicationToken =
+        residentSequencePublicationToken;
+      finalStep.nextParticleUploads.sphParticleUpload
+        .residentSequencePredecessorPublicationToken = residentSequencePublicationToken;
+      finalStep.nextParticleUploads.mlsMpmParticleUpload
+        .residentSequencePredecessorPublicationToken = residentSequencePublicationToken;
+      finalStep.residentSequencePublicationToken = residentSequencePublicationToken;
+    }
     finalStep.sequenceIndex = count - 1;
     const continuationBounds = residentBoundsContinuationFromStep(
       finalStep,
@@ -4870,34 +9256,427 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     finalStep.residentMaxSpeedMPerS = continuationBounds.maxSpeedMPerS;
     finalStep.residentPositionBoundsSource = continuationBounds.source;
     finalStep.residentActiveGridDispatchHint = activeGridDispatch;
+    const consumedPressureNeighborhoodAdmission =
+      sequencePressureChains[0]?.pressureNeighborhoodAdmission ?? null;
+    const consumedPressureNeighborhoodIdentity =
+      consumedPressureNeighborhoodAdmission?.expectedIdentity ?? null;
+    const consumedPressureNeighborhoodLease =
+      consumedPressureNeighborhoodAdmission?.descriptor?.lease ?? null;
+    const consumedPressureLaneToken = sequencePressureChains[0]?.laneLocalExecutionToken
+      ?? null;
+    const materialInterfaceSourceFieldEpochs = materialInterfaceSourceFieldGenerations.map(
+      (sourceGeneration, index) => {
+        const chain = sequencePressureChains[index] ?? null;
+        const admission = chain?.pressureNeighborhoodAdmission ?? null;
+        const identity = admission?.expectedIdentity ?? null;
+        const lease = admission?.descriptor?.lease ?? null;
+        const laneToken = chain?.laneLocalExecutionToken ?? null;
+        return {
+          schema: 'peercompute.ulg.sph-material-interface-source-field-consumption-epoch.v0',
+          status: sourceGeneration.status,
+          substepIndex: index,
+          sourceFieldGeneration: sourceGeneration.sourceFieldGeneration,
+          sourceStep: sourceGeneration.sourceStep,
+          sourcePositionEpoch: sourceGeneration.sourcePositionEpoch,
+          sourceNeighborhoodGeneration: sourceGeneration.sourceNeighborhoodGeneration,
+          sourceNeighborhoodLaneId: sourceGeneration.sourceNeighborhoodLaneId,
+          sourceNeighborhoodStateKey: sourceGeneration.sourceNeighborhoodStateKey,
+          sourceNeighborhoodLeaseId: sourceGeneration.sourceNeighborhoodLeaseId,
+          sourceNeighborhoodTaskId: sourceGeneration.sourceNeighborhoodTaskId,
+          sourceDeviceId: sourceGeneration.sourceDeviceId,
+          productEventCount: sourceGeneration.productEventCount,
+          productEventCountAuthority: sourceGeneration.productEventCountAuthority,
+          productEventDispatchMode: sourceGeneration.productEventDispatchMode,
+          productEventExactPrefixDispatch:
+            sourceGeneration.productEventExactPrefixDispatch === true,
+          productEventMetadataValidation: sourceGeneration.productEventMetadataValidation,
+          productEventSurfaceTraversal: sourceGeneration.productEventSurfaceTraversal,
+          consumedNeighborhoodIdentity: identity
+            ? {
+                schema: 'peercompute.ulg.pressure-consumed-resident-neighborhood-identity.v0',
+                generation: identity.generation,
+                positionEpoch: identity.positionEpoch,
+                sourceCount: identity.sourceCount,
+                sourceFamily: identity.sourceFamily,
+                consumerBit: identity.consumerBit,
+                leaseId: lease?.leaseId ?? null,
+                laneId: lease?.laneId ?? null,
+                stateKey: lease?.stateKey ?? null,
+                deviceId: lease?.deviceId ?? null,
+                leaseTokenLow: identity.leaseTokenLow,
+                leaseTokenHigh: identity.leaseTokenHigh,
+                tokenBinding: lease?.tokenBinding ?? null,
+                leaseIdentitySchema: lease?.identitySchema ?? null,
+                authoritative: lease?.authoritative === true,
+                taskId: laneToken?.taskId ?? null
+              }
+            : null
+        };
+      }
+    );
+    const initialSourceFieldEpoch = materialInterfaceSourceFieldEpochs[0] ?? null;
+    const finalSourceFieldEpoch = materialInterfaceSourceFieldEpochs.at(-1) ?? null;
+    const materialInterfaceSourceFieldConsumption = materialInterfaceSourceField
+      ? {
+          status: 'material-interface-source-field-consumed-by-submitted-gpu-sequence',
+          sourceStep: initialSourceFieldEpoch?.sourceStep
+            ?? materialInterfaceSourceField.sourceStep
+            ?? null,
+          sourcePositionEpoch: initialSourceFieldEpoch?.sourcePositionEpoch
+            ?? materialInterfaceSourceField.sourcePositionEpoch
+            ?? null,
+          sourceNeighborhoodGeneration:
+            initialSourceFieldEpoch?.sourceNeighborhoodGeneration
+            ?? materialInterfaceSourceField.sourceNeighborhoodGeneration
+            ?? null,
+          sourceNeighborhoodLaneId:
+            initialSourceFieldEpoch?.sourceNeighborhoodLaneId
+            ?? materialInterfaceSourceField.sourceNeighborhoodLaneId
+            ?? null,
+          sourceNeighborhoodStateKey:
+            initialSourceFieldEpoch?.sourceNeighborhoodStateKey
+            ?? materialInterfaceSourceField.sourceNeighborhoodStateKey
+            ?? null,
+          sourceDeviceId: initialSourceFieldEpoch?.sourceDeviceId
+            ?? materialInterfaceSourceField.sourceDeviceId
+            ?? null,
+          sourceFieldEpochs: materialInterfaceSourceFieldEpochs,
+          sourceFieldEpochCount: materialInterfaceSourceFieldEpochs.length,
+          finalSourceStep: finalSourceFieldEpoch?.sourceStep ?? null,
+          finalSourcePositionEpoch: finalSourceFieldEpoch?.sourcePositionEpoch ?? null,
+          finalSourceNeighborhoodGeneration:
+            finalSourceFieldEpoch?.sourceNeighborhoodGeneration ?? null,
+          consumerDeviceId: webGpuDeviceId(device),
+          consumerLaneId: consumedPressureNeighborhoodLease?.laneId ?? null,
+          consumerStateKey: consumedPressureNeighborhoodLease?.stateKey ?? null,
+          consumerLaneLeaseId: consumedPressureNeighborhoodLease?.leaseId ?? null,
+          consumerLaneTaskId: consumedPressureLaneToken?.taskId ?? null,
+          consumerLaneAuthoritative:
+            consumedPressureNeighborhoodLease?.authoritative === true,
+          consumedNeighborhoodIdentity: consumedPressureNeighborhoodIdentity
+            ? {
+                schema: 'peercompute.ulg.pressure-consumed-resident-neighborhood-identity.v0',
+                generation: consumedPressureNeighborhoodIdentity.generation,
+                positionEpoch: consumedPressureNeighborhoodIdentity.positionEpoch,
+                sourceCount: consumedPressureNeighborhoodIdentity.sourceCount,
+                sourceFamily: consumedPressureNeighborhoodIdentity.sourceFamily,
+                consumerBit: consumedPressureNeighborhoodIdentity.consumerBit,
+                leaseId: consumedPressureNeighborhoodLease?.leaseId ?? null,
+                laneId: consumedPressureNeighborhoodLease?.laneId ?? null,
+                stateKey: consumedPressureNeighborhoodLease?.stateKey ?? null,
+                deviceId: consumedPressureNeighborhoodLease?.deviceId ?? null,
+                leaseTokenLow: consumedPressureNeighborhoodIdentity.leaseTokenLow,
+                leaseTokenHigh: consumedPressureNeighborhoodIdentity.leaseTokenHigh,
+                tokenBinding: consumedPressureNeighborhoodLease?.tokenBinding ?? null,
+                leaseIdentitySchema:
+                  consumedPressureNeighborhoodLease?.identitySchema ?? null,
+                authoritative:
+                  consumedPressureNeighborhoodLease?.authoritative === true,
+                taskId: consumedPressureLaneToken?.taskId ?? null
+              }
+            : null,
+          pressureEpochCount: sequencePressureChains.length,
+          pressureAppliedSubstepCount: sequencePressureScatters.length,
+          physicsStepCount: count,
+          sourceFieldGenerationMode: 'same-encoder-state-thermo-direct',
+          sourceFieldLaneStatus: materialInterfaceSourceFieldLane?.status ?? null,
+          sourceFieldLaneAcquisitionStatus:
+            materialInterfaceSourceFieldLaneAcquisition?.status ?? null,
+          sourceFieldLaneReused: materialInterfaceSourceFieldLaneAcquisition?.reused === true,
+          sourceFieldLaneGrown: materialInterfaceSourceFieldLaneAcquisition?.grown === true,
+          sourceFieldLaneSubmitStatus: materialInterfaceSourceFieldLaneSubmit?.status ?? null,
+          sourceFieldLaneReleased: materialInterfaceSourceFieldLaneReleased === true,
+          sourceFieldLaneQueueFenceAwaited: false,
+          sourceFieldLanePool:
+            summarizeSphMaterialInterfaceSourceFieldLocalGpuLanePool(device),
+          retainedBufferRefs: [],
+          ephemeralScratchBufferRefs: [
+            'material-interface-source-field-lane-rows-buffer',
+            'material-interface-source-field-lane-surface-buffer',
+            'material-interface-source-field-lane-index-buffer'
+          ],
+          queueCompletionStatus: fusedMechanicsSequenceQueueFenceStatus === 'complete'
+            ? 'queue-work-completed'
+            : 'queue-submitted-source-field-retirement-must-be-deferred',
+          queueCompletionMethod: fusedMechanicsSequenceQueueFenceMethod
+            ?? 'deferSubmittedWorkCleanup(queue.onSubmittedWorkDone)',
+          cleanupDeferredUntilQueueCompletion: true,
+          sourceBuffersOwnedByCaller: true,
+          sourceBuffersDestroyedBySequence: false,
+          consumerLeaseId: materialInterfaceSourceFieldConsumerLease?.leaseId ?? null,
+          consumerLeaseStatus:
+            materialInterfaceSourceFieldConsumerLeaseRelease?.status
+              ?? materialInterfaceSourceFieldConsumerLease?.status
+              ?? null,
+          consumerLeaseReleaseDeferred:
+            materialInterfaceSourceFieldConsumerLeaseRelease?.deferred === true,
+          sourceRetirementWaitsForConsumerLease: Boolean(
+            materialInterfaceSourceFieldConsumerLease?.leaseId
+          )
+        }
+      : null;
     finalStep.fusedResidentSequence = {
       schema: 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0',
-      status: 'fused-resident-sequence-executed',
+      status: sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+        ? 'fused-resident-sequence-sparse-grid-source-fail-closed'
+        : 'fused-resident-sequence-executed',
       stepCount: count,
+      particleIterationCapacity,
+      particleCountAuthority: particleCountResidency
+        ? 'gpu-authored-residency-metadata'
+        : 'host-known-particle-count',
+      ...schroederParticleCountResidencyPublicFields(particleCountResidency),
+      pressureInterfaceForceRowScatter:
+        sequencePressureScatter.requested
+          ? {
+              status: schroederSparseGridPlan
+                ? (sparseGridTelemetry.schroederSparseGridHostSourceFailClosed
+                    ? 'pressure-interface-sparse-p2g-source-fail-closed-zero-indirect'
+                    : 'pressure-interface-sparse-p2g-accumulator-scatter-submitted')
+                : 'pressure-interface-direct-p2g-accumulator-scatter-submitted',
+              sourceMode: 'same-encoder-source-field-candidate-force-chain',
+              applicationPolicy:
+                'source-field-candidates-and-force-rows-rebuilt-per-current-position-epoch',
+              pressureEpochCount: sequencePressureChains.length,
+              pressureAppliedSubstepCount: sequencePressureScatters.length,
+              batchPartitionInvariantPolicy:
+                'one-current-position-pressure-epoch-per-physics-substep',
+              forceRowCapacity: sequencePressureScatter.forceRowCapacity,
+              forceRowStrideFloats: sequencePressureScatter.forceRowStrideFloats,
+              forceRowStatusGate: sequencePressureScatter.solver.forceRowStatusGate,
+              dispatchMode: 'dispatchWorkgroupsIndirect',
+              dispatchAuthority: sequencePressureScatter.candidateDispatchAuthority,
+              dispatchWorkgroups: null,
+              dispatchWorkgroupCapacityCeiling: Math.max(
+                1,
+                Math.ceil(sequencePressureScatter.forceRowCapacity / 64)
+              ),
+              candidateReadbackPerformed: false,
+              pressureReadbackPerformed: false,
+              gridNodeOuterLoop: false,
+              sparseHashLookup: Boolean(schroederSparseGridPlan),
+              directGridLookup: !schroederSparseGridPlan,
+              subsequentSubstepPolicy:
+                'rebuild-candidates-and-force-rows-against-current-resident-position-epoch'
+            }
+          : null,
+      materialInterfaceSourceFieldConsumption,
       commandSubmissionCount: 1,
+      mechanicsComputePassMode: gpuTimestampProfiler.active
+        ? 'timestamp-attributed-stage-passes'
+        : 'one-ordered-compute-pass-per-substep',
+      mechanicsGroupedComputePassCount: gpuTimestampProfiler.active ? 0 : count,
+      mechanicsTimestampAttributedComputePasses: gpuTimestampProfiler.active,
+      mechanicsBindGroupCacheEntryCount: [...fusedMechanicsBindGroupCache.values()]
+        .reduce((sum, entries) => sum + entries.length, 0),
+      mechanicsBindGroupCreationCount: fusedMechanicsBindGroupCreationCount,
+      mechanicsBindGroupReuseCount: fusedMechanicsBindGroupReuseCount,
+      residentSequenceSubmissionPreflightStatus:
+        residentSequenceSubmissionSeal?.status ?? null,
+      residentSequenceSubmissionCommitStatus:
+        residentSequenceSubmissionCommit?.status ?? null,
+      residentSequenceSubmissionCommitted:
+        residentSequenceSubmissionCommit?.accepted === true,
+      residentSequencePublicationToken,
       dispatchCount: dispatchTopology.totalDispatches + sidecarFusionDispatchCount,
       mechanicsDispatchCount: dispatchTopology.totalDispatches,
       sidecarFusionDispatchCount,
-      sidecarFusionSequence: useThermalSidecarFusion,
+      sidecarFusionSequence: useThermalSidecarFusion || useReactionSidecarFusion,
       sidecarFusionRequired: sidecarFusionPlan?.required === true,
       sidecarFusionRunnable: sidecarFusionPlan?.sidecarFusionRunnable === true,
-      sidecarFusionPromotesFusedSequence: useThermalSidecarFusion,
+      sidecarFusionPromotesFusedSequence:
+        useThermalSidecarFusion || useReactionSidecarFusion,
       sidecarFusionPlanStatus: sidecarFusionPlan?.status ?? null,
-      sidecarFusionStageCount: useThermalSidecarFusion ? 2 : 0,
-      sidecarFusionStageOrder: useThermalSidecarFusion ? ['thermal-phase', 'mechanics-refresh'] : [],
+      sidecarFusionStageCount:
+        (useThermalSidecarFusion ? 1 : 0)
+          + (useReactionSidecarFusion ? 1 : 0)
+          + (useMechanicsRefreshSidecarFusion ? 1 : 0),
+      sidecarFusionStageOrder: [
+        ...(useThermalSidecarFusion ? ['thermal-phase'] : []),
+        ...(useReactionSidecarFusion ? ['reaction'] : []),
+        ...(useMechanicsRefreshSidecarFusion ? ['mechanics-refresh'] : [])
+      ],
       thermalSidecarFused: useThermalSidecarFusion,
+      reactionSidecarFused: useReactionSidecarFusion,
+      residentProductMassContinued: Boolean(sequenceResidentProductMass),
+      residentProductMassStatus: sequenceResidentProductMass?.status ?? null,
+      residentProductMassProductEventRowCount: residentProductEventCount,
+      residentProductMassScatterDispatchCount:
+        residentProductEventCount > 0 ? count : 0,
+      residentProductMassSourceBufferOwnedBySequence: false,
+      residentProductMassSourceBufferDestroyedBySequence: false,
+      reactiveResidentSequence: reactiveMultiStepResidentSequence
+        ? {
+            schema: 'peercompute.ulg.reactive-resident-substep-sequence.v0',
+            status: 'reactive-resident-substep-sequence-submitted',
+            stepCount: count,
+            productEventRowsPerSubstep: reactiveProductEventRowsPerSubstep,
+            productEventPlacementWorkspaceStatus:
+              reactionProductEventPlacementWorkspace?.status ?? null,
+            productEventPlacementWorkspaceCapacityRows:
+              reactionProductEventPlacementWorkspace?.eventCapacityRows ?? 0,
+            productEventPlacementWorkspaceBufferCount:
+              reactionProductEventPlacementWorkspace?.allocationEntries?.length ?? 0,
+            productEventPlacementWorkspaceByteLength:
+              reactionProductEventPlacementWorkspace?.totalByteLength ?? 0,
+            productEventPlacementWorkspaceReusedSubstepCount:
+              reactionProductEventPlacementWorkspace ? Math.max(0, count - 1) : 0,
+            productEventAppendCount: reactiveProductEventAppendEvidence.length,
+            productEventAppendEvidence: reactiveProductEventAppendEvidence,
+            productEventArenaGeneration:
+              residentProductEventEncoderSequence.arena.generationId,
+            productEventArenaOccupiedRowCountAuthority:
+              'gpu-authored-metadata-word-2',
+            productEventArenaActiveRowCountAuthority:
+              'gpu-authored-metadata-word-3',
+            materialInterfaceProductEventRowCountUpperBounds,
+            materialInterfaceFutureCapacityRowsExcluded: Math.max(
+              0,
+              residentProductEventCount * count
+                - materialInterfaceProductEventRowCountUpperBounds.reduce(
+                    (sum, rowCount) => sum + rowCount,
+                    0
+                  )
+            ),
+            gasCellEosGenerationCount: residentGasCellEosResults.length,
+            gasCellEosSkippedEmptyGenerationCount:
+              residentGasCellEosSkippedEmptyGenerationCount,
+            gasCellEosSourceRowCountUpperBounds:
+              residentGasCellEosSourceRowCountUpperBounds,
+            gasCellEosFutureCapacityRowsExcluded: Math.max(
+              0,
+              residentProductEventCount * count
+                - residentGasCellEosSourceRowCountUpperBounds.reduce(
+                    (sum, rowCount) => sum + rowCount,
+                    0
+                  )
+            ),
+            gasCellEosSourceEpochs:
+              residentGasCellEosResults.map((result) => result.sourceEpoch),
+            gasCellEosSourceGenerations:
+              residentGasCellEosResults.map((result) => result.sourceGeneration),
+            pressureGenerationCount: sequencePressureChains.length,
+            ordering:
+              'arena-current -> gas-eos -> pressure -> mechanics -> thermal -> reaction -> carrier-placement -> arena-append -> neighborhood-refresh',
+            commandSubmissionCount: 1,
+            mapPerformed: false,
+            readbackPerformed: false,
+            normalHotLoopReadbackFree: true,
+            fullReadbackPerformed: false
+          }
+        : null,
+      residentGasCellEos: residentGasCellEosResult,
+      residentGasCellEosStatus: residentGasCellEosResult?.status ?? null,
+      residentGasCellEosGeneration: residentGasCellEosResult?.generation ?? null,
+      residentGasCellEosSourceEpoch: residentGasCellEosResult?.sourceEpoch ?? null,
+      residentGasCellEosSourceGeneration:
+        residentGasCellEosResult?.sourceGeneration ?? null,
+      residentGasCellEosSourceRowCount:
+        residentGasCellEosResult?.sourceRowCount ?? 0,
+      residentGasCellEosSourceCapacity:
+        residentGasCellEosResult?.sourceCapacity ?? 0,
+      residentGasCellEosExactSourceRowCount:
+        residentGasCellEosResult?.exactSourceRowCount ?? null,
+      residentGasCellEosExactSourceRowCountAuthority:
+        residentGasCellEosResult?.exactSourceRowCountAuthority ?? null,
+      residentGasCellEosExactPrefix:
+        residentGasCellEosResult?.exactPrefix === true,
+      residentGasCellEosGpuGatedIndirectDispatchCount:
+        residentGasCellEosResult?.gpuGatedIndirectDispatchCount ?? 0,
+      residentGasCellEosLaneCapacityClass:
+        residentGasCellEosResult?.residentGasCellEosLaneCapacityClass ?? null,
+      residentGasCellEosLaneCapacityPlan,
+      residentGasCellEosActiveCountSource:
+        residentGasCellEosResult?.pressureInterfaceGasPressureCellRowCountSource ?? null,
+      residentGasCellEosLane,
+      residentGasCellEosLaneCacheStatus: residentGasCellEosLane?.cacheStatus ?? null,
+      residentGasCellEosNormalHotLoopReadbackFree:
+        residentGasCellEosResult?.normalHotLoopReadbackFree === true,
+      residentGasCellEosFullReadbackPerformed:
+        residentGasCellEosResult?.fullReadbackPerformed === true,
       queueFenceRequested: measureQueueFence,
       queueFenceRequiredByTimestampReadback: timestampReadbackRequiresFence,
       queueFenceMs: fusedMechanicsSequenceQueueFenceMs,
       queueFenceStatus: fusedMechanicsSequenceQueueFenceStatus,
       queueFenceMethod: fusedMechanicsSequenceQueueFenceMethod,
       queueSubmitMs: fusedMechanicsSequenceQueueSubmitMs,
+      hostTiming: { ...fusedMechanicsSequenceHostTiming },
       gpuTimestampProfile,
       gpuTimestampRequested: Boolean(measureGpuTimestamps),
       gpuTimestampStatus: gpuTimestampProfile.status,
       gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+      gpuTimestampSpanCapacity: fusedResidentSequenceTimestampSpanCapacity(count),
+      residentNeighborhoodSharedTimestampProfiler:
+        Boolean(measureGpuTimestamps && residentNeighborhoodLane),
+      residentGasCellEosSharedTimestampProfiler:
+        Boolean(measureGpuTimestamps && residentGasCellEosEncodedInSequence),
       gpuAllocationEvidence: fusedMechanicsSequenceAllocationEvidence,
+      thermalWorkspaceSchema: thermalWorkspace?.schema ?? null,
+      thermalWorkspaceStatus: thermalWorkspace?.status ?? null,
+      thermalWorkspaceParticleCapacity: thermalWorkspace?.particleCapacity ?? 0,
+      thermalWorkspaceBufferCount: thermalWorkspace?.allocationEntries?.length ?? 0,
+      thermalWorkspaceByteLength: thermalWorkspace?.propertyBufferByteLength ?? 0,
+      thermalWorkspaceReusedSubstepCount: thermalWorkspace ? Math.max(0, count - 1) : 0,
+      reactionCoreWorkspaceSchema: reactionCoreWorkspace?.schema ?? null,
+      reactionCoreWorkspaceStatus: reactionCoreWorkspace?.status ?? null,
+      reactionCoreWorkspaceParticleCapacity:
+        reactionCoreWorkspace?.particleCapacity ?? 0,
+      reactionCoreWorkspaceBufferCount:
+        reactionCoreWorkspace?.allocationEntries?.length ?? 0,
+      reactionCoreWorkspaceByteLength:
+        reactionCoreWorkspace?.totalByteLength ?? 0,
+      reactionCoreWorkspaceReusedSubstepCount:
+        reactionCoreWorkspace ? Math.max(0, count - 1) : 0,
+      pressureInterfaceWorkspaceSchema: pressureInterfaceWorkspace?.schema ?? null,
+      pressureInterfaceWorkspaceStatus: pressureInterfaceWorkspace?.status ?? null,
+      pressureInterfaceWorkspaceCandidateCapacity:
+        pressureInterfaceWorkspace?.candidateCapacity ?? 0,
+      pressureInterfaceWorkspaceBufferCount:
+        pressureInterfaceWorkspace?.allocationEntries?.length ?? 0,
+      pressureInterfaceWorkspaceByteLength:
+        pressureInterfaceWorkspace?.totalByteLength ?? 0,
+      pressureInterfaceWorkspaceSequenceStepCapacity:
+        pressureInterfaceWorkspace?.sequenceStepCapacity ?? 0,
+      pressureInterfaceWorkspaceControlBufferByteLength:
+        pressureInterfaceWorkspace?.controlBufferByteLength ?? 0,
+      pressureInterfaceWorkspaceUsedControlSlotIndices: [
+        ...(pressureInterfaceWorkspace?.usedControlSlotIndices || [])
+      ],
+      pressureInterfaceWorkspaceBindGroupCacheEvidence:
+        pressureInterfaceWorkspace?.bindGroupCacheEvidence?.() ?? null,
+      pressureInterfaceScatterBindGroupCacheHitCount:
+        sequencePressureChains.filter(
+          (chain) => chain.pressureScatterBindGroupCacheHit === true
+        ).length,
+      pressureInterfaceWorkspaceReusedSubstepCount: pressureInterfaceWorkspace
+        ? Math.max(0, sequencePressureChains.length - 1)
+        : 0,
+      reactionProductEventPlacementWorkspaceStatus:
+        reactionProductEventPlacementWorkspace?.status ?? null,
+      reactionProductEventPlacementWorkspaceCapacityRows:
+        reactionProductEventPlacementWorkspace?.eventCapacityRows ?? 0,
+      reactionProductEventPlacementWorkspaceBufferCount:
+        reactionProductEventPlacementWorkspace?.allocationEntries?.length ?? 0,
+      reactionProductEventPlacementWorkspaceByteLength:
+        reactionProductEventPlacementWorkspace?.totalByteLength ?? 0,
+      reactionProductEventPlacementWorkspaceSequenceStepCapacity:
+        reactionProductEventPlacementWorkspace?.sequenceStepCapacity ?? 0,
+      reactionProductEventPlacementParamsSlotStrideBytes:
+        reactionProductEventPlacementWorkspace?.paramsSlotStrideBytes ?? 0,
+      reactionProductEventPlacementBindGroupCacheEvidence:
+        reactionProductEventPlacementWorkspace?.bindGroupCacheEvidence?.() ?? null,
+      reactionProductEventPlacementWorkspaceReusedSubstepCount:
+        reactionProductEventPlacementWorkspace ? Math.max(0, count - 1) : 0,
+      residentSequenceWorkspace: stageTiming.residentSequenceWorkspace,
+      particleFamilyPingReuse: stageTiming.particleFamilyPingReuse,
+      residentNeighborhoodLane: residentNeighborhoodLaneEvidence,
       dispatchTopology,
+      schroederSparseGrid,
+      schroederSparseGridEnabled: Boolean(schroederSparseGrid),
+      schroederSparseGridStorageMode: schroederSparseGridPlan?.storageMode ?? null,
+      ...sparseGridTelemetry,
+      schroederSparseGridPeakAllocatedByteLength:
+        schroederSparseGridPlan?.peakAllocatedByteLength ?? 0,
       activeGridDispatch,
       schroederLevelFilter: fusedSchroederLevelFilterMetadata(schroederLevelFilter),
       schroederLevelFilterEnabled: schroederLevelFilter.enabled === true,
@@ -4909,41 +9688,168 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       finalSourceSlot,
       finalNextSlot: finalStep.particlePingPong?.nextSlot ?? null
     };
+    finalStep.pressureInterfaceSourceFieldRequested = Boolean(materialInterfaceSourceField);
+    finalStep.pressureInterfaceRequestedSourceStep =
+      materialInterfaceSourceField?.sourceStep ?? null;
+    finalStep.materialInterfaceSourceFieldConsumption =
+      finalStep.fusedResidentSequence.materialInterfaceSourceFieldConsumption;
+    finalStep.pressureInterfaceEpochCount = sequencePressureChains.length;
+    finalStep.pressureInterfaceAppliedSubstepCount = sequencePressureScatters.length;
     const temporaryBuffers = [
       p2gAccumulatorBuffer,
       p2gParamsBuffer,
       gridUpdateParamsBuffer,
       g2pParamsBuffer,
-      productEventBuffer,
+      ...(ownsProductEventBuffer ? [productEventBuffer] : []),
+      ...(ownsProductEventMetadataBuffer ? [productEventMetadataBuffer] : []),
       ...(schroederLevelFilter.ownsAssignmentBuffer ? [schroederAssignmentBuffer] : []),
       ...(schroederActiveNodeFilter.ownsActiveNodeBuffer ? [schroederActiveNodeBuffer] : []),
       pressureRowsBuffer,
+      ...sequencePressureTemporaryBuffers,
+      ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false
+        ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean)
+        : []),
       ...statePingBuffers.filter((buffer) => buffer !== finalStateBuffer),
+      ...thermoPingBuffers.filter((buffer) => buffer !== finalThermoBuffer),
       ...mechanicsPingBuffers.filter((buffer) => buffer !== finalMechanicsBuffer)
-    ];
+    ].filter((buffer) => !isSphResidentSequenceWorkspaceBufferGpu(buffer));
     const retainedSidecarBuffers = new Set([
       finalThermalStep?.stateBuffer,
       finalThermalStep?.thermoBuffer,
+      finalReactionStep?.stateBuffer,
+      finalReactionStep?.thermoBuffer,
+      finalReactionStep?.mechanicsBuffer,
       finalMechanicsRefreshStep?.mechanicsBuffer,
       finalThermoBuffer
     ].filter(Boolean));
     temporaryBuffers.push(...sidecarOutputBuffers.filter((buffer) => buffer && !retainedSidecarBuffers.has(buffer)));
     deferSubmittedWorkCleanup(device, () => {
-      for (const stage of sidecarEncoderStages) stage.cleanupSubmittedWork?.();
+      completeResidentGasCellEosResultsAtSharedOuterFence(residentGasCellEosResults);
+      for (const stage of sidecarEncoderStages) {
+        stage.cleanupSubmittedWork?.({ destroyOutputs: false });
+      }
+      for (const productEventStage of reactiveProductEventStages) {
+        productEventStage?.cleanupSubmittedWork?.({ destroyProductEvents: true });
+      }
+      if (!residentSequenceWorkspaceAcquisition) {
+        thermalWorkspace?.destroy();
+        reactionCoreWorkspace?.destroy();
+        reactionProductEventPlacementWorkspace?.destroy();
+      }
+      for (const chain of sequencePressureChains) {
+        chain.pressureInterfaceStage?.cleanupSubmittedWork?.();
+        chain.pressureInterfaceStage?.destroyForceRowsBuffer?.();
+        chain.materialInterfaceCandidates?.cleanupSubmittedWork?.();
+        chain.materialInterfaceCandidates?.destroyMaterialInterfaceCandidateFieldBuffers?.({
+          reason: 'fused-pressure-sequence-submitted-work-complete'
+        });
+      }
+      if (!residentSequenceWorkspaceAcquisition) pressureInterfaceWorkspace?.destroy();
+      for (const execution of schroederSparseGridExecutions) {
+        execution.releaseTransientBuffers?.();
+      }
+      residentProductEventEncoderSequence?.releaseSubmittedWork();
+      residentProductEventEncoderSequence?.retiredArena?.destroy?.();
       for (const buffer of temporaryBuffers) buffer.destroy?.();
+      residentNeighborhoodLaneAcquisition?.release();
     });
     returned = true;
     return finalStep;
   } finally {
     if (!returned) {
-      gpuTimestampProfiler.destroy();
-      for (const stage of sidecarEncoderStages) {
-        stage.cleanupSubmittedWork?.();
+      if (
+        materialInterfaceSourceFieldLaneAcquisition
+        && !materialInterfaceSourceFieldLaneReleased
+      ) {
+        if (sequenceSubmitted) {
+          materialInterfaceSourceFieldLaneSubmit ??=
+            materialInterfaceSourceFieldLaneAcquisition.markSubmitted({
+              queueCompletionStatus: 'queue-submitted-before-sequence-error',
+              queueCompletionMethod: 'queue.submit'
+            });
+        } else {
+          materialInterfaceSourceFieldLaneAcquisition.cancelBeforeSubmit(
+            'fused-resident-sequence-aborted-before-submit'
+          );
+        }
+        materialInterfaceSourceFieldLaneReleased =
+          materialInterfaceSourceFieldLaneAcquisition.release({
+            reason: sequenceSubmitted
+              ? 'pressure-source-field-sequence-error-after-submit'
+              : 'pressure-source-field-sequence-error-before-submit'
+          });
       }
-      for (const buffer of sidecarOutputBuffers) {
-        buffer?.destroy?.();
+      if (
+        materialInterfaceSourceFieldConsumerLease?.leaseId
+        && !materialInterfaceSourceFieldConsumerLeaseRelease
+      ) {
+        materialInterfaceSourceFieldConsumerLeaseRelease =
+          materialInterfaceSourceField
+            .releaseMaterialInterfaceSourceFieldConsumerLease?.(
+              materialInterfaceSourceFieldConsumerLease.leaseId,
+              {
+                device: sequenceSubmitted ? device : null,
+                status: sequenceSubmitted
+                  ? 'released-after-pressure-sequence-error-post-submit'
+                  : 'released-after-pressure-sequence-error-pre-submit',
+                reason: 'pressure-sequence-error-consumer-release'
+              }
+            ) ?? null;
       }
-      for (const buffer of allCreatedBuffers) buffer.destroy?.();
+      for (const gasCellEosResult of residentGasCellEosResults) {
+        if (gasCellEosResult?.ready === true && !sequenceSubmitted) {
+          gasCellEosResult.cancelBeforeSubmit?.({
+            reason: 'fused-resident-sequence-aborted-before-submit'
+          });
+        } else {
+          gasCellEosResult?.retire?.({
+            reason: 'fused-resident-sequence-error-after-submit'
+          });
+        }
+      }
+      if (residentProductEventEncoderSequence && !sequenceSubmitted) {
+        residentProductEventEncoderSequence.cancelBeforeSubmit(
+          'fused-resident-sequence-aborted-before-submit'
+        );
+      }
+      const cleanupFailedSequence = () => {
+        gpuTimestampProfiler.destroy();
+        for (const stage of sidecarEncoderStages) stage.cleanupSubmittedWork?.();
+        if (!residentSequenceWorkspaceAcquisition) {
+          thermalWorkspace?.destroy();
+          reactionCoreWorkspace?.destroy();
+          reactionProductEventPlacementWorkspace?.destroy();
+        }
+        for (const chain of sequencePressureChains) {
+          chain.pressureInterfaceStage?.cleanupSubmittedWork?.();
+          chain.pressureInterfaceStage?.destroyForceRowsBuffer?.();
+          chain.materialInterfaceCandidates?.cleanupSubmittedWork?.();
+          chain.materialInterfaceCandidates?.destroyMaterialInterfaceCandidateFieldBuffers?.({
+            reason: 'fused-pressure-sequence-error-cleanup'
+          });
+        }
+        if (!residentSequenceWorkspaceAcquisition) pressureInterfaceWorkspace?.destroy();
+        for (const buffer of sidecarOutputBuffers) buffer?.destroy?.();
+        for (const buffer of allCreatedBuffers) {
+          if (!isSphResidentSequenceWorkspaceBufferGpu(buffer)) buffer.destroy?.();
+        }
+        residentProductEventEncoderSequence?.releaseSubmittedWork();
+        if (sequenceSubmitted) {
+          residentProductEventEncoderSequence?.retiredArena?.destroy?.();
+        }
+        for (const execution of schroederSparseGridExecutions) {
+          execution.releaseTransientBuffers?.();
+        }
+        schroederSparseGridRuntime?.destroy();
+        residentNeighborhoodLaneAcquisition?.release();
+        if (!sequenceSubmitted) {
+          residentSequenceWorkspaceAcquisition?.cancelBeforeSubmit(
+            'fused-resident-sequence-aborted-before-submit'
+          );
+        }
+      };
+      if (sequenceSubmitted) deferSubmittedWorkCleanup(device, cleanupFailedSequence);
+      else cleanupFailedSequence();
     }
   }
 }
@@ -6092,16 +10998,27 @@ function rejectResidentGpuLaneLease(manager, leaseId, reason) {
 }
 
 function queueEvidenceFromResidentStep(step) {
-  const retainedNoFullWebGpuChain = Boolean(
-    step?.backend === 'webgpu'
-    && step?.readbackMode === NO_FULL_READBACK_MODE
-    && (
-      step?.normalHotLoopReadbackFree === true
-      || step?.residentBuffersRetained === true
-      || step?.nextParticleUploads?.sphParticleUpload?.stateBuffer
-      || step?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
-    )
-  );
+  const computeTaskQueueFence = step?.computeTaskQueueFence ?? null;
+  if (
+    computeTaskQueueFence?.status === 'queue-work-completed'
+    || computeTaskQueueFence?.status === 'ordered-before-consumer-queue-completed'
+  ) {
+    return {
+      ...computeTaskQueueFence,
+      status: computeTaskQueueFence.status,
+      method: computeTaskQueueFence.method || (
+        computeTaskQueueFence.status === 'queue-work-completed'
+          ? 'queue.onSubmittedWorkDone'
+          : 'same-device-queue-order'
+      ),
+      fenceSatisfied: computeTaskQueueFence.fenceSatisfied === true,
+      satisfactionReason: computeTaskQueueFence.satisfactionReason || (
+        computeTaskQueueFence.status === 'queue-work-completed'
+          ? 'compute-task-observed-real-queue-completion'
+          : 'compute-task-submission-ordered-before-same-device-consumer'
+      )
+    };
+  }
   const fusedQueueFenceStatus =
     step?.fusedResidentSequence?.queueFenceStatus
     ?? step?.stageTiming?.queueFenceStatus?.fusedMechanicsSequence
@@ -6140,28 +11057,469 @@ function queueEvidenceFromResidentStep(step) {
       ?? candidate?.gpuResult?.queueCompletionMethod
       ?? null;
     if (status || method) {
-      const resolvedStatus = status || 'queue-work-completed';
-      const resolvedMethod = method || 'queue.onSubmittedWorkDone';
+      const resolvedStatus = status || 'queue-submitted-status-unspecified';
+      const resolvedMethod = method || null;
       const evidence = {
         status: resolvedStatus,
-        method: resolvedMethod
+        method: resolvedMethod,
+        fenceSatisfied: false
       };
-      if (resolvedStatus === 'queue-submitted-cleanup-deferred' && retainedNoFullWebGpuChain) {
-        evidence.fenceSatisfied = true;
-        evidence.satisfactionReason =
-          'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup';
-      }
       if (!firstQueueEvidence) firstQueueEvidence = evidence;
       if (evidence.fenceSatisfied === true || residentStepFenceSatisfied(resolvedStatus)) return evidence;
     }
   }
   if (firstQueueEvidence) return firstQueueEvidence;
   if (step?.backend === 'webgpu') {
-    return step.readbackMode === NO_FULL_READBACK_MODE
-      ? { status: 'queue-work-completed', method: 'resident-step-retained-webgpu-chain' }
-      : { status: 'readback-map-completed', method: 'resident-step-readback' };
+    return {
+      status: 'queue-completion-evidence-unavailable',
+      method: step.readbackMode === NO_FULL_READBACK_MODE
+        ? 'resident-step-retained-webgpu-chain'
+        : 'resident-step-webgpu-readback-evidence-missing',
+      fenceSatisfied: false
+    };
   }
   return { status: 'gpu-fence-not-submitted', method: null };
+}
+
+function nonEmptyResidentIdentity(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function residentComputeTaskQueueFencePolicy(requirement = null) {
+  return requirement?.queueFencePolicy
+    ?? requirement?.fencePolicy
+    ?? MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY;
+}
+
+export function validateMlsMpmResidentSameDeviceQueueOrderContext({
+  requirement = null,
+  gpuResidentLane = null,
+  gpuResidentLaneLeaseIdentity = null,
+  device = null,
+  computeTaskId = null,
+  readbackMode = null,
+  compactSummaryMode = null,
+  measureFusedSequenceQueueFence = false,
+  measureGpuTimestamps = false,
+  contactKinematicsParticleBinMetadataReadback = false,
+  reactionParticleBinMetadataReadback = false,
+  residentNeighborhoodMaxInFlightSubmissions =
+    MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS
+} = {}) {
+  const policy = residentComputeTaskQueueFencePolicy(requirement);
+  const identity = gpuResidentLaneLeaseIdentity;
+  const actualDeviceId = device ? webGpuDeviceId(device) : null;
+  const expectedDeviceId = requirement?.deviceId ?? gpuResidentLane?.deviceId ?? null;
+  const blockers = [
+    policy !== MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+      ? 'same-device-ordered-policy-not-requested'
+      : null,
+    gpuResidentLane?.localExecution !== 'inline'
+      ? 'same-device-ordered-policy-requires-inline-execution'
+      : null,
+    !device?.queue || typeof device.queue.onSubmittedWorkDone !== 'function'
+      ? 'same-device-ordered-policy-requires-queue-completion-observer'
+      : null,
+    readbackMode !== NO_FULL_READBACK_MODE
+      ? 'same-device-ordered-policy-requires-no-full-readback'
+      : null,
+    normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode)
+      !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+      ? 'same-device-ordered-policy-rejects-compact-summary-diagnostics'
+      : null,
+    measureFusedSequenceQueueFence === true
+      ? 'same-device-ordered-policy-rejects-fused-queue-fence-diagnostics'
+      : null,
+    measureGpuTimestamps === true
+      ? 'same-device-ordered-policy-rejects-gpu-timestamp-diagnostics'
+      : null,
+    contactKinematicsParticleBinMetadataReadback === true
+      ? 'same-device-ordered-policy-rejects-contact-bin-readback'
+      : null,
+    reactionParticleBinMetadataReadback === true
+      ? 'same-device-ordered-policy-rejects-reaction-bin-readback'
+      : null,
+    identity?.schema !== PEERCOMPUTE_GPU_RESIDENT_LANE_LEASE_IDENTITY_SCHEMA
+      ? 'same-device-ordered-policy-requires-compute-manager-lease-identity'
+      : null,
+    identity?.authoritative !== true
+      ? 'same-device-ordered-policy-requires-authoritative-lease-identity'
+      : null,
+    !nonEmptyResidentIdentity(identity?.leaseId)
+      ? 'same-device-ordered-policy-requires-lease-id'
+      : null,
+    !nonEmptyResidentIdentity(actualDeviceId)
+      ? 'same-device-ordered-policy-requires-device-id'
+      : null,
+    !nonEmptyResidentIdentity(expectedDeviceId)
+      ? 'same-device-ordered-policy-requires-expected-device-id'
+      : null,
+    nonEmptyResidentIdentity(expectedDeviceId)
+      && nonEmptyResidentIdentity(actualDeviceId)
+      && expectedDeviceId !== actualDeviceId
+      ? 'same-device-ordered-policy-device-id-mismatch'
+      : null,
+    identity?.laneId !== requirement?.laneId
+      || identity?.laneId !== gpuResidentLane?.laneId
+      ? 'same-device-ordered-policy-lane-id-mismatch'
+      : null,
+    identity?.stateKey !== requirement?.stateKey
+      || identity?.stateKey !== gpuResidentLane?.stateKey
+      ? 'same-device-ordered-policy-state-key-mismatch'
+      : null,
+    identity?.sourceFamily !== gpuResidentLane?.sourceFamily
+      ? 'same-device-ordered-policy-source-family-mismatch'
+      : null,
+    nonEmptyResidentIdentity(computeTaskId) && identity?.taskId !== computeTaskId
+      ? 'same-device-ordered-policy-task-id-mismatch'
+      : null
+  ].filter(Boolean);
+  const neighborhoodCapacity = Math.max(
+    0,
+    Math.round(Number(residentNeighborhoodMaxInFlightSubmissions) || 0)
+  );
+  const capacityBlockers = neighborhoodCapacity
+    < MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS
+    ? ['resident-neighborhood-gpu-lane-window-below-compute-window']
+    : [];
+  const effectiveCapacity = Math.max(1, Math.min(
+    MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS,
+    neighborhoodCapacity || MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS
+  ));
+  return {
+    schema: ULG_MLS_MPM_RESIDENT_COMPUTE_QUEUE_PACING_SCHEMA,
+    status: blockers.length === 0
+      ? 'same-device-compute-queue-order-admitted'
+      : 'same-device-compute-queue-order-blocked',
+    admitted: blockers.length === 0,
+    policy,
+    blockers,
+    deviceId: actualDeviceId,
+    expectedDeviceId,
+    laneId: identity?.laneId ?? null,
+    stateKey: identity?.stateKey ?? null,
+    leaseId: identity?.leaseId ?? null,
+    taskId: identity?.taskId ?? null,
+    sourceFamily: identity?.sourceFamily ?? null,
+    configuredCapacity: MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS,
+    effectiveCapacity,
+    capacityBlockers
+  };
+}
+
+function residentComputeTaskQueueWindow(device) {
+  let window = residentComputeTaskQueueWindows.get(device);
+  if (!window) {
+    window = {
+      entries: [],
+      peakPendingSubmissionCount: 0,
+      totalSubmissionCount: 0,
+      totalBackpressureWaitCount: 0,
+      totalSettlementCount: 0,
+      totalSettlementRejectionCount: 0
+    };
+    residentComputeTaskQueueWindows.set(device, window);
+  }
+  return window;
+}
+
+function pruneResidentComputeTaskQueueWindow(window) {
+  window.entries = window.entries.filter((entry) => entry.settled !== true);
+  return window.entries.length;
+}
+
+export async function acquireMlsMpmResidentComputeQueuePacingSlot({
+  device = null,
+  admission = null
+} = {}) {
+  if (admission?.admitted !== true) {
+    const error = new Error(
+      `Same-device resident compute queue ordering failed closed: ${
+        admission?.blockers?.join(', ') || 'admission evidence missing'
+      }`
+    );
+    error.code = 'ULG_RESIDENT_SAME_DEVICE_QUEUE_ORDER_NOT_ADMITTED';
+    error.admission = admission || null;
+    throw error;
+  }
+  const window = residentComputeTaskQueueWindow(device);
+  pruneResidentComputeTaskQueueWindow(window);
+  const pendingBeforeAdmission = window.entries.length;
+  let waitedForOldestSubmission = false;
+  let oldestSettlementStatus = null;
+  const effectiveCapacity = Math.max(1, Math.min(
+    MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS,
+    Math.round(Number(admission.effectiveCapacity) || 1)
+  ));
+  if (window.entries.length >= effectiveCapacity) {
+    const oldest = window.entries[0];
+    waitedForOldestSubmission = true;
+    window.totalBackpressureWaitCount += 1;
+    const settlement = await oldest.settlement;
+    oldestSettlementStatus = settlement?.status ?? null;
+    pruneResidentComputeTaskQueueWindow(window);
+  }
+  return {
+    schema: ULG_MLS_MPM_RESIDENT_COMPUTE_QUEUE_PACING_SCHEMA,
+    status: 'same-device-compute-queue-slot-admitted',
+    policy: admission.policy,
+    configuredCapacity: MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS,
+    capacity: effectiveCapacity,
+    capacityBlockers: [...(admission.capacityBlockers || [])],
+    deviceId: admission.deviceId,
+    laneId: admission.laneId,
+    stateKey: admission.stateKey,
+    leaseId: admission.leaseId,
+    taskId: admission.taskId,
+    sourceFamily: admission.sourceFamily,
+    pendingBeforeAdmission,
+    pendingAfterBackpressure: window.entries.length,
+    waitedForOldestSubmission,
+    oldestSettlementStatus,
+    backpressureWaitCount: window.totalBackpressureWaitCount,
+    peakPendingSubmissionCount: window.peakPendingSubmissionCount,
+    queueCompletionObserved: false,
+    settlementStatus: 'not-registered'
+  };
+}
+
+export function registerMlsMpmResidentComputeQueueSubmission({
+  device = null,
+  pacing = null
+} = {}) {
+  if (!device?.queue || typeof device.queue.onSubmittedWorkDone !== 'function') {
+    throw new Error('Resident compute queue pacing requires queue.onSubmittedWorkDone()');
+  }
+  if (pacing?.status !== 'same-device-compute-queue-slot-admitted') {
+    throw new Error('Resident compute queue pacing requires an admitted slot');
+  }
+  const window = residentComputeTaskQueueWindow(device);
+  const entry = {
+    settled: false,
+    settlement: null,
+    pacing
+  };
+  pacing.status = 'same-device-compute-queue-submission-pending';
+  pacing.settlementStatus = 'pending';
+  window.totalSubmissionCount += 1;
+  window.entries.push(entry);
+  window.peakPendingSubmissionCount = Math.max(
+    window.peakPendingSubmissionCount,
+    window.entries.length
+  );
+  pacing.pendingAfterSubmission = window.entries.length;
+  pacing.peakPendingSubmissionCount = window.peakPendingSubmissionCount;
+  pacing.totalSubmissionCount = window.totalSubmissionCount;
+  entry.settlement = Promise.resolve()
+    .then(() => device.queue.onSubmittedWorkDone())
+    .then(() => ({ status: 'queue-work-completed', reason: null }))
+    .catch((error) => ({
+      status: 'queue-completion-observer-rejected',
+      reason: error instanceof Error ? error.message : String(error)
+    }))
+    .then((settlement) => {
+      entry.settled = true;
+      window.totalSettlementCount += 1;
+      if (settlement.status !== 'queue-work-completed') {
+        window.totalSettlementRejectionCount += 1;
+      }
+      pacing.status = settlement.status === 'queue-work-completed'
+        ? 'same-device-compute-queue-submission-settled'
+        : 'same-device-compute-queue-submission-settlement-rejected';
+      pacing.settlementStatus = settlement.status;
+      pacing.settlementReason = settlement.reason;
+      pacing.queueCompletionObserved = settlement.status === 'queue-work-completed';
+      pacing.totalSettlementCount = window.totalSettlementCount;
+      pacing.totalSettlementRejectionCount = window.totalSettlementRejectionCount;
+      pruneResidentComputeTaskQueueWindow(window);
+      pacing.pendingAfterSettlement = window.entries.length;
+      return settlement;
+    });
+  return pacing;
+}
+
+export async function awaitResidentComputeTaskQueueFence(
+  execution,
+  requirement,
+  device,
+  {
+    gpuResidentLane = null,
+    gpuResidentLaneLeaseIdentity = null,
+    computeTaskId = null,
+    pacingAdmission = null,
+    pacing = null
+  } = {}
+) {
+  const step = execution?.finalStep || execution;
+  if (!step || typeof step !== 'object') return null;
+  if (requirement?.required === false) {
+    step.computeTaskQueueFence = {
+      status: 'gpu-fence-not-required',
+      method: null,
+      completed: true
+    };
+    return step.computeTaskQueueFence;
+  }
+  const queueFencePolicy = residentComputeTaskQueueFencePolicy(requirement);
+  if (queueFencePolicy === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED) {
+    const residentNeighborhoodLane = step?.fusedResidentSequence?.residentNeighborhoodLane
+      ?? step?.stageTiming?.residentNeighborhoodLane
+      ?? null;
+    const executionBlockers = [
+      pacingAdmission?.admitted !== true ? 'same-device-ordered-pacing-admission-missing' : null,
+      pacing?.status !== 'same-device-compute-queue-slot-admitted'
+        ? 'same-device-ordered-pacing-slot-missing'
+        : null,
+      step.backend !== 'webgpu' ? 'same-device-ordered-execution-not-webgpu' : null,
+      step.readbackMode !== NO_FULL_READBACK_MODE
+        ? 'same-device-ordered-execution-not-no-full-readback'
+        : null,
+      step.normalHotLoopReadbackFree !== true
+        ? 'same-device-ordered-execution-hot-loop-readback-detected'
+        : null,
+      residentNeighborhoodLane
+        && residentNeighborhoodLane.orderedReuseWindow !== true
+        ? 'same-device-ordered-neighborhood-reuse-window-missing'
+        : null,
+      residentNeighborhoodLane
+        && Number(residentNeighborhoodLane.maxInFlightSubmissions)
+          < MLS_MPM_RESIDENT_COMPUTE_TASK_MAX_IN_FLIGHT_SUBMISSIONS
+        ? 'same-device-ordered-neighborhood-reuse-window-too-small'
+        : null
+    ].filter(Boolean);
+    if (executionBlockers.length > 0) {
+      step.computeTaskQueueFence = {
+        status: 'same-device-queue-order-not-admitted',
+        method: null,
+        queueFencePolicy,
+        completed: false,
+        fenceSatisfied: false,
+        queueCompletionObserved: false,
+        blockers: executionBlockers,
+        deviceId: pacingAdmission?.deviceId ?? null,
+        laneId: pacingAdmission?.laneId ?? null,
+        stateKey: pacingAdmission?.stateKey ?? null,
+        leaseId: pacingAdmission?.leaseId ?? null,
+        taskId: pacingAdmission?.taskId ?? null,
+        sourceFamily: pacingAdmission?.sourceFamily ?? null
+      };
+      return step.computeTaskQueueFence;
+    }
+    registerMlsMpmResidentComputeQueueSubmission({ device, pacing });
+    pacing.residentNeighborhoodOrderedReuseWindow =
+      residentNeighborhoodLane?.orderedReuseWindow === true;
+    pacing.residentNeighborhoodMaxInFlightSubmissions =
+      residentNeighborhoodLane?.maxInFlightSubmissions ?? null;
+    pacing.residentNeighborhoodInFlightSubmissionCountAtAcquire =
+      residentNeighborhoodLane?.inFlightSubmissionCountAtAcquire ?? null;
+    step.computeTaskQueueFence = {
+      status: 'ordered-before-consumer-queue-completed',
+      method: 'same-device-queue-order',
+      queueFencePolicy,
+      completed: false,
+      fenceSatisfied: true,
+      orderingSatisfied: true,
+      queueCompletionObserved: false,
+      satisfactionReason: 'same-device-authoritative-lane-submission-ordered-before-consumer',
+      deviceId: pacingAdmission.deviceId,
+      laneId: pacingAdmission.laneId,
+      stateKey: pacingAdmission.stateKey,
+      leaseId: pacingAdmission.leaseId,
+      taskId: computeTaskId || pacingAdmission.taskId,
+      sourceFamily: pacingAdmission.sourceFamily,
+      leaseIdentitySchema: gpuResidentLaneLeaseIdentity?.schema ?? null,
+      leaseAuthoritative: gpuResidentLaneLeaseIdentity?.authoritative === true,
+      localExecution: gpuResidentLane?.localExecution ?? null,
+      pacing
+    };
+    return step.computeTaskQueueFence;
+  }
+  if (queueFencePolicy !== MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_LEGACY) {
+    step.computeTaskQueueFence = {
+      status: 'queue-fence-policy-not-implemented',
+      method: null,
+      queueFencePolicy,
+      completed: false
+    };
+    return step.computeTaskQueueFence;
+  }
+  if (typeof device?.queue?.onSubmittedWorkDone !== 'function') {
+    step.computeTaskQueueFence = {
+      status: 'queue-completion-observer-unavailable',
+      method: null,
+      queueFencePolicy,
+      completed: false
+    };
+    return step.computeTaskQueueFence;
+  }
+  try {
+    await device.queue.onSubmittedWorkDone();
+    step.computeTaskQueueFence = {
+      status: 'queue-work-completed',
+      method: 'queue.onSubmittedWorkDone',
+      queueFencePolicy,
+      completed: true
+    };
+  } catch (error) {
+    step.computeTaskQueueFence = {
+      status: 'queue-completion-observer-rejected',
+      method: 'queue.onSubmittedWorkDone',
+      queueFencePolicy,
+      completed: false,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+  return step.computeTaskQueueFence;
+}
+
+function promotePressureSourceConsumptionQueueCompletion(execution, queueFence = null) {
+  const queueCompleted = queueFence?.status === 'queue-work-completed'
+    && queueFence?.method === 'queue.onSubmittedWorkDone';
+  const sameDeviceOrdered = queueFence?.status === 'ordered-before-consumer-queue-completed'
+    && queueFence?.method === 'same-device-queue-order'
+    && queueFence?.queueFencePolicy
+      === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+    && queueFence?.fenceSatisfied === true
+    && queueFence?.orderingSatisfied === true
+    && queueFence?.completed === false
+    && queueFence?.queueCompletionObserved === false;
+  if (!queueCompleted && !sameDeviceOrdered) {
+    return false;
+  }
+  const finalStep = execution?.finalStep || execution;
+  const candidates = [
+    execution?.materialInterfaceSourceFieldConsumption,
+    finalStep?.materialInterfaceSourceFieldConsumption,
+    finalStep?.fusedResidentSequence?.materialInterfaceSourceFieldConsumption
+  ];
+  let promoted = false;
+  for (const consumption of new Set(candidates.filter(Boolean))) {
+    if (sameDeviceOrdered) {
+      const consumedNeighborhood = consumption?.consumedNeighborhoodIdentity ?? null;
+      const identityMismatch = [
+        consumption?.sourceDeviceId !== queueFence.deviceId,
+        consumption?.consumerDeviceId !== queueFence.deviceId,
+        consumption?.consumerLaneId !== queueFence.laneId,
+        consumption?.consumerStateKey !== queueFence.stateKey,
+        consumption?.consumerLaneLeaseId !== queueFence.leaseId,
+        consumption?.consumerLaneTaskId !== queueFence.taskId,
+        consumedNeighborhood?.deviceId !== queueFence.deviceId,
+        consumedNeighborhood?.laneId !== queueFence.laneId,
+        consumedNeighborhood?.stateKey !== queueFence.stateKey,
+        consumedNeighborhood?.leaseId !== queueFence.leaseId,
+        consumedNeighborhood?.taskId !== queueFence.taskId,
+        consumedNeighborhood?.authoritative !== true
+      ].some(Boolean);
+      if (identityMismatch) continue;
+    }
+    consumption.queueCompletionStatus = queueFence.status;
+    consumption.queueCompletionMethod = queueFence.method;
+    consumption.queueFencePolicy = queueFence.queueFencePolicy;
+    consumption.queueCompletionObserved = queueCompleted;
+    consumption.cleanupDeferredUntilQueueCompletion = !queueCompleted;
+    promoted = true;
+  }
+  return promoted;
 }
 
 function retainedBufferRefsFromResidentStep(step) {
@@ -6174,6 +11532,15 @@ function retainedBufferRefsFromResidentStep(step) {
   if (step?.residentProductMass?.productEventBufferRetained) refs.push('resident-product-mass-buffer');
   if (step?.schroederFarAggregateGasCellImportBufferRetained) refs.push('resident-gas-pressure-cells-buffer');
   if (step?.compactGpuSummary?.compactSummaryBufferAuthority) refs.push('compact-summary-diagnostics');
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload: step?.nextParticleUploads?.sphParticleUpload,
+    mlsMpmParticleUpload: step?.nextParticleUploads?.mlsMpmParticleUpload,
+    artifact: step?.schroederParticleStorageResidencyAdoptionCandidate
+  });
+  if (particleCountResidency) {
+    refs.push('schroeder-particle-storage-residency-metadata-buffer');
+    refs.push('schroeder-particle-storage-residency-dispatch-indirect-buffer');
+  }
   return [...new Set(refs)];
 }
 
@@ -6204,6 +11571,17 @@ export function createMlsMpmResidentStepGpuFenceReport(step, requirement = {}) {
     queueFencePolicy: requirement?.queueFencePolicy || requirement?.fencePolicy || 'queue.onSubmittedWorkDone-before-admission',
     queueCompletionStatus: status,
     queueCompletionMethod: method,
+    queueCompletionObserved: queueEvidence.queueCompletionObserved === true,
+    completed: queueEvidence.completed === true,
+    orderingSatisfied: queueEvidence.orderingSatisfied === true,
+    deviceId: queueEvidence.deviceId || requirement?.deviceId || null,
+    leaseId: queueEvidence.leaseId || null,
+    taskId: queueEvidence.taskId || null,
+    sourceFamily: queueEvidence.sourceFamily || requirement?.sourceFamily || null,
+    leaseIdentitySchema: queueEvidence.leaseIdentitySchema || null,
+    leaseAuthoritative: queueEvidence.leaseAuthoritative === true,
+    localExecution: queueEvidence.localExecution || requirement?.localExecution || null,
+    pacing: queueEvidence.pacing || null,
     retainedBufferRefs,
     source: 'ulg-mls-mpm-resident-step-compute-task',
     backend: step?.backend || null,
@@ -6227,6 +11605,17 @@ function compactGpuFenceForStateDelta(gpuFence = null) {
     queueFencePolicy: gpuFence.queueFencePolicy || gpuFence.fencePolicy || null,
     queueCompletionStatus: gpuFence.queueCompletionStatus || null,
     queueCompletionMethod: gpuFence.queueCompletionMethod || null,
+    queueCompletionObserved: gpuFence.queueCompletionObserved === true,
+    completed: gpuFence.completed === true,
+    orderingSatisfied: gpuFence.orderingSatisfied === true,
+    deviceId: gpuFence.deviceId || null,
+    leaseId: gpuFence.leaseId || null,
+    taskId: gpuFence.taskId || null,
+    sourceFamily: gpuFence.sourceFamily || null,
+    leaseIdentitySchema: gpuFence.leaseIdentitySchema || null,
+    leaseAuthoritative: gpuFence.leaseAuthoritative === true,
+    localExecution: gpuFence.localExecution || null,
+    pacing: gpuFence.pacing ? { ...gpuFence.pacing } : null,
     retainedBufferRefs: [...(gpuFence.retainedBufferRefs || [])],
     source: gpuFence.source || null
   };
@@ -6241,6 +11630,12 @@ function compactResidentStepSummaryForStateDelta(summary = null) {
     status: summary.status ?? null,
     readbackMode: summary.readbackMode ?? null,
     normalHotLoopReadbackFree: summary.normalHotLoopReadbackFree === true,
+    gpuResidentAuthoritativeContinuationCandidate:
+      summary.gpuResidentAuthoritativeContinuationCandidate === true,
+    gpuAuthorityAdmissionRequired: summary.gpuAuthorityAdmissionRequired === true,
+    gpuAuthorityAdmissionSatisfied: summary.gpuAuthorityAdmissionSatisfied === true,
+    gpuAuthorityStatus: summary.gpuAuthorityStatus ?? null,
+    gpuAuthorityCandidateBlockers: [...(summary.gpuAuthorityCandidateBlockers || [])],
     gpuAuthoritativeState: summary.gpuAuthoritativeState === true,
     renderStateReadbackAvailable: summary.renderStateReadbackAvailable === true,
     compactSummaryAuthority: summary.compactSummaryAuthority ?? null,
@@ -6251,6 +11646,18 @@ function compactResidentStepSummaryForStateDelta(summary = null) {
     schroederParticleStorageAdoptionMode: summary.schroederParticleStorageAdoptionMode ?? null,
     schroederParticleStorageAuthoritativeParticleCount:
       summary.schroederParticleStorageAuthoritativeParticleCount ?? null,
+    schroederParticleStorageAuthoritativeParticleCountAuthority:
+      summary.schroederParticleStorageAuthoritativeParticleCountAuthority ?? null,
+    schroederParticleStorageAuthoritativeParticleCountMetadataWord:
+      summary.schroederParticleStorageAuthoritativeParticleCountMetadataWord ?? null,
+    schroederParticleStorageOutputParticleCapacity:
+      summary.schroederParticleStorageOutputParticleCapacity ?? null,
+    schroederParticleStorageActiveDispatchIndirectByteOffset:
+      summary.schroederParticleStorageActiveDispatchIndirectByteOffset ?? null,
+    schroederParticleStorageSelectionDispatchIndirectByteOffset:
+      summary.schroederParticleStorageSelectionDispatchIndirectByteOffset ?? null,
+    schroederParticleStorageResidencyAdoptionToken:
+      summary.schroederParticleStorageResidencyAdoptionToken ?? null,
     schroederParticleStorageMaterializationStatus:
       summary.schroederParticleStorageMaterializationStatus ?? null,
     nextParticleCount: summary.nextParticleCount ?? null,
@@ -6274,6 +11681,54 @@ function compactResidentStepSummaryForStateDelta(summary = null) {
   };
 }
 
+const SCHROEDER_PARTICLE_STORAGE_RESIDENCY_COMMIT_REFS = Object.freeze([
+  'schroeder-particle-storage-residency-metadata-buffer',
+  'schroeder-particle-storage-residency-dispatch-indirect-buffer'
+]);
+
+function appendUniqueRetainedRefs(refs = [], required = []) {
+  return [...new Set([...(refs || []), ...(required || [])].filter(Boolean))];
+}
+
+function extendResidentLaneContractsForParticleStorageResidency({
+  gpuResidentLane = null,
+  residentSequenceLaneContract = null,
+  requiredRefs = []
+} = {}) {
+  if (requiredRefs.length === 0) {
+    return { gpuResidentLane, residentSequenceLaneContract };
+  }
+  const sequence = residentSequenceLaneContract
+    ? {
+        ...residentSequenceLaneContract,
+        laneMustRetainBuffers: appendUniqueRetainedRefs(
+          residentSequenceLaneContract.laneMustRetainBuffers,
+          requiredRefs
+        )
+      }
+    : null;
+  const nestedSequence = gpuResidentLane?.residentSequenceLaneContract
+    ? {
+        ...gpuResidentLane.residentSequenceLaneContract,
+        laneMustRetainBuffers: appendUniqueRetainedRefs(
+          gpuResidentLane.residentSequenceLaneContract.laneMustRetainBuffers,
+          requiredRefs
+        )
+      }
+    : sequence;
+  const lane = gpuResidentLane
+    ? {
+        ...gpuResidentLane,
+        retainedBufferRefs: appendUniqueRetainedRefs(
+          gpuResidentLane.retainedBufferRefs,
+          requiredRefs
+        ),
+        residentSequenceLaneContract: nestedSequence
+      }
+    : null;
+  return { gpuResidentLane: lane, residentSequenceLaneContract: sequence };
+}
+
 export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
   taskId = null,
   scope = 'ulg-sph-resident-pass-dag',
@@ -6287,17 +11742,378 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
   const finalStepSummary = stepSummaries.length
     ? stepSummaries[stepSummaries.length - 1]
     : summarizeResidentStepForSequence(execution?.finalStep || execution, Math.max(0, stepSummaries.length - 1));
-  const gpuFence = compactGpuFenceForStateDelta(execution?.gpuFence || execution?.gpuFenceReport || null);
+  const finalStep = execution?.finalStep || execution;
+  const schroederParticleStorageResidencyAdoptionToken =
+    execution?.schroederParticleStorageResidencyAdoptionToken
+    ?? finalStep?.schroederParticleStorageResidencyAdoptionToken
+    ?? finalStepSummary?.schroederParticleStorageResidencyAdoptionToken
+    ?? null;
+  const tokenValidation = schroederParticleStorageResidencyAdoptionToken
+    ? validateSchroederParticleStorageResidencyAdoptionToken(
+        schroederParticleStorageResidencyAdoptionToken
+      )
+    : null;
+  if (tokenValidation && !tokenValidation.accepted) {
+    throw new Error(
+      `Cannot publish invalid Schroeder particle-storage residency token: ${tokenValidation.reason}`
+    );
+  }
+  const requiredResidencyRefs = tokenValidation?.accepted
+    ? SCHROEDER_PARTICLE_STORAGE_RESIDENCY_COMMIT_REFS
+    : [];
+  const gpuFence = compactGpuFenceForStateDelta(
+    execution?.gpuFence || execution?.gpuFenceReport || null
+  );
+  if (gpuFence && requiredResidencyRefs.length > 0) {
+    gpuFence.retainedBufferRefs = appendUniqueRetainedRefs(
+      gpuFence.retainedBufferRefs,
+      requiredResidencyRefs
+    );
+  }
   const resolvedStateKey = stateKey || gpuFence?.stateKey || gpuResidentLane?.stateKey || null;
-  const schroederAdoptedParticleStorageDescriptor =
-    execution?.schroederAdoptedParticleStorageDescriptor
-    || createSchroederAdoptedParticleStorageDescriptorFromStep(execution?.finalStep || execution, {
-      gpuFence,
-      stateKey: resolvedStateKey,
-      source: 'ulg-mls-mpm-resident-steps-state-delta',
-      taskId
-    });
+  const schroederAdoptedParticleStorageDescriptor = tokenValidation?.accepted
+    ? null
+    : execution?.schroederAdoptedParticleStorageDescriptor
+      || createSchroederAdoptedParticleStorageDescriptorFromStep(
+        execution?.finalStep || execution,
+        {
+          gpuFence,
+          stateKey: resolvedStateKey,
+          source: 'ulg-mls-mpm-resident-steps-state-delta',
+          taskId
+        }
+      );
   const completedStepCount = Math.max(0, Math.round(finiteNumber(execution?.completedStepCount, stepSummaries.length)));
+  const extendedLaneContracts = extendResidentLaneContractsForParticleStorageResidency({
+    gpuResidentLane: gpuResidentLane || execution?.gpuResidentLaneRequirement || null,
+    residentSequenceLaneContract:
+      residentSequenceLaneContract || execution?.residentSequenceLaneContract || null,
+    requiredRefs: requiredResidencyRefs
+  });
+  const pressureSourceFieldRequested = execution?.pressureInterfaceSourceFieldRequested === true
+    || finalStep?.pressureInterfaceSourceFieldRequested === true;
+  const pressureSourceFieldConsumption = execution?.materialInterfaceSourceFieldConsumption
+    ?? finalStep?.materialInterfaceSourceFieldConsumption
+    ?? finalStep?.fusedResidentSequence?.materialInterfaceSourceFieldConsumption
+    ?? null;
+  const pressureScatter = finalStep?.fusedResidentSequence?.pressureInterfaceForceRowScatter
+    ?? null;
+  const pressureEpochCount = Math.max(0, Math.round(finiteNumber(
+    execution?.pressureInterfaceEpochCount
+      ?? finalStep?.pressureInterfaceEpochCount
+      ?? pressureScatter?.pressureEpochCount,
+    0
+  )));
+  const pressureAppliedSubstepCount = Math.max(0, Math.round(finiteNumber(
+    execution?.pressureInterfaceAppliedSubstepCount
+      ?? finalStep?.pressureInterfaceAppliedSubstepCount
+      ?? pressureScatter?.pressureAppliedSubstepCount,
+    0
+  )));
+  const residentNeighborhoodLane = finalStep?.fusedResidentSequence?.residentNeighborhoodLane
+    ?? finalStep?.stageTiming?.residentNeighborhoodLane
+    ?? null;
+  const pressureRequestedSourceStep =
+    execution?.pressureInterfaceRequestedSourceStep
+      ?? finalStep?.pressureInterfaceRequestedSourceStep
+      ?? pressureSourceFieldConsumption?.sourceStep
+      ?? null;
+  const pressureConsumedNeighborhoodIdentity =
+    pressureSourceFieldConsumption?.consumedNeighborhoodIdentity ?? null;
+  const pressureSourceFieldEpochs = Array.isArray(
+    pressureSourceFieldConsumption?.sourceFieldEpochs
+  )
+    ? pressureSourceFieldConsumption.sourceFieldEpochs
+    : [];
+  const pressureExpectedSourceEpoch = pressureSourceFieldEpochs[0]?.sourcePositionEpoch
+    ?? pressureSourceFieldConsumption?.sourcePositionEpoch
+    ?? null;
+  const pressureConsumerLaneId = pressureSourceFieldConsumption?.consumerLaneId
+    ?? residentNeighborhoodLane?.laneId
+    ?? null;
+  const pressureConsumerStateKey = pressureSourceFieldConsumption?.consumerStateKey
+    ?? residentNeighborhoodLane?.stateKey
+    ?? null;
+  const pressureConsumerLaneLeaseId =
+    pressureSourceFieldConsumption?.consumerLaneLeaseId
+      ?? residentNeighborhoodLane?.leaseId
+      ?? null;
+  const nonEmptyPressureIdentityString = (value) => (
+    typeof value === 'string' && value.length > 0
+  );
+  const pressureQueueCompletionObserved = Boolean(
+    pressureSourceFieldConsumption?.queueCompletionStatus === 'queue-work-completed'
+    && pressureSourceFieldConsumption?.queueCompletionMethod === 'queue.onSubmittedWorkDone'
+  );
+  const pressureQueueSameDeviceOrderingAdmitted = Boolean(
+    pressureSourceFieldConsumption?.queueCompletionStatus
+      === 'ordered-before-consumer-queue-completed'
+    && pressureSourceFieldConsumption?.queueCompletionMethod === 'same-device-queue-order'
+    && pressureSourceFieldConsumption?.queueFencePolicy
+      === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+    && pressureSourceFieldConsumption?.queueCompletionObserved === false
+    && gpuFence?.status === 'ordered-before-consumer-queue-completed'
+    && gpuFence?.method === 'same-device-queue-order'
+    && gpuFence?.queueFencePolicy
+      === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+    && gpuFence?.fenceSatisfied === true
+    && gpuFence?.orderingSatisfied === true
+    && gpuFence?.completed === false
+    && gpuFence?.queueCompletionObserved === false
+    && gpuFence?.deviceId === pressureSourceFieldConsumption?.sourceDeviceId
+    && gpuFence?.deviceId === pressureSourceFieldConsumption?.consumerDeviceId
+    && gpuFence?.laneId === pressureConsumerLaneId
+    && gpuFence?.stateKey === pressureConsumerStateKey
+    && gpuFence?.leaseId === pressureConsumerLaneLeaseId
+    && gpuFence?.taskId === pressureSourceFieldConsumption?.consumerLaneTaskId
+  );
+  const pressureQueueAdmissionSatisfied = pressureQueueCompletionObserved
+    || pressureQueueSameDeviceOrderingAdmitted;
+  const pressureSourceFieldEpochBlockers = pressureSourceFieldRequested
+    ? pressureSourceFieldEpochs.flatMap((epoch, index) => {
+        const identity = epoch?.consumedNeighborhoodIdentity ?? null;
+        const previous = index > 0 ? pressureSourceFieldEpochs[index - 1] : null;
+        const expectedStep = Number.isInteger(Number(pressureRequestedSourceStep))
+          ? Number(pressureRequestedSourceStep) + index
+          : null;
+        const initialPositionEpoch = Number(
+          pressureSourceFieldConsumption?.sourcePositionEpoch
+        );
+        const positionAdvance = previous
+          ? Number(epoch?.sourcePositionEpoch) - Number(previous?.sourcePositionEpoch)
+          : null;
+        return [
+          Number(epoch?.substepIndex) !== index
+            ? `pressure-source-epoch-${index}-substep-index-mismatch`
+            : null,
+          expectedStep !== null && Number(epoch?.sourceStep) !== expectedStep
+            ? `pressure-source-epoch-${index}-step-mismatch`
+            : null,
+          index === 0
+            && Number.isInteger(initialPositionEpoch)
+            && Number(epoch?.sourcePositionEpoch) !== initialPositionEpoch
+            ? `pressure-source-epoch-${index}-initial-position-epoch-mismatch`
+            : null,
+          previous
+            && (!Number.isInteger(positionAdvance)
+              || positionAdvance < 1
+              || positionAdvance > 3)
+            ? `pressure-source-epoch-${index}-mutation-phase-transition-invalid`
+            : null,
+          !Number.isInteger(Number(epoch?.sourceFieldGeneration))
+            || Number(epoch?.sourceFieldGeneration) < 1
+            ? `pressure-source-epoch-${index}-field-generation-invalid`
+            : null,
+          !Number.isInteger(Number(epoch?.sourcePositionEpoch))
+            || Number(epoch?.sourcePositionEpoch) < 0
+            ? `pressure-source-epoch-${index}-position-epoch-invalid`
+            : null,
+          Number(epoch?.sourceNeighborhoodGeneration)
+            !== Number(epoch?.sourcePositionEpoch)
+            ? `pressure-source-epoch-${index}-neighborhood-generation-mismatch`
+            : null,
+          !identity
+            ? `pressure-source-epoch-${index}-consumed-neighborhood-missing`
+            : null,
+          identity
+            && Number(identity.generation) !== Number(epoch?.sourceNeighborhoodGeneration)
+            ? `pressure-source-epoch-${index}-consumed-generation-mismatch`
+            : null,
+          identity
+            && Number(identity.positionEpoch) !== Number(epoch?.sourcePositionEpoch)
+            ? `pressure-source-epoch-${index}-consumed-position-epoch-mismatch`
+            : null,
+          identity && identity.laneId !== pressureConsumerLaneId
+            ? `pressure-source-epoch-${index}-lane-identity-mismatch`
+            : null,
+          identity && identity.stateKey !== pressureConsumerStateKey
+            ? `pressure-source-epoch-${index}-state-identity-mismatch`
+            : null,
+          identity && identity.leaseId !== pressureConsumerLaneLeaseId
+            ? `pressure-source-epoch-${index}-lease-identity-mismatch`
+            : null,
+          identity && identity.taskId !== pressureSourceFieldConsumption?.consumerLaneTaskId
+            ? `pressure-source-epoch-${index}-task-identity-mismatch`
+            : null,
+          identity && identity.authoritative !== true
+            ? `pressure-source-epoch-${index}-not-authoritative`
+            : null,
+          identity && epoch?.sourceNeighborhoodLaneId !== identity.laneId
+            ? `pressure-source-epoch-${index}-source-lane-binding-mismatch`
+            : null,
+          identity && epoch?.sourceNeighborhoodStateKey !== identity.stateKey
+            ? `pressure-source-epoch-${index}-source-state-binding-mismatch`
+            : null,
+          identity && epoch?.sourceNeighborhoodLeaseId !== identity.leaseId
+            ? `pressure-source-epoch-${index}-source-lease-binding-mismatch`
+            : null,
+          identity && epoch?.sourceNeighborhoodTaskId !== identity.taskId
+            ? `pressure-source-epoch-${index}-source-task-binding-mismatch`
+            : null,
+          epoch?.sourceDeviceId !== pressureSourceFieldConsumption?.consumerDeviceId
+            ? `pressure-source-epoch-${index}-device-identity-mismatch`
+            : null,
+          previous
+            && Number(epoch?.sourceFieldGeneration)
+              <= Number(previous?.sourceFieldGeneration)
+            ? `pressure-source-epoch-${index}-field-generation-not-monotonic`
+            : null,
+          previous
+            && Number(epoch?.sourcePositionEpoch)
+              <= Number(previous?.sourcePositionEpoch)
+            ? `pressure-source-epoch-${index}-position-epoch-not-monotonic`
+            : null
+        ].filter(Boolean);
+      })
+    : [];
+  const pressureAdmissionBlockers = pressureSourceFieldRequested
+    ? [
+        pressureSourceFieldConsumption?.status
+          !== 'material-interface-source-field-consumed-by-submitted-gpu-sequence'
+          ? 'pressure-source-field-consumption-missing'
+          : null,
+        ![
+          'pressure-interface-direct-p2g-accumulator-scatter-submitted',
+          'pressure-interface-sparse-p2g-accumulator-scatter-submitted'
+        ].includes(pressureScatter?.status)
+          ? 'pressure-force-row-scatter-not-submitted'
+          : null,
+        pressureEpochCount !== completedStepCount
+          ? 'pressure-epoch-count-does-not-match-physics-step-count'
+          : null,
+        pressureAppliedSubstepCount !== completedStepCount
+          ? 'pressure-scatter-count-does-not-match-physics-step-count'
+          : null,
+        pressureSourceFieldEpochs.length !== completedStepCount
+          ? 'pressure-source-field-epoch-count-does-not-match-physics-step-count'
+          : null,
+        ...pressureSourceFieldEpochBlockers,
+        !residentNeighborhoodLane?.laneId
+          ? 'pressure-resident-neighborhood-lane-identity-missing'
+          : null,
+        residentNeighborhoodLane?.initialGenerationEncodedBeforeFirstP2g !== true
+          ? 'pressure-initial-neighborhood-generation-not-encoded'
+          : null,
+        !Number.isInteger(Number(pressureRequestedSourceStep))
+          || Number(pressureRequestedSourceStep) < 0
+          ? 'pressure-source-step-invalid'
+          : null,
+        !Number.isInteger(Number(pressureSourceFieldConsumption?.sourcePositionEpoch))
+          || Number(pressureSourceFieldConsumption?.sourcePositionEpoch) < 0
+          ? 'pressure-source-position-epoch-invalid'
+          : null,
+        pressureExpectedSourceEpoch !== null
+          && Number(pressureSourceFieldConsumption?.sourcePositionEpoch)
+            !== pressureExpectedSourceEpoch
+          ? 'pressure-source-position-epoch-mismatch'
+          : null,
+        !Number.isInteger(Number(
+          pressureSourceFieldConsumption?.sourceNeighborhoodGeneration
+        ))
+          || Number(pressureSourceFieldConsumption?.sourceNeighborhoodGeneration) < 0
+          ? 'pressure-source-neighborhood-generation-invalid'
+          : null,
+        Number(pressureSourceFieldConsumption?.sourceNeighborhoodGeneration)
+          !== Number(pressureSourceFieldConsumption?.sourcePositionEpoch)
+          ? 'pressure-source-neighborhood-generation-mismatch'
+          : null,
+        !nonEmptyPressureIdentityString(pressureSourceFieldConsumption?.sourceDeviceId)
+          ? 'pressure-source-device-identity-missing'
+          : null,
+        !nonEmptyPressureIdentityString(pressureSourceFieldConsumption?.consumerDeviceId)
+          ? 'pressure-consumer-device-identity-missing'
+          : null,
+        pressureSourceFieldConsumption?.sourceDeviceId
+          !== pressureSourceFieldConsumption?.consumerDeviceId
+          ? 'pressure-source-consumer-device-identity-mismatch'
+          : null,
+        !nonEmptyPressureIdentityString(pressureConsumerLaneId)
+          ? 'pressure-consumer-lane-identity-missing'
+          : null,
+        !nonEmptyPressureIdentityString(pressureConsumerStateKey)
+          ? 'pressure-consumer-state-identity-missing'
+          : null,
+        !nonEmptyPressureIdentityString(pressureConsumerLaneLeaseId)
+          ? 'pressure-consumer-lane-lease-identity-missing'
+          : null,
+        !nonEmptyPressureIdentityString(
+          pressureSourceFieldConsumption?.consumerLaneTaskId
+        )
+          ? 'pressure-consumer-lane-task-identity-missing'
+          : null,
+        pressureSourceFieldConsumption?.consumerLaneAuthoritative !== true
+          ? 'pressure-consumer-lane-not-authoritative'
+          : null,
+        !nonEmptyPressureIdentityString(
+          pressureSourceFieldConsumption?.consumerLeaseId
+        )
+          ? 'pressure-source-consumer-lease-identity-missing'
+          : null,
+        !nonEmptyPressureIdentityString(
+          pressureSourceFieldConsumption?.consumerLeaseStatus
+        )
+          ? 'pressure-source-consumer-lease-status-missing'
+          : null,
+        !pressureQueueAdmissionSatisfied
+          ? 'pressure-source-consumption-queue-not-completed'
+          : null,
+        !pressureQueueAdmissionSatisfied
+          ? 'pressure-source-consumption-queue-method-invalid'
+          : null,
+        !pressureConsumedNeighborhoodIdentity
+          ? 'pressure-consumed-neighborhood-identity-missing'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && Number(pressureConsumedNeighborhoodIdentity.generation)
+            !== Number(pressureSourceFieldConsumption?.sourceNeighborhoodGeneration)
+          ? 'pressure-consumed-neighborhood-generation-mismatch'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && Number(pressureConsumedNeighborhoodIdentity.positionEpoch)
+            !== Number(pressureSourceFieldConsumption?.sourcePositionEpoch)
+          ? 'pressure-consumed-neighborhood-position-epoch-mismatch'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && (!Number.isInteger(Number(pressureConsumedNeighborhoodIdentity.sourceCount))
+            || Number(pressureConsumedNeighborhoodIdentity.sourceCount) < 1)
+          ? 'pressure-consumed-neighborhood-source-count-invalid'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && pressureConsumedNeighborhoodIdentity.leaseId !== pressureConsumerLaneLeaseId
+          ? 'pressure-consumed-neighborhood-lease-identity-mismatch'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && pressureConsumedNeighborhoodIdentity.laneId !== pressureConsumerLaneId
+          ? 'pressure-consumed-neighborhood-lane-identity-mismatch'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && pressureConsumedNeighborhoodIdentity.stateKey !== pressureConsumerStateKey
+          ? 'pressure-consumed-neighborhood-state-identity-mismatch'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && pressureConsumedNeighborhoodIdentity.deviceId
+            !== pressureSourceFieldConsumption?.consumerDeviceId
+          ? 'pressure-consumed-neighborhood-device-identity-mismatch'
+          : null,
+        pressureConsumedNeighborhoodIdentity
+          && pressureConsumedNeighborhoodIdentity.authoritative !== true
+          ? 'pressure-consumed-neighborhood-not-authoritative'
+          : null,
+        pressureSourceFieldConsumption?.sourceNeighborhoodLaneId !== null
+          && pressureSourceFieldConsumption?.sourceNeighborhoodLaneId !== undefined
+          && pressureSourceFieldConsumption.sourceNeighborhoodLaneId
+            !== pressureConsumerLaneId
+          ? 'pressure-source-consumer-lane-identity-mismatch'
+          : null,
+        pressureSourceFieldConsumption?.sourceNeighborhoodStateKey !== null
+          && pressureSourceFieldConsumption?.sourceNeighborhoodStateKey !== undefined
+          && pressureSourceFieldConsumption.sourceNeighborhoodStateKey
+            !== pressureConsumerStateKey
+          ? 'pressure-source-consumer-state-identity-mismatch'
+          : null
+      ].filter(Boolean)
+    : [];
+  const pressureStateManagerAdmissionApproved = pressureAdmissionBlockers.length === 0;
   const version = Math.max(
     0,
     Math.round(finiteNumber(
@@ -6316,12 +12132,86 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
     timestamp: Date.now(),
     payload: {
       schema: ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
-      status: execution?.status || 'resident-steps-delta-ready',
+      status: pressureStateManagerAdmissionApproved
+        ? (execution?.status || 'resident-steps-delta-ready')
+        : 'resident-steps-delta-blocked-pressure-coupling-incomplete',
       stateKey: resolvedStateKey,
       backend: execution?.backend || null,
       readbackMode: execution?.readbackMode || execution?.finalStep?.readbackMode || null,
       requestedReadbackMode: execution?.requestedReadbackMode || null,
       completedStepCount,
+      pressureSourceFieldRequested,
+      pressureRequestedSourceStep,
+      pressureSourceFieldConsumptionIdentity: pressureSourceFieldRequested
+        ? {
+            status: pressureSourceFieldConsumption?.status ?? null,
+            sourceStep: pressureSourceFieldConsumption?.sourceStep ?? null,
+            sourcePositionEpoch:
+              pressureSourceFieldConsumption?.sourcePositionEpoch ?? null,
+            sourceNeighborhoodGeneration:
+              pressureSourceFieldConsumption?.sourceNeighborhoodGeneration ?? null,
+            sourceNeighborhoodLaneId:
+              pressureSourceFieldConsumption?.sourceNeighborhoodLaneId ?? null,
+            sourceNeighborhoodStateKey:
+              pressureSourceFieldConsumption?.sourceNeighborhoodStateKey ?? null,
+            sourceDeviceId: pressureSourceFieldConsumption?.sourceDeviceId ?? null,
+            finalSourceStep:
+              pressureSourceFieldConsumption?.finalSourceStep ?? null,
+            finalSourcePositionEpoch:
+              pressureSourceFieldConsumption?.finalSourcePositionEpoch ?? null,
+            finalSourceNeighborhoodGeneration:
+              pressureSourceFieldConsumption?.finalSourceNeighborhoodGeneration ?? null,
+            consumerDeviceId: pressureSourceFieldConsumption?.consumerDeviceId ?? null,
+            pressureEpochCount,
+            pressureAppliedSubstepCount,
+            physicsStepCount: completedStepCount,
+            laneId: pressureConsumerLaneId,
+            stateKey: pressureConsumerStateKey,
+            leaseId: pressureConsumerLaneLeaseId,
+            consumerLaneTaskId:
+              pressureSourceFieldConsumption?.consumerLaneTaskId ?? null,
+            consumerLaneAuthoritative:
+              pressureSourceFieldConsumption?.consumerLaneAuthoritative === true,
+            consumerLeaseId:
+              pressureSourceFieldConsumption?.consumerLeaseId ?? null,
+            consumerLeaseStatus:
+              pressureSourceFieldConsumption?.consumerLeaseStatus ?? null,
+            consumedNeighborhoodIdentity: pressureConsumedNeighborhoodIdentity
+              ? { ...pressureConsumedNeighborhoodIdentity }
+              : null,
+            sourceFieldEpochs: pressureSourceFieldEpochs.map((epoch) => ({
+              ...epoch,
+              consumedNeighborhoodIdentity: epoch?.consumedNeighborhoodIdentity
+                ? { ...epoch.consumedNeighborhoodIdentity }
+                : null
+            })),
+            sourceFieldEpochCount: pressureSourceFieldEpochs.length,
+            neighborhoodGenerationBase:
+              residentNeighborhoodLane?.generationBase ?? null,
+            neighborhoodPositionEpochBase:
+              residentNeighborhoodLane?.positionEpochBase ?? null,
+            neighborhoodGenerationCount:
+              residentNeighborhoodLane?.generationCount ?? null,
+            queueCompletionStatus:
+              pressureSourceFieldConsumption?.queueCompletionStatus ?? null,
+            queueCompletionMethod:
+              pressureSourceFieldConsumption?.queueCompletionMethod ?? null,
+            queueFencePolicy:
+              pressureSourceFieldConsumption?.queueFencePolicy ?? null,
+            queueCompletionObserved:
+              pressureSourceFieldConsumption?.queueCompletionObserved === true,
+            sameDeviceQueueOrderingAdmitted:
+              pressureQueueSameDeviceOrderingAdmitted
+          }
+        : null,
+      pressureEpochCount,
+      pressureAppliedSubstepCount,
+      pressurePhysicsStepCount: completedStepCount,
+      pressureStateManagerAdmissionApproved,
+      pressureStateManagerAdmissionStatus: pressureStateManagerAdmissionApproved
+        ? 'pressure-coupling-state-mutation-admitted'
+        : 'pressure-coupling-state-mutation-blocked',
+      pressureStateManagerAdmissionBlockers: pressureAdmissionBlockers,
       continuationAvailable: execution?.continuationAvailable === true,
       continuedFromResidentState: execution?.continuedFromResidentState === true,
       residentSourceMode: execution?.residentSourceMode || null,
@@ -6330,18 +12220,33 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
       gpuFence,
       retainedBufferRefs: [...(gpuFence?.retainedBufferRefs || [])],
       schroederAdoptedParticleStorageDescriptor,
+      schroederParticleStorageResidencyAdoptionToken:
+        schroederParticleStorageResidencyAdoptionToken,
       schroederParticleStorageContinuationAvailable:
-        schroederAdoptedParticleStorageDescriptor?.ready === true,
+        schroederParticleStorageResidencyAdoptionToken?.ready === true
+        || schroederAdoptedParticleStorageDescriptor?.ready === true,
       schroederParticleStorageStateManagerAdmissionRequired:
-        schroederAdoptedParticleStorageDescriptor?.stateManagerAdmissionRequired === true,
+        schroederParticleStorageResidencyAdoptionToken?.stateManagerAdmissionRequired === true
+        || schroederAdoptedParticleStorageDescriptor?.stateManagerAdmissionRequired === true,
       schroederParticleStorageRawGpuBufferTransferDetected:
-        schroederAdoptedParticleStorageDescriptor?.rawGpuBufferTransferDetected === true,
-      gpuResidentLaneRequirement: gpuResidentLane || execution?.gpuResidentLaneRequirement || null,
-      residentSequenceLaneContract: residentSequenceLaneContract || execution?.residentSequenceLaneContract || null,
+        schroederParticleStorageResidencyAdoptionToken?.rawGpuBufferTransferDetected === true
+        || schroederAdoptedParticleStorageDescriptor?.rawGpuBufferTransferDetected === true,
+      gpuResidentLaneRequirement: extendedLaneContracts.gpuResidentLane,
+      residentSequenceLaneContract: extendedLaneContracts.residentSequenceLaneContract,
       finalStep: compactResidentStepSummaryForStateDelta(finalStepSummary),
-      stepSummaries: stepSummaries.slice(-4).map((summary) => compactResidentStepSummaryForStateDelta(summary)),
+      stepSummaries: stepSummaries.map((summary) => compactResidentStepSummaryForStateDelta(summary)),
       normalHotLoopReadbackFree: execution?.finalStep?.normalHotLoopReadbackFree === true,
-      gpuAuthoritativeState: execution?.finalStep?.gpuAuthoritativeState === true,
+      gpuResidentAuthoritativeContinuationCandidate:
+        finalStep?.gpuResidentAuthoritativeContinuationCandidate === true,
+      gpuAuthorityAdmissionRequired:
+        finalStep?.gpuResidentAuthoritativeContinuationCandidate === true,
+      gpuAuthorityAdmissionSatisfied: false,
+      gpuAuthorityStatus: finalStep?.gpuResidentAuthoritativeContinuationCandidate === true
+        ? 'gpu-resident-continuation-candidate-awaiting-state-manager-commit'
+        : (finalStep?.gpuAuthorityStatus
+            || 'gpu-authority-unavailable-no-resident-continuation-candidate'),
+      gpuAuthorityCandidateBlockers: [...(finalStep?.gpuAuthorityCandidateBlockers || [])],
+      gpuAuthoritativeState: false,
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,
@@ -6520,6 +12425,9 @@ function createResidentLawGraphNodeTaskRef({
 function createResidentGpuFenceRequirement({
   laneId,
   stateKey,
+  sourceFamily = null,
+  deviceId = null,
+  localExecution = null,
   queueFencePolicy,
   retainedBufferRefs,
   source,
@@ -6530,6 +12438,9 @@ function createResidentGpuFenceRequirement({
     required: required !== false,
     laneId,
     stateKey,
+    sourceFamily,
+    deviceId,
+    localExecution,
     queueFencePolicy,
     retainedBufferRefs: [...retainedBufferRefs],
     source
@@ -6588,14 +12499,16 @@ function fusedResidentSequenceSidecarBlockers({
   reactionTable = null,
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
-  residentProductMass = null
+  residentProductMass = null,
+  thermalEncoderStageSupported = false,
+  reactionEncoderStageSupported = false
 } = {}) {
   const blockers = [];
-  if (thermalMaterialTable) blockers.push('thermal-sidecar');
-  if (finiteNumber(reactionTable?.reactionCount, 0) > 0) blockers.push('reaction-sidecar');
+  if (thermalMaterialTable && thermalEncoderStageSupported !== true) blockers.push('thermal-sidecar');
+  if (finiteNumber(reactionTable?.reactionCount, 0) > 0
+    && reactionEncoderStageSupported !== true) blockers.push('reaction-sidecar');
   if (pressureInterfaceForceRowsBuffer) blockers.push('pressure-interface-force-rows');
   if (pressureInterfaceForceSolver) blockers.push('pressure-interface-force-solver');
-  if (residentProductMass) blockers.push('resident-product-mass-sidecar');
   return blockers;
 }
 
@@ -6610,7 +12523,8 @@ function createFusedResidentSidecarFusionPlan({
   compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
   activeGridRequested = false,
   sidecarBlockers = [],
-  thermalSidecarFusionAvailable = false
+  thermalSidecarFusionAvailable = false,
+  reactionSidecarFusionAvailable = false
 } = {}) {
   const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
   const sidecarFusionRequired = requested === true && normalizedSidecarBlockers.length > 0;
@@ -6620,6 +12534,19 @@ function createFusedResidentSidecarFusionPlan({
     && normalizedSidecarBlockers.length === 1
     && normalizedSidecarBlockers[0] === 'thermal-sidecar'
   );
+  const encoderSidecarBlockers = normalizedSidecarBlockers.filter((blocker) => (
+    blocker === 'thermal-sidecar' || blocker === 'reaction-sidecar'
+  ));
+  const encoderSidecarFusionRunnable = Boolean(
+    sidecarFusionRequired
+    && encoderSidecarBlockers.length === normalizedSidecarBlockers.length
+    && (!normalizedSidecarBlockers.includes('thermal-sidecar')
+      || thermalSidecarFusionAvailable === true)
+    && (!normalizedSidecarBlockers.includes('reaction-sidecar')
+      || reactionSidecarFusionAvailable === true)
+  );
+  const sidecarFusionRunnable = thermalSidecarFusionRunnable
+    || encoderSidecarFusionRunnable;
   const stages = [];
   const addStage = (stage) => {
     if (!stage || stages.some((entry) => entry.id === stage.id)) return;
@@ -6668,7 +12595,7 @@ function createFusedResidentSidecarFusionPlan({
     addStage({
       id: 'thermal-phase',
       blocker: 'thermal-sidecar',
-      implementedInCurrentFusedSequence: thermalSidecarFusionRunnable,
+      implementedInCurrentFusedSequence: sidecarFusionRunnable,
       lawNodeId: 'ulg-sph-thermal-phase-law',
       orderConstraint: 'after-mechanics-g2p-before-reaction',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'thermal-material-table'],
@@ -6683,26 +12610,32 @@ function createFusedResidentSidecarFusionPlan({
     addStage({
       id: 'reaction-product',
       blocker: 'reaction-sidecar',
+      implementedInCurrentFusedSequence: sidecarFusionRunnable,
       lawNodeId: 'ulg-sph-reaction-product-law',
       orderConstraint: normalizedSidecarBlockers.includes('thermal-sidecar')
-        ? 'after-thermal-phase-before-mechanics-refresh'
-        : 'after-mechanics-g2p-before-mechanics-refresh',
+        ? 'after-thermal-phase-before-next-mechanics-p2g'
+        : 'after-mechanics-g2p-before-next-mechanics-p2g',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'],
       writes: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass'],
       consumesRetainedBuffers: ['state-buffer', 'thermo-buffer', 'g2p-mechanics-buffer'],
-      producesRetainedBuffers: ['reaction-state-buffer', 'reaction-thermo-buffer', 'resident-product-mass-buffer'],
+      producesRetainedBuffers: [
+        'reaction-state-buffer',
+        'reaction-thermo-buffer',
+        'reaction-mechanics-buffer',
+        'resident-product-mass-buffer'
+      ],
       fusionRequirement: 'reaction-runner-must-retain-particle-and-product-mass-outputs'
     });
   }
 
   if (
     normalizedSidecarBlockers.includes('thermal-sidecar')
-    || normalizedSidecarBlockers.includes('reaction-sidecar')
+    && !normalizedSidecarBlockers.includes('reaction-sidecar')
   ) {
     addStage({
       id: 'mechanics-refresh',
-      blocker: normalizedSidecarBlockers.includes('reaction-sidecar') ? 'reaction-sidecar' : 'thermal-sidecar',
-      implementedInCurrentFusedSequence: thermalSidecarFusionRunnable,
+      blocker: 'thermal-sidecar',
+      implementedInCurrentFusedSequence: sidecarFusionRunnable,
       lawNodeId: 'ulg-mls-mpm-mechanics-refresh-law',
       orderConstraint: 'after-thermal-or-reaction-before-next-step-p2g',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'mechanics-material-table'],
@@ -6728,21 +12661,23 @@ function createFusedResidentSidecarFusionPlan({
     'resident-compact-summary-or-active-grid-plan'
   ];
   const blockers = sidecarFusionRequired
-    ? (thermalSidecarFusionRunnable ? [] : ['sidecar-fusion-execution-not-implemented'])
+    ? (sidecarFusionRunnable ? [] : ['sidecar-fusion-execution-not-implemented'])
     : [];
   return {
     schema: ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA,
     status: sidecarFusionRequired
-      ? (thermalSidecarFusionRunnable
+      ? (sidecarFusionRunnable
           ? 'sidecar-fusion-plan-runnable'
           : 'sidecar-fusion-plan-ready-execution-blocked')
       : 'sidecar-fusion-not-required',
     requested: requested === true,
     required: sidecarFusionRequired,
-    sequenceRunnableWithSidecars: thermalSidecarFusionRunnable,
-    sidecarFusionRunnable: !sidecarFusionRequired || thermalSidecarFusionRunnable,
+    sequenceRunnableWithSidecars: sidecarFusionRunnable,
+    sidecarFusionRunnable: !sidecarFusionRequired || sidecarFusionRunnable,
     thermalSidecarFusionAvailable: thermalSidecarFusionAvailable === true,
     thermalSidecarFusionRunnable,
+    reactionSidecarFusionAvailable: reactionSidecarFusionAvailable === true,
+    encoderSidecarFusionRunnable,
     stepCount: Math.max(1, Math.round(finiteNumber(stepCount, 1))),
     readbackMode,
     compactSummaryMode: normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode),
@@ -6754,8 +12689,8 @@ function createFusedResidentSidecarFusionPlan({
     stages,
     requiredStageOrder,
     requiredMechanicsStages: ['mechanics-p2g', 'mechanics-grid-update', 'mechanics-g2p'],
-    perStepFallbackMaintainsLawOrdering: sidecarFusionRequired && !thermalSidecarFusionRunnable,
-    fallbackModeUntilImplemented: sidecarFusionRequired && !thermalSidecarFusionRunnable
+    perStepFallbackMaintainsLawOrdering: sidecarFusionRequired && !sidecarFusionRunnable,
+    fallbackModeUntilImplemented: sidecarFusionRequired && !sidecarFusionRunnable
       ? 'per-step-resident-pass-dag-or-per-step-fused-mechanics-active-grid'
       : null,
     ownershipRules: [
@@ -6765,7 +12700,7 @@ function createFusedResidentSidecarFusionPlan({
       'scene-local-execution-must-not-bypass-law-graph-ordering'
     ],
     promotionStatus: sidecarFusionRequired
-      ? (thermalSidecarFusionRunnable
+      ? (sidecarFusionRunnable
           ? 'contract-ready-execution-promoted'
           : 'contract-ready-execution-not-promoted')
       : 'not-required',
@@ -7111,7 +13046,9 @@ function createFusedResidentSequencePreflight({
   requestActiveGridFusedNoFullMechanics = false,
   customRunnerBlockers = [],
   sidecarBlockers = [],
-  thermalSidecarFusionAvailable = false
+  thermalSidecarFusionAvailable = false,
+  reactionSidecarFusionAvailable = false,
+  allowSingleStepSequence = false
 } = {}) {
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
@@ -7124,11 +13061,14 @@ function createFusedResidentSequencePreflight({
     compactSummaryMode: normalizedCompactSummaryMode,
     activeGridRequested: requestActiveGridFusedNoFullMechanics,
     sidecarBlockers: normalizedSidecarBlockers,
-    thermalSidecarFusionAvailable
+    thermalSidecarFusionAvailable,
+    reactionSidecarFusionAvailable
   });
   const blockers = [];
   if (sequenceRequested) {
-    if (normalizedStepCount <= 1) blockers.push('step-count-not-greater-than-one');
+    if (normalizedStepCount <= 1 && allowSingleStepSequence !== true) {
+      blockers.push('step-count-not-greater-than-one');
+    }
     if (normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP) {
       blockers.push('compact-summary-every-step');
     }
@@ -7212,6 +13152,7 @@ function createFusedResidentSequencePreflight({
       : null,
     sidecarAwareSequencePromotesFusedSequence: false,
     sidecarAwareSequenceSupportedBlockers: ['thermal-sidecar'],
+    singleStepSequenceAllowed: allowSingleStepSequence === true,
     activeGridFallbackRequested: requestActiveGridFusedNoFullMechanics === true,
     thermalAwareFusionRequired: normalizedSidecarBlockers.includes('thermal-sidecar'),
     reactionAwareFusionRequired: normalizedSidecarBlockers.includes('reaction-sidecar'),
@@ -7236,7 +13177,9 @@ function createResidentSequenceLaneContract({
   activeGridDispatchPolicy = null,
   fusedResidentSequence = false,
   sidecarBlockers = [],
-  thermalSidecarFusionAvailable = false
+  thermalSidecarFusionAvailable = false,
+  reactionSidecarFusionAvailable = false,
+  allowSingleStepSequence = false
 } = {}) {
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
@@ -7249,11 +13192,14 @@ function createResidentSequenceLaneContract({
     compactSummaryMode: normalizedCompactSummaryMode,
     activeGridRequested: activeGridDispatchPolicy?.enabled === true,
     sidecarBlockers: normalizedSidecarBlockers,
-    thermalSidecarFusionAvailable
+    thermalSidecarFusionAvailable,
+    reactionSidecarFusionAvailable
   });
   const requirementBlockers = [];
   if (sequenceRequested) {
-    if (normalizedStepCount <= 1) requirementBlockers.push('step-count-not-greater-than-one');
+    if (normalizedStepCount <= 1 && allowSingleStepSequence !== true) {
+      requirementBlockers.push('step-count-not-greater-than-one');
+    }
     if (readbackMode !== NO_FULL_READBACK_MODE) requirementBlockers.push('full-readback-requested');
     if (normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP) {
       requirementBlockers.push('compact-summary-every-step');
@@ -7264,7 +13210,7 @@ function createResidentSequenceLaneContract({
   }
   const blockers = uniqueStringList(requirementBlockers);
   const sequenceRunnable = sequenceRequested
-    && normalizedStepCount > 1
+    && (normalizedStepCount > 1 || allowSingleStepSequence === true)
     && readbackMode === NO_FULL_READBACK_MODE
     && normalizedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP
     && blockers.length === 0;
@@ -7385,6 +13331,8 @@ function createResidentSequenceLaneContract({
 function createResidentGpuLaneTaskDescriptor({
   laneId,
   stateKey,
+  sourceFamily = null,
+  deviceId = null,
   domainKey = null,
   solverId,
   owner,
@@ -7403,6 +13351,8 @@ function createResidentGpuLaneTaskDescriptor({
     localExecution: localExecution === 'worker' ? 'worker' : 'inline',
     laneId,
     stateKey,
+    sourceFamily,
+    deviceId,
     domainKey,
     solverId,
     owner,
@@ -7426,6 +13376,7 @@ export function createMlsMpmResidentStepComputeTask({
   lawGraphNodeId = 'ulg-mls-mpm-sph-resident-step',
   laneId = 'ulg:sph-resident:active',
   stateKey = 'ulg:sph-resident-state',
+  sourceFamily = 'sph-particle-state',
   domainKey = null,
   localExecution = 'inline',
   queueFencePolicy = 'queue.onSubmittedWorkDone-before-admission',
@@ -7446,6 +13397,34 @@ export function createMlsMpmResidentStepComputeTask({
     gpuResidentLaneDomainKey: _ignoredLaneDomainKey,
     ...taskStepOptions
   } = residentStepOptions;
+  if (taskStepOptions.materialInterfaceSourceField) {
+    readFamilies = uniqueNonEmptyStrings([
+      ...readFamilies,
+      'sph-material-interface-source-field',
+      'sph-material-interface-field'
+    ]);
+    retainedBufferRefs = uniqueNonEmptyStrings([
+      ...retainedBufferRefs,
+      'material-interface-source-field-rows-buffer',
+      'material-interface-source-surface-buffer',
+      'material-interface-source-index-field-buffer'
+    ]);
+  }
+  const pressureGasCellImport = taskStepOptions.pressureInterfaceGasCellFieldImport
+    ?? taskStepOptions.pressureInterfaceStageOptions?.pressureInterfaceGasCellFieldImport
+    ?? null;
+  if (pressureGasCellImport) {
+    readFamilies = uniqueNonEmptyStrings([
+      ...readFamilies,
+      'resident-gas-pressure'
+    ]);
+    retainedBufferRefs = uniqueNonEmptyStrings([
+      ...retainedBufferRefs,
+      ...(pressureGasCellImport.retainedGasPressureBufferRefs || []),
+      ...(pressureGasCellImport.workerRetainedGasPressureBufferRefs || []),
+      'resident-gas-pressure-cells-buffer'
+    ]);
+  }
   const readbackMode = taskStepOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const hotLoopBudget = summarizeMlsMpmResidentHotLoopBudget({
     ...taskStepOptions,
@@ -7461,9 +13440,16 @@ export function createMlsMpmResidentStepComputeTask({
     writeFamilies
   });
   lawGraphNode.hotLoopBudget = hotLoopBudget;
+  const taskDeviceId = queueFencePolicy
+    === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+    ? webGpuDeviceId(taskStepOptions.device || taskStepOptions.deviceResult?.device || null)
+    : null;
   const gpuFence = createResidentGpuFenceRequirement({
     laneId,
     stateKey,
+    sourceFamily,
+    deviceId: taskDeviceId,
+    localExecution: localExecution === 'worker' ? 'worker' : 'inline',
     queueFencePolicy,
     retainedBufferRefs,
     source: 'ulg-mls-mpm-resident-step-compute-task'
@@ -7471,6 +13457,8 @@ export function createMlsMpmResidentStepComputeTask({
   const gpuResidentLane = createResidentGpuLaneTaskDescriptor({
     laneId,
     stateKey,
+    sourceFamily,
+    deviceId: taskDeviceId,
     domainKey,
     solverId,
     owner,
@@ -7503,6 +13491,7 @@ export function createMlsMpmResidentStepComputeTask({
       requiresQueueFence: true,
       laneId,
       stateKey,
+      sourceFamily,
       domainKey,
       queueFencePolicy,
       retainedBufferRefs: [...retainedBufferRefs],
@@ -7518,7 +13507,8 @@ export function createMlsMpmResidentStepComputeTask({
       gpuResidentLane,
       lawGraphNode,
       hotLoopBudget,
-      computeTaskSchema: ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA
+      computeTaskSchema: ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA,
+      computeTaskId: id
     }
   };
 }
@@ -7528,17 +13518,62 @@ export async function runMlsMpmResidentStepComputeTask(data = {}) {
     gpuResidentLaneManager: _ignoredLaneManager,
     gpuFenceRequirement = null,
     gpuResidentLane = null,
+    gpuResidentLaneLeaseIdentity = null,
     lawGraphNode = null,
     computeTaskSchema = ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA,
+    computeTaskId = null,
     ...residentStepOptions
   } = data || {};
+  const resolvedFenceRequirement = gpuFenceRequirement || gpuResidentLane || {};
+  const fenceDevice = residentStepOptions.device || residentStepOptions.deviceResult?.device || null;
+  const sameDeviceQueueOrderAdmission = residentComputeTaskQueueFencePolicy(resolvedFenceRequirement)
+    === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+    ? validateMlsMpmResidentSameDeviceQueueOrderContext({
+        requirement: resolvedFenceRequirement,
+        gpuResidentLane,
+        gpuResidentLaneLeaseIdentity,
+        device: fenceDevice,
+        computeTaskId,
+        readbackMode: residentStepOptions.readbackMode,
+        compactSummaryMode: residentStepOptions.compactSummaryMode,
+        measureFusedSequenceQueueFence: residentStepOptions.measureFusedSequenceQueueFence,
+        measureGpuTimestamps: residentStepOptions.measureGpuTimestamps,
+        contactKinematicsParticleBinMetadataReadback:
+          residentStepOptions.contactKinematicsParticleBinMetadataReadback,
+        reactionParticleBinMetadataReadback:
+          residentStepOptions.reactionParticleBinMetadataReadback
+      })
+    : null;
+  const computeQueuePacing = sameDeviceQueueOrderAdmission
+    ? await acquireMlsMpmResidentComputeQueuePacingSlot({
+        device: fenceDevice,
+        admission: sameDeviceQueueOrderAdmission
+      })
+    : null;
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...residentStepOptions,
-    gpuResidentLaneManager: null
+    gpuResidentLaneManager: null,
+    gpuResidentLaneId: gpuResidentLane?.laneId ?? null,
+    gpuResidentLaneStateKey: gpuResidentLane?.stateKey ?? null,
+    gpuResidentLaneDomainKey: gpuResidentLane?.domainKey ?? null,
+    gpuResidentLaneLeaseIdentity
   });
+  const computeTaskQueueFence = await awaitResidentComputeTaskQueueFence(
+    step,
+    resolvedFenceRequirement,
+    fenceDevice,
+    {
+      gpuResidentLane,
+      gpuResidentLaneLeaseIdentity,
+      computeTaskId,
+      pacingAdmission: sameDeviceQueueOrderAdmission,
+      pacing: computeQueuePacing
+    }
+  );
+  promotePressureSourceConsumptionQueueCompletion(step, computeTaskQueueFence);
   const gpuFence = createMlsMpmResidentStepGpuFenceReport(
     step,
-    gpuFenceRequirement || gpuResidentLane || {}
+    resolvedFenceRequirement
   );
   const schroederAdoptedParticleStorageDescriptor =
     createSchroederAdoptedParticleStorageDescriptorFromStep(step, {
@@ -7581,6 +13616,7 @@ export function createMlsMpmResidentStepsComputeTask({
   lawGraphNodeId = 'ulg-mls-mpm-sph-resident-pass-dag',
   laneId = 'ulg:sph-resident:active',
   stateKey = 'ulg:sph-resident-state',
+  sourceFamily = 'sph-particle-state',
   domainKey = null,
   localExecution = 'inline',
   queueFencePolicy = 'queue.onSubmittedWorkDone-before-admission',
@@ -7604,6 +13640,34 @@ export function createMlsMpmResidentStepsComputeTask({
     gpuResidentLaneDomainKey: _ignoredLaneDomainKey,
     ...taskStepOptions
   } = residentStepOptions;
+  if (taskStepOptions.materialInterfaceSourceField) {
+    readFamilies = uniqueNonEmptyStrings([
+      ...readFamilies,
+      'sph-material-interface-source-field',
+      'sph-material-interface-field'
+    ]);
+    retainedBufferRefs = uniqueNonEmptyStrings([
+      ...retainedBufferRefs,
+      'material-interface-source-field-rows-buffer',
+      'material-interface-source-surface-buffer',
+      'material-interface-source-index-field-buffer'
+    ]);
+  }
+  const pressureGasCellImport = taskStepOptions.pressureInterfaceGasCellFieldImport
+    ?? taskStepOptions.pressureInterfaceStageOptions?.pressureInterfaceGasCellFieldImport
+    ?? null;
+  if (pressureGasCellImport) {
+    readFamilies = uniqueNonEmptyStrings([
+      ...readFamilies,
+      'resident-gas-pressure'
+    ]);
+    retainedBufferRefs = uniqueNonEmptyStrings([
+      ...retainedBufferRefs,
+      ...(pressureGasCellImport.retainedGasPressureBufferRefs || []),
+      ...(pressureGasCellImport.workerRetainedGasPressureBufferRefs || []),
+      'resident-gas-pressure-cells-buffer'
+    ]);
+  }
   const readbackMode = taskStepOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const stepCount = Math.max(1, Math.round(finiteNumber(taskStepOptions.stepCount, 1)));
   const compactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(taskStepOptions.compactSummaryMode);
@@ -7627,13 +13691,21 @@ export function createMlsMpmResidentStepsComputeTask({
     residentProductMass: taskStepOptions.residentProductMass ?? taskStepOptions.nextParticleUploads?.residentProductMass ?? null
   });
   const thermalSidecarFusionAvailable = Boolean(
-    taskStepOptions.fuseThermalSidecarResidentSequence === true
+    taskStepOptions.fuseThermalSidecarResidentSequence !== false
     && taskStepOptions.thermalMaterialTable
     && taskStepOptions.mechanicsMaterialTable
     && (taskStepOptions.thermalStepRunner == null || taskStepOptions.thermalStepRunner === runSphThermalStepWebGpu)
     && (
       taskStepOptions.mechanicsRefreshRunner == null
       || taskStepOptions.mechanicsRefreshRunner === runMlsMpmMechanicsRefreshWithOptionalWebGpu
+    )
+  );
+  const reactionSidecarFusionAvailable = Boolean(
+    taskStepOptions.reactionTable?.reactionCount > 0
+    && taskStepOptions.thermalMaterialTable
+    && (
+      taskStepOptions.reactionStepRunner == null
+      || taskStepOptions.reactionStepRunner === runSphReactionStepWebGpu
     )
   );
   const residentSequenceLaneContract = createResidentSequenceLaneContract({
@@ -7650,7 +13722,9 @@ export function createMlsMpmResidentStepsComputeTask({
     activeGridDispatchPolicy,
     fusedResidentSequence: Boolean(taskStepOptions.fuseNoFullResidentMechanicsSequence),
     sidecarBlockers: residentSequenceSidecarBlockers,
-    thermalSidecarFusionAvailable
+    thermalSidecarFusionAvailable,
+    reactionSidecarFusionAvailable,
+    allowSingleStepSequence: Boolean(taskStepOptions.materialInterfaceSourceField)
   });
   const hotLoopBudget = summarizeMlsMpmResidentHotLoopBudget({
     ...taskStepOptions,
@@ -7671,9 +13745,16 @@ export function createMlsMpmResidentStepsComputeTask({
   lawGraphNode.activeGridDispatchPolicy = activeGridDispatchPolicy;
   lawGraphNode.residentSequenceLaneContract = residentSequenceLaneContract;
   lawGraphNode.hotLoopBudget = hotLoopBudget;
+  const taskDeviceId = queueFencePolicy
+    === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+    ? webGpuDeviceId(taskStepOptions.device || taskStepOptions.deviceResult?.device || null)
+    : null;
   const gpuFence = createResidentGpuFenceRequirement({
     laneId,
     stateKey,
+    sourceFamily,
+    deviceId: taskDeviceId,
+    localExecution: localExecution === 'worker' ? 'worker' : 'inline',
     queueFencePolicy,
     retainedBufferRefs,
     source: 'ulg-mls-mpm-resident-steps-compute-task'
@@ -7681,6 +13762,8 @@ export function createMlsMpmResidentStepsComputeTask({
   const gpuResidentLane = createResidentGpuLaneTaskDescriptor({
     laneId,
     stateKey,
+    sourceFamily,
+    deviceId: taskDeviceId,
     domainKey,
     solverId,
     owner,
@@ -7715,6 +13798,7 @@ export function createMlsMpmResidentStepsComputeTask({
       requiresQueueFence: true,
       laneId,
       stateKey,
+      sourceFamily,
       domainKey,
       queueFencePolicy,
       retainedBufferRefs: [...retainedBufferRefs],
@@ -7864,6 +13948,7 @@ export async function runMlsMpmResidentStepsComputeTask(data = {}) {
     gpuResidentLaneManager: _ignoredLaneManager,
     gpuFenceRequirement = null,
     gpuResidentLane = null,
+    gpuResidentLaneLeaseIdentity = null,
     lawGraphNode = null,
     computeTaskSchema = ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA,
     computeTaskId = null,
@@ -7876,19 +13961,71 @@ export async function runMlsMpmResidentStepsComputeTask(data = {}) {
     expectedOutputFamilies = [],
     ...residentStepOptions
   } = data || {};
-  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+  const resolvedFenceRequirement = gpuFenceRequirement || gpuResidentLane || {};
+  const fenceDevice = residentStepOptions.device || residentStepOptions.deviceResult?.device || null;
+  const sameDeviceQueueOrderAdmission = residentComputeTaskQueueFencePolicy(resolvedFenceRequirement)
+    === MLS_MPM_RESIDENT_COMPUTE_TASK_QUEUE_FENCE_POLICY_SAME_DEVICE_ORDERED
+    ? validateMlsMpmResidentSameDeviceQueueOrderContext({
+        requirement: resolvedFenceRequirement,
+        gpuResidentLane,
+        gpuResidentLaneLeaseIdentity,
+        device: fenceDevice,
+        computeTaskId,
+        readbackMode: residentStepOptions.readbackMode,
+        compactSummaryMode: residentStepOptions.compactSummaryMode,
+        measureFusedSequenceQueueFence: residentStepOptions.measureFusedSequenceQueueFence,
+        measureGpuTimestamps: residentStepOptions.measureGpuTimestamps,
+        contactKinematicsParticleBinMetadataReadback:
+          residentStepOptions.contactKinematicsParticleBinMetadataReadback,
+        reactionParticleBinMetadataReadback:
+          residentStepOptions.reactionParticleBinMetadataReadback
+      })
+    : null;
+  const computeQueuePacing = sameDeviceQueueOrderAdmission
+    ? await acquireMlsMpmResidentComputeQueuePacingSlot({
+        device: fenceDevice,
+        admission: sameDeviceQueueOrderAdmission
+      })
+    : null;
+  const executionOptions = {
     ...residentStepOptions,
-    gpuResidentLaneManager: null
-  });
+    gpuResidentLaneManager: null,
+    gpuResidentLaneId: gpuResidentLane?.laneId ?? null,
+    gpuResidentLaneStateKey: gpuResidentLane?.stateKey ?? null,
+    gpuResidentLaneSourceFamily: gpuResidentLane?.sourceFamily ?? null,
+    gpuResidentLaneLeaseIdentity
+  };
+  const execution = residentStepOptions.schroederSimulation === true
+    ? await (async () => {
+        const schroederRuntime = await import('./schroederHierarchyGpu.js');
+        return schroederRuntime.runSchroederResidentStepsWithOptionalWebGpu(
+          executionOptions
+        );
+      })()
+    : await runMlsMpmResidentStepsWithOptionalWebGpu(executionOptions);
+  const computeTaskQueueFence = await awaitResidentComputeTaskQueueFence(
+    execution,
+    resolvedFenceRequirement,
+    fenceDevice,
+    {
+      gpuResidentLane,
+      gpuResidentLaneLeaseIdentity,
+      computeTaskId,
+      pacingAdmission: sameDeviceQueueOrderAdmission,
+      pacing: computeQueuePacing
+    }
+  );
+  promotePressureSourceConsumptionQueueCompletion(execution, computeTaskQueueFence);
   const gpuFence = createMlsMpmResidentStepGpuFenceReport(
     execution?.finalStep || execution,
-    gpuFenceRequirement || gpuResidentLane || {}
+    resolvedFenceRequirement
   );
   const result = {
     ...execution,
     schema: execution?.schema || ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
     computeTaskResultSchema: ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
     computeTaskSchema,
+    computeTaskId,
     lawGraphNode,
     peerComputeSolverTask,
     activeGridDispatchPolicy,
@@ -10864,8 +17001,8 @@ export function createSphReactionProductStageComputeTask({
       readbackMode,
       retainOutputParticleBuffers: taskStageOptions.retainOutputParticleBuffers ?? true,
       ...(readbackMode === NO_FULL_READBACK_MODE ? {
-        readCompactReactionSummary: taskStageOptions.readCompactReactionSummary ?? true,
-        readReactionGasSpeciesSummary: taskStageOptions.readReactionGasSpeciesSummary ?? true,
+        readCompactReactionSummary: taskStageOptions.readCompactReactionSummary ?? false,
+        readReactionGasSpeciesSummary: taskStageOptions.readReactionGasSpeciesSummary ?? false,
         readReactionProductInventory: taskStageOptions.readReactionProductInventory ?? false,
         readReactionAtomResidual: taskStageOptions.readReactionAtomResidual ?? false
       } : {}),
@@ -14874,128 +21011,16 @@ function isSameResidentProductMass(left, right) {
   return Boolean(left.productEventBuffer && left.productEventBuffer === right.productEventBuffer);
 }
 
-function canMergeResidentProductMassBuffers(device, left, right) {
+function canRetainResidentProductMassBuffer(device, handle) {
   return Boolean(
     device?.createBuffer
     && device.queue?.submit
-    && residentProductMassMatchesDevice(left, device)
-    && residentProductMassMatchesDevice(right, device)
-    && left?.productEventBuffer
-    && right?.productEventBuffer
-    && left.productEventBuffer !== right.productEventBuffer
-    && left.productEventStrideFloats === right.productEventStrideFloats
-    && left.productEventStrideBytes === right.productEventStrideBytes
-    && (left.productEventBufferByteLength ?? 0) > 0
-    && (right.productEventBufferByteLength ?? 0) > 0
+    && residentProductMassMatchesDevice(handle, device)
+    && handle?.productEventBuffer
+    && (handle.productEventBufferByteLength ?? handle.productEventBuffer.size ?? 0) > 0
+    && (handle.productEventRowCount ?? 0) > 0
+    && (handle.productEventStrideFloats ?? 0) >= 20
   );
-}
-
-function residentProductMassSourceRowCounts(handle) {
-  const prior = handle?.productEventSourceRowCounts || handle?.mergeSourceProductEventRowCounts;
-  if (Array.isArray(prior) && prior.length > 0) return prior.map((value) => Math.max(0, Math.round(Number(value) || 0)));
-  return [Math.max(0, Math.round(Number(handle?.productEventRowCount) || 0))];
-}
-
-function residentProductMassSourceByteLengths(handle) {
-  const prior = handle?.mergeSourceProductEventBufferByteLengths;
-  if (Array.isArray(prior) && prior.length > 0) return prior.map((value) => Math.max(0, Math.round(Number(value) || 0)));
-  return [Math.max(0, Math.round(Number(handle?.productEventBufferByteLength) || 0))];
-}
-
-const RESIDENT_PRODUCT_EVENT_COMPACTION_THRESHOLD_BYTES = 262144;
-const RESIDENT_PRODUCT_EVENT_COMPACTION_MIN_GENERATIONS = 16;
-
-export async function compactResidentProductEventBufferWebGpu({
-  device,
-  sourceBuffer,
-  rowCount,
-  strideFloats,
-  strideBytes
-} = {}) {
-  if (!(rowCount > 0) || !sourceBuffer) return null;
-  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-resident-product-event-compact',
-    label: 'ulg-sph-resident-product-event-compact',
-    code: sphReactionProductEventCompactWgsl,
-    entryPoint: 'compact_rows',
-    bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'storage'),
-      computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
-    ]
-  });
-  const scratchBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-resident-product-event-compact-scratch',
-    size: Math.max(strideBytes, rowCount * strideBytes),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  }), device);
-  const countBuffer = device.createBuffer({
-    label: 'ulg-sph-resident-product-event-compact-count',
-    size: 4,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  });
-  const countReadbackBuffer = device.createBuffer({
-    label: 'ulg-sph-resident-product-event-compact-count-readback',
-    size: 4,
-    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-sph-resident-product-event-compact-params',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  try {
-    device.pushErrorScope?.('validation');
-    device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([rowCount, strideFloats / 4, 0, 0]));
-    const bindGroup = device.createBindGroup({
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: sourceBuffer } },
-        { binding: 1, resource: { buffer: scratchBuffer } },
-        { binding: 2, resource: { buffer: countBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
-      ]
-    });
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(1);
-    pass.end();
-    encoder.copyBufferToBuffer(countBuffer, 0, countReadbackBuffer, 0, 4);
-    device.queue.submit([encoder.finish()]);
-    if (device.popErrorScope) {
-      const scopeError = await device.popErrorScope();
-      if (scopeError) {
-        throw new Error(`product-event-compaction-validation:${scopeError.message}`);
-      }
-    }
-    await countReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
-    const liveRowCount = new Uint32Array(countReadbackBuffer.getMappedRange().slice(0))[0];
-    countReadbackBuffer.unmap();
-    const liveByteLength = liveRowCount * strideBytes;
-    // Keep at least one (zeroed) row so downstream array<vec4<f32>> bindings stay
-    // valid and the handle stays mergeable when every historical event is consumed.
-    const allocatedByteLength = Math.max(strideBytes, liveByteLength);
-    const compactBuffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: 'ulg-sph-resident-product-event-compact-live-rows',
-      size: allocatedByteLength,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-    }), device);
-    if (liveByteLength > 0) {
-      const copyEncoder = device.createCommandEncoder();
-      copyEncoder.copyBufferToBuffer(scratchBuffer, 0, compactBuffer, 0, liveByteLength);
-      device.queue.submit([copyEncoder.finish()]);
-    }
-    if (device.queue?.onSubmittedWorkDone) await device.queue.onSubmittedWorkDone();
-    return { buffer: compactBuffer, rowCount: liveRowCount, byteLength: allocatedByteLength };
-  } finally {
-    scratchBuffer.destroy?.();
-    countBuffer.destroy?.();
-    countReadbackBuffer.destroy?.();
-    paramsBuffer.destroy?.();
-  }
 }
 
 async function mergeResidentProductMassBuffersWebGpu({
@@ -15003,139 +21028,123 @@ async function mergeResidentProductMassBuffersWebGpu({
   inputResidentProductMass = null,
   emittedResidentProductMass = null
 } = {}) {
-  if (!inputResidentProductMass) return emittedResidentProductMass;
-  if (!emittedResidentProductMass) return inputResidentProductMass;
+  if (!inputResidentProductMass && !emittedResidentProductMass) return null;
   if (isSameResidentProductMass(inputResidentProductMass, emittedResidentProductMass)) {
     return emittedResidentProductMass;
   }
-  if (!canMergeResidentProductMassBuffers(device, inputResidentProductMass, emittedResidentProductMass)) {
-    return emittedResidentProductMass;
+  const sourceHandles = [inputResidentProductMass, emittedResidentProductMass]
+    .filter((handle, index, values) => handle && values.indexOf(handle) === index);
+  const arena = inputResidentProductMass?.productEventArena?.schema
+      === ULG_SPH_RESIDENT_PRODUCT_EVENT_ARENA_SCHEMA
+    ? inputResidentProductMass.productEventArena
+    : null;
+  const appendHandles = arena
+    ? sourceHandles.filter((handle) => handle !== inputResidentProductMass)
+    : sourceHandles;
+  if (appendHandles.some((handle) => !canRetainResidentProductMassBuffer(device, handle))) {
+    return emittedResidentProductMass || inputResidentProductMass;
   }
-  const inputByteLength = inputResidentProductMass.productEventBufferByteLength ?? 0;
-  const emittedByteLength = emittedResidentProductMass.productEventBufferByteLength ?? 0;
-  const mergedByteLength = inputByteLength + emittedByteLength;
-  const sourceRowCounts = [
-    ...residentProductMassSourceRowCounts(inputResidentProductMass),
-    ...residentProductMassSourceRowCounts(emittedResidentProductMass)
-  ];
-  const sourceByteLengths = [
-    ...residentProductMassSourceByteLengths(inputResidentProductMass),
-    ...residentProductMassSourceByteLengths(emittedResidentProductMass)
-  ];
+  if (arena && appendHandles.length === 0) return inputResidentProductMass;
+  const strideFloats = Math.max(0, Math.round(Number(
+    emittedResidentProductMass?.productEventStrideFloats
+      ?? inputResidentProductMass?.productEventStrideFloats
+  ) || 0));
+  const strideBytes = strideFloats * Float32Array.BYTES_PER_ELEMENT;
+  if (sourceHandles.some((handle) => (
+    handle.productEventStrideFloats !== strideFloats
+    || handle.productEventStrideBytes !== strideBytes
+  ))) {
+    return emittedResidentProductMass || inputResidentProductMass;
+  }
+  const appendExecution = appendResidentProductEventArenaGpu(device, {
+    arena,
+    strideFloats,
+    sources: appendHandles.map((handle) => ({
+      buffer: handle.productEventBuffer,
+      rowCount: handle.productEventRowCount,
+      byteLength: handle.productEventBufferByteLength
+    }))
+  });
+  const targetArena = appendExecution.arena;
+  const capacityDescriptor = appendExecution.capacityDescriptor
+    || createResidentProductEventArenaCapacityDescriptor(targetArena);
   const gasSpeciesLedger = mergeResidentGasSpeciesLedgers(
-    inputResidentProductMass.gasSpeciesLedger,
-    emittedResidentProductMass.gasSpeciesLedger
+    inputResidentProductMass?.gasSpeciesLedger,
+    emittedResidentProductMass?.gasSpeciesLedger
   );
-  const mergedBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-resident-product-mass-merged-product-events',
-    size: Math.max(4, mergedByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  }), device);
-  const encoder = device.createCommandEncoder();
-  encoder.copyBufferToBuffer(inputResidentProductMass.productEventBuffer, 0, mergedBuffer, 0, inputByteLength);
-  encoder.copyBufferToBuffer(emittedResidentProductMass.productEventBuffer, 0, mergedBuffer, inputByteLength, emittedByteLength);
-  let productEventMergeQueueCompletionStatus = 'not-submitted';
-  let productEventMergeQueueCompletionMethod = null;
-  device.queue.submit([encoder.finish()]);
-  productEventMergeQueueCompletionStatus = 'queue-submitted';
-  productEventMergeQueueCompletionMethod = 'queue.submit';
-  if (device.queue?.onSubmittedWorkDone) {
-    await device.queue.onSubmittedWorkDone();
-    productEventMergeQueueCompletionStatus = 'queue-work-completed';
-    productEventMergeQueueCompletionMethod = 'queue.onSubmittedWorkDone';
-  } else {
-    productEventMergeQueueCompletionStatus = 'queue-submitted-no-explicit-completion';
-  }
-  const mergedRowCount = (inputResidentProductMass.productEventRowCount ?? 0)
-    + (emittedResidentProductMass.productEventRowCount ?? 0);
-  const strideFloats = Math.max(0, Math.round(Number(emittedResidentProductMass.productEventStrideFloats) || 0));
-  const strideBytes = Math.max(0, Math.round(Number(emittedResidentProductMass.productEventStrideBytes) || strideFloats * Float32Array.BYTES_PER_ELEMENT));
-  let finalBuffer = mergedBuffer;
-  let finalByteLength = mergedByteLength;
-  let finalRowCount = mergedRowCount;
-  let finalSourceRowCounts = sourceRowCounts;
-  let finalSourceByteLengths = sourceByteLengths;
-  let productEventCompactionStatus = 'product-event-compaction-not-required';
-  let productEventCompactionDroppedRowCount = 0;
-  const compactionEligible = mergedByteLength >= RESIDENT_PRODUCT_EVENT_COMPACTION_THRESHOLD_BYTES
-    && sourceRowCounts.length >= RESIDENT_PRODUCT_EVENT_COMPACTION_MIN_GENERATIONS
-    && strideFloats >= 20
-    && strideFloats % 4 === 0
-    && strideBytes === strideFloats * Float32Array.BYTES_PER_ELEMENT
-    && mergedRowCount * strideBytes <= mergedByteLength;
-  if (compactionEligible) {
-    try {
-      const compacted = await compactResidentProductEventBufferWebGpu({
-        device,
-        sourceBuffer: mergedBuffer,
-        rowCount: mergedRowCount,
-        strideFloats,
-        strideBytes
-      });
-      if (compacted?.buffer) {
-        deferSubmittedWorkCleanup(device, () => mergedBuffer.destroy?.());
-        finalBuffer = compacted.buffer;
-        finalByteLength = compacted.byteLength;
-        finalRowCount = compacted.rowCount;
-        finalSourceRowCounts = [compacted.rowCount];
-        finalSourceByteLengths = [compacted.byteLength];
-        productEventCompactionStatus = 'product-event-compaction-performed';
-        productEventCompactionDroppedRowCount = mergedRowCount - compacted.rowCount;
-      }
-    } catch (error) {
-      productEventCompactionStatus = `product-event-compaction-failed:${error instanceof Error ? error.message : error}`;
-      console.warn('[ulg] resident product-event compaction failed; retaining concatenated buffer', error);
-    }
-  }
   let destroyed = false;
+  const ownerToken = {};
+  targetArena.ownerToken = ownerToken;
   const handle = {
-    schema: inputResidentProductMass.schema || emittedResidentProductMass.schema,
+    schema: inputResidentProductMass?.schema || emittedResidentProductMass?.schema,
     status: 'resident-product-mass-merged-gpu-resident',
-    source: 'resident-product-mass-merged-product-events',
-    productEventBuffer: finalBuffer,
+    source: 'resident-product-mass-dense-live-event-arena',
+    productEventBuffer: targetArena.buffer,
     productEventBufferRetained: true,
-    productEventBufferByteLength: finalByteLength,
-    productEventRowCount: finalRowCount,
-    productEventActiveEventCount: (inputResidentProductMass.productEventActiveEventCount ?? 0)
-      + (emittedResidentProductMass.productEventActiveEventCount ?? 0),
-    productEventStrideFloats: emittedResidentProductMass.productEventStrideFloats,
-    productEventStrideBytes: emittedResidentProductMass.productEventStrideBytes,
-    productEventGenerationCount: finalSourceRowCounts.length,
-    productEventSourceRowCounts: finalSourceRowCounts,
-    productEventCompactionStatus,
-    productEventCompactionDroppedRowCount,
-    productInventorySchema: emittedResidentProductMass.productInventorySchema || inputResidentProductMass.productInventorySchema || null,
-    productInventoryCount: (inputResidentProductMass.productInventoryCount ?? 0)
-      + (emittedResidentProductMass.productInventoryCount ?? 0),
+    productEventBufferByteLength: targetArena.buffer.size
+      ?? targetArena.capacityRows * strideBytes,
+    productEventRowCount: capacityDescriptor.occupiedRowCountUpperBound,
+    productEventRowCountExact: null,
+    productEventRowCountAuthority: capacityDescriptor.occupiedEventCountAuthority,
+    productEventActiveEventCount: null,
+    productEventActiveEventCountAuthority: capacityDescriptor.activeEventCountAuthority,
+    productEventStrideFloats: strideFloats,
+    productEventStrideBytes: strideBytes,
+    productEventRowCapacity: targetArena.capacityRows,
+    productEventBufferCapacityRows: targetArena.capacityRows,
+    productEventGenerationCount: Math.max(
+      inputResidentProductMass?.productEventGenerationCount ?? 0,
+      targetArena.appendSubmissionCount
+    ),
+    productEventSourceRowCounts: [capacityDescriptor.occupiedRowCountUpperBound],
+    productEventArena: targetArena,
+    productEventArenaCapacityDescriptor: capacityDescriptor,
+    productEventMetadataBuffer: targetArena.metadataBuffer,
+    productEventDispatchIndirectBuffer: targetArena.dispatchIndirectBuffer,
+    productEventDispatchMode: 'gpu-authored-exact-live-prefix-indirect',
+    productEventCompactionStatus: 'product-event-source-live-rows-compacted-deterministically',
+    productEventCompactionDroppedRowCount: null,
+    productInventorySchema: emittedResidentProductMass?.productInventorySchema
+      || inputResidentProductMass?.productInventorySchema || null,
+    productInventoryCount: (inputResidentProductMass?.productInventoryCount ?? 0)
+      + (emittedResidentProductMass?.productInventoryCount ?? 0),
     gasSpeciesLedgerSchema: gasSpeciesLedger?.schema
-      ?? emittedResidentProductMass.gasSpeciesLedgerSchema
-      ?? inputResidentProductMass.gasSpeciesLedgerSchema
+      ?? emittedResidentProductMass?.gasSpeciesLedgerSchema
+      ?? inputResidentProductMass?.gasSpeciesLedgerSchema
       ?? null,
     gasSpeciesLedger,
     gasSpeciesLedgerCount: gasSpeciesLedger?.recordCount
-      ?? ((inputResidentProductMass.gasSpeciesLedgerCount ?? 0) + (emittedResidentProductMass.gasSpeciesLedgerCount ?? 0)),
-    gasSpeciesReadbackByteLength: (inputResidentProductMass.gasSpeciesReadbackByteLength ?? 0)
-      + (emittedResidentProductMass.gasSpeciesReadbackByteLength ?? 0),
-    sealedBoxGasProductMoles: (inputResidentProductMass.sealedBoxGasProductMoles ?? 0)
-      + (emittedResidentProductMass.sealedBoxGasProductMoles ?? 0),
-    visibleProductMassKg: (inputResidentProductMass.visibleProductMassKg ?? 0)
-      + (emittedResidentProductMass.visibleProductMassKg ?? 0),
-    unplacedProductMassKg: (inputResidentProductMass.unplacedProductMassKg ?? 0)
-      + (emittedResidentProductMass.unplacedProductMassKg ?? 0),
-    unplacedGasProductMassKg: (inputResidentProductMass.unplacedGasProductMassKg ?? 0)
-      + (emittedResidentProductMass.unplacedGasProductMassKg ?? 0),
+      ?? ((inputResidentProductMass?.gasSpeciesLedgerCount ?? 0)
+        + (emittedResidentProductMass?.gasSpeciesLedgerCount ?? 0)),
+    gasSpeciesReadbackByteLength: (inputResidentProductMass?.gasSpeciesReadbackByteLength ?? 0)
+      + (emittedResidentProductMass?.gasSpeciesReadbackByteLength ?? 0),
+    sealedBoxGasProductMoles: (inputResidentProductMass?.sealedBoxGasProductMoles ?? 0)
+      + (emittedResidentProductMass?.sealedBoxGasProductMoles ?? 0),
+    visibleProductMassKg: (inputResidentProductMass?.visibleProductMassKg ?? 0)
+      + (emittedResidentProductMass?.visibleProductMassKg ?? 0),
+    unplacedProductMassKg: (inputResidentProductMass?.unplacedProductMassKg ?? 0)
+      + (emittedResidentProductMass?.unplacedProductMassKg ?? 0),
+    unplacedGasProductMassKg: (inputResidentProductMass?.unplacedGasProductMassKg ?? 0)
+      + (emittedResidentProductMass?.unplacedGasProductMassKg ?? 0),
     consumeMassPolicy: 'unplaced-product-mass-only',
     visibleMassAlreadyInParticleBuffers: true,
-    mergePolicy: productEventCompactionStatus === 'product-event-compaction-performed'
-      ? 'gpu-buffer-concat-compact-live-product-event-rows'
-      : 'gpu-buffer-concat-preserve-sparse-product-event-rows',
-    mergeSourceProductEventBufferCount: finalSourceByteLengths.length,
-    mergeSourceProductEventRowCounts: finalSourceRowCounts,
-    mergeSourceProductEventBufferByteLengths: finalSourceByteLengths,
-    productEventMergeQueueCompletionStatus,
-    productEventMergeQueueCompletionMethod,
-    eosCouplingStatus: emittedResidentProductMass.eosCouplingStatus ?? inputResidentProductMass.eosCouplingStatus ?? null,
-    forceCouplingStatus: emittedResidentProductMass.forceCouplingStatus ?? inputResidentProductMass.forceCouplingStatus ?? null,
+    mergePolicy: 'persistent-gpu-arena-deterministic-live-source-compact-append',
+    mergeSourceProductEventBufferCount: appendExecution.sourceBufferCount,
+    mergeSourceProductEventRowCounts: appendHandles.map((source) => source.productEventRowCount),
+    mergeSourceProductEventBufferByteLengths: appendHandles
+      .map((source) => source.productEventBufferByteLength),
+    productEventMergeQueueCompletionStatus: appendExecution.queueCompletionStatus,
+    productEventMergeQueueCompletionMethod: appendExecution.queueCompletionMethod,
+    productEventMergeQueueFenceAwaited: false,
+    productEventMergeMapPerformed: false,
+    productEventMergeReadbackBytes: 0,
+    productEventMergeHistoryCopiedRowCount: appendExecution.historyCopiedRowCount,
+    productEventMergeNormalAppendAllocationFree: appendExecution.normalAppendAllocationFree,
+    productEventMergeStableSourceOrderingPreserved: appendExecution.stableSourceOrderingPreserved,
+    eosCouplingStatus: emittedResidentProductMass?.eosCouplingStatus
+      ?? inputResidentProductMass?.eosCouplingStatus ?? null,
+    forceCouplingStatus: emittedResidentProductMass?.forceCouplingStatus
+      ?? inputResidentProductMass?.forceCouplingStatus ?? null,
     destroyResidentProductMassBuffers() {
       if (destroyed) return;
       destroyed = true;
@@ -15148,7 +21157,7 @@ async function mergeResidentProductMassBuffersWebGpu({
           deferSubmittedWorkCleanup(device, attemptDestroy);
           return;
         }
-        finalBuffer.destroy?.();
+        if (targetArena.ownerToken === ownerToken) targetArena.destroy?.();
       };
       deferSubmittedWorkCleanup(device, attemptDestroy);
     },
@@ -15271,6 +21280,8 @@ function buildNextParticleUploads({
   g2pReconstruction,
   schroederFarForceDeltaFusion = null,
   schroederParticleStorageAdoption = null,
+  schroederParticleStorageResidencySelection = null,
+  sourceParticleCountResidency = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -15283,20 +21294,26 @@ function buildNextParticleUploads({
   const schroederParticleStorage = schroederParticleStorageAdoption?.adopted === true
     ? schroederParticleStorageAdoption
     : null;
+  const selectedParticleStorage = schroederParticleStorageResidencySelection?.ready === true
+    ? schroederParticleStorageResidencySelection
+    : null;
   const thermal = retainedThermalOutputBuffers(thermalStep);
   const reaction = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefresh = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
   const reactionMutatesParticles = reactionOutputMutatesParticles(reactionStep);
-  const stateBuffer = schroederParticleStorage?.stateBuffer
+  const stateBuffer = selectedParticleStorage?.stateBuffer
+    || schroederParticleStorage?.stateBuffer
     || (reactionMutatesParticles ? reaction.stateBuffer : null)
     || thermal.stateBuffer
     || schroederFarForce.stateBuffer
     || retained.stateBuffer;
-  const thermoBuffer = schroederParticleStorage?.thermoBuffer
+  const thermoBuffer = selectedParticleStorage?.thermoBuffer
+    || schroederParticleStorage?.thermoBuffer
     || (reactionMutatesParticles ? reaction.thermoBuffer : null)
     || thermal.thermoBuffer
     || (sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null);
-  const mechanicsBuffer = schroederParticleStorage?.mechanicsBuffer
+  const mechanicsBuffer = selectedParticleStorage?.mechanicsBuffer
+    || schroederParticleStorage?.mechanicsBuffer
     || (reactionMutatesParticles ? reaction.mechanicsBuffer : null)
     || mechanicsRefresh.mechanicsBuffer
     || retained.mechanicsBuffer;
@@ -15305,20 +21322,32 @@ function buildNextParticleUploads({
   if (!thermoBuffer) return null;
   const nextParticleCount = schroederParticleStorage?.authoritativeParticleCount
     ?? sphParticleState.particleCount;
-  return {
+  const particleCountResidency = selectedParticleStorage
+    ? createSchroederParticleCountResidencyDescriptor(selectedParticleStorage)
+    : sourceParticleCountResidency;
+  const nextUploads = {
     residentProductMass,
     sphParticleUpload: {
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       sourceSchema: sphParticleState.schema,
-      sourceStage: schroederParticleStorage ? 'schroeder-particle-storage-materialization' : null,
+      sourceStage: selectedParticleStorage
+        ? 'schroeder-particle-storage-gpu-selected-continuation'
+        : schroederParticleStorage
+        ? 'schroeder-particle-storage-materialization'
+        : null,
       particleCount: nextParticleCount,
       stateStrideBytes: sphParticleState.stateStrideBytes,
       thermoStrideBytes: sphParticleState.thermoStrideBytes,
       stateBuffer,
       thermoBuffer,
-      ownsStateBuffer: true,
-      ownsThermoBuffer: Boolean(schroederParticleStorage?.thermoBuffer || reaction.thermoBuffer || thermal.thermoBuffer),
+      ownsStateBuffer: !isSphResidentSequenceWorkspaceBufferGpu(stateBuffer),
+      ownsThermoBuffer: !isSphResidentSequenceWorkspaceBufferGpu(thermoBuffer) && Boolean(
+        selectedParticleStorage?.thermoBuffer
+        || schroederParticleStorage?.thermoBuffer
+        || reaction.thermoBuffer
+        || thermal.thermoBuffer
+      ),
       slot: particlePingPong.nextSlot,
       sourceSlot: particlePingPong.sourceSlot,
       nextSlot: particlePingPong.nextSlot,
@@ -15333,11 +21362,15 @@ function buildNextParticleUploads({
       schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       sourceSchema: mlsMpmParticleState.schema,
-      sourceStage: schroederParticleStorage ? 'schroeder-particle-storage-materialization' : null,
+      sourceStage: selectedParticleStorage
+        ? 'schroeder-particle-storage-gpu-selected-continuation'
+        : schroederParticleStorage
+        ? 'schroeder-particle-storage-materialization'
+        : null,
       particleCount: nextParticleCount,
       mechanicsStrideBytes: mlsMpmParticleState.mechanicsStrideBytes,
       mechanicsBuffer,
-      ownsMechanicsBuffer: true,
+      ownsMechanicsBuffer: !isSphResidentSequenceWorkspaceBufferGpu(mechanicsBuffer),
       slot: particlePingPong.nextSlot,
       sourceSlot: particlePingPong.sourceSlot,
       nextSlot: particlePingPong.nextSlot,
@@ -15349,6 +21382,64 @@ function buildNextParticleUploads({
       fullPhysicsValidation: false
     }
   };
+  if (particleCountResidency?.ready) {
+    nextUploads.sphParticleUpload = attachSchroederParticleCountResidencyToUpload(
+      nextUploads.sphParticleUpload,
+      particleCountResidency
+    );
+    nextUploads.mlsMpmParticleUpload = attachSchroederParticleCountResidencyToUpload(
+      nextUploads.mlsMpmParticleUpload,
+      particleCountResidency
+    );
+    nextUploads.particleCountResidency = particleCountResidency;
+  }
+  return nextUploads;
+}
+
+function describeGpuAuthorityContinuationCandidate({
+  backend,
+  readbackMode,
+  normalHotLoopReadbackFree,
+  residentBuffersRetained,
+  nextParticleUploads
+} = {}) {
+  const sphUpload = nextParticleUploads?.sphParticleUpload || null;
+  const mechanicsUpload = nextParticleUploads?.mlsMpmParticleUpload || null;
+  const blockers = [
+    backend !== 'webgpu' ? 'backend-not-webgpu' : null,
+    readbackMode !== NO_FULL_READBACK_MODE ? 'full-particle-readback-required' : null,
+    normalHotLoopReadbackFree !== true ? 'hot-loop-map-or-readback-detected' : null,
+    residentBuffersRetained !== true ? 'resident-stage-buffers-not-retained' : null,
+    sphUpload?.status !== 'webgpu-uploaded' ? 'next-sph-upload-not-gpu-resident' : null,
+    !sphUpload?.stateBuffer ? 'next-particle-state-buffer-missing' : null,
+    !sphUpload?.thermoBuffer ? 'next-particle-thermo-buffer-missing' : null,
+    mechanicsUpload?.status !== 'webgpu-uploaded'
+      ? 'next-mechanics-upload-not-gpu-resident'
+      : null,
+    !mechanicsUpload?.mechanicsBuffer ? 'next-particle-mechanics-buffer-missing' : null
+  ].filter(Boolean);
+  const candidate = blockers.length === 0;
+  return {
+    gpuResidentAuthoritativeContinuationCandidate: candidate,
+    gpuAuthorityAdmissionRequired: candidate,
+    gpuAuthorityAdmissionSatisfied: false,
+    gpuAuthorityStatus: candidate
+      ? 'gpu-resident-continuation-candidate-awaiting-state-manager-commit'
+      : 'gpu-authority-unavailable-no-resident-continuation-candidate',
+    gpuAuthorityCandidateBlockers: blockers
+  };
+}
+
+function gpuResidentContinuationAvailableFromUploads(nextParticleUploads = null) {
+  const sphUpload = nextParticleUploads?.sphParticleUpload || null;
+  const mechanicsUpload = nextParticleUploads?.mlsMpmParticleUpload || null;
+  return Boolean(
+    sphUpload?.status === 'webgpu-uploaded'
+    && sphUpload.stateBuffer
+    && sphUpload.thermoBuffer
+    && mechanicsUpload?.status === 'webgpu-uploaded'
+    && mechanicsUpload.mechanicsBuffer
+  );
 }
 
 async function residentStepEnvelope({
@@ -15363,6 +21454,10 @@ async function residentStepEnvelope({
   schroederFarAggregateGasStateDelta = null,
   schroederFarAggregateGasCellImport = null,
   schroederParticleStorageMaterialization = null,
+  schroederParticleStorageResidencyAdoptionCandidate = null,
+  schroederParticleStorageResidencyAdoptionToken = null,
+  particleStorageContinuationSelector =
+    encodeSchroederParticleStorageContinuationSelectionWebGpu,
   // When an adoption guard (oscillation/no-topology-change/torn-group)
   // discarded the materialized epoch upstream, the materialization arrives
   // null but the skip must stay visible as an explicit adoption status.
@@ -15379,6 +21474,7 @@ async function residentStepEnvelope({
   device = null,
   sourceSlot = 0,
   inputResidentProductMass = null,
+  residentProductMassOverride = null,
   pressureInterfaceForceSolver = null,
   internalPressureScale = 1,
   sidecarFusionPlan = null,
@@ -15408,14 +21504,50 @@ async function residentStepEnvelope({
   const thermalPhaseTransition = thermalPhaseTransitionDiagnostics(thermalStep);
   const reactionOutput = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
-  const schroederParticleStorageAdoption = createSchroederParticleStorageAdoption({
-    schroederParticleStorageMaterialization,
-    sphParticleState,
-    mlsMpmParticleState
-  });
+  if (schroederParticleStorageResidencyAdoptionCandidate
+    || schroederParticleStorageResidencyAdoptionToken) {
+    if (
+      !schroederParticleStorageResidencyAdoptionCandidate
+      || !schroederParticleStorageResidencyAdoptionToken
+    ) {
+      throw new Error(
+        'Schroeder particle-storage residency requires both the local candidate and clone-safe token'
+      );
+    }
+    const tokenValidation = validateSchroederParticleStorageResidencyAdoptionToken(
+      schroederParticleStorageResidencyAdoptionToken
+    );
+    if (!tokenValidation.accepted) {
+      throw new Error(
+        `Invalid Schroeder particle-storage residency token: ${tokenValidation.reason}`
+      );
+    }
+    if (
+      schroederParticleStorageResidencyAdoptionCandidate.admissionToken
+        !== schroederParticleStorageResidencyAdoptionToken
+      || schroederParticleStorageResidencyAdoptionCandidate.authoritativeParticleCount !== null
+    ) {
+      throw new Error(
+        'Schroeder particle-storage local candidate does not match its clone-safe GPU count token'
+      );
+    }
+    if (schroederParticleStorageMaterialization) {
+      throw new Error(
+        'Schroeder particle storage cannot expose legacy numeric and GPU residency adoption together'
+      );
+    }
+  }
+  const schroederParticleStorageAdoption = schroederParticleStorageResidencyAdoptionCandidate
+    ? null
+    : createSchroederParticleStorageAdoption({
+        schroederParticleStorageMaterialization,
+        sphParticleState,
+        mlsMpmParticleState
+      });
   const reactionOutputParticleMutation = reactionOutputMutatesParticles(reactionStep);
   const nextUsesSchroederParticleStorageMaterialization =
-    schroederParticleStorageAdoption?.adopted === true;
+    schroederParticleStorageAdoption?.adopted === true
+    || schroederParticleStorageResidencyAdoptionCandidate?.ready === true;
   const nextUsesSchroederFarForceState = Boolean(schroederFarForceOutput.stateBuffer);
   const nextUsesReactionState = Boolean(
     !nextUsesSchroederParticleStorageMaterialization
@@ -15464,21 +21596,27 @@ async function residentStepEnvelope({
         : 'thermal-phase-transition-not-detected')
     : null;
   const emittedResidentProductMass = reactionOutput.residentProductMass || null;
-  const residentProductMass = await mergeResidentProductMassBuffersWebGpu({
-    device,
-    inputResidentProductMass,
-    emittedResidentProductMass
-  });
-  const mergeStatus = residentProductMassMergeStatus({
-    inputResidentProductMass,
-    emittedResidentProductMass,
-    mergedResidentProductMass: residentProductMass
-  });
+  const residentProductMass = residentProductMassOverride
+    || await mergeResidentProductMassBuffersWebGpu({
+      device,
+      inputResidentProductMass,
+      emittedResidentProductMass
+    });
+  const mergeStatus = residentProductMassOverride
+    ? 'resident-product-mass-merged-in-caller-encoder-arena'
+    : residentProductMassMergeStatus({
+        inputResidentProductMass,
+        emittedResidentProductMass,
+        mergedResidentProductMass: residentProductMass
+      });
   const g2pOutputBuffersRetained = Boolean(g2pOutput.stateBuffer && g2pOutput.mechanicsBuffer);
   const schroederFarForceOutputRequired = Boolean(schroederFarForceDeltaFusion);
   const schroederGasStateDeltaRequired = Boolean(schroederFarAggregateGasStateDelta);
   const schroederGasCellImportRequired = Boolean(schroederFarAggregateGasCellImport);
   const schroederParticleStorageMaterializationRequired = Boolean(schroederParticleStorageMaterialization);
+  const schroederParticleStorageResidencySelectionRequired = Boolean(
+    schroederParticleStorageResidencyAdoptionCandidate
+  );
   const thermalOutputRequired = Boolean(thermalStep);
   const reactionOutputRequired = Boolean(reactionStep);
   const mechanicsRefreshOutputRequired = Boolean(mechanicsRefreshStep);
@@ -15492,6 +21630,9 @@ async function residentStepEnvelope({
     !schroederGasCellImportRequired || Boolean(schroederGasCellImportOutput.gasPressureCellsBuffer);
   const schroederParticleStorageMaterializationSatisfied =
     !schroederParticleStorageMaterializationRequired || nextUsesSchroederParticleStorageMaterialization;
+  const schroederParticleStorageResidencySelectionSatisfied =
+    !schroederParticleStorageResidencySelectionRequired
+    || schroederParticleStorageResidencyAdoptionCandidate?.ready === true;
   const thermalOutputSatisfied = !thermalOutputRequired || thermalOutputBuffersRetained;
   const reactionOutputSatisfied = !reactionOutputRequired || reactionOutputBuffersRetained;
   const mechanicsRefreshOutputSatisfied = !mechanicsRefreshOutputRequired || mechanicsRefreshOutputBuffersRetained;
@@ -15501,13 +21642,15 @@ async function residentStepEnvelope({
     && schroederGasStateDeltaSatisfied
     && schroederGasCellImportSatisfied
     && schroederParticleStorageMaterializationSatisfied
+    && schroederParticleStorageResidencySelectionSatisfied
     && thermalOutputSatisfied
     && reactionOutputSatisfied
     && mechanicsRefreshOutputSatisfied;
-  // A stage keeps the hot loop readback-free when it either ran in
-  // no-full-readback mode or performed only a compact fixed-size readback
-  // (fullParticleReadbackPerformed === false) - compact summaries are
-  // explicitly allowed on the hot path. Requiring the literal
+  // A stage preserves resident particle state when it either ran in
+  // no-full-readback mode or performed only a compact fixed-size diagnostic
+  // (fullParticleReadbackPerformed === false). The separate
+  // normalHotLoopReadbackFree flag below records whether any map occurred.
+  // Requiring the literal
   // 'no-full-readback' string here made every merge-bearing step (whose
   // compaction stage reports 'compact-compaction-summary-readback')
   // downgrade the envelope to full-parity, which the scene's continuation
@@ -15520,6 +21663,8 @@ async function residentStepEnvelope({
   const noFullReadback = residentBuffersRetained
     && stages.every(stageHotLoopReadbackFree);
   const readbackMode = noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  const normalHotLoopReadbackFree = noFullReadback
+    && stages.every((stage) => stage?.normalHotLoopReadbackFree !== false);
   // A silent downgrade to full-parity readback defeats the scene's
   // continuation gate (each schedule then restarts from the CPU pack - a
   // replay treadmill). Name the failing gates so the downgrade is
@@ -15533,6 +21678,9 @@ async function residentStepEnvelope({
       !schroederGasStateDeltaSatisfied ? 'schroeder-gas-state-delta-missing' : null,
       !schroederGasCellImportSatisfied ? 'schroeder-gas-cell-import-missing' : null,
       !schroederParticleStorageMaterializationSatisfied ? 'schroeder-particle-storage-not-adopted' : null,
+      !schroederParticleStorageResidencySelectionSatisfied
+        ? 'schroeder-particle-storage-residency-selection-not-ready'
+        : null,
       !thermalOutputSatisfied ? 'thermal-output-buffers-not-retained' : null,
       !reactionOutputSatisfied ? 'reaction-output-buffers-not-retained' : null,
       !mechanicsRefreshOutputSatisfied ? 'mechanics-refresh-output-not-retained' : null,
@@ -15555,13 +21703,18 @@ async function residentStepEnvelope({
     time: sourceTime,
     nextTime: sourceTime + dt
   };
-  const nextParticleUploads = buildNextParticleUploads({
+  const sourceParticleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const fallbackNextParticleUploads = buildNextParticleUploads({
     sphParticleState,
     mlsMpmParticleState,
     sphParticleUpload,
     g2pReconstruction,
     schroederFarForceDeltaFusion,
     schroederParticleStorageAdoption,
+    sourceParticleCountResidency,
     thermalStep,
     reactionStep,
     mechanicsRefreshStep,
@@ -15569,10 +21722,74 @@ async function residentStepEnvelope({
     mergedResidentProductMass: residentProductMass,
     particlePingPong
   });
+  let schroederParticleStorageResidencySelection = null;
+  if (schroederParticleStorageResidencyAdoptionCandidate) {
+    if (
+      backend !== 'webgpu'
+      || !device?.createCommandEncoder
+      || !device.queue?.submit
+      || !fallbackNextParticleUploads?.sphParticleUpload?.stateBuffer
+      || !fallbackNextParticleUploads?.sphParticleUpload?.thermoBuffer
+      || !fallbackNextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+    ) {
+      throw new Error(
+        'Schroeder GPU-count residency selection requires complete WebGPU fallback mechanics outputs'
+      );
+    }
+    const selectionEncoder = device.createCommandEncoder({
+      label: 'ulg-schroeder-particle-storage-resident-continuation-selection'
+    });
+    schroederParticleStorageResidencySelection = particleStorageContinuationSelector({
+      device,
+      commandEncoder: selectionEncoder,
+      particleStorageResidencyAdoptionCandidate:
+        schroederParticleStorageResidencyAdoptionCandidate,
+      fallbackStateBuffer: fallbackNextParticleUploads.sphParticleUpload.stateBuffer,
+      fallbackThermoBuffer: fallbackNextParticleUploads.sphParticleUpload.thermoBuffer,
+      fallbackMechanicsBuffer:
+        fallbackNextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+      fallbackParticleCount: sphParticleState.particleCount
+    });
+    if (schroederParticleStorageResidencySelection?.ready !== true) {
+      throw new Error('Schroeder particle-storage continuation selector did not retain output');
+    }
+    device.queue.submit([selectionEncoder.finish()]);
+    schroederParticleStorageResidencySelection.queueSubmitPerformed = true;
+    schroederParticleStorageResidencySelection.queueSubmissionStatus =
+      'submitted-same-device-awaiting-state-manager-fence';
+    deferSubmittedWorkCleanup(device, () => {
+      schroederParticleStorageResidencySelection.releaseTransientBuffers?.();
+    });
+  }
+  const nextParticleUploads = schroederParticleStorageResidencySelection
+    ? buildNextParticleUploads({
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        g2pReconstruction,
+        schroederFarForceDeltaFusion,
+        schroederParticleStorageResidencySelection,
+        thermalStep,
+        reactionStep,
+        mechanicsRefreshStep,
+        inputResidentProductMass,
+        mergedResidentProductMass: residentProductMass,
+        particlePingPong
+      })
+    : fallbackNextParticleUploads;
+  const schroederParticleStorageContinuation =
+    schroederParticleStorageResidencySelection || schroederParticleStorageAdoption;
   const activeGridDispatchPlanHint = activeGridDispatchPlanHintFromCompactSummary(compactGpuSummary);
   if (nextParticleUploads && activeGridDispatchPlanHint) {
     nextParticleUploads.activeGridDispatchPlanHint = activeGridDispatchPlanHint;
   }
+  const gpuAuthority = describeGpuAuthorityContinuationCandidate({
+    backend,
+    readbackMode,
+    normalHotLoopReadbackFree,
+    residentBuffersRetained,
+    nextParticleUploads
+  });
   const diagnostics = compactMlsMpmResidentStepDiagnostics({
     sphParticleState,
     mlsMpmParticleState,
@@ -15691,13 +21908,24 @@ async function residentStepEnvelope({
     residentAuthorityMechanicsOwner: residentAuthoritySummary.familyOwners.mechanics?.ownerStage ?? null,
     residentAuthorityThermoOwner: residentAuthoritySummary.familyOwners['thermo-phase']?.ownerStage ?? null,
     schroederParticleStorageAdoptionStatus:
-      schroederParticleStorageAdoption?.status ?? schroederParticleStorageAdoptionSkipReason ?? null,
+      schroederParticleStorageContinuation?.status
+      ?? schroederParticleStorageAdoptionSkipReason
+      ?? null,
     schroederParticleStorageAdopted: schroederParticleStorageAdoption?.adopted === true,
-    schroederParticleStorageAdoptionMode: schroederParticleStorageAdoption?.adoptionMode ?? null,
-    schroederParticleStorageAdoptionBlockers: [...(schroederParticleStorageAdoption?.blockers || [])],
-    schroederParticleStorageAdoptionWarnings: [...(schroederParticleStorageAdoption?.warnings || [])],
+    schroederParticleStorageAdoptionMode:
+      schroederParticleStorageResidencySelection
+        ? 'conditional-gpu-selection-awaiting-state-manager-admission'
+        : schroederParticleStorageAdoption?.adoptionMode ?? null,
+    schroederParticleStorageAdoptionBlockers:
+      [...(schroederParticleStorageAdoption?.blockers || [])],
+    schroederParticleStorageAdoptionWarnings:
+      [...(schroederParticleStorageAdoption?.warnings || [])],
     schroederParticleStorageAuthoritativeParticleCount:
-      schroederParticleStorageAdoption?.authoritativeParticleCount ?? null,
+      schroederParticleStorageContinuation?.authoritativeParticleCount ?? null,
+    schroederParticleStorageAuthoritativeParticleCountAuthority:
+      schroederParticleStorageContinuation?.authoritativeParticleCountAuthority ?? null,
+    schroederParticleStorageAuthoritativeParticleCountMetadataWord:
+      schroederParticleStorageContinuation?.authoritativeParticleCountMetadataWord ?? null,
     schroederParticleStorageMaterializationStatus:
       schroederParticleStorageMaterialization?.status
       ?? schroederParticleStorageMaterialization?.result?.status
@@ -15744,6 +21972,7 @@ async function residentStepEnvelope({
     residentBufferLeaseActiveLeaseCount: residentBufferLeaseLedger.activeLeaseCount,
     residentBufferLeaseWarnings: [...residentBufferLeaseLedger.warnings],
     residentBufferLeaseBlockers: [...residentBufferLeaseLedger.blockers],
+    ...gpuAuthority,
     sidecarFusionStepEvidenceStatus: sidecarFusionStepEvidence?.status ?? null,
     sidecarFusionStepEvidenceStageCount: sidecarFusionStepEvidence?.stageCount ?? 0,
     sidecarFusionStepEvidencePassedStageCount: sidecarFusionStepEvidence?.passedStageCount ?? 0,
@@ -15783,10 +22012,20 @@ async function residentStepEnvelope({
     schroederFarAggregateGasCellImport,
     schroederParticleStorageMaterialization,
     schroederParticleStorageAdoption,
+    schroederParticleStorageResidencySelection,
+    schroederParticleStorageResidencyAdoptionCandidate:
+      schroederParticleStorageResidencySelection
+      ?? schroederParticleStorageResidencyAdoptionCandidate,
+    schroederParticleStorageResidencyAdoptionToken,
     schroederParticleStorageAdoptionStatus:
-      schroederParticleStorageAdoption?.status ?? schroederParticleStorageAdoptionSkipReason ?? null,
+      schroederParticleStorageContinuation?.status
+      ?? schroederParticleStorageAdoptionSkipReason
+      ?? null,
     schroederParticleStorageAdopted: schroederParticleStorageAdoption?.adopted === true,
-    schroederParticleStorageAdoptionMode: schroederParticleStorageAdoption?.adoptionMode ?? null,
+    schroederParticleStorageAdoptionMode:
+      schroederParticleStorageResidencySelection
+        ? 'conditional-gpu-selection-awaiting-state-manager-admission'
+        : schroederParticleStorageAdoption?.adoptionMode ?? null,
     schroederParticleStorageAdoptionBlockers: [...(schroederParticleStorageAdoption?.blockers || [])],
     schroederParticleStorageAdoptionWarnings: [...(schroederParticleStorageAdoption?.warnings || [])],
     schroederParticleStorageMaterializationStatus:
@@ -15794,23 +22033,29 @@ async function residentStepEnvelope({
       ?? schroederParticleStorageMaterialization?.result?.status
       ?? null,
     schroederParticleStorageMaterializationRetainedParticleBuffers:
-      Boolean(schroederParticleStorageAdoption?.retainedParticleBuffers),
+      Boolean(schroederParticleStorageContinuation?.stateBuffer),
     schroederParticleStorageMaterializationSourceParticleCount:
-      schroederParticleStorageAdoption?.sourceParticleCount ?? 0,
+      schroederParticleStorageContinuation?.sourceParticleCount ?? 0,
     schroederParticleStorageAuthoritativeParticleCount:
-      schroederParticleStorageAdoption?.authoritativeParticleCount ?? null,
+      schroederParticleStorageContinuation?.authoritativeParticleCount ?? null,
+    schroederParticleStorageAuthoritativeParticleCountAuthority:
+      schroederParticleStorageContinuation?.authoritativeParticleCountAuthority ?? null,
+    schroederParticleStorageAuthoritativeParticleCountMetadataWord:
+      schroederParticleStorageContinuation?.authoritativeParticleCountMetadataWord ?? null,
+    schroederParticleStorageOutputParticleCapacity:
+      schroederParticleStorageContinuation?.outputParticleCapacity ?? null,
     schroederParticleStorageStateBufferRetained:
-      Boolean(schroederParticleStorageAdoption?.stateBuffer),
+      Boolean(schroederParticleStorageContinuation?.stateBuffer),
     schroederParticleStorageThermoBufferRetained:
-      Boolean(schroederParticleStorageAdoption?.thermoBuffer),
+      Boolean(schroederParticleStorageContinuation?.thermoBuffer),
     schroederParticleStorageMechanicsBufferRetained:
-      Boolean(schroederParticleStorageAdoption?.mechanicsBuffer),
+      Boolean(schroederParticleStorageContinuation?.mechanicsBuffer),
     schroederParticleStorageStateBufferByteLength:
-      schroederParticleStorageAdoption?.stateBufferByteLength ?? 0,
+      schroederParticleStorageContinuation?.stateBufferByteLength ?? 0,
     schroederParticleStorageThermoBufferByteLength:
-      schroederParticleStorageAdoption?.thermoBufferByteLength ?? 0,
+      schroederParticleStorageContinuation?.thermoBufferByteLength ?? 0,
     schroederParticleStorageMechanicsBufferByteLength:
-      schroederParticleStorageAdoption?.mechanicsBufferByteLength ?? 0,
+      schroederParticleStorageContinuation?.mechanicsBufferByteLength ?? 0,
     schroederParticleStorageMaterializationBufferByteLength:
       schroederParticleStorageAdoption?.materializationBufferByteLength ?? 0,
     schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
@@ -15990,7 +22235,9 @@ async function residentStepEnvelope({
     nextParticleUploads,
     nextParticleBufferMode: nextParticleUploads
       ? (nextUsesSchroederParticleStorageMaterialization
-          ? 'retained-schroeder-particle-storage-materialized-buffers'
+          ? (schroederParticleStorageResidencySelection
+              ? 'retained-schroeder-particle-storage-gpu-selected-buffers'
+              : 'retained-schroeder-particle-storage-materialized-buffers')
           : (nextUsesReactionState
           ? 'retained-reaction-output-buffers'
           : (thermalOutput.stateBuffer
@@ -16001,7 +22248,7 @@ async function residentStepEnvelope({
       : 'not-available',
     nextParticleStateBufferByteLength:
       (nextUsesSchroederParticleStorageMaterialization
-        ? schroederParticleStorageAdoption.stateBufferByteLength
+        ? schroederParticleStorageContinuation.stateBufferByteLength
         : 0)
       || (nextUsesReactionState ? reactionOutput.stateBufferByteLength : 0)
       || (nextUsesThermalState ? thermalOutput.stateBufferByteLength : 0)
@@ -16009,18 +22256,21 @@ async function residentStepEnvelope({
       || g2pOutput.stateBufferByteLength,
     nextParticleThermoBufferByteLength:
       (nextUsesSchroederParticleStorageMaterialization
-        ? schroederParticleStorageAdoption.thermoBufferByteLength
+        ? schroederParticleStorageContinuation.thermoBufferByteLength
         : 0)
       || (nextUsesReactionThermo ? reactionOutput.thermoBufferByteLength : 0)
       || thermalOutput.thermoBufferByteLength,
     nextParticleMechanicsBufferByteLength:
       (nextUsesSchroederParticleStorageMaterialization
-        ? schroederParticleStorageAdoption.mechanicsBufferByteLength
+        ? schroederParticleStorageContinuation.mechanicsBufferByteLength
         : 0)
       || (nextUsesReactionMechanics ? reactionOutput.mechanicsBufferByteLength : 0)
       || (nextUsesMechanicsRefresh ? mechanicsRefreshOutput.mechanicsBufferByteLength : 0)
       || g2pOutput.mechanicsBufferByteLength,
     nextParticleCount: nextParticleUploads?.sphParticleUpload?.particleCount ?? sphParticleState.particleCount,
+    ...schroederParticleCountResidencyPublicFields(
+      nextParticleUploads?.particleCountResidency
+    ),
     g2pStateBufferReplacedBySchroederParticleStorageMaterialization:
       nextUsesSchroederParticleStorageMaterialization,
     g2pMechanicsBufferReplacedBySchroederParticleStorageMaterialization:
@@ -16050,8 +22300,9 @@ async function residentStepEnvelope({
       : null,
     readbackMode,
     compactGpuSummary,
-    normalHotLoopReadbackFree: noFullReadback,
+    normalHotLoopReadbackFree,
     renderStateReadbackAvailable: !noFullReadback,
+    ...gpuAuthority,
     gpuAuthoritativeState: false,
     diagnostics: diagnosticsWithAuthority,
     p2gProjectionValidation: false,
@@ -16074,11 +22325,15 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
   schroederActiveNodeList = null,
+  schroederSparseHierarchy = null,
+  schroederSparseGridArenaByteBudget = null,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
   schroederFarAggregateGasStateDelta = null,
   schroederFarAggregateGasCellImport = null,
   schroederParticleStorageMaterialization = null,
+  schroederParticleStorageResidencyAdoptionCandidate = null,
+  schroederParticleStorageResidencyAdoptionToken = null,
   schroederParticleStorageAdoptionSkipReason = null,
   schroederFarAggregateForceApplication = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
@@ -16091,6 +22346,14 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
   pressureInterfaceGridForceAdmission = null,
+  materialInterfaceSourceField = null,
+  materialInterfaceCompactCandidateCapacity = null,
+  residentNeighborhood = null,
+  residentNeighborhoodValidation = null,
+  pressureFeedback = null,
+  pressureInterfaceCoupling = null,
+  pressureInterfaceForcePreview = null,
+  pressureInterfaceStageOptions = {},
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -16112,6 +22375,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   mechanicsRefreshRunner = runMlsMpmMechanicsRefreshWithOptionalWebGpu,
   mechanicsRefreshOptions = {},
   schroederFarForceDeltaFusionRunner = runSchroederFarForceDeltaFusionWebGpu,
+  particleStorageContinuationSelector =
+    encodeSchroederParticleStorageContinuationSelectionWebGpu,
   reactionTable = null,
   reactionStepRunner = runSphReactionStepWebGpu,
   reactionStepOptions = {},
@@ -16124,7 +22389,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   gpuResidentLaneId = 'ulg:sph-resident:active',
   gpuResidentLaneStateKey = 'ulg:sph-resident-state',
   gpuResidentLaneDomainKey = null,
+  gpuResidentLaneLeaseIdentity = null,
   gpuResidentLaneCopyBudget: gpuResidentLaneCopyBudgetOverride = null,
+  residentSequenceAuthorityEpoch = 0,
   sequenceIndex = null,
   sequenceStepCount = null,
   fuseNoFullResidentMechanics = false,
@@ -16246,6 +22513,169 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       ? { status: 'webgpu-device-ready', reason: device ? 'provided device' : (resolvedDeviceResult?.reason || 'resident step shared device'), device: resolvedDevice }
       : resolvedDeviceResult;
 
+    if (materialInterfaceSourceField) {
+      const sourceSequenceSidecarBlockers = fusedResidentSequenceSidecarBlockers({
+        thermalMaterialTable,
+        reactionTable,
+        pressureInterfaceForceRowsBuffer,
+        pressureInterfaceForceSolver,
+        residentProductMass
+      });
+      const sourceSequenceSidecarPlan = createFusedResidentSidecarFusionPlan({
+        requested: true,
+        stepCount: 1,
+        readbackMode: requestedReadbackMode,
+        compactSummaryMode: MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY,
+        activeGridRequested: Boolean(
+          fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
+        ),
+        sidecarBlockers: sourceSequenceSidecarBlockers,
+        thermalSidecarFusionAvailable: Boolean(
+          thermalMaterialTable
+          && mechanicsMaterialTable
+          && thermalStepRunner === runSphThermalStepWebGpu
+          && mechanicsRefreshRunner === runMlsMpmMechanicsRefreshWithOptionalWebGpu
+        ),
+        reactionSidecarFusionAvailable: Boolean(
+          reactionTable?.reactionCount > 0
+          && thermalMaterialTable
+          && reactionStepRunner === runSphReactionStepWebGpu
+        )
+      });
+      const sourceSequenceBlockers = uniqueStringList([
+        requestedReadbackMode !== NO_FULL_READBACK_MODE ? 'full-readback-requested' : null,
+        preferWebGpu !== true ? 'webgpu-not-preferred' : null,
+        !(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer)
+          ? 'webgpu-device-unavailable'
+          : null,
+        sphParticleUpload?.status !== 'webgpu-uploaded'
+          ? 'sph-particle-upload-not-resident'
+          : null,
+        mlsMpmParticleUpload?.status !== 'webgpu-uploaded'
+          ? 'mls-mpm-particle-upload-not-resident'
+          : null,
+        p2gRunner ? 'custom-p2g-runner' : null,
+        gridUpdateRunner ? 'custom-grid-update-runner' : null,
+        g2pRunner ? 'custom-g2p-runner' : null,
+        p2gStageRunner ? 'custom-p2g-stage-runner' : null,
+        gridUpdateStageRunner ? 'custom-grid-update-stage-runner' : null,
+        g2pStageRunner ? 'custom-g2p-stage-runner' : null,
+        pressureInterfaceForceRowsBuffer ? 'pressure-interface-force-rows' : null,
+        pressureInterfaceForceSolver ? 'pressure-interface-force-solver' : null,
+        pressureInterfaceGridForceAdmission ? 'pressure-interface-grid-force-admission' : null,
+        schroederFarAggregateGasStateDelta ? 'schroeder-far-gas-state-delta' : null,
+        schroederFarAggregateGasCellImport ? 'schroeder-far-gas-cell-import' : null,
+        schroederFarAggregateForceApplication ? 'schroeder-far-force-application' : null,
+        sourceSequenceSidecarPlan.sidecarFusionRunnable !== true
+          ? 'source-sequence-sidecar-fusion-unavailable'
+          : null
+      ]);
+      if (sourceSequenceBlockers.length > 0) {
+        const error = new Error(
+          `Material-interface source field pressure coupling failed closed: ${sourceSequenceBlockers.join(', ')}`
+        );
+        error.code = 'ULG_PRESSURE_SOURCE_FIELD_NOT_CONSUMED';
+        error.pressureInterfaceStatus = 'pressure-interface-source-field-fail-closed';
+        error.pressureInterfaceBlockers = sourceSequenceBlockers;
+        throw error;
+      }
+      const sourceLaneId = materialInterfaceSourceField.sourceNeighborhoodLaneId
+        ?? gpuResidentLaneId
+        ?? 'compute-manager-resident-mechanics-lane';
+      const sourceStateKey = materialInterfaceSourceField.sourceNeighborhoodStateKey
+        ?? gpuResidentLaneStateKey
+        ?? `sph-particle-hot-state:${sourceSlot}`;
+      const sourceSequenceStep = await timedStage(
+        'fusedMechanicsSourceSequence',
+        () => runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
+          device: resolvedDevice,
+          sphParticleState,
+          mlsMpmParticleState,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          gridSpacingM,
+          boxDimsM: dims,
+          dt: dtSeconds,
+          gravityMPerS2: gravity,
+          cflFactor,
+          internalPressureScale,
+          stepCount: 1,
+          summaryRunner,
+          compactSummaryScope: resolvedCompactSummaryScope,
+          cohortRanges,
+          sourceSlot,
+          preferWebGpu,
+          fuseActiveGrid: Boolean(
+            fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
+          ),
+          activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
+          p2gBackend,
+          schroederLevelAssignment,
+          schroederSelectedLevel,
+          schroederActiveNodeList,
+          schroederSparseHierarchy,
+          schroederSparseGridArenaByteBudget,
+          measureQueueFence: true,
+          measureGpuTimestamps,
+          sidecarFusionPlan: sourceSequenceSidecarPlan,
+          thermalMaterialTable,
+          thermalStepOptions,
+          reactionTable,
+          reactionStepOptions,
+          mechanicsMaterialTable,
+          mechanicsRefreshOptions,
+          residentProductMass,
+          residentNeighborhood,
+          residentNeighborhoodValidation,
+          materialInterfaceSourceField,
+          materialInterfaceCompactCandidateCapacity,
+          pressureFeedback,
+          pressureInterfaceCoupling,
+          pressureInterfaceForcePreview,
+          residentSequenceAuthorityEpoch,
+          pressureInterfaceStageOptions: {
+            ...pressureInterfaceStageOptions,
+            algorithmMaterialContactRows,
+            schroederLawQueue,
+            schroederLawNeighborCandidates,
+            laneExecutionIdentity: gpuResidentLaneLeaseIdentity
+          },
+          residentNeighborhoodLaneOptions: {
+            enabled: true,
+            laneId: sourceLaneId,
+            stateKey: sourceStateKey,
+            sourceFamily: 'sph-particle-state',
+            generationBase:
+              materialInterfaceSourceField.sourceNeighborhoodGeneration,
+            positionEpochBase: materialInterfaceSourceField.sourcePositionEpoch,
+            leaseAuthorityIdentity: gpuResidentLaneLeaseIdentity,
+            authoritative: Boolean(gpuResidentLaneLeaseIdentity)
+          }
+        })
+      );
+      if (gpuResidentLaneLease) {
+        const queueEvidence = queueEvidenceFromResidentStep(sourceSequenceStep);
+        const gpuResidentLaneExecution = completeResidentGpuLaneLease(
+          gpuResidentLaneManager,
+          gpuResidentLaneLease.leaseId,
+          {
+            status: queueEvidence.status,
+            method: queueEvidence.method,
+            queueCompletionStatus: queueEvidence.status,
+            queueCompletionMethod: queueEvidence.method,
+            retainedBufferRefs: retainedBufferRefsFromResidentStep(sourceSequenceStep),
+            completed: queueEvidence.fenceSatisfied === true ? true : undefined,
+            source: 'ulg-mls-mpm-resident-step-source-pressure-sequence'
+          }
+        );
+        attachResidentGpuLaneExecution(sourceSequenceStep, {
+          lease: gpuResidentLaneLease,
+          execution: gpuResidentLaneExecution
+        });
+      }
+      return sourceSequenceStep;
+    }
+
     let fusedMechanics = null;
     stageMs.fusedMechanics = 0;
     const useFusedNoFullMechanics = Boolean(fuseNoFullResidentMechanics) && canUseFusedNoFullMechanicsPath({
@@ -16260,6 +22690,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       pressureInterfaceForceRowsBuffer,
       pressureInterfaceForceSolver,
       pressureInterfaceGridForceAdmission,
+      materialInterfaceSourceField,
+      residentNeighborhood,
+      schroederSparseHierarchy,
       residentProductMass
     });
     if (useFusedNoFullMechanics) {
@@ -16281,7 +22714,25 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         p2gBackend,
         schroederLevelAssignment,
         schroederSelectedLevel,
-        schroederActiveNodeList
+        schroederActiveNodeList,
+        schroederSparseHierarchy,
+        schroederSparseGridArenaByteBudget,
+        pressureInterfaceForceRowsBuffer,
+        pressureInterfaceForceSolver,
+        pressureInterfaceGridForceAdmission,
+        materialInterfaceSourceField,
+        materialInterfaceCompactCandidateCapacity,
+        residentNeighborhood,
+        residentNeighborhoodValidation,
+        pressureFeedback,
+        pressureInterfaceCoupling,
+        pressureInterfaceForcePreview,
+        pressureInterfaceStageOptions: {
+          algorithmMaterialContactRows,
+          schroederLawQueue,
+          schroederLawNeighborCandidates,
+          ...pressureInterfaceStageOptions
+        }
       }));
       stageMs.p2gGridProjection = 0;
       stageMs.gridUpdate = 0;
@@ -16295,6 +22746,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     mlsMpmParticleUpload,
     schroederLevelAssignment,
     schroederSelectedLevel,
+    schroederSparseHierarchy,
+    schroederSparseGridArenaByteBudget,
     gridSpacingM,
     boxDimsM: dims,
     dt: dtSeconds,
@@ -16439,13 +22892,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       const noFullReactionSummaryDefaults = requestedReadbackMode === NO_FULL_READBACK_MODE
         ? {
           readCompactReactionSummary: false,
-          // The gas-species ledger is a fixed-size readback (same budget
-          // class as the compact particle summary, which no-full mode keeps
-          // as final-only) and is the ONLY carrier of sealed-box gas moles
-          // when a gas product has no particle slot to place into. Disabling
-          // it silently discarded reaction gas pressure evidence (H2 from
-          // Na+H2O never reached the pressure summary).
-          readReactionGasSpeciesSummary: (reactionTable?.gasProductCount ?? 0) > 0,
+          // Spatial EOS consumes the retained product-event ledger on-device.
+          // Host gas-species summaries are checkpoint diagnostics only.
+          readReactionGasSpeciesSummary: false,
           readReactionProductInventory: false,
           readReactionAtomResidual: false
         }
@@ -16708,6 +23157,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     schroederFarAggregateGasStateDelta,
     schroederFarAggregateGasCellImport,
     schroederParticleStorageMaterialization,
+    schroederParticleStorageResidencyAdoptionCandidate,
+    schroederParticleStorageResidencyAdoptionToken,
+    particleStorageContinuationSelector,
     schroederParticleStorageAdoptionSkipReason,
     schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
     schroederFarForceDeltaFusionVelocityDeltaStatus:
@@ -17145,7 +23597,10 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     return true;
   };
   const destroyUnlessPreserved = (buffer) => {
-    if (!buffer || preserved.has(buffer) || released.has(buffer)) return;
+    if (!buffer
+      || preserved.has(buffer)
+      || released.has(buffer)
+      || isSphResidentSequenceWorkspaceBufferGpu(buffer)) return;
     buffer.destroy?.();
   };
   const destroySphUploadUnlessPreserved = (upload) => {
@@ -17170,6 +23625,8 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   }
   destroyUnlessPreserved(step?.p2gGridProjection?.gpuResult?.gridBuffer);
   destroyUnlessPreserved(step?.p2gGridProjection?.gridBuffer);
+  step?.p2gGridProjection?.gpuResult?.destroySchroederSparseGridBuffers?.();
+  step?.p2gGridProjection?.destroySchroederSparseGridBuffers?.();
   destroyUnlessPreserved(step?.gridUpdate?.gpuResult?.updatedGridBuffer);
   destroyUnlessPreserved(step?.gridUpdate?.updatedGridBuffer);
   if (step?.nextParticleUploads) {
@@ -17254,6 +23711,22 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   } else {
     step?.g2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
   }
+  const particleStorageResidencyCandidate =
+    step?.schroederParticleStorageResidencyAdoptionCandidate ?? null;
+  const particleStorageResidencyBuffers = [
+    particleStorageResidencyCandidate?.stateBuffer,
+    particleStorageResidencyCandidate?.thermoBuffer,
+    particleStorageResidencyCandidate?.mechanicsBuffer,
+    particleStorageResidencyCandidate?.residencyMetadataBuffer,
+    particleStorageResidencyCandidate?.residencyDispatchIndirectBuffer
+  ].filter(Boolean);
+  if (
+    particleStorageResidencyCandidate
+    && !particleStorageResidencyBuffers.some((buffer) => preserved.has(buffer))
+  ) {
+    particleStorageResidencyCandidate.destroy?.();
+  }
+  step?.destroySchroederSparseHierarchyBuffers?.();
 }
 
 export function retainedContinuationBuffersFromUploads(nextParticleUploads = null) {
@@ -17274,6 +23747,10 @@ export function cloneSphParticleStateForNext(source, step) {
   const schroederParticleStorageParticleCount = step.schroederParticleStorageAdoption?.adopted === true
     ? step.schroederParticleStorageAdoption.authoritativeParticleCount
     : null;
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload: step.nextParticleUploads?.sphParticleUpload,
+    mlsMpmParticleUpload: step.nextParticleUploads?.mlsMpmParticleUpload
+  });
   const activeGridDispatch = step.stageTiming?.activeGridDispatch
     || step.fusedResidentSequence?.activeGridDispatch
     || step.gridUpdate?.activeGridDispatch
@@ -17288,6 +23765,19 @@ export function cloneSphParticleStateForNext(source, step) {
     ...source,
     status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
     particleCount: schroederParticleStorageParticleCount ?? source.particleCount,
+    particleRowCapacity: particleCountResidency?.outputParticleCapacity
+      ?? source.particleRowCapacity
+      ?? source.particleCount,
+    ...(particleCountResidency ? { authoritativeParticleCount: null } : {}),
+    particleCountAuthority: particleCountResidency?.authoritativeParticleCountAuthority
+      ?? source.particleCountAuthority
+      ?? null,
+    particleCountMetadataWord: particleCountResidency?.authoritativeParticleCountMetadataWord
+      ?? source.particleCountMetadataWord
+      ?? null,
+    particleCountResidencyToken: particleCountResidency?.admissionToken
+      ?? source.particleCountResidencyToken
+      ?? null,
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
     state: noFullReadback
@@ -17325,10 +23815,27 @@ export function cloneMlsMpmParticleStateForNext(source, step) {
   const schroederParticleStorageParticleCount = step.schroederParticleStorageAdoption?.adopted === true
     ? step.schroederParticleStorageAdoption.authoritativeParticleCount
     : null;
+  const particleCountResidency = resolveSchroederParticleCountResidency({
+    sphParticleUpload: step.nextParticleUploads?.sphParticleUpload,
+    mlsMpmParticleUpload: step.nextParticleUploads?.mlsMpmParticleUpload
+  });
   return {
     ...source,
     status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
     particleCount: schroederParticleStorageParticleCount ?? source.particleCount,
+    particleRowCapacity: particleCountResidency?.outputParticleCapacity
+      ?? source.particleRowCapacity
+      ?? source.particleCount,
+    ...(particleCountResidency ? { authoritativeParticleCount: null } : {}),
+    particleCountAuthority: particleCountResidency?.authoritativeParticleCountAuthority
+      ?? source.particleCountAuthority
+      ?? null,
+    particleCountMetadataWord: particleCountResidency?.authoritativeParticleCountMetadataWord
+      ?? source.particleCountMetadataWord
+      ?? null,
+    particleCountResidencyToken: particleCountResidency?.admissionToken
+      ?? source.particleCountResidencyToken
+      ?? null,
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
     // Never adopt an empty step.mechanics (see cloneSphParticleStateForNext).
@@ -17368,6 +23875,8 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
   schroederActiveNodeList = null,
+  schroederSparseHierarchy = null,
+  schroederSparseGridArenaByteBudget = null,
   compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   sequenceIndex = null,
   sequenceStepCount = null,
@@ -17471,7 +23980,9 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     p2gBackend,
     schroederLevelAssignment,
     schroederSelectedLevel,
-    schroederActiveNodeList
+    schroederActiveNodeList,
+    schroederSparseHierarchy,
+    schroederSparseGridArenaByteBudget
   }));
   stageMs.p2gGridProjection = 0;
   stageMs.gridUpdate = 0;
@@ -17764,6 +24275,7 @@ function summarizeResidentStepForSequence(step, index) {
   );
   return {
     index,
+    stepIndex: index,
     backend: step.backend,
     status: step.status,
     stageStatus: { ...step.stageStatus },
@@ -17802,6 +24314,20 @@ function summarizeResidentStepForSequence(step, index) {
     schroederParticleStorageAdoptionMode: step.schroederParticleStorageAdoptionMode ?? null,
     schroederParticleStorageAuthoritativeParticleCount:
       step.schroederParticleStorageAuthoritativeParticleCount ?? null,
+    schroederParticleStorageAuthoritativeParticleCountAuthority:
+      step.schroederParticleStorageAuthoritativeParticleCountAuthority ?? null,
+    schroederParticleStorageAuthoritativeParticleCountMetadataWord:
+      step.schroederParticleStorageAuthoritativeParticleCountMetadataWord ?? null,
+    schroederParticleStorageOutputParticleCapacity:
+      step.schroederParticleStorageOutputParticleCapacity ?? null,
+    schroederParticleStorageActiveDispatchIndirectByteOffset:
+      step.schroederParticleStorageResidencyAdoptionCandidate
+        ?.activeDispatchIndirectByteOffset ?? null,
+    schroederParticleStorageSelectionDispatchIndirectByteOffset:
+      step.schroederParticleStorageResidencyAdoptionCandidate
+        ?.selectionDispatchIndirectByteOffset ?? null,
+    schroederParticleStorageResidencyAdoptionToken:
+      step.schroederParticleStorageResidencyAdoptionToken ?? null,
     schroederParticleStorageMaterializationStatus:
       step.schroederParticleStorageMaterializationStatus ?? null,
     gpuResidentLaneStatus: step.gpuResidentLaneStatus ?? null,
@@ -18010,6 +24536,12 @@ function summarizeResidentStepForSequence(step, index) {
     readbackMode: step.readbackMode,
     normalHotLoopReadbackFree: step.normalHotLoopReadbackFree,
     renderStateReadbackAvailable: step.renderStateReadbackAvailable,
+    gpuResidentAuthoritativeContinuationCandidate:
+      step.gpuResidentAuthoritativeContinuationCandidate === true,
+    gpuAuthorityAdmissionRequired: step.gpuAuthorityAdmissionRequired === true,
+    gpuAuthorityAdmissionSatisfied: step.gpuAuthorityAdmissionSatisfied === true,
+    gpuAuthorityStatus: step.gpuAuthorityStatus ?? null,
+    gpuAuthorityCandidateBlockers: [...(step.gpuAuthorityCandidateBlockers || [])],
     gpuAuthoritativeState: step.gpuAuthoritativeState,
     fullPhysicsValidation: false
   };
@@ -18104,7 +24636,13 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.mechanicsRefreshRunner == null
         || args.mechanicsRefreshRunner === runMlsMpmMechanicsRefreshWithOptionalWebGpu
       )
-    )
+    ),
+    reactionSidecarFusionAvailable: Boolean(
+      args.reactionTable?.reactionCount > 0
+      && args.thermalMaterialTable
+      && (args.reactionStepRunner == null || args.reactionStepRunner === runSphReactionStepWebGpu)
+    ),
+    allowSingleStepSequence: Boolean(args.materialInterfaceSourceField)
   });
   const sidecarAwareDirectRunnerContract = createThermalSidecarDirectRunnerContract({
     preflight: fusedResidentSequencePreflight,
@@ -18127,6 +24665,16 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   fusedResidentSequencePreflight.sidecarAwareDirectRunnerSelectionStatus =
     sidecarAwareDirectRunnerContract.directRunnerSelectionStatus;
   const useFusedNoFullResidentMechanicsSequence = fusedResidentSequencePreflight.sequenceRunnable === true;
+  if (args.materialInterfaceSourceField && count > 1 && !useFusedNoFullResidentMechanicsSequence) {
+    const error = new RangeError(
+      'Multi-step resident pressure coupling requires the one-submit fused sequence so every source field is regenerated from the current GPU state before consumption'
+    );
+    error.code = 'ULG_PRESSURE_SOURCE_FIELD_FUSED_SEQUENCE_REQUIRED';
+    error.batchPartitionInvariantStatus =
+      'multi-step-source-field-batch-rejected-before-gpu-encoding';
+    error.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
+    throw error;
+  }
   if (useFusedNoFullResidentMechanicsSequence) {
     markSequenceProgress('resident-sequence-fused-mechanics-started', {
       stepCount: count
@@ -18157,6 +24705,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       schroederLevelAssignment: args.schroederLevelAssignment ?? null,
       schroederSelectedLevel: args.schroederSelectedLevel ?? null,
       schroederActiveNodeList: args.schroederActiveNodeList ?? null,
+      schroederSparseHierarchy: args.schroederSparseHierarchy ?? null,
+      schroederSparseGridArenaByteBudget:
+        args.schroederSparseGridArenaByteBudget ?? null,
       measureQueueFence: Boolean(
         args.measureFusedSequenceQueueFence
         || args.measureGpuQueueFence
@@ -18167,30 +24718,99 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         || args.profileGpuTimestamps
         || args.benchmarkGpuTimestamps
       ),
+      includeGpuAllocationRows: Boolean(
+        args.measureGpuAllocationEvidence
+        || args.profileGpuAllocations
+      ),
       sidecarFusionPlan: fusedResidentSequencePreflight.sidecarFusionPlan,
       thermalMaterialTable: args.thermalMaterialTable,
       thermalStepOptions: args.thermalStepOptions ?? {},
+      reactionTable: args.reactionTable,
+      reactionStepOptions: args.reactionStepOptions ?? {},
       mechanicsMaterialTable: args.mechanicsMaterialTable,
-      mechanicsRefreshOptions: args.mechanicsRefreshOptions ?? {}
+      mechanicsRefreshOptions: args.mechanicsRefreshOptions ?? {},
+      residentProductMass,
+      residentNeighborhood: args.residentNeighborhood ?? null,
+      residentNeighborhoodValidation: args.residentNeighborhoodValidation ?? null,
+      materialInterfaceSourceField: args.materialInterfaceSourceField ?? null,
+      materialInterfaceCompactCandidateCapacity:
+        args.materialInterfaceCompactCandidateCapacity ?? null,
+      residentSequenceAuthorityEpoch: args.residentSequenceAuthorityEpoch ?? 0,
+      pressureFeedback: args.pressureFeedback ?? null,
+      pressureInterfaceCoupling: args.pressureInterfaceCoupling ?? null,
+      pressureInterfaceForcePreview: args.pressureInterfaceForcePreview ?? null,
+      pressureInterfaceStageOptions: {
+        ...(args.pressureInterfaceStageOptions || {}),
+        algorithmMaterialContactRows:
+          args.pressureInterfaceStageOptions?.algorithmMaterialContactRows
+            ?? mlsMpmParticleState?.algorithmMaterialContactRows
+            ?? null,
+        schroederLawQueue: args.schroederLawQueue ?? null,
+        schroederLawNeighborCandidates: args.schroederLawNeighborCandidates ?? null,
+        laneExecutionIdentity: args.gpuResidentLaneLeaseIdentity ?? null
+      },
+      residentNeighborhoodLaneOptions: args.residentNeighborhoodLaneOptions === false
+        ? false
+        : {
+            enabled: args.enableResidentNeighborhoodProductionLane !== false,
+            laneId: args.gpuResidentLaneId
+              ?? args.gpuResidentLane?.laneId
+              ?? 'compute-manager-resident-mechanics-lane',
+            stateKey: args.gpuResidentLaneStateKey
+              ?? args.gpuResidentLane?.stateKey
+              ?? `sph-particle-hot-state:${sourceSlot}`,
+            generationBase: args.residentNeighborhoodGenerationBase,
+            positionEpochBase: args.residentNeighborhoodPositionEpochBase,
+            maxCandidatesPerSource: args.residentNeighborhoodMaxCandidatesPerSource,
+            supportDistanceM: args.residentNeighborhoodSupportDistanceM,
+            cellSizeM: args.residentNeighborhoodCellSizeM,
+            consumers: args.residentNeighborhoodConsumers,
+            supportClasses: args.residentNeighborhoodSupportClasses,
+            sourceSupportAssignments: args.residentNeighborhoodSourceSupportAssignments,
+            sourceMetadataMode: args.residentNeighborhoodSourceMetadataMode,
+            chartLevelBuffer: args.residentNeighborhoodChartLevelBuffer,
+            chartLevelByteOffset: args.residentNeighborhoodChartLevelByteOffset,
+            supportClassBuffer: args.residentNeighborhoodSupportClassBuffer,
+            supportClassByteOffset: args.residentNeighborhoodSupportClassByteOffset,
+            sourceSupportAssignmentBuffer:
+              args.residentNeighborhoodSourceSupportAssignmentBuffer,
+            sourceSupportAssignmentByteOffset:
+              args.residentNeighborhoodSourceSupportAssignmentByteOffset,
+            encodeSourceMetadata: args.encodeResidentNeighborhoodSourceMetadata,
+            ...(args.residentNeighborhoodLaneOptions || {}),
+            sourceFamily: args.gpuResidentLaneSourceFamily
+              ?? args.gpuResidentLane?.sourceFamily
+              ?? 'sph-particle-state',
+            leaseAuthorityIdentity: args.gpuResidentLaneLeaseIdentity ?? null,
+            authoritative: true
+          }
     });
     const nextSphParticleState = cloneSphParticleStateForNext(sphParticleState, finalStep);
     const nextMlsMpmParticleState = cloneMlsMpmParticleStateForNext(mlsMpmParticleState, finalStep);
     finalStep.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
+    finalStep.pressureInterfaceSourceFieldRequested = Boolean(
+      args.materialInterfaceSourceField
+    );
+    finalStep.pressureInterfaceRequestedSourceStep =
+      args.materialInterfaceSourceField?.sourceStep ?? null;
     if (finalStep.stageTiming) {
       finalStep.stageTiming.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
     }
-    const stepSummaries = Array.from({ length: count }, (_, index) => {
-      const summary = summarizeResidentStepForSequence(finalStep, index);
-      summary.status = index === count - 1
+    const sharedFusedSummary = summarizeResidentStepForSequence(finalStep, count - 1);
+    const stepSummaries = Array.from({ length: count }, (_, index) => ({
+      ...sharedFusedSummary,
+      index,
+      stepIndex: index,
+      status: index === count - 1
         ? finalStep.status
-        : 'resident-step-fused-sequence-intermediate';
-      summary.fusedResidentSequence = true;
-      summary.fusedResidentSequenceStepCount = count;
-      summary.compactSummaryMode = resolvedCompactSummaryMode;
-      summary.compactSummaryAvailable = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
-        && index === count - 1;
-      return summary;
-    });
+        : 'resident-step-fused-sequence-intermediate',
+      fusedResidentSequence: true,
+      fusedResidentSequenceStepCount: count,
+      compactSummaryMode: resolvedCompactSummaryMode,
+      compactSummaryAvailable:
+        compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
+        && index === count - 1
+    }));
     markSequenceProgress('resident-sequence-fused-mechanics-complete', {
       completedStepCount: count,
       backend: finalStep.backend,
@@ -18210,9 +24830,21 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       retainedSteps,
       finalStep,
       stepSummaries,
+      pressureInterfaceSourceFieldRequested:
+        finalStep.pressureInterfaceSourceFieldRequested === true,
+      pressureInterfaceRequestedSourceStep:
+        finalStep.pressureInterfaceRequestedSourceStep ?? null,
+      materialInterfaceSourceFieldConsumption:
+        finalStep.materialInterfaceSourceFieldConsumption ?? null,
+      pressureInterfaceEpochCount: finalStep.pressureInterfaceEpochCount ?? 0,
+      pressureInterfaceAppliedSubstepCount:
+        finalStep.pressureInterfaceAppliedSubstepCount ?? 0,
       nextSphParticleState,
       nextMlsMpmParticleState,
       nextParticleUploads: finalStep.nextParticleUploads ?? null,
+      continuationAvailable: gpuResidentContinuationAvailableFromUploads(
+        finalStep.nextParticleUploads
+      ),
       nextResidentProductMass: null,
       nextParticleBufferMode: finalStep.nextParticleBufferMode ?? 'not-available',
       readbackMode: finalStep.readbackMode ?? NO_FULL_READBACK_MODE,
@@ -18239,6 +24871,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       sidecarAwareDirectRunnerContractStatus: sidecarAwareDirectRunnerContract.status,
       sidecarAwareResidentSequence: null,
       sidecarAwareResidentSequenceStatus: null,
+      gpuResidentAuthoritativeContinuationCandidate:
+        finalStep.gpuResidentAuthoritativeContinuationCandidate === true,
+      gpuAuthorityAdmissionRequired: finalStep.gpuAuthorityAdmissionRequired === true,
+      gpuAuthorityAdmissionSatisfied: false,
+      gpuAuthorityStatus: finalStep.gpuAuthorityStatus ?? null,
+      gpuAuthorityCandidateBlockers: [...(finalStep.gpuAuthorityCandidateBlockers || [])],
       gpuAuthoritativeState: false,
       scientificValidation: false,
       sphValidation: false,
@@ -18452,6 +25090,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     nextSphParticleState: sphParticleState,
     nextMlsMpmParticleState: mlsMpmParticleState,
     nextParticleUploads: finalStep?.nextParticleUploads ?? null,
+    continuationAvailable: gpuResidentContinuationAvailableFromUploads(
+      finalStep?.nextParticleUploads
+    ),
     nextResidentProductMass: residentProductMass,
     nextParticleBufferMode: finalStep?.nextParticleBufferMode ?? 'not-available',
     readbackMode: finalStep?.readbackMode ?? FULL_READBACK_MODE,
@@ -18486,6 +25127,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     sidecarAwareDirectRunnerSelected: sidecarAwareDirectRunnerContract.directRunnerSelected,
     sidecarAwareResidentSequence,
     sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null,
+    gpuResidentAuthoritativeContinuationCandidate:
+      finalStep?.gpuResidentAuthoritativeContinuationCandidate === true,
+    gpuAuthorityAdmissionRequired: finalStep?.gpuAuthorityAdmissionRequired === true,
+    gpuAuthorityAdmissionSatisfied: false,
+    gpuAuthorityStatus: finalStep?.gpuAuthorityStatus ?? null,
+    gpuAuthorityCandidateBlockers: [...(finalStep?.gpuAuthorityCandidateBlockers || [])],
     gpuAuthoritativeState: false,
     scientificValidation: false,
     sphValidation: false,
@@ -18607,6 +25254,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepsWithOptionalWebGpu({
     nextSphParticleState: sphParticleState,
     nextMlsMpmParticleState: mlsMpmParticleState,
     nextParticleUploads: finalStep?.nextParticleUploads ?? null,
+    continuationAvailable: gpuResidentContinuationAvailableFromUploads(
+      finalStep?.nextParticleUploads
+    ),
     nextResidentProductMass: null,
     nextParticleBufferMode: finalStep?.nextParticleBufferMode ?? 'not-available',
     readbackMode: finalStep?.readbackMode ?? FULL_READBACK_MODE,
@@ -18623,6 +25273,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepsWithOptionalWebGpu({
     residentBufferLeaseActiveLeaseCount: finalStep?.residentBufferLeaseActiveLeaseCount ?? 0,
     residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
     residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
+    gpuResidentAuthoritativeContinuationCandidate:
+      finalStep?.gpuResidentAuthoritativeContinuationCandidate === true,
+    gpuAuthorityAdmissionRequired: finalStep?.gpuAuthorityAdmissionRequired === true,
+    gpuAuthorityAdmissionSatisfied: false,
+    gpuAuthorityStatus: finalStep?.gpuAuthorityStatus ?? null,
+    gpuAuthorityCandidateBlockers: [...(finalStep?.gpuAuthorityCandidateBlockers || [])],
     gpuAuthoritativeState: false,
     scientificValidation: false,
     sphValidation: false,

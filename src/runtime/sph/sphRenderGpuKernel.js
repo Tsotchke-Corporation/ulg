@@ -38,6 +38,7 @@ import {
   sphRenderSurfaceVerticesWgsl,
   sphMaterialInterfaceCandidatesWgsl,
   sphMaterialInterfaceCompactCandidatesWgsl,
+  sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
   sphRenderFieldWgsl,
   sphRenderRowsWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
@@ -66,6 +67,10 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import {
+  tagWebGpuBufferDevice,
+  webGpuDeviceId
+} from './sphGpuDeviceIdentity.js';
 import {
   addResidentBufferLease,
   createResidentBufferLeaseLedger,
@@ -100,6 +105,7 @@ export {
   sphRenderSurfaceVerticesWgsl,
   sphMaterialInterfaceCandidatesWgsl,
   sphMaterialInterfaceCompactCandidatesWgsl,
+  sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
   sphRenderFieldWgsl,
   sphRenderRowsWgsl
 };
@@ -118,6 +124,11 @@ export const SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS = SPH_MATERIAL_INTERFACE_CA
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT = 64 * 1024 * 1024;
 export const SPH_MATERIAL_INTERFACE_COMPACT_CANDIDATE_ROWS_DEFAULT = 32_768;
+export const SPH_MATERIAL_INTERFACE_CANDIDATE_WORKGROUP_SIZE = 64;
+export const SPH_MATERIAL_INTERFACE_CANDIDATE_DISPATCH_INDIRECT_BYTE_LENGTH = 12;
+export const SPH_MATERIAL_INTERFACE_CANDIDATE_INITIAL_STATE_BYTE_LENGTH = 16;
+export const SPH_MATERIAL_INTERFACE_CANDIDATE_PARAMS_BYTE_LENGTH = 32;
+export const SPH_MATERIAL_INTERFACE_CANDIDATE_FINALIZE_PARAMS_BYTE_LENGTH = 16;
 export const SPH_SURFACE_VERTEX_COMPACT_BYTE_BUDGET_DEFAULT = 64 * 1024 * 1024;
 export const SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO = 4;
 export const SPH_RENDER_ROW_MAX_VOLUME_RATIO_J = SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO ** 3;
@@ -156,6 +167,8 @@ const GPU_BUFFER_USAGE = {
 const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
+const STORAGE_U32_RUNTIME_ARRAY_STRIDE_BYTES = Uint32Array.BYTES_PER_ELEMENT;
+const STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES = 4 * Float32Array.BYTES_PER_ELEMENT;
 
 function assertPackedSphParticleState(sphParticleState) {
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
@@ -772,8 +785,36 @@ export function extractSphRenderRowsCpu({
   };
 }
 
-function writeStorageBuffer(device, label, data, extraUsage = 0) {
-  const byteLength = Math.max(4, data.byteLength);
+function runtimeArrayStorageBindingByteLength(
+  payloadByteLength,
+  elementStrideBytes = STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES
+) {
+  const payload = Math.max(0, Math.trunc(finiteNumber(payloadByteLength, 0)));
+  const stride = Math.max(
+    STORAGE_U32_RUNTIME_ARRAY_STRIDE_BYTES,
+    Math.trunc(finiteNumber(elementStrideBytes, STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES))
+  );
+  if (stride % STORAGE_U32_RUNTIME_ARRAY_STRIDE_BYTES !== 0) {
+    throw new RangeError('storage runtime-array stride must be aligned to four bytes');
+  }
+  return Math.max(
+    stride,
+    Math.ceil(payload / STORAGE_U32_RUNTIME_ARRAY_STRIDE_BYTES)
+      * STORAGE_U32_RUNTIME_ARRAY_STRIDE_BYTES
+  );
+}
+
+function writeStorageBuffer(
+  device,
+  label,
+  data,
+  extraUsage = 0,
+  elementStrideBytes = STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES
+) {
+  const byteLength = runtimeArrayStorageBindingByteLength(
+    data.byteLength,
+    elementStrideBytes
+  );
   assertWebGpuBufferSizeFitsDevice(device, label, byteLength);
   assertWebGpuStorageBufferBindingSizeFitsDevice(device, label, byteLength);
   const buffer = device.createBuffer({
@@ -916,93 +957,6 @@ function skippedPhysicsMaterialInterfaceField({
     surfaceAreaDerivation: 'candidate-readback-skipped-budget-or-device-limit',
     physicsStage: 'material-interface-extraction',
     pressureInterfaceProducer: false,
-    scientificValidation: false,
-    sphValidation: false,
-    forceCouplingValidation: false,
-    fullPhysicsValidation: false
-  };
-}
-
-function gpuResidentSummaryPhysicsMaterialInterfaceField({
-  sourceField,
-  sourceRenderField,
-  resolvedFieldRowsBuffer,
-  resolvedSurfaceBuffer,
-  source,
-  sourceCadence,
-  candidateRowsByteLength,
-  candidateReadbackByteBudget,
-  candidateReadbackMode,
-  compactCandidateCapacity = null
-}) {
-  const surfaceCount = sourceRenderField?.surfaceTable?.surfaceCount
-    ?? sourceRenderField?.surfaceCount
-    ?? 0;
-  const candidateCount = Math.max(0, Math.round(finiteNumber(sourceRenderField?.totalFieldCells, 0))) * 3;
-  const compactCapacity = compactMaterialInterfaceCandidateCapacity({
-    candidateCount,
-    surfaceCount,
-    compactCandidateCapacity
-  });
-  const candidateCompactRowsByteLength = compactCapacity
-    * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS
-    * Float32Array.BYTES_PER_ELEMENT;
-  return {
-    schema: ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
-    status: 'material-interface-field-gpu-resident-summary-pending',
-    reason: 'candidate rows remain GPU-resident; CPU material-interface elements require compact readback or a GPU pressure consumer',
-    backend: 'webgpu-gpu-resident-summary',
-    authority: 'resident-physics-material-interface-extractor',
-    source,
-    sourceCadence,
-    sourceFieldSchema: sourceField?.schema ?? null,
-    sourceFieldStatus: sourceField?.status ?? null,
-    sourceFieldBackend: sourceField?.backend ?? null,
-    sourceFieldPipelineCacheStatus: sourceField?.sourceRenderFieldPipelineCacheStatus
-      ?? sourceField?.pipelineCacheStatus
-      ?? null,
-    sourceRenderFieldSchema: sourceRenderField?.schema ?? null,
-    sourceRenderFieldBackend: sourceRenderField?.backend ?? null,
-    sourceRenderFieldPipelineCacheStatus: sourceRenderField?.pipelineCacheStatus
-      ?? sourceField?.sourceRenderFieldPipelineCacheStatus
-      ?? null,
-    sourceRenderFieldReadback: Boolean(sourceRenderField?.renderFieldReadback),
-    sourceFieldRowsBufferBound: Boolean(resolvedFieldRowsBuffer),
-    sourceSurfaceBufferBound: Boolean(resolvedSurfaceBuffer),
-    surfaceCount,
-    readySurfaceCount: 0,
-    totalSurfaceAreaM2: 0,
-    candidateCount,
-    activeCandidateCount: 0,
-    activeCandidateCountPending: true,
-    candidateBackend: 'gpu-resident-summary',
-    candidateReadback: false,
-    candidateReadbackMode,
-    candidateRowsByteLength,
-    candidateDenseRowsByteLength: candidateRowsByteLength,
-    candidateCompactRowsByteLength,
-    candidateCompactCapacity: compactCapacity,
-    candidateCompactOverflowCount: 0,
-    candidateCompactFallbackStatus: null,
-    candidateMetadataReadback: false,
-    candidateReadbackByteBudget,
-    candidatePipelineCacheStatus: null,
-    elementCount: 0,
-    elementLayout: [...SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT],
-    elementStrideFloats: SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
-    elementRows: new Float32Array(),
-    elements: [],
-    forceCouplingStatus: 'blocked-gpu-resident-pressure-interface-consumer-required',
-    surfaces: [],
-    queueCompletionStatus: 'not-submitted-gpu-resident-summary',
-    queueCompletionMethod: null,
-    normalDerivation: 'gpu-resident-candidate-summary-pending',
-    surfaceAreaDerivation: 'gpu-resident-candidate-summary-pending',
-    physicsStage: 'material-interface-extraction',
-    pressureInterfaceProducer: false,
-    gpuAuthoritativeState: true,
-    gpuResidentMaterialInterfaceSummary: true,
-    gpuResidentMaterialInterfaceSummaryPending: true,
     scientificValidation: false,
     sphValidation: false,
     forceCouplingValidation: false,
@@ -2067,9 +2021,13 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
   const candidateRowsByteLength = candidateCount
     * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
-  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-candidates', Math.max(4, candidateRowsByteLength));
+  const candidateRowsBindingByteLength = runtimeArrayStorageBindingByteLength(
+    candidateRowsByteLength,
+    STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES
+  );
+  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-candidates', candidateRowsBindingByteLength);
   assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-candidate-readback', Math.max(4, candidateRowsByteLength));
-  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-candidates', Math.max(4, candidateRowsByteLength));
+  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-candidates', candidateRowsBindingByteLength);
   const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
   const borrowedSurfaceBuffer = surfaceBuffer || null;
   const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
@@ -2085,7 +2043,7 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
   );
   const candidateRowsBuffer = device.createBuffer({
     label: 'ulg-sph-interface-candidates',
-    size: Math.max(4, candidateRowsByteLength),
+    size: candidateRowsBindingByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
   const paramsBuffer = device.createBuffer({
@@ -2180,7 +2138,7 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
   };
 }
 
-function compactMaterialInterfaceCandidateCapacity({
+export function compactMaterialInterfaceCandidateCapacity({
   candidateCount,
   surfaceCount,
   compactCandidateCapacity = null
@@ -2210,7 +2168,15 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
   surfaceBuffer = null,
   sourceIndexFieldBuffer = null,
   isolationScale = 1,
-  compactCandidateCapacity = null
+  compactCandidateCapacity = null,
+  commandEncoder = null,
+  retainGpuCandidateBuffers = false,
+  residentAuthority = null,
+  targetCandidateRowsBuffer = null,
+  targetCompactMetadataBuffer = null,
+  targetInterfaceSourceKeyBuffer = null,
+  targetCandidateDispatchIndirectBuffer = null,
+  workspaceResources = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphMaterialInterfaceCompactCandidateFieldWebGpu requires a WebGPU-like device');
@@ -2224,6 +2190,20 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
   if (!surfaceBuffer && !(renderField.surfaceTable?.records instanceof Float32Array)) {
     throw new TypeError('buildSphMaterialInterfaceCompactCandidateFieldWebGpu requires surface table records or surfaceBuffer');
   }
+  const callerOwnsEncoder = commandEncoder != null;
+  if (callerOwnsEncoder && !commandEncoder?.beginComputePass) {
+    throw new TypeError('commandEncoder must be a WebGPU command encoder');
+  }
+  if (
+    callerOwnsEncoder
+    && targetCompactMetadataBuffer
+    && !commandEncoder?.copyBufferToBuffer
+  ) {
+    throw new TypeError(
+      'commandEncoder must support copyBufferToBuffer for command-ordered compact metadata reset'
+    );
+  }
+  const gpuResidentMode = retainGpuCandidateBuffers === true || callerOwnsEncoder;
   const surfaceCount = renderField.surfaceTable?.surfaceCount ?? renderField.surfaceCount ?? 0;
   const totalFieldCells = renderField.totalFieldCells ?? 0;
   const candidateCount = totalFieldCells * 3;
@@ -2241,12 +2221,82 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
   const compactSourceKeyRowsByteLength = compactCapacity
     * SPH_INTERFACE_SOURCE_KEY_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
-  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-compact-candidates', Math.max(4, compactCandidateRowsByteLength));
-  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-compact-candidates', Math.max(4, compactCandidateRowsByteLength));
-  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-source-keys', Math.max(4, compactSourceKeyRowsByteLength));
-  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-source-keys', Math.max(4, compactSourceKeyRowsByteLength));
+  const compactCandidateRowsBindingByteLength = runtimeArrayStorageBindingByteLength(
+    compactCandidateRowsByteLength,
+    STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES
+  );
+  const compactSourceKeyRowsBindingByteLength = runtimeArrayStorageBindingByteLength(
+    compactSourceKeyRowsByteLength,
+    STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES
+  );
+  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-compact-candidates', compactCandidateRowsBindingByteLength);
+  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-compact-candidates', compactCandidateRowsBindingByteLength);
+  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-source-keys', compactSourceKeyRowsBindingByteLength);
+  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-source-keys', compactSourceKeyRowsBindingByteLength);
   assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-compact-metadata', 16);
   assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-compact-metadata', 16);
+  assertWebGpuBufferSizeFitsDevice(
+    device,
+    'ulg-sph-interface-candidate-dispatch-indirect',
+    SPH_MATERIAL_INTERFACE_CANDIDATE_DISPATCH_INDIRECT_BYTE_LENGTH
+  );
+  assertWebGpuStorageBufferBindingSizeFitsDevice(
+    device,
+    'ulg-sph-interface-candidate-dispatch-indirect',
+    SPH_MATERIAL_INTERFACE_CANDIDATE_DISPATCH_INDIRECT_BYTE_LENGTH
+  );
+  const validateTargetBuffer = ({
+    buffer,
+    name,
+    minimumByteLength,
+    requiredUsage
+  }) => {
+    if (!buffer) return;
+    if (Math.max(0, Number(buffer.size) || 0) < minimumByteLength) {
+      throw new RangeError(`${name} must provide at least ${minimumByteLength} bytes`);
+    }
+    const usage = Number(buffer.usage);
+    if (Number.isFinite(usage) && (usage & requiredUsage) !== requiredUsage) {
+      throw new TypeError(`${name} requires usage mask ${requiredUsage}`);
+    }
+  };
+  validateTargetBuffer({
+    buffer: targetCandidateRowsBuffer,
+    name: 'targetCandidateRowsBuffer',
+    minimumByteLength: compactCandidateRowsBindingByteLength,
+    requiredUsage: GPU_BUFFER_USAGE.STORAGE
+  });
+  validateTargetBuffer({
+    buffer: targetCompactMetadataBuffer,
+    name: 'targetCompactMetadataBuffer',
+    minimumByteLength: 16,
+    requiredUsage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  validateTargetBuffer({
+    buffer: targetInterfaceSourceKeyBuffer,
+    name: 'targetInterfaceSourceKeyBuffer',
+    minimumByteLength: compactSourceKeyRowsBindingByteLength,
+    requiredUsage: GPU_BUFFER_USAGE.STORAGE
+  });
+  if (
+    targetCandidateDispatchIndirectBuffer
+    && Math.max(0, Number(targetCandidateDispatchIndirectBuffer.size) || 0)
+      < SPH_MATERIAL_INTERFACE_CANDIDATE_DISPATCH_INDIRECT_BYTE_LENGTH
+  ) {
+    throw new RangeError('targetCandidateDispatchIndirectBuffer must provide at least 12 bytes');
+  }
+  const targetCandidateDispatchUsage = Number(targetCandidateDispatchIndirectBuffer?.usage);
+  const requiredCandidateDispatchUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT;
+  if (
+    targetCandidateDispatchIndirectBuffer
+    && Number.isFinite(targetCandidateDispatchUsage)
+    && (targetCandidateDispatchUsage & requiredCandidateDispatchUsage)
+      !== requiredCandidateDispatchUsage
+  ) {
+    throw new TypeError(
+      'targetCandidateDispatchIndirectBuffer requires STORAGE and INDIRECT usage'
+    );
+  }
   const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
   const borrowedSurfaceBuffer = surfaceBuffer || null;
   const borrowedSourceIndexFieldBuffer = sourceIndexFieldBuffer || renderField.sourceIndexFieldBuffer || null;
@@ -2265,29 +2315,71 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
   const sourceIndexFieldInputBuffer = borrowedSourceIndexFieldBuffer || writeStorageBuffer(
     device,
     'ulg-sph-interface-source-index-disabled',
-    new Uint32Array(Math.max(1, totalFieldCells))
+    new Uint32Array(Math.max(1, totalFieldCells)),
+    0,
+    STORAGE_U32_RUNTIME_ARRAY_STRIDE_BYTES
   );
-  const candidateRowsBuffer = device.createBuffer({
-    label: 'ulg-sph-interface-compact-candidates',
-    size: Math.max(4, compactCandidateRowsByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const interfaceSourceKeyBuffer = device.createBuffer({
-    label: 'ulg-sph-interface-source-keys',
-    size: Math.max(4, compactSourceKeyRowsByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const compactMetadataBuffer = device.createBuffer({
-    label: 'ulg-sph-interface-compact-metadata',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const paramsBuffer = device.createBuffer({
+  const ownsCandidateRowsBuffer = !targetCandidateRowsBuffer;
+  const candidateRowsBuffer = targetCandidateRowsBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-interface-compact-candidates',
+      size: compactCandidateRowsBindingByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsInterfaceSourceKeyBuffer = !targetInterfaceSourceKeyBuffer;
+  const interfaceSourceKeyBuffer = targetInterfaceSourceKeyBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-interface-source-keys',
+      size: compactSourceKeyRowsBindingByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsCompactMetadataBuffer = !targetCompactMetadataBuffer;
+  const compactMetadataBuffer = targetCompactMetadataBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-interface-compact-metadata',
+      size: 16,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const ownsCandidateDispatchIndirectBuffer = !targetCandidateDispatchIndirectBuffer;
+  const candidateDispatchIndirectBuffer = targetCandidateDispatchIndirectBuffer
+    || tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-interface-candidate-dispatch-indirect',
+      size: SPH_MATERIAL_INTERFACE_CANDIDATE_DISPATCH_INDIRECT_BYTE_LENGTH,
+      usage: GPU_BUFFER_USAGE.STORAGE
+        | GPU_BUFFER_USAGE.INDIRECT
+        | GPU_BUFFER_USAGE.COPY_SRC
+        | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+  const commandOrderedMetadataReset = Boolean(
+    callerOwnsEncoder && targetCompactMetadataBuffer
+  );
+  const candidateInitControl = workspaceResources?.controlResources?.candidateInit ?? null;
+  const candidateControl = workspaceResources?.controlResources?.candidate ?? null;
+  const candidateFinalizeControl =
+    workspaceResources?.controlResources?.candidateFinalize ?? null;
+  const compactMetadataInitializerBuffer = commandOrderedMetadataReset
+    ? (candidateInitControl?.buffer || tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-sph-interface-compact-metadata-initializer',
+        size: SPH_MATERIAL_INTERFACE_CANDIDATE_INITIAL_STATE_BYTE_LENGTH,
+        usage: GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+      }), device))
+    : null;
+  const compactMetadataInitializerByteOffset = commandOrderedMetadataReset
+    ? (candidateInitControl?.byteOffset ?? 0)
+    : 0;
+  const paramsBuffer = candidateControl?.buffer || device.createBuffer({
     label: 'ulg-sph-interface-compact-candidate-params',
-    size: 32,
+    size: SPH_MATERIAL_INTERFACE_CANDIDATE_PARAMS_BYTE_LENGTH,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
-  device.queue.writeBuffer(paramsBuffer, 0, createMaterialInterfaceCandidateParamsArray({
+  const paramsByteOffset = candidateControl?.byteOffset ?? 0;
+  const finalizeParamsBuffer = candidateFinalizeControl?.buffer || device.createBuffer({
+    label: 'ulg-sph-interface-compact-candidate-finalize-params',
+    size: SPH_MATERIAL_INTERFACE_CANDIDATE_FINALIZE_PARAMS_BYTE_LENGTH,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const finalizeParamsByteOffset = candidateFinalizeControl?.byteOffset ?? 0;
+  device.queue.writeBuffer(paramsBuffer, paramsByteOffset, createMaterialInterfaceCandidateParamsArray({
     surfaceCount,
     totalFieldCells,
     candidateCount,
@@ -2296,16 +2388,25 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     isolationScale: finiteNumber(isolationScale, 1),
     sourceKeyEnabled: sourceIndexFieldAvailable
   }));
-  device.queue.writeBuffer(
-    interfaceSourceKeyBuffer,
-    0,
-    new Float32Array(compactCapacity * SPH_INTERFACE_SOURCE_KEY_FLOATS)
-  );
-  device.queue.writeBuffer(compactMetadataBuffer, 0, new Uint32Array([
+  const compactMetadataInitialState = new Uint32Array([
     0,
     0,
     compactCapacity,
     candidateCount
+  ]);
+  device.queue.writeBuffer(
+    compactMetadataInitializerBuffer || compactMetadataBuffer,
+    compactMetadataInitializerBuffer ? compactMetadataInitializerByteOffset : 0,
+    compactMetadataInitialState
+  );
+  device.queue.writeBuffer(finalizeParamsBuffer, finalizeParamsByteOffset, new Uint32Array([
+    compactCapacity,
+    candidateCount,
+    SPH_MATERIAL_INTERFACE_CANDIDATE_WORKGROUP_SIZE,
+    Math.max(1, Math.round(finiteNumber(
+      device.limits?.maxComputeWorkgroupsPerDimension,
+      65535
+    )))
   ]));
 
   const compactCandidateBindings = [
@@ -2328,19 +2429,100 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     entryPoint: 'main',
     bindings: compactCandidateBindings
   });
-  const bindGroup = device.createBindGroup({
-    layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: sourceSurfaceBuffer } },
-      { binding: 1, resource: { buffer: sourceFieldRowsBuffer } },
-      { binding: 2, resource: { buffer: candidateRowsBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } },
-      { binding: 4, resource: { buffer: compactMetadataBuffer } },
-      { binding: 5, resource: { buffer: sourceIndexFieldInputBuffer } },
-      { binding: 6, resource: { buffer: interfaceSourceKeyBuffer } }
+  const {
+    pipeline: finalizePipeline,
+    bindGroupLayout: finalizeBindGroupLayout,
+    cacheStatus: finalizePipelineCacheStatus
+  } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-interface-compact-candidates-finalize.v0',
+    label: 'ulg-sph-interface-compact-candidates-finalize',
+    code: sphMaterialInterfaceCompactCandidatesFinalizeWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
     ]
   });
-  const encoder = device.createCommandEncoder();
+  const exactResource = (buffer, offset = 0, size = null) => {
+    const byteOffset = Math.max(0, Math.trunc(finiteNumber(offset, 0)));
+    const available = Math.max(0, Math.trunc(finiteNumber(buffer?.size, 0)) - byteOffset);
+    const byteLength = size == null
+      ? available
+      : Math.max(0, Math.trunc(finiteNumber(size, available)));
+    if (byteLength < STORAGE_U32_RUNTIME_ARRAY_STRIDE_BYTES || byteLength > available) {
+      throw new RangeError(
+        `WebGPU binding range [${byteOffset}, ${byteOffset + byteLength}) exceeds `
+          + `the available ${available} bytes or the four-byte ABI minimum`
+      );
+    }
+    return { buffer, offset: byteOffset, size: byteLength };
+  };
+  const bindGroupSignature = (layout, entries) => [
+    layout,
+    ...entries.flatMap(({ binding, resource }) => [
+      binding,
+      resource.buffer,
+      resource.offset ?? 0,
+      resource.size ?? null
+    ])
+  ];
+  const candidateBindGroupEntries = [
+    { binding: 0, resource: exactResource(sourceSurfaceBuffer) },
+    { binding: 1, resource: exactResource(sourceFieldRowsBuffer) },
+    { binding: 2, resource: exactResource(candidateRowsBuffer, 0, compactCandidateRowsBindingByteLength) },
+    { binding: 3, resource: exactResource(paramsBuffer, paramsByteOffset, SPH_MATERIAL_INTERFACE_CANDIDATE_PARAMS_BYTE_LENGTH) },
+    { binding: 4, resource: exactResource(compactMetadataBuffer, 0, 16) },
+    { binding: 5, resource: exactResource(sourceIndexFieldInputBuffer) },
+    { binding: 6, resource: exactResource(interfaceSourceKeyBuffer, 0, compactSourceKeyRowsBindingByteLength) }
+  ];
+  const candidateBindGroupCache = workspaceResources?.bindGroupForKind?.(
+    'candidate',
+    bindGroupSignature(bindGroupLayout, candidateBindGroupEntries),
+    () => device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: candidateBindGroupEntries
+    })
+  ) ?? null;
+  const bindGroup = candidateBindGroupCache?.bindGroup || device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: candidateBindGroupEntries
+  });
+  const finalizeBindGroupEntries = [
+    { binding: 0, resource: exactResource(compactMetadataBuffer, 0, 16) },
+    { binding: 1, resource: exactResource(
+      candidateDispatchIndirectBuffer,
+      0,
+      SPH_MATERIAL_INTERFACE_CANDIDATE_DISPATCH_INDIRECT_BYTE_LENGTH
+    ) },
+    { binding: 2, resource: exactResource(
+      finalizeParamsBuffer,
+      finalizeParamsByteOffset,
+      SPH_MATERIAL_INTERFACE_CANDIDATE_FINALIZE_PARAMS_BYTE_LENGTH
+    ) }
+  ];
+  const finalizeBindGroupCache = workspaceResources?.bindGroupForKind?.(
+    'candidateFinalize',
+    bindGroupSignature(finalizeBindGroupLayout, finalizeBindGroupEntries),
+    () => device.createBindGroup({
+      layout: finalizeBindGroupLayout,
+      entries: finalizeBindGroupEntries
+    })
+  ) ?? null;
+  const finalizeBindGroup = finalizeBindGroupCache?.bindGroup || device.createBindGroup({
+    layout: finalizeBindGroupLayout,
+    entries: finalizeBindGroupEntries
+  });
+  const encoder = commandEncoder || device.createCommandEncoder();
+  if (compactMetadataInitializerBuffer) {
+    encoder.copyBufferToBuffer(
+      compactMetadataInitializerBuffer,
+      compactMetadataInitializerByteOffset,
+      compactMetadataBuffer,
+      0,
+      compactMetadataInitialState.byteLength
+    );
+  }
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
@@ -2349,7 +2531,174 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     Math.max(1, surfaceCount)
   );
   pass.end();
-  device.queue.submit([encoder.finish()]);
+  const finalizePass = encoder.beginComputePass();
+  finalizePass.setPipeline(finalizePipeline);
+  finalizePass.setBindGroup(0, finalizeBindGroup);
+  finalizePass.dispatchWorkgroups(1);
+  finalizePass.end();
+  if (!callerOwnsEncoder) device.queue.submit([encoder.finish()]);
+
+  let producerInputsDestroyed = false;
+  const cleanupProducerInputs = () => {
+    if (producerInputsDestroyed) return;
+    producerInputsDestroyed = true;
+    if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
+    if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+    if (!borrowedSourceIndexFieldBuffer) sourceIndexFieldInputBuffer.destroy?.();
+    if (!candidateControl) paramsBuffer.destroy?.();
+    if (!candidateFinalizeControl) finalizeParamsBuffer.destroy?.();
+    if (!candidateInitControl) compactMetadataInitializerBuffer?.destroy?.();
+  };
+  if (gpuResidentMode) {
+    if (!callerOwnsEncoder) deferSubmittedWorkCleanup(device, cleanupProducerInputs);
+    let retainedBuffersDestroyed = false;
+    const result = {
+      schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+      backend: 'webgpu-compact-gpu-resident',
+      status: callerOwnsEncoder
+        ? 'material-interface-compact-candidate-field-encoded-awaiting-caller-submit'
+        : 'material-interface-compact-candidate-field-gpu-resident-submitted',
+      reason: null,
+      sourceSchema: renderField.schema,
+      sourceBackend: renderField.backend,
+      surfaceCount,
+      totalFieldCells,
+      candidateCount,
+      activeCandidateCount: null,
+      activeCandidateCountPending: true,
+      rowLayout: [...SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT],
+      rowStrideFloats: SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS,
+      candidateRows: new Float32Array(),
+      candidateRowByteLength: 0,
+      candidateDenseRowsByteLength: denseCandidateRowsByteLength,
+      candidateCompactRowsByteLength: compactCandidateRowsByteLength,
+      candidateCompactRowsBindingByteLength: compactCandidateRowsBindingByteLength,
+      compactCandidateCapacity: compactCapacity,
+      candidateCompactCapacity: compactCapacity,
+      compactCandidateOverflowCount: null,
+      compactCandidateMetadata: null,
+      candidateShape: 'compact-active-render-field-cell-axis-triplets',
+      surfaces: [],
+      fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
+      surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+      sourceIndexFieldBufferBound: sourceIndexFieldAvailable,
+      queueCompletionStatus: callerOwnsEncoder
+        ? 'encoded-awaiting-caller-submit'
+        : 'queue-submitted-gpu-resident',
+      queueCompletionMethod: callerOwnsEncoder
+        ? 'caller-owned-command-encoder'
+        : 'queue.submit',
+      commandEncoderOwnership: callerOwnsEncoder ? 'caller' : 'local',
+      submissionOwnership: callerOwnsEncoder ? 'caller' : 'local',
+      queueSubmitPerformed: !callerOwnsEncoder,
+      mapPerformed: false,
+      readbackPerformed: false,
+      pipelineCacheStatus,
+      finalizePipelineCacheStatus,
+      candidateControlWorkspaceBound: Boolean(candidateControl),
+      candidateControlSlotIndex: workspaceResources?.slotIndex ?? null,
+      candidateBindGroupCacheHit: candidateBindGroupCache?.cacheHit === true,
+      candidateFinalizeBindGroupCacheHit: finalizeBindGroupCache?.cacheHit === true,
+      candidateReadback: false,
+      candidateReadbackMode: MATERIAL_INTERFACE_GPU_RESIDENT_SUMMARY_MODE,
+      candidateMetadataReadback: false,
+      gpuResidentInterfaceCandidates: true,
+      candidateRowsBuffer,
+      candidateRowsBufferRetained: true,
+      candidateRowsBufferOwned: ownsCandidateRowsBuffer,
+      candidateRowsBufferByteLength: compactCandidateRowsBindingByteLength,
+      candidateRowsBufferPayloadByteLength: compactCandidateRowsByteLength,
+      compactMetadataBuffer,
+      compactMetadataBufferRetained: true,
+      compactMetadataBufferOwned: ownsCompactMetadataBuffer,
+      compactMetadataBufferByteLength: 16,
+      compactMetadataInitializationMode: compactMetadataInitializerBuffer
+        ? 'command-encoded-copy-before-producer'
+        : 'queue-write-before-local-submit',
+      compactMetadataLayout: [
+        'activeCandidateCount:u32',
+        'overflowCount:u32',
+        'capacity:u32',
+        'denseCandidateCount:u32'
+      ],
+      compactMetadataFailClosePolicy:
+        'overflow-zero-and-active-count-within-capacity-required-by-gpu-consumers',
+      candidateDispatchIndirectBuffer,
+      candidateDispatchIndirectBufferRetained: true,
+      candidateDispatchIndirectBufferOwned: ownsCandidateDispatchIndirectBuffer,
+      candidateDispatchIndirectBufferByteLength:
+        SPH_MATERIAL_INTERFACE_CANDIDATE_DISPATCH_INDIRECT_BYTE_LENGTH,
+      candidateDispatchIndirectOffsetBytes: 0,
+      candidateDispatchIndirectLayout: [
+        'workgroupCountX:u32',
+        'workgroupCountY:u32',
+        'workgroupCountZ:u32'
+      ],
+      candidateDispatchIndirectWorkgroupSize:
+        SPH_MATERIAL_INTERFACE_CANDIDATE_WORKGROUP_SIZE,
+      candidateDispatchAuthority:
+        'gpu-finalized-active-count-fail-closed-indirect',
+      interfaceSourceKeySchema: ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
+      interfaceSourceKeyStatus: sourceIndexFieldAvailable
+        ? 'interface-source-key-gpu-resident-pending'
+        : 'interface-source-key-unavailable',
+      interfaceSourceKeyReason: sourceIndexFieldAvailable
+        ? null
+        : 'source-local material-interface source-index field was unavailable',
+      interfaceSourceKeyRows: new Float32Array(),
+      interfaceSourceKeyReadback: false,
+      interfaceSourceKeyRowCount: compactCapacity,
+      interfaceSourceKeyReadyCount: null,
+      interfaceSourceKeyStrideFloats: SPH_INTERFACE_SOURCE_KEY_FLOATS,
+      interfaceSourceKeyRowByteLength: compactSourceKeyRowsByteLength,
+      interfaceSourceKeyBufferRetained: true,
+      interfaceSourceKeyBufferOwned: ownsInterfaceSourceKeyBuffer,
+      interfaceSourceKeyBufferByteLength: compactSourceKeyRowsBindingByteLength,
+      interfaceSourceKeyBufferPayloadByteLength: compactSourceKeyRowsByteLength,
+      interfaceSourceKeySurfaceIndexFallbackEnabled: false,
+      interfaceSourceKeyBuffer,
+      sourceDeviceId: webGpuDeviceId(device),
+      residentAuthority: residentAuthority || null,
+      residentAuthorityStatus: residentAuthority
+        ? 'resident-candidate-authority-bound'
+        : 'resident-candidate-authority-unbound',
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+    result.cleanupSubmittedWork = callerOwnsEncoder ? cleanupProducerInputs : null;
+    result.destroyMaterialInterfaceCandidateFieldBuffers = ({
+      reason = 'material-interface-candidate-field-buffer-cleanup'
+    } = {}) => {
+      if (retainedBuffersDestroyed) {
+        return {
+          schema: 'peercompute.ulg.sph-material-interface-candidate-field-buffer-cleanup.v0',
+          status: 'material-interface-candidate-field-buffers-already-destroyed',
+          reason
+        };
+      }
+      retainedBuffersDestroyed = true;
+      if (ownsCandidateRowsBuffer) candidateRowsBuffer.destroy?.();
+      if (ownsCompactMetadataBuffer) compactMetadataBuffer.destroy?.();
+      if (ownsInterfaceSourceKeyBuffer) interfaceSourceKeyBuffer.destroy?.();
+      if (ownsCandidateDispatchIndirectBuffer) candidateDispatchIndirectBuffer.destroy?.();
+      result.candidateRowsBufferRetained = false;
+      result.compactMetadataBufferRetained = false;
+      result.interfaceSourceKeyBufferRetained = false;
+      result.candidateDispatchIndirectBufferRetained = false;
+      return {
+        schema: 'peercompute.ulg.sph-material-interface-candidate-field-buffer-cleanup.v0',
+        status: 'material-interface-candidate-field-buffers-destroyed',
+        reason,
+        candidateRowsBufferDestroyed: ownsCandidateRowsBuffer,
+        compactMetadataBufferDestroyed: ownsCompactMetadataBuffer,
+        interfaceSourceKeyBufferDestroyed: ownsInterfaceSourceKeyBuffer,
+        candidateDispatchIndirectBufferDestroyed: ownsCandidateDispatchIndirectBuffer
+      };
+    };
+    return result;
+  }
   const metadataBytes = await readBuffer(
     device,
     compactMetadataBuffer,
@@ -2385,12 +2734,10 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
   const interfaceSourceKeyReadyCount = countReadyInterfaceSourceKeyRows(interfaceSourceKeyRows);
   const keepInterfaceSourceKeyBuffer = Boolean(sourceIndexFieldAvailable && compactRowCount > 0);
 
-  if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
-  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
-  if (!borrowedSourceIndexFieldBuffer) sourceIndexFieldInputBuffer.destroy?.();
+  cleanupProducerInputs();
   candidateRowsBuffer.destroy?.();
   compactMetadataBuffer.destroy?.();
-  paramsBuffer.destroy?.();
+  if (ownsCandidateDispatchIndirectBuffer) candidateDispatchIndirectBuffer.destroy?.();
   if (!keepInterfaceSourceKeyBuffer) interfaceSourceKeyBuffer.destroy?.();
 
   const surfaces = summarizeMaterialInterfaceCandidateSurfaces(renderField, candidateRows, isolationScale);
@@ -2417,6 +2764,7 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     candidateDenseRowsByteLength: denseCandidateRowsByteLength,
     candidateCompactRowsByteLength: activeRowsByteLength,
     compactCandidateCapacity: compactCapacity,
+    candidateCompactCapacity: compactCapacity,
     compactCandidateOverflowCount: compactOverflowCount,
     compactCandidateMetadata: {
       activeCandidateCount,
@@ -2432,6 +2780,10 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     queueCompletionStatus: 'compact-readback-map-completed',
     queueCompletionMethod: 'mapAsync(compact-candidate-readback-buffer)',
     pipelineCacheStatus,
+    candidateControlWorkspaceBound: Boolean(candidateControl),
+    candidateControlSlotIndex: workspaceResources?.slotIndex ?? null,
+    candidateBindGroupCacheHit: candidateBindGroupCache?.cacheHit === true,
+    candidateFinalizeBindGroupCacheHit: finalizeBindGroupCache?.cacheHit === true,
     candidateReadback: true,
     candidateReadbackMode: MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE,
     candidateMetadataReadback: true,
@@ -5887,7 +6239,13 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
   sourceCadence = 'resident-physics-stage',
   candidateReadbackByteBudget = SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT,
   candidateReadbackMode = MATERIAL_INTERFACE_DENSE_CANDIDATE_READBACK_MODE,
-  compactCandidateCapacity = null
+  compactCandidateCapacity = null,
+  commandEncoder = null,
+  residentAuthority = null,
+  targetCandidateRowsBuffer = null,
+  targetCompactMetadataBuffer = null,
+  targetInterfaceSourceKeyBuffer = null,
+  targetCandidateDispatchIndirectBuffer = null
 } = {}) {
   const sourceField = renderField?.schema === ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA
     ? renderField
@@ -5903,18 +6261,141 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
           ? MATERIAL_INTERFACE_GPU_RESIDENT_SUMMARY_MODE
           : MATERIAL_INTERFACE_DENSE_CANDIDATE_READBACK_MODE);
   if (normalizedCandidateReadbackMode === MATERIAL_INTERFACE_GPU_RESIDENT_SUMMARY_MODE) {
-    return gpuResidentSummaryPhysicsMaterialInterfaceField({
-      sourceField,
-      sourceRenderField,
-      resolvedFieldRowsBuffer,
-      resolvedSurfaceBuffer,
+    const candidateField = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+      device,
+      renderField: sourceRenderField,
+      fieldRowsBuffer: resolvedFieldRowsBuffer,
+      surfaceBuffer: resolvedSurfaceBuffer,
+      sourceIndexFieldBuffer: sourceField?.sourceIndexFieldBuffer || sourceRenderField?.sourceIndexFieldBuffer || null,
+      isolationScale,
+      commandEncoder,
+      retainGpuCandidateBuffers: true,
+      residentAuthority,
+      compactCandidateCapacity,
+      targetCandidateRowsBuffer,
+      targetCompactMetadataBuffer,
+      targetInterfaceSourceKeyBuffer,
+      targetCandidateDispatchIndirectBuffer
+    });
+    const result = {
+      schema: ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
+      status: candidateField.status,
+      reason: candidateField.reason,
+      backend: 'webgpu-gpu-resident-candidates',
+      authority: 'resident-physics-material-interface-extractor',
       source,
       sourceCadence,
-      candidateRowsByteLength,
-      candidateReadbackByteBudget,
+      sourceFieldSchema: sourceField?.schema ?? null,
+      sourceFieldStatus: sourceField?.status ?? null,
+      sourceFieldBackend: sourceField?.backend ?? null,
+      sourceFieldPipelineCacheStatus: sourceField?.sourceRenderFieldPipelineCacheStatus
+        ?? sourceField?.pipelineCacheStatus
+        ?? null,
+      sourceRenderFieldSchema: sourceRenderField?.schema ?? null,
+      sourceRenderFieldBackend: sourceRenderField?.backend ?? null,
+      sourceRenderFieldPipelineCacheStatus: sourceRenderField?.pipelineCacheStatus
+        ?? sourceField?.sourceRenderFieldPipelineCacheStatus
+        ?? null,
+      sourceRenderFieldReadback: Boolean(sourceRenderField?.renderFieldReadback),
+      sourceFieldRowsBufferBound: Boolean(resolvedFieldRowsBuffer),
+      sourceSurfaceBufferBound: Boolean(resolvedSurfaceBuffer),
+      surfaceCount: candidateField.surfaceCount,
+      readySurfaceCount: null,
+      readySurfaceCountPending: true,
+      totalSurfaceAreaM2: null,
+      totalSurfaceAreaPending: true,
+      candidateCount: candidateField.candidateCount,
+      activeCandidateCount: null,
+      activeCandidateCountPending: true,
+      candidateBackend: candidateField.backend,
+      candidateReadback: false,
       candidateReadbackMode: normalizedCandidateReadbackMode,
-      compactCandidateCapacity
-    });
+      candidateRowsByteLength,
+      candidateDenseRowsByteLength: candidateField.candidateDenseRowsByteLength,
+      candidateCompactRowsByteLength: candidateField.candidateCompactRowsByteLength,
+      candidateCompactCapacity: candidateField.compactCandidateCapacity,
+      candidateCompactOverflowCount: null,
+      candidateCompactFallbackStatus: null,
+      candidateMetadataReadback: false,
+      candidateReadbackByteBudget,
+      candidatePipelineCacheStatus: candidateField.pipelineCacheStatus,
+      elementCount: candidateField.compactCandidateCapacity,
+      elementCountMode: 'gpu-capacity-status-gated',
+      elementLayout: [...SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT],
+      elementStrideFloats: SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
+      elementRows: new Float32Array(),
+      elements: [],
+      forceCouplingStatus: residentAuthority
+        ? 'gpu-resident-pressure-interface-consumer-ready'
+        : 'blocked-resident-pressure-interface-authority-required',
+      surfaces: [],
+      queueCompletionStatus: candidateField.queueCompletionStatus,
+      queueCompletionMethod: candidateField.queueCompletionMethod,
+      commandEncoderOwnership: candidateField.commandEncoderOwnership,
+      submissionOwnership: candidateField.submissionOwnership,
+      queueSubmitPerformed: candidateField.queueSubmitPerformed,
+      mapPerformed: false,
+      readbackPerformed: false,
+      normalDerivation: 'gpu-resident-field-cell-crossing-candidates',
+      surfaceAreaDerivation: 'gpu-resident-fixed-cell-face-area',
+      physicsStage: 'material-interface-extraction',
+      pressureInterfaceProducer: true,
+      gpuAuthoritativeState: true,
+      gpuResidentMaterialInterfaceSummary: true,
+      gpuResidentMaterialInterfaceSummaryPending: true,
+      gpuResidentInterfaceCandidates: true,
+      candidateRowsBuffer: candidateField.candidateRowsBuffer,
+      candidateRowsBufferRetained: candidateField.candidateRowsBufferRetained,
+      candidateRowsBufferOwned: candidateField.candidateRowsBufferOwned,
+      candidateRowsBufferByteLength: candidateField.candidateRowsBufferByteLength,
+      compactMetadataBuffer: candidateField.compactMetadataBuffer,
+      compactMetadataBufferRetained: candidateField.compactMetadataBufferRetained,
+      compactMetadataBufferOwned: candidateField.compactMetadataBufferOwned,
+      compactMetadataBufferByteLength: candidateField.compactMetadataBufferByteLength,
+      compactMetadataLayout: candidateField.compactMetadataLayout,
+      compactMetadataFailClosePolicy: candidateField.compactMetadataFailClosePolicy,
+      candidateDispatchIndirectBuffer: candidateField.candidateDispatchIndirectBuffer,
+      candidateDispatchIndirectBufferRetained:
+        candidateField.candidateDispatchIndirectBufferRetained,
+      candidateDispatchIndirectBufferOwned:
+        candidateField.candidateDispatchIndirectBufferOwned,
+      candidateDispatchIndirectBufferByteLength:
+        candidateField.candidateDispatchIndirectBufferByteLength,
+      candidateDispatchIndirectOffsetBytes:
+        candidateField.candidateDispatchIndirectOffsetBytes,
+      candidateDispatchIndirectLayout:
+        candidateField.candidateDispatchIndirectLayout,
+      candidateDispatchIndirectWorkgroupSize:
+        candidateField.candidateDispatchIndirectWorkgroupSize,
+      candidateDispatchAuthority: candidateField.candidateDispatchAuthority,
+      interfaceSourceKeySchema: candidateField.interfaceSourceKeySchema,
+      interfaceSourceKeyStatus: candidateField.interfaceSourceKeyStatus,
+      interfaceSourceKeyReason: candidateField.interfaceSourceKeyReason,
+      interfaceSourceKeyRows: new Float32Array(),
+      interfaceSourceKeyReadback: false,
+      interfaceSourceKeyRowCount: candidateField.interfaceSourceKeyRowCount,
+      interfaceSourceKeyReadyCount: null,
+      interfaceSourceKeyStrideFloats: candidateField.interfaceSourceKeyStrideFloats,
+      interfaceSourceKeyRowByteLength: candidateField.interfaceSourceKeyRowByteLength,
+      interfaceSourceKeyBufferRetained: candidateField.interfaceSourceKeyBufferRetained,
+      interfaceSourceKeyBufferOwned: candidateField.interfaceSourceKeyBufferOwned,
+      interfaceSourceKeyBufferByteLength: candidateField.interfaceSourceKeyBufferByteLength,
+      interfaceSourceKeySurfaceIndexFallbackEnabled: false,
+      interfaceSourceKeyBuffer: candidateField.interfaceSourceKeyBuffer,
+      sourceDeviceId: candidateField.sourceDeviceId,
+      residentAuthority: candidateField.residentAuthority,
+      residentAuthorityStatus: candidateField.residentAuthorityStatus,
+      gpuFailCloseStatusSource:
+        'compact-metadata-active-count-overflow-capacity-plus-resident-neighborhood-header',
+      cleanupSubmittedWork: candidateField.cleanupSubmittedWork,
+      destroyMaterialInterfaceFieldBuffers: candidateField.destroyMaterialInterfaceCandidateFieldBuffers,
+      destroyMaterialInterfaceCandidateFieldBuffers: candidateField.destroyMaterialInterfaceCandidateFieldBuffers,
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+    return result;
   }
   const normalizedReadbackCandidateMode =
     normalizedCandidateReadbackMode === MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE
@@ -6099,6 +6580,15 @@ export async function buildSphRenderFieldWebGpu({
   const fieldRowByteLength = surfaceTable.totalFieldCells
     * SPH_GPU_RENDER_FIELD_CELL_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
+  const fieldRowsBufferBindingByteLength = runtimeArrayStorageBindingByteLength(
+    fieldRowByteLength,
+    STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES
+  );
+  const surfaceBufferPayloadByteLength = surfaceTable.records.byteLength;
+  const surfaceBufferBindingByteLength = runtimeArrayStorageBindingByteLength(
+    surfaceBufferPayloadByteLength,
+    STORAGE_VEC4_RUNTIME_ARRAY_STRIDE_BYTES
+  );
   const targetFieldRowsByteLength = targetFieldRowsBuffer
     ? Math.max(0, Math.round(finiteNumber(
       targetFieldRowsBufferByteLength
@@ -6108,9 +6598,12 @@ export async function buildSphRenderFieldWebGpu({
       0
     )))
     : 0;
-  if (targetFieldRowsBuffer && targetFieldRowsByteLength < fieldRowByteLength) {
+  if (
+    targetFieldRowsBuffer
+    && targetFieldRowsByteLength < fieldRowsBufferBindingByteLength
+  ) {
     throw new RangeError(
-      `targetFieldRowsBuffer is too small (${targetFieldRowsByteLength}) for render field (${fieldRowByteLength})`
+      `targetFieldRowsBuffer is too small (${targetFieldRowsByteLength}) for render field binding (${fieldRowsBufferBindingByteLength})`
     );
   }
   const fieldRowsBufferBorrowed = Boolean(targetFieldRowsBuffer);
@@ -6295,14 +6788,22 @@ export async function buildSphRenderFieldWebGpu({
       renderFieldLeaseIds.push(lease.leaseId);
     }
   };
-  const fieldRowsResourceKey = `render-field:field-rows:${surfaceTable.totalFieldCells}:${fieldRowByteLength}`;
-  const surfaceTableResourceKey = `render-field:surface-table:${surfaceTable.surfaceCount}:${surfaceTable.records.byteLength}`;
+  const retainedFieldRowsBufferByteLength = Math.max(
+    fieldRowsBufferBindingByteLength,
+    Number(fieldRowsBuffer.size) || 0
+  );
+  const retainedSurfaceBufferByteLength = Math.max(
+    surfaceBufferBindingByteLength,
+    Number(surfaceBuffer.size) || 0
+  );
+  const fieldRowsResourceKey = `render-field:field-rows:${surfaceTable.totalFieldCells}:${retainedFieldRowsBufferByteLength}`;
+  const surfaceTableResourceKey = `render-field:surface-table:${surfaceTable.surfaceCount}:${retainedSurfaceBufferByteLength}`;
   if (retainFieldRowsBuffer) {
     registerRetainedRenderFieldBuffer({
       resourceKey: fieldRowsResourceKey,
       resourceKind: 'render-field-rows-buffer',
       buffer: fieldRowsBuffer,
-      byteLength: fieldRowByteLength,
+      byteLength: retainedFieldRowsBufferByteLength,
       rowCount: surfaceTable.totalFieldCells,
       expectedConsumers: ['material-interface-extraction', 'surface-vertex-extraction']
     });
@@ -6312,7 +6813,7 @@ export async function buildSphRenderFieldWebGpu({
       resourceKey: surfaceTableResourceKey,
       resourceKind: 'render-field-surface-table-buffer',
       buffer: surfaceBuffer,
-      byteLength: surfaceTable.records.byteLength,
+      byteLength: retainedSurfaceBufferByteLength,
       rowCount: surfaceTable.surfaceCount,
       expectedConsumers: ['surface-vertex-extraction', 'surface-draw-metadata']
     });
@@ -6355,12 +6856,18 @@ export async function buildSphRenderFieldWebGpu({
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
     fieldRowsBufferRetained: Boolean(retainFieldRowsBuffer),
-    fieldRowsBufferByteLength: retainFieldRowsBuffer ? fieldRowByteLength : 0,
+    fieldRowsBufferByteLength: retainFieldRowsBuffer
+      ? retainedFieldRowsBufferByteLength
+      : 0,
+    fieldRowsBufferPayloadByteLength: retainFieldRowsBuffer ? fieldRowByteLength : 0,
     fieldRowsBufferBorrowed,
     fieldRowsBufferReused: fieldRowsBufferBorrowed,
     fieldRowsBufferOwnedByResult: !fieldRowsBufferBorrowed,
     surfaceBufferRetained: Boolean(retainSurfaceBuffer),
-    surfaceBufferByteLength: retainSurfaceBuffer ? surfaceTable.records.byteLength : 0,
+    surfaceBufferByteLength: retainSurfaceBuffer ? retainedSurfaceBufferByteLength : 0,
+    surfaceBufferPayloadByteLength: retainSurfaceBuffer
+      ? surfaceBufferPayloadByteLength
+      : 0,
     residentBufferLeaseLedger: renderFieldLeaseLedger,
     residentBufferLeaseSummary: summarizeResidentBufferLeaseLedger(renderFieldLeaseLedger),
     residentBufferLeaseLedgerStatus: renderFieldLeaseLedger.status,
@@ -6464,11 +6971,14 @@ export async function buildSphMaterialInterfaceSourceFieldWebGpu({
     surfaceBuffer: sourceRenderField.surfaceBuffer || null,
     fieldRowsBufferRetained: Boolean(sourceRenderField.fieldRowsBufferRetained),
     fieldRowsBufferByteLength: sourceRenderField.fieldRowsBufferByteLength ?? 0,
+    fieldRowsBufferPayloadByteLength:
+      sourceRenderField.fieldRowsBufferPayloadByteLength ?? 0,
     fieldRowsBufferBorrowed: Boolean(sourceRenderField.fieldRowsBufferBorrowed),
     fieldRowsBufferReused: Boolean(sourceRenderField.fieldRowsBufferReused),
     fieldRowsBufferOwnedByResult: sourceRenderField.fieldRowsBufferOwnedByResult ?? null,
     surfaceBufferRetained: Boolean(sourceRenderField.surfaceBufferRetained),
     surfaceBufferByteLength: sourceRenderField.surfaceBufferByteLength ?? 0,
+    surfaceBufferPayloadByteLength: sourceRenderField.surfaceBufferPayloadByteLength ?? 0,
     readbackMode: sourceRenderField.readbackMode ?? null,
     queueCompletionStatus: sourceRenderField.queueCompletionStatus ?? null,
     queueCompletionMethod: sourceRenderField.queueCompletionMethod ?? null,

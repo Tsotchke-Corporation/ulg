@@ -18,9 +18,74 @@ import {
   createSchroederCrossLevelGridCouplingPlan,
   decodeSchroederCrossLevelGridConservationSummaryRow,
   prolongGridRowsCpuOracle,
+  runSchroederTwoLevelMechanicsStepWebGpu,
   restrictGridRowsCpuOracle,
   summarizeGridConservationCpuOracle
 } from '../src/runtime/sph/schroederCrossLevelCouplingGpu.js';
+
+function fakeEncoderStageDevice() {
+  const submissions = [];
+  const passes = [];
+  const device = {
+    submissions,
+    passes,
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        buffer.lastWrite = { offset, byteLength: data.byteLength };
+      },
+      submit(commands) {
+        submissions.push(commands);
+      },
+      async onSubmittedWorkDone() {}
+    },
+    createBuffer({ label, size, usage }) {
+      return {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        destroy() { this.destroyed = true; }
+      };
+    },
+    createShaderModule({ code }) { return { code }; },
+    createComputePipeline({ compute }) {
+      return {
+        compute,
+        getBindGroupLayout() { return { entryPoint: compute.entryPoint }; }
+      };
+    },
+    createBindGroup({ layout, entries }) { return { layout, entries }; },
+    createCommandEncoder() {
+      const encoder = {
+        beginComputePass() {
+          const record = {};
+          passes.push(record);
+          return {
+            setPipeline(pipeline) { record.pipeline = pipeline; },
+            setBindGroup(index, bindGroup) { record.bindGroup = { index, bindGroup }; },
+            dispatchWorkgroups(...workgroups) { record.workgroups = workgroups; },
+            dispatchWorkgroupsIndirect(buffer, offset) {
+              record.indirect = { buffer, offset };
+            },
+            end() { record.ended = true; }
+          };
+        },
+        copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+          recordCopy(source, sourceOffset, destination, destinationOffset, size);
+        },
+        clearBuffer() {},
+        finish() { return { passCount: passes.length }; }
+      };
+      return encoder;
+    }
+  };
+  const copies = [];
+  const recordCopy = (source, sourceOffset, destination, destinationOffset, size) => {
+    copies.push({ source, sourceOffset, destination, destinationOffset, size });
+  };
+  device.copies = copies;
+  return device;
+}
 
 function seededRandom(seed) {
   let state = seed >>> 0;
@@ -337,4 +402,134 @@ test('cross-level grid coupling WGSL kernels declare the shared params and entry
   assert.match(schroederCrossLevelGridProlongationWgsl, /var<storage, read> coarse_grid/);
   assert.match(schroederCrossLevelGridProlongationWgsl, /var<storage, read_write> fine_grid/);
   assert.match(schroederCrossLevelGridConservationSummaryWgsl, /var<storage, read_write> summary_row/);
+});
+
+test('two-level authority stages share one caller-owned encoder and one submit', async () => {
+  const device = fakeEncoderStageDevice();
+  const encoder = device.createCommandEncoder();
+  const state = new Float32Array([1, 1, 1, 1, 0, 0, 0, 1]);
+  const thermo = new Float32Array(12);
+  const mechanics = new Float32Array(32);
+  mechanics[0] = 1;
+  mechanics[4] = 1;
+  mechanics[8] = 1;
+  mechanics[18] = 1;
+  mechanics[19] = 0.001;
+  const sphParticleState = {
+    particleCount: 1,
+    smoothingLengthM: 0.5,
+    step: 0,
+    time: 0,
+    state,
+    thermo
+  };
+  const mlsMpmParticleState = {
+    particleCount: 1,
+    mechanicsDtS: 1e-4,
+    step: 0,
+    time: 0,
+    mechanics
+  };
+  const seenEncoders = [];
+  const p2gRunner = async ({ commandEncoder }) => {
+    seenEncoders.push(commandEncoder);
+    const gridBuffer = device.createBuffer({ label: 'stub-p2g-grid', size: 2048, usage: 128 });
+    return {
+      backend: 'webgpu',
+      gridNodeCount: 64,
+      gridSpacingM: 0.5,
+      gridBuffer,
+      queueSubmitPerformed: false,
+      cleanupSubmittedWork() {},
+      destroyGridBuffer() { gridBuffer.destroy(); }
+    };
+  };
+  const gridUpdateRunner = async ({ commandEncoder, p2gGridProjection }) => {
+    seenEncoders.push(commandEncoder);
+    const updatedGridBuffer = device.createBuffer({
+      label: 'stub-updated-grid',
+      size: 2048,
+      usage: 128
+    });
+    return {
+      backend: 'webgpu',
+      gridNodeCount: p2gGridProjection.gridNodeCount,
+      gridSpacingM: p2gGridProjection.gridSpacingM,
+      updatedGridBuffer,
+      queueSubmitPerformed: false,
+      cleanupSubmittedWork() {},
+      destroyUpdatedGridBuffer() { updatedGridBuffer.destroy(); }
+    };
+  };
+  const g2pRunner = async ({ commandEncoder }) => {
+    seenEncoders.push(commandEncoder);
+    const stateBuffer = device.createBuffer({ label: 'stub-g2p-state', size: 32, usage: 128 });
+    const mechanicsBuffer = device.createBuffer({
+      label: 'stub-g2p-mechanics',
+      size: 128,
+      usage: 128
+    });
+    return {
+      backend: 'webgpu',
+      stateBuffer,
+      mechanicsBuffer,
+      queueSubmitPerformed: false,
+      cleanupSubmittedWork() {}
+    };
+  };
+
+  const result = await runSchroederTwoLevelMechanicsStepWebGpu({
+    device,
+    commandEncoder: encoder,
+    authoritySequenceStagePrefix: ['sparse-hierarchy-compaction'],
+    sphParticleState,
+    mlsMpmParticleState,
+    levelAssignment: { assignments: new Float32Array(16) },
+    fineLevel: 0,
+    baseGridSpacingM: 0.5,
+    boxDimsM: [2, 2, 2],
+    dt: 1e-4,
+    gravityMPerS2: [0, 0, 0],
+    gridSpecFactory: () => ({ gridDims: [4, 4, 4], shift: 1 }),
+    p2gRunner,
+    gridUpdateRunner,
+    g2pRunner
+  });
+
+  assert.equal(device.submissions.length, 0);
+  assert.ok(seenEncoders.length >= 6);
+  assert.ok(seenEncoders.every((value) => value === encoder));
+  assert.equal(result.authoritySequence.commandEncoderOwnership, 'caller');
+  assert.equal(result.authoritySequence.commandSubmissionCount, 0);
+  assert.deepEqual(result.authoritySequence.stageList, [
+    'sparse-hierarchy-compaction',
+    'fine-sparse-grid-view-build',
+    'fine-compact-p2g',
+    'coarse-sparse-grid-view-build',
+    'coarse-compact-p2g',
+    'cross-level-grid-restriction',
+    'coarse-pre-update-grid-copy',
+    'coarse-compact-grid-update',
+    'fine-compact-grid-update-0',
+    'cross-level-velocity-delta-transfer-0',
+    'fine-compact-g2p-0',
+    'coarse-compact-g2p',
+    'cross-level-retained-conservation-evidence'
+  ]);
+  assert.equal(result.authoritySequence.normalPathMapCount, 0);
+  assert.equal(result.authoritySequence.normalPathReadbackBytes, 0);
+  assert.equal(result.authoritySequence.conservationEvidenceRetained, true);
+
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  result.markAuthoritySequenceSubmitted();
+  assert.equal(device.submissions.length, 1);
+  assert.equal(result.authoritySequence.commandSubmissionCount, 1);
+  assert.equal(
+    result.authoritySequence.status,
+    'schroeder-two-level-authority-sequence-completed'
+  );
+  result.cleanupSubmittedWork();
+  result.destroyOutputParticleBuffers();
+  result.destroyConservationEvidenceBuffer();
 });

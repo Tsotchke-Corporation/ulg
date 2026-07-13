@@ -856,3 +856,35 @@ test('native WebGPU resident refresh reuses the engine-owned consumer device', (
     'transient requestAdapter null results should not poison the cached resident WebGPU device'
   );
 });
+
+test('native WebGPU probe retains generation ownership and fence diagnostics', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const fields = [
+    'renderBridgeNativeSurfaceResourceGeneration',
+    'renderBridgeNativeSurfaceRetiredGenerationCount',
+    'renderBridgeNativeSurfaceConsumerSubmitFencePending',
+    'renderBridgeNativeSurfaceConsumerSubmitFenceFailed',
+    'renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget',
+    'renderBridgeAdditionalSurfaceAttachStatus',
+    'renderBridgeAdditionalSurfaceDrawCount'
+  ];
+
+  for (const field of fields) {
+    assert.match(probeSource, new RegExp(`${field}:`));
+  }
+});
+
+test('native WebGPU refresh entry points quarantine a failed surface bridge', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /async function refreshSphResidentSurfaceDrawFromExtension[\s\S]*?nativeBridgeFailure = nativeSurfaceBridgeFailureReason\(previousResidentRenderBridge\)[\s\S]*?resident extension surface refresh blocked/,
+    'direct extension refresh must not replace a failed native bridge'
+  );
+  assert.match(
+    sceneSource,
+    /async function refreshSphResidentRenderState[\s\S]*?nativeBridgeFailure = nativeSurfaceBridgeFailureReason\([\s\S]*?resident render refresh blocked/,
+    'resident render refresh must not bypass a failed native bridge'
+  );
+});

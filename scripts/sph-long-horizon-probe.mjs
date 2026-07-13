@@ -3,6 +3,9 @@ import { access, lstat, mkdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { chromium } from '@playwright/test';
+import {
+  nativeSurfaceVisualIntervalExtractionEnabled
+} from '../src/visualization/nativeSurfaceResourceLifecycle.js';
 
 const DEFAULT_URL = '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0';
 const DEFAULT_WALL_TEMPERATURE_K = 283.15;
@@ -1326,10 +1329,16 @@ async function runBrowserProbe({
   nativeSurfaceDebugMode = 'none',
   nativeSurfaceValidationWaitMs = 0,
   captureFrames,
+  visualIntervalCaptureRequested = captureFrames,
   captureFrameEvery,
   captureFrameMax,
   initialResidentWaitMs
 }) {
+  const nativeSurfaceExtractionAtVisualIntervals =
+    nativeSurfaceVisualIntervalExtractionEnabled({
+      surfaceDrawMode: surfaceDrawDiagnosticMode,
+      captureFrames: visualIntervalCaptureRequested
+    });
   const browser = await launchProbeBrowser();
   const page = await newProbePage(browser);
   const preProbeSnapshots = [];
@@ -1458,6 +1467,9 @@ async function runBrowserProbe({
 	      nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
 	      nativeSurfaceValidationWaitMs: requestedNativeSurfaceValidationWaitMs,
 	      captureFrames: requestedCaptureFrames,
+      visualIntervalCaptureRequested: requestedVisualIntervalCaptureRequested,
+      nativeSurfaceExtractionAtVisualIntervals:
+        requestedNativeSurfaceExtractionAtVisualIntervals,
       captureFrameEvery: requestedCaptureFrameEvery,
       captureFrameMax: requestedCaptureFrameMax,
       preProbeSnapshots: requestedPreProbeSnapshots,
@@ -2262,6 +2274,13 @@ async function runBrowserProbe({
         if (String(phase || '').includes('error') || String(phase || '').includes('anomaly')) return true;
         return batchIndex % requestedCaptureFrameEvery === 0;
       };
+      const shouldExtractNativeSurface = (batchIndex, phase) => Boolean(
+        batchIndex === requestedBatches
+        || (
+          requestedNativeSurfaceExtractionAtVisualIntervals
+          && shouldCaptureFrame(batchIndex, phase)
+        )
+      );
       const captureFrame = async (batchIndex, phase, sampleIndex) => {
         if (!shouldCaptureFrame(batchIndex, phase)) return;
         const canvases = Array.from(document.querySelectorAll('canvas'));
@@ -4040,8 +4059,32 @@ async function runBrowserProbe({
               surfaceDraw.renderBridgeLastNativeSurfaceConsumerRafReason ?? null,
             renderBridgeLastNativeSurfaceConsumerRafScheduleReason:
               surfaceDraw.renderBridgeLastNativeSurfaceConsumerRafScheduleReason ?? null,
-            renderBridgeNativeSurfaceConsumerRafBlockedReason:
-              surfaceDraw.renderBridgeNativeSurfaceConsumerRafBlockedReason ?? null,
+	            renderBridgeNativeSurfaceConsumerRafBlockedReason:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerRafBlockedReason ?? null,
+	            renderBridgeNativeSurfaceConsumerSubmitFencePending:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFencePending ?? null,
+	            renderBridgeNativeSurfaceConsumerSubmitFenceSerial:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceSerial ?? null,
+	            renderBridgeNativeSurfaceConsumerSubmitFenceReason:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceReason ?? null,
+	            renderBridgeNativeSurfaceConsumerSubmitFenceElapsedMs:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceElapsedMs ?? null,
+	            renderBridgeNativeSurfaceConsumerSubmitFenceTimedOut:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceTimedOut ?? null,
+	            renderBridgeNativeSurfaceConsumerSubmitFenceFailed:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceFailed ?? null,
+	            renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget:
+	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget ?? null,
+	            renderBridgeNativeSurfaceResourceGeneration:
+	              surfaceDraw.renderBridgeNativeSurfaceResourceGeneration ?? null,
+	            renderBridgeNativeSurfaceRetiredGenerationCount:
+	              surfaceDraw.renderBridgeNativeSurfaceRetiredGenerationCount ?? null,
+	            renderBridgeAdditionalSurfaceAttachStatus:
+	              surfaceDraw.renderBridgeAdditionalSurfaceAttachStatus ?? null,
+	            renderBridgeAdditionalSurfaceAttachReason:
+	              surfaceDraw.renderBridgeAdditionalSurfaceAttachReason ?? null,
+	            renderBridgeAdditionalSurfaceDrawCount:
+	              surfaceDraw.renderBridgeAdditionalSurfaceDrawCount ?? null,
             renderBridgeCanvasWidth: surfaceDraw.renderBridgeCanvasWidth ?? null,
             renderBridgeCanvasHeight: surfaceDraw.renderBridgeCanvasHeight ?? null,
             renderBridgeCanvasCssWidth: surfaceDraw.renderBridgeCanvasCssWidth ?? null,
@@ -4553,7 +4596,10 @@ async function runBrowserProbe({
               surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
               surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
               gasPressureSummary: overlay.__sphResidentGasPressureSummary || null,
-              allowNativeSurfaceExtraction: batchIndex === requestedBatches
+              allowNativeSurfaceExtraction: shouldExtractNativeSurface(
+                batchIndex,
+                'resident-batch'
+              )
             });
             probeResidentBatchTiming.renderRefreshAwaitMs =
               performance.now() - renderRefreshAwaitStartedAtMs;
@@ -4662,7 +4708,10 @@ async function runBrowserProbe({
               surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
               surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
               gasPressureSummary: overlay.__sphResidentGasPressureSummary || null,
-              allowNativeSurfaceExtraction: batchIndex === requestedBatches
+              allowNativeSurfaceExtraction: shouldExtractNativeSurface(
+                batchIndex,
+                'resident-batch-anomaly'
+              )
             });
             if (requestedResidentBufferDebug && sceneApi.debugSphResidentParticleUpload) {
               overlay.__sphResidentParticleUploadDebug = await sceneApi.debugSphResidentParticleUpload({
@@ -4744,6 +4793,9 @@ async function runBrowserProbe({
         pageConsole: requestedPageConsole || [],
         visualFrameCapture: {
           enabled: Boolean(requestedCaptureFrames),
+          visualIntervalCaptureRequested: Boolean(requestedVisualIntervalCaptureRequested),
+          nativeSurfaceExtractionAtVisualIntervals:
+            Boolean(requestedNativeSurfaceExtractionAtVisualIntervals),
           frameEveryBatches: requestedCaptureFrameEvery,
           maxFrames: requestedCaptureFrameMax,
           frameCount: visualFrames.length,
@@ -4784,6 +4836,8 @@ async function runBrowserProbe({
       nativeSurfaceDebugMode,
       nativeSurfaceValidationWaitMs,
       captureFrames,
+      visualIntervalCaptureRequested,
+      nativeSurfaceExtractionAtVisualIntervals,
       captureFrameEvery,
       captureFrameMax,
       preProbeSnapshots,
@@ -8509,10 +8563,14 @@ async function main() {
     : null;
   const nativeSurfaceFrameValidationRequired =
     surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer';
-  const captureFrames = probeMode !== 'direct-resident'
+  const visualIntervalCaptureRequested = probeMode !== 'direct-resident'
     && (
       process.env.ULG_PROBE_CAPTURE_FRAMES === '1'
       || Boolean(frameDir)
+    );
+  const captureFrames = probeMode !== 'direct-resident'
+    && (
+      visualIntervalCaptureRequested
       || nativeSurfaceFrameValidationRequired
     );
   const captureFrameEvery = positiveInteger(process.env.ULG_PROBE_FRAME_EVERY, 1);
@@ -8653,6 +8711,7 @@ async function main() {
       nativeSurfaceDebugMode,
 	        nativeSurfaceValidationWaitMs,
 	        captureFrames,
+        visualIntervalCaptureRequested,
         captureFrameEvery,
         captureFrameMax,
         initialResidentWaitMs

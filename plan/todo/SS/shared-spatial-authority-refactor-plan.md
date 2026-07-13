@@ -84,7 +84,17 @@ spatialEpochCount == physicsIntegrationStepCount
 privateLawSpatialBuildCount == 0
 ```
 
-## Canonical `ss-spatial-epoch.v1` Data
+## Canonical Spatial-Epoch Data Target
+
+The bullets below are the evolved target contract. Slice 2 implements the
+directory-foundation subset as `ss-spatial-epoch.v1`: its 48-word GPU header
+contains source/cell counts, identity epochs, logical live words, physical
+address bounds, retained directory capacity, completion/overflow evidence,
+dispatch, and cleared-word evidence. Active-node/level/chart aggregate counts,
+per-arena allocation budgets, timestamps, submissions, maps, and readbacks
+remain runtime/verification telemetry until a later ABI version or explicitly
+versioned auxiliary evidence row adds them. They must not be inferred from a
+v1 header field.
 
 ### Identity and evidence header
 
@@ -318,12 +328,16 @@ CPU tree or a second solver authority.
 - No reaction/contact/thermal/private law build when the shared generation is
   admitted.
 - No production `N^2` fallback or fixed `N * candidateBudget` arena.
-- No per-step buffer allocation after warmup.
+- No per-step `GPUBuffer` allocation after warmup; separately budget and bound
+  host-side control-object allocation/caches before per-substep integration.
 - Base retained bytes scale as `O(N + occupiedCells + hierarchyNodes)`; optional
   exact views scale with deliberately materialized interactions.
 - Zero full particle readback and zero JavaScript hot-state reupload.
 - GPU timestamp p50/p95 for key emission, sort, unique, view build, traversal,
   and every migrated law; host enqueue time is not GPU performance evidence.
+- Dispatch-granular timestamp mode is instrumented/nonrepresentative because it
+  splits grouped production passes. Performance acceptance requires coarse
+  spans that preserve the grouped production command structure.
 - Track build count, sort passes, cells/nodes, candidate visits, consumer-mask
   hits, required/admitted/capacity/overflow bytes, clears, allocations,
   submissions, fences, maps, and readbacks.
@@ -377,8 +391,10 @@ production-incomplete consumer claims.
 
 ## Active Checkpoint
 
-- [x] Verified recovery checkpoint preserved.
+- [x] Verified recovery checkpoint preserved (`bdd3eee`).
 - [x] Dedicated branch and linked worktree created.
-- [x] Active/moot/done planning routes committed.
-- [ ] Working GPU cell-directory foundation and native probe green.
-- [ ] First production exact-near consumer migrated and old lookup removed.
+- [x] Active/moot/done planning routes committed (`0131601`).
+- [x] Generic GPU radix/scan/unique primitive committed (`9eb0d6b`).
+- [x] Working GPU cell-directory foundation and native probe green.
+- [ ] First same-epoch pre-integration production consumer migrated and old
+  lookup removed.

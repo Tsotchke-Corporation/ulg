@@ -3,25 +3,42 @@
 ## Current Focus - 2026-07-13 AKDT
 
 Branch `ss-spatial-authority-refactor` starts at verified recovery checkpoint
-`bdd3eee`. Active work is Slice 2 of
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md`: a standalone,
+`bdd3eee`. Slice 2 of
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md` now has a standalone,
 caller-owned GPU spatial epoch that emits one particle membership key, builds a
 compact unique cell directory/CSR, publishes reverse particle-to-cell mapping
-and fail-closed capacity evidence, and changes no production consumer yet.
+and fail-closed capacity evidence, and changes no production consumer. Current
+work moves to Slice 3 only after the Slice 2 commit and ICC durability gates.
 
-Last green is the exact recovery checkpoint: full tests and build passed,
-native refraction science was 52/52, and the sodium-water native sequence
-advanced through step 640 with water displacement, visible products, opaque
-PBR refraction, current surface generations, and no browser/resident errors.
+Slice 2 is now executable and native-green. The v1 GPU header carries device,
+lane, lease, source-family/storage, tick/substep, and membership epochs. A
+caller-owned runtime emits exact keys, runs persistent variable-count radix/
+scan/unique, and assembles stable cell CSR plus `particleToCell` into two
+complete fence-safe arenas. It never creates an encoder, submits, maps, or
+claims host completion. Focused ABI/lifecycle and primitive tests pass 28/28.
+The native Vulkan WebGPU probe passes 35/35: bounded one-word and exact five-word paths
+produce identical keys/CSR, while invalid rows and atlas/cell overflow publish
+zero consumer dispatch. It also proves exact rejection of a near-integral
+source identity, a 4,097-row multilevel scan with forced 2-D dispatch, fenced
+same-arena reuse at 513 rows, and an admitted empty epoch, with no validation,
+compilation, or uncaptured errors.
+The complete regression suite is green at 1,079 passed / 3 intentional opt-in
+skips / 0 failed, and the production build passes (143 modules; existing large
+chunk warning only).
 
-The caller-owned GPU radix/scan/unique primitive is now isolated on this branch:
-its 16 focused plan/encoding/residency tests pass, and its result explicitly
-publishes the per-sorted-row unique group index needed for reverse
-`particleToCell` assembly without another scan.
+The caller-owned GPU radix/scan/unique primitive is isolated on this branch:
+its focused plan/encoding/residency tests include bounded variable-count scan
+parameter caching, exact parameter-write/clear telemetry, portable 16-KiB
+workgroup-storage admission, and discard/fence-only retained-slot lifecycle. It
+publishes the exclusive unique-head prefix;
+the directory derives each true group from the next prefix without adding a
+ninth storage binding or another scan.
 
-Next: build the v1 cell directory and native probe. Do not append another descriptor
-chain to `schroederHierarchyGpu.js`, migrate a post-G2P law against stale
-positions, or port the abandoned neighborhood scheduler/candidate CSR.
+Next: migrate one same-epoch pre-integration consumer (pressure/contact broad
+phase or mechanics node activation) and remove its old lookup in the same
+slice. Do not append another descriptor chain to
+`schroederHierarchyGpu.js`, migrate a post-G2P law against stale positions, or
+port the abandoned neighborhood scheduler/candidate CSR.
 
 Updated: 2026-06-20 native marching-cubes vertex-row budget, GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 

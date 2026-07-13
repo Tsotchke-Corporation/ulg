@@ -310,7 +310,8 @@ Landed checkpoints:
     unvalidated, and the scene pressure refresh injects promoted SS imports
     into next-frame same-level pressure feedback.
 
-Next implementation queue:
+Historical implementation queue (superseded 2026-07-13 by
+`shared-spatial-authority-refactor-plan.md`):
 
 1. Continue Slice 7 by adding a worker-owned retained gas-cell import/admission
    path for dedicated mounted worker lanes. Keep the boundary descriptor-only
@@ -320,3 +321,13 @@ Next implementation queue:
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary
    adapters behind explicit law admissibility, compact diagnostics, and
    StateManager admission.
+
+Current implementation queue:
+
+1. Continue Slice 3 of `shared-spatial-authority-refactor-plan.md`: migrate one
+   same-epoch, pre-integration pressure/contact or mechanics consumer to the
+   verified GPU spatial epoch directory.
+2. Preserve the standalone Slice 2 directory as the fail-closed authority;
+   do not add a parallel per-law spatial lookup or a CPU hot-path bridge.
+3. Measure removed lookup work and end-to-end timing before claiming a
+   production performance improvement.

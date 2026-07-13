@@ -15,6 +15,7 @@
     "bench:sph-performance": "node scripts/sph-performance-benchmark.mjs",
     "probe:sph-long-horizon": "node scripts/sph-long-horizon-probe.mjs",
     "probe:sph-visual-matrix": "node scripts/sph-visual-sanity-matrix.mjs",
+    "probe:schroeder-spatial-epoch": "node scripts/schroeder-spatial-epoch-probe.mjs",
     "test:sph-standard-visual": "ULG_VISUAL_MATRIX_STANDARD=1 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_PROBE_CHROMIUM_ARGS='--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer' node scripts/sph-visual-sanity-matrix.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:e2e": "playwright test --config tests/playwright.config.mjs",

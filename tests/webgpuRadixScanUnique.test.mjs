@@ -7,6 +7,8 @@ import {
   createWebGpuU32ExclusiveScan,
   createWebGpuU32ScanPlan,
   WEBGPU_RADIX_RETAINED_PARAMS_SLOT_COUNT_DEFAULT,
+  WEBGPU_RADIX_SCATTER_WORKGROUP_STORAGE_BYTES,
+  WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT,
   webGpuDispatchShapeId,
   webGpuStableRadixWgsl,
   webGpuU32ExclusiveScanWgsl,
@@ -171,7 +173,7 @@ test('300k five-word radix topology fuses bounded scan tops to 168 ordered dispa
     )).length,
     1
   );
-  runtime.releaseTransientBuffers(result);
+  runtime.releaseExecution(result, { discardedEncoder: true });
   runtime.destroy();
 });
 
@@ -255,6 +257,7 @@ test('scan and radix shaders use parallel portable workgroups without serial pre
   assert.match(webGpuU32ExclusiveScanWgsl, /fn scan_top_and_add_lower/);
   assert.match(webGpuU32ExclusiveScanWgsl, /lower_index = lower_index \+ 256u/);
   assert.match(webGpuStableRadixWgsl, /var<workgroup> digit_prefix: array<vec4<u32>, 1024>/);
+  assert.equal(WEBGPU_RADIX_SCATTER_WORKGROUP_STORAGE_BYTES, 16 * 1024);
   assert.match(webGpuStableRadixWgsl, /linear_group < radix_params\.workgroup_count/);
   assert.match(webGpuStableRadixWgsl, /for \(var offset = 1u; offset < 256u;/);
   assert.doesNotMatch(webGpuStableRadixWgsl, /@workgroup_size\(1\)[\s\S]*prefix/i);
@@ -283,6 +286,9 @@ test('radix sort and unique encode a no-readback GPU CSR with indirect dispatch'
 
   assert.equal(result.status, 'webgpu-stable-radix-sort-unique-csr-encoded');
   assert.equal(result.radixPassCount, 40);
+  assert.equal(result.paramsWriteCount, 4);
+  assert.equal(result.clearedWordCount, WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT);
+  assert.equal(WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT, 12);
   assert.equal(result.readbackPerformed, false);
   assert.equal(result.generationId, 9);
   assert.equal(result.uniqueHeadFlagsBuffer.label, 'test-radix-head-flags');
@@ -321,7 +327,7 @@ test('radix sort and unique encode a no-readback GPU CSR with indirect dispatch'
   );
   assert.ok(result.transientBuffers.length > 0);
 
-  runtime.releaseTransientBuffers(result);
+  runtime.releaseExecution(result, { discardedEncoder: true });
   assert.ok(result.transientBuffers.every((buffer) => buffer.destroyed));
   runtime.destroy();
 });
@@ -422,13 +428,12 @@ test('active timestamp profiling preserves radix and unique stage pass attributi
     3
   );
 
-  runtime.releaseTransientBuffers(result);
+  runtime.releaseExecution(result, { discardedEncoder: true });
   runtime.destroy();
 });
 
 test('fixed-count radix scans retain immutable scan params across encodings', () => {
   const device = createFakeDevice();
-  const encoder = createFakeEncoder();
   const keyBuffer = device.createBuffer({ label: 'keys', size: 4096, usage: 128 });
   const runtime = createWebGpuStableRadixScanUnique(device, {
     maxElementCount: 1024,
@@ -441,7 +446,7 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
 
   const writesBeforeFirst = device.writes.length;
   const bindGroupsBeforeFirst = device.bindGroups.length;
-  const first = runtime.encodeSortUnique(encoder, {
+  const first = runtime.encodeSortUnique(createFakeEncoder(), {
     keyBuffer,
     elementCount: 1024,
     keyWordCount: 5,
@@ -453,7 +458,7 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
   const bufferCountAfterFirst = device.buffers.length;
   const writesBeforeSecond = device.writes.length;
   const bindGroupsBeforeSecond = device.bindGroups.length;
-  const second = runtime.encodeSortUnique(encoder, {
+  const second = runtime.encodeSortUnique(createFakeEncoder(), {
     keyBuffer,
     elementCount: 1024,
     keyWordCount: 5,
@@ -474,6 +479,8 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
   assert.equal(second.transientBuffers.length, 0);
   assert.equal(firstWriteCount, 4);
   assert.equal(secondWriteCount, 2);
+  assert.equal(first.paramsWriteCount, 4);
+  assert.equal(second.paramsWriteCount, 2);
   assert.equal(first.paramsBufferCreationCount, 0);
   assert.equal(second.paramsBufferCreationCount, 0);
   assert.equal(first.paramsSlotIndex, 0);
@@ -496,7 +503,7 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
   assert.equal(secondBindGroupCount, firstBindGroupCount - 3);
   assert.equal(second.bindGroupCreationCount, first.bindGroupCreationCount - 3);
   assert.throws(
-    () => runtime.encodeSortUnique(encoder, {
+    () => runtime.encodeSortUnique(createFakeEncoder(), {
       keyBuffer,
       elementCount: 1024,
       keyWordCount: 5,
@@ -507,9 +514,9 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
       && error.slotCapacity === 2
   );
 
-  runtime.releaseTransientBuffers(first);
+  runtime.releaseExecution(first, { discardedEncoder: true });
   const bindGroupsBeforeThird = device.bindGroups.length;
-  const third = runtime.encodeSortUnique(encoder, {
+  const third = runtime.encodeSortUnique(createFakeEncoder(), {
     keyBuffer,
     elementCount: 1024,
     keyWordCount: 5,
@@ -517,17 +524,18 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
     generationId: 3
   });
   assert.equal(third.paramsSlotIndex, 0);
+  assert.equal(third.paramsWriteCount, 2);
   assert.equal(device.bindGroups.length - bindGroupsBeforeThird, 0);
   assert.equal(third.bindGroupCreationCount, 0);
   assert.ok(third.bindGroupReuseCount > 0);
-  runtime.releaseTransientBuffers(third);
+  runtime.releaseExecution(third, { discardedEncoder: true });
 
   const alternateKeyBuffer = device.createBuffer({
     label: 'alternate-keys',
     size: 4096,
     usage: 128
   });
-  const changedResource = runtime.encodeSortUnique(encoder, {
+  const changedResource = runtime.encodeSortUnique(createFakeEncoder(), {
     keyBuffer: alternateKeyBuffer,
     elementCount: 1024,
     keyWordCount: 5,
@@ -537,9 +545,9 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
   assert.equal(changedResource.paramsSlotIndex, 0);
   assert.ok(changedResource.bindGroupCreationCount > 0);
   assert.ok(changedResource.bindGroupReuseCount > 0);
-  runtime.releaseTransientBuffers(changedResource);
+  runtime.releaseExecution(changedResource, { discardedEncoder: true });
   assert.throws(
-    () => runtime.encodeSortUnique(encoder, {
+    () => runtime.encodeSortUnique(createFakeEncoder(), {
       keyBuffer,
       elementCount: 1000,
       keyWordCount: 5,
@@ -549,13 +557,75 @@ test('fixed-count radix scans retain immutable scan params across encodings', ()
     /fixed elementCount 1024/
   );
 
-  runtime.releaseTransientBuffers(second);
+  runtime.releaseExecution(second, { discardedEncoder: true });
   runtime.destroy();
 });
 
-test('variable-count retained scan rewrites params when the active range changes', () => {
+test('variable retained scan rejects same-slot reuse until discard or fence-proven release', async () => {
   const device = createFakeDevice();
-  const encoder = createFakeEncoder();
+  const discardedEncoder = createFakeEncoder();
+  const inputBuffer = device.createBuffer({ label: 'leased-scan-input', size: 4096, usage: 128 });
+  const outputBuffer = device.createBuffer({ label: 'leased-scan-output', size: 4096, usage: 128 });
+  const scan = createWebGpuU32ExclusiveScan(device, {
+    maxElementCount: 1024,
+    label: 'leased-variable-scan',
+    retainParamsBuffer: true,
+    retainedParamsSlotCount: 2
+  });
+
+  const first = scan.encode(discardedEncoder, {
+    inputBuffer,
+    outputBuffer,
+    elementCount: 1024
+  });
+  const writesAfterFirst = device.writes.length;
+  const bindGroupsAfterFirst = device.bindGroups.length;
+  assert.equal(first.retainedParamsSlotIndex, 0);
+  assert.throws(
+    () => scan.encode(discardedEncoder, { inputBuffer, outputBuffer, elementCount: 256 }),
+    (error) => error?.code === 'ERR_WEBGPU_SCAN_PARAMS_SLOT_IN_USE'
+      && error.slotIndex === 0
+      && error.slotCapacity === 2
+  );
+  assert.equal(device.writes.length, writesAfterFirst);
+  assert.equal(device.bindGroups.length, bindGroupsAfterFirst);
+
+  const parallel = scan.encode(discardedEncoder, {
+    inputBuffer,
+    outputBuffer,
+    elementCount: 256,
+    retainedParamsSlotIndex: 1
+  });
+  assert.equal(parallel.retainedParamsSlotIndex, 1);
+  assert.throws(() => scan.releasePrepared(first), /discardedEncoder.*releasePreparedAfter/);
+  assert.equal(scan.releasePrepared(first, { discardedEncoder: true }), true);
+  assert.equal(scan.releasePrepared(first, { discardedEncoder: true }), false);
+  assert.equal(scan.releasePrepared(parallel, { discardedEncoder: true }), true);
+
+  const submittedEncoder = createFakeEncoder();
+  const reused = scan.encode(submittedEncoder, {
+    inputBuffer,
+    outputBuffer,
+    elementCount: 256
+  });
+  assert.equal(reused.retainedParamsSlotIndex, 0);
+  assert.throws(
+    () => scan.releasePreparedAfter(reused, null),
+    /submissionFence must be a thenable/
+  );
+  assert.equal(await scan.releasePreparedAfter(reused, Promise.resolve()), true);
+  const afterFence = scan.encode(createFakeEncoder(), {
+    inputBuffer,
+    outputBuffer,
+    elementCount: 128
+  });
+
+  scan.releasePrepared(afterFence, { discardedEncoder: true });
+  scan.destroy();
+});
+
+test('variable-count retained scan bounds topology caching and reports params writes truthfully', () => {
+  const device = createFakeDevice();
   const inputBuffer = device.createBuffer({ label: 'variable-scan-input', size: 4096, usage: 128 });
   const outputBuffer = device.createBuffer({ label: 'variable-scan-output', size: 4096, usage: 128 });
   const scan = createWebGpuU32ExclusiveScan(device, {
@@ -563,21 +633,178 @@ test('variable-count retained scan rewrites params when the active range changes
     label: 'variable-retained-scan',
     retainParamsBuffer: true
   });
-  const first = scan.encode(encoder, { inputBuffer, outputBuffer, elementCount: 1024 });
+  const encode = (elementCount) => scan.encode(
+    createFakeEncoder(),
+    { inputBuffer, outputBuffer, elementCount }
+  );
+  const first = encode(1024);
   const writesAfterFirst = device.writes.filter(
     ({ buffer }) => buffer.label === 'variable-retained-scan-params-retained'
   ).length;
-  const second = scan.encode(encoder, { inputBuffer, outputBuffer, elementCount: 256 });
+  scan.releasePrepared(first, { discardedEncoder: true });
+  const second = encode(256);
   const writesAfterSecond = device.writes.filter(
+    ({ buffer }) => buffer.label === 'variable-retained-scan-params-retained'
+  ).length;
+  const bindGroupsAfterSecond = device.bindGroups.length;
+  scan.releasePrepared(second, { discardedEncoder: true });
+  const third = encode(128);
+  const writesAfterThird = device.writes.filter(
+    ({ buffer }) => buffer.label === 'variable-retained-scan-params-retained'
+  ).length;
+  scan.releasePrepared(third, { discardedEncoder: true });
+  const fourth = encode(128);
+  const writesAfterFourth = device.writes.filter(
     ({ buffer }) => buffer.label === 'variable-retained-scan-params-retained'
   ).length;
   assert.equal(first.paramsWritePerformed, true);
   assert.equal(second.paramsWritePerformed, true);
+  assert.equal(third.paramsWritePerformed, true);
+  assert.equal(fourth.paramsWritePerformed, false);
+  assert.deepEqual(
+    [first, second, third, fourth].map(({ paramsWriteCount }) => paramsWriteCount),
+    [1, 1, 1, 0]
+  );
   assert.equal(writesAfterFirst, 1);
   assert.equal(writesAfterSecond, 2);
+  assert.equal(writesAfterThird, 3);
+  assert.equal(writesAfterFourth, 3);
+  assert.equal(third.preparedScanCacheHit, true);
+  assert.equal(fourth.preparedScanCacheHit, true);
+  assert.equal(third.bindGroupCreationCount, 0);
+  assert.equal(fourth.bindGroupCreationCount, 0);
+  assert.equal(device.bindGroups.length, bindGroupsAfterSecond);
   assert.equal(first.transientBuffers.length, 0);
   assert.equal(second.transientBuffers.length, 0);
+  scan.releasePrepared(fourth, { discardedEncoder: true });
   scan.destroy();
+});
+
+test('variable retained radix telemetry includes first, changed, and reused scan params writes', () => {
+  const device = createFakeDevice();
+  const keyBuffer = device.createBuffer({ label: 'variable-radix-keys', size: 4096, usage: 128 });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 1024,
+    maxKeyWordCount: 1,
+    label: 'variable-retained-radix',
+    retainConstantScanParamsBuffers: true,
+    retainVariableScanParamsBuffers: true,
+    retainedParamsSlotCount: 1
+  });
+
+  const encode = (elementCount, generationId) => {
+    const writesBefore = device.writes.length;
+    const result = runtime.encodeSortUnique(createFakeEncoder(), {
+      keyBuffer,
+      elementCount,
+      keyWordCount: 1,
+      generationId
+    });
+    assert.equal(device.writes.length - writesBefore, result.paramsWriteCount);
+    return result;
+  };
+  const first = encode(1024, 1);
+  runtime.releaseExecution(first, { discardedEncoder: true });
+  const changed = encode(256, 2);
+  runtime.releaseExecution(changed, { discardedEncoder: true });
+  const reused = encode(256, 3);
+
+  assert.deepEqual(
+    [first, changed, reused].map(({ paramsWriteCount }) => paramsWriteCount),
+    [4, 4, 2]
+  );
+  assert.equal(
+    [first, changed, reused].every(
+      ({ clearedWordCount }) => clearedWordCount === WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT
+    ),
+    true
+  );
+
+  runtime.releaseExecution(reused, { discardedEncoder: true });
+  runtime.destroy();
+});
+
+test('variable retained radix outer slots require discard or fence-proven release', async () => {
+  const device = createFakeDevice();
+  const keyBuffer = device.createBuffer({ label: 'concurrent-variable-keys', size: 4096, usage: 128 });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 1024,
+    maxKeyWordCount: 1,
+    label: 'concurrent-variable-radix',
+    retainConstantScanParamsBuffers: true,
+    retainVariableScanParamsBuffers: true,
+    retainedParamsSlotCount: 2
+  });
+  const encode = (elementCount, generationId) => runtime.encodeSortUnique(createFakeEncoder(), {
+    keyBuffer,
+    elementCount,
+    keyWordCount: 1,
+    generationId
+  });
+
+  const first = encode(1024, 1);
+  const second = encode(256, 2);
+  assert.deepEqual([first.paramsSlotIndex, second.paramsSlotIndex], [0, 1]);
+  assert.throws(
+    () => encode(128, 3),
+    (error) => error?.code === 'ERR_WEBGPU_RADIX_PARAMS_ARENA_EXHAUSTED'
+      && error.slotCapacity === 2
+  );
+
+  assert.throws(() => runtime.releaseExecution(first), /discarded encoder.*releaseExecutionAfter/);
+  await assert.rejects(runtime.releaseExecutionAfter(first, null), /submission-fence thenable/);
+  assert.equal(await runtime.releaseExecutionAfter(first, Promise.resolve()), true);
+  const replacement = encode(128, 3);
+  assert.equal(replacement.paramsSlotIndex, 0);
+
+  runtime.releaseExecution(second, { discardedEncoder: true });
+  runtime.releaseExecution(replacement, { discardedEncoder: true });
+  runtime.destroy();
+});
+
+test('radix runtimes reject foreign executions without releasing the owner lease', () => {
+  const device = createFakeDevice();
+  const keyBuffer = device.createBuffer({ label: 'foreign-release-keys', size: 256, usage: 128 });
+  const createRuntime = (label) => createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 64,
+    maxKeyWordCount: 1,
+    label,
+    retainConstantScanParamsBuffers: true,
+    retainVariableScanParamsBuffers: true,
+    retainedParamsSlotCount: 1
+  });
+  const owner = createRuntime('foreign-release-owner');
+  const foreign = createRuntime('foreign-release-other');
+  const execution = owner.encodeSortUnique(createFakeEncoder(), {
+    keyBuffer,
+    elementCount: 64,
+    keyWordCount: 1,
+    generationId: 1
+  });
+
+  assert.throws(
+    () => foreign.releaseExecution(execution, { discardedEncoder: true }),
+    (error) => error?.code === 'ERR_WEBGPU_RADIX_FOREIGN_EXECUTION'
+  );
+  assert.throws(
+    () => owner.encodeSortUnique(createFakeEncoder(), {
+      keyBuffer,
+      elementCount: 32,
+      keyWordCount: 1,
+      generationId: 2
+    }),
+    (error) => error?.code === 'ERR_WEBGPU_RADIX_PARAMS_ARENA_EXHAUSTED'
+  );
+  assert.equal(owner.releaseExecution(execution, { discardedEncoder: true }), true);
+  const replacement = owner.encodeSortUnique(createFakeEncoder(), {
+    keyBuffer,
+    elementCount: 32,
+    keyWordCount: 1,
+    generationId: 2
+  });
+  owner.releaseExecution(replacement, { discardedEncoder: true });
+  owner.destroy();
+  foreign.destroy();
 });
 
 test('retained parameter slots preserve direct reentrant sort and unique callers', () => {
@@ -624,6 +851,9 @@ test('retained parameter slots preserve direct reentrant sort and unique callers
   assert.equal(unique.paramsSlotIndex, 0);
   assert.equal(sorted.paramsBufferCreationCount, 0);
   assert.equal(unique.paramsBufferCreationCount, 0);
+  assert.equal(sorted.paramsWriteCount, 2);
+  assert.equal(unique.paramsWriteCount, 2);
+  assert.equal(unique.clearedWordCount, WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT);
   assert.equal(sorted.transientBuffers.length, 0);
   assert.equal(unique.transientBuffers.length, 0);
   assert.equal(sorted.readbackPerformed ?? false, false);
@@ -641,8 +871,8 @@ test('retained parameter slots preserve direct reentrant sort and unique callers
     (error) => error?.code === 'ERR_WEBGPU_RADIX_PARAMS_ARENA_EXHAUSTED'
   );
 
-  runtime.releaseTransientBuffers(sorted);
-  runtime.releaseTransientBuffers(unique);
+  runtime.releaseExecution(sorted, { discardedEncoder: true });
+  runtime.releaseExecution(unique, { discardedEncoder: true });
   runtime.destroy();
 });
 
@@ -658,7 +888,7 @@ test('default retained arena holds two 49-generation submissions without slot al
   });
   const bufferCount = device.buffers.length;
   const inFlight = Array.from({ length: 98 }, (_, generationId) => (
-    runtime.encodeSortUnique(encoder, {
+    runtime.encodeSortUnique(createFakeEncoder(), {
       keyBuffer,
       elementCount: 64,
       keyWordCount: 1,
@@ -675,9 +905,11 @@ test('default retained arena holds two 49-generation submissions without slot al
   assert.equal(inFlight.every(({ transientBuffers }) => transientBuffers.length === 0), true);
   assert.equal(device.buffers.length, bufferCount);
 
-  for (const execution of inFlight.slice(0, 49)) runtime.releaseTransientBuffers(execution);
+  for (const execution of inFlight.slice(0, 49)) {
+    runtime.releaseExecution(execution, { discardedEncoder: true });
+  }
   const replacements = Array.from({ length: 49 }, (_, index) => (
-    runtime.encodeSortUnique(encoder, {
+    runtime.encodeSortUnique(createFakeEncoder(), {
       keyBuffer,
       elementCount: 64,
       keyWordCount: 1,
@@ -693,7 +925,7 @@ test('default retained arena holds two 49-generation submissions without slot al
   assert.equal(device.buffers.length, bufferCount);
 
   for (const execution of [...inFlight.slice(49), ...replacements]) {
-    runtime.releaseTransientBuffers(execution);
+    runtime.releaseExecution(execution, { discardedEncoder: true });
   }
   runtime.destroy();
 });
@@ -723,4 +955,31 @@ test('runtime rejects scratch that exceeds a device storage binding limit', () =
     }),
     /maxStorageBufferBindingSize/
   );
+});
+
+test('radix runtime validates the scatter entrypoint 16 KiB workgroup-storage requirement', () => {
+  const insufficientDevice = createFakeDevice();
+  insufficientDevice.limits = {
+    maxComputeWorkgroupStorageSize: WEBGPU_RADIX_SCATTER_WORKGROUP_STORAGE_BYTES - 1
+  };
+  assert.throws(
+    () => createWebGpuStableRadixScanUnique(insufficientDevice, {
+      maxElementCount: 64,
+      maxKeyWordCount: 1,
+      label: 'undersized-workgroup-storage'
+    }),
+    /scatter entry point requires 16384 bytes.*16383/
+  );
+
+  const portableMinimumDevice = createFakeDevice();
+  portableMinimumDevice.limits = {
+    maxComputeWorkgroupStorageSize: WEBGPU_RADIX_SCATTER_WORKGROUP_STORAGE_BYTES
+  };
+  const runtime = createWebGpuStableRadixScanUnique(portableMinimumDevice, {
+    maxElementCount: 64,
+    maxKeyWordCount: 1,
+    label: 'portable-workgroup-storage'
+  });
+  assert.equal(runtime.status, 'webgpu-stable-radix-scan-unique-ready');
+  runtime.destroy();
 });

@@ -41286,7 +41286,61 @@ Validation and review:
   overflow, residency, and native GPU gates pass.
 - Selectively ported the caller-owned generic WebGPU u32 scan and stable radix/
   unique primitive plus its ABI/tests, not the neighborhood builder or lane.
-  Exposed the unique-head prefix as the stable group index for every sorted row,
-  which lets the cell-directory assembly write `particleToCell` without another
-  prefix pass. Focused result: 16/16 pass; no queue submission or readback is
-  owned by the primitive.
+  Exposed the exclusive unique-head prefix; the cell-directory assembly derives
+  each true group from the next prefix and writes `particleToCell` without a
+  ninth storage binding or another scan. Focused result: 16/16 pass; no queue
+  submission or readback is owned by the primitive.
+
+## 2026-07-13 AKDT - Standalone GPU Spatial Epoch Foundation
+
+- Added the short `ss-spatial-epoch.v1` ABI with exact integral
+  `(chart, level, cellX, cellY, cellZ)` identity, device/lane/lease,
+  source-family/storage, tick/substep, membership epochs, logical required/
+  admitted/capacity words, completion ordinal, primitive evidence, and
+  fail-closed indirect dispatch.
+- Added `schroederSpatialEpochGpu.js` as a standalone caller-encoded runtime.
+  It owns two complete persistent arenas by default; each arena includes keys,
+  radix/scan scratch, evidence, directory, reverse mapping, dispatch, and
+  uniforms. An arena cannot be reused until the caller releases it after a
+  submission fence, so in-flight generations do not alias.
+- Extended the generic retained scan path to support variable live counts in
+  per-slot parameter arenas. Its bind-group topology cache is bounded per
+  input/output/slot instead of growing with every observed count; parameter
+  writes and cleared words are reported exactly. The spatial runtime encodes
+  source counts below capacity without creating a `GPUBuffer` in the hot encode
+  path. Host control objects are still allocated, so this is not a zero-JS-
+  allocation claim.
+- The temporary active-node adapter validates exact row/source identity,
+  established admitted status (`0 < status < 32`), finite position, positive
+  unmodified native spacing, integral chart/level, and exact f32/i32 ranges.
+  The bounded atlas is always revalidated; malformed rows or range/capacity
+  overflow fail closed and leave consumer dispatch `[0, 0, 0]`.
+- Focused validation passed 28/28 across ABI math, atlas proof, descriptor
+  completion semantics, WGSL structure, variable-count residency, arena
+  exhaustion/reuse, caller ownership, and device limits.
+- Native system-Chrome Vulkan WebGPU validation passed 35/35 in ICC-controlled
+  `runtime_evidence/schroeder-spatial-epoch-probe.json`: bounded-atlas (8 radix passes)
+  and exact u32x5 (40 passes) produced identical six-cell keys, offsets,
+  stable members, and reverse map for duplicate, negative-coordinate,
+  cross-level, and cross-chart rows. Invalid status, near-integral source
+  identity, atlas overflow, and cell capacity overflow all failed closed. A
+  4,097-row all-unique case crossed scan hierarchy/workgroup boundaries and
+  forced 2-D key/assembly/consumer dispatch; the same fenced arena then rebuilt
+  correctly at 513 and zero rows. There were zero shader compilation,
+  validation, or uncaptured errors; zero runtime encoder/submit/map calls; four
+  caller submissions; stable allocation identities; and zero encode-time
+  `GPUBuffer` creation across all nine encodes.
+- The runtime now reports exact retained `GPUBuffer` bytes per arena/all arenas,
+  total dispatches, radix digit passes, parameter writes, cleared words, and
+  logical-versus-physical directory bounds. The native 4,097-capacity arena
+  retained 472,912 bytes. This is still a shadow foundation over the existing
+  active-node classification: no production lookup was removed, no large-N
+  timestamp A/B exists, and no runtime performance benefit is claimed.
+- The complete `npm test` regression gate passed 1,079 tests with three
+  intentional opt-in skips and zero failures (1,082 total). `npm run build`
+  transformed 143 modules and passed; the pre-existing large-chunk warning is
+  unchanged. Syntax checks and `git diff --check` also passed.
+- The linked worktree remains available over HTTPS at
+  `https://dadbox.tail5c077c.ts.net:5174/`. No production law consumes the new
+  directory yet; Slice 3 must migrate one pre-integration consumer and remove
+  its private lookup before claiming runtime performance benefit.

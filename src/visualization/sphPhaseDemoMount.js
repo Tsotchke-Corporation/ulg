@@ -2066,11 +2066,20 @@ export async function mountSphPhaseDemoOverlay({
   }
   const initialQuery = new URLSearchParams(window.location.search);
   const initialHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const initialScenarioPreset = sphPhaseScenarioPresetById(
+    initialHash.get('scenario') ?? initialQuery.get('scenario')
+  );
+  const initialScenarioRuntime = initialScenarioPreset?.runtime || {};
   // The mechanics select only receives the URL value at applyUrlToControls()
   // (just before the first build) - init-time policy decisions that key on
   // the integrator must read the URL directly or they see the default.
   const initialMechanicsMode = (() => {
-    const raw = String(initialHash.get('mech') ?? initialQuery.get('mech') ?? '').trim().toLowerCase();
+    const raw = String(
+      initialHash.get('mech')
+      ?? initialQuery.get('mech')
+      ?? initialScenarioPreset?.controls?.mech
+      ?? ''
+    ).trim().toLowerCase();
     return MECHANICS_MODE_OPTIONS.some(([value]) => value === raw) ? raw : MECHANICS_MODE_DEFAULT;
   })();
   const preserveDrawingBufferForCapture = ['1', 'true', 'yes'].includes(
@@ -2146,19 +2155,31 @@ export async function mountSphPhaseDemoOverlay({
     false
   );
   const initialGridCflFactor = (() => {
-    const value = Number(initialHash.get('cfl') ?? initialQuery.get('cfl'));
+    const value = Number(
+      initialHash.get('cfl')
+      ?? initialQuery.get('cfl')
+      ?? initialScenarioRuntime.cfl
+    );
     return Number.isFinite(value) && value > 0 && value <= 2 ? value : null;
   })();
   const initialCflSafety = (() => {
-    const value = Number(initialHash.get('cflSafety') ?? initialQuery.get('cflSafety'));
+    const value = Number(
+      initialHash.get('cflSafety')
+      ?? initialQuery.get('cflSafety')
+      ?? initialScenarioRuntime.cflSafety
+    );
     return Number.isFinite(value) && value > 0 && value <= 2 ? value : null;
   })();
   const initialSimDtS = (() => {
-    const value = Number(initialHash.get('sdt') ?? initialQuery.get('sdt'));
+    const value = Number(
+      initialHash.get('sdt')
+      ?? initialQuery.get('sdt')
+      ?? initialScenarioRuntime.sdt
+    );
     return Number.isFinite(value) && value > 0 && value <= 0.01 ? value : null;
   })();
   const numericUrlOption = (key, { min = 0, max = 10 } = {}) => {
-    const raw = initialHash.get(key) ?? initialQuery.get(key);
+    const raw = initialHash.get(key) ?? initialQuery.get(key) ?? initialScenarioRuntime[key];
     // Absent params must stay null: Number(null) is 0, which silently
     // overrode tuned defaults (avAlpha/diffAlpha/wallAlpha) with 0.
     if (raw == null || raw === '') return null;
@@ -2623,6 +2644,7 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentVisualSteps')
       ?? initialHash.get('presentationStepsPerSchedule')
       ?? initialQuery.get('presentationStepsPerSchedule')
+      ?? initialScenarioRuntime.residentStepsPerSchedule
   );
   const residentStepsPerScheduleMax = positiveIntegerUrlParam(
     initialHash.get('residentStepsPerScheduleMax')
@@ -2649,6 +2671,7 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('residentInterfaceRefresh')
     ?? initialHash.get('residentPostStepInterfaceRefresh')
     ?? initialQuery.get('residentPostStepInterfaceRefresh')
+    ?? initialScenarioRuntime.residentInterfaceRefreshMode
     ?? null
   );
   const residentInterfaceRefreshWarmupFrames = nonNegativeIntegerUrlParam(
@@ -2666,6 +2689,7 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('residentPlaybackComputeMode')
     ?? initialHash.get('residentComputeMode')
     ?? initialQuery.get('residentComputeMode')
+    ?? initialScenarioRuntime.residentComputeManagerMode
     ?? null
   );
   const urlMaterialInterfaceMaxFieldCells = positiveIntegerUrlParam(

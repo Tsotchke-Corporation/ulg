@@ -202,4 +202,15 @@ test('long-horizon probe maps compact evidence only and keeps compositor fixes',
   assert.match(source, /authoritative-gpu-checkpoint-capacity-overflow/);
   assert.match(source, /checkpoint\.materialMappingStatus === 'complete'/);
   assert.match(source, /finalParticlesByMaterialSource/);
+  assert.match(source, /eventCountInferred: false/);
+  assert.match(
+    source,
+    /minReactionEventsTotal === 1[\s\S]*?timeline\?\.readbackMode === 'no-full-readback'[\s\S]*?authoritativeReactionProductMassGrowthConfirmed/,
+    'no-readback reaction progress should require authoritative retained-GPU product growth'
+  );
+  assert.match(
+    source,
+    /reactionProgressGateEvidenceSource = 'authoritative-gpu-product-mass-growth'/,
+    'the probe should label product-mass evidence without fabricating an event counter'
+  );
 });

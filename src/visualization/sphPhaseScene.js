@@ -162,11 +162,23 @@ import {
   nativeSurfaceDrawStateUsesExecution,
   prepareNativeSurfaceBridgeForForcedDisposal,
   rendererCanvasResizeRequired,
+  resolveNativeSurfaceAnimationFramePolicy,
+  resolveNativeSurfaceSubmitSynchronization,
+  retireNativeRefractionTargetSet,
   resolveAdditionalNativeSurfaceGenerationAttempt,
+  resolveNativeRefractionTargetSetAction,
   resolveNativeSurfaceResourceReleaseAction,
   shouldCommitAdditionalNativeSurfaceCandidate,
   takeNativeSurfaceResourceOwners
 } from './nativeSurfaceResourceLifecycle.js';
+import {
+  ULG_NATIVE_REFRACTION_TRANSPORT_WGSL
+} from './nativeRefractionTransportWgsl.js';
+import {
+  ULG_NATIVE_SURFACE_TEMPERATURE_LAYOUT_NAME,
+  ULG_NATIVE_SURFACE_TEMPERATURE_ROWS_SCHEMA,
+  encodeNativeSurfaceTemperatureRowsWebGpu
+} from './nativeSurfaceTemperatureWgsl.js';
 
 // Matches the native WebGPU surface consumer's historical clear color so the
 // default look is consistent across the webgl and native renderer backends
@@ -244,6 +256,23 @@ export function normalizeSphSceneBackgroundColorHex(
   return normalizeHexColor(value)
     || normalizeHexColor(fallback)
     || SPH_SCENE_BACKGROUND_COLOR_DEFAULT;
+}
+
+export function nativeSurfaceBackgroundCoverScale({
+  imageWidth,
+  imageHeight,
+  canvasWidth,
+  canvasHeight
+} = {}) {
+  const sourceWidth = Math.max(1, Number(imageWidth) || 1);
+  const sourceHeight = Math.max(1, Number(imageHeight) || 1);
+  const targetWidth = Math.max(1, Number(canvasWidth) || 1);
+  const targetHeight = Math.max(1, Number(canvasHeight) || 1);
+  const imageAspect = sourceWidth / sourceHeight;
+  const canvasAspect = targetWidth / targetHeight;
+  return imageAspect > canvasAspect
+    ? [canvasAspect / imageAspect, 1]
+    : [1, imageAspect / canvasAspect];
 }
 
 function schroederPhaseVolumeDiagnosticField(row, fieldName) {
@@ -1994,6 +2023,7 @@ export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_SHOW = 1e-2;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_HIDE = 5e-3;
 export const SPH_VAPOR_SURFACE_SCATTER_SHOW_PER_M = 1e-6;
 export const SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT = 'depth24plus';
+export const SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT = 'depth32float';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT = 'rgba16float';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT = 'rgba8unorm';
 export const SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY = 'retain-last-overlay-until-replacement-ready';
@@ -2547,7 +2577,6 @@ const SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'extension-resident-s
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE = 'native-webgpu-surface-consumer';
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS = 'native-webgpu-surface-consumer-ready';
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_DEBUG_MODES = new Set(['none', 'clear-only']);
-const SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS = 32;
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE = Object.freeze({
   r: 0.08,
   g: 0.48,
@@ -5716,6 +5745,42 @@ const CPU_SURFACE_ADAPTIVE_RESOLUTION = Object.freeze([
   { maxParticles: 64, resolution: 16, maxPolyCount: 19000 }
 ]);
 
+export const SPH_NATIVE_WEBGPU_BACKGROUND_WGSL = `
+struct BackgroundParams {
+  cover_scale: vec2<f32>,
+  pad0: vec2<f32>,
+};
+
+@group(0) @binding(0) var background_image: texture_2d<f32>;
+@group(0) @binding(1) var background_sampler: sampler;
+@group(0) @binding(2) var<uniform> params: BackgroundParams;
+
+struct BackgroundVertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> BackgroundVertexOutput {
+  let positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(3.0, -1.0),
+    vec2<f32>(-1.0, 3.0)
+  );
+  let position = positions[vertex_index];
+  var output: BackgroundVertexOutput;
+  output.position = vec4<f32>(position, 1.0, 1.0);
+  output.uv = vec2<f32>(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5);
+  return output;
+}
+
+@fragment
+fn fs_main(input: BackgroundVertexOutput) -> @location(0) vec4<f32> {
+  let uv = (input.uv - vec2<f32>(0.5)) * params.cover_scale + vec2<f32>(0.5);
+  return vec4<f32>(textureSample(background_image, background_sampler, uv).rgb, 1.0);
+}
+`;
+
 export const SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL = `
 struct CameraUniform {
   view_projection: mat4x4<f32>,
@@ -5743,6 +5808,12 @@ struct VertexOut {
 // fixed plausible direction (its camera uniform is only a matrix).
 fn resident_view_direction(world_position: vec3<f32>) -> vec3<f32> {
   return normalize(vec3<f32>(0.15, 0.25, 1.0));
+}
+
+// The compact production variant replaces this with the draw batch's admitted
+// transparency class. Legacy vertex-row draws can only refract exact records.
+fn refractive_draw_admitted() -> bool {
+  return true;
 }
 
 // Thermal emission for hot materials (blackbody-ish ramp). The compact
@@ -5804,6 +5875,25 @@ fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
 // fallback when no background image is active.
 @group(1) @binding(2) var env_map: texture_2d<f32>;
 @group(1) @binding(3) var env_sampler: sampler;
+// Native compact surfaces bind a full-resolution depth32float texture written
+// by a front-culled backface pass. Legacy paths bind a 1x1 dummy and therefore
+// fail closed to reflective/opaque PBR without ray bending.
+@group(1) @binding(4) var refractive_back_depth: texture_depth_2d;
+
+struct RefractiveBackfaceGeometry {
+  world_position: vec3<f32>,
+  valid: f32,
+};
+
+fn resident_refractive_backface(in: VertexOut) -> RefractiveBackfaceGeometry {
+  return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+}
+
+fn resident_refraction_max_path_m() -> f32 {
+  return 0.0;
+}
+
+${ULG_NATIVE_REFRACTION_TRANSPORT_WGSL}
 
 fn env_latlong_sample(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
   var d = dir;
@@ -5822,11 +5912,6 @@ fn env_latlong_sample(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
   return pow(clamp(sampled, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
 }
 
-struct OitFragmentOut {
-  @location(0) accum: vec4<f32>,
-  @location(1) revealage: vec4<f32>,
-};
-
 struct OpticalMaterial {
   base_color_linear: vec3<f32>,
   metalness: f32,
@@ -5840,6 +5925,8 @@ struct OpticalMaterial {
   scattering_coefficient_per_m: f32,
   optical_depth: f32,
   spectral_tint_linear: vec3<f32>,
+  spectral_offset: f32,
+  spectral_count: f32,
   status: f32,
   blocked: f32,
   found: f32,
@@ -5922,6 +6009,64 @@ fn spectral_tint_from_samples(spectral_offset: f32, spectral_count_value: f32, t
   return clamp(tint / max(max_channel, 0.0001), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+struct SpectralComplexIndex {
+  n_rgb: vec3<f32>,
+  k_rgb: vec3<f32>,
+  valid: f32,
+};
+
+fn spectral_complex_index_rgb(spectral_offset: f32, spectral_count_value: f32) -> SpectralComplexIndex {
+  let total_samples = spectral_sample_count();
+  let start = u32(max(0.0, round(spectral_offset)));
+  let count = min(u32(max(0.0, round(spectral_count_value))), 32u);
+  var n_rgb = vec3<f32>(1.0);
+  var k_rgb = vec3<f32>(0.0);
+  var found = vec3<f32>(0.0);
+  var best_distance = vec3<f32>(1.0e9);
+  for (var local = 0u; local < 32u; local = local + 1u) {
+    if (local >= count) { break; }
+    let sample_index = start + local;
+    if (sample_index >= total_samples) { break; }
+    let row0 = spectral_sample_row(sample_index, 0u);
+    let row1 = spectral_sample_row(sample_index, 1u);
+    let wavelength_nm = row0.x;
+    let n = row1.y;
+    let k = row1.z;
+    if (!(wavelength_nm >= 380.0 && wavelength_nm <= 780.0 && n >= 1.0 && n < 10.0 && k >= 0.0 && k < 1.0e6)) {
+      continue;
+    }
+    let red_distance = abs(wavelength_nm - 630.0);
+    if (wavelength_nm >= 600.0 && red_distance < best_distance.r) {
+      best_distance.r = red_distance;
+      n_rgb.r = n;
+      k_rgb.r = k;
+      found.r = 1.0;
+    }
+    let green_distance = abs(wavelength_nm - 530.0);
+    if (wavelength_nm >= 500.0 && wavelength_nm < 600.0 && green_distance < best_distance.g) {
+      best_distance.g = green_distance;
+      n_rgb.g = n;
+      k_rgb.g = k;
+      found.g = 1.0;
+    }
+    let blue_distance = abs(wavelength_nm - 480.0);
+    if (wavelength_nm < 500.0 && blue_distance < best_distance.b) {
+      best_distance.b = blue_distance;
+      n_rgb.b = n;
+      k_rgb.b = k;
+      found.b = 1.0;
+    }
+  }
+  let valid = select(0.0, 1.0, all(found > vec3<f32>(0.5)));
+  return SpectralComplexIndex(n_rgb, k_rgb, valid);
+}
+
+fn complex_normal_fresnel_rgb(n_rgb: vec3<f32>, k_rgb: vec3<f32>) -> vec3<f32> {
+  let numerator = (n_rgb - vec3<f32>(1.0)) * (n_rgb - vec3<f32>(1.0)) + k_rgb * k_rgb;
+  let denominator = (n_rgb + vec3<f32>(1.0)) * (n_rgb + vec3<f32>(1.0)) + k_rgb * k_rgb;
+  return clamp(numerator / max(denominator, vec3<f32>(1.0e-8)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn fallback_optical_material(phase_id: f32) -> OpticalMaterial {
   var color = vec3<f32>(0.72, 0.9, 1.0);
   if (phase_id < 1.5) {
@@ -5931,7 +6076,7 @@ fn fallback_optical_material(phase_id: f32) -> OpticalMaterial {
   } else if (phase_id < 3.5) {
     color = vec3<f32>(0.86, 0.96, 1.0);
   }
-  return OpticalMaterial(color, 0.0, 0.65, 0.0, 0.42, 1.0, vec3<f32>(1.0), 1.0e20, 0.0, 0.0, 0.0, vec3<f32>(1.0), 0.0, 1.0, 0.0);
+  return OpticalMaterial(color, 0.0, 0.65, 0.0, 1.0, 1.0, vec3<f32>(1.0), 1.0e20, 0.0, 0.0, 0.0, vec3<f32>(1.0), 0.0, 0.0, 0.0, 1.0, 0.0);
 }
 
 fn find_optical_material(material_id: f32, phase_id: f32, optical_state_id: f32) -> OpticalMaterial {
@@ -5960,6 +6105,8 @@ fn find_optical_material(material_id: f32, phase_id: f32, optical_state_id: f32)
           max(row4.y, 0.0),
           max(row5.x, 0.0),
           spectral_tint,
+          row0.z,
+          row0.w,
           row5.z,
           row5.y,
           1.0
@@ -5983,18 +6130,20 @@ fn find_optical_material(material_id: f32, phase_id: f32, optical_state_id: f32)
       clamp(mix(row1.xyz, row1.xyz * spectral_tint, 0.35), vec3<f32>(0.0), vec3<f32>(1.0)),
       clamp(row1.w, 0.0, 1.0),
       clamp(row2.x, 0.04, 1.0),
-      clamp(row2.y, 0.0, 1.0),
-      clamp(row2.z, 0.0, 1.0),
-      max(row2.w, 1.0),
+      0.0,
+      1.0,
+      1.0,
       clamp(row3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
       max(row3.w, 0.00001),
       max(row4.x, 0.0),
       max(row4.y, 0.0),
       max(row5.x, 0.0),
       spectral_tint,
-      row5.z,
+      0.0,
+      0.0,
+      1.0,
       row5.y,
-      1.0
+      0.0
     );
   }
   return fallback_optical_material(phase_id);
@@ -6039,9 +6188,21 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let view_dir = resident_view_direction(in.world_position);
   let roughness = clamp(optical.roughness, 0.04, 1.0);
   let metalness = clamp(optical.metalness, 0.0, 1.0);
-  let ior = max(optical.ior, 1.0);
-  let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
-  let f0 = mix(vec3<f32>(dielectric_f0), base_color, metalness);
+  // Recovery retains the closure-admitted material IOR (water = 1.333).
+  // The refactor-only molecular index is explicitly unvalidated and is not
+  // granted rendering authority by this bounded port.
+  let refractive_index = max(optical.ior, 1.0);
+  let refractive_authority = optical.found > 0.5
+    && optical.blocked < 0.5
+    && abs(optical.status - 255.0) > 0.5
+    && refractive_index > 1.000001
+    && refractive_draw_admitted();
+  let dielectric_f0_scalar = pow(
+    (refractive_index - 1.0) / (refractive_index + 1.0),
+    2.0
+  );
+  let dielectric_f0 = select(vec3<f32>(0.04), vec3<f32>(dielectric_f0_scalar), refractive_authority);
+  let f0 = mix(dielectric_f0, base_color, metalness);
   let ndotv = clamp(dot(normal, view_dir), 0.0, 1.0);
   // Sphere-lane PBR parity: the particle bridge renders through Three's
   // MeshPhysicalMaterial (GGX microfacet BRDF, energy-conserving Lambert)
@@ -6050,8 +6211,43 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // 0xbfe9ff 0.5 from (-6,3,-4) - with a RoomEnvironment IBL. This shader
   // mirrors that: same lights, GGX + Smith + Schlick, split-sum environment
   // approximation, then the same ACESFilmic(exposure 1.08) tone pipeline.
+  let backface = resident_refractive_backface(in);
+  let refraction_max_path_m = resident_refraction_max_path_m();
+  let refracted_path_r = refracted_path_to_back_plane(
+    in.world_position,
+    backface.world_position,
+    backface.valid,
+    refract(-view_dir, normal, 1.0 / refractive_index),
+    camera_data.view_projection,
+    refraction_max_path_m
+  );
+  let refracted_path_g = refracted_path_to_back_plane(
+    in.world_position,
+    backface.world_position,
+    backface.valid,
+    refract(-view_dir, normal, 1.0 / refractive_index),
+    camera_data.view_projection,
+    refraction_max_path_m
+  );
+  let refracted_path_b = refracted_path_to_back_plane(
+    in.world_position,
+    backface.world_position,
+    backface.valid,
+    refract(-view_dir, normal, 1.0 / refractive_index),
+    camera_data.view_projection,
+    refraction_max_path_m
+  );
+  let scene_color_available = textureDimensions(scene_color_copy, 0).x > 1u;
+  let refracted_geometry_valid = refracted_path_r.valid > 0.5
+    && refracted_path_g.valid > 0.5
+    && refracted_path_b.valid > 0.5;
   let is_vapor = round(in.phase_id) == 3.0;
-  let transmissive_surface = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
+  let transmissive_surface = optical.transmission > 0.01
+    && metalness < 0.1
+    && !is_vapor
+    && refractive_authority
+    && refracted_geometry_valid
+    && scene_color_available;
   // Three's MeshPhysicalMaterial transmission model: transmitted light
   // REPLACES diffuse reflection (energy conservation) - a clear medium has
   // almost no diffuse term. Adding full diffuse on top of transmission was
@@ -6121,78 +6317,49 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // attenuation distance, weighted by (1 - Fresnel) x transmission. The old
   // path drew water as a ghost alpha film (alpha = 1 - 0.72 x transmission).
   if (transmissive_surface) {
-    let fresnel_w = clamp(dot(f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndotv, 5.0), vec3<f32>(0.333)), 0.0, 1.0);
-    let attenuation_sigma = -log(clamp(optical.attenuation_linear, vec3<f32>(1.0e-4), vec3<f32>(1.0)))
-      / max(optical.attenuation_distance_m, 1.0e-3);
-    let path_m = clamp(optical.attenuation_distance_m, 0.02, 2.0);
-    let transmitted_tint = exp(-attenuation_sigma * path_m);
-    var transmitted = vec3<f32>(0.0);
-    let scene_dims = textureDimensions(scene_color_copy, 0);
-    if (scene_dims.x > 1u) {
-      // Screen-space refraction: bend the view ray at the surface by the
-      // material IOR and sample the post-opaque scene copy at the deflected
-      // screen position. The offset scales with the transmission path length
-      // (thicker medium bends the image more); roughness widens the sample
-      // footprint (frosted glass) with a 5-tap blur.
-      let viewport = vec2<f32>(f32(scene_dims.x), f32(scene_dims.y));
-      let screen_uv = in.position.xy / viewport;
-      let refr_dir = refract(-view_dir, normal, 1.0 / ior);
-      let deviation = refr_dir + view_dir;
-      let uv_offset = vec2<f32>(deviation.x, -deviation.y) * path_m * 0.35;
-      let uv = clamp(
-        screen_uv + clamp(uv_offset, vec2<f32>(-0.15), vec2<f32>(0.15)),
-        vec2<f32>(0.001),
-        vec2<f32>(0.999)
-      );
-      let blur_px = roughness * 14.0;
-      let blur_uv = vec2<f32>(blur_px) / viewport;
-      var refracted = textureSampleLevel(scene_color_copy, scene_color_sampler, uv, 0.0).rgb;
-      refracted = refracted
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(blur_uv.x, blur_uv.y), 0.0).rgb
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(-blur_uv.x, blur_uv.y), 0.0).rgb
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(blur_uv.x, -blur_uv.y), 0.0).rgb
-        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(-blur_uv.x, -blur_uv.y), 0.0).rgb;
-      refracted = refracted * 0.2;
-      // The canvas copy is display-encoded; shading runs in linear light.
-      let refracted_linear = pow(clamp(refracted, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
-      transmitted = refracted_linear * transmitted_tint;
-    } else {
-      // Analytic fallback (opaque pass, legacy lane, non-native bridges).
-      var transmitted_env = mix(vec3<f32>(0.10, 0.13, 0.16), vec3<f32>(0.35, 0.42, 0.48),
-        clamp(-normal.y * 0.5 + 0.5, 0.0, 1.0));
-      if (textureDimensions(env_map, 0).x > 1u) {
-        // Refraction miss-case: with no scene copy bound, the transmitted
-        // light comes from the environment along the refracted ray (total
-        // internal reflection falls back to the reflected ray).
-        var refr_env_dir = refract(-view_dir, normal, 1.0 / ior);
-        if (dot(refr_env_dir, refr_env_dir) <= 1.0e-8) {
-          refr_env_dir = reflect(-view_dir, normal);
-        }
-        transmitted_env = env_latlong_sample(refr_env_dir, roughness);
-      }
-      transmitted = transmitted_env * transmitted_tint * base_color;
-    }
-    lit = lit + (1.0 - fresnel_w) * clamp(optical.transmission, 0.0, 1.0) * transmitted;
+    let fresnel_rgb = clamp(
+      f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndotv, 5.0),
+      vec3<f32>(0.0),
+      vec3<f32>(1.0)
+    );
+    let path_m_rgb = vec3<f32>(
+      refracted_path_r.path_m,
+      refracted_path_g.path_m,
+      refracted_path_b.path_m
+    );
+    let attenuation_sigma_rgb = -log(clamp(
+      optical.attenuation_linear,
+      vec3<f32>(1.0e-6),
+      vec3<f32>(1.0)
+    )) / max(optical.attenuation_distance_m, 1.0e-6);
+    let transmitted_tint = refraction_beer_lambert_transmission_rgb(
+      attenuation_sigma_rgb,
+      path_m_rgb
+    );
+    let refracted = vec3<f32>(
+      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_r.exit_uv, 0.0).r,
+      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_g.exit_uv, 0.0).g,
+      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_b.exit_uv, 0.0).b
+    );
+    // The canvas copy is display-encoded; shading runs in linear light.
+    let refracted_linear = pow(clamp(refracted, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
+    let transmitted = refracted_linear * transmitted_tint;
+    lit = lit + (vec3<f32>(1.0) - fresnel_rgb)
+      * clamp(optical.transmission, 0.0, 1.0)
+      * transmitted;
   }
   // Three tone pipeline: exposure, ACESFilmic, then display encode below.
   lit = lit * 1.08;
   let aces_a = lit * (2.51 * lit + vec3<f32>(0.03));
   let aces_b = lit * (2.43 * lit + vec3<f32>(0.59)) + vec3<f32>(0.14);
   lit = clamp(aces_a / aces_b, vec3<f32>(0.0), vec3<f32>(1.0));
-  // No artistic alpha anywhere (user directive): compositing weights are
-  // physically derived only. Transmissive dielectrics are fully opaque -
-  // their transparency lives entirely in the transmitted-light term above
-  // (Three's MeshPhysicalMaterial transmission model; refracted-scene
-  // sampling is the recorded follow-up). Participating media (vapor) use
-  // Beer-Lambert coverage 1 - exp(-tau) from the derived optical depth -
-  // that IS the PBR transparency of a volume, not a tuned opacity.
-  let optical_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);
-  let base_alpha = select(clamp(optical.opacity, 0.0, 1.0), optical_alpha, is_vapor);
-  let alpha = select(base_alpha, 1.0, transmissive_surface);
+  // Production surfaces are alpha-one. Dielectric transmission is represented
+  // only by the PBR transmitted-light term above; participating media require
+  // a separate volume integrator and never enter the alpha surface route.
   // The canvas format is non-sRGB (getPreferredCanvasFormat), so linear-light
   // shading must be display-encoded here or everything reads ~2x too dark.
   let display_lit = pow(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
-  return vec4<f32>(display_lit * alpha, alpha);
+  return vec4<f32>(display_lit, 1.0);
 }
 
 @fragment
@@ -6200,20 +6367,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   return resident_surface_color(in);
 }
 
-@fragment
-fn fs_oit_main(in: VertexOut) -> OitFragmentOut {
-  let color = resident_surface_color(in);
-  let alpha = clamp(color.a, 0.0, 1.0);
-  let weight = clamp(alpha * 8.0 + 0.01, 0.01, 8.0);
-  var out: OitFragmentOut;
-  out.accum = vec4<f32>(color.rgb * weight, alpha * weight);
-  out.revealage = vec4<f32>(alpha, 0.0, 0.0, alpha);
-  return out;
-}
 `;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH =
-  16 * Float32Array.BYTES_PER_ELEMENT + 192;
+  16 * Float32Array.BYTES_PER_ELEMENT + 192 + 16 * Float32Array.BYTES_PER_ELEMENT;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
@@ -6271,6 +6428,7 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   camera_position_y_m: f32,
   camera_position_z_m: f32,
   emissive_temperature_k: f32,
+  inverse_view_projection: mat4x4<f32>,
 };`
     )
     .replace(
@@ -6291,6 +6449,61 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
 }`
     )
     .replace(
+      `fn refractive_draw_admitted() -> bool {
+  return true;
+}`,
+      `fn refractive_draw_admitted() -> bool {
+  return abs(camera_data.transparency_class_id - 2.0) < 0.5;
+}`
+    )
+    .replace(
+      `fn resident_refractive_backface(in: VertexOut) -> RefractiveBackfaceGeometry {
+  return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+}`,
+      `fn resident_refractive_backface(in: VertexOut) -> RefractiveBackfaceGeometry {
+  let dimensions = textureDimensions(refractive_back_depth);
+  let surface_pixel = refraction_surface_pixel(in.position.xy, dimensions);
+  if (!(surface_pixel.valid > 0.5)) {
+    return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+  }
+  let back_depth = textureLoad(refractive_back_depth, surface_pixel.pixel, 0);
+  let back_point = refraction_unproject_uv_depth(
+    surface_pixel.uv,
+    back_depth,
+    camera_data.inverse_view_projection
+  );
+  if (!(back_point.valid > 0.5)) {
+    return RefractiveBackfaceGeometry(vec3<f32>(0.0), 0.0);
+  }
+  let back_world = back_point.world_position;
+  return RefractiveBackfaceGeometry(
+    back_world,
+    refraction_rear_surface_admitted(
+      in.position.z,
+      back_depth,
+      in.world_position,
+      back_world,
+      in.normal,
+      resident_view_direction(in.world_position),
+      resident_refraction_max_path_m()
+    )
+  );
+}`
+    )
+    .replace(
+      `fn resident_refraction_max_path_m() -> f32 {
+  return 0.0;
+}`,
+      `fn resident_refraction_max_path_m() -> f32 {
+  let radius_m = camera_data.bounds_radius_m;
+  return select(
+    0.0,
+    2.0 * radius_m,
+    radius_m == radius_m && abs(radius_m) < 1.0e20 && radius_m > 1.0e-6
+  );
+}`
+    )
+    .replace(
       `fn resident_surface_emissive(emissive_temperature_k: f32) -> vec3<f32> {
   return vec3<f32>(0.0);
 }`,
@@ -6304,7 +6517,8 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
     .replace(
       '@group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;',
       `@group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;
-@group(0) @binding(4) var<storage, read> render_field_scalars: array<f32>;`
+@group(0) @binding(4) var<storage, read> compact_packed_normals: array<u32>;
+@group(0) @binding(5) var<storage, read> compact_vertex_temperatures_k: array<f32>;`
     )
     .replace(
       /@vertex\nfn vs_main\(@builtin\(vertex_index\) vertex_index: u32\) -> VertexOut \{[\s\S]*?\n\}\n\nfn resident_surface_color/,
@@ -6360,90 +6574,31 @@ fn compact_normal(vertex_index: u32) -> vec3<f32> {
   return normalize(n);
 }
 
-fn field_scalar_at(ix: i32, iy: i32, iz: i32) -> f32 {
-  let cx = clamp(ix, 0, i32(camera_data.field_dim_x) - 1);
-  let cy = clamp(iy, 0, i32(camera_data.field_dim_y) - 1);
-  let cz = clamp(iz, 0, i32(camera_data.field_dim_z) - 1);
-  let index = camera_data.field_offset
-    + u32(cx) * camera_data.field_stride_x
-    + u32(cy) * camera_data.field_stride_y
-    + u32(cz) * camera_data.field_stride_z;
-  return render_field_scalars[index];
+fn octahedral_sign_not_zero(v: vec2<f32>) -> vec2<f32> {
+  return select(vec2<f32>(-1.0), vec2<f32>(1.0), v >= vec2<f32>(0.0));
 }
 
-fn field_sample(p: vec3<f32>) -> f32 {
-  let base = floor(p);
-  let f = p - base;
-  let ix = i32(base.x);
-  let iy = i32(base.y);
-  let iz = i32(base.z);
-  let c00 = mix(field_scalar_at(ix, iy, iz), field_scalar_at(ix + 1, iy, iz), f.x);
-  let c10 = mix(field_scalar_at(ix, iy + 1, iz), field_scalar_at(ix + 1, iy + 1, iz), f.x);
-  let c01 = mix(field_scalar_at(ix, iy, iz + 1), field_scalar_at(ix + 1, iy, iz + 1), f.x);
-  let c11 = mix(field_scalar_at(ix, iy + 1, iz + 1), field_scalar_at(ix + 1, iy + 1, iz + 1), f.x);
-  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
-}
-
-// Smooth outward normal from the density gradient (density falls outward,
-// so the outward normal is -gradient). Grid-space central differences over
-// the retained render field; returns vec3(0) where the gradient degenerates
-// so the caller can keep the flat triangle normal.
-fn field_gradient_normal(grid_position: vec3<f32>) -> vec3<f32> {
-  let h = 1.0;
-  let gx = field_sample(grid_position + vec3<f32>(h, 0.0, 0.0))
-    - field_sample(grid_position - vec3<f32>(h, 0.0, 0.0));
-  let gy = field_sample(grid_position + vec3<f32>(0.0, h, 0.0))
-    - field_sample(grid_position - vec3<f32>(0.0, h, 0.0));
-  let gz = field_sample(grid_position + vec3<f32>(0.0, 0.0, h))
-    - field_sample(grid_position - vec3<f32>(0.0, 0.0, h));
-  let g = vec3<f32>(gx, gy, gz);
-  if (dot(g, g) <= 0.000000000001) {
+fn compact_packed_normal(vertex_index: u32) -> vec3<f32> {
+  if (vertex_index >= arrayLength(&compact_packed_normals)) {
     return vec3<f32>(0.0);
   }
-  return normalize(-g);
-}
-
-// Temperature lane of the render-field cell row (lane offset +4; see
-// SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT): density-weighted mean particle
-// temperature, trilinearly sampled at the vertex and interpolated across the
-// triangle so emission varies spatially instead of per surface.
-fn field_temperature_at(ix: i32, iy: i32, iz: i32) -> f32 {
-  let cx = clamp(ix, 0, i32(camera_data.field_dim_x) - 1);
-  let cy = clamp(iy, 0, i32(camera_data.field_dim_y) - 1);
-  let cz = clamp(iz, 0, i32(camera_data.field_dim_z) - 1);
-  let index = camera_data.field_offset
-    + u32(cx) * camera_data.field_stride_x
-    + u32(cy) * camera_data.field_stride_y
-    + u32(cz) * camera_data.field_stride_z;
-  return render_field_scalars[index + 4u];
-}
-
-fn field_temperature_sample(p: vec3<f32>) -> f32 {
-  // Density-weighted trilinear: temperature is only defined inside matter, so
-  // plain trilinear dilutes surface vertices toward the 0K of neighbouring
-  // empty cells and stamps blocky cold patches on the isosurface. Weighting
-  // each corner by trilinear_weight x density interpolates over occupied
-  // cells only.
-  let base = floor(p);
-  let f = p - base;
-  let ix = i32(base.x);
-  let iy = i32(base.y);
-  let iz = i32(base.z);
-  var temperature_sum = 0.0;
-  var weight_sum = 0.0;
-  for (var corner = 0u; corner < 8u; corner = corner + 1u) {
-    let dx = i32(corner & 1u);
-    let dy = i32((corner >> 1u) & 1u);
-    let dz = i32((corner >> 2u) & 1u);
-    let wx = select(1.0 - f.x, f.x, dx == 1);
-    let wy = select(1.0 - f.y, f.y, dy == 1);
-    let wz = select(1.0 - f.z, f.z, dz == 1);
-    let density = max(field_scalar_at(ix + dx, iy + dy, iz + dz), 0.0);
-    let weight = wx * wy * wz * density;
-    temperature_sum = temperature_sum + field_temperature_at(ix + dx, iy + dy, iz + dz) * weight;
-    weight_sum = weight_sum + weight;
+  let packed = compact_packed_normals[vertex_index];
+  if (packed == 0x80008000u) {
+    return vec3<f32>(0.0);
   }
-  return select(0.0, temperature_sum / weight_sum, weight_sum > 1.0e-6);
+  let oct = unpack2x16snorm(packed);
+  var normal = vec3<f32>(oct, 1.0 - abs(oct.x) - abs(oct.y));
+  if (normal.z < 0.0) {
+    normal = vec3<f32>(
+      (vec2<f32>(1.0) - abs(normal.yx)) * octahedral_sign_not_zero(normal.xy),
+      normal.z
+    );
+  }
+  let length_squared = dot(normal, normal);
+  if (length_squared <= 0.000000000001) {
+    return vec3<f32>(0.0);
+  }
+  return normal / sqrt(length_squared);
 }
 
 @vertex
@@ -6458,20 +6613,19 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   out.position = clip;
   out.world_position = position_m;
   var normal = compact_normal(vertex_index);
-  if (camera_data.field_gradient_enabled > 0.5) {
-    let smooth_normal = field_gradient_normal(compact_position(vertex_index));
-    if (dot(smooth_normal, smooth_normal) > 0.25) {
-      normal = smooth_normal;
-    }
+  let smooth_normal = compact_packed_normal(vertex_index);
+  if (dot(smooth_normal, smooth_normal) > 0.25) {
+    normal = smooth_normal;
   }
   out.normal = normal;
   out.material_id = camera_data.material_id;
   out.phase_id = camera_data.phase_id;
   out.optical_state_id = camera_data.optical_state_id;
-  out.emissive_temperature_k = 0.0;
-  if (camera_data.field_gradient_enabled > 0.5) {
-    out.emissive_temperature_k = field_temperature_sample(compact_position(vertex_index));
+  var vertex_temperature_k = 0.0;
+  if (vertex_index < arrayLength(&compact_vertex_temperatures_k)) {
+    vertex_temperature_k = compact_vertex_temperatures_k[vertex_index];
   }
+  out.emissive_temperature_k = vertex_temperature_k;
   return out;
 }
 
@@ -7365,36 +7519,36 @@ export function sphereEmissiveIntensityForTemperature(temperatureK) {
 }
 
 export function renderAlphaFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
-  const opacity = clamp(Number.isFinite(optics.opacity) ? optics.opacity : 1, 0, 1);
+  return 1;
+}
+
+export function hasAdmittedClosureRefraction(optics = {}, descriptorOrRow = {}) {
   const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
   const metalness = clamp(Number.isFinite(optics.metalness) ? optics.metalness : 0, 0, 1);
-  const isVapor = isVaporOpticalSurface(optics, descriptorOrRow);
-  if (transmission > 0.01 && metalness < 0.1 && !isVapor) {
-    return 1;
-  }
-  return opacity;
+  const ior = Number(optics.ior);
+  const status = Number(optics.status);
+  return transmission > 0.01
+    && metalness < 0.1
+    && !isVaporOpticalSurface(optics, descriptorOrRow)
+    && optics.blocked !== true
+    && (!Number.isFinite(status) || status !== 255)
+    && Number.isFinite(ior)
+    && ior > 1.000001;
 }
 
 export function renderDepthWriteFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
-  const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
-  return alpha >= 0.999;
+  return true;
 }
 
 export function renderLayerFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
-  const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
-  const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
-  const isVapor = isVaporOpticalSurface(optics, descriptorOrRow);
-  if (isVapor) return 'vapor-surface';
-  if (transmission > 0.01) return 'transmissive-surface';
-  if (alpha < 0.999) return 'alpha-surface';
-  return 'opaque-surface';
+  return hasAdmittedClosureRefraction(optics, descriptorOrRow)
+    ? 'refractive-surface'
+    : 'opaque-surface';
 }
 
 export function renderOrderFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
   const layer = renderLayerFromOpticalResponse(optics, descriptorOrRow);
-  if (layer === 'vapor-surface') return SPH_PHASE_RENDER_ORDER.vaporSurface;
-  if (layer === 'transmissive-surface') return SPH_PHASE_RENDER_ORDER.transmissiveSurface;
-  if (layer === 'alpha-surface') return SPH_PHASE_RENDER_ORDER.alphaSurface;
+  if (layer === 'refractive-surface') return SPH_PHASE_RENDER_ORDER.transmissiveSurface;
   return SPH_PHASE_RENDER_ORDER.opaqueSurface;
 }
 
@@ -7408,9 +7562,7 @@ export function residentSurfaceDrawOrder(surfaces = [], {
       const transparencyClassId = Number.isFinite(Number(surface?.transparencyClassId))
         ? Number(surface.transparencyClassId)
         : 0;
-      const depthWriteFlag = Number.isFinite(Number(surface?.depthWriteFlag))
-        ? Number(surface.depthWriteFlag)
-        : (transparencyClassId > 0 ? 0 : 1);
+      const depthWriteFlag = 1;
       const renderOrder = Number.isFinite(Number(surface?.renderOrder))
         ? Number(surface.renderOrder)
         : (transparencyClassId * 1000 + surfaceIndex);
@@ -7441,7 +7593,10 @@ export function residentSurfaceDrawOrder(surfaces = [], {
 }
 
 export function residentSurfaceDrawPipelineKey(draw = {}) {
-  return Number(draw?.depthWriteFlag) > 0 ? 'opaque-depth-write' : 'transparent-depth-test';
+  return draw?.renderLayer === 'refractive-surface'
+    || Number(draw?.transparencyClassId) === 2
+    ? 'refractive-depth-write'
+    : 'opaque-depth-write';
 }
 
 function finiteNumberOrNull(value) {
@@ -7846,7 +8001,10 @@ function updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
   viewProjection = null,
   drawOrder = [],
   opaqueDraws = [],
-  transparentDraws = []
+  refractiveDraws = null,
+  // Compatibility input for callers/tests written before refractive surfaces
+  // became opaque framebuffer writes rather than transparent composites.
+  transparentDraws = null
 } = {}) {
   if (!bridge) return null;
   const surfaces = Array.isArray(bridge.drawState?.surfaces) ? bridge.drawState.surfaces : [];
@@ -7868,7 +8026,13 @@ function updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
     ?? finiteNumberOrNull(resolveSphScenePixelRatio(bridgeWindow.devicePixelRatio ?? globalThis.devicePixelRatio));
   bridge.lastDrawOrderCount = Array.isArray(drawOrder) ? drawOrder.length : 0;
   bridge.lastOpaqueDrawCount = Array.isArray(opaqueDraws) ? opaqueDraws.length : 0;
-  bridge.lastTransparentDrawCount = Array.isArray(transparentDraws) ? transparentDraws.length : 0;
+  const resolvedRefractiveDraws = Array.isArray(refractiveDraws)
+    ? refractiveDraws
+    : (Array.isArray(transparentDraws) ? transparentDraws : []);
+  bridge.lastRefractiveDrawCount = resolvedRefractiveDraws.length;
+  // Retain the old field as an explicit alias for downstream probes. These
+  // draws use the opaque refractive pipeline; they are not alpha blended.
+  bridge.lastTransparentDrawCount = bridge.lastRefractiveDrawCount;
   bridge.primarySurfaceIndex = primarySurfaceIndex;
   bridge.primarySurfaceBoundsCenterM = projectedBounds?.boundsCenterM ?? null;
   bridge.primarySurfaceBoundsRadiusM = projectedBounds?.boundsRadiusM ?? null;
@@ -7912,6 +8076,10 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
     bridge.nativeSurfaceConsumerSubmitFenceFailed ?? null;
   target.renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget =
     bridge.nativeSurfaceConsumerSubmitFenceExceededBudget ?? null;
+  target.renderBridgeNativeSurfaceConsumerInFlightSubmitCount = Math.max(
+    0,
+    Math.round(Number(bridge.nativeSurfaceConsumerInFlightSubmitCount) || 0)
+  );
   target.renderBridgeNativeSurfaceResourceGeneration =
     bridge.activeSurfaceResourceOwner?.generation ?? bridge.nativeSurfaceResourceGeneration ?? null;
   target.renderBridgeNativeSurfaceRetiredGenerationCount = Array.isArray(
@@ -7989,6 +8157,71 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
       || null;
     target.renderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
     target.renderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
+    target.renderBridgeLastRefractiveDrawCount = bridge.lastRefractiveDrawCount
+      ?? bridge.lastTransparentDrawCount
+      ?? 0;
+    target.renderBridgeConfiguredAlphaMode = bridge.configuredAlphaMode ?? null;
+    target.renderBridgeSurfaceAlphaMode = bridge.surfaceAlphaMode ?? null;
+    target.renderBridgeSurfaceBlendEnabled = Boolean(bridge.surfaceBlendEnabled);
+    target.renderBridgeSurfaceDepthWriteEnabled = Boolean(bridge.surfaceDepthWriteEnabled);
+    target.renderBridgePackedNormalReady = Boolean(
+      bridge.drawState?.packedNormalBuffer
+      && (bridge.drawState?.packedNormalRowCount ?? 0) > 0
+    );
+    target.renderBridgePackedNormalByteLength = bridge.externalGpuBufferPackedNormalByteLength ?? 0;
+    target.renderBridgePackedNormalRowCount = bridge.externalGpuBufferPackedNormalRowCount ?? 0;
+    target.renderBridgePackedNormalEncoding = bridge.externalGpuBufferPackedNormalEncoding ?? null;
+    target.renderBridgePackedNormalSurfaceGenerationId =
+      bridge.externalGpuBufferPackedNormalSurfaceGenerationId ?? null;
+    target.renderBridgePackedNormalAdditionalSubmitCount =
+      bridge.externalGpuBufferPackedNormalAdditionalSubmitCount ?? null;
+    target.renderBridgeVertexTemperatureReady = Boolean(
+      bridge.drawState?.vertexTemperatureBuffer
+      && (bridge.drawState?.vertexTemperatureRowCount ?? 0) > 0
+    );
+    target.renderBridgeVertexTemperatureByteLength =
+      bridge.externalGpuBufferVertexTemperatureByteLength ?? 0;
+    target.renderBridgeVertexTemperatureRowCount =
+      bridge.externalGpuBufferVertexTemperatureRowCount ?? 0;
+    target.renderBridgeVertexTemperatureEncoding =
+      bridge.externalGpuBufferVertexTemperatureEncoding ?? null;
+    target.renderBridgeVertexTemperatureSurfaceGenerationId =
+      bridge.externalGpuBufferVertexTemperatureSurfaceGenerationId ?? null;
+    target.renderBridgeVertexTemperatureVolumeGenerationId =
+      bridge.externalGpuBufferVertexTemperatureVolumeGenerationId ?? null;
+    target.renderBridgeVertexTemperatureAdditionalSubmitCount =
+      bridge.externalGpuBufferVertexTemperatureAdditionalSubmitCount ?? null;
+    target.renderBridgeVertexTemperatureAdditionalReadyCount = (
+      bridge.drawState?.additionalSurfaceDraws || []
+    ).filter((draw) => draw?.temperatureBuffer && (draw?.temperatureRowCount ?? 0) > 0).length;
+    target.renderBridgeRefractionTargetLifecycleStatus = bridge.refractionTargetLifecycleStatus ?? null;
+    target.renderBridgeRefractionTargetLifecycleReason = bridge.refractionTargetLifecycleReason ?? null;
+    target.renderBridgeRefractionTargetGeneration = bridge.refractionTargetSet?.generation
+      ?? bridge.refractionTargetGeneration
+      ?? null;
+    target.renderBridgeRefractionTargetWidth = bridge.refractionTargetSet?.width
+      ?? bridge.refractionCopyWidth
+      ?? 0;
+    target.renderBridgeRefractionTargetHeight = bridge.refractionTargetSet?.height
+      ?? bridge.refractionCopyHeight
+      ?? 0;
+    target.renderBridgeRefractionTargetColorFormat = bridge.refractionTargetSet?.colorFormat
+      ?? bridge.refractionCopyFormat
+      ?? null;
+    target.renderBridgeRefractionTargetDepthFormat = bridge.refractionTargetSet?.depthFormat
+      ?? bridge.refractionBackfaceDepthFormat
+      ?? null;
+    target.renderBridgeRefractionTargetRetirementPendingCount =
+      bridge.refractionTargetRetirementPendingCount ?? 0;
+    target.renderBridgeRefractionTargetRetirementCount = bridge.refractionTargetRetirementCount ?? 0;
+    target.renderBridgeRefractionBackfaceStatus = bridge.refractionBackfaceStatus ?? null;
+    target.renderBridgeRefractionBackfaceCacheHit = bridge.lastRefractionBackfaceCacheHit ?? null;
+    target.renderBridgeRefractionBackfacePassDrawCount =
+      bridge.lastRefractionBackfacePassDrawCount ?? 0;
+    target.renderBridgeRefractionBackfaceAdditionalSubmitCount =
+      bridge.refractionBackfaceAdditionalSubmitCount ?? null;
+    target.renderBridgeBackgroundImageGpuStatus = bridge.backgroundImageGpuStatus ?? null;
+    target.renderBridgeBackgroundImageDrawCount = bridge.backgroundImageDrawCount ?? 0;
   target.renderBridgeSchroederRenderProxyLocalResolverStatus =
     bridge.schroederRenderProxyLocalResolverStatus
     ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.status
@@ -8071,6 +8304,10 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
     bridge.nativeSurfaceConsumerSubmitFenceElapsedMs ?? null;
   target.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceTimedOut =
     bridge.nativeSurfaceConsumerSubmitFenceTimedOut ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerInFlightSubmitCount = Math.max(
+    0,
+    Math.round(Number(bridge.nativeSurfaceConsumerInFlightSubmitCount) || 0)
+  );
   target.surfaceDrawRenderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
   target.surfaceDrawRenderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
   target.surfaceDrawRenderBridgeCanvasCssWidth = bridge.lastCanvasCssWidth ?? null;
@@ -8142,6 +8379,76 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
       || null;
     target.surfaceDrawRenderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
     target.surfaceDrawRenderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
+    target.surfaceDrawRenderBridgeLastRefractiveDrawCount = bridge.lastRefractiveDrawCount
+      ?? bridge.lastTransparentDrawCount
+      ?? 0;
+    target.surfaceDrawRenderBridgeConfiguredAlphaMode = bridge.configuredAlphaMode ?? null;
+    target.surfaceDrawRenderBridgeSurfaceAlphaMode = bridge.surfaceAlphaMode ?? null;
+    target.surfaceDrawRenderBridgeSurfaceBlendEnabled = Boolean(bridge.surfaceBlendEnabled);
+    target.surfaceDrawRenderBridgeSurfaceDepthWriteEnabled = Boolean(bridge.surfaceDepthWriteEnabled);
+    target.surfaceDrawRenderBridgePackedNormalReady = Boolean(
+      bridge.drawState?.packedNormalBuffer
+      && (bridge.drawState?.packedNormalRowCount ?? 0) > 0
+    );
+    target.surfaceDrawRenderBridgePackedNormalByteLength =
+      bridge.externalGpuBufferPackedNormalByteLength ?? 0;
+    target.surfaceDrawRenderBridgePackedNormalRowCount = bridge.externalGpuBufferPackedNormalRowCount ?? 0;
+    target.surfaceDrawRenderBridgePackedNormalEncoding = bridge.externalGpuBufferPackedNormalEncoding ?? null;
+    target.surfaceDrawRenderBridgePackedNormalSurfaceGenerationId =
+      bridge.externalGpuBufferPackedNormalSurfaceGenerationId ?? null;
+    target.surfaceDrawRenderBridgePackedNormalAdditionalSubmitCount =
+      bridge.externalGpuBufferPackedNormalAdditionalSubmitCount ?? null;
+    target.surfaceDrawRenderBridgeVertexTemperatureReady = Boolean(
+      bridge.drawState?.vertexTemperatureBuffer
+      && (bridge.drawState?.vertexTemperatureRowCount ?? 0) > 0
+    );
+    target.surfaceDrawRenderBridgeVertexTemperatureByteLength =
+      bridge.externalGpuBufferVertexTemperatureByteLength ?? 0;
+    target.surfaceDrawRenderBridgeVertexTemperatureRowCount =
+      bridge.externalGpuBufferVertexTemperatureRowCount ?? 0;
+    target.surfaceDrawRenderBridgeVertexTemperatureEncoding =
+      bridge.externalGpuBufferVertexTemperatureEncoding ?? null;
+    target.surfaceDrawRenderBridgeVertexTemperatureSurfaceGenerationId =
+      bridge.externalGpuBufferVertexTemperatureSurfaceGenerationId ?? null;
+    target.surfaceDrawRenderBridgeVertexTemperatureVolumeGenerationId =
+      bridge.externalGpuBufferVertexTemperatureVolumeGenerationId ?? null;
+    target.surfaceDrawRenderBridgeVertexTemperatureAdditionalSubmitCount =
+      bridge.externalGpuBufferVertexTemperatureAdditionalSubmitCount ?? null;
+    target.surfaceDrawRenderBridgeVertexTemperatureAdditionalReadyCount = (
+      bridge.drawState?.additionalSurfaceDraws || []
+    ).filter((draw) => draw?.temperatureBuffer && (draw?.temperatureRowCount ?? 0) > 0).length;
+    target.surfaceDrawRenderBridgeRefractionTargetLifecycleStatus =
+      bridge.refractionTargetLifecycleStatus ?? null;
+    target.surfaceDrawRenderBridgeRefractionTargetLifecycleReason =
+      bridge.refractionTargetLifecycleReason ?? null;
+    target.surfaceDrawRenderBridgeRefractionTargetGeneration = bridge.refractionTargetSet?.generation
+      ?? bridge.refractionTargetGeneration
+      ?? null;
+    target.surfaceDrawRenderBridgeRefractionTargetWidth = bridge.refractionTargetSet?.width
+      ?? bridge.refractionCopyWidth
+      ?? 0;
+    target.surfaceDrawRenderBridgeRefractionTargetHeight = bridge.refractionTargetSet?.height
+      ?? bridge.refractionCopyHeight
+      ?? 0;
+    target.surfaceDrawRenderBridgeRefractionTargetColorFormat = bridge.refractionTargetSet?.colorFormat
+      ?? bridge.refractionCopyFormat
+      ?? null;
+    target.surfaceDrawRenderBridgeRefractionTargetDepthFormat = bridge.refractionTargetSet?.depthFormat
+      ?? bridge.refractionBackfaceDepthFormat
+      ?? null;
+    target.surfaceDrawRenderBridgeRefractionTargetRetirementPendingCount =
+      bridge.refractionTargetRetirementPendingCount ?? 0;
+    target.surfaceDrawRenderBridgeRefractionTargetRetirementCount =
+      bridge.refractionTargetRetirementCount ?? 0;
+    target.surfaceDrawRenderBridgeRefractionBackfaceStatus = bridge.refractionBackfaceStatus ?? null;
+    target.surfaceDrawRenderBridgeRefractionBackfaceCacheHit =
+      bridge.lastRefractionBackfaceCacheHit ?? null;
+    target.surfaceDrawRenderBridgeRefractionBackfacePassDrawCount =
+      bridge.lastRefractionBackfacePassDrawCount ?? 0;
+    target.surfaceDrawRenderBridgeRefractionBackfaceAdditionalSubmitCount =
+      bridge.refractionBackfaceAdditionalSubmitCount ?? null;
+    target.surfaceDrawRenderBridgeBackgroundImageGpuStatus = bridge.backgroundImageGpuStatus ?? null;
+    target.surfaceDrawRenderBridgeBackgroundImageDrawCount = bridge.backgroundImageDrawCount ?? 0;
   target.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverStatus =
     bridge.schroederRenderProxyLocalResolverStatus
     ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.status
@@ -9619,6 +9926,22 @@ function resolveMaterialInterfaceSurfaceTablePolicy(policy = null) {
   };
 }
 
+export function packedNormalRowsCoverCompactPositionPrefix({
+  normalRowCount = 0,
+  normalBufferByteLength = 0,
+  compactPositionVertexCount = 0
+} = {}) {
+  const drawVertexCount = Math.max(
+    0,
+    Math.floor(Number(compactPositionVertexCount) || 0)
+  );
+  const rowCount = Math.max(0, Math.floor(Number(normalRowCount) || 0));
+  const byteLength = Math.max(0, Math.floor(Number(normalBufferByteLength) || 0));
+  return drawVertexCount >= 3
+    && rowCount >= drawVertexCount
+    && byteLength >= drawVertexCount * Uint32Array.BYTES_PER_ELEMENT;
+}
+
 export function createSphPhaseScene(container, {
   boxEdgeM = 10,
   boxDimsM = null,
@@ -9751,10 +10074,10 @@ export function createSphPhaseScene(container, {
   let sceneBackgroundColorHex = normalizeSphSceneBackgroundColorHex(backgroundColor);
   let sceneBackgroundImageUrl = null;
   function residentSurfaceDrawBackgroundClearValue() {
-    // When a background image is active the canvases clear fully transparent
-    // (premultiplied zero) so the container's CSS image shows through.
+    // Native WebGPU canvases are opaque. While the same-canvas image texture is
+    // loading, clear to opaque black instead of depending on CSS transparency.
     if (sceneBackgroundImageUrl) {
-      return { r: 0, g: 0, b: 0, a: 0 };
+      return { r: 0, g: 0, b: 0, a: 1 };
     }
     // Parse the display-space hex directly (Three.Color may convert managed
     // colors to linear; the native canvas clear wants raw display channels).
@@ -11487,6 +11810,22 @@ export function createSphPhaseScene(container, {
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.target.copy(center);
+  let nativeSurfaceCameraDirty = true;
+  let nativeSurfaceStateDirty = true;
+  controls.addEventListener?.('change', () => {
+    nativeSurfaceCameraDirty = true;
+  });
+
+  function invalidateSphNativeWebGpuSurfaceFrame(bridge, reason = 'native-surface-state-changed') {
+    if (
+      bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      || bridge !== sphResidentSurfaceDrawRenderBridge
+    ) return false;
+    nativeSurfaceStateDirty = true;
+    bridge.nativeSurfaceAnimationFrameInvalidationReason = reason;
+    bridge.nativeSurfaceAnimationFrameInvalidatedAtMs = nowMs();
+    return true;
+  }
 
   // Bright, fairly even illumination so the non-emissive surfaces (ice/water) read clearly; a
   // hemisphere light gives a soft sky/ground fill on top of the flat ambient, and two directional
@@ -11591,41 +11930,6 @@ export function createSphPhaseScene(container, {
   const releasedSphResidentSurfaceResourceObjects = new WeakSet();
   let sphResidentRenderSurfaceState = null;
   let sphResidentRenderFieldRowsBufferPool = null;
-  // Double-buffered snapshots of the render-field scalars for the native
-  // draw's gradient normals. The pooled field buffer is rewritten by every
-  // render-field pass (~25/s) while frames draw at 60fps; binding it live
-  // made normals flicker mid-generation. Two slots alternate so the copy for
-  // generation N+1 never lands in the buffer generation N still binds.
-  const sphResidentFieldGradientSnapshotRings = new Map();
-  function snapshotResidentFieldGradientBuffer({ device, sourceBuffer, copyByteLength, slotKey = 'primary' }) {
-    const bytes = Math.max(0, Math.round(Number(copyByteLength) || 0));
-    if (!device?.createBuffer || !sourceBuffer || bytes <= 0) return null;
-    let ring = sphResidentFieldGradientSnapshotRings.get(slotKey);
-    if (!ring) {
-      ring = { slots: [null, null], next: 0 };
-      sphResidentFieldGradientSnapshotRings.set(slotKey, ring);
-    }
-    const slotIndex = ring.next;
-    ring.next = (slotIndex + 1) % 2;
-    let slot = ring.slots[slotIndex];
-    if (!slot || slot.device !== device || slot.byteLength < bytes) {
-      slot?.buffer?.destroy?.();
-      slot = {
-        device,
-        byteLength: bytes,
-        buffer: device.createBuffer({
-          label: `ulg-sph-field-gradient-snapshot-${slotKey}-${slotIndex}`,
-          size: bytes,
-          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-        })
-      };
-      ring.slots[slotIndex] = slot;
-    }
-    const encoder = device.createCommandEncoder({ label: 'ulg-sph-field-gradient-snapshot-copy' });
-    encoder.copyBufferToBuffer(sourceBuffer, 0, slot.buffer, 0, bytes);
-    device.queue.submit([encoder.finish()]);
-    return slot.buffer;
-  }
   // Secondary native surfaces (every ok render-field descriptor beyond the
   // primary): each carries its own compact-position translation, per-surface
   // camera uniform (material/phase/optical ids -> per-material PBR lookup),
@@ -11647,17 +11951,67 @@ export function createSphPhaseScene(container, {
     if (!translation || typeof translation !== 'object') return;
     if (releasedSphResidentSurfaceResourceObjects.has(translation)) return;
     releasedSphResidentSurfaceResourceObjects.add(translation);
+    translation.nativeSurfaceTemperatureRows?.destroy?.();
     translation.releaseExtensionSurfaceBufferLeases?.({ status: reason });
     translation.destroyExtensionSurfaceBuffers?.({ releaseLeases: true, reason });
+  }
+  function attachNativeSurfaceTemperatureRowsToTranslation(
+    translation,
+    temperatureRows,
+    { additionalSubmitCount = 1 } = {}
+  ) {
+    if (!translation?.surfaceDraw || !temperatureRows?.temperatureRowsBuffer) {
+      throw new TypeError(
+        'native surface translation and encoded temperature rows are required'
+      );
+    }
+    const coverage = temperatureRows.coverage || null;
+    const metadata = {
+      compactTemperatureRowsBufferRetained: true,
+      compactTemperatureRowsBufferByteLength:
+        temperatureRows.temperatureRowsBufferByteLength ?? 0,
+      compactTemperatureRowsBufferRowCount:
+        temperatureRows.temperatureRowsBufferRowCount ?? 0,
+      compactTemperatureRowsStrideFloats:
+        temperatureRows.temperatureRowsStrideFloats ?? 1,
+      compactTemperatureRowsSchema: temperatureRows.temperatureRowsSchema ?? null,
+      compactTemperatureRowsLayoutName: temperatureRows.temperatureRowsLayoutName ?? null,
+      compactTemperatureRowsEncoding: temperatureRows.encoding ?? null,
+      compactTemperatureRowsSemantic: temperatureRows.semantic ?? null,
+      compactTemperatureRowsSurfaceGenerationId:
+        temperatureRows.surfaceGenerationId ?? null,
+      compactTemperatureRowsVolumeGenerationId:
+        temperatureRows.volumeGenerationId ?? null,
+      compactTemperatureRowsCoverageSchema: coverage?.schema ?? null,
+      compactTemperatureRowsCoverageComplete: coverage?.complete === true,
+      compactTemperatureRowsCoverageRowCount: coverage?.rowCount ?? 0,
+      compactTemperatureRowsOwnership:
+        temperatureRows.temperatureRowsOwnership ?? 'ulg-owned-generation-buffer',
+      compactTemperatureRowsAdditionalSubmitCount: Math.max(
+        0,
+        Math.round(Number(additionalSubmitCount) || 0)
+      )
+    };
+    translation.nativeSurfaceTemperatureRows = temperatureRows;
+    Object.assign(translation, metadata);
+    Object.assign(translation.surfaceVertices || {}, metadata);
+    Object.assign(translation.surfaceDraw, metadata, {
+      compactTemperatureRowsBuffer: temperatureRows.temperatureRowsBuffer
+    });
+    return translation;
   }
   function releaseUncommittedNativeSurfaceResources({
     device = null,
     translation = null,
+    nativeSurfaceTemperatureRows = null,
     extensionSurfaceResult = null,
     reason = 'uncommitted-native-surface-resources-released'
   } = {}) {
     const release = () => {
       destroyExtensionSurfaceTranslationOnce(translation, reason);
+      if (translation?.nativeSurfaceTemperatureRows !== nativeSurfaceTemperatureRows) {
+        nativeSurfaceTemperatureRows?.destroy?.();
+      }
       releaseExtensionSurfaceResultOnce(extensionSurfaceResult);
     };
     if (typeof device?.queue?.onSubmittedWorkDone === 'function') {
@@ -11792,8 +12146,13 @@ export function createSphPhaseScene(container, {
             {
               binding: 4,
               resource: {
-                buffer: execution.renderFieldGradientVolume?.buffer
-                  || bridge.fieldGradientDummyBuffer
+                buffer: nativeDrawInput.normalBuffer || bridge.fieldGradientDummyBuffer
+              }
+            },
+            {
+              binding: 5,
+              resource: {
+                buffer: nativeDrawInput.temperatureBuffer || bridge.temperatureDummyBuffer
               }
             }
           ]
@@ -11803,6 +12162,13 @@ export function createSphPhaseScene(container, {
           surfaceKey,
           bindGroup,
           cameraBuffer,
+          surfaceInputBuffer: nativeDrawInput.buffer,
+          surfaceGenerationId: execution.compactPositionRowsSurfaceGenerationId ?? null,
+          temperatureBuffer: nativeDrawInput.temperatureBuffer || null,
+          temperatureBufferByteLength: nativeDrawInput.temperatureBufferByteLength || 0,
+          temperatureRowCount: nativeDrawInput.temperatureRowCount || 0,
+          temperatureSurfaceGenerationId:
+            nativeDrawInput.temperatureSurfaceGenerationId ?? null,
           drawIndirectRowsBuffer: execution.drawIndirectRowsBuffer,
           compactPositionDrawState: nativeDrawInput.compactPositionDrawState,
           depthWriteFlag: Number(surface.depthWriteFlag ?? entry.depthWriteFlag ?? 1),
@@ -14298,10 +14664,7 @@ export function createSphPhaseScene(container, {
     return resolveNativeSurfaceResourceReleaseAction({
       drawState: renderBridge?.drawState ?? null,
       surfaceDrawExecution,
-      validationPending: sphNativeWebGpuSurfaceValidationPending(renderBridge),
-      submitFencePending: Boolean(renderBridge?.nativeSurfaceConsumerSubmitFencePending),
-      submitFenceTimedOut: Boolean(renderBridge?.nativeSurfaceConsumerSubmitFenceTimedOut),
-      submitFenceFailed: Boolean(renderBridge?.nativeSurfaceConsumerSubmitFenceFailed)
+      validationPending: sphNativeWebGpuSurfaceValidationPending(renderBridge)
     });
   }
 
@@ -14540,10 +14903,18 @@ export function createSphPhaseScene(container, {
       renderBridge.opticalGpuBuffers?.recordsBuffer?.destroy?.();
       renderBridge.opticalGpuBuffers?.spectralSamplesBuffer?.destroy?.();
       renderBridge.fieldGradientDummyBuffer?.destroy?.();
+      renderBridge.temperatureDummyBuffer?.destroy?.();
       renderBridge.refractionDummyTexture?.destroy?.();
-      renderBridge.refractionCopyTexture?.destroy?.();
+      renderBridge.refractionBackfaceDummyTexture?.destroy?.();
+      destroySphResidentSurfaceRefractionTargetSet(renderBridge.refractionTargetSet);
+      clearSphResidentSurfaceRefractionTargetBindings(renderBridge);
       renderBridge.envDummyTexture?.destroy?.();
       renderBridge.envMapTexture?.destroy?.();
+      renderBridge.backgroundImageTexture?.destroy?.();
+      renderBridge.backgroundImageRenderer?.uniformBuffer?.destroy?.();
+      for (const texture of renderBridge.retiredBackgroundImageTextures || []) {
+        texture?.destroy?.();
+      }
       renderBridge.boxWireframe?.uniformBuffer?.destroy?.();
       for (const buffer of renderBridge.additionalSurfaceCameraBuffers?.values?.() || []) {
         buffer?.destroy?.();
@@ -14573,12 +14944,17 @@ export function createSphPhaseScene(container, {
       renderBridge.cameraBuffer = null;
       renderBridge.opticalGpuBuffers = null;
       renderBridge.fieldGradientDummyBuffer = null;
+      renderBridge.temperatureDummyBuffer = null;
       renderBridge.refractionDummyTexture = null;
-      renderBridge.refractionCopyTexture = null;
+      renderBridge.refractionBackfaceDummyTexture = null;
+      renderBridge.refractionBackfaceDummyView = null;
       renderBridge.envDummyTexture = null;
       renderBridge.envMapTexture = null;
       renderBridge.envMapView = null;
       renderBridge.envMapFailedUrl = null;
+      renderBridge.backgroundImageTexture = null;
+      renderBridge.backgroundImageRenderer = null;
+      renderBridge.retiredBackgroundImageTextures = null;
       renderBridge.boxWireframe = null;
       renderBridge.additionalSurfaceCameraBuffers = null;
       renderBridge.depthTexture = null;
@@ -15144,13 +15520,14 @@ export function createSphPhaseScene(container, {
         || previous?.context !== context
         || previous?.configuredCanvasWidth !== canvas.width
         || previous?.configuredCanvasHeight !== canvas.height
+        || previous?.configuredAlphaMode !== 'opaque'
       );
       if (needsConfigure) {
         context.configure({
           device,
           format,
           usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
-          alphaMode: 'premultiplied'
+          alphaMode: 'opaque'
         });
       }
       const contextConfigureCount = (previous?.contextConfigureCount || 0) + (needsConfigure ? 1 : 0);
@@ -15182,6 +15559,7 @@ export function createSphPhaseScene(container, {
         configuredCanvasHeight: canvas.height,
         configuredFormat: format,
         configuredDevice: device,
+        configuredAlphaMode: 'opaque',
         contextConfigureCount,
         lastContextConfigureReason: needsConfigure
           ? 'native-surface-consumer-ensure'
@@ -15253,18 +15631,20 @@ export function createSphPhaseScene(container, {
       || bridge.configuredCanvasHeight !== canvas.height
       || bridge.configuredFormat !== format
       || bridge.configuredDevice !== device
+      || bridge.configuredAlphaMode !== 'opaque'
     );
     if (!needsConfigure) return false;
     context.configure({
       device,
       format,
       usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
-      alphaMode: 'premultiplied'
+      alphaMode: 'opaque'
     });
     bridge.configuredCanvasWidth = canvas.width;
     bridge.configuredCanvasHeight = canvas.height;
     bridge.configuredFormat = format;
     bridge.configuredDevice = device;
+    bridge.configuredAlphaMode = 'opaque';
     bridge.contextConfigureCount = (bridge.contextConfigureCount || 0) + 1;
     bridge.lastContextConfigureReason = reason;
     const nativeConsumer = renderer.userData?.sphNativeWebGpuSurfaceConsumer || null;
@@ -15273,6 +15653,7 @@ export function createSphPhaseScene(container, {
       nativeConsumer.configuredCanvasHeight = canvas.height;
       nativeConsumer.configuredFormat = format;
       nativeConsumer.configuredDevice = device;
+      nativeConsumer.configuredAlphaMode = 'opaque';
       nativeConsumer.contextConfigureCount = (nativeConsumer.contextConfigureCount || 0) + 1;
       nativeConsumer.lastContextConfigureReason = reason;
       nativeConsumer.updatedAtMs = nowMs();
@@ -15284,26 +15665,460 @@ export function createSphPhaseScene(container, {
   // Scene-color copy target for screen-space refraction: matches the canvas
   // size/format, filled by copyTextureToTexture after the opaque pass. Only
   // the native surface-consumer lane configures its canvas with COPY_SRC.
-  function ensureSphResidentSurfaceRefractionCopy(bridge, width, height) {
-    if (!bridge?.device || !bridge?.format) return null;
-    const w = Math.max(1, Math.round(Number(width) || 0));
-    const h = Math.max(1, Math.round(Number(height) || 0));
-    const existing = bridge.refractionCopyTexture;
-    if (existing && bridge.refractionCopyWidth === w && bridge.refractionCopyHeight === h
-      && bridge.refractionCopyFormat === bridge.format) {
-      return existing;
-    }
-    try { existing?.destroy?.(); } catch { /* released with device */ }
-    bridge.refractionCopyTexture = bridge.device.createTexture({
-      label: 'ulg-sph-resident-surface-draw-refraction-copy',
-      size: [w, h, 1],
-      format: bridge.format,
-      usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+  function clearSphResidentSurfaceRefractionTargetBindings(bridge) {
+    if (!bridge) return;
+    bridge.refractionTargetSet = null;
+    bridge.refractionCopyTexture = null;
+    bridge.refractionCopyView = null;
+    bridge.refractionCopyWidth = 0;
+    bridge.refractionCopyHeight = 0;
+    bridge.refractionCopyFormat = null;
+    bridge.refractionCopyByteLength = 0;
+    bridge.refractionBackfaceTexture = null;
+    bridge.refractionBackfaceView = null;
+    bridge.refractionBackfaceWidth = 0;
+    bridge.refractionBackfaceHeight = 0;
+    bridge.refractionBackfaceByteLength = 0;
+    bridge.refractionBackfaceCacheValid = false;
+    bridge.refractionBindGroup = null;
+    bridge.refractionBindGroupSceneColorView = null;
+    bridge.refractionBindGroupEnvironmentView = null;
+    bridge.refractionBindGroupBackDepthView = null;
+  }
+
+  function destroySphResidentSurfaceRefractionTargetSet(targetSet) {
+    if (!targetSet || targetSet.destroyed) return false;
+    targetSet.destroyed = true;
+    try { targetSet.copyTexture?.destroy?.(); } catch { /* device teardown */ }
+    try { targetSet.backfaceTexture?.destroy?.(); } catch { /* device teardown */ }
+    targetSet.copyTexture = null;
+    targetSet.copyView = null;
+    targetSet.backfaceTexture = null;
+    targetSet.backfaceView = null;
+    return true;
+  }
+
+  function retireSphResidentSurfaceRefractionTargetSet(bridge, targetSet, reason) {
+    if (!bridge || !targetSet) return false;
+    targetSet.retirementStatus = 'retirement-requested';
+    targetSet.retirementReason = reason;
+    const retirement = retireNativeRefractionTargetSet({
+      targetSet,
+      status: reason,
+      deferRelease: (request) => deferSphNativeWebGpuSurfaceResourceRelease(bridge, request),
+      destroyTargetSet: destroySphResidentSurfaceRefractionTargetSet,
+      onRelease: ({ released: destroyed }) => {
+      targetSet.retirementStatus = destroyed ? 'retired-after-liveness-boundary' : 'already-retired';
+      bridge.refractionTargetRetirementPendingCount = Math.max(
+        0,
+        Math.round(Number(bridge.refractionTargetRetirementPendingCount) || 0) - 1
+      );
+      if (destroyed) {
+        bridge.refractionTargetRetirementCount = Math.max(
+          0,
+          Math.round(Number(bridge.refractionTargetRetirementCount) || 0)
+        ) + 1;
+      }
+      }
     });
-    bridge.refractionCopyWidth = w;
-    bridge.refractionCopyHeight = h;
-    bridge.refractionCopyFormat = bridge.format;
-    return bridge.refractionCopyTexture;
+    if (retirement.deferred) {
+      targetSet.retirementStatus = 'retirement-liveness-pending';
+      bridge.refractionTargetRetirementPendingCount = Math.max(
+        0,
+        Math.round(Number(bridge.refractionTargetRetirementPendingCount) || 0)
+      ) + 1;
+      return true;
+    }
+    return false;
+  }
+
+  function detachSphResidentSurfaceRefractionTargetSet(bridge, reason) {
+    const targetSet = bridge?.refractionTargetSet || null;
+    if (!targetSet) {
+      clearSphResidentSurfaceRefractionTargetBindings(bridge);
+      return null;
+    }
+    clearSphResidentSurfaceRefractionTargetBindings(bridge);
+    retireSphResidentSurfaceRefractionTargetSet(bridge, targetSet, reason);
+    return targetSet;
+  }
+
+  // Scene color and rear depth are one exact size/format generation. A frame
+  // either binds both resources or fails closed through the dummy target.
+  function ensureSphResidentSurfaceRefractionTargetSet(bridge, width, height) {
+    const action = resolveNativeRefractionTargetSetAction({
+      required: true,
+      activeTargetSet: bridge?.refractionTargetSet ?? null,
+      device: bridge?.device ?? null,
+      width,
+      height,
+      colorFormat: bridge?.format ?? null,
+      depthFormat: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+      resourceReleaseBlocked: sphNativeWebGpuSurfaceResourceReleaseBlocked(bridge)
+    });
+    bridge.refractionTargetLifecycleStatus = action.status;
+    if (action.reuse) {
+      bridge.refractionTargetLifecycleReason = null;
+      return bridge.refractionTargetSet;
+    }
+    if (action.retireActive) {
+      detachSphResidentSurfaceRefractionTargetSet(
+        bridge,
+        'native-refraction-target-set-replaced'
+      );
+    }
+    if (!action.create || !bridge?.refractiveBackfacePipeline) return null;
+    let copyTexture = null;
+    let backfaceTexture = null;
+    try {
+      copyTexture = bridge.device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-copy',
+        size: [action.width, action.height, 1],
+        format: action.colorFormat,
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+      });
+      backfaceTexture = bridge.device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-backface-depth',
+        size: [action.width, action.height, 1],
+        format: action.depthFormat,
+        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.TEXTURE_BINDING
+      });
+      const targetSet = {
+        schema: 'peercompute.ulg.native-refraction-target-set.v0',
+        generation: Math.max(
+          0,
+          Math.round(Number(bridge.refractionTargetGeneration) || 0)
+        ) + 1,
+        device: bridge.device,
+        width: action.width,
+        height: action.height,
+        colorFormat: action.colorFormat,
+        depthFormat: action.depthFormat,
+        copyTexture,
+        copyView: copyTexture.createView(),
+        backfaceTexture,
+        backfaceView: backfaceTexture.createView(),
+        destroyed: false,
+        retirementStatus: 'active'
+      };
+      bridge.refractionTargetGeneration = targetSet.generation;
+      bridge.refractionTargetSet = targetSet;
+      bridge.refractionCopyTexture = targetSet.copyTexture;
+      bridge.refractionCopyView = targetSet.copyView;
+      bridge.refractionCopyWidth = targetSet.width;
+      bridge.refractionCopyHeight = targetSet.height;
+      bridge.refractionCopyFormat = targetSet.colorFormat;
+      bridge.refractionCopyByteLength = targetSet.width * targetSet.height * 4;
+      bridge.refractionBackfaceTexture = targetSet.backfaceTexture;
+      bridge.refractionBackfaceView = targetSet.backfaceView;
+      bridge.refractionBackfaceWidth = targetSet.width;
+      bridge.refractionBackfaceHeight = targetSet.height;
+      bridge.refractionBackfaceByteLength =
+        targetSet.width * targetSet.height * Float32Array.BYTES_PER_ELEMENT;
+      bridge.refractionBackfaceCacheValid = false;
+      bridge.refractionBindGroup = null;
+      bridge.refractionTargetLifecycleStatus = 'target-set-created';
+      bridge.refractionTargetLifecycleReason = null;
+      return targetSet;
+    } catch (error) {
+      try { copyTexture?.destroy?.(); } catch { /* device teardown */ }
+      try { backfaceTexture?.destroy?.(); } catch { /* device teardown */ }
+      bridge.refractionTargetLifecycleStatus = 'target-set-create-error';
+      bridge.refractionTargetLifecycleReason = error instanceof Error
+        ? error.message
+        : String(error);
+      return null;
+    }
+  }
+
+  function releaseSphResidentSurfaceRefractionTargetsWhenOpaque(bridge, width, height) {
+    const action = resolveNativeRefractionTargetSetAction({
+      required: false,
+      activeTargetSet: bridge?.refractionTargetSet ?? null,
+      device: bridge?.device ?? null,
+      width,
+      height,
+      colorFormat: bridge?.format ?? null,
+      depthFormat: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+      resourceReleaseBlocked: sphNativeWebGpuSurfaceResourceReleaseBlocked(bridge)
+    });
+    bridge.refractionTargetLifecycleStatus = action.status;
+    bridge.refractionTargetLifecycleReason = null;
+    if (action.retireActive) {
+      detachSphResidentSurfaceRefractionTargetSet(
+        bridge,
+        'native-refraction-target-set-released-opaque-only'
+      );
+    } else if (!bridge?.refractionTargetSet) {
+      clearSphResidentSurfaceRefractionTargetBindings(bridge);
+    }
+    return action;
+  }
+
+  function ensureSphResidentSurfaceRefractionCopy(bridge, width, height) {
+    return ensureSphResidentSurfaceRefractionTargetSet(bridge, width, height)?.copyTexture || null;
+  }
+
+  function ensureSphResidentSurfaceRefractionBackfaceDepth(bridge, width, height) {
+    return ensureSphResidentSurfaceRefractionTargetSet(bridge, width, height)?.backfaceView || null;
+  }
+
+  function sphResidentSurfaceRefractionBackfaceCacheHit(bridge, {
+    drawState,
+    additionalSurfaceDraws,
+    refractiveDraws,
+    additionalRefractiveDraws,
+    viewProjection
+  } = {}) {
+    if (
+      !bridge?.refractionBackfaceCacheValid
+      || bridge.refractionBackfaceCacheSurfaceInputBuffer !== drawState?.surfaceInputBuffer
+      || bridge.refractionBackfaceCacheDrawIndirectRowsBuffer !== drawState?.drawIndirectRowsBuffer
+      || bridge.refractionBackfaceCacheSurfaceGenerationId
+        !== (drawState?.surfaceDrawExecution?.compactPositionRowsSurfaceGenerationId ?? null)
+    ) {
+      return false;
+    }
+    const cachedPrimaryOffsets = bridge.refractionBackfaceCachePrimaryIndirectOffsets;
+    if (!Array.isArray(cachedPrimaryOffsets) || cachedPrimaryOffsets.length !== refractiveDraws.length) {
+      return false;
+    }
+    for (let index = 0; index < refractiveDraws.length; index += 1) {
+      if (cachedPrimaryOffsets[index] !== refractiveDraws[index].indirectOffsetBytes) return false;
+    }
+    const cachedAdditional = bridge.refractionBackfaceCacheAdditionalDraws;
+    if (!Array.isArray(cachedAdditional) || cachedAdditional.length !== additionalRefractiveDraws.length) {
+      return false;
+    }
+    for (let index = 0; index < additionalRefractiveDraws.length; index += 1) {
+      const cached = cachedAdditional[index];
+      const currentDraw = additionalRefractiveDraws[index];
+      if (
+        cached.surfaceKey !== currentDraw.surfaceKey
+        || cached.surfaceInputBuffer !== currentDraw.surfaceInputBuffer
+        || cached.surfaceGenerationId !== currentDraw.surfaceGenerationId
+        || cached.drawIndirectRowsBuffer !== currentDraw.drawIndirectRowsBuffer
+      ) {
+        return false;
+      }
+    }
+    const current = viewProjection?.elements;
+    const cached = bridge.refractionBackfaceCacheViewProjection;
+    if (!current || !(cached instanceof Float32Array) || cached.length !== 16) return false;
+    for (let index = 0; index < 16; index += 1) {
+      // Ignore sub-pixel OrbitControls damping noise; a larger camera change
+      // invalidates the cached rear surface on the next frame.
+      if (Math.abs(Number(cached[index]) - Number(current[index])) > 1e-6) return false;
+    }
+    return true;
+  }
+
+  function commitSphResidentSurfaceRefractionBackfaceCache(bridge, {
+    drawState,
+    additionalSurfaceDraws,
+    refractiveDraws,
+    additionalRefractiveDraws,
+    viewProjection
+  } = {}) {
+    bridge.refractionBackfaceCacheValid = true;
+    bridge.refractionBackfaceCacheSurfaceInputBuffer = drawState?.surfaceInputBuffer || null;
+    bridge.refractionBackfaceCacheDrawIndirectRowsBuffer = drawState?.drawIndirectRowsBuffer || null;
+    bridge.refractionBackfaceCacheSurfaceGenerationId =
+      drawState?.surfaceDrawExecution?.compactPositionRowsSurfaceGenerationId ?? null;
+    bridge.refractionBackfaceCachePrimaryIndirectOffsets = refractiveDraws.map(
+      (draw) => draw.indirectOffsetBytes
+    );
+    bridge.refractionBackfaceCacheAdditionalDraws = additionalRefractiveDraws.map((draw) => ({
+      surfaceKey: draw.surfaceKey,
+      surfaceInputBuffer: draw.surfaceInputBuffer,
+      surfaceGenerationId: draw.surfaceGenerationId,
+      drawIndirectRowsBuffer: draw.drawIndirectRowsBuffer
+    }));
+    bridge.refractionBackfaceCacheViewProjection = bridge.refractionBackfaceCacheViewProjection
+      instanceof Float32Array
+      ? bridge.refractionBackfaceCacheViewProjection
+      : new Float32Array(16);
+    bridge.refractionBackfaceCacheViewProjection.set(viewProjection?.elements || []);
+  }
+
+  function ensureSphNativeSurfaceBackgroundRenderer(bridge) {
+    if (!bridge?.device || !bridge?.format) return null;
+    if (bridge.backgroundImageRenderer?.pipeline) return bridge.backgroundImageRenderer;
+    const module = bridge.device.createShaderModule({
+      label: 'ulg-sph-native-surface-background',
+      code: SPH_NATIVE_WEBGPU_BACKGROUND_WGSL
+    });
+    const pipeline = bridge.device.createRenderPipeline({
+      label: 'ulg-sph-native-surface-background',
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs_main' },
+      fragment: {
+        module,
+        entryPoint: 'fs_main',
+        targets: [{ format: bridge.format }]
+      },
+      primitive: { topology: 'triangle-list' },
+      depthStencil: {
+        format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        depthWriteEnabled: false,
+        depthCompare: 'always'
+      }
+    });
+    const sampler = bridge.device.createSampler({
+      label: 'ulg-sph-native-surface-background',
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge'
+    });
+    const uniformBuffer = bridge.device.createBuffer({
+      label: 'ulg-sph-native-surface-background-cover',
+      size: 4 * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    bridge.backgroundImageRenderer = {
+      pipeline,
+      sampler,
+      uniformBuffer,
+      bindGroup: null,
+      coverScaleKey: null,
+      imageWidth: 0,
+      imageHeight: 0
+    };
+    return bridge.backgroundImageRenderer;
+  }
+
+  function retireSphNativeSurfaceBackgroundTexture(bridge, texture, reason) {
+    if (!texture || texture === bridge?.backgroundImageTexture) return false;
+    const release = () => {
+      try { texture.destroy?.(); } catch { /* device teardown */ }
+    };
+    if (deferSphNativeWebGpuSurfaceResourceRelease(bridge, {
+      status: reason || 'native-background-texture-retired',
+      requiresLivenessBoundary: true,
+      release
+    })) {
+      return true;
+    }
+    release();
+    return false;
+  }
+
+  function uploadSphNativeSurfaceBackgroundImage(bridge, image, url) {
+    if (!bridge?.device || !image || sceneBackgroundImageUrl !== url) return false;
+    let texture = null;
+    try {
+      const renderer = ensureSphNativeSurfaceBackgroundRenderer(bridge);
+      if (!renderer) return false;
+      const sourceWidth = Math.max(1, Number(image.naturalWidth || image.width) || 1);
+      const sourceHeight = Math.max(1, Number(image.naturalHeight || image.height) || 1);
+      const maxDeviceDimension = Math.max(
+        1,
+        Math.floor(Number(bridge.device.limits?.maxTextureDimension2D) || 2048)
+      );
+      const maxUploadDimension = Math.min(2048, maxDeviceDimension);
+      const resizeScale = Math.min(1, maxUploadDimension / Math.max(sourceWidth, sourceHeight));
+      const width = Math.max(1, Math.round(sourceWidth * resizeScale));
+      const height = Math.max(1, Math.round(sourceHeight * resizeScale));
+      const uploadCanvas = document.createElement('canvas');
+      uploadCanvas.width = width;
+      uploadCanvas.height = height;
+      const context2d = uploadCanvas.getContext('2d');
+      if (!context2d) return false;
+      context2d.drawImage(image, 0, 0, width, height);
+      const imagePixels = context2d.getImageData(0, 0, width, height).data;
+      const sourceBytesPerRow = width * 4;
+      const uploadBytesPerRow = Math.ceil(sourceBytesPerRow / 256) * 256;
+      let uploadPixels = imagePixels;
+      if (uploadBytesPerRow !== sourceBytesPerRow) {
+        uploadPixels = new Uint8Array(uploadBytesPerRow * height);
+        for (let row = 0; row < height; row += 1) {
+          uploadPixels.set(
+            imagePixels.subarray(row * sourceBytesPerRow, (row + 1) * sourceBytesPerRow),
+            row * uploadBytesPerRow
+          );
+        }
+      }
+      texture = bridge.device.createTexture({
+        label: 'ulg-sph-native-surface-background-image',
+        size: [width, height, 1],
+        format: 'rgba8unorm',
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+      });
+      bridge.device.queue.writeTexture(
+        { texture },
+        uploadPixels,
+        { bytesPerRow: uploadBytesPerRow, rowsPerImage: height },
+        [width, height, 1]
+      );
+      const bindGroup = bridge.device.createBindGroup({
+        label: 'ulg-sph-native-surface-background',
+        layout: renderer.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: texture.createView() },
+          { binding: 1, resource: renderer.sampler },
+          { binding: 2, resource: { buffer: renderer.uniformBuffer } }
+        ]
+      });
+      const previousTexture = bridge.backgroundImageTexture;
+      bridge.backgroundImageTexture = texture;
+      bridge.backgroundImageTextureUrl = url;
+      bridge.backgroundImageTextureWidth = width;
+      bridge.backgroundImageTextureHeight = height;
+      bridge.backgroundImageGpuStatus = 'native-opaque-background-image-ready';
+      bridge.backgroundImageGpuReason = null;
+      renderer.bindGroup = bindGroup;
+      renderer.imageWidth = width;
+      renderer.imageHeight = height;
+      renderer.coverScaleKey = null;
+      texture = null;
+      retireSphNativeSurfaceBackgroundTexture(
+        bridge,
+        previousTexture,
+        'native-background-texture-replaced'
+      );
+      return true;
+    } catch (error) {
+      texture?.destroy?.();
+      bridge.backgroundImageGpuStatus = 'native-opaque-background-image-upload-failed';
+      bridge.backgroundImageGpuReason = error instanceof Error ? error.message : String(error);
+      return false;
+    }
+  }
+
+  function drawSphNativeSurfaceBackgroundImage(bridge, pass) {
+    const renderer = bridge?.backgroundImageRenderer;
+    if (!renderer?.pipeline || !renderer.bindGroup || !bridge?.backgroundImageTexture) return false;
+    const coverScaleKey = [
+      renderer.imageWidth,
+      renderer.imageHeight,
+      bridge.canvas?.width || 1,
+      bridge.canvas?.height || 1
+    ].join(':');
+    if (renderer.coverScaleKey !== coverScaleKey) {
+      const coverScale = nativeSurfaceBackgroundCoverScale({
+        imageWidth: renderer.imageWidth,
+        imageHeight: renderer.imageHeight,
+        canvasWidth: bridge.canvas?.width,
+        canvasHeight: bridge.canvas?.height
+      });
+      bridge.device.queue.writeBuffer(
+        renderer.uniformBuffer,
+        0,
+        new Float32Array([coverScale[0], coverScale[1], 0, 0])
+      );
+      renderer.coverScaleKey = coverScaleKey;
+      bridge.backgroundImageCoverScale = coverScale;
+    }
+    pass.setPipeline(renderer.pipeline);
+    pass.setBindGroup(0, renderer.bindGroup);
+    pass.draw(3);
+    bridge.backgroundImageDrawCount = Math.max(
+      0,
+      Math.round(Number(bridge.backgroundImageDrawCount) || 0)
+    ) + 1;
+    bridge.backgroundImageGpuStatus = 'native-opaque-background-image-rendered';
+    return true;
   }
 
   // Prefiltered environment map from the scene background image: 256x128
@@ -15323,7 +16138,8 @@ export function createSphPhaseScene(container, {
         { binding: 0, resource: bridge.refractionDummyTexture.createView() },
         { binding: 1, resource: bridge.refractionSampler },
         { binding: 2, resource: bridge.envMapView || bridge.envDummyView },
-        { binding: 3, resource: bridge.envSampler }
+        { binding: 3, resource: bridge.envSampler },
+        { binding: 4, resource: bridge.refractionBackfaceDummyView }
       ]
     });
   }
@@ -15331,21 +16147,44 @@ export function createSphPhaseScene(container, {
   function ensureSphResidentSurfaceEnvMap(bridge) {
     if (!bridge?.device || !bridge.envSampler) return;
     const url = sceneBackgroundImageUrl;
-    if (
-      bridge.envMapUrl === url
-      || bridge.envMapPendingUrl === url
-      || bridge.envMapFailedUrl === url
-    ) return;
     if (!url) {
       bridge.envMapUrl = null;
       bridge.envMapPendingUrl = null;
       bridge.envMapFailedUrl = null;
-      try { bridge.envMapTexture?.destroy?.(); } catch { /* device teardown */ }
+      const previousEnvMap = bridge.envMapTexture;
       bridge.envMapTexture = null;
       bridge.envMapView = null;
+      retireSphNativeSurfaceBackgroundTexture(
+        bridge,
+        previousEnvMap,
+        'native-environment-map-cleared'
+      );
+      const backgroundTexture = bridge.backgroundImageTexture;
+      bridge.backgroundImageTexture = null;
+      bridge.backgroundImageTextureUrl = null;
+      bridge.backgroundImageGpuStatus = 'native-opaque-background-image-cleared';
+      bridge.backgroundImageGpuReason = null;
+      if (bridge.backgroundImageRenderer) {
+        bridge.backgroundImageRenderer.bindGroup = null;
+      }
+      retireSphNativeSurfaceBackgroundTexture(
+        bridge,
+        backgroundTexture,
+        'native-background-texture-cleared'
+      );
       rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
       return;
     }
+    const backgroundReady = bridge.backgroundImageTextureUrl === url
+      && Boolean(bridge.backgroundImageTexture);
+    if (
+      (bridge.envMapUrl === url && backgroundReady)
+      || (bridge.envMapUrl === url && bridge.backgroundImageFailedUrl === url)
+      || bridge.envMapPendingUrl === url
+      || (bridge.envMapFailedUrl === url && (
+        backgroundReady || bridge.backgroundImageFailedUrl === url
+      ))
+    ) return;
     if (typeof Image === 'undefined' || typeof document === 'undefined') return;
     bridge.envMapPendingUrl = url;
     const image = new Image();
@@ -15358,6 +16197,11 @@ export function createSphPhaseScene(container, {
       ) return;
       bridge.envMapPendingUrl = null;
       if (sceneBackgroundImageUrl !== url || !bridge.device) return;
+      if (uploadSphNativeSurfaceBackgroundImage(bridge, image, url)) {
+        bridge.backgroundImageFailedUrl = null;
+      } else {
+        bridge.backgroundImageFailedUrl = url;
+      }
       let texture = null;
       try {
         const baseWidth = 256;
@@ -15394,11 +16238,16 @@ export function createSphPhaseScene(container, {
             [levels[level].width, levels[level].height, 1]
           );
         }
-        try { bridge.envMapTexture?.destroy?.(); } catch { /* replaced */ }
+        const previousEnvMap = bridge.envMapTexture;
         bridge.envMapTexture = texture;
         bridge.envMapView = texture.createView();
         bridge.envMapUrl = url;
         bridge.envMapFailedUrl = null;
+        retireSphNativeSurfaceBackgroundTexture(
+          bridge,
+          previousEnvMap,
+          'native-environment-map-replaced'
+        );
         rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
         texture = null;
         markSphResidentRenderProgress('surface-env-map-built', {
@@ -15430,11 +16279,16 @@ export function createSphPhaseScene(container, {
           reason: error instanceof Error ? error.message : String(error)
         });
       }
+      invalidateSphNativeWebGpuSurfaceFrame(
+        bridge,
+        'native-surface-background-or-environment-image-loaded'
+      );
     };
     image.onerror = () => {
       if (bridge.released || bridge !== sphResidentSurfaceDrawRenderBridge) return;
       if (bridge.envMapPendingUrl === url) bridge.envMapPendingUrl = null;
       bridge.envMapFailedUrl = url;
+      bridge.backgroundImageFailedUrl = url;
       markSphResidentRenderProgress('surface-env-map-image-load-failed', {
         stage: 'surface-env-map',
         url
@@ -16458,7 +17312,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       || !drawState?.bindGroup
       || !drawState?.drawIndirectRowsBuffer
       || !bridge.opaquePipeline
-      || !bridge.transparentPipeline
+      || !bridge.refractivePipeline
       || ((opaqueDraws.length > 0 || transparentDraws.length > 0) && !bridge.refractionDummyBindGroup)
       || !encoder?.copyTextureToBuffer
       || !bridge.device?.createBuffer
@@ -16519,7 +17373,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         }
       }
       if (transparentDraws.length > 0) {
-        validationPass.setPipeline(bridge.transparentPipeline);
+        validationPass.setPipeline(bridge.refractivePipeline);
         validationPass.setBindGroup(0, drawState.bindGroup);
         validationPass.setBindGroup(1, bridge.refractionDummyBindGroup);
         for (const draw of transparentDraws) {
@@ -18089,6 +18943,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
   function compactPositionCameraUniformPayload({
     viewProjection,
+    inverseViewProjection,
     compactPositionDrawState,
     cameraPosition = null
   } = {}) {
@@ -18099,6 +18954,16 @@ fn fs_main() -> @location(0) vec4<f32> {
       : (Array.isArray(viewProjection) || ArrayBuffer.isView(viewProjection) ? viewProjection : null);
     if (matrixSource) {
       matrix.set(Array.from(matrixSource).slice(0, 16), 0);
+    }
+    const inverseMatrix = new Float32Array(payload, 256, 16);
+    const inverseMatrixSource = Array.isArray(inverseViewProjection?.elements)
+      || ArrayBuffer.isView(inverseViewProjection?.elements)
+      ? inverseViewProjection.elements
+      : (Array.isArray(inverseViewProjection) || ArrayBuffer.isView(inverseViewProjection)
+          ? inverseViewProjection
+          : null);
+    if (inverseMatrixSource) {
+      inverseMatrix.set(Array.from(inverseMatrixSource).slice(0, 16), 0);
     }
     const view = new DataView(payload);
     const state = compactPositionDrawState || {};
@@ -18183,11 +19048,91 @@ fn fs_main() -> @location(0) vec4<f32> {
         ?? surfaceDrawExecution?.compactPositionRowsBufferRowCount
         ?? surfaceDrawExecution?.vertexCount
     ) || 0));
+    const compactNormalRowsBuffer = surfaceDrawExecution?.compactNormalRowsBuffer || null;
+    const compactNormalRowsBufferByteLength = Math.max(
+      0,
+      Math.round(Number(surfaceDrawExecution?.compactNormalRowsBufferByteLength) || 0)
+    );
+    const compactNormalRowCount = Math.max(
+      0,
+      Math.floor(Number(surfaceDrawExecution?.compactNormalRowsBufferRowCount) || 0)
+    );
+    const compactNormalGenerationMatches = Boolean(
+      Number.isInteger(Number(surfaceDrawExecution?.compactNormalRowsSurfaceGenerationId))
+      && surfaceDrawExecution?.compactNormalRowsSurfaceGenerationId
+        === surfaceDrawExecution?.compactPositionRowsSurfaceGenerationId
+      && (
+        surfaceDrawExecution?.compactNormalRowsVolumeGenerationId == null
+        || surfaceDrawExecution?.compactPositionRowsVolumeGenerationId == null
+        || surfaceDrawExecution?.compactNormalRowsVolumeGenerationId
+          === surfaceDrawExecution?.compactPositionRowsVolumeGenerationId
+      )
+    );
+    const compactNormalReady = Boolean(
+      compactNormalRowsBuffer
+      && packedNormalRowsCoverCompactPositionPrefix({
+        normalRowCount: compactNormalRowCount,
+        normalBufferByteLength: compactNormalRowsBufferByteLength,
+        compactPositionVertexCount
+      })
+      && surfaceDrawExecution?.compactNormalRowsSchema
+        === 'peercompute.webgpu-marching-cubes.packed-normal-rows.v0'
+      && surfaceDrawExecution?.compactNormalRowsLayoutName
+        === 'peercompute.webgpu-marching-cubes.layout.normal-octahedral-snorm16x2.v0'
+      && surfaceDrawExecution?.compactNormalRowsEncoding === 'octahedral-snorm16x2'
+      && surfaceDrawExecution?.compactNormalRowsSemantic === 'oriented-scalar-gradient'
+      && surfaceDrawExecution?.compactNormalRowsSourceSemantic === 'scalar-gradient'
+      && surfaceDrawExecution?.compactNormalRowsNormalSign === -1
+      && surfaceDrawExecution?.compactNormalRowsAdditionalSubmitCount === 0
+      && compactNormalGenerationMatches
+    );
+    const compactTemperatureRowsBuffer =
+      surfaceDrawExecution?.compactTemperatureRowsBuffer || null;
+    const compactTemperatureRowsBufferByteLength = Math.max(
+      0,
+      Math.round(Number(surfaceDrawExecution?.compactTemperatureRowsBufferByteLength) || 0)
+    );
+    const compactTemperatureRowCount = Math.max(
+      0,
+      Math.floor(Number(surfaceDrawExecution?.compactTemperatureRowsBufferRowCount) || 0)
+    );
+    const compactTemperatureVolumeGenerationMatches = Boolean(
+      surfaceDrawExecution?.compactTemperatureRowsVolumeGenerationId == null
+        && surfaceDrawExecution?.compactPositionRowsVolumeGenerationId == null
+        ? true
+        : Number.isInteger(surfaceDrawExecution?.compactTemperatureRowsVolumeGenerationId)
+          && Number.isInteger(surfaceDrawExecution?.compactPositionRowsVolumeGenerationId)
+          && surfaceDrawExecution.compactTemperatureRowsVolumeGenerationId
+            === surfaceDrawExecution.compactPositionRowsVolumeGenerationId
+    );
+    const compactTemperatureGenerationMatches = Boolean(
+      Number.isInteger(surfaceDrawExecution?.compactTemperatureRowsSurfaceGenerationId)
+      && surfaceDrawExecution.compactTemperatureRowsSurfaceGenerationId
+        === surfaceDrawExecution?.compactPositionRowsSurfaceGenerationId
+      && compactTemperatureVolumeGenerationMatches
+    );
+    const compactTemperatureReady = Boolean(
+      compactTemperatureRowsBuffer
+      && compactTemperatureRowCount >= compactPositionVertexCount
+      && compactTemperatureRowsBufferByteLength
+        >= compactPositionVertexCount * Float32Array.BYTES_PER_ELEMENT
+      && surfaceDrawExecution?.compactTemperatureRowsSchema
+        === ULG_NATIVE_SURFACE_TEMPERATURE_ROWS_SCHEMA
+      && surfaceDrawExecution?.compactTemperatureRowsLayoutName
+        === ULG_NATIVE_SURFACE_TEMPERATURE_LAYOUT_NAME
+      && surfaceDrawExecution?.compactTemperatureRowsEncoding === 'f32-kelvin'
+      && surfaceDrawExecution?.compactTemperatureRowsSemantic
+        === 'density-weighted-render-field-temperature-k'
+      && surfaceDrawExecution?.compactTemperatureRowsCoverageComplete === true
+      && surfaceDrawExecution?.compactTemperatureRowsAdditionalSubmitCount === 1
+      && compactTemperatureGenerationMatches
+    );
     if (
       compactPositionRowsBuffer
       && compactPositionRowsBufferByteLength > 0
       && compactPositionVertexCount >= 3
       && surfaceDrawExecution?.directCompactPositionDraw === true
+      && compactNormalReady
     ) {
       return {
         layout: 'webgpu-marching-cubes-compact-position-rows',
@@ -18199,9 +19144,44 @@ fn fs_main() -> @location(0) vec4<f32> {
             ?? surfaceDrawExecution?.sourceVertexStrideFloats
             ?? 4
         ) || 4)),
-        normalAttribute: false,
-        normalAttributeDisabledReason:
-          'native WebGPU surface consumer derives flat normals from compact marching-cubes triangle position rows',
+        normalAttribute: true,
+        normalBuffer: compactNormalRowsBuffer,
+        normalBufferByteLength: compactNormalRowsBufferByteLength,
+        normalRowCount: compactNormalRowCount,
+        normalEncoding: surfaceDrawExecution.compactNormalRowsEncoding,
+        normalSemantic: surfaceDrawExecution.compactNormalRowsSemantic,
+        normalSign: surfaceDrawExecution.compactNormalRowsNormalSign,
+        normalSurfaceGenerationId:
+          surfaceDrawExecution.compactNormalRowsSurfaceGenerationId,
+        normalVolumeGenerationId:
+          surfaceDrawExecution.compactNormalRowsVolumeGenerationId,
+        normalAdditionalSubmitCount:
+          surfaceDrawExecution.compactNormalRowsAdditionalSubmitCount,
+        normalAttributeDisabledReason: null,
+        temperatureAttribute: compactTemperatureReady,
+        temperatureBuffer: compactTemperatureReady ? compactTemperatureRowsBuffer : null,
+        temperatureBufferByteLength: compactTemperatureReady
+          ? compactTemperatureRowsBufferByteLength
+          : 0,
+        temperatureRowCount: compactTemperatureReady ? compactTemperatureRowCount : 0,
+        temperatureEncoding: compactTemperatureReady
+          ? surfaceDrawExecution.compactTemperatureRowsEncoding
+          : null,
+        temperatureSemantic: compactTemperatureReady
+          ? surfaceDrawExecution.compactTemperatureRowsSemantic
+          : null,
+        temperatureSurfaceGenerationId: compactTemperatureReady
+          ? surfaceDrawExecution.compactTemperatureRowsSurfaceGenerationId
+          : null,
+        temperatureVolumeGenerationId: compactTemperatureReady
+          ? surfaceDrawExecution.compactTemperatureRowsVolumeGenerationId
+          : null,
+        temperatureAdditionalSubmitCount: compactTemperatureReady
+          ? surfaceDrawExecution.compactTemperatureRowsAdditionalSubmitCount
+          : null,
+        temperatureAttributeDisabledReason: compactTemperatureReady
+          ? null
+          : 'generation-matched native surface temperature rows are unavailable',
         compactPositionDrawState: resolveCompactPositionSurfaceDrawState(surfaceDrawExecution)
       };
     }
@@ -18227,6 +19207,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       normalAttribute: false,
       normalAttributeDisabledReason:
         'native WebGPU surface consumer reads packed normals directly from retained compact vertex rows',
+      temperatureAttribute: false,
+      temperatureAttributeDisabledReason:
+        'native per-vertex temperatures require retained compact marching-cubes position rows',
       compactPositionDrawState: null
     };
   }
@@ -18337,7 +19320,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           device,
           format,
           usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
-          alphaMode: 'premultiplied'
+          alphaMode: 'opaque'
         });
       }
       const bridgeOpticalGpuTable = opticalGpuTable?.recordCount > 0
@@ -18362,11 +19345,8 @@ fn fs_main() -> @location(0) vec4<f32> {
         && previousBridge.bindGroupLayout
         && previousBridge.cameraBuffer
         && previousBridge.opaquePipeline
-        && previousBridge.transparentPipeline
-        && previousBridge.transparentOitPipeline
-        && previousBridge.oitCompositePipeline
-        && previousBridge.oitCompositeBindGroupLayout
-        && previousBridge.oitSampler
+        && previousBridge.refractivePipeline
+        && previousBridge.refractiveBackfacePipeline
         // Env-map era bridges carry envSampler; older layouts (2-entry
         // refraction group) must rebuild against the 4-entry layout.
         && previousBridge.envSampler
@@ -18377,9 +19357,11 @@ fn fs_main() -> @location(0) vec4<f32> {
         && previousBridge.opticalGpuTable === bridgeOpticalGpuTable
         && previousBridge.opticalGpuTableReuseKey === bridgeOpticalGpuTableReuseKey
         && previousBridge.fieldGradientDummyBuffer
+        && previousBridge.temperatureDummyBuffer
         // Bridges built before the refraction bind group exist must rebuild
-        // so the transparent pass can bind group(1).
+        // so the opaque refractive pass can bind group(1).
         && previousBridge.refractionDummyBindGroup
+        && previousBridge.refractionBackfaceDummyTexture
       );
       if (canReuseNativeBridge) {
         const bindGroup = device.createBindGroup({
@@ -18393,8 +19375,13 @@ fn fs_main() -> @location(0) vec4<f32> {
             {
               binding: 4,
               resource: {
-                buffer: surfaceDrawExecution?.renderFieldGradientVolume?.buffer
-                  || previousBridge.fieldGradientDummyBuffer
+                buffer: nativeDrawInput.normalBuffer || previousBridge.fieldGradientDummyBuffer
+              }
+            },
+            {
+              binding: 5,
+              resource: {
+                buffer: nativeDrawInput.temperatureBuffer || previousBridge.temperatureDummyBuffer
               }
             }
           ]
@@ -18426,11 +19413,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
           drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
-          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthPolicy: 'all-surfaces-depth-write',
           depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          transparencyCompositeMode: 'weighted-blended-oit',
-          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          transparencyCompositeMode: 'disabled-opaque-pbr',
+          surfaceAlphaMode: 'opaque',
+          surfaceBlendEnabled: false,
+          surfaceDepthWriteEnabled: true,
+          oitAccumFormat: null,
+          oitRevealFormat: null,
           opticalRenderSource: 'closure-derived-optical-gpu-table',
           opticalRecordCount: bridgeOpticalGpuTable.recordCount,
           opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
@@ -18440,6 +19430,21 @@ fn fs_main() -> @location(0) vec4<f32> {
           indirectStrideBytes,
           surfaceInputLayout,
           surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          packedNormalBuffer: nativeDrawInput.normalBuffer || null,
+          packedNormalBufferByteLength: nativeDrawInput.normalBufferByteLength || 0,
+          packedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+          packedNormalEncoding: nativeDrawInput.normalEncoding || null,
+          packedNormalSurfaceGenerationId: nativeDrawInput.normalSurfaceGenerationId ?? null,
+          vertexTemperatureBuffer: nativeDrawInput.temperatureBuffer || null,
+          vertexTemperatureBufferByteLength: nativeDrawInput.temperatureBufferByteLength || 0,
+          vertexTemperatureRowCount: nativeDrawInput.temperatureRowCount || 0,
+          vertexTemperatureEncoding: nativeDrawInput.temperatureEncoding || null,
+          vertexTemperatureSurfaceGenerationId:
+            nativeDrawInput.temperatureSurfaceGenerationId ?? null,
+          vertexTemperatureVolumeGenerationId:
+            nativeDrawInput.temperatureVolumeGenerationId ?? null,
+          vertexTemperatureAdditionalSubmitCount:
+            nativeDrawInput.temperatureAdditionalSubmitCount ?? null,
           compactPositionDrawState: nativeDrawInput.compactPositionDrawState
         };
         Object.assign(previousBridge, {
@@ -18459,6 +19464,28 @@ fn fs_main() -> @location(0) vec4<f32> {
           externalGpuBufferVertexRowStrideFloats: nativeDrawInput.rowStrideFloats,
           externalGpuBufferInputLayout: surfaceInputLayout,
           externalGpuBufferNormalAttribute: Boolean(nativeDrawInput.normalAttribute),
+          externalGpuBufferPackedNormalByteLength: nativeDrawInput.normalBufferByteLength || 0,
+          externalGpuBufferPackedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+          externalGpuBufferPackedNormalEncoding: nativeDrawInput.normalEncoding || null,
+          externalGpuBufferPackedNormalSurfaceGenerationId:
+            nativeDrawInput.normalSurfaceGenerationId ?? null,
+          externalGpuBufferPackedNormalAdditionalSubmitCount:
+            nativeDrawInput.normalAdditionalSubmitCount ?? null,
+          externalGpuBufferVertexTemperature: Boolean(nativeDrawInput.temperatureAttribute),
+          externalGpuBufferVertexTemperatureByteLength:
+            nativeDrawInput.temperatureBufferByteLength || 0,
+          externalGpuBufferVertexTemperatureRowCount:
+            nativeDrawInput.temperatureRowCount || 0,
+          externalGpuBufferVertexTemperatureEncoding:
+            nativeDrawInput.temperatureEncoding || null,
+          externalGpuBufferVertexTemperatureSurfaceGenerationId:
+            nativeDrawInput.temperatureSurfaceGenerationId ?? null,
+          externalGpuBufferVertexTemperatureVolumeGenerationId:
+            nativeDrawInput.temperatureVolumeGenerationId ?? null,
+          externalGpuBufferVertexTemperatureAdditionalSubmitCount:
+            nativeDrawInput.temperatureAdditionalSubmitCount ?? null,
+          externalGpuBufferVertexTemperatureDisabledReason:
+            nativeDrawInput.temperatureAttributeDisabledReason ?? null,
           externalGpuBufferNormalAttributeDisabledReason:
             nativeDrawInput.normalAttributeDisabledReason,
           compactPositionDirectInput: useCompactPositionRows,
@@ -18524,11 +19551,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
           drawOrderCount: drawOrder.length,
-          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthPolicy: 'all-surfaces-depth-write',
           depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          transparencyCompositeMode: 'weighted-blended-oit',
-          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          transparencyCompositeMode: 'disabled-opaque-pbr',
+          surfaceAlphaMode: 'opaque',
+          surfaceBlendEnabled: false,
+          surfaceDepthWriteEnabled: true,
+          oitAccumFormat: null,
+          oitRevealFormat: null,
           opticalRenderSource: 'closure-derived-optical-gpu-table',
           opticalRecordCount: bridgeOpticalGpuTable.recordCount,
           opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
@@ -18550,10 +19580,6 @@ fn fs_main() -> @location(0) vec4<f32> {
         code: useCompactPositionRows
           ? SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL
           : SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
-      });
-      const oitCompositeModule = device.createShaderModule({
-        label: 'ulg-sph-resident-surface-draw-oit-composite',
-        code: SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL
       });
       const opticalGpuBuffers = uploadOpticalGpuTable(device, bridgeOpticalGpuTable);
       const bindGroupLayout = device.createBindGroupLayout({
@@ -18585,6 +19611,11 @@ fn fs_main() -> @location(0) vec4<f32> {
             binding: 4,
             visibility: GPU_SHADER_STAGE.VERTEX,
             buffer: { type: 'read-only-storage' }
+          },
+          {
+            binding: 5,
+            visibility: GPU_SHADER_STAGE.VERTEX,
+            buffer: { type: 'read-only-storage' }
           }
         ]
       });
@@ -18610,6 +19641,11 @@ fn fs_main() -> @location(0) vec4<f32> {
             binding: 3,
             visibility: GPU_SHADER_STAGE.FRAGMENT,
             sampler: { type: 'filtering' }
+          },
+          {
+            binding: 4,
+            visibility: GPU_SHADER_STAGE.FRAGMENT,
+            texture: { sampleType: 'depth' }
           }
         ]
       });
@@ -18617,26 +19653,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         label: 'ulg-sph-resident-surface-draw-overlay-pipeline-layout',
         bindGroupLayouts: [bindGroupLayout, refractionBindGroupLayout]
       });
-      const createOverlayPipeline = ({
-        label,
-        depthWriteEnabled,
-        fragmentEntryPoint = 'fs_main',
-        targets = [{
-          format,
-          blend: {
-            color: {
-              srcFactor: 'one',
-              dstFactor: 'one-minus-src-alpha',
-              operation: 'add'
-            },
-            alpha: {
-              srcFactor: 'one',
-              dstFactor: 'one-minus-src-alpha',
-              operation: 'add'
-            }
-          }
-        }]
-      }) => device.createRenderPipeline({
+      const createOverlayPipeline = ({ label }) => device.createRenderPipeline({
         label,
         layout: pipelineLayout,
         vertex: {
@@ -18645,104 +19662,47 @@ fn fs_main() -> @location(0) vec4<f32> {
         },
         fragment: {
           module,
-          entryPoint: fragmentEntryPoint,
-          targets
+          entryPoint: 'fs_main',
+          targets: [{ format }]
         },
         primitive: {
           topology: 'triangle-list',
           // The marching-cubes kernel enforces outward winding
           // (sv_emit_triangle outward_hint), so back faces are interior
-          // walls; drawing them through the transmissive OIT average showed
-          // as bright streaks that flickered with every field re-extraction.
+          // walls and are excluded from both opaque PBR passes.
           cullMode: 'back'
         },
         depthStencil: {
           format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          depthWriteEnabled,
+          depthWriteEnabled: true,
           depthCompare: 'less-equal'
         }
       });
       const opaquePipeline = createOverlayPipeline({
-        label: 'ulg-sph-resident-surface-draw-overlay-opaque-depth',
-        depthWriteEnabled: true
+        label: 'ulg-sph-resident-surface-draw-overlay-opaque-depth'
       });
-      const transparentPipeline = createOverlayPipeline({
-        label: 'ulg-sph-resident-surface-draw-overlay-transparent-depth-test',
-        depthWriteEnabled: false
+      const refractivePipeline = createOverlayPipeline({
+        label: 'ulg-sph-resident-surface-draw-overlay-refractive-depth-write'
       });
-      const transparentOitPipeline = createOverlayPipeline({
-        label: 'ulg-sph-resident-surface-draw-overlay-transparent-oit',
-        depthWriteEnabled: false,
-        fragmentEntryPoint: 'fs_oit_main',
-        targets: [
-          {
-            format: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-            blend: {
-              color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+      const refractiveBackfacePipeline = useCompactPositionRows
+        ? device.createRenderPipeline({
+            label: 'ulg-sph-resident-surface-draw-refractive-backface-depth',
+            layout: pipelineLayout,
+            vertex: {
+              module,
+              entryPoint: 'vs_main'
+            },
+            primitive: {
+              topology: 'triangle-list',
+              cullMode: 'front'
+            },
+            depthStencil: {
+              format: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+              depthWriteEnabled: true,
+              depthCompare: 'less'
             }
-          },
-          {
-            format: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
-            blend: {
-              color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha', operation: 'add' }
-            }
-          }
-        ]
-      });
-      const oitCompositeBindGroupLayout = device.createBindGroupLayout({
-        label: 'ulg-sph-resident-surface-draw-oit-composite-bind-group-layout',
-        entries: [
-          {
-            binding: 0,
-            visibility: GPU_SHADER_STAGE.FRAGMENT,
-            texture: { sampleType: 'float' }
-          },
-          {
-            binding: 1,
-            visibility: GPU_SHADER_STAGE.FRAGMENT,
-            texture: { sampleType: 'float' }
-          },
-          {
-            binding: 2,
-            visibility: GPU_SHADER_STAGE.FRAGMENT,
-            sampler: { type: 'filtering' }
-          }
-        ]
-      });
-      const oitCompositePipelineLayout = device.createPipelineLayout({
-        label: 'ulg-sph-resident-surface-draw-oit-composite-pipeline-layout',
-        bindGroupLayouts: [oitCompositeBindGroupLayout]
-      });
-      const oitCompositePipeline = device.createRenderPipeline({
-        label: 'ulg-sph-resident-surface-draw-oit-composite-pipeline',
-        layout: oitCompositePipelineLayout,
-        vertex: {
-          module: oitCompositeModule,
-          entryPoint: 'vs_main'
-        },
-        fragment: {
-          module: oitCompositeModule,
-          entryPoint: 'fs_main',
-          targets: [{
-            format,
-            blend: {
-              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
-            }
-          }]
-        },
-        primitive: {
-          topology: 'triangle-list',
-          cullMode: 'none'
-        }
-      });
-      const oitSampler = device.createSampler({
-        label: 'ulg-sph-resident-surface-draw-oit-sampler',
-        magFilter: 'linear',
-        minFilter: 'linear'
-      });
+          })
+        : null;
       const cameraBuffer = device.createBuffer({
         label: 'ulg-sph-resident-surface-draw-camera',
         size: cameraBufferByteLength,
@@ -18761,6 +19721,13 @@ fn fs_main() -> @location(0) vec4<f32> {
         format: 'rgba8unorm',
         usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
       });
+      const refractionBackfaceDummyTexture = device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-backface-dummy',
+        size: [1, 1, 1],
+        format: SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
+      });
+      const refractionBackfaceDummyView = refractionBackfaceDummyTexture.createView();
       // Environment sampler wraps in longitude (latlong seam) and walks the
       // prefiltered mip chain for roughness-indexed lookups.
       const envSampler = device.createSampler({
@@ -18785,11 +19752,17 @@ fn fs_main() -> @location(0) vec4<f32> {
           { binding: 0, resource: refractionDummyTexture.createView() },
           { binding: 1, resource: refractionSampler },
           { binding: 2, resource: envDummyView },
-          { binding: 3, resource: envSampler }
+          { binding: 3, resource: envSampler },
+          { binding: 4, resource: refractionBackfaceDummyView }
         ]
       });
       const fieldGradientDummyBuffer = device.createBuffer({
         label: 'ulg-sph-resident-surface-draw-field-gradient-dummy',
+        size: 16,
+        usage: GPU_BUFFER_USAGE.STORAGE
+      });
+      const temperatureDummyBuffer = device.createBuffer({
+        label: 'ulg-sph-resident-surface-draw-temperature-dummy',
         size: 16,
         usage: GPU_BUFFER_USAGE.STORAGE
       });
@@ -18804,8 +19777,13 @@ fn fs_main() -> @location(0) vec4<f32> {
           {
             binding: 4,
             resource: {
-              buffer: surfaceDrawExecution?.renderFieldGradientVolume?.buffer
-                || fieldGradientDummyBuffer
+              buffer: nativeDrawInput.normalBuffer || fieldGradientDummyBuffer
+            }
+          },
+          {
+            binding: 5,
+            resource: {
+              buffer: nativeDrawInput.temperatureBuffer || temperatureDummyBuffer
             }
           }
         ]
@@ -18845,6 +19823,28 @@ fn fs_main() -> @location(0) vec4<f32> {
           useNativeConsumer ? nativeDrawInput.rowStrideFloats : 0,
         externalGpuBufferInputLayout: useNativeConsumer ? surfaceInputLayout : null,
         externalGpuBufferNormalAttribute: Boolean(nativeDrawInput.normalAttribute),
+        externalGpuBufferPackedNormalByteLength: nativeDrawInput.normalBufferByteLength || 0,
+        externalGpuBufferPackedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+        externalGpuBufferPackedNormalEncoding: nativeDrawInput.normalEncoding || null,
+        externalGpuBufferPackedNormalSurfaceGenerationId:
+          nativeDrawInput.normalSurfaceGenerationId ?? null,
+        externalGpuBufferPackedNormalAdditionalSubmitCount:
+          nativeDrawInput.normalAdditionalSubmitCount ?? null,
+        externalGpuBufferVertexTemperature: Boolean(nativeDrawInput.temperatureAttribute),
+        externalGpuBufferVertexTemperatureByteLength:
+          nativeDrawInput.temperatureBufferByteLength || 0,
+        externalGpuBufferVertexTemperatureRowCount:
+          nativeDrawInput.temperatureRowCount || 0,
+        externalGpuBufferVertexTemperatureEncoding:
+          nativeDrawInput.temperatureEncoding || null,
+        externalGpuBufferVertexTemperatureSurfaceGenerationId:
+          nativeDrawInput.temperatureSurfaceGenerationId ?? null,
+        externalGpuBufferVertexTemperatureVolumeGenerationId:
+          nativeDrawInput.temperatureVolumeGenerationId ?? null,
+        externalGpuBufferVertexTemperatureAdditionalSubmitCount:
+          nativeDrawInput.temperatureAdditionalSubmitCount ?? null,
+        externalGpuBufferVertexTemperatureDisabledReason:
+          nativeDrawInput.temperatureAttributeDisabledReason ?? null,
         externalGpuBufferNormalAttributeDisabledReason: useNativeConsumer
           ? nativeDrawInput.normalAttributeDisabledReason
           : null,
@@ -18890,6 +19890,7 @@ fn fs_main() -> @location(0) vec4<f32> {
               'native-webgpu-surface-resource-release-idle',
             nativeSurfaceDeferredResourceReleaseReason: null,
             nativeSurfaceDeferredResourceReleasePending: 0,
+            nativeSurfaceConsumerInFlightSubmitCount: 0,
             readbackSmokeValidationStatus: nativeConsumer?.readbackSmokeValidationStatus || 'not-run',
             readbackSmokeValidationReason: nativeConsumer?.readbackSmokeValidationReason || null,
             readbackSmokeValidationSample: Array.isArray(nativeConsumer?.readbackSmokeValidationSample)
@@ -18908,22 +19909,27 @@ fn fs_main() -> @location(0) vec4<f32> {
         backgroundClearValue: useNativeConsumer
           ? residentSurfaceDrawBackgroundClearValue()
           : { r: 0, g: 0, b: 0, a: 0 },
-        pipeline: transparentPipeline,
+        pipeline: opaquePipeline,
         opaquePipeline,
-        transparentPipeline,
-        transparentOitPipeline,
+        refractivePipeline,
+        refractiveBackfacePipeline,
+        transparentPipeline: null,
+        transparentOitPipeline: null,
         bindGroupLayout,
         pipelineLayout,
-        oitCompositePipeline,
-        oitCompositeBindGroupLayout,
-        oitCompositePipelineLayout,
-        oitSampler,
+        oitCompositePipeline: null,
+        oitCompositeBindGroupLayout: null,
+        oitCompositePipelineLayout: null,
+        oitSampler: null,
         cameraBuffer,
         cameraBufferByteLength,
         fieldGradientDummyBuffer,
+        temperatureDummyBuffer,
         refractionBindGroupLayout,
         refractionSampler,
         refractionDummyTexture,
+        refractionBackfaceDummyTexture,
+        refractionBackfaceDummyView,
         refractionDummyBindGroup,
         envSampler,
         envDummyTexture,
@@ -18947,11 +19953,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
           drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
-          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthPolicy: 'all-surfaces-depth-write',
           depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-          transparencyCompositeMode: 'weighted-blended-oit',
-          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          transparencyCompositeMode: 'disabled-opaque-pbr',
+          surfaceAlphaMode: 'opaque',
+          surfaceBlendEnabled: false,
+          surfaceDepthWriteEnabled: true,
+          oitAccumFormat: null,
+          oitRevealFormat: null,
           opticalRenderSource: 'closure-derived-optical-gpu-table',
           opticalRecordCount: bridgeOpticalGpuTable.recordCount,
           opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
@@ -18961,18 +19970,36 @@ fn fs_main() -> @location(0) vec4<f32> {
           indirectStrideBytes,
           surfaceInputLayout,
           surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          packedNormalBuffer: nativeDrawInput.normalBuffer || null,
+          packedNormalBufferByteLength: nativeDrawInput.normalBufferByteLength || 0,
+          packedNormalRowCount: nativeDrawInput.normalRowCount || 0,
+          packedNormalEncoding: nativeDrawInput.normalEncoding || null,
+          packedNormalSurfaceGenerationId: nativeDrawInput.normalSurfaceGenerationId ?? null,
+          vertexTemperatureBuffer: nativeDrawInput.temperatureBuffer || null,
+          vertexTemperatureBufferByteLength: nativeDrawInput.temperatureBufferByteLength || 0,
+          vertexTemperatureRowCount: nativeDrawInput.temperatureRowCount || 0,
+          vertexTemperatureEncoding: nativeDrawInput.temperatureEncoding || null,
+          vertexTemperatureSurfaceGenerationId:
+            nativeDrawInput.temperatureSurfaceGenerationId ?? null,
+          vertexTemperatureVolumeGenerationId:
+            nativeDrawInput.temperatureVolumeGenerationId ?? null,
+          vertexTemperatureAdditionalSubmitCount:
+            nativeDrawInput.temperatureAdditionalSubmitCount ?? null,
           compactPositionDrawState: nativeDrawInput.compactPositionDrawState
         },
         drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
         drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
         drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
         drawOrderCount: drawOrder.length,
-        depthPolicy: 'opaque-depth-write-transparent-depth-test',
+        depthPolicy: 'all-surfaces-depth-write',
         depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
         depthAttachmentReady: false,
-        transparencyCompositeMode: 'weighted-blended-oit',
-        oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-        oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+        transparencyCompositeMode: 'disabled-opaque-pbr',
+        surfaceAlphaMode: 'opaque',
+        surfaceBlendEnabled: false,
+        surfaceDepthWriteEnabled: true,
+        oitAccumFormat: null,
+        oitRevealFormat: null,
         oitTargetsReady: false,
         opticalGpuBuffers,
         opticalGpuTable: bridgeOpticalGpuTable,
@@ -19034,11 +20061,6 @@ fn fs_main() -> @location(0) vec4<f32> {
       bridge.nativeSurfaceConsumerRafBlockedReason = 'scene-not-running';
       return;
     }
-    if (bridge.nativeSurfaceConsumerSubmitFencePending) {
-      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-pending';
-      bridge.nativeSurfaceConsumerRafSustain = true;
-      return;
-    }
     if (nativeWebGpuSurfaceConsumerRaf != null) {
       bridge.nativeSurfaceConsumerRafBlockedReason = 'raf-already-pending';
       bridge.nativeSurfaceConsumerRafSustain = true;
@@ -19069,18 +20091,6 @@ fn fs_main() -> @location(0) vec4<f32> {
     rafHost.cancelAnimationFrame?.(nativeWebGpuSurfaceConsumerRaf);
     nativeWebGpuSurfaceConsumerRaf = null;
     nativeWebGpuSurfaceConsumerRafHost = null;
-  }
-
-  function isAutomaticSphNativeWebGpuSurfaceConsumerRenderReason(reason) {
-    const text = String(reason || '');
-    return (
-      text === 'animation-frame'
-      || text.includes('raf')
-      || text.includes('retry')
-      || text.includes('bridge-ready')
-      || text.includes('bridge-reused')
-      || text.includes('after-submit-fence')
-    );
   }
 
   function renderSphResidentSurfaceDrawOverlay({ reason = 'animation-frame' } = {}) {
@@ -19133,95 +20143,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           reason: 'native-webgpu-surface-consumer-retry-after-gpu-work'
         });
       }
-      return;
-    }
-    if (
-      bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-      && bridge.nativeSurfaceConsumerSubmitFenceFailed === true
-    ) {
-      const status = 'resident-surface-draw-skipped-native-submit-fence-error';
-      bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
-      bridge.lastRenderSkipStatus = status;
-      bridge.lastRenderSkipReason =
-        'native WebGPU queue completion failed; presentation and retirement remain quarantined';
-      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-error';
-      scene.userData.sphResidentSurfaceDrawRenderSkip = {
-        schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
-        status,
-        reason: bridge.lastRenderSkipReason,
-        submitFenceSerial: bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
-        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
-        updatedAtMs: nowMs(),
-        scientificValidation: false,
-        sphValidation: false,
-        fullPhysicsValidation: false
-      };
-      return;
-    }
-    if (
-      bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-      && bridge.nativeSurfaceConsumerSubmitFenceTimedOut === true
-      && isAutomaticSphNativeWebGpuSurfaceConsumerRenderReason(reason)
-    ) {
-      const status = 'resident-surface-draw-skipped-native-submit-fence-timeout';
-      bridge.lastRenderStatusPreservedAfterNativeSubmitFence = true;
-      bridge.lastRenderStatusPreservedReason = status;
-      bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
-      bridge.lastRenderSkipStatus = status;
-      bridge.lastRenderSkipReason =
-        'native WebGPU surface submit fence exceeded its budget; the prior canvas remains presented while actual queue completion is pending';
-      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-pending-after-timeout';
-      scene.userData.sphResidentSurfaceDrawRenderSkip = {
-        schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
-        status,
-        reason: bridge.lastRenderSkipReason,
-        submitFenceSerial: bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
-        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
-        updatedAtMs: nowMs(),
-        scientificValidation: false,
-        sphValidation: false,
-        fullPhysicsValidation: false
-      };
-      if (sphResidentSurfaceDraw) {
-        sphResidentSurfaceDraw.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
-        publishResidentSurfaceDrawRenderBridgeDiagnostics(sphResidentSurfaceDraw, bridge);
-      }
-      if (sphResidentRenderState) {
-        sphResidentRenderState.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
-        publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(sphResidentRenderState, bridge);
-      }
-      return;
-    }
-    if (
-      bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-      && bridge.nativeSurfaceConsumerSubmitFencePending
-    ) {
-      const status = 'resident-surface-draw-skipped-native-submit-fence-pending';
-      bridge.lastRenderStatusPreservedAfterNativeSubmitFence = true;
-      bridge.lastRenderStatusPreservedReason = status;
-      bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
-      bridge.lastRenderSkipStatus = status;
-      bridge.lastRenderSkipReason = 'native WebGPU surface submit fence is pending';
-      scene.userData.sphResidentSurfaceDrawRenderSkip = {
-        schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
-        status,
-        reason: bridge.lastRenderSkipReason,
-        submitFenceSerial: bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
-        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
-        updatedAtMs: nowMs(),
-        scientificValidation: false,
-        sphValidation: false,
-        fullPhysicsValidation: false
-      };
-      if (sphResidentSurfaceDraw) {
-        sphResidentSurfaceDraw.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
-        publishResidentSurfaceDrawRenderBridgeDiagnostics(sphResidentSurfaceDraw, bridge);
-      }
-      if (sphResidentRenderState) {
-        sphResidentRenderState.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
-        publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(sphResidentRenderState, bridge);
-      }
-      return;
+      return false;
     }
     const rowDrawState = bridge?.renderRowDrawState;
     if (bridge?.device && bridge?.context && rowDrawState?.bindGroup && rowDrawState?.particleCount > 0) {
@@ -19292,11 +20214,12 @@ fn fs_main() -> @location(0) vec4<f32> {
           sphResidentRenderState.surfaceDrawRenderBridgeTemporalSwapPolicy = bridge.temporalSwapPolicy ?? null;
           sphResidentRenderState.surfaceDrawRenderBridgeRetainedPreviousOverlay = Boolean(bridge.retainedPreviousOverlay);
         }
+        return true;
       } catch (error) {
         bridge.lastRenderStatus = 'webgpu-render-row-overlay-render-error';
         bridge.reason = error instanceof Error ? error.message : String(error);
+        return false;
       }
-      return;
     }
     const drawState = bridge?.drawState;
     if (!bridge?.device || !bridge?.context || !drawState?.bindGroup || !drawState?.drawIndirectRowsBuffer) {
@@ -19332,7 +20255,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           });
         }
       }
-      return;
+      return false;
     }
     try {
       resizeSphResidentSurfaceDrawOverlayCanvas(bridge);
@@ -19343,12 +20266,14 @@ fn fs_main() -> @location(0) vec4<f32> {
       camera.updateMatrixWorld?.();
       camera.matrixWorldInverse?.copy?.(camera.matrixWorld)?.invert?.();
       const viewProjection = new Three.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      const inverseViewProjection = new Three.Matrix4().copy(viewProjection).invert();
       if (drawState.surfaceInputLayout === 'webgpu-marching-cubes-compact-position-rows') {
         bridge.device.queue.writeBuffer(
           bridge.cameraBuffer,
           0,
           compactPositionCameraUniformPayload({
             viewProjection,
+            inverseViewProjection,
             compactPositionDrawState: drawState.compactPositionDrawState,
             cameraPosition: [camera.position.x, camera.position.y, camera.position.z]
           })
@@ -19365,6 +20290,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           0,
           compactPositionCameraUniformPayload({
             viewProjection,
+            inverseViewProjection,
             compactPositionDrawState: additionalDraw.compactPositionDrawState,
             cameraPosition: [camera.position.x, camera.position.y, camera.position.z]
           })
@@ -19372,8 +20298,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
       const additionalOpaqueDraws = additionalSurfaceDraws
         .filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
-      const additionalTransparentDraws = additionalSurfaceDraws
-        .filter((draw) => residentSurfaceDrawPipelineKey(draw) !== 'opaque-depth-write');
+      const additionalRefractiveDraws = additionalSurfaceDraws
+        .filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'refractive-depth-write');
       const drawOrder = Array.isArray(drawState.drawOrder) && drawState.drawOrder.length
         ? drawState.drawOrder
         : residentSurfaceDrawOrder(
@@ -19381,12 +20307,12 @@ fn fs_main() -> @location(0) vec4<f32> {
           { indirectStrideBytes: drawState.indirectStrideBytes }
         );
       const opaqueDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
-      const transparentDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) !== 'opaque-depth-write');
+      const refractiveDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'refractive-depth-write');
         updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
           viewProjection,
           drawOrder,
           opaqueDraws,
-          transparentDraws
+          refractiveDraws
         });
         const nativeSurfaceDebugMode = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
           ? resolveSphNativeWebGpuSurfaceConsumerDebugMode({ bridge })
@@ -19398,7 +20324,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           ? 'native-webgpu-surface-consumer-debug-clear-only'
           : null;
         bridge.lastNativeSurfaceDebugSkippedDrawCount = nativeSurfaceClearOnly
-          ? opaqueDraws.length + transparentDraws.length
+          ? opaqueDraws.length + refractiveDraws.length
           : null;
         bridge.lastNativeSurfaceDebugClearValue = nativeSurfaceClearOnly
           ? { ...SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE }
@@ -19425,7 +20351,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
         const submittedDrawCount = nativeSurfaceClearOnly
         ? 0
-        : opaqueDraws.length + transparentDraws.length
+        : opaqueDraws.length + refractiveDraws.length
           + additionalSurfaceDraws.length + schroederProxyDrawCommandCount;
         const nativeSurfaceValidationCadence =
           resolveSphNativeWebGpuSurfaceValidationCadence({
@@ -19447,6 +20373,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           nativeSurfaceValidationCadence.offscreenValidationNeeded;
         bridge.nativeSurfaceOffscreenValidationSkippedReason =
           nativeSurfaceValidationCadence.offscreenValidationSkippedReason;
+        ensureSphResidentSurfaceEnvMap(bridge);
         const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
         const canvasTexture = bridge.context.getCurrentTexture();
         const canvasView = canvasTexture.createView();
@@ -19455,7 +20382,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             view: canvasView,
             clearValue: nativeSurfaceClearOnly
               ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE
-              : (bridge.backgroundClearValue || { r: 0, g: 0, b: 0, a: 0 }),
+              : (bridge.backgroundClearValue || { r: 0, g: 0, b: 0, a: 1 }),
             loadOp: 'clear',
             storeOp: 'store'
           }],
@@ -19468,6 +20395,9 @@ fn fs_main() -> @location(0) vec4<f32> {
             }
           : undefined
         });
+        const backgroundImageDrawn = !nativeSurfaceClearOnly
+          && drawSphNativeSurfaceBackgroundImage(bridge, opaquePass);
+        bridge.lastBackgroundImageDrawn = Boolean(backgroundImageDrawn);
         opaquePass.setPipeline(bridge.opaquePipeline || bridge.pipeline);
         opaquePass.setBindGroup(0, drawState.bindGroup);
         if (bridge.refractionDummyBindGroup) {
@@ -19505,15 +20435,74 @@ fn fs_main() -> @location(0) vec4<f32> {
           schroederProxySubmit.drawInstanceCount;
       }
         opaquePass.end();
-        ensureSphResidentSurfaceEnvMap(bridge);
+        const refractionTargetsRequired = Boolean(
+          !nativeSurfaceClearOnly
+          && (refractiveDraws.length > 0 || additionalRefractiveDraws.length > 0)
+        );
+        if (!refractionTargetsRequired) {
+          releaseSphResidentSurfaceRefractionTargetsWhenOpaque(
+            bridge,
+            canvasTexture.width,
+            canvasTexture.height
+          );
+        }
         let refractionBindGroup = bridge.refractionDummyBindGroup || null;
+        let refractionBackfaceView = null;
+        let refractionBackfaceCacheHit = false;
+        let refractionBackfacePassDrawCount = 0;
         if (
           bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
           && !nativeSurfaceClearOnly
           && bridge.refractionBindGroupLayout
           && bridge.refractionSampler
-          && (transparentDraws.length > 0 || additionalTransparentDraws.length > 0)
+          && refractionTargetsRequired
         ) {
+          refractionBackfaceView = ensureSphResidentSurfaceRefractionBackfaceDepth(
+            bridge,
+            canvasTexture.width,
+            canvasTexture.height
+          );
+          refractionBackfaceCacheHit = Boolean(
+            refractionBackfaceView
+            && sphResidentSurfaceRefractionBackfaceCacheHit(bridge, {
+              drawState,
+              additionalSurfaceDraws,
+              refractiveDraws,
+              additionalRefractiveDraws,
+              viewProjection
+            })
+          );
+          if (refractionBackfaceView && !refractionBackfaceCacheHit) {
+            const backfacePass = encoder.beginRenderPass({
+              colorAttachments: [],
+              depthStencilAttachment: {
+                view: refractionBackfaceView,
+                depthClearValue: 1,
+                depthLoadOp: 'clear',
+                depthStoreOp: 'store'
+              }
+            });
+            backfacePass.setPipeline(bridge.refractiveBackfacePipeline);
+            backfacePass.setBindGroup(0, drawState.bindGroup);
+            backfacePass.setBindGroup(1, bridge.refractionDummyBindGroup);
+            for (const draw of refractiveDraws) {
+              backfacePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+            }
+            for (const additionalDraw of additionalRefractiveDraws) {
+              backfacePass.setBindGroup(0, additionalDraw.bindGroup);
+              backfacePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
+            }
+            backfacePass.end();
+            refractionBackfacePassDrawCount =
+              refractiveDraws.length + additionalRefractiveDraws.length;
+            commitSphResidentSurfaceRefractionBackfaceCache(bridge, {
+              drawState,
+              additionalSurfaceDraws,
+              refractiveDraws,
+              additionalRefractiveDraws,
+              viewProjection
+            });
+          }
           const copyTexture = ensureSphResidentSurfaceRefractionCopy(
             bridge,
             canvasTexture.width,
@@ -19525,111 +20514,79 @@ fn fs_main() -> @location(0) vec4<f32> {
               { texture: copyTexture },
               [canvasTexture.width, canvasTexture.height, 1]
             );
-            refractionBindGroup = bridge.device.createBindGroup({
-              label: 'ulg-sph-resident-surface-draw-refraction-bind-group',
-              layout: bridge.refractionBindGroupLayout,
-              entries: [
-                { binding: 0, resource: copyTexture.createView() },
-                { binding: 1, resource: bridge.refractionSampler },
-                { binding: 2, resource: bridge.envMapView || bridge.envDummyView },
-                { binding: 3, resource: bridge.envSampler }
-              ]
-            });
+            const sceneColorView = bridge.refractionCopyView || copyTexture.createView();
+            const environmentView = bridge.envMapView || bridge.envDummyView;
+            const backDepthView = refractionBackfaceView || bridge.refractionBackfaceDummyView;
+            if (
+              bridge.refractionBindGroup
+              && bridge.refractionBindGroupSceneColorView === sceneColorView
+              && bridge.refractionBindGroupEnvironmentView === environmentView
+              && bridge.refractionBindGroupBackDepthView === backDepthView
+            ) {
+              refractionBindGroup = bridge.refractionBindGroup;
+            } else {
+              refractionBindGroup = bridge.device.createBindGroup({
+                label: 'ulg-sph-resident-surface-draw-refraction-bind-group',
+                layout: bridge.refractionBindGroupLayout,
+                entries: [
+                  { binding: 0, resource: sceneColorView },
+                  { binding: 1, resource: bridge.refractionSampler },
+                  { binding: 2, resource: environmentView },
+                  { binding: 3, resource: bridge.envSampler },
+                  { binding: 4, resource: backDepthView }
+                ]
+              });
+              bridge.refractionBindGroup = refractionBindGroup;
+              bridge.refractionBindGroupSceneColorView = sceneColorView;
+              bridge.refractionBindGroupEnvironmentView = environmentView;
+              bridge.refractionBindGroupBackDepthView = backDepthView;
+            }
           }
         }
-        let transparentCompositeSubmitted = false;
-        if (
-          transparentDraws.length > 0
-          && !nativeSurfaceClearOnly
-          && bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-          && depthView
-          && bridge.transparentOitPipeline
-        && bridge.oitCompositePipeline
-        && bridge.oitCompositeBindGroupLayout
-      ) {
-        const oitTargets = ensureSphResidentSurfaceDrawOitTargets(bridge);
-        if (oitTargets?.accumView && oitTargets?.revealView) {
-          const transparentPass = encoder.beginRenderPass({
-            colorAttachments: [
-              {
-                view: oitTargets.accumView,
-                clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                loadOp: 'clear',
-                storeOp: 'store'
-              },
-              {
-                view: oitTargets.revealView,
-                clearValue: { r: 1, g: 1, b: 1, a: 1 },
-                loadOp: 'clear',
-                storeOp: 'store'
-              }
-            ],
-            depthStencilAttachment: {
-              view: depthView,
-              depthLoadOp: 'load',
-              depthStoreOp: 'store'
-            }
-          });
-          transparentPass.setPipeline(bridge.transparentOitPipeline);
-          transparentPass.setBindGroup(0, drawState.bindGroup);
-          if (bridge.refractionDummyBindGroup) {
-            transparentPass.setBindGroup(1, bridge.refractionDummyBindGroup);
-          }
-          for (const draw of transparentDraws) {
-            transparentPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
-          }
-          transparentPass.end();
-          const compositeBindGroup = bridge.device.createBindGroup({
-            label: 'ulg-sph-resident-surface-draw-oit-composite-bind-group',
-            layout: bridge.oitCompositeBindGroupLayout,
-            entries: [
-              { binding: 0, resource: bridge.oitAccumTexture.createView() },
-              { binding: 1, resource: bridge.oitRevealTexture.createView() },
-              { binding: 2, resource: bridge.oitSampler }
-            ]
-          });
-          const compositePass = encoder.beginRenderPass({
+        bridge.lastRefractionBackfaceCacheHit = refractionBackfaceCacheHit;
+        bridge.lastRefractionBackfacePassDrawCount = refractionBackfacePassDrawCount;
+        bridge.refractionBackfaceAdditionalSubmitCount = 0;
+        bridge.refractionBackfaceDepthFormat =
+          SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT;
+        bridge.refractionBackfaceStatus = refractionBackfaceView
+          ? (refractionBackfaceCacheHit
+              ? 'native-refractive-backface-depth-cache-hit'
+              : 'native-refractive-backface-depth-rendered')
+          : (refractionTargetsRequired
+              ? 'native-refractive-backface-depth-required-unavailable'
+              : 'native-refractive-backface-depth-not-required');
+        if ((
+          refractiveDraws.length > 0
+          || additionalRefractiveDraws.length > 0
+        ) && !nativeSurfaceClearOnly) {
+          const refractivePass = encoder.beginRenderPass({
             colorAttachments: [{
               view: canvasView,
               loadOp: 'load',
               storeOp: 'store'
-            }]
+            }],
+            depthStencilAttachment: depthView
+              ? {
+                  view: depthView,
+                  depthLoadOp: 'load',
+                  depthStoreOp: 'store'
+                }
+              : undefined
           });
-          compositePass.setPipeline(bridge.oitCompositePipeline);
-          compositePass.setBindGroup(0, compositeBindGroup);
-          compositePass.draw(3);
-          compositePass.end();
-          transparentCompositeSubmitted = true;
+          refractivePass.setPipeline(bridge.refractivePipeline);
+          refractivePass.setBindGroup(0, drawState.bindGroup);
+          if (refractionBindGroup) {
+            refractivePass.setBindGroup(1, refractionBindGroup);
+          }
+          for (const draw of refractiveDraws) {
+            refractivePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+          }
+          for (const additionalDraw of additionalRefractiveDraws) {
+            refractivePass.setBindGroup(0, additionalDraw.bindGroup);
+            refractivePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
+          }
+          refractivePass.end();
         }
-        } else if ((transparentDraws.length > 0 || additionalTransparentDraws.length > 0) && !nativeSurfaceClearOnly) {
-          const transparentPass = encoder.beginRenderPass({
-          colorAttachments: [{
-            view: canvasView,
-            loadOp: 'load',
-            storeOp: 'store'
-          }],
-          depthStencilAttachment: depthView
-            ? {
-                view: depthView,
-                depthLoadOp: 'load',
-                depthStoreOp: 'store'
-              }
-            : undefined
-        });
-        transparentPass.setPipeline(bridge.transparentPipeline || bridge.pipeline);
-        transparentPass.setBindGroup(0, drawState.bindGroup);
-        if (refractionBindGroup) {
-          transparentPass.setBindGroup(1, refractionBindGroup);
-        }
-        for (const draw of transparentDraws) {
-          transparentPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
-        }
-        for (const additionalDraw of additionalTransparentDraws) {
-          transparentPass.setBindGroup(0, additionalDraw.bindGroup);
-          transparentPass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
-        }
-        transparentPass.end();
-      }
           const nativeSurfacePixelValidationDrawCount = nativeSurfaceClearOnly
             ? 1
             : submittedDrawCount;
@@ -19674,11 +20631,11 @@ fn fs_main() -> @location(0) vec4<f32> {
               beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
                 bridge,
                 validationEncoder,
-                {
-                  drawCount: submittedDrawCount,
-                  opaqueDraws,
-                  transparentDraws,
-                  schroederProxyExecutor
+                  {
+                    drawCount: submittedDrawCount,
+                    opaqueDraws,
+                    transparentDraws: refractiveDraws,
+                    schroederProxyExecutor
                 }
               );
             if (completeNativeOffscreenValidation) {
@@ -19701,10 +20658,11 @@ fn fs_main() -> @location(0) vec4<f32> {
           : 'webgpu-overlay-rendered');
         bridge.lastTransparentCompositeMode = nativeSurfaceClearOnly
           ? 'native-debug-clear-only'
-          : (transparentCompositeSubmitted ? 'weighted-blended-oit' : 'direct-alpha-depth-test');
+          : 'disabled-opaque-pbr';
         bridge.transparencyCompositeMode = bridge.lastTransparentCompositeMode;
         if (nativeSurfaceClearOnly) {
           bridge.lastOpaqueDrawCount = 0;
+          bridge.lastRefractiveDrawCount = 0;
           bridge.lastTransparentDrawCount = 0;
         }
       if (sphResidentSurfaceDraw) {
@@ -19800,9 +20758,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null;
         }
       }
-      if (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
-        scheduleSphNativeWebGpuSurfaceConsumerFrame();
-      }
+      return true;
     } catch (error) {
       bridge.lastRenderStatus = 'webgpu-overlay-render-error';
       bridge.reason = error instanceof Error ? error.message : String(error);
@@ -19840,6 +20796,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         sphResidentRenderState.surfaceDrawRenderBridgeLastRenderStatus = bridge.lastRenderStatus;
         sphResidentRenderState.surfaceDrawRenderBridgeReason = bridge.reason;
       }
+      return false;
     }
   }
 
@@ -23998,11 +24955,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       const renderLayer = renderLayerFromOpticalResponse(optics, batch.descriptor);
       const renderOrder = renderOrderFromOpticalResponse(optics, batch.descriptor);
       const depthWriteFlag = renderDepthWriteFromOpticalResponse(optics, batch.descriptor) ? 1 : 0;
-      const transparencyClassId = renderLayer === 'vapor-surface'
-        ? 3
-        : (renderLayer === 'transmissive-surface'
-          ? 2
-          : (renderLayer === 'alpha-surface' ? 1 : 0));
+      const transparencyClassId = renderLayer === 'refractive-surface' ? 2 : 0;
       return {
         surfaceKey: batch.surfaceKey,
         material: batch.material,
@@ -25462,6 +26415,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       scalarOffset: descriptor.scalarOffset,
       bufferByteLength: descriptor.scalarBufferByteLength,
       scalarType: descriptor.scalarType || 'f32',
+      normalSign: descriptor.normalSign,
       label: descriptor.label || `ulg-sph-native-mc-${descriptor.surfaceKey || descriptor.surfaceIndex || 0}`,
       source: descriptor.source || 'ulg-render-field-density-storage-buffer'
     });
@@ -25477,6 +26431,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       `strides=${strides.join('x')}`,
       `offset=${descriptor.scalarOffset ?? 0}`,
       `bytes=${descriptor.scalarBufferByteLength ?? 0}`,
+      `normalSign=${descriptor.normalSign ?? 1}`,
       `type=${descriptor.scalarType || 'f32'}`,
       `source=${descriptor.source || 'ulg-render-field-density-storage-buffer'}`
     ].join('|');
@@ -25735,6 +26690,111 @@ fn fs_main() -> @location(0) vec4<f32> {
       errorStack: extensionError?.stack ?? null,
       extensionExecution
     };
+  }
+
+  function encodeAndSubmitNativeSurfaceTemperatureRows({
+    device,
+    extensionExecution,
+    descriptor,
+    label = 'ulg-native-surface-temperature'
+  } = {}) {
+    const rawExecution = extensionExecution?.extensionExecution || extensionExecution;
+    const result = rawExecution?.result || null;
+    const positionDescriptor = result?.outputDescriptors?.rows?.position
+      || result?.rowMetadata?.position
+      || null;
+    const positionBuffer = positionDescriptor?.buffer
+      || result?.outputDescriptors?.retainedBuffers?.position
+      || result?.buffer
+      || null;
+    const actualVertexCounterBuffer = result?.actualVertexCounterBuffer
+      || result?.vertexCounterBuffer
+      || null;
+    const conservativeVertexRowCount = Math.max(
+      0,
+      Math.round(Number(positionDescriptor?.rowCount ?? result?.vertexCount) || 0)
+    );
+    const positionStrideFloats = Math.max(
+      0,
+      Math.round(Number(
+        positionDescriptor?.rowStrideFloats ?? result?.vertexStrideFloats
+      ) || 0)
+    );
+    const positionBufferByteLength = Math.max(
+      0,
+      Math.round(Number(
+        positionDescriptor?.bufferByteLength
+          ?? result?.bufferByteLength
+          ?? positionBuffer?.size
+      ) || 0)
+    );
+    const actualVertexCounterBufferByteLength = Math.max(
+      0,
+      Math.round(Number(
+        result?.actualVertexCounterBufferByteLength
+          ?? result?.vertexCounterBufferByteLength
+          ?? actualVertexCounterBuffer?.size
+      ) || 0)
+    );
+    if (!Object.prototype.hasOwnProperty.call(result || {}, 'surfaceGenerationId')) {
+      throw new TypeError('native surface result must author surfaceGenerationId');
+    }
+    if (!Object.prototype.hasOwnProperty.call(result || {}, 'volumeGenerationId')) {
+      throw new TypeError('native surface result must author volumeGenerationId');
+    }
+    if (
+      !positionBuffer
+      || !actualVertexCounterBuffer
+      || conservativeVertexRowCount <= 0
+      || positionStrideFloats < 3
+    ) {
+      throw new TypeError(
+        'native surface temperature encoding requires compact positions and the GPU vertex counter'
+      );
+    }
+    const commandEncoder = device.createCommandEncoder({
+      label: `${label}-command-encoder`
+    });
+    let temperatureRows = null;
+    try {
+      temperatureRows = encodeNativeSurfaceTemperatureRowsWebGpu({
+        device,
+        commandEncoder,
+        compactPositions: {
+          buffer: positionBuffer,
+          byteLength: positionBufferByteLength,
+          rowCount: conservativeVertexRowCount,
+          strideFloats: positionStrideFloats,
+          surfaceGenerationId: result.surfaceGenerationId,
+          volumeGenerationId: result.volumeGenerationId
+        },
+        actualVertexCounter: {
+          buffer: actualVertexCounterBuffer,
+          byteLength: actualVertexCounterBufferByteLength
+        },
+        renderField: {
+          buffer: descriptor?.scalarBuffer || null,
+          byteLength: descriptor?.scalarBufferByteLength,
+          dims: descriptor?.dims,
+          scalarStrides: descriptor?.scalarStrides,
+          scalarOffsetFloats: descriptor?.scalarOffset ?? 0,
+          volumeGenerationId: result.volumeGenerationId
+        },
+        generation: {
+          surfaceGenerationId: result.surfaceGenerationId,
+          volumeGenerationId: result.volumeGenerationId
+        },
+        label
+      });
+      device.queue.submit([commandEncoder.finish()]);
+      temperatureRows.integrationSubmitCount = 1;
+      temperatureRows.integrationSubmitStatus =
+        'native-surface-temperature-command-submitted';
+      return temperatureRows;
+    } catch (error) {
+      temperatureRows?.destroy?.();
+      throw error;
+    }
   }
 
     async function buildSphResidentSurfaceDrawBridge({
@@ -26525,8 +27585,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     materialProperties = currentMaterialProperties,
     waitForQueueCompletion = true,
     rendererOwnedDevice = false,
-    renderFieldGradientVolume = null,
-    emissiveTemperatureK = 0
+    emissiveTemperatureK = 0,
+    nativeSurfaceTemperatureRows = null
   } = {}) {
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
@@ -26635,6 +27695,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         readbackMode: translationReadbackMode,
         compactSummaryReadback: false,
         translateVertexRows: !renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge,
+        allowExtensionDrawIndirectBuffer: renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge,
         retainVertexRowsBuffer: true,
         retainDrawRowsBuffer: true,
         retainDrawIndirectRowsBuffer: true,
@@ -26646,34 +27707,20 @@ fn fs_main() -> @location(0) vec4<f32> {
           });
         }
       });
+      if (nativeSurfaceTemperatureRows) {
+        attachNativeSurfaceTemperatureRowsToTranslation(
+          translation,
+          nativeSurfaceTemperatureRows,
+          {
+            additionalSubmitCount:
+              nativeSurfaceTemperatureRows.integrationSubmitCount ?? 1
+          }
+        );
+      }
       const extensionSurfaceTranslationElapsedMs = Math.max(0, nowMs() - translationStartedMs);
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
       surfaceDrawExecution.emissiveTemperatureK = Math.max(0, Number(emissiveTemperatureK) || 0);
-      if (renderFieldGradientVolume?.buffer) {
-        // Snapshot the render-field scalars for smooth gradient normals in
-        // the native draw. The live pooled buffer is rewritten every field
-        // pass, so the draw binds a copy that stays consistent with the
-        // vertices extracted this refresh (queue-ordered after the field
-        // compute and before any frame that binds it).
-        const snapshotBuffer = snapshotResidentFieldGradientBuffer({
-          device: resolvedDeviceResult.device,
-          sourceBuffer: renderFieldGradientVolume.buffer,
-          copyByteLength: renderFieldGradientVolume.byteLength
-        });
-        if (snapshotBuffer) {
-          surfaceDrawExecution.renderFieldGradientVolume = {
-            buffer: snapshotBuffer,
-            dims: Array.isArray(renderFieldGradientVolume.dims)
-              ? [...renderFieldGradientVolume.dims]
-              : [0, 0, 0],
-            scalarStrides: Array.isArray(renderFieldGradientVolume.scalarStrides)
-              ? [...renderFieldGradientVolume.scalarStrides]
-              : [0, 0, 0],
-            scalarOffset: Math.max(0, Math.round(Number(renderFieldGradientVolume.scalarOffset) || 0))
-          };
-        }
-      }
       const renderBridgeBuildStartedMs = nowMs();
       const renderBridge = renderBridgePlan.useThreeCompactBridge
         ? createSphResidentSurfaceDrawThreeCompactBridge({
@@ -26743,6 +27790,20 @@ fn fs_main() -> @location(0) vec4<f32> {
         compactPositionRowsStrideBytes: surfaceDrawExecution.compactPositionRowsStrideBytes ?? 0,
         compactPositionRowsFormat: surfaceDrawExecution.compactPositionRowsFormat ?? null,
         directCompactPositionDraw: Boolean(surfaceDrawExecution.directCompactPositionDraw),
+        compactTemperatureRowsBufferRetained:
+          Boolean(surfaceDrawExecution.compactTemperatureRowsBufferRetained),
+        compactTemperatureRowsBufferByteLength:
+          surfaceDrawExecution.compactTemperatureRowsBufferByteLength ?? 0,
+        compactTemperatureRowsBufferRowCount:
+          surfaceDrawExecution.compactTemperatureRowsBufferRowCount ?? 0,
+        compactTemperatureRowsEncoding:
+          surfaceDrawExecution.compactTemperatureRowsEncoding ?? null,
+        compactTemperatureRowsSurfaceGenerationId:
+          surfaceDrawExecution.compactTemperatureRowsSurfaceGenerationId ?? null,
+        compactTemperatureRowsVolumeGenerationId:
+          surfaceDrawExecution.compactTemperatureRowsVolumeGenerationId ?? null,
+        compactTemperatureRowsAdditionalSubmitCount:
+          surfaceDrawExecution.compactTemperatureRowsAdditionalSubmitCount ?? null,
         residentBufferLeaseLedgerStatus: translation.residentBufferLeaseLedgerStatus ?? null,
         residentBufferLeaseResourceCount: translation.residentBufferLeaseResourceCount ?? 0,
         residentBufferLeaseActiveLeaseCount: translation.residentBufferLeaseActiveLeaseCount ?? 0,
@@ -27054,6 +28115,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       releaseUncommittedNativeSurfaceResources({
         device: resolvedDeviceResult.device,
         translation,
+        nativeSurfaceTemperatureRows,
         extensionSurfaceResult,
         reason: 'extension-surface-draw-error-cleanup'
       });
@@ -27076,7 +28138,39 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
   }
 
-  async function refreshSphResidentRenderState({
+  // Render-field production uses a reusable GPU buffer. Serialize refreshes so
+  // one caller cannot rewrite that field while another is still extracting
+  // generation-coupled positions, normals, and temperatures from it.
+  let sphResidentRenderRefreshTail = Promise.resolve();
+  let sphResidentRenderRefreshSerial = 0;
+  async function refreshSphResidentRenderState(options = {}) {
+    const previous = sphResidentRenderRefreshTail;
+    let releaseTurn = null;
+    const turn = new Promise((resolve) => { releaseTurn = resolve; });
+    sphResidentRenderRefreshTail = previous.catch(() => null).then(() => turn);
+    await previous.catch(() => null);
+    const serial = sphResidentRenderRefreshSerial + 1;
+    sphResidentRenderRefreshSerial = serial;
+    scene.userData.sphResidentRenderRefreshSerialization = {
+      schema: 'peercompute.ulg.sph-resident-render-refresh-serialization.v0',
+      status: 'resident-render-refresh-serialized-active',
+      serial,
+      updatedAtMs: nowMs()
+    };
+    try {
+      return await refreshSphResidentRenderStateUnserialized(options);
+    } finally {
+      releaseTurn?.();
+      scene.userData.sphResidentRenderRefreshSerialization = {
+        schema: 'peercompute.ulg.sph-resident-render-refresh-serialization.v0',
+        status: 'resident-render-refresh-serialized-idle',
+        serial,
+        updatedAtMs: nowMs()
+      };
+    }
+  }
+
+  async function refreshSphResidentRenderStateUnserialized({
     preferWebGpu = true,
     navigatorRef: overrideNavigatorRef = navigatorRef,
     device = null,
@@ -27093,6 +28187,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     surfaceDrawDiagnosticMaxResolution = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT,
     nativeMarchingCubesMaxVertexRowsBufferByteLength =
       SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
+    nativeMarchingCubesMaxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
     surfaceDrawOverlayPolicyOverride = null,
     residentAuthorityHost = null,
     pressureInterfaceGasCellFieldAdmission = null,
@@ -27447,13 +28542,13 @@ fn fs_main() -> @location(0) vec4<f32> {
         reason: 'pausing Three WebGPU presentation while resident compute uses the renderer-owned device',
         count: residentGpuRefreshInFlightCount,
         rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-        nativeWebGpuRenderer: false,
+        nativeWebGpuRenderer: Boolean(renderer?.isNativeWebGPURenderer),
         updatedAtMs: nowMs()
       };
       markSphResidentRenderProgress('resident-render-renderer-owned-device-pause-started', {
         stage: 'renderer-owned-device-pause',
         rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-        nativeWebGpuRenderer: false
+        nativeWebGpuRenderer: Boolean(renderer?.isNativeWebGPURenderer)
       });
       try {
         if (typeof globalThis.requestAnimationFrame === 'function') {
@@ -27469,7 +28564,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       markSphResidentRenderProgress('resident-render-renderer-owned-device-pause-complete', {
         stage: 'renderer-owned-device-pause',
         rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-        nativeWebGpuRenderer: false,
+        nativeWebGpuRenderer: Boolean(renderer?.isNativeWebGPURenderer),
         queueFenceStatus: 'skipped',
         queueFenceMethod: 'requestAnimationFrame-presentation-drain'
       });
@@ -27724,6 +28819,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
         )
       );
+      const requestedNativeMarchingCubesMaxResolution = Math.max(
+        2,
+        Math.min(
+          RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
+          Math.round(Number(nativeMarchingCubesMaxResolution)
+            || RESIDENT_RENDER_FIELD_MAX_RESOLUTION)
+        )
+      );
       markSphResidentRenderProgress('resident-render-rows-started', {
         stage: 'render-rows',
         particleCount: nextSphParticleState.particleCount,
@@ -27943,7 +29046,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       const nativeMarchingCubesSurfaceTableMaxResolution = useNativeMarchingCubesSurfaceTableBudget
         ? nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(fieldBatches.length, {
           maxVertexRowsBufferByteLength: requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
-          maxResolution: RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
+          maxResolution: requestedNativeMarchingCubesMaxResolution,
           vertexRowsBudgetEnforcedByExtraction: true
         })
         : null;
@@ -27991,6 +29094,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         nativeMarchingCubesSurfaceTableMaxResolution,
         nativeMarchingCubesMaxVertexRowsBufferByteLength:
           requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+        nativeMarchingCubesMaxResolution: requestedNativeMarchingCubesMaxResolution,
         nativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength,
         overlayPolicyStatus: surfaceOverlayPolicy.status ?? null
       });
@@ -28894,6 +29998,25 @@ fn fs_main() -> @location(0) vec4<f32> {
                 });
                 const extensionExecution = nativeExtraction.extensionExecution;
                 if (extensionExecution?.extensionExecution?.ok === true) {
+                  let nativeSurfaceTemperatureRows = null;
+                  try {
+                    nativeSurfaceTemperatureRows =
+                      encodeAndSubmitNativeSurfaceTemperatureRows({
+                        device: resolvedDeviceResult.device,
+                        extensionExecution,
+                        descriptor: nativeDescriptor,
+                        label: `ulg-native-surface-temperature-${nativeDescriptor.surfaceIndex}`
+                      });
+                  } catch (temperatureError) {
+                    releaseUncommittedNativeSurfaceResources({
+                      device: resolvedDeviceResult.device,
+                      nativeSurfaceTemperatureRows,
+                      extensionSurfaceResult:
+                        extensionExecution?.extensionExecution?.result ?? null,
+                      reason: 'native-surface-temperature-encoding-error'
+                    });
+                    throw temperatureError;
+                  }
                   const nativeSurfaceDraw = await refreshSphResidentSurfaceDrawFromExtension({
                     extensionExecution,
                     device: resolvedDeviceResult.device,
@@ -28927,16 +30050,8 @@ fn fs_main() -> @location(0) vec4<f32> {
                         : SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE),
                     materialProperties,
                     waitForQueueCompletion: !shouldUseNativeWebGpuSurfaceConsumerBridge,
-                    renderFieldGradientVolume: {
-                      buffer: nativeDescriptor.scalarBuffer ?? null,
-                      dims: nativeDescriptor.dims ?? null,
-                      scalarStrides: nativeDescriptor.scalarStrides ?? null,
-                      scalarOffset: nativeDescriptor.scalarOffset ?? 0,
-                      byteLength: nativeDescriptor.scalarRequiredByteLength
-                        ?? nativeDescriptor.scalarBufferByteLength
-                        ?? 0
-                    },
-                    emissiveTemperatureK: nativeSurfaceRecord.emissiveTemperatureK ?? 0
+                    emissiveTemperatureK: nativeSurfaceRecord.emissiveTemperatureK ?? 0,
+                    nativeSurfaceTemperatureRows
                   });
                   nextResidentSurfaceDraw = {
                     ...nativeSurfaceDraw,
@@ -29027,6 +30142,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                       if (!additionalRecord) continue;
                       let additionalTranslation = null;
                       let additionalSurfaceResult = null;
+                      let additionalTemperatureRows = null;
                       try {
                         const additionalExtraction =
                           await extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
@@ -29052,6 +30168,14 @@ fn fs_main() -> @location(0) vec4<f32> {
                           });
                           continue;
                         }
+                        additionalTemperatureRows =
+                          encodeAndSubmitNativeSurfaceTemperatureRows({
+                            device: resolvedDeviceResult.device,
+                            extensionExecution: additionalWrapped,
+                            descriptor: additionalDescriptor,
+                            label:
+                              `ulg-native-surface-temperature-${additionalDescriptor.surfaceIndex}`
+                          });
                         additionalTranslation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
                             device: resolvedDeviceResult.device,
                             extensionExecution: additionalWrapped.extensionExecution,
@@ -29088,15 +30212,25 @@ fn fs_main() -> @location(0) vec4<f32> {
                             readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
                             compactSummaryReadback: false,
                             translateVertexRows: false,
+                            allowExtensionDrawIndirectBuffer: true,
                             retainVertexRowsBuffer: true,
                             retainDrawRowsBuffer: true,
                             retainDrawIndirectRowsBuffer: true,
                             waitForQueueCompletion: false
                           });
+                        attachNativeSurfaceTemperatureRowsToTranslation(
+                          additionalTranslation,
+                          additionalTemperatureRows,
+                          {
+                            additionalSubmitCount:
+                              additionalTemperatureRows.integrationSubmitCount ?? 1
+                          }
+                        );
                         if (!additionalTranslation?.surfaceDraw) {
                           releaseUncommittedNativeSurfaceResources({
                             device: resolvedDeviceResult.device,
                             translation: additionalTranslation,
+                            nativeSurfaceTemperatureRows: additionalTemperatureRows,
                             extensionSurfaceResult: additionalSurfaceResult,
                             reason: 'additional-native-surface-translation-not-ready'
                           });
@@ -29104,30 +30238,6 @@ fn fs_main() -> @location(0) vec4<f32> {
                         }
                         additionalTranslation.surfaceDraw.emissiveTemperatureK =
                           Math.max(0, Number(additionalRecord.emissiveTemperatureK) || 0);
-                        const additionalSnapshotBuffer = snapshotResidentFieldGradientBuffer({
-                          device: resolvedDeviceResult.device,
-                          sourceBuffer: additionalDescriptor.scalarBuffer ?? null,
-                          copyByteLength: additionalDescriptor.scalarRequiredByteLength
-                            ?? additionalDescriptor.scalarBufferByteLength
-                            ?? 0,
-                          slotKey: additionalRecord.surfaceKey
-                            ?? `surface:${additionalDescriptor.surfaceIndex}`
-                        });
-                        if (additionalSnapshotBuffer) {
-                          additionalTranslation.surfaceDraw.renderFieldGradientVolume = {
-                            buffer: additionalSnapshotBuffer,
-                            dims: Array.isArray(additionalDescriptor.dims)
-                              ? [...additionalDescriptor.dims]
-                              : [0, 0, 0],
-                            scalarStrides: Array.isArray(additionalDescriptor.scalarStrides)
-                              ? [...additionalDescriptor.scalarStrides]
-                              : [0, 0, 0],
-                            scalarOffset: Math.max(
-                              0,
-                              Math.round(Number(additionalDescriptor.scalarOffset) || 0)
-                            )
-                          };
-                        }
                         additionalEntries.push({
                           translation: additionalTranslation,
                           extensionSurfaceResult: additionalSurfaceResult,
@@ -29143,6 +30253,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                         releaseUncommittedNativeSurfaceResources({
                           device: resolvedDeviceResult.device,
                           translation: additionalTranslation,
+                          nativeSurfaceTemperatureRows: additionalTemperatureRows,
                           extensionSurfaceResult: additionalSurfaceResult,
                           reason: 'additional-native-surface-extraction-error'
                         });
@@ -30577,14 +31688,14 @@ fn fs_main() -> @location(0) vec4<f32> {
         markSphResidentRenderProgress('resident-render-queue-fence-started', {
           stage: 'resident-render-refresh-queue-fence',
           rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-          nativeWebGpuRenderer: false
+          nativeWebGpuRenderer: Boolean(renderer?.isNativeWebGPURenderer)
         });
         try {
           await resolvedDeviceResult.device.queue.onSubmittedWorkDone();
           markSphResidentRenderProgress('resident-render-queue-fence-complete', {
             stage: 'resident-render-refresh-queue-fence',
             rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-            nativeWebGpuRenderer: false,
+            nativeWebGpuRenderer: Boolean(renderer?.isNativeWebGPURenderer),
             queueFenceStatus: 'resolved',
             queueFenceMethod: 'queue.onSubmittedWorkDone',
             queueFenceMs: Math.max(0, nowMs() - queueFenceStartedAtMs)
@@ -30593,7 +31704,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           markSphResidentRenderProgress('resident-render-queue-fence-error', {
             stage: 'resident-render-refresh-queue-fence',
             rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-            nativeWebGpuRenderer: false,
+            nativeWebGpuRenderer: Boolean(renderer?.isNativeWebGPURenderer),
             queueFenceStatus: 'error',
             queueFenceMethod: 'queue.onSubmittedWorkDone',
             reason: queueFenceError instanceof Error ? queueFenceError.message : String(queueFenceError)
@@ -30610,7 +31721,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           reason: null,
           count: residentGpuRefreshInFlightCount,
           rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-          nativeWebGpuRenderer: false,
+          nativeWebGpuRenderer: Boolean(renderer?.isNativeWebGPURenderer),
           updatedAtMs: nowMs()
         };
       }
@@ -30746,6 +31857,34 @@ fn fs_main() -> @location(0) vec4<f32> {
     reason = 'resident-surface-draw-submit',
     renderStatus = bridge?.lastRenderStatus ?? null
   } = {}) {
+    const submitSynchronization = resolveNativeSurfaceSubmitSynchronization({
+      rendererBridge: bridge?.rendererBridge ?? null
+    });
+    if (!submitSynchronization.requiresCpuQueueFence) {
+      bridge.lastSubmitFenceStatus = 'same-queue-submission-boundary';
+      bridge.lastSubmitFenceReason = reason;
+      bridge.nativeSurfaceConsumerSubmitFencePending = false;
+      bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
+      bridge.nativeSurfaceConsumerSubmitFenceFailed = false;
+      bridge.nativeSurfaceConsumerSubmitFenceExceededBudget = false;
+      bridge.nativeSurfaceConsumerSubmitFenceReason = submitSynchronization.reason;
+      bridge.nativeSurfaceConsumerRafBlockedReason = null;
+      bridge.nativeSurfaceConsumerInFlightSubmitCount = 0;
+      const telemetry = publishResidentSurfaceDrawSubmitFence(
+        'resident-surface-draw-submit-same-queue-submission-boundary',
+        {
+          reason,
+          renderStatus,
+          requiresCpuQueueFence: false,
+          sameQueueSubmissionBoundary: true,
+          resourceRetirementSafeAfterSubmit: true
+        }
+      );
+      flushSphNativeWebGpuSurfaceDeferredResourceReleases(bridge, {
+        reason: 'native-webgpu-surface-submit-boundary'
+      });
+      return null;
+    }
     if (typeof bridge?.device?.queue?.onSubmittedWorkDone !== 'function') {
       bridge.lastSubmitFenceStatus = 'unsupported';
       publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-unsupported', {
@@ -30757,27 +31896,13 @@ fn fs_main() -> @location(0) vec4<f32> {
     const serial = residentSurfaceDrawSubmitFenceSerial + 1;
     residentSurfaceDrawSubmitFenceSerial = serial;
     const startedAtMs = nowMs();
-    const nativeConsumerFence = bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
     bridge.lastSubmitFenceSerial = serial;
     bridge.lastSubmitFenceStatus = 'pending';
-    if (nativeConsumerFence) {
-      bridge.nativeSurfaceConsumerSubmitFencePending = true;
-      bridge.nativeSurfaceConsumerSubmitFenceSerial = serial;
-      bridge.nativeSurfaceConsumerSubmitFenceReason = reason;
-      bridge.nativeSurfaceConsumerSubmitFenceStartedAtMs = startedAtMs;
-      bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = null;
-      bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
-      bridge.nativeSurfaceConsumerSubmitFenceFailed = false;
-      bridge.nativeSurfaceConsumerSubmitFenceExceededBudget = false;
-      bridge.nativeSurfaceConsumerRafBlockedReason = null;
-    }
     publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-pending', {
       reason,
       renderStatus,
       startedAtMs
     });
-    let nativeFenceTimeoutHandle = null;
-    let nativeFenceExceededBudget = false;
     const queueFence = bridge.device.queue.onSubmittedWorkDone()
       .then(
         () => ({ status: 'resolved' }),
@@ -30805,110 +31930,35 @@ fn fs_main() -> @location(0) vec4<f32> {
         ...extra
       };
     };
-    if (nativeConsumerFence) {
-      nativeFenceTimeoutHandle = setTimeout(() => {
-        nativeFenceTimeoutHandle = null;
-        nativeFenceExceededBudget = true;
-        const elapsedMs = Math.max(0, nowMs() - startedAtMs);
-        if (bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
-          bridge.lastSubmitFenceStatus = 'pending-timeout';
-          bridge.lastSubmitFenceElapsedMs = elapsedMs;
-          bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = elapsedMs;
-          bridge.nativeSurfaceConsumerSubmitFenceTimedOut = true;
-          bridge.nativeSurfaceConsumerSubmitFenceExceededBudget = true;
-          bridge.nativeSurfaceConsumerSubmitFenceReason =
-            `native WebGPU surface submit fence exceeded ${SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS}ms; actual queue completion is still pending`;
-          bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-pending-after-timeout';
-        }
-        publishSphNativeWebGpuSurfaceDeferredResourceRelease(bridge, {
-          status: 'native-webgpu-surface-resource-release-waiting-submit-fence-timeout',
-          reason: bridge.nativeSurfaceConsumerSubmitFenceReason
-        });
-        publishFenceSettlement('resident-surface-draw-submit-fence-timeout', {
-          reason,
-          renderStatus,
-          elapsedMs,
-          timeoutMs: SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS,
-          queueCompletionPending: true
-        });
-      }, SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS);
-    }
     fence = queueFence
       .then((result = { status: 'resolved' }) => {
-        if (nativeFenceTimeoutHandle != null) {
-          clearTimeout(nativeFenceTimeoutHandle);
-          nativeFenceTimeoutHandle = null;
-        }
         const elapsedMs = Math.max(0, nowMs() - startedAtMs);
         if (result.status === 'error') {
           const error = result.error;
           const message = error instanceof Error ? error.message : String(error);
           bridge.lastSubmitFenceStatus = 'error';
           bridge.lastSubmitFenceReason = message;
-          if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
-            bridge.nativeSurfaceConsumerSubmitFencePending = false;
-            bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
-            bridge.nativeSurfaceConsumerSubmitFenceFailed = true;
-            bridge.nativeSurfaceConsumerSubmitFenceReason = message;
-            bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-error';
-          }
-          publishSphNativeWebGpuSurfaceDeferredResourceRelease(bridge, {
-            status: 'native-webgpu-surface-resource-release-waiting-submit-fence-error',
-            reason: message
-          });
           const errorTelemetry = publishFenceSettlement(
             'resident-surface-draw-submit-fence-error',
             {
             reason,
             renderStatus,
             elapsedMs,
-            exceededTimeoutBudget: nativeFenceExceededBudget,
             error: message
             }
           );
           if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
           return errorTelemetry;
         }
-        bridge.lastSubmitFenceStatus = nativeFenceExceededBudget
-          ? 'resolved-after-timeout'
-          : 'resolved';
+        bridge.lastSubmitFenceStatus = 'resolved';
         bridge.lastSubmitFenceElapsedMs = elapsedMs;
-        if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
-          bridge.nativeSurfaceConsumerSubmitFencePending = false;
-          bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = elapsedMs;
-          bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
-          bridge.nativeSurfaceConsumerSubmitFenceFailed = false;
-          bridge.nativeSurfaceConsumerSubmitFenceExceededBudget = nativeFenceExceededBudget;
-          bridge.nativeSurfaceConsumerSubmitFenceReason = nativeFenceExceededBudget
-            ? `${reason}; queue completion resolved after exceeding the ${SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS}ms budget`
-            : reason;
-          if (
-            bridge.nativeSurfaceConsumerContinuousRaf === true
-            && running
-            && sphResidentSurfaceDrawRenderBridge === bridge
-          ) {
-            scheduleSphNativeWebGpuSurfaceConsumerFrame({
-              reason: nativeFenceExceededBudget
-                ? 'native-webgpu-surface-consumer-after-late-submit-fence'
-                : 'native-webgpu-surface-consumer-after-submit-fence'
-            });
-          }
-        }
-        const resolvedTelemetry = publishFenceSettlement(nativeFenceExceededBudget
-          ? 'resident-surface-draw-submit-fence-resolved-after-timeout'
-          : 'resident-surface-draw-submit-fence-resolved', {
+        const resolvedTelemetry = publishFenceSettlement(
+          'resident-surface-draw-submit-fence-resolved', {
           reason,
           renderStatus,
-          elapsedMs,
-          exceededTimeoutBudget: nativeFenceExceededBudget,
-          timeoutMs: nativeFenceExceededBudget ? SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS : null
+          elapsedMs
         });
         if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
-        if (nativeConsumerFence) {
-          flushSphNativeWebGpuSurfaceDeferredResourceReleases(bridge, {
-            reason: 'native-webgpu-surface-submit-fence-resolved'
-          });
-        }
         return resolvedTelemetry;
       });
     residentSurfaceDrawSubmitFence = fence;
@@ -30922,21 +31972,6 @@ fn fs_main() -> @location(0) vec4<f32> {
   } = {}) {
     const fence = residentSurfaceDrawSubmitFence;
     if (!fence) {
-      const bridge = sphResidentSurfaceDrawRenderBridge;
-      if (
-        bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-        && bridge.nativeSurfaceConsumerSubmitFenceFailed
-      ) {
-        const message = bridge.nativeSurfaceConsumerSubmitFenceReason
-          || 'resident surface draw submit fence failed';
-        publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-await-error', {
-          reason,
-          stage,
-          error: message,
-          persistentFailure: true
-        });
-        throw new Error(message);
-      }
       return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-skip-no-pending-submit', {
         reason,
         stage
@@ -31069,10 +32104,45 @@ fn fs_main() -> @location(0) vec4<f32> {
   }
   function animate() {
     if (!running) return;
-    controls.update();
+    const controlsChanged = controls.update() === true;
+    const nativeBridge = sphResidentSurfaceDrawRenderBridge?.rendererBridge
+      === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
+    const nativeContinuousRedraw = Boolean(
+      nativeBridge
+      && sphResidentSurfaceDrawRenderBridge?.nativeSurfaceConsumerContinuousRaf === true
+    );
+    const nativeAnimationFramePolicy = resolveNativeSurfaceAnimationFramePolicy({
+      nativeBridge,
+      cameraDirty: nativeSurfaceCameraDirty,
+      stateDirty: nativeSurfaceStateDirty,
+      controlsChanged,
+      continuousRedraw: nativeContinuousRedraw
+    });
+    const nativeAnimationFrameDrawRequired = nativeAnimationFramePolicy.drawRequired;
     const rendered = renderSceneFrame({ reason: 'animation-frame' });
-    if (rendered) {
-      renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
+    if (rendered && nativeAnimationFrameDrawRequired) {
+      const overlayRendered = renderSphResidentSurfaceDrawOverlay({
+        reason: 'animation-frame'
+      });
+      if (nativeBridge && overlayRendered) {
+        nativeSurfaceCameraDirty = false;
+        nativeSurfaceStateDirty = false;
+        sphResidentSurfaceDrawRenderBridge.nativeSurfaceAnimationFrameRedrawPolicy =
+          nativeAnimationFramePolicy.mode;
+      } else if (nativeBridge) {
+        sphResidentSurfaceDrawRenderBridge.nativeSurfaceAnimationFrameRedrawPolicy =
+          `${nativeAnimationFramePolicy.mode}-retry-pending`;
+      }
+    } else if (rendered && nativeBridge) {
+      sphResidentSurfaceDrawRenderBridge.nativeSurfaceAnimationFrameRenderSkippedCount =
+        Math.max(
+          0,
+          Math.round(Number(
+            sphResidentSurfaceDrawRenderBridge.nativeSurfaceAnimationFrameRenderSkippedCount
+          ) || 0)
+        ) + 1;
+      sphResidentSurfaceDrawRenderBridge.nativeSurfaceAnimationFrameRedrawPolicy =
+        nativeAnimationFramePolicy.mode;
     }
     requestAnimationFrame(animate);
   }

@@ -37,6 +37,13 @@ export const WEBGPU_MARCHING_CUBES_SURFACE_OUTPUT_DESCRIPTOR_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface-output-descriptor.v0';
 export const WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA =
   'peercompute.webgpu-marching-cubes.compact-position-rows.v0';
+export const WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA =
+  'peercompute.webgpu-marching-cubes.packed-normal-rows.v0';
+export const WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME =
+  'peercompute.webgpu-marching-cubes.layout.normal-octahedral-snorm16x2.v0';
+export const WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA =
+  'peercompute.webgpu-marching-cubes.normal-buffer-descriptor.v0';
+export const WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING = 'octahedral-snorm16x2';
 export const WEBGPU_MARCHING_CUBES_SURFACE_DRAW_ROWS_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface-draw-rows.v0';
 export const WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA =
@@ -733,6 +740,9 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     scalarType: 'f32',
     scalarLane: 'density',
     scalarLaneIndex: 0,
+    normalSign: -1,
+    normalSemantic: 'outward-density-gradient',
+    normalSourceSemantic: 'scalar-gradient',
     scalarBuffer,
     storageBuffer: scalarBuffer,
     buffer: scalarBuffer,
@@ -1000,6 +1010,15 @@ function assertSameDeviceExtensionSurfaceBuffer(extensionExecution) {
   if (ownership?.ok === false || ownership?.status === 'cross-device-resource') {
     throw new TypeError(`extension surface buffer is not owned by this GPUDevice (${ownership.status})`);
   }
+  const normal = packedNormalRowsSource(result);
+  if (
+    normal.resourceOwnership?.ok === false
+    || normal.resourceOwnership?.status === 'cross-device-resource'
+  ) {
+    throw new TypeError(
+      `extension packed normal buffer is not owned by this GPUDevice (${normal.resourceOwnership.status})`
+    );
+  }
 }
 
 function compactPositionRowsSource(result = null) {
@@ -1066,6 +1085,98 @@ function compactPositionRowsSource(result = null) {
   };
 }
 
+function packedNormalRowsSource(result = null) {
+  const outputDescriptors = result?.outputDescriptors || null;
+  const outputNormal = outputDescriptors?.rows?.normal || null;
+  const rowMetadataNormal = result?.rowMetadata?.normal || null;
+  const normal = outputNormal || rowMetadataNormal || null;
+  const descriptor = normal?.normalBufferDescriptor
+    || outputDescriptors?.normalBufferDescriptor
+    || null;
+  const generation = isObject(descriptor?.generation) ? descriptor.generation : null;
+  const generationDescriptorAuthored = generation != null;
+  const surfaceGenerationIdAuthored = Boolean(
+    generationDescriptorAuthored
+    && Object.prototype.hasOwnProperty.call(generation, 'surfaceGenerationId')
+  );
+  const pairedPositionSurfaceGenerationIdAuthored = Boolean(
+    generationDescriptorAuthored
+    && Object.prototype.hasOwnProperty.call(generation, 'pairedPositionSurfaceGenerationId')
+  );
+  const volumeGenerationIdAuthored = Boolean(
+    generationDescriptorAuthored
+    && Object.prototype.hasOwnProperty.call(generation, 'volumeGenerationId')
+  );
+  const buffer = normal?.buffer
+    || outputDescriptors?.retainedBuffers?.normal
+    || result?.normalBuffer
+    || null;
+  const bufferByteLength = Math.max(0, Math.round(finiteNumber(
+    normal?.bufferByteLength
+      ?? descriptor?.bufferByteLength
+      ?? result?.normalBufferByteLength,
+    0
+  )));
+  const rowCount = Math.max(0, Math.round(finiteNumber(
+    normal?.rowCount ?? descriptor?.rowCount,
+    0
+  )));
+  const surfaceGenerationId = surfaceGenerationIdAuthored
+    ? generation.surfaceGenerationId
+    : null;
+  const pairedPositionSurfaceGenerationId = pairedPositionSurfaceGenerationIdAuthored
+    ? generation.pairedPositionSurfaceGenerationId
+    : null;
+  const volumeGenerationId = volumeGenerationIdAuthored
+    ? generation.volumeGenerationId
+    : null;
+  return {
+    descriptorSchema: descriptor?.schema ?? null,
+    rowSchema: normal?.schema ?? descriptor?.rowSchema ?? null,
+    layoutName: normal?.layoutName ?? descriptor?.layoutName ?? null,
+    encoding: normal?.encoding ?? descriptor?.encoding ?? result?.normalEncoding ?? null,
+    semantic: normal?.semantic ?? descriptor?.semantic ?? result?.normalSemantic ?? null,
+    sourceSemantic: normal?.sourceSemantic
+      ?? descriptor?.sourceSemantic
+      ?? result?.normalSourceSemantic
+      ?? null,
+    normalSign: Number(normal?.normalSign ?? descriptor?.normalSign ?? result?.normalSign),
+    status: normal?.status ?? descriptor?.status ?? null,
+    available: Boolean(normal?.available ?? descriptor?.available),
+    buffer,
+    bufferRetained: Boolean(
+      (normal?.bufferRetained && normal?.buffer)
+      || (descriptor?.bufferRetained && descriptor?.buffer)
+      || (outputDescriptors?.retainedBuffers?.normal && buffer)
+    ),
+    bufferByteLength,
+    rowStrideBytes: Math.max(0, Math.round(finiteNumber(
+      normal?.rowStrideBytes ?? descriptor?.rowStrideBytes,
+      0
+    ))),
+    rowCount,
+    ownerDeviceId: normal?.ownerDeviceId ?? descriptor?.ownerDeviceId ?? null,
+    resourceOwnership: normal?.resourceOwnership ?? descriptor?.resourceOwnership ?? null,
+    generationDescriptorAuthored,
+    surfaceGenerationIdAuthored,
+    pairedPositionSurfaceGenerationIdAuthored,
+    volumeGenerationIdAuthored,
+    surfaceGenerationId,
+    pairedPositionSurfaceGenerationId,
+    volumeGenerationId,
+    sameSubmitAsPosition: descriptor?.generation?.sameSubmitAsPosition === true,
+    lifetimeOwner: descriptor?.lifetime?.owner ?? null,
+    pairedWithPositionBuffer: descriptor?.lifetime?.pairedWithPositionBuffer === true,
+    producerStage: descriptor?.producer?.stage ?? result?.normalProducerStage ?? null,
+    timestampSpanLabel:
+      descriptor?.producer?.timestampSpanLabel ?? result?.normalTimestampSpanLabel ?? null,
+    additionalSubmitCount: Math.max(0, Math.round(finiteNumber(
+      descriptor?.producer?.additionalSubmitCount ?? result?.normalAdditionalSubmitCount,
+      0
+    )))
+  };
+}
+
 function createMissingExecutionSummary(reason) {
   return {
     schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
@@ -1112,6 +1223,7 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
   }
   const result = execution.result || null;
   const positionRows = compactPositionRowsSource(result);
+  const normalRows = packedNormalRowsSource(result);
   const extensionSurfaceSchema = result?.schema ?? null;
   const extensionOk = execution.ok === true;
   const extensionVertexCount = Math.max(0, Math.round(finiteNumber(result?.vertexCount, 0)));
@@ -1151,6 +1263,55 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
   const extensionVertexFormat = result?.vertexFormat ?? null;
   const extensionBufferRetained = positionRows.bufferRetained;
   const extensionResourceOwnershipStatus = positionRows.resourceOwnership?.status ?? null;
+  const normalVolumeGenerationMatches = Boolean(
+    normalRows.volumeGenerationId == null && result?.volumeGenerationId == null
+      ? true
+      : Number.isInteger(normalRows.volumeGenerationId)
+        && Number.isInteger(result?.volumeGenerationId)
+        && normalRows.volumeGenerationId === result.volumeGenerationId
+  );
+  const normalGenerationMatches = Boolean(
+    normalRows.generationDescriptorAuthored
+    && normalRows.surfaceGenerationIdAuthored
+    && normalRows.pairedPositionSurfaceGenerationIdAuthored
+    && normalRows.volumeGenerationIdAuthored
+    && Number.isInteger(normalRows.surfaceGenerationId)
+    && Number.isInteger(normalRows.pairedPositionSurfaceGenerationId)
+    && Number.isInteger(result?.surfaceGenerationId)
+    && normalRows.surfaceGenerationId === normalRows.pairedPositionSurfaceGenerationId
+    && normalRows.surfaceGenerationId === result.surfaceGenerationId
+    && normalVolumeGenerationMatches
+  );
+  const extensionPackedNormalReady = Boolean(
+    normalRows.descriptorSchema === WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA
+    && normalRows.rowSchema === WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA
+    && normalRows.layoutName === WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME
+    && normalRows.encoding === WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING
+    && normalRows.semantic === 'oriented-scalar-gradient'
+    && normalRows.sourceSemantic === 'scalar-gradient'
+    && (normalRows.normalSign === -1 || normalRows.normalSign === 1)
+    && normalRows.available
+    && normalRows.bufferRetained
+    && normalRows.buffer
+    && normalRows.rowStrideBytes === Uint32Array.BYTES_PER_ELEMENT
+    && normalRows.rowCount === extensionVertexCount
+    && normalRows.bufferByteLength >= extensionVertexCount * Uint32Array.BYTES_PER_ELEMENT
+    && normalRows.resourceOwnership?.ok !== false
+    && normalRows.resourceOwnership?.status !== 'cross-device-resource'
+    && normalGenerationMatches
+    && normalRows.sameSubmitAsPosition
+    && normalRows.pairedWithPositionBuffer
+    && normalRows.lifetimeOwner === 'surface-result'
+    && normalRows.additionalSubmitCount === 0
+  );
+  let extensionPackedNormalStatus = 'packed-normal-ready';
+  if (!normalRows.buffer || !normalRows.bufferRetained) {
+    extensionPackedNormalStatus = 'packed-normal-buffer-unavailable';
+  } else if (!normalGenerationMatches) {
+    extensionPackedNormalStatus = 'packed-normal-generation-mismatch';
+  } else if (!extensionPackedNormalReady) {
+    extensionPackedNormalStatus = 'packed-normal-contract-invalid';
+  }
   const extensionError = execution.errors?.[0]
     || execution.webgpuStatus?.error
     || result?.error
@@ -1215,6 +1376,36 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionTriangleCount,
     extensionBufferRetained,
     extensionBufferByteLength: positionRows.bufferByteLength,
+    extensionPackedNormalReady,
+    extensionPackedNormalStatus,
+    extensionNormalDescriptorSchema: normalRows.descriptorSchema,
+    extensionNormalRowsSchema: normalRows.rowSchema,
+    extensionNormalLayoutName: normalRows.layoutName,
+    extensionNormalEncoding: normalRows.encoding,
+    extensionNormalSemantic: normalRows.semantic,
+    extensionNormalSourceSemantic: normalRows.sourceSemantic,
+    extensionNormalSign: Number.isFinite(normalRows.normalSign) ? normalRows.normalSign : null,
+    extensionNormalBufferRetained: normalRows.bufferRetained,
+    extensionNormalBufferByteLength: normalRows.bufferByteLength,
+    extensionNormalRowStrideBytes: normalRows.rowStrideBytes,
+    extensionNormalRowCount: normalRows.rowCount,
+    extensionNormalOwnerDeviceId: normalRows.ownerDeviceId,
+    extensionNormalResourceOwnershipStatus: normalRows.resourceOwnership?.status ?? null,
+    extensionNormalGenerationDescriptorAuthored: normalRows.generationDescriptorAuthored,
+    extensionNormalSurfaceGenerationIdAuthored: normalRows.surfaceGenerationIdAuthored,
+    extensionNormalPairedPositionSurfaceGenerationIdAuthored:
+      normalRows.pairedPositionSurfaceGenerationIdAuthored,
+    extensionNormalVolumeGenerationIdAuthored: normalRows.volumeGenerationIdAuthored,
+    extensionNormalSurfaceGenerationId: normalRows.surfaceGenerationId,
+    extensionNormalPairedPositionSurfaceGenerationId:
+      normalRows.pairedPositionSurfaceGenerationId,
+    extensionNormalVolumeGenerationId: normalRows.volumeGenerationId,
+    extensionNormalSameSubmitAsPosition: normalRows.sameSubmitAsPosition,
+    extensionNormalLifetimeOwner: normalRows.lifetimeOwner,
+    extensionNormalPairedWithPositionBuffer: normalRows.pairedWithPositionBuffer,
+    extensionNormalProducerStage: normalRows.producerStage,
+    extensionNormalTimestampSpanLabel: normalRows.timestampSpanLabel,
+    extensionNormalAdditionalSubmitCount: normalRows.additionalSubmitCount,
     extensionOutputDescriptorSchema: positionRows.outputDescriptorSchema,
     extensionOutputDescriptorStatus: positionRows.outputDescriptorStatus,
     extensionOutputDescriptorTopology: positionRows.outputDescriptorTopology,
@@ -1764,6 +1955,15 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   const sourceVertexCount = Math.max(0, Math.round(finiteNumber(summary.extensionVertexCount, 0)));
   const sourceVertexCountMode = summary.extensionVertexCountMode ?? null;
   const extensionResult = extensionExecution?.result || null;
+  const packedNormalSource = packedNormalRowsSource(extensionResult);
+  if (directCompactPositionDraw && summary.extensionPackedNormalReady !== true) {
+    throw new TypeError(
+      `direct compact-position surface draw requires generation-matched packed normals (${summary.extensionPackedNormalStatus})`
+    );
+  }
+  if (directCompactPositionDraw && packedNormalSource.normalSign !== -1) {
+    throw new TypeError('ULG SPH density surfaces require packed normalSign=-1');
+  }
   const extensionActualVertexCounterBuffer = extensionResult?.actualVertexCounterBuffer
     || extensionResult?.vertexCounterBuffer
     || null;
@@ -2178,6 +2378,45 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     0,
     Math.round(finiteNumber(summary.extensionVertexStrideBytes, sourceStrideFloats * Float32Array.BYTES_PER_ELEMENT))
   ) * sourceVertexCount;
+  const compactPositionRowsSurfaceGenerationId = extensionResult?.surfaceGenerationId ?? null;
+  const compactPositionRowsVolumeGenerationId = extensionResult?.volumeGenerationId ?? null;
+  const compactNormalRowsBufferRetained = Boolean(
+    directCompactPositionDraw
+    && packedNormalSource.buffer
+    && packedNormalSource.bufferRetained
+    && summary.extensionPackedNormalReady
+  );
+  const compactNormalRowsBufferByteLength = compactNormalRowsBufferRetained
+    ? packedNormalSource.bufferByteLength
+    : 0;
+  const compactNormalRowsBufferRowCount = compactNormalRowsBufferRetained
+    ? packedNormalSource.rowCount
+    : 0;
+  const compactNormalMetadata = {
+    compactNormalRowsBufferRetained,
+    compactNormalRowsBufferByteLength,
+    compactNormalRowsBufferRowCount,
+    compactNormalRowsSchema: packedNormalSource.rowSchema,
+    compactNormalRowsDescriptorSchema: packedNormalSource.descriptorSchema,
+    compactNormalRowsLayoutName: packedNormalSource.layoutName,
+    compactNormalRowsEncoding: packedNormalSource.encoding,
+    compactNormalRowsSemantic: packedNormalSource.semantic,
+    compactNormalRowsSourceSemantic: packedNormalSource.sourceSemantic,
+    compactNormalRowsNormalSign: Number.isFinite(packedNormalSource.normalSign)
+      ? packedNormalSource.normalSign
+      : null,
+    compactNormalRowsSurfaceGenerationId: packedNormalSource.surfaceGenerationId,
+    compactNormalRowsPairedPositionSurfaceGenerationId:
+      packedNormalSource.pairedPositionSurfaceGenerationId,
+    compactNormalRowsVolumeGenerationId: packedNormalSource.volumeGenerationId,
+    compactNormalRowsSameSubmitAsPosition: packedNormalSource.sameSubmitAsPosition,
+    compactNormalRowsLifetimeOwner: packedNormalSource.lifetimeOwner,
+    compactNormalRowsPairedWithPositionBuffer: packedNormalSource.pairedWithPositionBuffer,
+    compactNormalRowsProducerStage: packedNormalSource.producerStage,
+    compactNormalRowsTimestampSpanLabel: packedNormalSource.timestampSpanLabel,
+    compactNormalRowsAdditionalSubmitCount: packedNormalSource.additionalSubmitCount,
+    compactNormalRowsOwnership: 'extension-owned-retained-buffer'
+  };
   const surfaceVertices = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
     backend: 'webgpu',
@@ -2234,6 +2473,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactPositionRowsFormat: summary.extensionVertexFormat,
     compactPositionRowsSchema: WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
     compactPositionRowsOwnership: 'extension-owned-retained-buffer',
+    compactPositionRowsSurfaceGenerationId,
+    compactPositionRowsVolumeGenerationId,
+    ...compactNormalMetadata,
     vertexRowsBufferClearStatus,
     translationPipelineCacheStatus,
     directCompactPositionDrawIndirectSource,
@@ -2252,6 +2494,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   };
   if (keepVertexRowsBuffer) surfaceVertices.vertexRowsBuffer = vertexRowsBuffer;
   if (compactPositionRowsBufferRetained) surfaceVertices.compactPositionRowsBuffer = sourceBuffer;
+  if (compactNormalRowsBufferRetained) {
+    surfaceVertices.compactNormalRowsBuffer = packedNormalSource.buffer;
+  }
 
   const surfaceDraw = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
@@ -2313,6 +2558,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactPositionRowsFormat: summary.extensionVertexFormat,
     compactPositionRowsSchema: WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
     compactPositionRowsOwnership: 'extension-owned-retained-buffer',
+    compactPositionRowsSurfaceGenerationId,
+    compactPositionRowsVolumeGenerationId,
+    ...compactNormalMetadata,
     directCompactPositionDraw,
     sourceVertexRowCount: translatedVertexCount,
     sourceVertexRowsBufferBound: true,
@@ -2340,6 +2588,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   if (keepDrawIndirectRowsBuffer) surfaceDraw.drawIndirectRowsBuffer = drawIndirectRowsBuffer;
   if (keepVertexRowsBuffer) surfaceDraw.compactedVertexRowsBuffer = vertexRowsBuffer;
   if (compactPositionRowsBufferRetained) surfaceDraw.compactPositionRowsBuffer = sourceBuffer;
+  if (compactNormalRowsBufferRetained) {
+    surfaceDraw.compactNormalRowsBuffer = packedNormalSource.buffer;
+  }
 
   const leaseLedger = createResidentBufferLeaseLedger({
     ledgerId: `sph-extension-surface:${resolvedSurfaceIndex}:${translatedVertexCount}:buffer-leases`,
@@ -2380,6 +2631,32 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   const vertexRowsResourceKey = `extension-surface:vertex-rows:${translatedVertexCount}:${vertexRowsByteLength}`;
   const drawRowsResourceKey = `extension-surface:draw-rows:1:${drawRowsByteLength}`;
   const drawIndirectRowsResourceKey = `extension-surface:draw-indirect:1:${drawIndirectRowsByteLength}`;
+  const compactPositionRowsResourceKey =
+    `extension-surface:compact-position:g${packedNormalSource.surfaceGenerationId ?? 'unknown'}:${compactPositionRowsBufferByteLength}`;
+  const compactNormalRowsResourceKey =
+    `extension-surface:packed-normal:g${packedNormalSource.surfaceGenerationId ?? 'unknown'}:${compactNormalRowsBufferByteLength}`;
+  if (directCompactPositionDraw && compactPositionRowsBufferRetained) {
+    registerRetainedBuffer({
+      resourceKey: compactPositionRowsResourceKey,
+      resourceKind: 'extension-owned-compact-position-buffer',
+      buffer: sourceBuffer,
+      byteLength: compactPositionRowsBufferByteLength,
+      rowCount: sourceVertexCount,
+      expectedConsumers: ['surface-draw-renderer', 'diagnostics'],
+      status: 'resident-extension-surface-buffer-borrowed-generation-owned'
+    });
+  }
+  if (compactNormalRowsBufferRetained) {
+    registerRetainedBuffer({
+      resourceKey: compactNormalRowsResourceKey,
+      resourceKind: 'extension-owned-packed-normal-buffer',
+      buffer: packedNormalSource.buffer,
+      byteLength: compactNormalRowsBufferByteLength,
+      rowCount: packedNormalSource.rowCount,
+      expectedConsumers: ['surface-draw-renderer', 'diagnostics'],
+      status: 'resident-extension-surface-buffer-borrowed-generation-owned'
+    });
+  }
   if (keepVertexRowsBuffer) {
     registerRetainedBuffer({
       resourceKey: vertexRowsResourceKey,
@@ -2436,6 +2713,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactPositionRowsStrideFloats: sourceStrideFloats,
     compactPositionRowsFormat: summary.extensionVertexFormat,
     compactPositionRowsOwnership: 'extension-owned-retained-buffer',
+    compactPositionRowsSurfaceGenerationId,
+    compactPositionRowsVolumeGenerationId,
+    ...compactNormalMetadata,
     directCompactPositionDraw,
     sourceVertexCount,
     translatedVertexCount,
@@ -2466,6 +2746,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     residentBufferLeaseResourceCount: leaseLedger.resourceCount,
     residentBufferLeaseActiveLeaseCount: leaseLedger.activeLeaseCount
   };
+  if (compactNormalRowsBufferRetained) {
+    result.compactNormalRowsBuffer = packedNormalSource.buffer;
+  }
   const refreshLeaseSummary = () => {
     result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(leaseLedger);
     result.residentBufferLeaseLedgerStatus = result.residentBufferLeaseSummary.status;
@@ -2508,6 +2791,22 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       destroyResidentBufferWithLease(leaseLedger, vertexRowsResourceKey, () => {
         destroyBufferOnce(vertexRowsResourceKey, vertexRowsBuffer);
       }, { force, reason });
+    }
+    if (directCompactPositionDraw && compactPositionRowsBufferRetained) {
+      destroyResidentBufferWithLease(
+        leaseLedger,
+        compactPositionRowsResourceKey,
+        null,
+        { force, reason }
+      );
+    }
+    if (compactNormalRowsBufferRetained) {
+      destroyResidentBufferWithLease(
+        leaseLedger,
+        compactNormalRowsResourceKey,
+        null,
+        { force, reason }
+      );
     }
     if (keepDrawRowsBuffer) {
       destroyResidentBufferWithLease(leaseLedger, drawRowsResourceKey, () => {

@@ -291,12 +291,84 @@ function reactionCacheKeyForOptions(options, materialProperties) {
   });
 }
 
-function cachedProductClosuresFromColdCache(cache, { generatorFingerprint = null } = {}) {
+function productClosureTier({
+  allowFixtureMaterialProperties = false,
+  allowReducedProductProperties = false
+} = {}) {
+  if (allowFixtureMaterialProperties === true) return 'fixture';
+  if (allowReducedProductProperties === true) return 'reduced';
+  return 'strict';
+}
+
+function closureUsesReducedProductModel(closure) {
+  const properties = closure?.properties || {};
+  if (String(properties.derivation || '').startsWith('reduced-reaction-product-closure:')) {
+    return true;
+  }
+  return (properties.propertyProvenance?.entries || []).some((entry) => (
+    entry?.source === 'reactant-packed-product-closure'
+  ));
+}
+
+function closureMatchesProductTier(closure, requestedClosureTier) {
+  if (requestedClosureTier === 'fixture') return true;
+  const properties = closure?.properties || null;
+  if (!properties) return false;
+  // Tier-specific derivation only applies to generated compound products.
+  // Shared elemental/molecular closures (for example H2) are identical in
+  // strict and reduced reaction runs and remain reusable within the cache
+  // record's declared tier.
+  if (properties.compound !== true) return true;
+  const reduced = closureUsesReducedProductModel(closure);
+  return requestedClosureTier === 'reduced' ? reduced : !reduced;
+}
+
+function storedProductClosureTier(closure, reactionCache) {
+  const requestedClosureTier = productClosureTier(reactionCache);
+  if (requestedClosureTier === 'fixture' || closure?.properties?.compound !== true) {
+    return requestedClosureTier;
+  }
+  return closureUsesReducedProductModel(closure) ? 'reduced' : 'strict';
+}
+
+function reactionRecordMatchesProductTier(record, requestedClosureTier) {
+  return [record?.productClosures, record?.result?.productClosures].every((productClosures) => (
+    Object.values(productClosures || {}).every((closure) => (
+      closureMatchesProductTier(closure, requestedClosureTier)
+    ))
+  ));
+}
+
+function productReuseMatchesClosureTier(record, {
+  sourceReactionCacheKey = null,
+  requestedClosureTier = 'strict'
+} = {}) {
+  // Existing records predate the explicit tier field. Reusing one remains
+  // safe when its source reaction key is identical because that key already
+  // hashes the fixture/reduced options. Cross-key reuse requires the explicit
+  // tier so an old strict product cannot leak into a reduced interactive run
+  // (or vice versa).
+  if (!closureMatchesProductTier(record?.closure, requestedClosureTier)) return false;
+  if (sourceReactionCacheKey && record?.sourceReactionCacheKey === sourceReactionCacheKey) {
+    return !record?.closureTier || record.closureTier === requestedClosureTier;
+  }
+  return record?.closureTier === requestedClosureTier;
+}
+
+function cachedProductClosuresFromColdCache(cache, {
+  generatorFingerprint = null,
+  sourceReactionCacheKey = null,
+  requestedClosureTier = 'strict'
+} = {}) {
   const closures = {};
   for (const record of Object.values(cache?.productReuse || {})) {
     if (
       record?.schema === SPH_PRODUCT_REUSE_RECORD_SCHEMA
       && (!generatorFingerprint || record.generatorFingerprint === generatorFingerprint)
+      && productReuseMatchesClosureTier(record, {
+        sourceReactionCacheKey,
+        requestedClosureTier
+      })
       && record.productKey
       && record.closure?.properties
     ) {
@@ -312,17 +384,24 @@ export function cachedReactionRecordForOptionsFromSnapshot(options, closureLooku
   const cache = parseSphColdStartCacheSnapshot(snapshot, { generatorFingerprint });
   const materialProperties = materialPropertiesFromClosureLookup(closureLookup);
   const cacheKey = reactionCacheKeyForOptions(options, materialProperties);
+  const requestedClosureTier = productClosureTier(options);
+  const reusableProductClosures = cachedProductClosuresFromColdCache(cache, {
+    generatorFingerprint,
+    sourceReactionCacheKey: cacheKey,
+    requestedClosureTier
+  });
   const record = cacheKey ? cache.reactions?.[cacheKey] : null;
   const reuse = record?.schema === REACTION_DISCOVERY_CACHE_RECORD_SCHEMA
     && record.cacheKey === cacheKey
     && (!generatorFingerprint || record.generatorFingerprint === generatorFingerprint)
+    && reactionRecordMatchesProductTier(record, requestedClosureTier)
     && record.result
     ? {
       status: 'reaction-cache-hit',
       cacheKey,
       record,
       productClosures: {
-        ...cachedProductClosuresFromColdCache(cache, { generatorFingerprint }),
+        ...reusableProductClosures,
         ...(record.productClosures || {})
       }
     }
@@ -330,7 +409,7 @@ export function cachedReactionRecordForOptionsFromSnapshot(options, closureLooku
       status: cacheKey ? 'reaction-cache-miss' : 'reaction-cache-unkeyed',
       cacheKey,
       record: null,
-      productClosures: cachedProductClosuresFromColdCache(cache, { generatorFingerprint })
+      productClosures: reusableProductClosures
     };
   return {
     schema: 'peercompute.ulg.sph-cold-start-cache-lookup.v0',
@@ -405,11 +484,13 @@ export function applySphLocalCacheLookupToOptions(options = {}, lookup = null) {
 function productReuseRecord(productKey, closure, reactionDiscovery, {
   generatorFingerprint = null
 } = {}) {
+  const reactionCache = reactionDiscovery?.cache || {};
   return {
     schema: SPH_PRODUCT_REUSE_RECORD_SCHEMA,
     productKey,
     closure,
-    sourceReactionCacheKey: reactionDiscovery?.cache?.cacheKey || null,
+    sourceReactionCacheKey: reactionCache.cacheKey || null,
+    closureTier: storedProductClosureTier(closure, reactionCache),
     generatorFingerprint,
     closureHash: hashPayload(closure?.properties || closure || null),
     updatedAt: nowIso(),

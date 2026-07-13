@@ -25,12 +25,13 @@ const COMMON_CONTROLS = Object.freeze({
   blob: '1'
 });
 
-function preset({ id, label, controls, validation }) {
+function preset({ id, label, controls, runtime, validation }) {
   return Object.freeze({
     schema: SPH_PHASE_SCENARIO_PRESET_SCHEMA,
     id,
     label,
     controls: Object.freeze({ ...COMMON_CONTROLS, ...controls }),
+    runtime: Object.freeze({ ...(runtime || {}) }),
     validation: Object.freeze({
       ...validation,
       checkpoints: Object.freeze((validation?.checkpoints || []).map((checkpoint) => (
@@ -107,9 +108,23 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       baset: '293.15',
       wymin: '293.15',
       wymax: '293.15',
-      boxx: '4',
-      boxy: '4',
-      boxz: '4'
+      boxx: '3',
+      boxy: '3',
+      boxz: '3'
+    },
+    runtime: {
+      // The sodium starts 1 cm above the water. At the stable 1 ms preview
+      // step, a 32-step visual batch ends before the ~45 ms free-fall contact
+      // time and therefore looks frozen. Amortize the resident submission and
+      // present 128 ms per completed batch so the first visible continuation
+      // contains real contact-driven motion. Explicit URL values still win.
+      sdt: '0.001',
+      cfl: '0.6',
+      cflSafety: '0.4',
+      avAlpha: '0',
+      residentStepsPerSchedule: '128',
+      residentComputeManagerMode: 'direct',
+      residentInterfaceRefreshMode: 'pipelined'
     },
     validation: {
       batches: 10,
@@ -174,6 +189,7 @@ export function sphPhaseScenarioPresetUrl(id, extraParams = {}) {
   const params = new URLSearchParams({
     scenario: entry.id,
     ...entry.controls,
+    ...entry.runtime,
     ...extraParams
   });
   return `/?${params.toString()}`;

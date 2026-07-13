@@ -43,6 +43,18 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
   assert.ok(Number(quench.controls.baset) < 273.15);
 
   const sodium = sphPhaseScenarioPresetById('sodium-water');
+  assert.equal(sodium.controls.boxx, '3');
+  assert.equal(sodium.controls.boxy, '3');
+  assert.equal(sodium.controls.boxz, '3');
+  assert.deepEqual(sodium.runtime, {
+    sdt: '0.001',
+    cfl: '0.6',
+    cflSafety: '0.4',
+    avAlpha: '0',
+    residentStepsPerSchedule: '128',
+    residentComputeManagerMode: 'direct',
+    residentInterfaceRefreshMode: 'pipelined'
+  });
   assert.deepEqual(sodium.validation.expectedMaterialPresent, ['naoh', 'h2']);
   assert.equal(sodium.validation.initialMaxTemperatureK, 300);
   assert.equal(sodium.validation.minimumReactionTemperatureRiseK, 50);
@@ -64,6 +76,9 @@ test('SPH preset URLs round-trip the preset id and all control values', () => {
     assert.equal(parsed.searchParams.get('scenario'), entry.id);
     assert.equal(parsed.searchParams.get('visualCapture'), '1');
     for (const [key, value] of Object.entries(entry.controls)) {
+      assert.equal(parsed.searchParams.get(key), value, `${entry.id}:${key}`);
+    }
+    for (const [key, value] of Object.entries(entry.runtime)) {
       assert.equal(parsed.searchParams.get(key), value, `${entry.id}:${key}`);
     }
   }

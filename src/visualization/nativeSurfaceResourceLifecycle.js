@@ -1,5 +1,48 @@
 export const NATIVE_WEBGPU_SURFACE_CONSUMER_MODE = 'native-webgpu-surface-consumer';
 
+export function resolveNativeSurfaceAnimationFramePolicy({
+  nativeBridge = false,
+  cameraDirty = false,
+  stateDirty = false,
+  controlsChanged = false,
+  continuousRedraw = false
+} = {}) {
+  const drawRequired = Boolean(
+    !nativeBridge
+    || cameraDirty
+    || stateDirty
+    || controlsChanged
+    || continuousRedraw
+  );
+  return {
+    schema: 'peercompute.ulg.native-surface-animation-frame-policy.v0',
+    drawRequired,
+    mode: nativeBridge ? 'on-demand-camera-or-state-change' : 'continuous-engine-frame',
+    reason: drawRequired
+      ? (!nativeBridge
+        ? 'non-native rendering follows the engine animation frame'
+        : 'native surface presentation changed or continuous redraw was requested')
+      : 'native surface presentation is unchanged'
+  };
+}
+
+export function resolveNativeSurfaceSubmitSynchronization({
+  rendererBridge = null
+} = {}) {
+  const nativeSameQueueConsumer =
+    rendererBridge === NATIVE_WEBGPU_SURFACE_CONSUMER_MODE;
+  return {
+    schema: 'peercompute.ulg.native-surface-submit-synchronization.v0',
+    nativeSameQueueConsumer,
+    requiresCpuQueueFence: !nativeSameQueueConsumer,
+    sameQueueSubmissionBoundary: nativeSameQueueConsumer,
+    resourceRetirementSafeAfterSubmit: nativeSameQueueConsumer,
+    reason: nativeSameQueueConsumer
+      ? 'native render and compute share one ordered queue; submitted command buffers retain referenced allocations without a per-frame CPU fence'
+      : 'non-native consumers retain the generic CPU queue-completion fence contract'
+  };
+}
+
 export function nativeSurfaceBridgeFailureReason(renderBridge) {
   if (!renderBridge || renderBridge.rendererBridge !== NATIVE_WEBGPU_SURFACE_CONSUMER_MODE) {
     return null;
@@ -7,10 +50,6 @@ export function nativeSurfaceBridgeFailureReason(renderBridge) {
   if (renderBridge.released) return 'native WebGPU surface bridge was released';
   if (renderBridge.deviceLost) {
     return renderBridge.deviceLostReason || 'native WebGPU surface device was lost';
-  }
-  if (renderBridge.nativeSurfaceConsumerSubmitFenceFailed) {
-    return renderBridge.nativeSurfaceConsumerSubmitFenceReason
-      || 'native WebGPU surface submit fence failed';
   }
   return null;
 }
@@ -142,6 +181,115 @@ export function rendererCanvasResizeRequired({
   );
 }
 
+export function resolveNativeRefractionTargetSetAction({
+  required = false,
+  activeTargetSet = null,
+  device = null,
+  width = 0,
+  height = 0,
+  colorFormat = null,
+  depthFormat = 'depth32float',
+  resourceReleaseBlocked = false
+} = {}) {
+  const normalizedWidth = Math.max(0, Math.round(Number(width) || 0));
+  const normalizedHeight = Math.max(0, Math.round(Number(height) || 0));
+  const active = Boolean(activeTargetSet);
+  const retirementBlocked = Boolean(resourceReleaseBlocked);
+  const base = {
+    width: normalizedWidth,
+    height: normalizedHeight,
+    colorFormat: colorFormat || null,
+    depthFormat: depthFormat || null,
+    retireActive: false,
+    deferRetirement: false,
+    create: false,
+    reuse: false
+  };
+  if (!required) {
+    return active
+      ? {
+          ...base,
+          status: 'release-opaque-targets',
+          retireActive: true,
+          deferRetirement: retirementBlocked
+        }
+      : { ...base, status: 'opaque-no-targets' };
+  }
+  if (
+    !device
+    || normalizedWidth <= 1
+    || normalizedHeight <= 1
+    || !colorFormat
+    || !depthFormat
+  ) {
+    return {
+      ...base,
+      status: 'required-targets-unavailable',
+      retireActive: active,
+      deferRetirement: active && retirementBlocked
+    };
+  }
+  const exactMatch = Boolean(
+    activeTargetSet?.device === device
+    && activeTargetSet.width === normalizedWidth
+    && activeTargetSet.height === normalizedHeight
+    && activeTargetSet.colorFormat === colorFormat
+    && activeTargetSet.depthFormat === depthFormat
+    && activeTargetSet.copyTexture
+    && activeTargetSet.backfaceTexture
+  );
+  if (exactMatch) {
+    return { ...base, status: 'reuse-targets', reuse: true };
+  }
+  return {
+    ...base,
+    status: active ? 'replace-targets' : 'create-targets',
+    retireActive: active,
+    deferRetirement: active && retirementBlocked,
+    create: true
+  };
+}
+
+export function retireNativeRefractionTargetSet({
+  targetSet = null,
+  status = 'native-refraction-target-set-retired',
+  deferRelease = null,
+  destroyTargetSet = null,
+  onRelease = null
+} = {}) {
+  if (!targetSet || typeof destroyTargetSet !== 'function') {
+    return {
+      status: 'retirement-unavailable',
+      deferred: false,
+      released: false,
+      request: null
+    };
+  }
+  let released = false;
+  const release = () => {
+    if (released) return false;
+    released = Boolean(destroyTargetSet(targetSet));
+    onRelease?.({ targetSet, released });
+    return released;
+  };
+  const request = {
+    status,
+    requiresLivenessBoundary: true,
+    release
+  };
+  const deferred = Boolean(
+    typeof deferRelease === 'function'
+    && deferRelease(request) === true
+  );
+  if (!deferred) release();
+  return {
+    status: deferred ? 'retirement-liveness-pending' : 'retired-without-liveness-blocker',
+    deferred,
+    get released() { return released; },
+    request
+  };
+}
+
 export function nativeSurfaceDrawStateUsesExecution(drawState, surfaceDrawExecution) {
   if (!drawState || !surfaceDrawExecution) return false;
   if (drawState.surfaceDrawExecution) {
@@ -156,10 +304,7 @@ export function nativeSurfaceDrawStateUsesExecution(drawState, surfaceDrawExecut
 export function resolveNativeSurfaceResourceReleaseAction({
   drawState = null,
   surfaceDrawExecution = null,
-  validationPending = false,
-  submitFencePending = false,
-  submitFenceTimedOut = false,
-  submitFenceFailed = false
+  validationPending = false
 } = {}) {
   if (nativeSurfaceDrawStateUsesExecution(drawState, surfaceDrawExecution)) {
     return {
@@ -168,23 +313,6 @@ export function resolveNativeSurfaceResourceReleaseAction({
       defer: false,
       retainActive: true,
       reason: 'the native bridge draw state still owns this surface execution'
-    };
-  }
-  if (submitFencePending || submitFenceTimedOut || submitFenceFailed) {
-    return {
-      status: submitFenceFailed
-        ? 'defer-submit-fence-error'
-        : (submitFenceTimedOut
-          ? 'defer-submit-fence-timeout'
-          : 'defer-submit-fence'),
-      releaseNow: false,
-      defer: true,
-      retainActive: false,
-      reason: submitFenceFailed
-        ? 'the latest native submit fence failed and has not proved resource retirement safe'
-        : (submitFenceTimedOut
-          ? 'the latest native submit fence exceeded its budget and has not proved resource retirement safe'
-          : 'the latest native submit fence is pending')
     };
   }
   if (validationPending) {
@@ -201,7 +329,7 @@ export function resolveNativeSurfaceResourceReleaseAction({
     releaseNow: true,
     defer: false,
     retainActive: false,
-    reason: 'the surface generation is inactive and all submitted work has settled'
+    reason: 'the surface generation is inactive and has no outstanding liveness references'
   };
 }
 

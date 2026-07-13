@@ -223,7 +223,9 @@ function probeChromiumLaunchOptions() {
   const args = [...new Set([...DEFAULT_CHROMIUM_ARGS, ...extraArgs])];
   const channel = String(process.env.ULG_PROBE_CHROMIUM_CHANNEL || '').trim();
   const executablePath = String(process.env.ULG_PROBE_CHROMIUM_EXECUTABLE || '').trim();
+  const headless = booleanEnv(process.env.ULG_PROBE_HEADLESS, true);
   return {
+    headless,
     args,
     ...(channel ? { channel } : {}),
     ...(executablePath ? { executablePath } : {})
@@ -234,6 +236,7 @@ function probeChromiumLaunchReport() {
   const options = probeChromiumLaunchOptions();
   return {
     schema: 'peercompute.ulg.sph-probe-browser-launch.v0',
+    headless: options.headless,
     channel: options.channel || null,
     executablePath: options.executablePath || null,
     args: [...options.args],
@@ -349,7 +352,7 @@ async function ensureProbeSphPhaseOverlay(page, { timeoutMs }) {
   const overlay = page.locator('#sph-phase-overlay');
   if (await overlay.count() === 0) {
     await page.locator('#run-sph-phase').click({
-      timeout: Math.min(5_000, timeoutMs)
+      timeout: Math.min(30_000, timeoutMs)
     }).catch(async (error) => {
       if (await overlay.count() > 0) return;
       throw error;
@@ -1316,6 +1319,8 @@ async function runBrowserProbe({
   surfaceDrawDiagnosticMode,
   surfaceDrawDiagnosticMaxFieldCells,
   surfaceDrawDiagnosticMaxResolution,
+  nativeMarchingCubesMaxVertexRowsBufferByteLength,
+  nativeMarchingCubesMaxResolution,
   disablePressureInterface,
   contactBinMetadataReadback = false,
   reactionBinMetadataReadback = false,
@@ -1391,6 +1396,66 @@ async function runBrowserProbe({
     }
   });
   try {
+    if (process.env.ULG_PROBE_TRACE_NATIVE_QUEUE_FENCES === '1') {
+      await page.addInitScript(() => {
+        let queueFenceTraceInstallAttempts = 0;
+        const installQueueFenceTrace = () => {
+          const prototype = globalThis.GPUQueue?.prototype;
+          const original = prototype?.onSubmittedWorkDone;
+          if (!prototype || typeof original !== 'function') {
+            queueFenceTraceInstallAttempts += 1;
+            if (queueFenceTraceInstallAttempts < 200) {
+              setTimeout(installQueueFenceTrace, 10);
+            }
+            return;
+          }
+          if (prototype.__ulgQueueFenceTraceInstalled) return;
+          Object.defineProperty(prototype, '__ulgQueueFenceTraceInstalled', {
+            value: true,
+            configurable: true
+          });
+          Object.defineProperty(prototype, 'onSubmittedWorkDone', {
+            configurable: true,
+            writable: true,
+            value(...args) {
+              console.error('[ulg-native-queue-fence-trace]', new Error().stack || 'stack unavailable');
+              return original.apply(this, args);
+            }
+          });
+        };
+        installQueueFenceTrace();
+      });
+    }
+    if (process.env.ULG_PROBE_TRACE_NATIVE_DEVICE_DESTROY === '1') {
+      await page.addInitScript(() => {
+        let deviceDestroyTraceInstallAttempts = 0;
+        const installDeviceDestroyTrace = () => {
+          const prototype = globalThis.GPUDevice?.prototype;
+          const original = prototype?.destroy;
+          if (!prototype || typeof original !== 'function') {
+            deviceDestroyTraceInstallAttempts += 1;
+            if (deviceDestroyTraceInstallAttempts < 200) {
+              setTimeout(installDeviceDestroyTrace, 10);
+            }
+            return;
+          }
+          if (prototype.__ulgDeviceDestroyTraceInstalled) return;
+          Object.defineProperty(prototype, '__ulgDeviceDestroyTraceInstalled', {
+            value: true,
+            configurable: true
+          });
+          Object.defineProperty(prototype, 'destroy', {
+            configurable: true,
+            writable: true,
+            value(...args) {
+              console.error('[ulg-native-device-destroy-trace]', new Error().stack || 'stack unavailable');
+              return original.apply(this, args);
+            }
+          });
+        };
+        installDeviceDestroyTrace();
+      });
+    }
     if (nativeSurfaceDebugMode !== 'none') {
       await page.addInitScript((mode) => {
         window.__ULG_SPH_NATIVE_SURFACE_DEBUG_MODE = mode;
@@ -1454,6 +1519,9 @@ async function runBrowserProbe({
       surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
       surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
       surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+      nativeMarchingCubesMaxVertexRowsBufferByteLength:
+        requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+      nativeMarchingCubesMaxResolution: requestedNativeMarchingCubesMaxResolution,
       disablePressureInterface: requestedDisablePressureInterface,
       contactBinMetadataReadback: requestedContactBinMetadataReadback,
       reactionBinMetadataReadback: requestedReactionBinMetadataReadback,
@@ -1641,7 +1709,31 @@ async function runBrowserProbe({
         residentAuthorityLedgerStatus: diagnostics.residentAuthorityLedgerStatus ?? null,
         residentAuthorityParticleOwner: diagnostics.residentAuthorityParticleOwner ?? null,
         residentAuthorityMechanicsOwner: diagnostics.residentAuthorityMechanicsOwner ?? null,
-        residentAuthorityThermoOwner: diagnostics.residentAuthorityThermoOwner ?? null
+        residentAuthorityThermoOwner: diagnostics.residentAuthorityThermoOwner ?? null,
+        reactionEvidence: {
+          summaryAvailable: diagnostics.reactionSummaryAvailable ?? null,
+          summaryStatus: diagnostics.reactionSummaryStatus ?? null,
+          canonicalEventCount: diagnostics.reactionCanonicalEventCount ?? null,
+          changedMaterialCount: diagnostics.reactionChangedMaterialCount ?? null,
+          changedMassCount: diagnostics.reactionChangedMassCount ?? null,
+          visibleProductMassKg: finiteOrNull(diagnostics.reactionVisibleProductMassKg),
+          visibleGasProductMassKg: finiteOrNull(diagnostics.reactionVisibleGasProductMassKg),
+          consumedReactantMassKg: finiteOrNull(diagnostics.reactionConsumedReactantMassKg),
+          expectedProductMassKg: finiteOrNull(diagnostics.reactionExpectedProductMassKg),
+          heatJ: finiteOrNull(diagnostics.reactionHeatJ),
+          productEventRowCount: diagnostics.reactionProductEventRowCount ?? null,
+          productEventActiveEventCount: diagnostics.reactionProductEventActiveEventCount ?? null,
+          productEventBufferRetained: diagnostics.reactionProductEventBufferRetained ?? null,
+          residentProductMassStatus: diagnostics.reactionResidentProductMassStatus ?? null,
+          residentProductMassBufferRetained:
+            diagnostics.reactionResidentProductMassBufferRetained ?? null,
+          residentProductMassUnplacedProductMassKg:
+            finiteOrNull(diagnostics.reactionResidentProductMassUnplacedProductMassKg),
+          residentProductMassUnplacedGasProductMassKg:
+            finiteOrNull(diagnostics.reactionResidentProductMassUnplacedGasProductMassKg),
+          productInventory: diagnostics.reactionProductInventory || null,
+          gasSpeciesLedger: diagnostics.reactionGasSpeciesLedger || null
+        }
       } : null;
       const compactSidecarFusionPlan = (plan) => plan ? {
         schema: plan.schema ?? null,
@@ -4073,8 +4165,10 @@ async function runBrowserProbe({
 	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceTimedOut ?? null,
 	            renderBridgeNativeSurfaceConsumerSubmitFenceFailed:
 	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceFailed ?? null,
-	            renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget:
-	              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget ?? null,
+		            renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget:
+		              surfaceDraw.renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget ?? null,
+		            renderBridgeNativeSurfaceConsumerInFlightSubmitCount:
+		              surfaceDraw.renderBridgeNativeSurfaceConsumerInFlightSubmitCount ?? null,
 	            renderBridgeNativeSurfaceResourceGeneration:
 	              surfaceDraw.renderBridgeNativeSurfaceResourceGeneration ?? null,
 	            renderBridgeNativeSurfaceRetiredGenerationCount:
@@ -4110,6 +4204,66 @@ async function runBrowserProbe({
 	              surfaceDraw.renderBridgeTransparencyCompositeMode ?? null,
 	            renderBridgeLastOpaqueDrawCount: surfaceDraw.renderBridgeLastOpaqueDrawCount ?? null,
 	            renderBridgeLastTransparentDrawCount: surfaceDraw.renderBridgeLastTransparentDrawCount ?? null,
+	            renderBridgeLastRefractiveDrawCount:
+	              surfaceDraw.renderBridgeLastRefractiveDrawCount ?? null,
+	            renderBridgeConfiguredAlphaMode: surfaceDraw.renderBridgeConfiguredAlphaMode ?? null,
+	            renderBridgeSurfaceAlphaMode: surfaceDraw.renderBridgeSurfaceAlphaMode ?? null,
+	            renderBridgeSurfaceBlendEnabled: surfaceDraw.renderBridgeSurfaceBlendEnabled ?? null,
+	            renderBridgeSurfaceDepthWriteEnabled:
+	              surfaceDraw.renderBridgeSurfaceDepthWriteEnabled ?? null,
+	            renderBridgePackedNormalReady: surfaceDraw.renderBridgePackedNormalReady ?? null,
+	            renderBridgePackedNormalByteLength:
+	              surfaceDraw.renderBridgePackedNormalByteLength ?? null,
+	            renderBridgePackedNormalRowCount: surfaceDraw.renderBridgePackedNormalRowCount ?? null,
+	            renderBridgePackedNormalEncoding: surfaceDraw.renderBridgePackedNormalEncoding ?? null,
+	            renderBridgePackedNormalSurfaceGenerationId:
+	              surfaceDraw.renderBridgePackedNormalSurfaceGenerationId ?? null,
+	            renderBridgePackedNormalAdditionalSubmitCount:
+	              surfaceDraw.renderBridgePackedNormalAdditionalSubmitCount ?? null,
+	            renderBridgeVertexTemperatureReady:
+	              surfaceDraw.renderBridgeVertexTemperatureReady ?? null,
+	            renderBridgeVertexTemperatureByteLength:
+	              surfaceDraw.renderBridgeVertexTemperatureByteLength ?? null,
+	            renderBridgeVertexTemperatureRowCount:
+	              surfaceDraw.renderBridgeVertexTemperatureRowCount ?? null,
+	            renderBridgeVertexTemperatureEncoding:
+	              surfaceDraw.renderBridgeVertexTemperatureEncoding ?? null,
+	            renderBridgeVertexTemperatureSurfaceGenerationId:
+	              surfaceDraw.renderBridgeVertexTemperatureSurfaceGenerationId ?? null,
+	            renderBridgeVertexTemperatureVolumeGenerationId:
+	              surfaceDraw.renderBridgeVertexTemperatureVolumeGenerationId ?? null,
+	            renderBridgeVertexTemperatureAdditionalSubmitCount:
+	              surfaceDraw.renderBridgeVertexTemperatureAdditionalSubmitCount ?? null,
+	            renderBridgeVertexTemperatureAdditionalReadyCount:
+	              surfaceDraw.renderBridgeVertexTemperatureAdditionalReadyCount ?? null,
+	            renderBridgeRefractionTargetLifecycleStatus:
+	              surfaceDraw.renderBridgeRefractionTargetLifecycleStatus ?? null,
+	            renderBridgeRefractionTargetLifecycleReason:
+	              surfaceDraw.renderBridgeRefractionTargetLifecycleReason ?? null,
+	            renderBridgeRefractionTargetGeneration:
+	              surfaceDraw.renderBridgeRefractionTargetGeneration ?? null,
+	            renderBridgeRefractionTargetWidth: surfaceDraw.renderBridgeRefractionTargetWidth ?? null,
+	            renderBridgeRefractionTargetHeight: surfaceDraw.renderBridgeRefractionTargetHeight ?? null,
+	            renderBridgeRefractionTargetColorFormat:
+	              surfaceDraw.renderBridgeRefractionTargetColorFormat ?? null,
+	            renderBridgeRefractionTargetDepthFormat:
+	              surfaceDraw.renderBridgeRefractionTargetDepthFormat ?? null,
+	            renderBridgeRefractionTargetRetirementPendingCount:
+	              surfaceDraw.renderBridgeRefractionTargetRetirementPendingCount ?? null,
+	            renderBridgeRefractionTargetRetirementCount:
+	              surfaceDraw.renderBridgeRefractionTargetRetirementCount ?? null,
+	            renderBridgeRefractionBackfaceStatus:
+	              surfaceDraw.renderBridgeRefractionBackfaceStatus ?? null,
+	            renderBridgeRefractionBackfaceCacheHit:
+	              surfaceDraw.renderBridgeRefractionBackfaceCacheHit ?? null,
+	            renderBridgeRefractionBackfacePassDrawCount:
+	              surfaceDraw.renderBridgeRefractionBackfacePassDrawCount ?? null,
+	            renderBridgeRefractionBackfaceAdditionalSubmitCount:
+	              surfaceDraw.renderBridgeRefractionBackfaceAdditionalSubmitCount ?? null,
+	            renderBridgeBackgroundImageGpuStatus:
+	              surfaceDraw.renderBridgeBackgroundImageGpuStatus ?? null,
+	            renderBridgeBackgroundImageDrawCount:
+	              surfaceDraw.renderBridgeBackgroundImageDrawCount ?? null,
 	            renderBridgeNativeSurfaceDebugMode:
 	              surfaceDraw.renderBridgeNativeSurfaceDebugMode ?? null,
 	            renderBridgeNativeSurfaceDebugStatus:
@@ -4302,6 +4456,9 @@ async function runBrowserProbe({
             surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
             surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
             surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+            nativeMarchingCubesMaxVertexRowsBufferByteLength:
+              requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+            nativeMarchingCubesMaxResolution: requestedNativeMarchingCubesMaxResolution,
             gasPressureSummary: overlay.__sphResidentGasPressureSummary || null
           });
           overlay.__sphResidentSurfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || null;
@@ -4595,6 +4752,9 @@ async function runBrowserProbe({
               surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
               surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
               surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+              nativeMarchingCubesMaxVertexRowsBufferByteLength:
+                requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+              nativeMarchingCubesMaxResolution: requestedNativeMarchingCubesMaxResolution,
               gasPressureSummary: overlay.__sphResidentGasPressureSummary || null,
               allowNativeSurfaceExtraction: shouldExtractNativeSurface(
                 batchIndex,
@@ -4733,7 +4893,11 @@ async function runBrowserProbe({
             batchMs: performance.now() - started,
             error: error instanceof Error ? error.message : String(error)
           });
-          errors.push({ batchIndex, message: error instanceof Error ? error.message : String(error) });
+          errors.push({
+            batchIndex,
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack || null : null
+          });
           await appendMetricWithValidationCapture(
             sample(batchIndex, 'resident-batch-error', performance.now() - started)
           );
@@ -4778,6 +4942,9 @@ async function runBrowserProbe({
         surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
         surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
         surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+        nativeMarchingCubesMaxVertexRowsBufferByteLength:
+          requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+        nativeMarchingCubesMaxResolution: requestedNativeMarchingCubesMaxResolution,
         nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
         nativeSurfaceValidationWaitMs: requestedNativeSurfaceValidationWaitMs,
         materialInterfaceDiagnostic: Boolean(requestedMaterialInterfaceDiagnostic),
@@ -4823,6 +4990,8 @@ async function runBrowserProbe({
       surfaceDrawDiagnosticMode,
       surfaceDrawDiagnosticMaxFieldCells,
       surfaceDrawDiagnosticMaxResolution,
+      nativeMarchingCubesMaxVertexRowsBufferByteLength,
+      nativeMarchingCubesMaxResolution,
       disablePressureInterface,
       contactBinMetadataReadback,
       reactionBinMetadataReadback,
@@ -4863,6 +5032,8 @@ async function runBrowserProbe({
 	          surfaceDrawDiagnosticMode,
 	          surfaceDrawDiagnosticMaxFieldCells,
 	          surfaceDrawDiagnosticMaxResolution,
+	          nativeMarchingCubesMaxVertexRowsBufferByteLength,
+	          nativeMarchingCubesMaxResolution,
 	          nativeSurfaceDebugMode,
 	          nativeSurfaceValidationWaitMs,
 	          pressureInterfaceDisabled: Boolean(disablePressureInterface),
@@ -5463,7 +5634,31 @@ async function runDirectResidentProbe({
         residentAuthorityLedgerStatus: diagnostics.residentAuthorityLedgerStatus ?? null,
         residentAuthorityParticleOwner: diagnostics.residentAuthorityParticleOwner ?? null,
         residentAuthorityMechanicsOwner: diagnostics.residentAuthorityMechanicsOwner ?? null,
-        residentAuthorityThermoOwner: diagnostics.residentAuthorityThermoOwner ?? null
+        residentAuthorityThermoOwner: diagnostics.residentAuthorityThermoOwner ?? null,
+        reactionEvidence: {
+          summaryAvailable: diagnostics.reactionSummaryAvailable ?? null,
+          summaryStatus: diagnostics.reactionSummaryStatus ?? null,
+          canonicalEventCount: diagnostics.reactionCanonicalEventCount ?? null,
+          changedMaterialCount: diagnostics.reactionChangedMaterialCount ?? null,
+          changedMassCount: diagnostics.reactionChangedMassCount ?? null,
+          visibleProductMassKg: finiteOrNull(diagnostics.reactionVisibleProductMassKg),
+          visibleGasProductMassKg: finiteOrNull(diagnostics.reactionVisibleGasProductMassKg),
+          consumedReactantMassKg: finiteOrNull(diagnostics.reactionConsumedReactantMassKg),
+          expectedProductMassKg: finiteOrNull(diagnostics.reactionExpectedProductMassKg),
+          heatJ: finiteOrNull(diagnostics.reactionHeatJ),
+          productEventRowCount: diagnostics.reactionProductEventRowCount ?? null,
+          productEventActiveEventCount: diagnostics.reactionProductEventActiveEventCount ?? null,
+          productEventBufferRetained: diagnostics.reactionProductEventBufferRetained ?? null,
+          residentProductMassStatus: diagnostics.reactionResidentProductMassStatus ?? null,
+          residentProductMassBufferRetained:
+            diagnostics.reactionResidentProductMassBufferRetained ?? null,
+          residentProductMassUnplacedProductMassKg:
+            finiteOrNull(diagnostics.reactionResidentProductMassUnplacedProductMassKg),
+          residentProductMassUnplacedGasProductMassKg:
+            finiteOrNull(diagnostics.reactionResidentProductMassUnplacedGasProductMassKg),
+          productInventory: diagnostics.reactionProductInventory || null,
+          gasSpeciesLedger: diagnostics.reactionGasSpeciesLedger || null
+        }
       } : null;
       const cohortRangesFromCounts = (counts = {}) => {
         const baseCount = Math.max(0, Math.round(Number(counts.base) || 0));
@@ -6200,7 +6395,29 @@ async function runDirectResidentProbe({
         dropParticleEdge: positiveInteger(params.get('dropn'), defaults.dropParticleEdge),
         baseParticleEdge: positiveInteger(params.get('basen'), defaults.baseParticleEdge),
         mechanics: normalizedMechanicsMode(params.get('mech') ?? params.get('mechanics')),
-        physicalLawGroups
+        physicalLawGroups,
+        // Match the interactive mount's explicitly admitted reaction-product
+        // tier. Without this, direct probes derived molecular NaOH while the
+        // live scene used the reduced liquid-only product closure.
+        allowReducedProductProperties: true,
+        ...(() => {
+          const value = finiteOrNull(params.get('sdt'));
+          return value != null && value > 0 && value <= 0.01 ? { dt: value } : {};
+        })(),
+        ...(() => {
+          const value = finiteOrNull(params.get('cfl'));
+          return value != null && value > 0 && value <= 2 ? { gridCflFactor: value } : {};
+        })(),
+        ...(() => {
+          const value = finiteOrNull(params.get('cflSafety'));
+          return value != null && value > 0 && value <= 2 ? { cflSafety: value } : {};
+        })(),
+        ...(() => {
+          const value = finiteOrNull(params.get('avAlpha'));
+          return value != null && value >= 0 && value <= 10
+            ? { mlsMpmArtificialViscosityAlpha: value }
+            : {};
+        })()
       };
 
       const metrics = [];
@@ -6335,6 +6552,21 @@ async function runDirectResidentProbe({
             preflight,
             initialHydrostaticState: viewState.initialHydrostaticState || null,
             physicalLawGroups,
+            productClosurePolicy: 'interactive-reduced-product-properties',
+            reactionProductPhases: Object.fromEntries(
+              [...new Set((staticTables.reactionTable?.productTermMetadata || [])
+                .map((term) => term.material)
+                .filter(Boolean))]
+                .map((material) => [material, {
+                  phases: (viewState.materialProperties?.[material]?.phases || []).map((phase) => ({
+                    name: phase.name ?? null,
+                    temperatureRange: Array.isArray(phase.temperatureRange)
+                      ? [...phase.temperatureRange]
+                      : null
+                  })),
+                  transitionCount: viewState.materialProperties?.[material]?.transitions?.length ?? 0
+                }])
+            ),
             staticTables: {
               thermalMaterialStatus: staticTables.thermalMaterialTable?.status ?? null,
               thermalMaterialCount: staticTables.thermalMaterialTable?.materialCount ?? null,
@@ -7628,16 +7860,100 @@ function analyzeTimeline(timeline, {
     }
     return 0;
   };
+  const normalizedExpectedReactionProducts = Array.from(new Set(
+    expectedMaterialPresent
+      .map((material) => String(material || '').trim().toLowerCase())
+      .filter(Boolean)
+  ));
+  const completeReactionProductMassCheckpoints = capturedMaterialPhaseCheckpoints
+    .filter(checkpointMaterialEvidenceComplete)
+    .map((checkpoint) => {
+      const massKgByMaterial = {};
+      for (const row of checkpoint.materialPhases) {
+        const material = String(row?.material || '').trim().toLowerCase();
+        const massKg = finiteMetric(row?.massKg);
+        if (!material || !Number.isFinite(massKg) || massKg < 0) continue;
+        massKgByMaterial[material] = (massKgByMaterial[material] || 0) + massKg;
+      }
+      return {
+        batchIndex: finiteMetric(checkpoint.batchIndex),
+        sourceTimeS: finiteMetric(checkpoint.sourceTimeS),
+        massKgByMaterial
+      };
+    });
+  const authoritativeReactionProductMassEvidence = normalizedExpectedReactionProducts
+    .map((material) => {
+      const massKgSeries = completeReactionProductMassCheckpoints
+        .map((checkpoint) => finiteMetric(checkpoint.massKgByMaterial[material]) ?? 0);
+      const firstMassKg = massKgSeries.length > 0 ? massKgSeries[0] : null;
+      const finalMassKg = massKgSeries.length > 0 ? massKgSeries[massKgSeries.length - 1] : null;
+      const maxObservedMassKg = massKgSeries.length > 0 ? Math.max(...massKgSeries) : null;
+      const maxSubsequentMassKg = massKgSeries.length > 1 ? Math.max(...massKgSeries.slice(1)) : null;
+      const growthToleranceKg = Number.isFinite(maxObservedMassKg)
+        ? Math.max(1e-12, Math.abs(maxObservedMassKg) * 1e-6)
+        : null;
+      const maxMassIncreaseKg = (
+        Number.isFinite(firstMassKg)
+        && Number.isFinite(maxSubsequentMassKg)
+      ) ? maxSubsequentMassKg - firstMassKg : null;
+      return {
+        material,
+        sampleCount: massKgSeries.length,
+        firstMassKg,
+        finalMassKg,
+        maxObservedMassKg,
+        maxMassIncreaseKg,
+        growthToleranceKg,
+        positiveMassObserved: (
+          Number.isFinite(maxObservedMassKg)
+          && Number.isFinite(growthToleranceKg)
+          && maxObservedMassKg > growthToleranceKg
+        ),
+        measurableMassGrowthObserved: (
+          Number.isFinite(maxMassIncreaseKg)
+          && Number.isFinite(growthToleranceKg)
+          && maxMassIncreaseKg > growthToleranceKg
+        )
+      };
+    });
+  const authoritativeReactionProductMassGrowthConfirmed = Boolean(
+    normalizedExpectedReactionProducts.length > 0
+    && completeReactionProductMassCheckpoints.length >= 2
+    && authoritativeReactionProductMassEvidence.every((evidence) => (
+      evidence.positiveMassObserved
+      && evidence.measurableMassGrowthObserved
+    ))
+  );
+  const authoritativeReactionProgressEvidence = {
+    schema: 'peercompute.ulg.sph-authoritative-reaction-progress-evidence.v1',
+    status: normalizedExpectedReactionProducts.length === 0
+      ? 'missing-expected-product-materials'
+      : completeReactionProductMassCheckpoints.length < 2
+      ? 'insufficient-complete-checkpoints'
+      : authoritativeReactionProductMassGrowthConfirmed
+      ? 'confirmed-product-mass-growth'
+      : 'product-mass-growth-not-confirmed',
+    source: 'authoritative-gpu-material-phase-checkpoints',
+    authority: 'gpu-resident-retained-state',
+    eventCountInferred: false,
+    completeCheckpointCount: completeReactionProductMassCheckpoints.length,
+    expectedProductMaterials: normalizedExpectedReactionProducts,
+    products: authoritativeReactionProductMassEvidence
+  };
   const reactionEventsTotalSeries = metrics
     .map((metric) => finiteMetric(
       metric?.plainSphStepResult?.reactionEventsTotal
         ?? metric?.residentStep?.reactionEventsTotal
         ?? metric?.residentStep?.reactionLedger?.eventCount
+        ?? metric?.residentStep?.diagnostics?.reactionEvidence?.canonicalEventCount
+        ?? metric?.residentStep?.diagnostics?.reactionEvidence?.productEventActiveEventCount
     ))
     .filter(Number.isFinite);
   const maxReactionEventsTotal = reactionEventsTotalSeries.length
     ? Math.max(...reactionEventsTotalSeries)
     : null;
+  let reactionProgressGateEvidenceSource = null;
+  let reactionProgressGateSatisfied = null;
   const batchMsSeries = metrics
     .filter((metric) => metric.phase === 'resident-batch')
     .map((metric) => finiteMetric(metric.batchMs))
@@ -8108,10 +8424,22 @@ function analyzeTimeline(timeline, {
   }
   if (!visualOnly && maxPressureImpulseNSeconds != null && maxPressureImpulseNSeconds > 1e-5) issues.push('same-material-pressure-impulse-applied');
   if (Number.isFinite(minReactionEventsTotal)) {
-    if (!Number.isFinite(maxReactionEventsTotal)) {
+    if (Number.isFinite(maxReactionEventsTotal)) {
+      reactionProgressGateEvidenceSource = 'reaction-events-total';
+      reactionProgressGateSatisfied = maxReactionEventsTotal >= minReactionEventsTotal;
+      if (!reactionProgressGateSatisfied) {
+        issues.push(`reaction-events-total<${minReactionEventsTotal}`);
+      }
+    } else if (
+      minReactionEventsTotal === 1
+      && timeline?.readbackMode === 'no-full-readback'
+      && authoritativeReactionProductMassGrowthConfirmed
+    ) {
+      reactionProgressGateEvidenceSource = 'authoritative-gpu-product-mass-growth';
+      reactionProgressGateSatisfied = true;
+    } else {
+      reactionProgressGateSatisfied = false;
       issues.push('missing-reaction-events-total');
-    } else if (maxReactionEventsTotal < minReactionEventsTotal) {
-      issues.push(`reaction-events-total<${minReactionEventsTotal}`);
     }
   }
   for (const material of expectedMaterialPresent) {
@@ -8386,6 +8714,9 @@ function analyzeTimeline(timeline, {
     authoritativeGpuCheckpointUnclassifiedCount,
     finalMaterialPhases,
     maxReactionEventsTotal,
+    reactionProgressGateEvidenceSource,
+    reactionProgressGateSatisfied,
+    authoritativeReactionProgressEvidence,
     capturedVisualFrameCount: capturedVisualFrames.length,
     pngAnalyzedVisualFrameCount: pngAnalyzedVisualFrames.length,
     pngAnalyzedCanvasFrameCount: pngAnalyzedCanvasFrames.length,
@@ -8520,6 +8851,16 @@ async function main() {
   const surfaceDrawDiagnosticMaxResolution = positiveInteger(
     process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION,
     8
+  );
+  const nativeMarchingCubesMaxVertexRowsBufferByteLength = positiveInteger(
+    process.env.ULG_PROBE_NATIVE_MARCHING_CUBES_MAX_VERTEX_ROWS_BUFFER_BYTES
+      ?? process.env.ULG_PROBE_NATIVE_SURFACE_VERTEX_ROWS_BUFFER_BYTES,
+    null
+  );
+  const nativeMarchingCubesMaxResolution = positiveInteger(
+    process.env.ULG_PROBE_NATIVE_MARCHING_CUBES_MAX_RESOLUTION
+      ?? process.env.ULG_PROBE_NATIVE_SURFACE_MAX_RESOLUTION,
+    null
   );
   const disablePressureInterface = process.env.ULG_PROBE_DISABLE_PRESSURE === '1'
     || process.env.ULG_PROBE_DISABLE_PRESSURE_INTERFACE === '1';
@@ -8698,6 +9039,8 @@ async function main() {
         surfaceDrawDiagnosticMode,
         surfaceDrawDiagnosticMaxFieldCells,
         surfaceDrawDiagnosticMaxResolution,
+        nativeMarchingCubesMaxVertexRowsBufferByteLength,
+        nativeMarchingCubesMaxResolution,
         disablePressureInterface,
         contactBinMetadataReadback,
         reactionBinMetadataReadback,

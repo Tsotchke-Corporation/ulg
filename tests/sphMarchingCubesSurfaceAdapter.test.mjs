@@ -18,6 +18,10 @@ import {
   WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME,
   WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE,
   WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
+  WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA,
+  WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING,
+  WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME,
+  WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_DRAW_ROWS_SCHEMA,
@@ -52,9 +56,16 @@ function extensionExecution({
   actualVertexCounterBuffer = null,
   actualVertexCounterBufferByteLength = 0,
   drawIndirectBuffer = null,
-  drawIndirectBufferByteLength = drawIndirectBuffer?.size ?? 0
+  drawIndirectBufferByteLength = drawIndirectBuffer?.size ?? 0,
+  includePackedNormals = false,
+  surfaceGenerationId = 7,
+  volumeGenerationId = 42,
+  normalSign = -1
 } = {}) {
   const buffer = bufferRetained ? { label: 'surface-buffer', size: vertexCount * vertexStrideFloats * 4 } : null;
+  const normalBuffer = includePackedNormals && bufferRetained
+    ? { label: 'packed-normal-buffer', size: vertexCount * Uint32Array.BYTES_PER_ELEMENT }
+    : null;
   const resourceOwnership = {
     ok: resourceOwnershipStatus !== 'cross-device-resource',
     status: resourceOwnershipStatus
@@ -81,7 +92,54 @@ function extensionExecution({
       resourceOwnership,
       readback: false
     },
-    normal: {
+    normal: includePackedNormals ? {
+      schema: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA,
+      status: 'normal-rows-resident',
+      available: true,
+      buffer: normalBuffer,
+      bufferRetained: true,
+      bufferByteLength: normalBuffer.size,
+      rowCount: vertexCount,
+      rowStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+      layoutName: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME,
+      encoding: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING,
+      semantic: 'oriented-scalar-gradient',
+      sourceSemantic: 'scalar-gradient',
+      normalSign,
+      resourceOwnership,
+      normalBufferDescriptor: {
+        schema: WEBGPU_MARCHING_CUBES_NORMAL_BUFFER_DESCRIPTOR_SCHEMA,
+        status: 'normal-rows-resident',
+        available: true,
+        buffer: normalBuffer,
+        bufferRetained: true,
+        bufferByteLength: normalBuffer.size,
+        rowCount: vertexCount,
+        rowStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+        layoutName: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_LAYOUT_NAME,
+        rowSchema: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ROWS_SCHEMA,
+        encoding: WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING,
+        semantic: 'oriented-scalar-gradient',
+        sourceSemantic: 'scalar-gradient',
+        normalSign,
+        resourceOwnership,
+        generation: {
+          surfaceGenerationId,
+          pairedPositionSurfaceGenerationId: surfaceGenerationId,
+          volumeGenerationId,
+          sameSubmitAsPosition: true
+        },
+        lifetime: {
+          owner: 'surface-result',
+          pairedWithPositionBuffer: true
+        },
+        producer: {
+          stage: 'marchingCubesVertexEmit',
+          timestampSpanLabel: 'marchingCubesVertexEmit',
+          additionalSubmitCount: 0
+        }
+      }
+    } : {
       status: 'normal-rows-not-produced',
       available: false
     },
@@ -97,7 +155,8 @@ function extensionExecution({
     readback: false,
     fullReadback: false,
     retainedBuffers: {
-      position: buffer
+      position: buffer,
+      normal: normalBuffer
     },
     rows: {
       position: {
@@ -116,7 +175,7 @@ function extensionExecution({
         resourceOwnership,
         readback: false
       },
-      normal: {
+      normal: includePackedNormals ? rowMetadata.normal : {
         status: 'normal-rows-not-produced',
         available: false
       },
@@ -174,6 +233,17 @@ function extensionExecution({
       bufferByteLength: vertexCount * vertexStrideFloats * 4,
       bufferRetained: topLevelBuffer ? bufferRetained : false,
       resourceOwnership: topLevelBuffer ? resourceOwnership : null,
+      surfaceGenerationId,
+      volumeGenerationId,
+      normalBuffer,
+      normalBufferByteLength: normalBuffer?.size ?? 0,
+      normalEncoding: includePackedNormals ? WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING : null,
+      normalSemantic: includePackedNormals ? 'oriented-scalar-gradient' : null,
+      normalSourceSemantic: includePackedNormals ? 'scalar-gradient' : null,
+      normalSign,
+      normalProducerStage: includePackedNormals ? 'marchingCubesVertexEmit' : null,
+      normalTimestampSpanLabel: includePackedNormals ? 'marchingCubesVertexEmit' : null,
+      normalAdditionalSubmitCount: includePackedNormals ? 0 : null,
       rowMetadata,
       outputDescriptors
     }
@@ -194,12 +264,14 @@ function fakeExtensionSurfaceDevice() {
   const copies = [];
   const createdBuffers = [];
   const queueWrites = [];
+  const queueSubmissions = [];
   const device = {
     queue: {
       writeBuffer(buffer, offset, data) {
         queueWrites.push({ buffer, offset, byteLength: data?.byteLength ?? 0 });
       },
       submit(commands) {
+        queueSubmissions.push(commands);
         this.submitted = commands;
       },
       async onSubmittedWorkDone() {}
@@ -271,7 +343,16 @@ function fakeExtensionSurfaceDevice() {
       };
     }
   };
-  return { device, shaderModules, bindGroups, dispatches, copies, createdBuffers, queueWrites };
+  return {
+    device,
+    shaderModules,
+    bindGroups,
+    dispatches,
+    copies,
+    createdBuffers,
+    queueWrites,
+    queueSubmissions
+  };
 }
 
 test('ULG exposes retained render-field buffers as native MC scalar-buffer volumes', () => {
@@ -1085,7 +1166,9 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   };
   const execution = extensionExecution({
     vertexCount: 9,
+    includeRowMetadata: true,
     includeOutputDescriptors: true,
+    includePackedNormals: true,
     vertexCountMode: 'gpu-counter',
     drawIndirectBuffer: extensionDrawIndirectBuffer
   });
@@ -1109,6 +1192,14 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   assert.equal(result.compactPositionRowsBufferByteLength, 9 * 4 * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(result.compactPositionRowsVertexCount, 9);
   assert.equal(result.compactPositionRowsStrideFloats, 4);
+  assert.equal(result.compactNormalRowsBufferRetained, true);
+  assert.equal(result.compactNormalRowsBuffer, execution.result.normalBuffer);
+  assert.equal(result.compactNormalRowsBufferByteLength, 9 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.compactNormalRowsBufferRowCount, 9);
+  assert.equal(result.compactNormalRowsEncoding, WEBGPU_MARCHING_CUBES_PACKED_NORMAL_ENCODING);
+  assert.equal(result.compactNormalRowsSurfaceGenerationId, 7);
+  assert.equal(result.compactPositionRowsSurfaceGenerationId, 7);
+  assert.equal(result.compactNormalRowsAdditionalSubmitCount, 0);
 
   assert.equal(result.surfaceVertices.status, 'surface-vertices-resident-extension-compact-position-direct');
   assert.equal(result.surfaceVertices.directCompactPositionDraw, true);
@@ -1143,8 +1234,8 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params'), true);
-  assert.equal(result.residentBufferLeaseResourceCount, 2);
-  assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);
+  assert.equal(result.residentBufferLeaseResourceCount, 4);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 4);
 
   const retainedBuffers = [
     result.surfaceDraw.drawRowsBuffer,
@@ -1156,13 +1247,185 @@ test('ULG GPU builder retains compact position rows without borrowing extension 
   assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
   assert.equal(extensionDrawIndirectBuffer.destroyed, false);
   assert.equal(execution.result.buffer.destroyed, undefined);
+  assert.equal(execution.result.normalBuffer.destroyed, undefined);
+});
+
+test('ULG GPU builder reuses opted-in extension indirect draw without an adapter compute submit', async () => {
+  const {
+    device,
+    shaderModules,
+    bindGroups,
+    dispatches,
+    createdBuffers,
+    queueWrites,
+    queueSubmissions
+  } = fakeExtensionSurfaceDevice();
+  const extensionDrawIndirectBuffer = {
+    label: 'extension-draw-indirect',
+    size: SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length * Uint32Array.BYTES_PER_ELEMENT,
+    destroyed: false,
+    destroy() {
+      this.destroyed = true;
+    }
+  };
+  const execution = extensionExecution({
+    vertexCount: 45,
+    includeRowMetadata: true,
+    includeOutputDescriptors: true,
+    includePackedNormals: true,
+    vertexCountMode: 'conservative-upper-bound',
+    drawIndirectBuffer: extensionDrawIndirectBuffer
+  });
+
+  const result = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: execution,
+    readbackMode: 'no-full-readback',
+    translateVertexRows: false,
+    allowExtensionDrawIndirectBuffer: true,
+    waitForQueueCompletion: false
+  });
+
+  assert.equal(result.directCompactPositionDraw, true);
+  assert.equal(
+    result.directCompactPositionDrawIndirectSource,
+    'webgpu-marching-cubes-extension-draw-indirect-buffer'
+  );
+  assert.equal(result.drawIndirectRowsOwnership, 'extension-owned-retained-buffer');
+  assert.equal(result.surfaceDraw.drawIndirectRowsBuffer, extensionDrawIndirectBuffer);
+  assert.equal(result.surfaceDraw.drawIndirectRowsOwnership, 'extension-owned-retained-buffer');
+  assert.equal(result.translationPipelineCacheStatus, 'skipped-extension-draw-indirect-buffer');
+  assert.equal(result.queueCompletionStatus, 'queue-work-not-required');
+  assert.equal(result.queueCompletionMethod, 'extension-owned-draw-indirect-buffer');
+  assert.equal(shaderModules.length, 0);
+  assert.equal(bindGroups.length, 0);
+  assert.equal(dispatches.length, 0);
+  assert.equal(queueSubmissions.length, 0);
+  assert.equal(
+    createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-draw-indirect'),
+    false
+  );
+  assert.equal(
+    createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'),
+    false
+  );
+  assert.equal(
+    createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-source-vertex-count'),
+    false
+  );
+  assert.equal(
+    queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params'),
+    false
+  );
+
+  const ownedDrawRowsBuffer = result.surfaceDraw.drawRowsBuffer;
+  result.releaseExtensionSurfaceBufferLeases();
+  result.destroyExtensionSurfaceBuffers();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(ownedDrawRowsBuffer.destroyed, true);
+  assert.equal(extensionDrawIndirectBuffer.destroyed, false);
+});
+
+test('ULG GPU builder fails closed when compact draw has no packed normal generation', async () => {
+  const { device } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({
+    vertexCount: 9,
+    includeRowMetadata: true,
+    includeOutputDescriptors: true,
+    includePackedNormals: false,
+    vertexCountMode: 'gpu-counter'
+  });
+
+  await assert.rejects(
+    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution: execution,
+      readbackMode: 'no-full-readback',
+      translateVertexRows: false,
+      waitForQueueCompletion: false
+    }),
+    /generation-matched packed normals \(packed-normal-buffer-unavailable\)/
+  );
+});
+
+test('ULG GPU builder fails closed when packed normals do not match the position generation', async () => {
+  const { device } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({
+    vertexCount: 9,
+    includeRowMetadata: true,
+    includeOutputDescriptors: true,
+    includePackedNormals: true,
+    vertexCountMode: 'gpu-counter',
+    surfaceGenerationId: 11
+  });
+  execution.result.outputDescriptors.rows.normal.normalBufferDescriptor
+    .generation.surfaceGenerationId = 10;
+
+  await assert.rejects(
+    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution: execution,
+      readbackMode: 'no-full-readback',
+      translateVertexRows: false,
+      waitForQueueCompletion: false
+    }),
+    /generation-matched packed normals \(packed-normal-generation-mismatch\)/
+  );
+});
+
+test('ULG GPU builder requires each packed-normal pairing ID to be descriptor-authored', async (t) => {
+  const cases = [
+    ['surfaceGenerationId', 'extensionNormalSurfaceGenerationIdAuthored'],
+    [
+      'pairedPositionSurfaceGenerationId',
+      'extensionNormalPairedPositionSurfaceGenerationIdAuthored'
+    ],
+    ['volumeGenerationId', 'extensionNormalVolumeGenerationIdAuthored']
+  ];
+
+  for (const [generationField, summaryField] of cases) {
+    await t.test(generationField, async () => {
+      const { device } = fakeExtensionSurfaceDevice();
+      const execution = extensionExecution({
+        vertexCount: 9,
+        includeRowMetadata: true,
+        includeOutputDescriptors: true,
+        includePackedNormals: true,
+        vertexCountMode: 'conservative-upper-bound',
+        surfaceGenerationId: 11,
+        volumeGenerationId: 42
+      });
+      delete execution.result.outputDescriptors.rows.normal.normalBufferDescriptor
+        .generation[generationField];
+
+      const summary = summarizeWebGpuMarchingCubesExtensionExecution(execution);
+      assert.equal(summary[summaryField], false);
+      assert.equal(summary.extensionPackedNormalReady, false);
+      assert.equal(summary.extensionPackedNormalStatus, 'packed-normal-generation-mismatch');
+      assert.equal(execution.result.surfaceGenerationId, 11);
+      assert.equal(execution.result.volumeGenerationId, 42);
+
+      await assert.rejects(
+        buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+          device,
+          extensionExecution: execution,
+          readbackMode: 'no-full-readback',
+          translateVertexRows: false,
+          waitForQueueCompletion: false
+        }),
+        /generation-matched packed normals \(packed-normal-generation-mismatch\)/
+      );
+    });
+  }
 });
 
 test('ULG GPU builder falls back to compact draw metadata when extension indirect output is absent', async () => {
   const { device, shaderModules, bindGroups, dispatches, createdBuffers, queueWrites } = fakeExtensionSurfaceDevice();
   const execution = extensionExecution({
     vertexCount: 9,
+    includeRowMetadata: true,
     includeOutputDescriptors: true,
+    includePackedNormals: true,
     vertexCountMode: 'gpu-counter'
   });
 
@@ -1192,8 +1455,8 @@ test('ULG GPU builder falls back to compact draw metadata when extension indirec
   assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-extension-surface-source-vertex-count');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
-  assert.equal(result.residentBufferLeaseResourceCount, 2);
-  assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);
+  assert.equal(result.residentBufferLeaseResourceCount, 4);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 4);
 
   const retainedBuffers = [
     result.surfaceDraw.drawRowsBuffer,

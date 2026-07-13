@@ -5,11 +5,10 @@ import {
   SPH_PHASE_RENDER_MODE,
   SPH_PHASE_RENDER_ORDER,
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
+  SPH_NATIVE_WEBGPU_BACKGROUND_WGSL,
   SPH_SCENE_MAX_DEVICE_PIXEL_RATIO,
   SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-  SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
-  SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL,
-  SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+  SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH,
   SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL,
@@ -63,6 +62,7 @@ import {
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphSceneBackgroundColorHex,
+  nativeSurfaceBackgroundCoverScale,
   normalizeSphRendererBackend,
   resolveThreeWebGpuPresentationPolicy,
   createThreeWebGpuExternalInterleavedBufferAttribute,
@@ -86,6 +86,7 @@ import {
   resolveResidentSurfaceDrawOverlayPolicy,
   renderAlphaFromOpticalResponse,
   renderDepthWriteFromOpticalResponse,
+  hasAdmittedClosureRefraction,
   renderLayerFromOpticalResponse,
   renderOrderFromOpticalResponse,
   resolveSphSurfaceRendererMaterialPolicy,
@@ -114,6 +115,7 @@ import {
   estimateNativeMarchingCubesVertexRowsByteLengthForResolution,
   nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget,
   nativeMarchingCubesVertexRowsBudgetPerSurface,
+  packedNormalRowsCoverCompactPositionPrefix,
   workerResidentParticleStateProducerSourceCacheDescriptor
 } from '../src/visualization/sphPhaseScene.js';
 import {
@@ -313,6 +315,23 @@ test('SPH scene background color defaults to dark navy and normalizes URL hex va
   assert.equal(normalizeSphSceneBackgroundColorHex('87CEEB'), '#87ceeb');
   assert.equal(normalizeSphSceneBackgroundColorHex('#8ce'), '#88ccee');
   assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');
+});
+
+test('native WebGPU background image uses opaque cover rendering', () => {
+  assert.deepEqual(nativeSurfaceBackgroundCoverScale({
+    imageWidth: 200,
+    imageHeight: 100,
+    canvasWidth: 100,
+    canvasHeight: 100
+  }), [0.5, 1]);
+  assert.deepEqual(nativeSurfaceBackgroundCoverScale({
+    imageWidth: 100,
+    imageHeight: 200,
+    canvasWidth: 200,
+    canvasHeight: 100
+  }), [1, 0.25]);
+  assert.match(SPH_NATIVE_WEBGPU_BACKGROUND_WGSL, /textureSample\(background_image/);
+  assert.match(SPH_NATIVE_WEBGPU_BACKGROUND_WGSL, /vec4<f32>\([^;]*, 1\.0\)/);
 });
 
 test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-to-steam status', () => {
@@ -1978,7 +1997,7 @@ test('SPH phase renderer feeds material-bank display PBR into surface optical ro
   assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'roughness') - 0.32) < 1e-6);
 });
 
-test('SPH renderer keeps condensed transmissive H2O geometrically visible', () => {
+test('SPH renderer keeps every surface alpha-one and depth-writing', () => {
   const waterOptics = {
     material: 'h2o',
     phase: 'liquid',
@@ -1996,7 +2015,8 @@ test('SPH renderer keeps condensed transmissive H2O geometrically visible', () =
 
   assert.equal(renderAlphaFromOpticalResponse(waterOptics, waterOptics), 1);
   assert.equal(renderDepthWriteFromOpticalResponse(waterOptics, waterOptics), true);
-  assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), vaporOptics.opacity);
+  assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), 1);
+  assert.equal(renderDepthWriteFromOpticalResponse(vaporOptics, vaporOptics), true);
 });
 
 test('SPH renderer gates vapor geometry from derived optical depth and scattering', () => {
@@ -2159,30 +2179,26 @@ test('SPH renderer gives surfaces stable intra-layer render order', () => {
   assert.ok(waterOrder < baseOrder + 0.01);
 });
 
-test('SPH renderer leaves transparent same-layer meshes depth-sortable', () => {
+test('SPH renderer gives all depth-writing surfaces stable intra-layer order', () => {
   const baseOrder = SPH_PHASE_RENDER_ORDER.transmissiveSurface;
 
-  assert.equal(
+  assert.notEqual(
     surfaceObjectRenderOrder(baseOrder, 'front-water', {
-      renderLayer: 'transmissive-surface',
-      depthWrite: false
+      renderLayer: 'refractive-surface',
+      depthWrite: true
     }),
-    baseOrder
-  );
-  assert.equal(
     surfaceObjectRenderOrder(baseOrder, 'back-water', {
-      renderLayer: 'transmissive-surface',
-      depthWrite: false
-    }),
-    baseOrder
+      renderLayer: 'refractive-surface',
+      depthWrite: true
+    })
   );
   assert.notEqual(
     surfaceObjectRenderOrder(baseOrder, 'depth-writing-water-a', {
-      renderLayer: 'transmissive-surface',
+      renderLayer: 'refractive-surface',
       depthWrite: true
     }),
     surfaceObjectRenderOrder(baseOrder, 'depth-writing-water-b', {
-      renderLayer: 'transmissive-surface',
+      renderLayer: 'refractive-surface',
       depthWrite: true
     })
   );
@@ -2202,12 +2218,19 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   const order = residentSurfaceDrawOrder([
     { surfaceIndex: 0, renderOrder: 300, transparencyClassId: 3, depthWriteFlag: 0 },
     { surfaceIndex: 1, renderOrder: 100, transparencyClassId: 0, depthWriteFlag: 1 },
-    { surfaceIndex: 2, renderOrder: 200, transparencyClassId: 2, depthWriteFlag: 0 }
+    {
+      surfaceIndex: 2,
+      renderOrder: 200,
+      renderLayer: 'refractive-surface',
+      transparencyClassId: 2,
+      depthWriteFlag: 0
+    }
   ], { indirectStrideBytes: 16 });
 
   assert.deepEqual(order.map((row) => row.surfaceIndex), [1, 2, 0]);
   assert.deepEqual(order.map((row) => row.indirectOffsetBytes), [16, 32, 0]);
   assert.deepEqual(order.map((row) => row.renderOrder), [100, 200, 300]);
+  assert.deepEqual(order.map((row) => row.depthWriteFlag), [1, 1, 1]);
   const extensionOrder = residentSurfaceDrawOrder([
     {
       surfaceIndex: 5,
@@ -2222,10 +2245,11 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   assert.deepEqual(extensionOrder.map((row) => row.indirectRowIndex), [0]);
   assert.deepEqual(extensionOrder.map((row) => row.indirectOffsetBytes), [0]);
   assert.equal(residentSurfaceDrawPipelineKey(order[0]), 'opaque-depth-write');
-  assert.equal(residentSurfaceDrawPipelineKey(order[1]), 'transparent-depth-test');
+  assert.equal(residentSurfaceDrawPipelineKey(order[1]), 'refractive-depth-write');
+  assert.equal(residentSurfaceDrawPipelineKey(order[2]), 'opaque-depth-write');
+  assert.equal(residentSurfaceDrawPipelineKey({ transparencyClassId: 2 }), 'refractive-depth-write');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT, 'depth24plus');
-  assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT, 'rgba16float');
-  assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT, 'rgba8unorm');
+  assert.equal(SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT, 'depth32float');
 });
 
 test('SPH render-row sphere bridge contract uses variable-size closure PBR', () => {
@@ -2522,34 +2546,91 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /base_color_linear/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /transmissive_surface/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /clip\.z = clip\.z \* 0\.5 \+ clip\.w \* 0\.5/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn fs_oit_main/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /struct OitFragmentOut/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn fs_oit_main/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /struct OitFragmentOut/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /attenuation_linear/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /optical_depth/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /dielectric_f0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /optical\.status == 255\.0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /refractive_index = max\(optical\.ior, 1\.0\)/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /optical\.status - 2\.0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn resident_refractive_backface/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn refracted_path_to_back_plane/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn refraction_beer_lambert_transmission_rgb/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /path_m_rgb/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /return vec4<f32>\(display_lit, 1\.0\)/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /scattering_coefficient_per_m/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /accum_texture/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /reveal_texture/);
 });
 
-test('SPH resident compact-position native shader keeps PBR optics and derives triangle normals', () => {
-  // 208 -> 240: eight field-gradient sampling fields (dims, strides, offset,
-  // enable flag) for smooth normals from the retained render field.
+test('SPH native compact normals may cover a triangle-aligned prefix with trailing atomic rows', () => {
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 1_398_099,
+    normalRowCount: 1_398_101,
+    normalBufferByteLength: 1_398_101 * Uint32Array.BYTES_PER_ELEMENT
+  }), true);
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 12,
+    normalRowCount: 12,
+    normalBufferByteLength: 12 * Uint32Array.BYTES_PER_ELEMENT
+  }), true);
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 12,
+    normalRowCount: 11,
+    normalBufferByteLength: 12 * Uint32Array.BYTES_PER_ELEMENT
+  }), false);
+  assert.equal(packedNormalRowsCoverCompactPositionPrefix({
+    compactPositionVertexCount: 12,
+    normalRowCount: 12,
+    normalBufferByteLength: 11 * Uint32Array.BYTES_PER_ELEMENT
+  }), false);
+});
+
+test('SPH resident compact-position native shader keeps PBR optics and decodes generation normals', () => {
+  // 208 -> 240: retained ABI slots from the retired draw-time field-gradient path.
   // 240 -> 256: camera world position (real view direction for fresnel and
   // specular) and the closure-derived emissive temperature (blackbody glow).
-  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 256);
+  // 256 -> 320: inverse view-projection for GPU backface-depth unprojection.
+  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 320);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /compact_position_rows: array<f32>/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_world_position/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_normal/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /cross\(p1 - p0, p2 - p0\)/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /render_field_scalars: array<f32>/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn field_gradient_normal/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /field_gradient_enabled/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /compact_packed_normals: array<u32>/);
+  assert.match(
+    SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
+    /@group\(0\) @binding\(5\) var<storage, read> compact_vertex_temperatures_k: array<f32>/
+  );
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_packed_normal/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /unpack2x16snorm/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /0x80008000u/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /var normal = compact_normal\(vertex_index\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /if \(dot\(smooth_normal, smooth_normal\) > 0\.25\)/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /render_field_scalars: array<f32>/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn field_gradient_normal/);
+  assert.match(
+    SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
+    /if \(vertex_index < arrayLength\(&compact_vertex_temperatures_k\)\)/
+  );
+  assert.match(
+    SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
+    /out\.emissive_temperature_k = vertex_temperature_k/
+  );
+  assert.doesNotMatch(
+    SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
+    /out\.emissive_temperature_k = 0\.0/
+  );
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /out\.material_id = camera_data\.material_id/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /@binding\(2\).*optical_records/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn find_optical_material/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /dielectric_f0/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn fs_oit_main/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /transparency_class_id - 2\.0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /inverse_view_projection/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /refractive_back_depth: texture_depth_2d/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn resident_refractive_backface/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn refracted_path_to_back_plane/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn refraction_beer_lambert_transmission_rgb/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /path_m_rgb/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /path_m \* 0\.35/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /vec2<f32>\(-0\.15\)/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn fs_oit_main/);
 });
 
 test('SPH resident render-row overlay shader draws directly from retained GPU rows', () => {
@@ -4647,7 +4728,12 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(pending.status, 'native-webgpu-surface-validation-pending');
 });
 
-test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {
+test('SPH renderer admits only closure-backed condensed refraction and never alpha transparency', () => {
+  const closureRefraction = {
+    ior: 1.333,
+    status: 1,
+    blocked: false
+  };
   const opaqueMetal = {
     material: 'fe',
     phase: 'solid',
@@ -4656,6 +4742,7 @@ test('SPH renderer depth policy separates transmissive glass from alpha transpar
     metalness: 1
   };
   const condensedWater = {
+    ...closureRefraction,
     material: 'h2o',
     phase: 'liquid',
     opacity: 0.0028,
@@ -4663,6 +4750,7 @@ test('SPH renderer depth policy separates transmissive glass from alpha transpar
     metalness: 0
   };
   const vapor = {
+    ...closureRefraction,
     material: 'h2o',
     phase: 'gas',
     opacity: 0.04,
@@ -4676,6 +4764,16 @@ test('SPH renderer depth policy separates transmissive glass from alpha transpar
     transmission: 0.95,
     metalness: 0
   };
+  const blockedGlass = {
+    material: 'sio2',
+    phase: 'solid',
+    opacity: 0.02,
+    transmission: 0.95,
+    metalness: 0,
+    ior: 1.46,
+    status: 255,
+    blocked: true
+  };
   const alphaSurface = {
     material: 'generic',
     phase: 'liquid',
@@ -4685,24 +4783,34 @@ test('SPH renderer depth policy separates transmissive glass from alpha transpar
   };
 
   assert.equal(renderDepthWriteFromOpticalResponse(opaqueMetal, opaqueMetal), true);
+  assert.equal(renderAlphaFromOpticalResponse(opaqueMetal, opaqueMetal), 1);
   assert.equal(renderLayerFromOpticalResponse(opaqueMetal, opaqueMetal), 'opaque-surface');
   assert.equal(renderOrderFromOpticalResponse(opaqueMetal, opaqueMetal), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 
   assert.equal(renderDepthWriteFromOpticalResponse(condensedWater, condensedWater), true);
-  assert.equal(renderLayerFromOpticalResponse(condensedWater, condensedWater), 'transmissive-surface');
+  assert.equal(renderAlphaFromOpticalResponse(condensedWater, condensedWater), 1);
+  assert.equal(hasAdmittedClosureRefraction(condensedWater, condensedWater), true);
+  assert.equal(renderLayerFromOpticalResponse(condensedWater, condensedWater), 'refractive-surface');
   assert.equal(renderOrderFromOpticalResponse(condensedWater, condensedWater), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
 
-  assert.equal(renderDepthWriteFromOpticalResponse(vapor, vapor), false);
-  assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'vapor-surface');
-  assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.vaporSurface);
+  assert.equal(renderDepthWriteFromOpticalResponse(vapor, vapor), true);
+  assert.equal(renderAlphaFromOpticalResponse(vapor, vapor), 1);
+  assert.equal(hasAdmittedClosureRefraction(vapor, vapor), false);
+  assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'opaque-surface');
+  assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 
   assert.equal(renderDepthWriteFromOpticalResponse(transparentSolid, transparentSolid), true);
-  assert.equal(renderLayerFromOpticalResponse(transparentSolid, transparentSolid), 'transmissive-surface');
-  assert.equal(renderOrderFromOpticalResponse(transparentSolid, transparentSolid), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
+  assert.equal(hasAdmittedClosureRefraction(transparentSolid, transparentSolid), false);
+  assert.equal(renderLayerFromOpticalResponse(transparentSolid, transparentSolid), 'opaque-surface');
+  assert.equal(renderOrderFromOpticalResponse(transparentSolid, transparentSolid), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 
-  assert.equal(renderDepthWriteFromOpticalResponse(alphaSurface, alphaSurface), false);
-  assert.equal(renderLayerFromOpticalResponse(alphaSurface, alphaSurface), 'alpha-surface');
-  assert.equal(renderOrderFromOpticalResponse(alphaSurface, alphaSurface), SPH_PHASE_RENDER_ORDER.alphaSurface);
+  assert.equal(hasAdmittedClosureRefraction(blockedGlass, blockedGlass), false);
+  assert.equal(renderLayerFromOpticalResponse(blockedGlass, blockedGlass), 'opaque-surface');
+
+  assert.equal(renderDepthWriteFromOpticalResponse(alphaSurface, alphaSurface), true);
+  assert.equal(renderAlphaFromOpticalResponse(alphaSurface, alphaSurface), 1);
+  assert.equal(renderLayerFromOpticalResponse(alphaSurface, alphaSurface), 'opaque-surface');
+  assert.equal(renderOrderFromOpticalResponse(alphaSurface, alphaSurface), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 });
 
 test('SPH resident pressure interface state owns retained force rows outside render cadence', () => {

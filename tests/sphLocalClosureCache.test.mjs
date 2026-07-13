@@ -54,7 +54,29 @@ const lookupMaterialProperties = {
   h2: materialProperties.h2
 };
 
-function fakeReactionDiscovery(cacheKey) {
+const reducedNaohProperties = {
+  ...materialProperties.naoh,
+  compound: true,
+  derivation: 'reduced-reaction-product-closure: test reactant-packed estimate',
+  propertyProvenance: {
+    schema: 'ulg.material-property-provenance.v0',
+    entries: [{ source: 'reactant-packed-product-closure' }]
+  },
+  phases: [{
+    name: 'liquid',
+    densityKgPerM3: 1500,
+    bulkModulusPa: 1e9,
+    shearModulusPa: 0,
+    cpJPerKgK: 1500,
+    temperatureRange: [0, 1e6]
+  }],
+  transitions: []
+};
+
+function fakeReactionDiscovery(cacheKey, {
+  allowFixtureMaterialProperties = false,
+  allowReducedProductProperties = false
+} = {}) {
   return {
     reactions: [{
       a: 'Na',
@@ -74,12 +96,18 @@ function fakeReactionDiscovery(cacheKey) {
       }
     }],
     productClosures: {
-      naoh: { properties: materialProperties.naoh },
+      naoh: {
+        properties: allowReducedProductProperties
+          ? reducedNaohProperties
+          : { ...materialProperties.naoh, compound: true }
+      },
       h2: { properties: materialProperties.h2 }
     },
     cache: {
       cacheKey,
-      cacheStatus: 'derived-cache-miss'
+      cacheStatus: 'derived-cache-miss',
+      allowFixtureMaterialProperties,
+      allowReducedProductProperties
     }
   };
 }
@@ -137,4 +165,82 @@ test('SPH local closure cache persistence prepares material and reaction snapsho
     generatorFingerprint
   });
   assert.equal(lookup.sphColdStartCacheLookup.status, 'reaction-cache-hit');
+});
+
+test('SPH product closure reuse preserves same-tier misses and rejects strict/reduced cross-tier records', () => {
+  const materialWrite = createPeerClosureCacheWrite({
+    materialProperties,
+    generatorFingerprint
+  });
+  const lookupForTier = (coldStartCacheSnapshot, allowReducedProductProperties) => createSphLocalCacheLookup({
+    materialCacheSnapshot: materialWrite.cacheSnapshot,
+    coldStartCacheSnapshot,
+    // Omitting h2 deliberately changes the material-properties digest so the
+    // reaction record misses and exercises product-level reuse across keys.
+    materials: ['Na', 'h2o'],
+    options: {
+      dropMaterial: 'Na',
+      baseMaterial: 'h2o',
+      allowReducedProductProperties
+    },
+    generatorFingerprint
+  });
+  const snapshotForTier = (allowReducedProductProperties) => {
+    const cacheKey = createReactionDiscoveryCacheKey('Na', 'h2o', {
+      materialProperties: lookupMaterialProperties,
+      allowReducedProductProperties
+    });
+    return createSphColdStartReactionCacheWrite({
+      reactionDiscovery: fakeReactionDiscovery(cacheKey, { allowReducedProductProperties }),
+      materialProperties,
+      generatorFingerprint
+    }).cacheSnapshot;
+  };
+
+  const strictSnapshot = snapshotForTier(false);
+  const strictReuse = lookupForTier(strictSnapshot, false);
+  const strictIntoReduced = lookupForTier(strictSnapshot, true);
+  assert.equal(strictReuse.sphColdStartCacheLookup.status, 'reaction-cache-miss');
+  assert.equal(strictReuse.sphColdStartCacheLookup.productClosures.naoh.properties.formula, 'NaOH');
+  assert.equal(strictReuse.sphColdStartCacheLookup.productClosures.naoh.properties.phases[0].name, 'solid');
+  assert.deepEqual(strictIntoReduced.sphColdStartCacheLookup.productClosures, {});
+
+  const reducedSnapshot = snapshotForTier(true);
+  const reducedReuse = lookupForTier(reducedSnapshot, true);
+  const reducedIntoStrict = lookupForTier(reducedSnapshot, false);
+  assert.equal(reducedReuse.sphColdStartCacheLookup.status, 'reaction-cache-miss');
+  assert.equal(reducedReuse.sphColdStartCacheLookup.productClosures.naoh.properties.formula, 'NaOH');
+  assert.equal(reducedReuse.sphColdStartCacheLookup.productClosures.naoh.properties.phases[0].name, 'liquid');
+  assert.deepEqual(reducedIntoStrict.sphColdStartCacheLookup.productClosures, {});
+
+  const reducedCacheKey = createReactionDiscoveryCacheKey('Na', 'h2o', {
+    materialProperties: lookupMaterialProperties,
+    allowReducedProductProperties: true
+  });
+  const poisonedReducedDiscovery = fakeReactionDiscovery(reducedCacheKey, {
+    allowReducedProductProperties: true
+  });
+  poisonedReducedDiscovery.productClosures.naoh = {
+    properties: { ...materialProperties.naoh, compound: true }
+  };
+  const poisonedSnapshot = createSphColdStartReactionCacheWrite({
+    reactionDiscovery: poisonedReducedDiscovery,
+    materialProperties,
+    generatorFingerprint
+  }).cacheSnapshot;
+  const exactReducedLookup = createSphLocalCacheLookup({
+    materialCacheSnapshot: materialWrite.cacheSnapshot,
+    coldStartCacheSnapshot: poisonedSnapshot,
+    materials: ['Na', 'h2o', 'h2'],
+    options: {
+      dropMaterial: 'Na',
+      baseMaterial: 'h2o',
+      allowReducedProductProperties: true
+    },
+    generatorFingerprint
+  });
+  assert.equal(exactReducedLookup.sphColdStartCacheLookup.status, 'reaction-cache-miss');
+  assert.equal(exactReducedLookup.sphColdStartCacheLookup.record, null);
+  assert.equal(exactReducedLookup.sphColdStartCacheLookup.productClosures.naoh, undefined);
+  assert.equal(exactReducedLookup.sphColdStartCacheLookup.productClosures.h2.properties.formula, 'H2');
 });

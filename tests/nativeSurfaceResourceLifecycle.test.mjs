@@ -8,12 +8,47 @@ import {
   nativeSurfaceVisualIntervalExtractionEnabled,
   prepareNativeSurfaceBridgeForForcedDisposal,
   rendererCanvasResizeRequired,
+  retireNativeRefractionTargetSet,
   resolveAdditionalNativeSurfaceGenerationAttempt,
+  resolveNativeRefractionTargetSetAction,
+  resolveNativeSurfaceAnimationFramePolicy,
   resolveNativeSurfaceResourceReleaseAction,
+  resolveNativeSurfaceSubmitSynchronization,
   shouldCommitAdditionalNativeSurfaceCandidate,
   shouldExtractNativeSurfaceForProbeBatch,
   takeNativeSurfaceResourceOwners
 } from '../src/visualization/nativeSurfaceResourceLifecycle.js';
+
+test('native surface animation frames render only for observable presentation changes', () => {
+  assert.equal(resolveNativeSurfaceAnimationFramePolicy().drawRequired, true);
+  assert.equal(resolveNativeSurfaceAnimationFramePolicy({
+    nativeBridge: true
+  }).drawRequired, false);
+
+  for (const changed of ['cameraDirty', 'stateDirty', 'controlsChanged', 'continuousRedraw']) {
+    const policy = resolveNativeSurfaceAnimationFramePolicy({
+      nativeBridge: true,
+      [changed]: true
+    });
+    assert.equal(policy.drawRequired, true, `${changed} should request a native redraw`);
+    assert.equal(policy.mode, 'on-demand-camera-or-state-change');
+  }
+});
+
+test('native surface submission uses the ordered queue boundary without a per-frame CPU fence', () => {
+  const native = resolveNativeSurfaceSubmitSynchronization({
+    rendererBridge: 'native-webgpu-surface-consumer'
+  });
+  assert.equal(native.requiresCpuQueueFence, false);
+  assert.equal(native.sameQueueSubmissionBoundary, true);
+  assert.equal(native.resourceRetirementSafeAfterSubmit, true);
+
+  const generic = resolveNativeSurfaceSubmitSynchronization({
+    rendererBridge: 'three-webgpu-surface-buffers'
+  });
+  assert.equal(generic.requiresCpuQueueFence, true);
+  assert.equal(generic.sameQueueSubmissionBoundary, false);
+});
 
 test('native surface lifecycle retains the execution still bound by the active draw state', () => {
   const execution = { drawIndirectRowsBuffer: {} };
@@ -62,7 +97,189 @@ test('renderer canvas resize guard preserves an unchanged native canvas', () => 
   }), true);
 });
 
-test('native surface lifecycle defers replaced generations until submit and validation settle', () => {
+test('native refraction target-set policy keeps opaque frames allocation-free', () => {
+  const device = {};
+  assert.deepEqual(resolveNativeRefractionTargetSetAction({
+    required: false,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm'
+  }), {
+    status: 'opaque-no-targets',
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    depthFormat: 'depth32float',
+    retireActive: false,
+    deferRetirement: false,
+    create: false,
+    reuse: false
+  });
+
+  const activeTargetSet = {
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    depthFormat: 'depth32float',
+    copyTexture: {},
+    backfaceTexture: {}
+  };
+  const release = resolveNativeRefractionTargetSetAction({
+    required: false,
+    activeTargetSet,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    resourceReleaseBlocked: true
+  });
+  assert.equal(release.status, 'release-opaque-targets');
+  assert.equal(release.retireActive, true);
+  assert.equal(release.deferRetirement, true);
+});
+
+test('native refraction target-set policy reuses exact generations and defers blocked replacement', () => {
+  const device = {};
+  const activeTargetSet = {
+    device,
+    width: 640,
+    height: 360,
+    colorFormat: 'bgra8unorm',
+    depthFormat: 'depth32float',
+    copyTexture: {},
+    backfaceTexture: {}
+  };
+  const reuse = resolveNativeRefractionTargetSetAction({
+    required: true,
+    activeTargetSet,
+    device,
+    width: 640,
+    height: 360,
+    colorFormat: 'bgra8unorm',
+    resourceReleaseBlocked: true
+  });
+  assert.equal(reuse.status, 'reuse-targets');
+  assert.equal(reuse.reuse, true);
+  assert.equal(reuse.retireActive, false);
+
+  const replace = resolveNativeRefractionTargetSetAction({
+    required: true,
+    activeTargetSet,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    resourceReleaseBlocked: true
+  });
+  assert.equal(replace.status, 'replace-targets');
+  assert.equal(replace.create, true);
+  assert.equal(replace.retireActive, true);
+  assert.equal(replace.deferRetirement, true);
+
+  const settledReplace = resolveNativeRefractionTargetSetAction({
+    required: true,
+    activeTargetSet,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    resourceReleaseBlocked: false
+  });
+  assert.equal(settledReplace.status, 'replace-targets');
+  assert.equal(settledReplace.deferRetirement, false);
+});
+
+test('native refraction resize activates the replacement while validation keeps the old target alive', () => {
+  const device = {};
+  const oldTarget = {
+    generation: 1,
+    device,
+    width: 640,
+    height: 360,
+    colorFormat: 'bgra8unorm',
+    depthFormat: 'depth32float',
+    copyTexture: {},
+    backfaceTexture: {}
+  };
+  const action = resolveNativeRefractionTargetSetAction({
+    required: true,
+    activeTargetSet: oldTarget,
+    device,
+    width: 1280,
+    height: 720,
+    colorFormat: 'bgra8unorm',
+    resourceReleaseBlocked: true
+  });
+  assert.equal(action.status, 'replace-targets');
+  assert.equal(action.retireActive, true);
+  assert.equal(action.create, true);
+
+  const deferred = [];
+  let destroyCount = 0;
+  const retirement = retireNativeRefractionTargetSet({
+    targetSet: oldTarget,
+    deferRelease(request) {
+      deferred.push(request);
+      return true;
+    },
+    destroyTargetSet(target) {
+      assert.equal(target, oldTarget);
+      destroyCount += 1;
+      return true;
+    }
+  });
+  const activeTarget = {
+    generation: 2,
+    device,
+    width: action.width,
+    height: action.height,
+    colorFormat: action.colorFormat,
+    depthFormat: action.depthFormat
+  };
+
+  assert.equal(activeTarget.generation, 2);
+  assert.equal(retirement.status, 'retirement-liveness-pending');
+  assert.equal(destroyCount, 0, 'pending validation must retain the old target');
+  deferred[0].release();
+  assert.equal(destroyCount, 1, 'validation settlement destroys the old target once');
+  assert.equal(deferred[0].release(), false);
+  assert.equal(destroyCount, 1);
+  assert.equal(activeTarget.generation, 2, 'the replacement remains active');
+});
+
+test('native refraction target retirement waits for a liveness boundary and destroys once', () => {
+  let destroyCount = 0;
+  const deferredRequests = [];
+  const targetSet = { generation: 7 };
+  const retirement = retireNativeRefractionTargetSet({
+    targetSet,
+    status: 'resize-target-set',
+    deferRelease(request) {
+      deferredRequests.push(request);
+      return true;
+    },
+    destroyTargetSet(retired) {
+      assert.equal(retired, targetSet);
+      destroyCount += 1;
+      return true;
+    }
+  });
+  assert.equal(retirement.deferred, true);
+  assert.equal(retirement.released, false);
+  assert.equal(deferredRequests.length, 1);
+  assert.equal(deferredRequests[0].requiresLivenessBoundary, true);
+  assert.equal(destroyCount, 0);
+
+  deferredRequests.shift()?.release();
+  assert.equal(destroyCount, 1);
+  assert.equal(retirement.released, true);
+  assert.equal(retirement.request.release(), false);
+  assert.equal(destroyCount, 1);
+});
+
+test('native surface lifecycle defers replaced generations until validation settles', () => {
   const activeExecution = { drawIndirectRowsBuffer: {} };
   const retiredExecution = { drawIndirectRowsBuffer: {} };
   const drawState = {
@@ -70,30 +287,6 @@ test('native surface lifecycle defers replaced generations until submit and vali
     drawIndirectRowsBuffer: activeExecution.drawIndirectRowsBuffer
   };
 
-  assert.equal(
-    resolveNativeSurfaceResourceReleaseAction({
-      drawState,
-      surfaceDrawExecution: retiredExecution,
-      submitFencePending: true
-    }).status,
-    'defer-submit-fence'
-  );
-  assert.equal(
-    resolveNativeSurfaceResourceReleaseAction({
-      drawState,
-      surfaceDrawExecution: retiredExecution,
-      submitFenceTimedOut: true
-    }).status,
-    'defer-submit-fence-timeout'
-  );
-  assert.equal(
-    resolveNativeSurfaceResourceReleaseAction({
-      drawState,
-      surfaceDrawExecution: retiredExecution,
-      submitFenceFailed: true
-    }).status,
-    'defer-submit-fence-error'
-  );
   assert.equal(
     resolveNativeSurfaceResourceReleaseAction({
       drawState,
@@ -220,12 +413,7 @@ test('additional native generations reject stale and invalid transactional candi
   }), true);
 });
 
-test('native bridge failures are sticky across refresh and require explicit disposal', () => {
-  assert.equal(nativeSurfaceBridgeFailureReason({
-    rendererBridge: 'native-webgpu-surface-consumer',
-    nativeSurfaceConsumerSubmitFenceFailed: true,
-    nativeSurfaceConsumerSubmitFenceReason: 'queue rejected'
-  }), 'queue rejected');
+test('native bridge device loss and release are sticky across refresh and require explicit disposal', () => {
   assert.equal(nativeSurfaceBridgeFailureReason({
     rendererBridge: 'native-webgpu-surface-consumer',
     deviceLost: true,

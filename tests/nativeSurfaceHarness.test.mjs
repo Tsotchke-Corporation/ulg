@@ -762,58 +762,48 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   );
 });
 
-test('native WebGPU offscreen validation binds transparent pipeline resources', () => {
+test('native WebGPU offscreen validation binds opaque and refractive pipeline resources', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
   assert.match(
     sceneSource,
-    /beginSphNativeWebGpuSurfaceConsumerOffscreenValidation[\s\S]*?validationPass\.setPipeline\(bridge\.opaquePipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);[\s\S]*?validationPass\.setPipeline\(bridge\.transparentPipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);/,
-    'opaque and transparent offscreen validation must satisfy the shared refraction and environment bind group layout'
+    /beginSphNativeWebGpuSurfaceConsumerOffscreenValidation[\s\S]*?validationPass\.setPipeline\(bridge\.opaquePipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);[\s\S]*?validationPass\.setPipeline\(bridge\.refractivePipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);/,
+    'opaque and refractive offscreen validation must satisfy the shared refraction and environment bind group layout'
   );
 });
 
-test('native WebGPU surface consumer uses submit-fence pacing', () => {
+test('native WebGPU surface consumer uses a same-queue submission boundary', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
   assert.match(
     sceneSource,
-    /nativeSurfaceConsumerSubmitFencePending/,
-    'native surface RAF scheduling should expose submit-fence pacing state'
+    /resolveNativeSurfaceSubmitSynchronization\(\{[\s\S]*?rendererBridge: bridge\?\.rendererBridge[\s\S]*?if \(!submitSynchronization\.requiresCpuQueueFence\)/,
+    'native surface submissions should resolve the executable synchronization policy before requesting a queue fence'
   );
   assert.match(
     sceneSource,
-    /native-webgpu-surface-consumer-after-submit-fence/,
-    'native surface RAF should resume only after queue completion'
+    /resident-surface-draw-submit-same-queue-submission-boundary/,
+    'native surface submission telemetry should report the ordered queue boundary'
   );
   assert.match(
     sceneSource,
-    /SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS/,
-    'native surface submit fencing should be bounded in browsers where queue completion hangs'
+    /flushSphNativeWebGpuSurfaceDeferredResourceReleases\(bridge, \{\s*reason: 'native-webgpu-surface-submit-boundary'/,
+    'inactive generations should retire after their final referring command buffer is submitted'
   );
   assert.match(
     sceneSource,
-    /resident-surface-draw-skipped-native-submit-fence-pending/,
-    'main animation rendering should also respect native submit-fence pacing'
+    /const controlsChanged = controls\.update\(\) === true;/,
+    'native surface rendering should observe camera changes before deciding whether to redraw'
   );
   assert.match(
     sceneSource,
-    /resident-surface-draw-skipped-native-submit-fence-timeout/,
-    'automatic native redraws should pause after a bounded submit-fence timeout'
+    /resolveNativeSurfaceAnimationFramePolicy\(\{[\s\S]*?cameraDirty: nativeSurfaceCameraDirty,[\s\S]*?stateDirty: nativeSurfaceStateDirty,[\s\S]*?controlsChanged,[\s\S]*?continuousRedraw: nativeContinuousRedraw[\s\S]*?if \(rendered && nativeAnimationFrameDrawRequired\)/,
+    'native surfaces should redraw for camera/state changes without continuously resubmitting an unchanged 466k-vertex frame'
   );
   assert.match(
     sceneSource,
-    /nativeSurfaceConsumerSubmitFenceTimedOut = false/,
-    'new native surface submits should reset stale timeout diagnostics'
-  );
-  assert.match(
-    sceneSource,
-    /controls\.update\(\);\s*const rendered = renderSceneFrame\(\{ reason: 'animation-frame' \}\);/,
-    'native surface rendering should update camera controls before each engine frame'
-  );
-  assert.match(
-    sceneSource,
-    /if \(rendered\) \{\s*renderSphResidentSurfaceDrawOverlay\(\{ reason: 'animation-frame' \}\);/,
-    'native main-canvas WebGPU surfaces must redraw every engine frame because swap-chain contents are not retained'
+    /const overlayRendered = renderSphResidentSurfaceDrawOverlay\([\s\S]*?if \(nativeBridge && overlayRendered\) \{[\s\S]*?nativeSurfaceCameraDirty = false;[\s\S]*?nativeSurfaceStateDirty = false;/,
+    'native presentation invalidations must remain dirty until a surface draw is actually submitted'
   );
   assert.match(
     sceneSource,
@@ -827,8 +817,171 @@ test('native WebGPU surface consumer uses submit-fence pacing', () => {
   );
   assert.doesNotMatch(
     sceneSource,
+    /if \(bridge\.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE\) \{\s*scheduleSphNativeWebGpuSurfaceConsumerFrame\(\);\s*\}/,
+    'a completed native draw must not unconditionally schedule another draw and defeat on-demand rendering'
+  );
+  assert.doesNotMatch(
+    sceneSource,
     /skipped-native-webgpu-surface-consumer/,
-    'native surface draws should no longer bypass submit fencing'
+    'native surface draws should not fall through the obsolete bridge-skip path'
+  );
+});
+
+test('native WebGPU environment loads invalidate one on-demand frame without a second RAF loop', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /image\.onload = \(\) => \{[\s\S]*?invalidateSphNativeWebGpuSurfaceFrame\(\s*bridge,\s*'native-surface-background-or-environment-image-loaded'/,
+    'an asynchronously uploaded background or environment texture must invalidate native presentation state'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /native-surface-background-or-environment-image-loaded'[\s\S]{0,300}scheduleSphNativeWebGpuSurfaceConsumerFrame/,
+    'the regular animation frame should consume the invalidation without starting a second RAF loop'
+  );
+});
+
+test('native diagnostics bound prototype trace installation retries', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(
+    probeSource,
+    /queueFenceTraceInstallAttempts < 200[\s\S]*?setTimeout\(installQueueFenceTrace, 10\)/,
+    'queue-fence trace installation retries must be finite and yield between attempts'
+  );
+  assert.match(
+    probeSource,
+    /deviceDestroyTraceInstallAttempts < 200[\s\S]*?setTimeout\(installDeviceDestroyTrace, 10\)/,
+    'device-destroy trace installation retries must be finite and yield between attempts'
+  );
+});
+
+test('direct resident chemistry probes match the interactive product tier and retain reaction evidence', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(
+    probeSource,
+    /const driverOptions = \{[\s\S]*?allowReducedProductProperties: true/,
+    'direct probes must use the same explicitly admitted reduced product closure as the live scene'
+  );
+  assert.match(
+    probeSource,
+    /params\.get\('sdt'\)[\s\S]*?\{ dt: value \}[\s\S]*?params\.get\('avAlpha'\)[\s\S]*?mlsMpmArtificialViscosityAlpha: value/,
+    'direct probes must honor the live preview timestep and artificial-viscosity controls'
+  );
+  assert.match(probeSource, /productClosurePolicy: 'interactive-reduced-product-properties'/);
+  assert.match(
+    probeSource,
+    /reactionEvidence: \{[\s\S]*?canonicalEventCount:[\s\S]*?gasSpeciesLedger:/,
+    'compact probe serialization must preserve already-available reaction evidence without a new readback'
+  );
+});
+
+test('native WebGPU surface diagnostics distinguish opaque refraction and prove zero-submit normals', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  for (const field of [
+    'renderBridgeLastRefractiveDrawCount',
+    'renderBridgeConfiguredAlphaMode',
+    'renderBridgeSurfaceBlendEnabled',
+    'renderBridgePackedNormalReady',
+    'renderBridgePackedNormalAdditionalSubmitCount',
+    'renderBridgeVertexTemperatureReady',
+    'renderBridgeVertexTemperatureByteLength',
+    'renderBridgeVertexTemperatureRowCount',
+    'renderBridgeVertexTemperatureEncoding',
+    'renderBridgeVertexTemperatureSurfaceGenerationId',
+    'renderBridgeVertexTemperatureVolumeGenerationId',
+    'renderBridgeVertexTemperatureAdditionalSubmitCount',
+    'renderBridgeVertexTemperatureAdditionalReadyCount',
+    'renderBridgeRefractionTargetLifecycleStatus',
+    'renderBridgeRefractionTargetGeneration',
+    'renderBridgeRefractionBackfaceStatus',
+    'renderBridgeRefractionBackfaceAdditionalSubmitCount',
+    'renderBridgeBackgroundImageGpuStatus'
+  ]) {
+    assert.match(sceneSource, new RegExp(field));
+  }
+  assert.match(
+    sceneSource,
+    /allowExtensionDrawIndirectBuffer: renderBridgePlan\.useNativeWebGpuSurfaceConsumerBridge/,
+    'the primary native draw should reuse the extension indirect buffer without a translation submit'
+  );
+  assert.match(
+    sceneSource,
+    /refractionTargetLifecycleStatus = 'target-set-created';\s*bridge\.refractionTargetLifecycleReason = null;/,
+    'a successful refraction allocation must clear stale failure diagnostics'
+  );
+  assert.match(
+    sceneSource,
+    /backgroundImageGpuStatus = 'native-opaque-background-image-ready';\s*bridge\.backgroundImageGpuReason = null;/,
+    'a successful background upload must clear stale failure diagnostics'
+  );
+  assert.match(
+    sceneSource,
+    /refractionTargetsRequired[\s\S]*?'native-refractive-backface-depth-required-unavailable'/,
+    'missing rear depth must be reported as unavailable when a refractive draw requires it'
+  );
+  assert.match(
+    sceneSource,
+    /translateVertexRows: false,\s*allowExtensionDrawIndirectBuffer: true,/,
+    'additional native surfaces should also reuse their extension indirect buffers'
+  );
+  assert.match(
+    sceneSource,
+    /nativeDrawInput\.temperatureBuffer \|\| bridge\.temperatureDummyBuffer/,
+    'additional native draws must bind generation-owned vertex temperatures at binding 5'
+  );
+  assert.match(
+    sceneSource,
+    /nativeDrawInput\.temperatureBuffer \|\| previousBridge\.temperatureDummyBuffer/,
+    'reused native bridges must bind the new primary temperature generation'
+  );
+  assert.match(
+    sceneSource,
+    /nativeDrawInput\.temperatureBuffer \|\| temperatureDummyBuffer/,
+    'fresh native bridges must bind a fail-closed temperature fallback'
+  );
+  assert.match(
+    sceneSource,
+    /previousBridge\.temperatureDummyBuffer/,
+    'the native bridge reuse gate must reject layouts predating binding 5'
+  );
+  assert.match(
+    sceneSource,
+    /encodeAndSubmitNativeSurfaceTemperatureRows\([\s\S]*?descriptor: nativeDescriptor/,
+    'primary native extraction must encode its immutable temperature stream'
+  );
+  assert.match(
+    sceneSource,
+    /encodeAndSubmitNativeSurfaceTemperatureRows\([\s\S]*?descriptor: additionalDescriptor/,
+    'additional native extractions must encode their own temperature streams'
+  );
+  assert.match(
+    sceneSource,
+    /translation\.nativeSurfaceTemperatureRows\?\.destroy\?\.\(\)/,
+    'temperature buffers must retire with their generation-owned translation'
+  );
+});
+
+test('native WebGPU resource retirement uses same-queue and liveness boundaries', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /resourceReleaseBlocked: sphNativeWebGpuSurfaceResourceReleaseBlocked\(bridge\)/,
+    'target replacement should defer only while a real validation or ownership reference remains live'
+  );
+  assert.match(
+    sceneSource,
+    /retired-after-liveness-boundary/,
+    'retirement diagnostics should describe their actual liveness contract'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /const nativeConsumerFence|nativeSurfaceConsumerInFlightSubmitCount = Math\.max\([\s\S]*?\) \+ 1;/,
+    'the native same-queue path must not retain dead per-frame CPU fence accounting'
   );
 });
 
@@ -865,8 +1018,26 @@ test('native WebGPU probe retains generation ownership and fence diagnostics', (
     'renderBridgeNativeSurfaceConsumerSubmitFencePending',
     'renderBridgeNativeSurfaceConsumerSubmitFenceFailed',
     'renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget',
+    'renderBridgeNativeSurfaceConsumerInFlightSubmitCount',
     'renderBridgeAdditionalSurfaceAttachStatus',
-    'renderBridgeAdditionalSurfaceDrawCount'
+    'renderBridgeAdditionalSurfaceDrawCount',
+    'renderBridgeLastRefractiveDrawCount',
+    'renderBridgeConfiguredAlphaMode',
+    'renderBridgePackedNormalReady',
+    'renderBridgePackedNormalAdditionalSubmitCount',
+    'renderBridgeVertexTemperatureReady',
+    'renderBridgeVertexTemperatureByteLength',
+    'renderBridgeVertexTemperatureRowCount',
+    'renderBridgeVertexTemperatureEncoding',
+    'renderBridgeVertexTemperatureSurfaceGenerationId',
+    'renderBridgeVertexTemperatureVolumeGenerationId',
+    'renderBridgeVertexTemperatureAdditionalSubmitCount',
+    'renderBridgeVertexTemperatureAdditionalReadyCount',
+    'renderBridgeRefractionTargetLifecycleStatus',
+    'renderBridgeRefractionTargetGeneration',
+    'renderBridgeRefractionBackfaceStatus',
+    'renderBridgeRefractionBackfaceAdditionalSubmitCount',
+    'renderBridgeBackgroundImageGpuStatus'
   ];
 
   for (const field of fields) {

@@ -120,6 +120,30 @@ test('resident commit bridge admits descriptor-only Schroeder adopted particle s
   assert.equal(warmAdmission.schroederAdoptedParticleStorageAuthoritativeParticleCount, 4);
 });
 
+test('resident commit bridge rejects deferred cleanup mislabeled as a satisfied fence', () => {
+  const delta = residentDeltaWithSchroederAdoptedStorageDescriptor();
+  delta.payload.gpuFence.status = 'queue-submitted-cleanup-deferred';
+  delta.payload.gpuFence.method = 'deferred queue.onSubmittedWorkDone cleanup';
+  delta.payload.gpuFence.fenceSatisfied = true;
+
+  const admission = validateResidentStepsCommitDelta(delta);
+
+  assert.equal(admission.accepted, false);
+  assert.equal(admission.reason, 'gpu-fence-status-not-completed');
+  assert.ok(admission.issues.includes('gpu-fence-status-not-completed'));
+});
+
+test('resident commit bridge rejects a completed status without the completion method', () => {
+  const delta = residentDeltaWithSchroederAdoptedStorageDescriptor();
+  delta.payload.gpuFence.method = 'resident-step-retained-webgpu-chain';
+
+  const admission = validateResidentStepsCommitDelta(delta);
+
+  assert.equal(admission.accepted, false);
+  assert.equal(admission.reason, 'gpu-fence-completion-method-invalid');
+  assert.ok(admission.issues.includes('gpu-fence-completion-method-invalid'));
+});
+
 test('resident commit bridge rejects Schroeder adopted storage descriptors with raw GPUBuffer transfer', () => {
   const delta = residentDeltaWithSchroederAdoptedStorageDescriptor();
   delta.payload.schroederParticleStorageRawGpuBufferTransferDetected = true;

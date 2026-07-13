@@ -2795,7 +2795,42 @@ test('MLS-MPM resident step compute task handler returns explicit GPU fence evid
   assert.equal(directFence.laneId, 'ulg:test:sph-resident');
 });
 
-test('MLS-MPM resident step fence accepts deferred cleanup for retained WebGPU no-full chains', () => {
+test('MLS-MPM resident step compute task observes a real outer queue fence for deferred cleanup', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const originalGridUpdateRunner = options.gridUpdateRunner;
+  let queueFenceCallCount = 0;
+  const device = {
+    queue: {
+      async onSubmittedWorkDone() {
+        queueFenceCallCount += 1;
+      }
+    }
+  };
+  const task = createMlsMpmResidentStepComputeTask({
+    ...options,
+    device,
+    gridUpdateRunner(args) {
+      return {
+        ...originalGridUpdateRunner(args),
+        queueCompletionStatus: 'queue-submitted-cleanup-deferred',
+        queueCompletionMethod: 'deferred unified fused mechanics cleanup'
+      };
+    },
+    modulePath: './sphMlsMpmGpuStep.js',
+    laneId: 'ulg:test:sph-resident-outer-fence',
+    stateKey: 'ulg:test:sph-state-outer-fence'
+  });
+
+  const result = await runMlsMpmResidentStepComputeTask(task.data);
+
+  assert.equal(queueFenceCallCount, 1);
+  assert.equal(result.gpuFence.status, 'queue-work-completed');
+  assert.equal(result.gpuFence.method, 'queue.onSubmittedWorkDone');
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.gpuFence.satisfactionReason, 'compute-task-observed-real-queue-completion');
+});
+
+test('MLS-MPM resident step fence rejects deferred cleanup without a completed queue fence', () => {
   const fence = createMlsMpmResidentStepGpuFenceReport({
     backend: 'webgpu',
     status: 'resident-step-webgpu-executed',
@@ -2823,11 +2858,8 @@ test('MLS-MPM resident step fence accepts deferred cleanup for retained WebGPU n
 
   assert.equal(fence.status, 'queue-submitted-cleanup-deferred');
   assert.equal(fence.method, 'deferred unified fused mechanics cleanup');
-  assert.equal(fence.fenceSatisfied, true);
-  assert.equal(
-    fence.satisfactionReason,
-    'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup'
-  );
+  assert.equal(fence.fenceSatisfied, false);
+  assert.equal(fence.satisfactionReason, null);
   assert.equal(fence.laneId, 'ulg:test:sph-resident');
   assert.equal(fence.stateKey, 'ulg:test:sph-state');
 });
@@ -7389,14 +7421,15 @@ test('MLS-MPM resident steps compute task accepts fused active-grid no-summary r
   assert.equal(result.status, 'resident-steps-executed');
   assert.equal(result.finalStep.fusedResidentSequence.status, 'fused-resident-sequence-executed');
   assert.equal(result.finalStep.compactGpuSummary.status, 'compact-summary-plan-only-ready');
-  assert.equal(result.gpuFence.status, 'queue-submitted-cleanup-deferred');
+  assert.equal(result.gpuFence.status, 'queue-work-completed');
+  assert.equal(result.gpuFence.method, 'queue.onSubmittedWorkDone');
   assert.equal(result.gpuFence.fenceSatisfied, true);
   assert.equal(
     result.gpuFence.satisfactionReason,
-    'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup'
+    'compute-task-observed-real-queue-completion'
   );
   assert.equal(result.commitDelta.payload.gpuFence.fenceSatisfied, true);
-  assert.equal(result.commitDelta.payload.gpuFence.status, 'queue-submitted-cleanup-deferred');
+  assert.equal(result.commitDelta.payload.gpuFence.status, 'queue-work-completed');
   destroyMlsMpmResidentStepsBuffers(result);
 });
 

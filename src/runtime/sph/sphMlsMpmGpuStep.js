@@ -5947,16 +5947,19 @@ function rejectResidentGpuLaneLease(manager, leaseId, reason) {
 }
 
 function queueEvidenceFromResidentStep(step) {
-  const retainedNoFullWebGpuChain = Boolean(
-    step?.backend === 'webgpu'
-    && step?.readbackMode === NO_FULL_READBACK_MODE
-    && (
-      step?.normalHotLoopReadbackFree === true
-      || step?.residentBuffersRetained === true
-      || step?.nextParticleUploads?.sphParticleUpload?.stateBuffer
-      || step?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
-    )
-  );
+  const computeTaskQueueFence = step?.computeTaskQueueFence ?? null;
+  if (
+    computeTaskQueueFence?.status === 'queue-work-completed'
+    && computeTaskQueueFence?.method === 'queue.onSubmittedWorkDone'
+    && computeTaskQueueFence?.completed === true
+    && computeTaskQueueFence?.fenceSatisfied === true
+  ) {
+    return {
+      ...computeTaskQueueFence,
+      satisfactionReason: computeTaskQueueFence.satisfactionReason
+        || 'compute-task-observed-real-queue-completion'
+    };
+  }
   const fusedQueueFenceStatus =
     step?.fusedResidentSequence?.queueFenceStatus
     ?? step?.stageTiming?.queueFenceStatus?.fusedMechanicsSequence
@@ -5995,28 +5998,87 @@ function queueEvidenceFromResidentStep(step) {
       ?? candidate?.gpuResult?.queueCompletionMethod
       ?? null;
     if (status || method) {
-      const resolvedStatus = status || 'queue-work-completed';
-      const resolvedMethod = method || 'queue.onSubmittedWorkDone';
+      const resolvedStatus = status || 'queue-submitted-status-unspecified';
+      const resolvedMethod = method || null;
       const evidence = {
         status: resolvedStatus,
-        method: resolvedMethod
+        method: resolvedMethod,
+        fenceSatisfied: false
       };
-      if (resolvedStatus === 'queue-submitted-cleanup-deferred' && retainedNoFullWebGpuChain) {
-        evidence.fenceSatisfied = true;
-        evidence.satisfactionReason =
-          'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup';
-      }
       if (!firstQueueEvidence) firstQueueEvidence = evidence;
-      if (evidence.fenceSatisfied === true || residentStepFenceSatisfied(resolvedStatus)) return evidence;
+      if (residentStepFenceSatisfied(resolvedStatus, resolvedMethod)) return evidence;
     }
   }
   if (firstQueueEvidence) return firstQueueEvidence;
   if (step?.backend === 'webgpu') {
-    return step.readbackMode === NO_FULL_READBACK_MODE
-      ? { status: 'queue-work-completed', method: 'resident-step-retained-webgpu-chain' }
-      : { status: 'readback-map-completed', method: 'resident-step-readback' };
+    return {
+      status: 'queue-completion-evidence-unavailable',
+      method: step.readbackMode === NO_FULL_READBACK_MODE
+        ? 'resident-step-retained-webgpu-chain'
+        : 'resident-step-webgpu-readback-evidence-missing',
+      fenceSatisfied: false
+    };
   }
   return { status: 'gpu-fence-not-submitted', method: null };
+}
+
+async function awaitResidentComputeTaskQueueFence(execution, requirement, device) {
+  const step = execution?.finalStep || execution;
+  if (!step || typeof step !== 'object') return null;
+  if (requirement?.required === false) {
+    step.computeTaskQueueFence = {
+      status: 'gpu-fence-not-required',
+      method: null,
+      completed: false,
+      fenceSatisfied: false
+    };
+    return step.computeTaskQueueFence;
+  }
+
+  const existingEvidence = queueEvidenceFromResidentStep(step);
+  const existingCompletionIsValid = (
+    existingEvidence.status === 'queue-work-completed'
+    && existingEvidence.method === 'queue.onSubmittedWorkDone'
+  ) || existingEvidence.status === 'readback-map-completed';
+  if (existingCompletionIsValid) {
+    step.computeTaskQueueFence = {
+      ...existingEvidence,
+      completed: true,
+      fenceSatisfied: true,
+      satisfactionReason: existingEvidence.satisfactionReason
+        || 'resident-step-reported-explicit-queue-completion'
+    };
+    return step.computeTaskQueueFence;
+  }
+
+  if (typeof device?.queue?.onSubmittedWorkDone !== 'function') {
+    step.computeTaskQueueFence = {
+      status: 'queue-completion-observer-unavailable',
+      method: null,
+      completed: false,
+      fenceSatisfied: false
+    };
+    return step.computeTaskQueueFence;
+  }
+  try {
+    await device.queue.onSubmittedWorkDone();
+    step.computeTaskQueueFence = {
+      status: 'queue-work-completed',
+      method: 'queue.onSubmittedWorkDone',
+      completed: true,
+      fenceSatisfied: true,
+      satisfactionReason: 'compute-task-observed-real-queue-completion'
+    };
+  } catch (error) {
+    step.computeTaskQueueFence = {
+      status: 'queue-completion-observer-rejected',
+      method: 'queue.onSubmittedWorkDone',
+      completed: false,
+      fenceSatisfied: false,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+  return step.computeTaskQueueFence;
 }
 
 function retainedBufferRefsFromResidentStep(step) {
@@ -6032,13 +6094,15 @@ function retainedBufferRefsFromResidentStep(step) {
   return [...new Set(refs)];
 }
 
-function residentStepFenceSatisfied(status) {
+function residentStepFenceSatisfied(status, method = null) {
+  const normalizedStatus = String(status || '');
+  if (normalizedStatus === 'queue-work-completed') {
+    return method === 'queue.onSubmittedWorkDone';
+  }
   return [
     'gpu-fence-completed',
-    'queue-work-completed',
-    'readback-map-completed',
-    'ordered-before-consumer-queue-completed'
-  ].includes(String(status || ''));
+    'readback-map-completed'
+  ].includes(normalizedStatus);
 }
 
 export function createMlsMpmResidentStepGpuFenceReport(step, requirement = {}) {
@@ -6047,7 +6111,7 @@ export function createMlsMpmResidentStepGpuFenceReport(step, requirement = {}) {
   const method = queueEvidence.method || null;
   const retainedBufferRefs = retainedBufferRefsFromResidentStep(step);
   const fenceSatisfied = queueEvidence.fenceSatisfied === true
-    || residentStepFenceSatisfied(status);
+    || residentStepFenceSatisfied(status, method);
   return {
     schema: PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA,
     status,
@@ -7387,13 +7451,20 @@ export async function runMlsMpmResidentStepComputeTask(data = {}) {
     computeTaskSchema = ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA,
     ...residentStepOptions
   } = data || {};
+  const resolvedFenceRequirement = gpuFenceRequirement || gpuResidentLane || {};
+  const fenceDevice = residentStepOptions.device || residentStepOptions.deviceResult?.device || null;
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...residentStepOptions,
     gpuResidentLaneManager: null
   });
+  await awaitResidentComputeTaskQueueFence(
+    step,
+    resolvedFenceRequirement,
+    fenceDevice
+  );
   const gpuFence = createMlsMpmResidentStepGpuFenceReport(
     step,
-    gpuFenceRequirement || gpuResidentLane || {}
+    resolvedFenceRequirement
   );
   const schroederAdoptedParticleStorageDescriptor =
     createSchroederAdoptedParticleStorageDescriptorFromStep(step, {
@@ -7731,13 +7802,20 @@ export async function runMlsMpmResidentStepsComputeTask(data = {}) {
     expectedOutputFamilies = [],
     ...residentStepOptions
   } = data || {};
+  const resolvedFenceRequirement = gpuFenceRequirement || gpuResidentLane || {};
+  const fenceDevice = residentStepOptions.device || residentStepOptions.deviceResult?.device || null;
   const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
     ...residentStepOptions,
     gpuResidentLaneManager: null
   });
+  await awaitResidentComputeTaskQueueFence(
+    execution,
+    resolvedFenceRequirement,
+    fenceDevice
+  );
   const gpuFence = createMlsMpmResidentStepGpuFenceReport(
     execution?.finalStep || execution,
-    gpuFenceRequirement || gpuResidentLane || {}
+    resolvedFenceRequirement
   );
   const result = {
     ...execution,

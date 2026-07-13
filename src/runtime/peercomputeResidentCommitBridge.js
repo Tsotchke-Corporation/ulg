@@ -22,6 +22,14 @@ function finiteNonNegativeNumber(value) {
   return Number.isFinite(number) && number >= 0;
 }
 
+function completedGpuFenceStatus(status) {
+  return [
+    'gpu-fence-completed',
+    'queue-work-completed',
+    'readback-map-completed'
+  ].includes(String(status || ''));
+}
+
 function schroederParticleStorageDescriptorFromPayload(payload = null) {
   return plainObject(payload?.schroederAdoptedParticleStorageDescriptor)
     ? payload.schroederAdoptedParticleStorageDescriptor
@@ -123,6 +131,16 @@ export function validateResidentStepsCommitDelta(delta, {
     } else {
       if (requireFenceSatisfied && gpuFence.fenceSatisfied !== true) {
         issues.push('gpu-fence-unsatisfied');
+      }
+      if (requireFenceSatisfied && !completedGpuFenceStatus(gpuFence.status)) {
+        issues.push('gpu-fence-status-not-completed');
+      }
+      if (
+        requireFenceSatisfied
+        && gpuFence.status === 'queue-work-completed'
+        && gpuFence.method !== 'queue.onSubmittedWorkDone'
+      ) {
+        issues.push('gpu-fence-completion-method-invalid');
       }
       if (payload.stateKey && gpuFence.stateKey && payload.stateKey !== gpuFence.stateKey) {
         issues.push('state-key-fence-mismatch');

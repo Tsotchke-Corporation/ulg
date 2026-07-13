@@ -3063,7 +3063,10 @@ test('ULG resident StateManager bridge rejects deltas without satisfied payload 
       assert.equal(error.code, 'ERR_ULG_RESIDENT_DELTA_REJECTED');
       assert.equal(error.admission.schema, ULG_RESIDENT_STATE_COMMIT_ADMISSION_SCHEMA);
       assert.equal(error.admission.reason, 'gpu-fence-unsatisfied');
-      assert.deepEqual(error.admission.issues, ['gpu-fence-unsatisfied']);
+      assert.deepEqual(error.admission.issues, [
+        'gpu-fence-unsatisfied',
+        'gpu-fence-status-not-completed'
+      ]);
       return true;
     }
   );

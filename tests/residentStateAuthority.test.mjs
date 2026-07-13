@@ -87,6 +87,64 @@ test('resident authority ledger warns on unknown state families without blocking
   assert.equal(ledger.blockers.length, 0);
 });
 
+test('resident authority ledger blocks conflicting authoritative owners without replacing the first owner', () => {
+  const ledger = createResidentStateAuthorityLedger({
+    entries: [
+      {
+        family: RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+        ownerStage: 'g2p',
+        backend: 'webgpu'
+      },
+      {
+        family: RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+        ownerStage: 'reaction-step',
+        backend: 'webgpu'
+      }
+    ]
+  });
+
+  assert.equal(ledger.status, 'resident-authority-ledger-blocked');
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage,
+    'g2p'
+  );
+  assert.deepEqual(ledger.blockers, [
+    'resident-state-authority-conflict:particle-kinematics:g2p:reaction-step'
+  ]);
+  assert.throws(
+    () => assertResidentStateAuthorityLedger(ledger),
+    /Resident state authority blocked: resident-state-authority-conflict:particle-kinematics:g2p:reaction-step/
+  );
+});
+
+test('resident authority ledger permits a same-owner metadata refresh', () => {
+  const ledger = createResidentStateAuthorityLedger({
+    entries: [
+      {
+        family: RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+        ownerStage: 'g2p',
+        status: 'submitted',
+        backend: 'webgpu'
+      },
+      {
+        family: RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+        ownerStage: 'g2p',
+        status: 'completed',
+        backend: 'webgpu'
+      }
+    ]
+  });
+
+  assert.equal(ledger.status, 'resident-authority-ledger-ready');
+  assert.equal(ledger.entries.length, 2);
+  assert.equal(ledger.familyCount, 1);
+  assert.equal(ledger.blockers.length, 0);
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].status,
+    'completed'
+  );
+});
+
 test('MLS-MPM resident authority ledger preserves g2p ownership when reaction emits no particle mutation', () => {
   const ledger = buildMlsMpmResidentStepAuthorityLedger({
     step: 1,

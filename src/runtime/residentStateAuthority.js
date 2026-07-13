@@ -131,7 +131,17 @@ export function addResidentStateAuthorityEntry(ledger, entry) {
   const normalized = normalizeEntry(entry, ledger.entries.length);
   ledger.entries.push(normalized);
   if (normalized.authoritative) {
-    ledger.familyOwners[normalized.family] = cloneOwner(normalized);
+    const existingOwner = ledger.familyOwners[normalized.family] ?? null;
+    if (existingOwner && existingOwner.ownerStage !== normalized.ownerStage) {
+      ledger.blockers.push([
+        'resident-state-authority-conflict',
+        normalized.family,
+        existingOwner.ownerStage,
+        normalized.ownerStage
+      ].join(':'));
+    } else {
+      ledger.familyOwners[normalized.family] = cloneOwner(normalized);
+    }
   }
   ledger.warnings.push(...normalized.warnings);
   ledger.blockers.push(...normalized.blockers);

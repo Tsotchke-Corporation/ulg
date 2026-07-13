@@ -1,5 +1,10 @@
 # Fable session handoff — 2026-07-09/10 run
 
+Status: moot historical session handoff. The third-level hold and relevant
+spatial/numerical gates are carried forward by
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md`; coherent-solid work
+remains active in `plan/todo/sol-critic.md`.
+
 Branch `SS`, tip `6f4bb82` (all work merged locally; nothing pushed to a
 remote this session). Final suite on tip: 980+ pass / 0 fail (996-999 tests
 depending on round), all four SS e2e gates green. Live server: main tree on

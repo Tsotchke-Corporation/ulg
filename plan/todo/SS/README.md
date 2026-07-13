@@ -1,7 +1,8 @@
 # SS Todo Routing
 
 Date: 2026-07-01 AKDT
-Branch: `SS`
+Updated: 2026-07-13 AKDT
+Active branch: `ss-spatial-authority-refactor`
 
 `SS` means Schroeder Simulation. This folder is now the active routing layer for
 new architecture work in ULG.
@@ -18,12 +19,15 @@ Required coherent-solid correction:
   mostly-solid and mixed solid-liquid scenes from human to planetary scale.
   Use GPU-native invariant/metamorphic validation; do not build a CPU mirror.
 
-Active execution plan (2026-07-02):
+Active execution plan (2026-07-13):
 
-- `fable-plan-2026-07-02.md` — land the runtime-policy checkpoint, then a
-  physics-first checkpoint (real cross-level coupling operator, two-level
-  co-simulation with numeric conservation gates, one admitted split/merge).
-  The portable cross-peer rematerializer is deferred until after that.
+- `shared-spatial-authority-refactor-plan.md` — build one canonical
+  GPU-resident cell/hierarchy generation per immutable spatial epoch and derive
+  mechanics, exact-near, cross-level, aggregate-far, solid-proxy, and render
+  views without independent law grids or maximal pair storage.
+
+Historical July 2 Fable handoff/queue documents are preserved under
+`plan/moot/SS/`; their landed checkpoints remain evidence, not active order.
 
 Supporting routing:
 
@@ -31,16 +35,22 @@ Supporting routing:
 
 ## Active Priority
 
-1. GPU-first Schroeder level assignment.
-2. Per-level active node/tile lists.
-3. Same-level MLS-MPM/Ocean mechanics on selected SS levels.
-4. Adjacent-level conservative restriction/prolongation.
-5. Phase-volume migration, starting with water-to-steam expansion.
-6. Law work queues for reaction/contact/interface.
+1. One exact GPU particle-to-cell key emission and canonical sort/unique per
+   immutable spatial epoch.
+2. Compact unique cell/member directory with explicit byte capacity, overflow,
+   identity, and completion evidence.
+3. Derived exact-near support views that replace private reaction, contact,
+   pressure/interface, separation, thermal, and radiation lookups one at a
+   time.
+4. Compact mechanics node/stencil view for same-level MLS-MPM/Ocean kernels.
+5. Explicit epoch-boundary scheduling for position, topology, phase/support,
+   and level changes.
+6. Conservative two-level coupling and aggregate-far traversal; the third
+   level remains on hold.
 7. Coherent-solid body/member/contact/shape carriers and mixed solid-liquid
    coupling from `../sol-critic.md`.
-8. Aggregate far-field traversal for laws that declare physical error bounds.
-9. Render LOD and PeerCompute portable summaries.
+8. Render/source-family views and PeerCompute portable summaries without
+   presentation authority over physics.
 
 ## Rules
 

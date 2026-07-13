@@ -6,6 +6,13 @@ These diagrams capture the intended direction after the WebGPU-resident refactor
 bugs. They are planning diagrams, not proof that the runtime already behaves
 this way.
 
+Routing update, 2026-07-13 AKDT: the target loop now has one explicit
+SS-spatial-epoch producer after authoritative state admission and before
+mechanics/law dispatch. Mechanics, exact-near, cross-level, aggregate-far, and
+render views consume that immutable generation; position/topology commit occurs
+once at the declared epoch boundary. See
+`SS/shared-spatial-authority-refactor-plan.md`.
+
 ## Target Distributed Main Loop
 
 ```mermaid

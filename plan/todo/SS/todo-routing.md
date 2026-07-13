@@ -5,9 +5,14 @@ Date: 2026-07-01 AKDT
 This matrix reorganizes the existing flat `plan/todo` backlog around Schroeder
 Simulation.
 
+Active execution order is now owned by
+`shared-spatial-authority-refactor-plan.md`. The original Schroeder plan remains
+the architecture contract; this matrix records how adjacent plans constrain or
+consume the shared substrate.
+
 | Existing todo | SS routing |
 | --- | --- |
-| `adaptive-mlsmpm-support-radius-and-coarsening-plan.md` | Superseded as a CPU-first adaptive track. Its conservation invariants remain acceptance gates for SS split/coarsen and cross-level coupling. |
+| `plan/moot/adaptive-mlsmpm-support-radius-and-coarsening-plan.md` | Superseded as a CPU-first adaptive track. Its conservation invariants are carried into the active spatial-authority plan for SS support, split/coarsen, and cross-level coupling. |
 | `webgpu-ocean-mlsmpm-simulator-plan.md` | Retained as dense local mechanics backend inside SS levels. Ocean-style P2G/grid/G2P is no longer the whole architecture. |
 | `generalized-spatial-law-tree-plan.md` | Replaced by `SS/schroeder-tree-and-algorithm-plan.md`. The hierarchy is now part of MLS-MPM mechanics and law acceleration. |
 | `gpu-resident-lanes-and-warm-services-plan.md` | Retained. SS buffers must live inside GPU resident lane ownership and same-worker/same-device rules. |

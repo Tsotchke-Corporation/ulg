@@ -51,12 +51,12 @@ work that belongs before it, but must not resume that level.
 
 ## Clean-Break Routing - Adaptive MLS-MPM
 
-True adaptive MLS-MPM is carved out into
-`plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`. Keep it
-separate from the current fixed-grid water/liquid pressure work. The adaptive
-track starts after the next clean break and covers per-particle support radius,
-normalized variable-support P2G/G2P, conservation-safe split/merge/coarsening,
-and mass/momentum/volume/energy continuity tests.
+Adaptive support and coarsening now route through
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md` as derived views and
+conservative SS level/topology changes. The former CPU-first execution queue is
+preserved in `plan/moot/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`;
+its partition-of-unity, first-moment, and split/merge conservation tests remain
+mandatory.
 
 ## Coherent Solid Routing
 
@@ -3285,8 +3285,8 @@ physics work:
   quality, and surface-tension behavior remain open follow-up work.
 - [ ] Keep true adaptive MLS-MPM out of this bugfix track. The per-particle
   support radius, normalized variable-support P2G/G2P, and conservation-safe
-  split/merge plan lives in
-  `plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`.
+  split/merge work lives in
+  `plan/todo/SS/shared-spatial-authority-refactor-plan.md`.
 
 ### Current Worker-Render Status - 2026-06-28 AKDT
 

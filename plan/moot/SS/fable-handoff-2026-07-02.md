@@ -3,6 +3,9 @@
 Date: 2026-07-02
 Branch: `SS`
 Repo: `/home/cos/projects/ulg`
+Status: moot historical handoff. Its checkpoint was superseded first by the
+July 2 Fable plan and now by
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md`.
 
 This handoff is for taking over the Schroeder Simulation work without relying on
 the chat history. The current branch is not at a clean stopping point. There is a

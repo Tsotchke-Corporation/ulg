@@ -1,6 +1,9 @@
 # True Adaptive MLS-MPM Support Radius and Coarsening Plan
 
 Date: 2026-06-22 AKDT
+Status: moot as an independent CPU-first execution track; numerical transfer,
+support, and split/merge conservation gates are carried by
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md`.
 
 ## Purpose
 

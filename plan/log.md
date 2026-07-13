@@ -41262,3 +41262,25 @@ Validation and review:
   import/status audit is the focused validation for this documentation slice.
 - Planned coherent-point commit command:
   `git add README.md plan/plan.md plan/log.md plan/solver-law-inventory.md && git commit -m "Document ULG solver and law inventory"`.
+
+## 2026-07-13 AKDT - SS Spatial Authority Refactor Branch And Routing
+
+- ICC verified that the existing water-flow/PBR dirty fingerprint exactly
+  matched the green `water-flow-cadence-fix-20260713` attempt. Preserved it as
+  recovery commit `bdd3eee` after `git diff --check` passed.
+- Created linked worktree `/home/cos/projects/ulg-ss-spatial-authority` on branch
+  `ss-spatial-authority-refactor`, registered it as ICC repo
+  `ulg-ss-spatial-authority`, and rebuilt index, memory, substrate, and Git
+  history at the checkpoint.
+- Added `plan/todo/SS/shared-spatial-authority-refactor-plan.md` as the active
+  execution plan: one canonical GPU membership/sort/unique generation per
+  immutable spatial epoch, with distinct mechanics, exact-near, cross-level,
+  aggregate-far, solid-proxy, and render views.
+- Moved the superseded adaptive/Fable queues to `plan/moot`; moved the completed
+  GPU-resident recovery decision to `plan/done`. The Schroeder architecture,
+  SOL critique, Ocean mechanics, authority plans, laws, closures, and visual
+  gates remain active.
+- First implementation checkpoint is a standalone caller-owned GPU cell
+  directory and native probe. It must be real executable work, not a descriptor
+  claim, and it does not change a production consumer until exact membership,
+  overflow, residency, and native GPU gates pass.

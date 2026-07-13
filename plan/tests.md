@@ -454,8 +454,9 @@ Residual risk:
 
 ## Pending Gate - True Adaptive MLS-MPM
 
-`plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md` defines the
-next clean-break adaptive MLS-MPM test target. Required future gates are:
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md` now owns the adaptive
+support and SS spatial-authority test target. The superseded CPU-first queue is
+preserved under `plan/moot`. Required gates remain:
 
 - variable-support kernel partition-of-unity and first-moment tests;
 - CPU P2G/G2P round-trip tests across support radii;

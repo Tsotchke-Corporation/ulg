@@ -39,6 +39,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-07-13 AKDT: spatial architecture and performance
+work routes through
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md` on branch
+`ss-spatial-authority-refactor`. Build one SS-owned GPU spatial generation per
+immutable position/topology/support epoch, then derive distinct mechanics,
+exact-near, cross-level, aggregate-far, solid-proxy, and render views. Do not
+add another private law grid, fixed per-particle candidate arena, universal
+widest-law pair list, implicit exhaustive fallback, or descriptor-only
+completion claim. The original Schroeder plan and SOL critique remain active
+scientific contracts.
+
 Current routing note, 2026-07-09 AKDT: `plan/todo/sol-critic.md` is the required
 Schroeder coherent-solid architecture correction. A solid needs an authoritative
 body/material frame, body-local members, independently refinable contact
@@ -238,10 +249,11 @@ quality is still open: the sphere diagnostic is visible and uses
 closure-derived PBR, but it remains particle-like rather than a refractive
 merged liquid surface. CPU and GPU P2G/G2P still use a fixed global quadratic
 support stencil. Follow
-`plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md` only as its
-own follow-up track. The adaptive track must add per-particle support radius,
-normalized variable-support P2G/G2P, conservation-safe split/merge/coarsening,
-and tests for mass, momentum, volume, and energy continuity. A 2x2x2 block may
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md` for the admitted SS
+support/coarsening track. The older CPU-first queue is retained under
+`plan/moot/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`; its
+partition-of-unity, first-moment, split/merge, mass, momentum, volume, and
+energy continuity gates remain mandatory. A 2x2x2 block may
 simplify to one macro-particle only through that admitted conservation path,
 not through renderer radius changes or role-specific particle spacing.
 

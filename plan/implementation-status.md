@@ -14,8 +14,12 @@ native refraction science was 52/52, and the sodium-water native sequence
 advanced through step 640 with water displacement, visible products, opaque
 PBR refraction, current surface generations, and no browser/resident errors.
 
-Next: port/prove the generic GPU radix/scan/unique primitive in isolation, then
-build the v1 cell directory and native probe. Do not append another descriptor
+The caller-owned GPU radix/scan/unique primitive is now isolated on this branch:
+its 16 focused plan/encoding/residency tests pass, and its result explicitly
+publishes the per-sorted-row unique group index needed for reverse
+`particleToCell` assembly without another scan.
+
+Next: build the v1 cell directory and native probe. Do not append another descriptor
 chain to `schroederHierarchyGpu.js`, migrate a post-G2P law against stale
 positions, or port the abandoned neighborhood scheduler/candidate CSR.
 

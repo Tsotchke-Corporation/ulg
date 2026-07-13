@@ -41284,3 +41284,9 @@ Validation and review:
   directory and native probe. It must be real executable work, not a descriptor
   claim, and it does not change a production consumer until exact membership,
   overflow, residency, and native GPU gates pass.
+- Selectively ported the caller-owned generic WebGPU u32 scan and stable radix/
+  unique primitive plus its ABI/tests, not the neighborhood builder or lane.
+  Exposed the unique-head prefix as the stable group index for every sorted row,
+  which lets the cell-directory assembly write `particleToCell` without another
+  prefix pass. Focused result: 16/16 pass; no queue submission or readback is
+  owned by the primitive.

@@ -1,4 +1,5 @@
 export * from './sphPhaseContracts.js';
+export * from './parallelPrimitives.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';

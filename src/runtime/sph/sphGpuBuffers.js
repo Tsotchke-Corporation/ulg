@@ -35,6 +35,10 @@ export const MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS = MLS_MPM_GPU_PARTICLE_MECHAN
 // PBD-style relaxation for the excluded-volume pair separation projection in
 // G2P post-processing; 0 disables the pass.
 export const MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT = 0.5;
+// Excluded-volume projection preserves represented volume. Pair-normal
+// velocity damping is a separate, optional collision response; physical
+// viscosity and the constitutive laws own ordinary liquid dissipation.
+export const MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT = 0;
 export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
   ready: 1,
   energyClampedLow: 2,
@@ -181,7 +185,11 @@ function mechanicsScaleOptions(state, {
     particleSeparationRelaxation: finiteNumber(
       stateParams.mlsMpmParticleSeparationRelaxation,
       MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
-    )
+    ),
+    particleSeparationVelocityDamping: Math.min(Math.max(finiteNumber(
+      stateParams.mlsMpmParticleSeparationVelocityDamping,
+      MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT
+    ), 0), 1)
   };
 }
 
@@ -555,6 +563,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     liquidWallDampingAlpha: scaleOptions.liquidWallDampingAlpha,
     liquidWallDampingDistanceM: scaleOptions.liquidWallDampingDistanceM,
     particleSeparationRelaxation: scaleOptions.particleSeparationRelaxation,
+    particleSeparationVelocityDamping: scaleOptions.particleSeparationVelocityDamping,
     mechanicsDtS: finiteNumber(state.gpuMechanics?.dt, 0),
     mechanicalSubsteps: Math.max(1, Math.round(finiteNumber(state.gpuMechanics?.mechanicalSubsteps, 1))),
     gridCflFactor: finiteNumber(state.gpuMechanics?.gridCflFactor, 0),

@@ -4630,6 +4630,10 @@ fn render_row2(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE + 2u];
 }
 
+fn render_row3(particle_index: u32) -> vec4<f32> {
+  return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE + 3u];
+}
+
 fn render_row4(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE + 4u];
 }
@@ -4727,9 +4731,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let subtract = max(s1.z, 1.0e-12);
   let strength = s1.w;
   let support_norm = sqrt(abs(strength) / subtract);
+  // Render-field ABI v1 uses negative surface row2.x as the mode sentinel for
+  // retained per-particle radius. Positive values keep the legacy radiusNorm
+  // behavior inside v1; v0 consumers must reject the v1 schema. The
+  // surface-wide strength remains the product-event fallback.
+  let particle_radius_scale = select(0.0, -s2.x, s2.x < 0.0);
   let color = vec3<f32>(s2.y, s2.z, s2.w);
   let span = 1.0 - 2.0 * params.field_padding;
   let ref_edge = max(params.ref_edge_m, 1.0e-12);
+  let particle_radius_norm_scale = particle_radius_scale * span / ref_edge;
+  // Conservative sparse voxel proxy for an under-resolved physical radius.
+  // sqrt(3/(4N^2) + kernel epsilon) is the tight interior 3-D point-sampling
+  // bound. It prevents an all-negative field without claiming exact geometry.
+  let particle_radius_floor_norm = select(
+    0.0,
+    sqrt(0.75 * inv_resolution * inv_resolution + 0.000001),
+    particle_radius_scale > 0.0
+  );
+  let particle_support_multiplier = sqrt(max((s1.y + subtract) / subtract, 0.0));
 
   var density = 0.0;
   var palette = vec3<f32>(0.0, 0.0, 0.0);
@@ -4749,6 +4768,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row0 = render_row0(particle_index);
     let row1 = render_row1(particle_index);
     let row2 = render_row2(particle_index);
+    let row3 = render_row3(particle_index);
     if (
       row1.x != material_id
       || (render_domain_id > 0.0 && row2.w != render_domain_id)
@@ -4767,18 +4787,38 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
     let delta = cell - particle;
     let dist2 = dot(delta, delta);
-    let value = (strength * phase_weight) / (0.000001 + dist2) - subtract;
-	    if (value > 0.0) {
-	      density = density + value;
-	      let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
-	      palette = palette + color * smooth_palette_weight(ratio) * phase_weight;
-	      temperature_weighted = temperature_weighted + row1.z * value;
-	      temperature_weight = temperature_weight + value;
-	      let particle_velocity = row4.yzw;
-	      velocity_weighted = velocity_weighted + particle_velocity * value;
-	      velocity_sq_weighted = velocity_sq_weighted + dot(particle_velocity, particle_velocity) * value;
-	    }
-	  }
+    // The contribution is multiplied by phase_weight below. Compensate the
+    // conservative point-sampling floor by 1/sqrt(weight), otherwise a
+    // fractional transition carrier can fall below isolation at every cell.
+    let phase_aware_particle_radius_floor_norm = particle_radius_floor_norm
+      / sqrt(max(phase_weight, 1.0e-8));
+    let particle_radius_norm = select(
+      0.0,
+      max(row3.y * particle_radius_norm_scale, phase_aware_particle_radius_floor_norm),
+      particle_radius_scale > 0.0 && row3.y > 0.0
+    );
+    let particle_strength = select(
+      strength,
+      (s1.y + subtract) * particle_radius_norm * particle_radius_norm,
+      particle_radius_norm > 0.0
+    );
+    let particle_support_norm = select(
+      support_norm,
+      particle_radius_norm * particle_support_multiplier,
+      particle_radius_norm > 0.0
+    );
+    let value = (particle_strength * phase_weight) / (0.000001 + dist2) - subtract;
+    if (value > 0.0) {
+      density = density + value;
+      let ratio = sqrt(dist2) / max(particle_support_norm, 1.0e-6);
+      palette = palette + color * smooth_palette_weight(ratio) * phase_weight;
+      temperature_weighted = temperature_weighted + row1.z * value;
+      temperature_weight = temperature_weight + value;
+      let particle_velocity = row4.yzw;
+      velocity_weighted = velocity_weighted + particle_velocity * value;
+      velocity_sq_weighted = velocity_sq_weighted + dot(particle_velocity, particle_velocity) * value;
+    }
+  }
 
   // Splash-shard smear correction: mass in a dispersing cell spreads over
   // L = sigma_v * render_smear_dt between refreshes, so each contribution is
@@ -4800,6 +4840,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let row0 = render_row0(particle_index);
         let row1 = render_row1(particle_index);
         let row2 = render_row2(particle_index);
+        let row3 = render_row3(particle_index);
         if (
           row1.x != material_id
           || (render_domain_id > 0.0 && row2.w != render_domain_id)
@@ -4817,15 +4858,32 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
         let delta = cell - particle;
         let dist2 = dot(delta, delta) + smear_sq;
-        let value = (strength * phase_weight) / (0.000001 + dist2) - subtract;
-	        if (value > 0.0) {
-	          corrected_density = corrected_density + value;
-	          let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
-	          corrected_palette = corrected_palette + color * smooth_palette_weight(ratio) * phase_weight;
-	          corrected_temperature_weighted = corrected_temperature_weighted + row1.z * value;
-	          corrected_temperature_weight = corrected_temperature_weight + value;
-	        }
-	      }
+        let phase_aware_particle_radius_floor_norm = particle_radius_floor_norm
+          / sqrt(max(phase_weight, 1.0e-8));
+        let particle_radius_norm = select(
+          0.0,
+          max(row3.y * particle_radius_norm_scale, phase_aware_particle_radius_floor_norm),
+          particle_radius_scale > 0.0 && row3.y > 0.0
+        );
+        let particle_strength = select(
+          strength,
+          (s1.y + subtract) * particle_radius_norm * particle_radius_norm,
+          particle_radius_norm > 0.0
+        );
+        let particle_support_norm = select(
+          support_norm,
+          particle_radius_norm * particle_support_multiplier,
+          particle_radius_norm > 0.0
+        );
+        let value = (particle_strength * phase_weight) / (0.000001 + dist2) - subtract;
+        if (value > 0.0) {
+          corrected_density = corrected_density + value;
+          let ratio = sqrt(dist2) / max(particle_support_norm, 1.0e-6);
+          corrected_palette = corrected_palette + color * smooth_palette_weight(ratio) * phase_weight;
+          corrected_temperature_weighted = corrected_temperature_weighted + row1.z * value;
+          corrected_temperature_weight = corrected_temperature_weight + value;
+        }
+      }
       density = corrected_density;
       palette = corrected_palette;
       temperature_weighted = corrected_temperature_weighted;
@@ -7967,7 +8025,7 @@ struct SeparationParams {
   box_x: f32,
   box_y: f32,
   box_z: f32,
-  enabled: u32,
+  normal_velocity_damping: f32,
   bin_nx: u32,
   bin_ny: u32,
   bin_nz: u32,
@@ -7998,7 +8056,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (particle_index >= params.particle_count) {
     return;
   }
-  if (params.enabled == 0u || params.relaxation <= 0.0) {
+  if (params.relaxation <= 0.0 && params.normal_velocity_damping <= 0.0) {
     return;
   }
   let pos_mass = in_state[particle_index * 2u];
@@ -8024,7 +8082,7 @@ struct SeparationParams {
   box_x: f32,
   box_y: f32,
   box_z: f32,
-  enabled: u32,
+  normal_velocity_damping: f32,
   bin_nx: u32,
   bin_ny: u32,
   bin_nz: u32,
@@ -8065,7 +8123,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   corrections[particle_index * 2u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
   corrections[particle_index * 2u + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  if (params.enabled == 0u || params.relaxation <= 0.0) {
+  if (params.relaxation <= 0.0 && params.normal_velocity_damping <= 0.0) {
     return;
   }
   let phase_class = separation_phase_class(particle_index);
@@ -8164,7 +8222,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           dx = dx + params.relaxation * share * (pair_rest_distance - dist) * normal;
           let approach = dot(velocity - in_state[other * 2u + 1u].xyz, normal);
           if (approach < 0.0) {
-            dv = dv - share * approach * normal;
+            dv = dv - params.normal_velocity_damping * share * approach * normal;
           }
         }
       }
@@ -8189,7 +8247,7 @@ struct SeparationParams {
   box_x: f32,
   box_y: f32,
   box_z: f32,
-  enabled: u32,
+  normal_velocity_damping: f32,
   bin_nx: u32,
   bin_ny: u32,
   bin_nz: u32,
@@ -8213,7 +8271,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (particle_index >= params.particle_count) {
     return;
   }
-  if (params.enabled == 0u || params.relaxation <= 0.0) {
+  if (params.relaxation <= 0.0 && params.normal_velocity_damping <= 0.0) {
     return;
   }
   let dx = corrections[particle_index * 2u].xyz;

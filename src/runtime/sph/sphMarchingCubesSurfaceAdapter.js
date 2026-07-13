@@ -622,7 +622,7 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
   if (field.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA) {
     return renderFieldBufferVolumeBlocked(
       'ulg-render-field-buffer-volume-blocked-schema',
-      'ULG buffer-volume extraction requires peercompute.ulg.sph-gpu-render-field.v0 input',
+      'ULG buffer-volume extraction requires peercompute.ulg.sph-gpu-render-field.v1 input',
       { renderFieldSchema: field.schema ?? null }
     );
   }

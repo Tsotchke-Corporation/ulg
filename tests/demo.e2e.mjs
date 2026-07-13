@@ -5613,7 +5613,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphResidentRenderState.schema).toBe('peercompute.ulg.sph-resident-render-state.v0');
     expect(derivedSummary.sphResidentRenderState.status).toBe('resident-render-field-applied');
     expect(derivedSummary.sphResidentRenderState.source).toBe('resident-gpu-render-field');
-    expect(derivedSummary.sphResidentRenderState.sourceExecutionSchema).toBe('peercompute.ulg.sph-gpu-render-field.v0');
+    expect(derivedSummary.sphResidentRenderState.sourceExecutionSchema).toBe('peercompute.ulg.sph-gpu-render-field.v1');
     expect([
       'webgpu',
       'render-rows-three-point-bridge',
@@ -5675,7 +5675,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         'resident-surface-draw-unavailable'
       );
       expect(derivedSummary.sphResidentRenderState.surfaceDrawSourceRenderFieldSchema).toBe(
-        'peercompute.ulg.sph-gpu-render-field.v0'
+        'peercompute.ulg.sph-gpu-render-field.v1'
       );
     }
     expect(derivedSummary.sphResidentRenderState.surfaceDrawSourceSurfaceVertexSchema).toBe(null);

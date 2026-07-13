@@ -6,6 +6,7 @@ import { chromium } from '@playwright/test';
 import {
   nativeSurfaceVisualIntervalExtractionEnabled
 } from '../src/visualization/nativeSurfaceResourceLifecycle.js';
+import { reactionLedgerEventCount } from './sph-probe-reaction-evidence.mjs';
 
 const DEFAULT_URL = '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0';
 const DEFAULT_WALL_TEMPERATURE_K = 283.15;
@@ -2526,6 +2527,18 @@ async function runBrowserProbe({
         }
         return authoritativeGpuCheckpointModulePromise;
       };
+      const uploadHasBuffers = (upload) => Boolean(upload?.stateBuffer && upload?.thermoBuffer);
+      const metadataIsExplicitFiniteZero = (value) => (
+        typeof value === 'number'
+        && Number.isFinite(value)
+        && value === 0
+      );
+      const uploadIsVerifiedTimeZero = (upload) => (
+        uploadHasBuffers(upload)
+        && upload?.status === 'webgpu-uploaded'
+        && metadataIsExplicitFiniteZero(upload?.step)
+        && metadataIsExplicitFiniteZero(upload?.time)
+      );
       const captureAuthoritativeGpuCheckpoint = async ({ batchIndex, phase, sampleIndex }) => {
         const checkpointBase = {
           schema: 'peercompute.ulg.sph-authoritative-gpu-material-phase-checkpoint.v1',
@@ -2575,19 +2588,35 @@ async function runBrowserProbe({
           };
         }
 
-        const uploadCandidates = [
-          ['resident-steps-next-particle-uploads', currentSteps?.nextParticleUploads?.sphParticleUpload],
-          ['resident-steps-final-step-next-particle-uploads', currentSteps?.finalStep?.nextParticleUploads?.sphParticleUpload],
-          ['resident-step-next-particle-uploads', currentStep?.nextParticleUploads?.sphParticleUpload]
-        ];
+        // A time-zero checkpoint may never borrow a later resident result and
+        // relabel it as initial state. At phase=initial accept only the upload
+        // created by the initial scene/overlay refresh; later checkpoints use
+        // only completed resident-step outputs.
+        const uploadCandidates = phase === 'initial'
+          ? [
+              ['scene-initial-particle-upload', sceneApi.getSphGpuParticleUpload?.()],
+              ['overlay-initial-particle-upload', overlay.__sphGpuParticleUpload]
+            ]
+          : [
+              ['resident-steps-next-particle-uploads', currentSteps?.nextParticleUploads?.sphParticleUpload],
+              ['resident-steps-final-step-next-particle-uploads', currentSteps?.finalStep?.nextParticleUploads?.sphParticleUpload],
+              ['resident-step-next-particle-uploads', currentStep?.nextParticleUploads?.sphParticleUpload]
+            ];
         const [uploadSource, sphParticleUpload] = uploadCandidates.find(([, upload]) => (
-          upload?.stateBuffer && upload?.thermoBuffer
+          phase === 'initial' ? uploadIsVerifiedTimeZero(upload) : uploadHasBuffers(upload)
         )) || [];
         if (!sphParticleUpload) {
+          const readyButUnverified = phase === 'initial'
+            ? uploadCandidates.find(([, upload]) => uploadHasBuffers(upload))?.[1]
+            : null;
           return {
             ...checkpointBase,
             status: 'unavailable',
-            reason: 'retained resident state and thermo GPUBuffer pair is unavailable'
+            reason: phase === 'initial' && readyButUnverified
+              ? 'retained upload exists but exact time-zero provenance is not verified'
+              : 'retained resident state and thermo GPUBuffer pair is unavailable',
+            uploadStep: finiteOrNull(Number(readyButUnverified?.step)),
+            uploadTimeS: finiteOrNull(Number(readyButUnverified?.time))
           };
         }
 
@@ -2599,8 +2628,8 @@ async function runBrowserProbe({
         const thermoCapacity = Math.floor(Number(thermoBuffer.size) / thermoStrideBytes);
         const bufferParticleCapacity = Math.min(stateCapacity, thermoCapacity);
         const requestedParticleCount = Math.round(Number(
-          currentSteps?.nextParticleCount
-          ?? currentStep?.nextParticleCount
+          (phase === 'initial' ? null : currentSteps?.nextParticleCount)
+          ?? (phase === 'initial' ? null : currentStep?.nextParticleCount)
           ?? sphParticleUpload.authoritativeParticleCount
           ?? sphParticleUpload.particleCount
           ?? bufferParticleCapacity
@@ -2656,13 +2685,20 @@ async function runBrowserProbe({
           return {
             ...checkpointBase,
             uploadSource,
-            sourceStep: currentStep?.particlePingPong?.nextStep
-              ?? currentSteps?.nextSphParticleState?.step
-              ?? null,
+            sourceStep: Number.isFinite(Number(sphParticleUpload.step))
+              ? Number(sphParticleUpload.step)
+              : currentStep?.particlePingPong?.nextStep
+                ?? currentSteps?.nextSphParticleState?.step
+                ?? null,
             sourceTimeS: finiteOrNull(
-              currentStep?.particlePingPong?.nextTime
-              ?? currentSteps?.nextSphParticleState?.time
+              Number.isFinite(Number(sphParticleUpload.time))
+                ? Number(sphParticleUpload.time)
+                : currentStep?.particlePingPong?.nextTime
+                  ?? currentSteps?.nextSphParticleState?.time
             ),
+            timeZeroProvenanceVerified: phase === 'initial'
+              ? uploadIsVerifiedTimeZero(sphParticleUpload)
+              : null,
             sourceBufferLabels: {
               state: stateBuffer.label || null,
               thermo: thermoBuffer.label || null
@@ -4433,6 +4469,29 @@ async function runBrowserProbe({
       };
       if (requestedCaptureFrames) {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        // The final-only compact-summary path does not otherwise need an
+        // initial render refresh. Materialize its retained upload explicitly
+        // before the first checkpoint so time zero is authoritative rather
+        // than merely a visual-frame label.
+        const initialUpload = sceneApi.getSphGpuParticleUpload?.()
+          || overlay.__sphGpuParticleUpload
+          || null;
+        const initialUploadIsVerifiedTimeZero = uploadIsVerifiedTimeZero(initialUpload);
+        if (!initialUploadIsVerifiedTimeZero) {
+          markProbeProgress('initial-authoritative-upload-started');
+          try {
+            overlay.__sphGpuParticleUpload = await sceneApi.refreshSphGpuParticleBuffers?.({
+              preferWebGpu: true
+            }) || overlay.__sphGpuParticleUpload || null;
+            markProbeProgress('initial-authoritative-upload-completed', {
+              ready: uploadIsVerifiedTimeZero(overlay.__sphGpuParticleUpload)
+            });
+          } catch (error) {
+            markProbeProgress('initial-authoritative-upload-skipped', {
+              reason: error instanceof Error ? error.message : String(error)
+            });
+          }
+        }
       }
       if (
         requestedCompactSummaryMode === 'none'
@@ -6417,6 +6476,18 @@ async function runDirectResidentProbe({
           return value != null && value >= 0 && value <= 10
             ? { mlsMpmArtificialViscosityAlpha: value }
             : {};
+        })(),
+        ...(() => {
+          const value = finiteOrNull(params.get('sep'));
+          return value != null && value >= 0 && value <= 10
+            ? { mlsMpmParticleSeparationRelaxation: value }
+            : {};
+        })(),
+        ...(() => {
+          const value = finiteOrNull(params.get('sepVel'));
+          return value != null && value >= 0 && value <= 1
+            ? { mlsMpmParticleSeparationVelocityDamping: value }
+            : {};
         })()
       };
 
@@ -7941,13 +8012,22 @@ function analyzeTimeline(timeline, {
     products: authoritativeReactionProductMassEvidence
   };
   const reactionEventsTotalSeries = metrics
-    .map((metric) => finiteMetric(
-      metric?.plainSphStepResult?.reactionEventsTotal
-        ?? metric?.residentStep?.reactionEventsTotal
-        ?? metric?.residentStep?.reactionLedger?.eventCount
-        ?? metric?.residentStep?.diagnostics?.reactionEvidence?.canonicalEventCount
-        ?? metric?.residentStep?.diagnostics?.reactionEvidence?.productEventActiveEventCount
-    ))
+    .map((metric) => {
+      const evidence = metric?.residentStep?.diagnostics?.reactionEvidence;
+      // These routes can describe different points in the placement pipeline.
+      // In particular, a present zero active/canonical count must not mask a
+      // positive pre-placement species-ledger count. Take the strongest finite
+      // evidence for this checkpoint instead of nullish-selecting one route.
+      const counts = [
+        metric?.plainSphStepResult?.reactionEventsTotal,
+        metric?.residentStep?.reactionEventsTotal,
+        metric?.residentStep?.reactionLedger?.eventCount,
+        evidence?.canonicalEventCount,
+        reactionLedgerEventCount(evidence),
+        evidence?.productEventActiveEventCount
+      ].map(finiteMetric).filter(Number.isFinite);
+      return counts.length ? Math.max(...counts) : null;
+    })
     .filter(Number.isFinite);
   const maxReactionEventsTotal = reactionEventsTotalSeries.length
     ? Math.max(...reactionEventsTotalSeries)

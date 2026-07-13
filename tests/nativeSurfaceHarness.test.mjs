@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import {
+  groupedReactionEventCount,
+  reactionLedgerEventCount
+} from '../scripts/sph-probe-reaction-evidence.mjs';
 
 function readRepoFile(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
@@ -9,6 +13,7 @@ function readRepoFile(relativePath) {
 test('native WebGPU probe and benchmark flatten validation scope diagnostics', () => {
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
   const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
   const fields = [
     'surfaceDrawRenderBridgeNativeSurfaceValidationScope',
     'surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible',
@@ -24,9 +29,70 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /offscreenValidationEligible,/);
   assert.match(probeSource, /offscreenValidationSkippedReason,/);
   assert.match(probeSource, /nativeSurfaceValidation: nativeSurfaceValidationSnapshot\(\)/);
+  assert.match(
+    probeSource,
+    /phase === 'initial'[\s\S]*?\['scene-initial-particle-upload', sceneApi\.getSphGpuParticleUpload\?\.\(\)\][\s\S]*?: \[[\s\S]*?resident-steps-next-particle-uploads/
+  );
+  assert.match(
+    probeSource,
+    /metadataIsExplicitFiniteZero[\s\S]*?typeof value === 'number'[\s\S]*?Number\.isFinite\(value\)[\s\S]*?value === 0[\s\S]*?uploadIsVerifiedTimeZero[\s\S]*?metadataIsExplicitFiniteZero\(upload\?\.step\)[\s\S]*?metadataIsExplicitFiniteZero\(upload\?\.time\)/
+  );
+  assert.match(
+    probeSource,
+    /sourceStep: Number\.isFinite\(Number\(sphParticleUpload\.step\)\)[\s\S]*?sourceTimeS: finiteOrNull\([\s\S]*?sphParticleUpload\.time/
+  );
+  assert.match(
+    probeSource,
+    /phase === 'initial' \? null : currentSteps\?\.nextParticleCount[\s\S]*?sphParticleUpload\.particleCount/,
+    'time-zero reduction length must come from the verified initial upload rather than later resident state'
+  );
+  assert.match(
+    probeSource,
+    /const initialUpload = sceneApi\.getSphGpuParticleUpload\?\.\(\)[\s\S]*?refreshSphGpuParticleBuffers\?\.\(\{[\s\S]*?preferWebGpu: true[\s\S]*?markProbeProgress\('sampling-initial-state'\)/,
+    'final-only visual probes must materialize a retained initial upload before sampling time zero'
+  );
+  assert.match(
+    probeSource,
+    /initialUploadIsVerifiedTimeZero = uploadIsVerifiedTimeZero\(initialUpload\)/,
+    'an existing initial upload is reusable only with explicit zero-step and zero-time provenance'
+  );
+  assert.match(
+    sceneSource,
+    /threeWebGpuSurfaceBufferRetainResidentHandoff \|\| shouldUseNativeWebGpuSurfaceConsumerBridge[\s\S]*?visibleRenderFieldReadbackMode = RESIDENT_NO_FULL_READBACK_MODE[\s\S]*?native-webgpu-surface-consumer requires a retained no-full-readback render-field handoff/,
+    'native surface presentation must coerce auto/full render-field reads to its GPU-resident handoff'
+  );
   assert.match(probeSource, /validationBlockerFamily,/);
   assert.match(probeSource, /textureReadbackUnavailable,/);
   assert.match(probeSource, /gpuBufferHandoffReady,/);
+});
+
+test('time-zero provenance rejects missing, empty, and non-finite metadata', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const predicateSource = probeSource.match(
+    /const metadataIsExplicitFiniteZero = \(value\) => \(([\s\S]*?)\n\s*\);/
+  )?.[1];
+  assert.ok(predicateSource, 'probe must expose the exact finite-zero metadata predicate');
+  const predicate = Function('value', `return (${predicateSource});`);
+
+  for (const value of [
+    null,
+    undefined,
+    '',
+    ' ',
+    '0',
+    false,
+    [],
+    {},
+    Number.NaN,
+    Infinity,
+    -Infinity,
+    1,
+    -1
+  ]) {
+    assert.equal(predicate(value), false, `metadata value ${String(value)} must not prove time zero`);
+  }
+  assert.equal(predicate(0), true);
+  assert.equal(predicate(-0), true);
 });
 
 test('performance benchmark reports worker offscreen frame transport budget', () => {
@@ -876,6 +942,51 @@ test('direct resident chemistry probes match the interactive product tier and re
     /reactionEvidence: \{[\s\S]*?canonicalEventCount:[\s\S]*?gasSpeciesLedger:/,
     'compact probe serialization must preserve already-available reaction evidence without a new readback'
   );
+  assert.match(
+    probeSource,
+    /reactionLedgerEventCount\(evidence\)[\s\S]*?productEventActiveEventCount[\s\S]*?Math\.max\(\.\.\.counts\)/,
+    'placed reaction products must retain event-count evidence after the active event row is consumed'
+  );
+});
+
+test('reaction evidence groups product terms by reaction without losing condensed-only chemistry', () => {
+  assert.equal(groupedReactionEventCount([
+    { reactionIndex: 0, productTermIndex: 0, eventCount: 5 },
+    { reactionIndex: 0, productTermIndex: 1, eventCount: 5 },
+    { reactionIndex: 1, productTermIndex: 2, eventCount: 3 }
+  ]), 8);
+  assert.equal(reactionLedgerEventCount({
+    productInventory: {
+      records: [
+        { reactionIndex: 4, material: 'condensed-a', eventCount: 7 },
+        { reactionIndex: 4, material: 'condensed-b', eventCount: 7 }
+      ]
+    },
+    gasSpeciesLedger: { records: [] }
+  }), 7);
+});
+
+test('reaction evidence falls back to grouped gas ledger when product inventory was not run', () => {
+  assert.equal(reactionLedgerEventCount({
+    productInventory: { records: [] },
+    gasSpeciesLedger: {
+      records: [
+        { reactionIndex: 0, material: 'gas-a', eventCount: 9 },
+        { reactionIndex: 0, material: 'gas-b', eventCount: 9 }
+      ]
+    }
+  }), 9);
+});
+
+test('reaction evidence does not let a zero product snapshot mask placed gas events', () => {
+  assert.equal(reactionLedgerEventCount({
+    productInventory: {
+      records: [{ reactionIndex: 0, material: 'condensed', eventCount: 0 }]
+    },
+    gasSpeciesLedger: {
+      records: [{ reactionIndex: 0, material: 'gas', eventCount: 9 }]
+    }
+  }), 9);
 });
 
 test('native WebGPU surface diagnostics distinguish opaque refraction and prove zero-submit normals', () => {

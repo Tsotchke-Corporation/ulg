@@ -3751,6 +3751,10 @@ export function createSphPhaseDemo(options = {}) {
   // Excluded-volume pair separation relaxation; undefined defers to the GPU
   // buffer default (sphGpuBuffers). Explicit 0 disables for A/B isolation.
   const mlsMpmParticleSeparationRelaxation = options.mlsMpmParticleSeparationRelaxation;
+  // Velocity damping is deliberately separate from the volume-preserving
+  // position projection. Zero lets viscosity/constitutive stress own liquid
+  // dissipation; one reproduces the legacy perfectly inelastic pair update.
+  const mlsMpmParticleSeparationVelocityDamping = options.mlsMpmParticleSeparationVelocityDamping;
   const mlsMpmLiquidFreeSurfaceRelaxationAlpha = mechanics === 'mlsmpm'
     && physicalLawGroups.gravity
     && physicalLawGroups.pressure
@@ -3825,6 +3829,7 @@ export function createSphPhaseDemo(options = {}) {
     mlsMpmLiquidWallDampingAlpha,
     mlsMpmLiquidWallDampingDistanceM,
     mlsMpmParticleSeparationRelaxation,
+    mlsMpmParticleSeparationVelocityDamping,
     mlsMpmLiquidFreeSurfaceRelaxationAlpha,
     mlsMpmLiquidFreeSurfaceTargetDepthM,
     mlsMpmLiquidFreeSurfaceContactDepthM,

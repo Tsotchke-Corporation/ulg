@@ -77,6 +77,7 @@ import {
   summarizeSphRenderFieldSurfacesCpu,
   summarizeSphRenderFieldSurfacesWebGpu,
   summarizeSphRenderFieldSurfacesWithOptionalWebGpu,
+  sphRenderFieldWgsl,
   sphRenderRowsWgsl
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
 
@@ -1153,6 +1154,113 @@ test('SPH render field surface table packs generic material-phase surfaces', () 
   assert.equal(table.metadata[1].phaseId, GPU_PHASE_IDS.gas);
 });
 
+test('SPH render field surface table opts into retained physical particle radii without stealing draw policy lanes', () => {
+  const table = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'h2o|h2o|liquid',
+    material: 'h2o',
+    phase: 'liquid',
+    resolution: 16,
+    isolation: 80,
+    subtract: 24,
+    radiusNorm: 0.2,
+    particleRadiusScale: 0.75,
+    transparencyClassId: 2,
+    depthWriteFlag: 0
+  }]);
+
+  assert.equal(table.records[8], -0.75);
+  assert.equal(table.records[14], 2);
+  assert.equal(table.records[15], 0);
+  assert.equal(table.metadata[0].radiusNorm, 0.2);
+  assert.equal(table.metadata[0].particleRadiusScale, 0.75);
+  assert.equal(table.metadata[0].particleRadiusFloorNorm, Math.sqrt(0.75 / (16 * 16) + 0.000001));
+});
+
+test('SPH render field physical-radius mode follows each retained particle radius', () => {
+  const materialId = stableOpticalMaterialId('h2o');
+  const renderRowsForRadius = (particleRadiusM, positionM = 0.5, liquidWeight = 1) => {
+    const rows = new Float32Array(SPH_GPU_RENDER_ROW_FLOATS);
+    rows.set([
+      positionM, positionM, positionM, 1,
+      materialId, GPU_PHASE_IDS.liquid, 300, 1,
+      1000, 1 - liquidWeight, 1, 0,
+      (4 * Math.PI * particleRadiusM ** 3) / 3,
+      particleRadiusM,
+      1,
+      0,
+      0,
+      0, 0, 0
+    ]);
+    return rows;
+  };
+  const surfaceTable = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'h2o|h2o|liquid',
+    material: 'h2o',
+    phase: 'liquid',
+    resolution: 32,
+    isolation: 80,
+    subtract: 24,
+    // Deliberately unrelated legacy fallback: particle-radius mode must make
+    // the retained row radius authoritative for particle contributions.
+    radiusNorm: 0.3,
+    particleRadiusScale: 1
+  }]);
+  const activeCellCount = (particleRadiusM, positionM = 0.5, liquidWeight = 1) => {
+    const field = buildSphRenderFieldCpu({
+      renderRows: renderRowsForRadius(particleRadiusM, positionM, liquidWeight),
+      surfaceTable,
+      fieldPadding: 0.22,
+      refEdgeM: 1
+    });
+    let count = 0;
+    for (let offset = 0; offset < field.fieldRows.length; offset += SPH_GPU_RENDER_FIELD_CELL_FLOATS) {
+      if (field.fieldRows[offset] >= 80) count += 1;
+    }
+    return count;
+  };
+
+  const smallCount = activeCellCount(0.05);
+  const largeCount = activeCellCount(0.2);
+  // Put a sub-cell particle halfway between samples on all three axes. The
+  // one-cell conservative voxel floor must keep it extractable; the previous
+  // aligned-only test could not detect this aliasing hole.
+  const halfCellNormalized = 0.5 + 0.5 / 32;
+  const halfCellPositionM = (halfCellNormalized - 0.22) / (1 - 2 * 0.22);
+  const offGridSmallCount = activeCellCount(0.04, halfCellPositionM);
+  const halfWeightOffGridCount = activeCellCount(0.04, halfCellPositionM, 0.5);
+  const tenthWeightOffGridCount = activeCellCount(0.04, halfCellPositionM, 0.1);
+  assert.ok(smallCount > 0);
+  assert.ok(offGridSmallCount > 0);
+  assert.ok(halfWeightOffGridCount > 0);
+  assert.ok(tenthWeightOffGridCount > 0);
+  assert.ok(largeCount > smallCount * 8);
+});
+
+test('SPH render field sparse proxy is strength-independent and matches the WGSL lattice bound', () => {
+  const resolution = 32;
+  const expectedFloor = Math.sqrt(0.75 / (resolution * resolution) + 0.000001);
+  const table = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'h2|h2|gas',
+    material: 'h2',
+    phase: 'gas',
+    resolution,
+    isolation: 80,
+    subtract: 24,
+    radiusNorm: 0.3,
+    // Exercise the public explicit-strength path; it must not create a
+    // CPU/GPU disagreement in the physical-radius alias proxy.
+    strength: 0.012345,
+    particleRadiusScale: 1
+  }]);
+
+  assert.equal(table.records[7], Math.fround(0.012345));
+  assert.equal(table.metadata[0].particleRadiusFloorNorm, expectedFloor);
+  assert.match(
+    sphRenderFieldWgsl,
+    /sqrt\(0\.75 \* inv_resolution \* inv_resolution \+ 0\.000001\)/
+  );
+});
+
 test('SPH render field CPU splats only matching material-phase rows', () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
@@ -1628,6 +1736,24 @@ test('SPH render field CPU splats only unplaced product-event mass', () => {
 
   assert.equal(field.productEventCount, 1);
   assert.ok(Math.max(...surfaces[0].field) > 20);
+
+  const physicalRadiusModeTable = buildSphRenderFieldSurfaceTable([{
+    ...table.metadata[0],
+    particleRadiusScale: 1
+  }]);
+  const physicalRadiusModeEventField = buildSphRenderFieldCpu({
+    renderRows: extracted.renderRows,
+    productEventRows,
+    productEventCount: 1,
+    surfaceTable: physicalRadiusModeTable,
+    fieldPadding: 0.22,
+    refEdgeM: 10
+  });
+  assert.deepEqual(
+    physicalRadiusModeEventField.fieldRows,
+    field.fieldRows,
+    'event-only fields retain surface-wide product strength in particle-radius mode'
+  );
 
   productEventRows[13] = 0;
   const visibleOnlyField = buildSphRenderFieldCpu({

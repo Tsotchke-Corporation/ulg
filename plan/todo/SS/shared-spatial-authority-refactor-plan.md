@@ -398,3 +398,110 @@ production-incomplete consumer claims.
 - [x] Working GPU cell-directory foundation and native probe green (`9d48c98`).
 - [ ] First same-epoch pre-integration production consumer migrated and old
   lookup removed.
+
+## Visual-Physics Restoration Checkpoint Before Slice 3
+
+The first production-consumer migration remains the next SS architecture
+slice, but it must start from trustworthy mechanics, phase transport, render
+scale, and reaction diagnostics. The recovery work below is deliberately a
+baseline repair; it does not claim that a production law consumes the shared
+spatial directory yet.
+
+- [x] Capture the retained GPU upload at time zero so initial visual evidence
+  cannot silently start after the first mechanics step.
+- [x] Make retained render-field extraction use each particle's physical,
+  `J`-adjusted radius instead of treating smoothing support as visible volume,
+  with the tight conservative 3-D point-sampling bound as a sparse voxel proxy.
+  The proxy is phase-weight aware so a fractional phase cannot lose the
+  guaranteed half-cell contribution after weighting. It prevents an
+  all-negative field, inflates under-resolved geometry to the sampling bound,
+  and is not an exact physical-radius surface. Preserve the positive-radius
+  legacy field path and opaque PBR/refraction draw contract.
+- [x] Separate excluded-volume position projection from pair-normal velocity
+  damping. Position overlap relaxation remains enabled; the new velocity
+  damping control defaults to zero and remains independently executable when
+  position relaxation is zero, so overlap correction does not erase water flow
+  implicitly.
+- [x] Count placed reaction progress from the gas-species ledger as well as
+  still-active product-event rows. Placement consumes/zeros event rows, so an
+  active-event count of zero is not evidence of no chemistry. Product and gas
+  snapshots are reduced independently before taking the larger event count, so
+  a zero product snapshot cannot mask a positive placed-gas ledger.
+- [x] Make time-zero evidence provenance fail closed: a candidate must be a
+  retained `webgpu-uploaded` state/thermo pair whose own metadata says
+  `step=0` and `time=0`; the harness reports the source values rather than
+  relabeling a later upload. Only numeric finite zero proves time zero;
+  missing, null, string, boolean, array, object, and non-finite metadata do not.
+- [x] Version the tagged render-field ABI as v1. Consumers that only understand
+  the v0 surface-wide radius lane reject the per-particle-radius sentinel;
+  retained-buffer handoff also rejects v0 or missing source schemas.
+- [x] Coerce native WebGPU surface presentation to its retained
+  `no-full-readback` render-field handoff, including when the caller requested
+  `auto`; compact summary readback can no longer silently bypass native
+  marching cubes.
+- [ ] Derive gas transport from a real drag/terminal-velocity closure before
+  adding fractional plateau or product-gas buoyancy. Repeatedly adding an
+  uncoupled acceleration cap without drag is not an admissible substitute.
+
+The final-code native water probe at
+`/tmp/ulg-ss-spatial-visual-native-final-v2/result.json` is green at
+`t=3.072 s`: all four requested retained checkpoints were captured, including
+the initial scene upload at exact `step=0`, `time=0`; retained handoff and the
+native visible consumer are accepted; opaque PBR refraction remains selected;
+and the run reports `maxSpeed=1.08636 m/s`, `minJ=0.981526`,
+`maxJ=1.000259`, zero browser/WebGPU issues, and no analysis issues. Its final
+pool is broad but still visibly bead/lobe textured. A separate every-batch
+sequence through `1.024 s` confirms motion while showing that the pool remains
+too cohesive. The same sequence at `alpha=0.03` is only marginally wider and
+still mound-like. Earlier `alpha=0`, `0.01`, and `0.02` long A/B runs sprayed or
+lifted the pool. Keep `0.04` as an explicit temporary stabilizer until a
+compression-only numerical term and closure-derived physical viscosity are
+available; do not reinterpret it as molecular viscosity or visual acceptance.
+
+The final-code sodium probe at
+`/tmp/ulg-ss-spatial-sodium-native-final-v2/result.json` also captured its exact
+time-zero upload and proved chemistry rather than merely inferring it: the
+reaction gate counted nine events, and the final authoritative checkpoint
+contained 15 NaOH particles (`1.87348 kg`) and four H2 particles
+(`0.0472152 kg`). Sodium remains visually and numerically rejected. Aggregate
+speed reaches `65.0116 m/s`, `J` reaches its `1000` cap, and the final frame is
+occluded by large merged lobe/boulder surfaces. This is not primarily sparse
+proxy inflation: the mounted `blob=1` path selects full physical particle
+radii, the point-sampling floor is inactive for the decoded final rows, and
+water positions really expand almost across the container. The coarse `96^3`
+field facets and merges those physical-radius carriers; the four H2 rows alone
+reach the `J=1000` cap while sampled water remains near `J=1`. A short causal
+A/B rejects a preset-only damping fix: `alpha=0.04` with reaction disabled is
+green (`1.17253 m/s`,
+`J=0.983976..1.008039`), while the same damping with reaction enabled still
+reaches `91.0991 m/s` and `J=1000`. Damping stabilizes the condensed carrier but
+does not close the reaction-created gas path, so the sodium override remains
+unchanged until per-phase mechanics evidence quantifies how the four cap-hit H2
+rows couple energy into the condensed carrier.
+At `0.256 s`, reaction-off and reaction-on controls are still near the same
+total kinetic energy (`1536 J` versus `1508 J`). By `0.512 s`, reaction-off is
+bounded at `2.43 m/s`, `J=1.036`, and `709 J`, whereas reaction-on reaches
+`62.56 m/s`, `J=1000`, and `33,976 J` with box-spanning water. The first
+physics audit therefore targets reaction-product placement/merge and its next
+mechanics refresh, with pair-normal separation damping treated as a secondary
+amplifier rather than the primary fix.
+
+Visible-loop repair outranks the first production-consumer migration. Before
+accepting Slice 3, close these observability/stability items in small reversible
+commits:
+
+1. add compact per-material/per-phase speed, `J`, rest-volume,
+   represented-volume, and cap-hit reductions;
+2. publish post-placement placed/merged/unplaced product-mass provenance;
+3. isolate and bound the condensed-contact energy injection between
+   `0.256 s` and `0.512 s`, including a manufactured multi-step contact test;
+4. keep field-resolution/radius-floor classification as a renderer diagnostic
+   follow-up rather than treating it as the current explosion fix;
+5. derive ambient-density drag and terminal velocity for gas-only products,
+   then couple buoyancy through that closure; and
+6. replace the broad fixed reaction radius with shared-SS support-surface
+   contact plus a small declared hysteresis when reaction migrates to the
+   canonical spatial epoch.
+
+Do not widen the reaction radius, globally change the water damping default,
+or treat a deliberately relaxed diagnostic threshold as scientific acceptance.

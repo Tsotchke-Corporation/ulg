@@ -1482,7 +1482,13 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       isolation,
       subtract,
       strength,
-      radiusNorm,
+      // Backward-compatible mode sentinel in a lane that no WGSL consumer
+      // previously read: positive radiusNorm keeps legacy surface-wide
+      // strength, while a negative value selects retained per-particle radius
+      // and carries its multiplier. Metadata below remains fully explicit.
+      Math.max(0, finiteNumber(descriptor.particleRadiusScale, 0)) > 0
+        ? -Math.max(0, finiteNumber(descriptor.particleRadiusScale, 0))
+        : radiusNorm,
       clamp(finiteNumber(color[0], 1), 0, 1),
       clamp(finiteNumber(color[1], 1), 0, 1),
       clamp(finiteNumber(color[2], 1), 0, 1),
@@ -1524,6 +1530,14 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       subtract,
       strength,
       radiusNorm,
+      particleRadiusScale: Math.max(0, finiteNumber(descriptor.particleRadiusScale, 0)),
+      // Physical-radius fields still need a conservative proxy when the
+      // requested isosurface is smaller than the farthest interior sample
+      // corner. sqrt(3/(4N^2) + kernelEpsilon) is the tight 3-D point-sampling
+      // bound for this lattice/kernel, not smoothing support or exact geometry.
+      particleRadiusFloorNorm: Math.max(0, finiteNumber(descriptor.particleRadiusScale, 0)) > 0
+        ? Math.sqrt(0.75 / (resolution * resolution) + 0.000001)
+        : 0,
       colorLinear: [
         clamp(finiteNumber(color[0], 1), 0, 1),
         clamp(finiteNumber(color[1], 1), 0, 1),
@@ -1650,6 +1664,15 @@ export function buildSphRenderFieldCpu({
   for (const surface of surfaceTable.metadata) {
     const resolution = surface.resolution;
     const supportNorm = Math.sqrt(Math.abs(surface.strength) / Math.max(surface.subtract, 1e-12));
+    const particleRadiusScale = Math.max(0, finiteNumber(surface.particleRadiusScale, 0));
+    const particleRadiusFloorNorm = Math.max(0, finiteNumber(surface.particleRadiusFloorNorm, 0));
+    const fieldSpan = 1 - 2 * fieldPadding;
+    const fieldRefEdgeM = Math.max(refEdgeM, 1e-12);
+    const particleRadiusNormScale = (particleRadiusScale * fieldSpan) / fieldRefEdgeM;
+    const particleSupportMultiplier = Math.sqrt(Math.max(
+      (surface.isolation + surface.subtract) / Math.max(surface.subtract, 1e-12),
+      0
+    ));
     for (let cellIndex = 0; cellIndex < surface.fieldCellCount; cellIndex += 1) {
       const xy = resolution * resolution;
       const z = Math.floor(cellIndex / xy);
@@ -1688,12 +1711,28 @@ export function buildSphRenderFieldCpu({
           );
           if (phaseWeight <= 0.003) continue;
           const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
+          const particleRadiusM = finiteNumber(renderRows[renderOffset + 13], 0);
+          // Phase weighting reduces metaball strength after radius selection.
+          // Scale the conservative lattice floor by 1/sqrt(weight) so every
+          // admitted transition contribution still reaches isolation at the
+          // worst half-cell sample instead of disappearing mid-transition.
+          const phaseAwareParticleRadiusFloorNorm = particleRadiusFloorNorm
+            / Math.sqrt(Math.max(phaseWeight, 1e-8));
+          const particleRadiusNorm = particleRadiusScale > 0 && particleRadiusM > 0
+            ? Math.max(particleRadiusM * particleRadiusNormScale, phaseAwareParticleRadiusFloorNorm)
+            : 0;
+          const particleStrength = particleRadiusNorm > 0
+            ? (surface.isolation + surface.subtract) * particleRadiusNorm ** 2
+            : surface.strength;
+          const particleSupportNorm = particleRadiusNorm > 0
+            ? particleRadiusNorm * particleSupportMultiplier
+            : supportNorm;
           const accumulated = accumulateMetaballSample({
             cell,
             position: particle,
-            strength: surface.strength * phaseWeight,
+            strength: particleStrength * phaseWeight,
             subtract: surface.subtract,
-            supportNorm,
+            supportNorm: particleSupportNorm,
             color: surface.colorLinear,
             density: pass.density,
             palette: pass.palette,

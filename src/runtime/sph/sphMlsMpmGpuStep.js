@@ -65,6 +65,7 @@ import {
   MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
   MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
   encodeMlsMpmParticleSeparationPasses,
   maxSeparationRestDistanceM,
@@ -3639,6 +3640,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       boxDimsM: dims,
       relaxation: mlsMpmParticleState?.particleSeparationRelaxation
         ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+      normalVelocityDamping: mlsMpmParticleState?.particleSeparationVelocityDamping
+        ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
       maxPairRestDistanceM: maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount),
       gridSpacingM: gridSpec.gridSpacingM
     });
@@ -4296,6 +4299,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         boxDimsM: dims,
         relaxation: mlsMpmParticleState?.particleSeparationRelaxation
           ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+        normalVelocityDamping: mlsMpmParticleState?.particleSeparationVelocityDamping
+          ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
         maxPairRestDistanceM: separationMaxPairRestDistanceM,
         // Thermal conduction shares these bins; its clamped scan radius (<=3)
         // must cover the 2h support, so cells are at least 2h/3.

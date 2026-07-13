@@ -752,7 +752,7 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
 });
 
 test('SPH GPU render field ABI exposes material-phase surface fields', () => {
-  assert.equal(ULG_SPH_GPU_RENDER_FIELD_SCHEMA, 'peercompute.ulg.sph-gpu-render-field.v0');
+  assert.equal(ULG_SPH_GPU_RENDER_FIELD_SCHEMA, 'peercompute.ulg.sph-gpu-render-field.v1');
   assert.equal(
     ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
     'peercompute.ulg.sph-material-interface-source-field.v0'
@@ -777,7 +777,7 @@ test('SPH GPU render field ABI exposes material-phase surface fields', () => {
   );
   assert.equal(
     ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
-    'peercompute.ulg.sph-gpu-render-field-execution.v0'
+    'peercompute.ulg.sph-gpu-render-field-execution.v1'
   );
   assert.equal(
     ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
@@ -820,7 +820,7 @@ test('SPH GPU render field ABI exposes material-phase surface fields', () => {
     'strength:f32'
   ]);
   assert.deepEqual(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.slice(8), [
-    'radiusNorm:f32',
+    'radiusNormOrNegativeParticleRadiusScale:f32',
     'colorLinearR:f32',
     'colorLinearG:f32',
     'colorLinearB:f32',
@@ -966,6 +966,10 @@ test('SPH GPU render field ABI exposes material-phase surface fields', () => {
   assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(4\) var<storage, read> product_events/);
   assert.match(sphRenderFieldWgsl, /fn product_event_row3/);
   assert.match(sphRenderFieldWgsl, /event_unplaced_mass_kg <= 0\.0/);
+  assert.match(sphRenderFieldWgsl, /fn render_row3/);
+  assert.match(sphRenderFieldWgsl, /particle_radius_scale = select\(0\.0, -s2\.x, s2\.x < 0\.0\)/);
+  assert.match(sphRenderFieldWgsl, /particle_radius_norm_scale = particle_radius_scale \* span \/ ref_edge/);
+  assert.match(sphRenderFieldWgsl, /row3\.y \* particle_radius_norm_scale/);
   assert.match(sphRenderFieldWgsl, /material_id/);
   assert.match(sphRenderFieldWgsl, /phase_id/);
   assert.match(sphMaterialInterfaceCandidatesWgsl, /struct InterfaceCandidateParams/);

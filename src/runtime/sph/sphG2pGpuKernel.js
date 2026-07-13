@@ -20,11 +20,15 @@ import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmitt
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 
-export { MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT };
+export {
+  MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT
+};
 import { MLS_MPM_GPU_GRID_VELOCITY_FLOATS } from './sphGridUpdateGpuKernel.js';
 
 export {
@@ -199,8 +203,8 @@ function separationPhaseClass(mechanics, mechanicsOffset) {
  * overlap never registers as compression. This pass projects pair overlap
  * out at the particle level: pair rest distance derives from each particle's
  * rest volume (cbrt(V0)), corrections are inverse-mass weighted and
- * symmetric (momentum/COM conserving), and approaching normal velocity is
- * removed inelastically. Solid-solid pairs are skipped (the elastic
+ * symmetric (momentum/COM conserving). Optional pair-normal velocity damping
+ * is independent of the position projection. Solid-solid pairs are skipped (the elastic
  * constitutive law owns intra-lattice repulsion); gas is skipped (gas EOS
  * owns compressibility). Mutates state in place.
  */
@@ -210,10 +214,12 @@ export function applyMlsMpmParticleSeparationCpu({
   particleCount,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  normalVelocityDamping = MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   gridSpacingM = 0
 } = {}) {
-  const alpha = finiteNumber(relaxation, 0);
-  if (!(alpha > 0) || !(particleCount > 1)) return { correctedCount: 0 };
+  const alpha = Math.max(finiteNumber(relaxation, 0), 0);
+  const beta = clamp(finiteNumber(normalVelocityDamping, 0), 0, 1);
+  if (!(alpha > 0 || beta > 0) || !(particleCount > 1)) return { correctedCount: 0 };
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const corrections = new Float64Array(particleCount * 6);
   const stateStride = SPH_GPU_PARTICLE_STATE_FLOATS;
@@ -264,7 +270,7 @@ export function applyMlsMpmParticleSeparationCpu({
         + (state[iState + 5] - state[oState + 5]) * nY
         + (state[iState + 6] - state[oState + 6]) * nZ;
       if (approach < 0) {
-        const impulse = -share * approach;
+        const impulse = -beta * share * approach;
         dvX += impulse * nX; dvY += impulse * nY; dvZ += impulse * nZ;
       }
     }
@@ -547,7 +553,9 @@ export function reconstructMlsMpmG2pCpu({
   liquidWallDampingAlpha = mlsMpmParticleState?.liquidWallDampingAlpha ?? 0,
   liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
   particleSeparationRelaxation = mlsMpmParticleState?.particleSeparationRelaxation
-    ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
+    ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  particleSeparationVelocityDamping = mlsMpmParticleState?.particleSeparationVelocityDamping
+    ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT
 } = {}) {
   assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
   const dtSeconds = finiteNumber(dt, 0);
@@ -704,6 +712,7 @@ export function reconstructMlsMpmG2pCpu({
     particleCount: sphParticleState.particleCount,
     boxDimsM: dims,
     relaxation: particleSeparationRelaxation,
+    normalVelocityDamping: particleSeparationVelocityDamping,
     gridSpacingM: gridUpdate.gridSpacingM
   });
 
@@ -835,13 +844,15 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   particleCount,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  normalVelocityDamping = MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   maxPairRestDistanceM = 0,
   minCellSizeM = 0,
   gridSpacingM = 0,
   scratch = null
 } = {}) {
-  const alpha = finiteNumber(relaxation, 0);
-  if (!(alpha > 0) || !(particleCount > 1) || !stateBuffer || !mechanicsBuffer) {
+  const alpha = Math.max(finiteNumber(relaxation, 0), 0);
+  const beta = clamp(finiteNumber(normalVelocityDamping, 0), 0, 1);
+  if (!(alpha > 0 || beta > 0) || !(particleCount > 1) || !stateBuffer || !mechanicsBuffer) {
     return { enabled: false, transientBuffers: scratch?.transientBuffers || [], scratch };
   }
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -865,7 +876,7 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     view.setFloat32(8, dims[0], true);
     view.setFloat32(12, dims[1], true);
     view.setFloat32(16, dims[2], true);
-    view.setUint32(20, 1, true);
+    view.setFloat32(20, beta, true);
     view.setUint32(24, binPlan.nx >>> 0, true);
     view.setUint32(28, binPlan.ny >>> 0, true);
     view.setUint32(32, binPlan.nz >>> 0, true);
@@ -908,7 +919,7 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     };
   }
   const binFillPipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-bin-fill.v2',
+    cacheKey: 'ulg-mls-mpm-particle-separation-bin-fill.v3',
     label: 'ulg-mls-mpm-particle-separation-bin-fill',
     code: mlsMpmParticleSeparationBinFillWgsl,
     entryPoint: 'main',
@@ -920,7 +931,7 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     ]
   });
   const computePipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-compute.v3',
+    cacheKey: 'ulg-mls-mpm-particle-separation-compute.v4',
     label: 'ulg-mls-mpm-particle-separation-compute',
     code: mlsMpmParticleSeparationComputeWgsl,
     entryPoint: 'main',
@@ -933,7 +944,7 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     ]
   });
   const applyPipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-apply.v2',
+    cacheKey: 'ulg-mls-mpm-particle-separation-apply.v3',
     label: 'ulg-mls-mpm-particle-separation-apply',
     code: mlsMpmParticleSeparationApplyWgsl,
     entryPoint: 'main',
@@ -1007,6 +1018,8 @@ export async function runMlsMpmG2pWebGpu({
   liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
   particleSeparationRelaxation = mlsMpmParticleState?.particleSeparationRelaxation
     ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  particleSeparationVelocityDamping = mlsMpmParticleState?.particleSeparationVelocityDamping
+    ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   schroederLevelAssignment = null,
   schroederActiveNodeList = null,
   schroederSelectedLevel = null,
@@ -1142,6 +1155,7 @@ export async function runMlsMpmG2pWebGpu({
       particleCount: sphParticleState.particleCount,
       boxDimsM: dims,
       relaxation: particleSeparationRelaxation,
+      normalVelocityDamping: particleSeparationVelocityDamping,
       maxPairRestDistanceM: maxSeparationRestDistanceM(
         mlsMpmParticleState.mechanics,
         sphParticleState.particleCount
@@ -1329,6 +1343,8 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
   particleSeparationRelaxation = mlsMpmParticleState?.particleSeparationRelaxation
     ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  particleSeparationVelocityDamping = mlsMpmParticleState?.particleSeparationVelocityDamping
+    ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -1352,7 +1368,8 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
         internalPressureScale,
         liquidWallDampingAlpha,
         liquidWallDampingDistanceM,
-        particleSeparationRelaxation
+        particleSeparationRelaxation,
+        particleSeparationVelocityDamping
       });
     }
     return cpuReference;
@@ -1400,6 +1417,7 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       liquidWallDampingAlpha,
       liquidWallDampingDistanceM,
       particleSeparationRelaxation,
+      particleSeparationVelocityDamping,
       retainOutputParticleBuffers,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });

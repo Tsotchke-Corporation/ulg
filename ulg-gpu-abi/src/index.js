@@ -34,8 +34,11 @@ export const ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-g
 export const ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-step-parity.v0';
 export const ULG_SPH_GPU_RENDER_ROWS_SCHEMA = 'peercompute.ulg.sph-gpu-render-rows.v0';
 export const ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-rows-execution.v0';
-export const ULG_SPH_GPU_RENDER_FIELD_SCHEMA = 'peercompute.ulg.sph-gpu-render-field.v0';
-export const ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-field-execution.v0';
+// v1 admits the negative surface-row radius sentinel used for retained
+// per-particle physical-radius sampling. v0 consumers must reject this schema
+// rather than interpreting the tagged value as a legacy radiusNorm.
+export const ULG_SPH_GPU_RENDER_FIELD_SCHEMA = 'peercompute.ulg.sph-gpu-render-field.v1';
+export const ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-field-execution.v1';
 export const ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-render-field-surface-summary.v0';
 export const ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-field-surface-summary-execution.v0';
 export const ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA = 'peercompute.ulg.sph-material-interface-source-field.v0';
@@ -511,7 +514,10 @@ export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'isolation:f32',
   'subtract:f32',
   'strength:f32',
-  'radiusNorm:f32',
+  // Tagged union introduced by render-field schema v1: non-negative values
+  // are the legacy surface radiusNorm; negative values are
+  // -particleRadiusScale and select per-particle physical-radius sampling.
+  'radiusNormOrNegativeParticleRadiusScale:f32',
   'colorLinearR:f32',
   'colorLinearG:f32',
   'colorLinearB:f32',

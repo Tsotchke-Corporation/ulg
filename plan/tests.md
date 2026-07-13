@@ -13909,3 +13909,159 @@ Direct-resident queue-fence split, 2026-06-30 19:25 AKDT:
     progress event was emitted, and Chromium entered uninterruptible sleep
     before page-evaluate code ran. Reset the headless-browser/GPU state before
     trusting live WebGPU benchmark results from this host.
+
+SS visual/physics baseline restoration, 2026-07-13 AKDT:
+
+- Focused changed-runtime and ABI suite:
+  `node --test tests/sphRenderGpuKernel.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseDemoMountRemoteRefresh.test.mjs tests/nativeSurfaceHarness.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs`
+  - Passed: `280/280` after the final thermal-transport revert.
+- Focused harness/render/WGSL follow-up:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/sphRenderGpuKernel.test.mjs tests/webgpuKernelAbi.test.mjs`
+  - Passed: `91/91`.
+- Final complete regression and build gates are recorded below after their
+  post-edit rerun.
+- Complete regression gate: `npm test`
+  - Passed `1086/1089`, zero failures, three intentional opt-in long-horizon
+    skips, duration `192786 ms`.
+- Production build: `npm run build`
+  - Passed with 143 transformed modules. The pre-existing large-chunk warning
+    remains.
+- Exact time-zero retained checkpoint smoke:
+  `/tmp/ulg-ss-spatial-t0-final/result.json`
+  - Status `good`; both requested checkpoints captured.
+  - Initial checkpoint source is `scene-initial-particle-upload`, with
+    `sourceStep=0`, `sourceTimeS=0`, `1216 kg` H2O, and zero kinetic energy.
+- Final-code native water long run:
+  `/tmp/ulg-ss-spatial-visual-native-final-v2/result.json`
+  - Status `good`, no issues, all four retained GPU checkpoints captured,
+    retained surface handoff and visible GPU consumer accepted, opaque
+    PBR/refraction selected, `maxSpeed=1.086359 m/s`, `minJ=0.981526`,
+    `maxJ=1.000259`, and a broad floor pool at `3.072 s`.
+  - Native indirect draw passed with `vertexCount=18180`; browser pixel
+    validation observed 812 distinct colors and no browser/WebGPU errors.
+  - Final composited frame:
+    `/tmp/ulg-ss-spatial-visual-native-final-v2/frames/0005-b012-post-probe-composited-page.png`.
+- Sequential final-code water run:
+  `/tmp/ulg-ss-spatial-water-sequence-final/result.json`
+  - Status `good`; nine of nine requested GPU checkpoints captured at exact
+    times from `0` through `1.024 s`, with `maxSpeed=1.086359 m/s`,
+    `minJ=0.996426`, and `maxJ=1.000259`.
+  - Direct inspection of batches 1, 4, and 8 confirms downward motion and
+    spreading, but the final surface remains a cohesive mound with visible
+    bead/lobe texture. This is motion evidence, not smooth-water acceptance.
+- Same-code `alpha=0.03` sequential A/B:
+  `/tmp/ulg-ss-spatial-water-sequence-av003/result.json`
+  - Status `good`, `maxSpeed=1.347315 m/s`, `minJ=0.996133`, and
+    `maxJ=1.000279`; direct frame comparison is only marginally wider at
+    `1.024 s`, so this does not justify a default change.
+- Same-seed water artificial-viscosity A/B at `3.072 s`:
+  - `alpha=0`: `maxSpeed=15.67 m/s`, full-box spray.
+  - `alpha=0.01`: `maxSpeed=10.42 m/s`, suspended spray.
+  - `alpha=0.02`: `maxSpeed=3.87 m/s`, raised/toroidal pool.
+  - `alpha=0.03`: `maxSpeed=1.88 m/s`, stable flat pool.
+  - The current global `alpha=0.04` remains the accepted temporary water
+    stabilizer. No physical-viscosity or performance claim is made from it.
+- Final-code sodium production-preset evidence (`alpha=0`):
+  `/tmp/ulg-ss-spatial-sodium-native-final-v2/result.json`
+  - All four requested GPU checkpoints captured, including the initial scene
+    upload at exact `step=0`, `time=0`, and zero kinetic energy.
+  - Reaction evidence reports `maxReactionEventsTotal=9` and a satisfied gate.
+    Final authoritative inventory contains 27 Na, 15 NaOH, four H2, and 125
+    H2O live particles; NaOH mass is `1.87348 kg` and H2 mass is
+    `0.0472152 kg`.
+  - Native indirect draw and browser pixel validation pass with
+    `vertexCount=105708`, 3614 distinct center-crop colors, and no
+    browser/WebGPU errors.
+  - Overall status remains `bad`: `maxSpeed=65.0116 m/s` and `maxJ=1000`.
+    Direct inspection shows large lobe/boulder surfaces occluding the scene;
+    chemistry evidence is valid, but physics and product geometry are not.
+  - Decoded retained rows and the mounted URL path disprove sparse-floor
+    inflation as the primary cause: `blob=1` selects physical radius scale
+    `1`, final water and NaOH radii stay above the `96^3` sampling floor, water
+    locations expand almost across the box, and exactly four H2 rows reach the
+    gas `J=1000` cap. The coarse field facets/merges that real expansion.
+- Sodium short causal A/B at `0.768 s`:
+  - Existing `alpha=0`, reaction-on checkpoints show the liquid/grid energy
+    burst and H2 outlier: global `62.5602 m/s` at `0.512 s`, with H2 RMS speed
+    `56.21 m/s`, while water and sodium carry most of the total kinetic energy.
+  - `/tmp/ulg-ss-spatial-sodium-ab-av004-reaction/result.json` keeps products
+    and greatly reduces condensed kinetic energy, but still fails at
+    `maxSpeed=91.0991 m/s`, `maxJ=1000`; H2 remains the speed outlier.
+  - `/tmp/ulg-ss-spatial-sodium-ab-av004-no-reaction/result.json` is green at
+    `maxSpeed=1.17253 m/s`, `minJ=0.983976`, `maxJ=1.008039` with only Na and
+    H2O. Reaction-created gas mechanics, not undamped liquid alone, are the
+    remaining cap-hit path.
+  - A same-seed default-damping differential is still nearly matched at
+    `0.256 s` (`1536 J` reaction-off versus `1508 J` reaction-on). At
+    `0.512 s`, reaction-off remains bounded at `2.43 m/s`, `J=1.036`, and
+    `709 J`, while reaction-on reaches `62.56 m/s`, `J=1000`, and `33,976 J`
+    with water spanning the box. `sepVel=1` reduces reaction-on energy to
+    `20,030 J` but does not prevent the expansion.
+
+Hardened SS baseline follow-up, 2026-07-13 AKDT:
+
+- Focused hardening suite:
+  `node --test tests/sphG2pGpuKernel.test.mjs tests/sphRenderGpuKernel.test.mjs tests/nativeSurfaceHarness.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphAuthoritativeGpuCheckpoint.test.mjs`
+  - Passed `263/263`.
+- Native harness and renderer follow-up after the automatic readback coercion:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed `127/127`.
+- Fresh native water long run with
+  `ULG_PROBE_RENDER_READBACK_MODE=auto`:
+  `/tmp/ulg-ss-spatial-water-visual-hardened/result.json`
+  - Status `good`; exact `step=0,time=0` provenance is verified; all four
+    authoritative checkpoints were captured; final time is `3.072 s`;
+    `maxSpeed=1.086359 m/s`; `J=0.981526..1.000259`.
+  - `renderFieldReadback=false`, native marching-cubes budget active, retained
+    extension surface buffers ready, native consumer ready, browser pixel
+    validation passed with 1265 distinct center-crop colors, and no issues.
+  - Direct final-frame inspection confirms a broad but bead/lobe-textured pool.
+- Fresh every-batch native water sequence:
+  `/tmp/ulg-ss-spatial-water-sequence-hardened/result.json`
+  - Status `good`; exact time-zero provenance is verified; final time is
+    `1.024 s`; `maxSpeed=1.086359 m/s`; `J=0.996547..1.000259`.
+  - Direct inspection of all four resident frames confirms downward motion and
+    spreading. The retained surface remains square-shouldered and mound-like,
+    so this passes motion/PBR/provenance gates but not smooth-water acceptance.
+- Complete post-hardening regression: `npm test`
+  - Passed `1088/1091`, zero failures, three intentional opt-in skips,
+    duration `178176 ms`. The final strict numeric-type predicate edit landed
+    while this broad suite was running, so the focused post-edit gate below is
+    the direct authority for that predicate.
+- Production build: `npm run build`
+  - Passed with 143 transformed modules. The pre-existing large-chunk warning
+    remains.
+- Syntax and whitespace gates:
+  `git diff --check` plus `node --check` for the changed probe, reaction helper,
+  G2P, render-field, and scene modules.
+  - Passed.
+- Fail-closed provenance/schema follow-up:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed `128/128`.
+  - The provenance test executes the predicate extracted from the actual probe
+    source and rejects null, undefined, empty/whitespace/numeric strings,
+    booleans, arrays, objects, non-finite numbers, and nonzero numbers.
+  - Direct handoff tests reject both v0 and missing retained render-field
+    schemas before native extraction.
+- Post-fix native smoke:
+  `/tmp/ulg-ss-spatial-water-failclosed-smoke/result.json`
+  - Status `good`; exact time-zero provenance verified; automatic native
+    no-full handoff active; `renderFieldReadback=false`; retained native draw
+  ready with 7,992 indirect vertices; browser pixel validation passed; no
+  analysis issues.
+- Final strict-type native smoke with the same validated Vulkan/ANGLE launch:
+  `/tmp/ulg-ss-spatial-water-final-strict-smoke-v2/result.json`
+  - Status `good`; two of two authoritative checkpoints captured, including
+    numeric upload-owned `step=0,time=0`; automatic render readback retained
+    the native no-full path; browser pixel validation passed; all four captured
+    frames were nonblank; `maxSpeed=1.086359 m/s` and
+    `J=0.998454..1.000047`; no analysis issues.
+  - Direct inspection confirms the expected visible descending water blocks.
+    This short run proves the final evidence/render route, not smooth-water
+    shape acceptance.
+- A preceding launch without the required Vulkan/ANGLE flags is intentionally
+  rejected at
+  `/tmp/ulg-ss-spatial-water-final-strict-smoke/result.json`: Chromium lost its
+  external WebGPU instance, native readback failed, and canvas captures were
+  transparent. It is retained as harness-backend failure evidence and is not
+  counted as a source regression.

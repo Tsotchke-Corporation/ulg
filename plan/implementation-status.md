@@ -3,43 +3,41 @@
 ## Current Focus - 2026-07-13 AKDT
 
 Branch `ss-spatial-authority-refactor` starts at verified recovery checkpoint
-`bdd3eee`. Slice 2 of
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md` now has a standalone,
-caller-owned GPU spatial epoch that emits one particle membership key, builds a
-compact unique cell directory/CSR, publishes reverse particle-to-cell mapping
-and fail-closed capacity evidence, and changes no production consumer.
-Slice 2 is durably committed as `9d48c98` and ICC-verified; current work is
-Slice 3, the first same-epoch production-consumer migration.
+`bdd3eee`; standalone SS spatial epoch Slice 2 is durably committed as
+`9d48c98`. Slice 3 remains the first same-epoch production-consumer migration,
+but visible-loop repair currently outranks it.
 
-Slice 2 is now executable and native-green. The v1 GPU header carries device,
-lane, lease, source-family/storage, tick/substep, and membership epochs. A
-caller-owned runtime emits exact keys, runs persistent variable-count radix/
-scan/unique, and assembles stable cell CSR plus `particleToCell` into two
-complete fence-safe arenas. It never creates an encoder, submits, maps, or
-claims host completion. Focused ABI/lifecycle and primitive tests pass 28/28.
-The native Vulkan WebGPU probe passes 35/35: bounded one-word and exact five-word paths
-produce identical keys/CSR, while invalid rows and atlas/cell overflow publish
-zero consumer dispatch. It also proves exact rejection of a near-integral
-source identity, a 4,097-row multilevel scan with forced 2-D dispatch, fenced
-same-arena reuse at 513 rows, and an admitted empty epoch, with no validation,
-compilation, or uncaptured errors.
-The complete regression suite is green at 1,079 passed / 3 intentional opt-in
-skips / 0 failed, and the production build passes (143 modules; existing large
-chunk warning only).
+The in-flight checkpoint separates excluded-volume position projection from
+pair-normal velocity damping, uses retained per-particle `J`-adjusted render
+radii with an explicitly conservative sparse sampling proxy, fixes grouped
+reaction-event accounting, and makes the native harness capture a real retained
+GPU reduction at exact `step=0`, `time=0`. The 3.072-second water run is green:
+`maxSpeed=1.08636 m/s`, `minJ=0.981526`, `maxJ=1.000259`, no browser/WebGPU
+issues, retained native PBR/refraction accepted, and all requested checkpoints
+captured. Sequential frames prove motion, but water remains too cohesive and
+bead/lobe textured; the temporary `0.04` artificial-viscosity stabilizer is not
+physical viscosity.
 
-The caller-owned GPU radix/scan/unique primitive is isolated on this branch:
-its focused plan/encoding/residency tests include bounded variable-count scan
-parameter caching, exact parameter-write/clear telemetry, portable 16-KiB
-workgroup-storage admission, and discard/fence-only retained-slot lifecycle. It
-publishes the exclusive unique-head prefix;
-the directory derives each true group from the next prefix without adding a
-ninth storage binding or another scan.
-
-Next: migrate one same-epoch pre-integration consumer (pressure/contact broad
-phase or mechanics node activation) and remove its old lookup in the same
-slice. Do not append another descriptor chain to
-`schroederHierarchyGpu.js`, migrate a post-G2P law against stale positions, or
-port the abandoned neighborhood scheduler/candidate CSR.
+Sodium-water chemistry is now observable and correctly counted, but the scene
+is not accepted. The final-code probe captures time zero, counts nine events,
+and retains NaOH/H2 mass, yet reaches `65.0116 m/s`, hits `J=1000`, and is
+occluded by box-wide merged lobe/boulder surfaces. A decoded audit confirms
+that the mounted `blob=1` path uses full physical particle radii: the sparse
+point-sampling floor is inactive, water positions really expand almost across
+the container, and the four H2 rows are the `J=1000` cap hits. Next: add compact
+per-material and per-phase speed/J/volume reductions plus post-placement
+product provenance. A short
+A/B proves `alpha=0.04` without reaction is green (`1.17253 m/s`,
+`J=0.983976..1.008039`), but reaction-on still reaches `91.0991 m/s` and
+`J=1000`; changing the sodium damping preset alone is not a fix. Use the new
+reductions to isolate the `0.256..0.512 s` condensed-contact energy injection
+before implementing drag/terminal-velocity closure or changing render policy.
+The decisive same-seed reaction-off control remains bounded at `0.512 s`
+(`2.43 m/s`, `J=1.036`, `709 J`), while reaction-on reaches `62.56 m/s`,
+`J=1000`, and `33,976 J`; both were near `1.5 kJ` at `0.256 s`.
+Do not add uncoupled fractional buoyancy, widen the
+reaction radius, globally relax acceptance thresholds, or start Slice 3 while
+the visible physics loop remains untrustworthy.
 
 Updated: 2026-06-20 native marching-cubes vertex-row budget, GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
@@ -6152,3 +6150,37 @@ Still open:
   browser-frame/native readback validation story is completed.
 - Continue moving renderer/physics synchronization and native presentation
   ownership toward the planned worker/engine split.
+
+## 2026-07-13 Status Update - Trusted Water Baseline Before SS Slice 3
+
+Current state:
+
+- Water mechanics now preserve the existing excluded-volume position
+  projection while defaulting pair-normal velocity damping to zero. The two
+  controls are independent in CPU and WGSL execution.
+- Retained render fields use J-adjusted per-particle physical radii under a v1
+  tagged ABI. The sparse lattice floor is phase-weight aware, and native WebGPU
+  mode always retains its no-full-readback handoff even when the caller asks
+  for automatic readback selection.
+- Probe time zero is accepted only from retained state/thermo buffers carrying
+  numeric, finite, upload-owned `step=0,time=0` metadata; null, strings,
+  booleans, arrays, objects, missing values, and non-finite numbers fail closed.
+  Retained render-field extraction likewise requires the v1 source
+  schema. Reaction progress compares separately grouped product and gas ledgers
+  so zero snapshots cannot hide placed events.
+- Fresh long and every-batch native water probes are green and visibly moving.
+  Direct frame inspection still rejects the square-shouldered, lobe-textured
+  pool as smooth-water acceptance.
+- A final one-batch Vulkan/ANGLE native smoke after the strict metadata type
+  gate is green at
+  `/tmp/ulg-ss-spatial-water-final-strict-smoke-v2/result.json`: both exact
+  checkpoints were captured, browser pixel validation passed, all canvas
+  frames were nonblank, and no analysis issues were reported.
+
+Still open:
+
+- Add compact per-material/per-phase speed, deformation, rest-volume,
+  represented-volume, and cap-hit evidence before changing sodium product or
+  gas mechanics.
+- Trace placed/merged/unplaced product mass through the first mechanics refresh
+  after reaction placement; sodium remains numerically and visually rejected.

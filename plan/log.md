@@ -41352,3 +41352,136 @@ Validation and review:
   audit. The scoped audit used `min_lines=600` because the only earlier default
   index-quality warning was the intentional 500-line JavaScript module made
   solely of exported WGSL template strings, not executable JavaScript symbols.
+
+## 2026-07-13 AKDT - Water Visual/Physics Baseline Restoration
+
+- Added a true time-zero retained-upload checkpoint to the native visual
+  harness. Final-only summary probes now explicitly materialize the initial
+  scene upload before the first reduction; later checkpoints cannot be borrowed
+  and relabeled as initial. The final Vulkan probes captured exact `step=0`,
+  `time=0` evidence with both retained buffers and zero initial kinetic energy.
+- Corrected reaction-progress accounting. Product inventory and gas ledger rows
+  are grouped by reaction identity, use the maximum product-term event count
+  inside each reaction, and sum across distinct reactions. Placed chemistry can
+  no longer be hidden by a later zero active-event count, while multiple gas
+  products cannot multiply one reaction.
+- Changed retained render-field sampling to use the per-particle physical,
+  `J`-adjusted render radius. Render-field schema v1 makes the fixed-width
+  surface-table lane a documented tagged union: non-negative values retain the
+  legacy surface-wide radius and negative values select per-particle scaling;
+  v0 consumers must reject it rather than misread the sentinel. A tight
+  conservative 3-D lattice bound prevents sparse all-negative fields, but
+  inflates under-resolved geometry and is explicitly not an exact surface. The
+  bound is divided by the square root of phase weight because field
+  contributions are subsequently phase weighted.
+- Split excluded-volume position relaxation from pair-normal velocity damping.
+  The existing `0.5` position correction remains; the new velocity damping
+  defaults to zero and is threaded through demo, mount, resident step, probe,
+  CPU reference, WGSL, and ABI tests. Both controls now execute independently;
+  `positionRelaxation=0` no longer disables nonzero velocity damping.
+- Hardened the evidence contracts found during baseline review. Initial
+  checkpoints require retained buffers plus upload-owned `step=0,time=0`
+  metadata; product and gas ledgers are grouped independently before their
+  event counts are compared; and the tagged render-field ABI is v1 so v0
+  consumers cannot accept the negative per-particle-radius sentinel.
+- Native WebGPU surface mode now coerces `auto` or full render-field readback to
+  the retained no-full handoff it requires. A fresh probe intentionally left
+  `ULG_PROBE_RENDER_READBACK_MODE=auto`; native marching cubes stayed active,
+  render-field and summary readback stayed off, and the visible consumer passed
+  browser pixel validation.
+- Rejected and removed the proposed fractional plateau buoyancy after review:
+  repeatedly applying an acceleration cap without drag or terminal velocity is
+  not a physical transport closure. Gas transport remains an open closure.
+- Final-code native water evidence at 3.072 seconds is green with a broad floor
+  pool, `maxSpeed=1.08636 m/s`, `minJ=0.981526`, `maxJ=1.000259`, four of four
+  authoritative GPU checkpoints captured, accepted retained handoff/visible
+  consumer, opaque PBR refraction, and no browser, WebGPU, visual-surface, or
+  analysis issues. The final composited frame is
+  `/tmp/ulg-ss-spatial-visual-native-final-v2/frames/0005-b012-post-probe-composited-page.png`.
+- The every-batch sequence in
+  `/tmp/ulg-ss-spatial-water-sequence-final/result.json` confirms advancing
+  motion through 1.024 seconds but remains mound-like and bead/lobe textured.
+  A same-code `alpha=0.03` sequence reaches `1.34732 m/s` instead of
+  `1.08636 m/s` and is only marginally wider, so it does not justify changing
+  the global default.
+- Artificial-viscosity A/B evidence rejected `alpha=0`, `0.01`, and `0.02` as
+  water defaults due to spray/lift. Kept the global `0.04` default as a
+  temporary stability policy; it is not physical water viscosity.
+- Final-code sodium evidence at 2.56 seconds captured all four requested GPU
+  checkpoints including time zero, counted nine reaction events, and ended
+  with 15 NaOH particles (`1.87348 kg`) plus four H2 particles
+  (`0.0472152 kg`). It remains rejected: `maxSpeed=65.0116 m/s`, `maxJ=1000`,
+  and large merged/lobed surfaces occlude the final frame. A decoded follow-up
+  corrected the first renderer hypothesis: mounted `blob=1` selects full
+  physical particle radii, so the point-sampling floor is inactive in this
+  capture. Water locations truly expand almost container-wide, while the four
+  H2 rows alone hit `J=1000`; the `96^3` field merely facets/merges the actual
+  expanded carriers. The next slice is compact per-material speed/J/volume
+  evidence plus placed-product provenance before any further visual or
+  gas-transport correction.
+- Sodium causal A/B at 0.768 seconds separated carrier damping from the
+  reaction-created gas failure. `alpha=0.04`, reaction disabled is green at
+  `maxSpeed=1.17253 m/s`, `J=0.983976..1.008039`. With reaction enabled the
+  condensed kinetic energy is strongly reduced, NaOH/H2 still grow, but the
+  global maximum worsens to `91.0991 m/s` and `J=1000`. Do not remove the
+  sodium `alpha=0` override as a standalone fix; add material/phase mechanics
+  reductions and audit product placement/merge plus the following mechanics
+  refresh before changing gas transport.
+- A same-seed reaction-on/off differential localizes the real expansion. Both
+  controls are near `1.5 kJ` at `0.256 s`; at `0.512 s`, reaction-off remains
+  bounded at `2.43 m/s`, `J=1.036`, and `709 J`, while reaction-on reaches
+  `62.56 m/s`, `J=1000`, and `33,976 J` with box-spanning water. Setting
+  separation velocity damping to `1` reduces the reaction-on energy to
+  `20,030 J` but does not prevent box-wide expansion. Prioritize product
+  placement/merge and the following mechanics refresh; contact damping is only
+  a secondary amplifier.
+- Final full regression passed `1086/1089` with zero failures and three
+  intentional opt-in skips in `192786 ms`.
+- Production build passed with 143 transformed modules; the existing large
+  bundle warning remains.
+
+## 2026-07-13 AKDT - Hardened Water Baseline Visual Recheck
+
+- Fresh native long evidence is green at
+  `/tmp/ulg-ss-spatial-water-visual-hardened/result.json`: exact verified time
+  zero, four of four authoritative checkpoints, `t=3.072 s`,
+  `maxSpeed=1.086359 m/s`, `J=0.981526..1.000259`, native retained surface
+  buffers, opaque PBR/refraction, and zero analysis/browser/WebGPU issues.
+- Fresh every-batch evidence is green at
+  `/tmp/ulg-ss-spatial-water-sequence-hardened/result.json`: exact verified
+  time zero, `t=1.024 s`, `maxSpeed=1.086359 m/s`, and
+  `J=0.996547..1.000259`. Direct inspection of batches one through four proves
+  falling and spreading motion, but also confirms a square-shouldered cohesive
+  mound and lobe texture. This is a trusted moving baseline, not smooth-water
+  visual acceptance.
+- The earlier failed hardened capture was a real harness-policy finding: native
+  mode plus `auto` selected compact render-field readback, which made the
+  surface budget inactive. The source now coerces native mode to the required
+  retained no-full handoff, and the fresh runs prove the repaired path rather
+  than hiding it with command-line overrides.
+- Final post-hardening regression passed `1088/1091` with zero failures and
+  three intentional opt-in skips in `178176 ms`. The last strict numeric-type
+  predicate edit overlapped that run; its direct post-edit focused gate passed
+  `128/128`. Production build passed with
+  143 transformed modules and only the existing large-chunk warning; syntax
+  checks and `git diff --check` passed.
+- An independent counterexample review found and closed two final fail-open
+  edges. JavaScript numeric coercion no longer lets null, strings, booleans,
+  arrays, objects, or non-finite upload metadata prove time zero, and retained
+  render-field handoff now requires the v1 source
+  schema before exposing density buffers to native extraction. Negative tests
+  cover null/empty/non-finite provenance plus v0/missing render-field schemas.
+- The post-fix native smoke at
+  `/tmp/ulg-ss-spatial-water-failclosed-smoke/result.json` is green: verified
+  exact time zero, automatic no-full native selection, no render-field
+  readback, retained native draw buffers, 7,992 indirect vertices, passed
+  browser pixels, and no analysis issues.
+- The final strict-type Vulkan/ANGLE native smoke at
+  `/tmp/ulg-ss-spatial-water-final-strict-smoke-v2/result.json` is also green:
+  two of two checkpoints including verified numeric time zero, all canvas
+  frames nonblank, passed browser pixels, `maxSpeed=1.086359 m/s`,
+  `J=0.998454..1.000047`, and no analysis issues. Direct inspection still reads
+  as descending faceted blocks, so this is route/provenance evidence rather
+  than smooth-water acceptance. A preceding run without the validated
+  Vulkan/ANGLE flags failed with an invalid external WebGPU instance and
+  transparent frames; it is a launch-backend control, not accepted evidence.

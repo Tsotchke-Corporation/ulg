@@ -3374,7 +3374,7 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   const renderFieldReady = resolveResidentSurfaceBufferHandoff({
     readbackMode: 'no-full-readback',
     surfaceDraw: {
-      sourceRenderFieldSchema: 'peercompute.ulg.sph-gpu-render-field.v0',
+      sourceRenderFieldSchema: 'peercompute.ulg.sph-gpu-render-field.v1',
       surfaceDrawReadback: false,
       surfaceDrawSummaryReadback: false,
       fullSurfaceDrawReadback: false,
@@ -3390,7 +3390,7 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   assert.equal(renderFieldReady.status, 'resident-render-field-buffer-direct-consumer-ready');
   assert.equal(renderFieldReady.ready, true);
   assert.equal(renderFieldReady.handoffKind, 'render-field-buffers');
-  assert.equal(renderFieldReady.directConsumerInputSchema, 'peercompute.ulg.sph-gpu-render-field.v0');
+  assert.equal(renderFieldReady.directConsumerInputSchema, 'peercompute.ulg.sph-gpu-render-field.v1');
   assert.equal(renderFieldReady.requiresSurfaceExtraction, true);
   assert.equal(renderFieldReady.surfaceExtractionInputKind, 'render-field-density-storage-buffer');
   assert.equal(
@@ -3407,6 +3407,34 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   assert.equal(renderFieldReady.renderFieldSurfaceBufferByteLength, 512);
   assert.equal(renderFieldReady.upperBoundVertexCount, 0);
   assert.equal(renderFieldReady.upperBoundTriangleCount, 0);
+
+  for (const sourceRenderFieldSchema of [
+    'peercompute.ulg.sph-gpu-render-field.v0',
+    null
+  ]) {
+    const incompatibleRenderField = resolveResidentSurfaceBufferHandoff({
+      readbackMode: 'no-full-readback',
+      surfaceDraw: {
+        sourceRenderFieldSchema,
+        surfaceDrawReadback: false,
+        surfaceDrawSummaryReadback: false,
+        fullSurfaceDrawReadback: false,
+        renderFieldRowsBufferRetained: true,
+        renderFieldRowsBufferByteLength: 2048,
+        renderFieldSurfaceBufferRetained: true,
+        renderFieldSurfaceBufferByteLength: 512
+      }
+    });
+    assert.equal(incompatibleRenderField.ready, false);
+    assert.equal(
+      incompatibleRenderField.status,
+      'resident-render-field-buffer-direct-consumer-blocked-schema'
+    );
+    assert.equal(incompatibleRenderField.handoffKind, null);
+    assert.equal(incompatibleRenderField.sourceRenderFieldSchema, sourceRenderFieldSchema);
+    assert.equal(incompatibleRenderField.renderFieldSchemaCompatible, false);
+    assert.match(incompatibleRenderField.reason, /render-field\.v1/);
+  }
 });
 
 test('SPH resident render source metadata keeps stale retained surfaces visible', () => {
@@ -4563,6 +4591,7 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     handoff: resolveResidentSurfaceBufferHandoff({
       readbackMode: 'no-full-readback',
       surfaceDraw: {
+        sourceRenderFieldSchema: 'peercompute.ulg.sph-gpu-render-field.v1',
         surfaceDrawReadback: false,
         surfaceDrawSummaryReadback: false,
         fullSurfaceDrawReadback: false,

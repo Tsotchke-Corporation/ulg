@@ -192,6 +192,9 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'lawv',
   'lawst',
   'blob',
+  'avAlpha',
+  'sep',
+  'sepVel',
   'bg',
   'residentAuto',
   'residentWorkers',
@@ -2195,6 +2198,7 @@ export async function mountSphPhaseDemoOverlay({
   const initialLiquidVelocityDiffusionAlpha = numericUrlOption('diffAlpha');
   const initialLiquidWallDampingAlpha = numericUrlOption('wallAlpha');
   const initialParticleSeparationRelaxation = numericUrlOption('sep');
+  const initialParticleSeparationVelocityDamping = numericUrlOption('sepVel', { max: 1 });
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -3003,6 +3007,9 @@ export async function mountSphPhaseDemoOverlay({
         : {}),
       ...(initialParticleSeparationRelaxation != null
         ? { mlsMpmParticleSeparationRelaxation: initialParticleSeparationRelaxation }
+        : {}),
+      ...(initialParticleSeparationVelocityDamping != null
+        ? { mlsMpmParticleSeparationVelocityDamping: initialParticleSeparationVelocityDamping }
         : {}),
       ...(initialHydrostaticInitialization != null
         ? { hydrostaticInitialization: initialHydrostaticInitialization }

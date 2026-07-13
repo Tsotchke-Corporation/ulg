@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mlsMpmG2pReconstructWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+import {
+  mlsMpmG2pReconstructWgsl,
+  mlsMpmParticleSeparationApplyWgsl,
+  mlsMpmParticleSeparationBinFillWgsl,
+  mlsMpmParticleSeparationComputeWgsl
+} from '../ulg-gpu-abi/src/wgsl.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -16,6 +21,7 @@ import {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+  applyMlsMpmParticleSeparationCpu,
   createMlsMpmG2pParityReport,
   reconstructMlsMpmG2pCpu,
   runMlsMpmG2pWebGpu,
@@ -97,6 +103,86 @@ function fixture({
     }
   };
 }
+
+function liquidSeparationPair() {
+  const state = new Float32Array(2 * 8);
+  state.set([2, 2, 2, 1, 1, 0, 0, 0], 0);
+  state.set([2.5, 2, 2, 1, -1, 0, 0, 0], 8);
+  const mechanics = new Float32Array(2 * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
+  for (let index = 0; index < 2; index += 1) {
+    const offset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
+    mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], offset);
+    mechanics[offset + 18] = 1;
+    mechanics[offset + 19] = 1;
+    mechanics[offset + 20] = 0;
+    mechanics[offset + 26] = 1;
+  }
+  return { state, mechanics };
+}
+
+test('excluded-volume projection separates position without implicitly erasing liquid velocity', () => {
+  const undamped = liquidSeparationPair();
+  const legacy = liquidSeparationPair();
+  const partial = liquidSeparationPair();
+  const velocityOnly = liquidSeparationPair();
+
+  applyMlsMpmParticleSeparationCpu({
+    ...undamped,
+    particleCount: 2,
+    relaxation: 0.5,
+    normalVelocityDamping: 0
+  });
+  applyMlsMpmParticleSeparationCpu({
+    ...legacy,
+    particleCount: 2,
+    relaxation: 0.5,
+    normalVelocityDamping: 1
+  });
+  applyMlsMpmParticleSeparationCpu({
+    ...partial,
+    particleCount: 2,
+    relaxation: 0.5,
+    normalVelocityDamping: 0.25
+  });
+  applyMlsMpmParticleSeparationCpu({
+    ...velocityOnly,
+    particleCount: 2,
+    relaxation: 0,
+    normalVelocityDamping: 1
+  });
+
+  assert.deepEqual(
+    [undamped.state[0], undamped.state[8]],
+    [legacy.state[0], legacy.state[8]],
+    'position projection is independent of velocity damping'
+  );
+  assert.deepEqual([undamped.state[4], undamped.state[12]], [1, -1]);
+  assert.deepEqual([legacy.state[4], legacy.state[12]], [0, 0]);
+  assert.deepEqual([partial.state[4], partial.state[12]], [0.75, -0.75]);
+  assert.deepEqual([velocityOnly.state[0], velocityOnly.state[8]], [2, 2.5]);
+  assert.deepEqual([velocityOnly.state[4], velocityOnly.state[12]], [0, 0]);
+  assert.equal(undamped.state[4] + undamped.state[12], 0);
+  assert.equal(partial.state[4] + partial.state[12], 0);
+});
+
+test('excluded-volume WGSL packs independent pair-normal velocity damping in the fixed uniform', () => {
+  for (const source of [
+    mlsMpmParticleSeparationBinFillWgsl,
+    mlsMpmParticleSeparationComputeWgsl,
+    mlsMpmParticleSeparationApplyWgsl
+  ]) {
+    assert.match(source, /normal_velocity_damping: f32/);
+    assert.match(
+      source,
+      /params\.relaxation <= 0\.0 && params\.normal_velocity_damping <= 0\.0/
+    );
+    assert.doesNotMatch(source, /params\.enabled/);
+  }
+  assert.match(
+    mlsMpmParticleSeparationComputeWgsl,
+    /dv = dv - params\.normal_velocity_damping \* share \* approach \* normal/
+  );
+});
 
 function webGpuNavigator() {
   return {

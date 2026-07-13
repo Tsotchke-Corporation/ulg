@@ -18,6 +18,7 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
   ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import {
@@ -3418,6 +3419,10 @@ export function resolveResidentSurfaceBufferHandoff({
     0,
     Math.round(Number(surfaceDraw?.renderFieldSurfaceBufferByteLength) || 0)
   );
+  const sourceRenderFieldSchema = surfaceDraw?.sourceRenderFieldSchema
+    ?? surfaceDraw?.renderFieldExecution?.schema
+    ?? null;
+  const renderFieldSchemaCompatible = sourceRenderFieldSchema === ULG_SPH_GPU_RENDER_FIELD_SCHEMA;
   const upperBoundVertexCount = Math.max(
     0,
     Math.floor(Number(surfaceDraw?.surfaceDrawGpuOnlyUpperBoundVertexCount) || 0),
@@ -3466,9 +3471,14 @@ export function resolveResidentSurfaceBufferHandoff({
     reason = 'surface draw summary readback was used; this is diagnostic/parity mode, not the direct hot path';
   } else if (!hasRetainedBuffers) {
     if (hasRetainedRenderFieldBuffers) {
-      status = 'resident-render-field-buffer-direct-consumer-ready';
-      reason = null;
-      handoffKind = 'render-field-buffers';
+      if (!renderFieldSchemaCompatible) {
+        status = 'resident-render-field-buffer-direct-consumer-blocked-schema';
+        reason = `retained render-field handoff requires ${ULG_SPH_GPU_RENDER_FIELD_SCHEMA}; received ${sourceRenderFieldSchema ?? 'missing schema'}`;
+      } else {
+        status = 'resident-render-field-buffer-direct-consumer-ready';
+        reason = null;
+        handoffKind = 'render-field-buffers';
+      }
     } else {
       status = 'resident-surface-buffer-direct-consumer-blocked-missing-retained-buffers';
       reason = 'retained draw/indirect/compact-vertex buffers or retained render-field/surface buffers are required';
@@ -3506,8 +3516,10 @@ export function resolveResidentSurfaceBufferHandoff({
     ready,
     handoffKind,
     directConsumerInputSchema: handoffKind === 'render-field-buffers'
-      ? (surfaceDraw?.sourceRenderFieldSchema ?? surfaceDraw?.renderFieldExecution?.schema ?? null)
+      ? sourceRenderFieldSchema
       : (surfaceDraw?.surfaceDrawSchema ?? surfaceDraw?.schema ?? null),
+    sourceRenderFieldSchema,
+    renderFieldSchemaCompatible,
     requiresSurfaceExtraction: handoffKind === 'render-field-buffers',
     surfaceExtractionInputKind,
     surfaceExtractionInputLayout: handoffKind === 'render-field-buffers'
@@ -24909,6 +24921,12 @@ fn fs_main() -> @location(0) vec4<f32> {
         RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
         resolvedMaxResolution
       );
+      const explicitSurfaceRadius = Number.isFinite(surfaceRadiusM);
+      const particleRadiusScale = explicitSurfaceRadius
+        ? 0
+        : surfaceRadiusScaleForRenderBatch(batch, radiusScale, {
+          explicitSurfaceRadius: false
+        });
       const radiusM = surfaceRadiusMForBatch(batch);
       const sparseRadiusFloorApplies = batch.count > 0
         && batch.count <= SPH_RENDER_FIELD_RADIUS_FLOOR_MAX_PARTICLES;
@@ -24974,6 +24992,12 @@ fn fs_main() -> @location(0) vec4<f32> {
         isolation: config.isolation,
         subtract: config.subtract,
         radiusNorm,
+        // Resident render rows already carry the current, J-adjusted physical
+        // particle radius. Use it for particle metaballs so smoothing length
+        // remains a physics-neighborhood support rather than inflating the
+        // visible liquid. A caller-supplied absolute surface radius keeps the
+        // legacy constant-strength path; unplaced product events do too.
+        particleRadiusScale,
         strength: (config.isolation + config.subtract) * radiusNorm * radiusNorm,
         colorLinear: averageBatchColor(batch),
         status: 1
@@ -26833,7 +26857,7 @@ fn fs_main() -> @location(0) vec4<f32> {
               : 'resident-overlay')))
       });
       if (
-        renderFieldExecution?.schema !== 'peercompute.ulg.sph-gpu-render-field.v0'
+        renderFieldExecution?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA
         || renderFieldExecution.backend !== 'webgpu'
         || !renderFieldExecution.fieldRowsBuffer
         || !renderFieldExecution.surfaceBuffer
@@ -28996,12 +29020,13 @@ fn fs_main() -> @location(0) vec4<f32> {
         : residentRenderFieldReadbackModeForSurfaceOverlay(surfaceOverlayPolicy.enabled);
       let renderFieldReadbackModeCoercionReason = null;
       if (
-        threeWebGpuSurfaceBufferRetainResidentHandoff
+        (threeWebGpuSurfaceBufferRetainResidentHandoff || shouldUseNativeWebGpuSurfaceConsumerBridge)
         && visibleRenderFieldReadbackMode !== RESIDENT_NO_FULL_READBACK_MODE
       ) {
         visibleRenderFieldReadbackMode = RESIDENT_NO_FULL_READBACK_MODE;
-        renderFieldReadbackModeCoercionReason =
-          'three-webgpu-surface-buffers request is retained as an engine direct-consumer handoff; render field stays GPU-resident';
+        renderFieldReadbackModeCoercionReason = shouldUseNativeWebGpuSurfaceConsumerBridge
+          ? 'native-webgpu-surface-consumer requires a retained no-full-readback render-field handoff'
+          : 'three-webgpu-surface-buffers request is retained as an engine direct-consumer handoff; render field stays GPU-resident';
       }
       const shouldAutoRetainSurfaceBufferHandoff = Boolean(
         requestedSurfaceDrawDiagnosticMode === 'auto'
@@ -29130,7 +29155,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             ? 'Three sphere bridge'
             : 'Three point bridge');
         renderFieldExecution = {
-          schema: 'peercompute.ulg.sph-gpu-render-field.v0',
+          schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
           backend: renderRowBridgeBackend,
           status: renderRowBridgeStatus,
           reason: shouldUseWebGpuRenderRowOverlayBridge
@@ -29552,7 +29577,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           suppressThreeSurfaceMeshesForResidentOverlay('resident-render-field-fallback-no-cpu-surface-geometry');
         }
         renderFieldExecution = {
-          schema: 'peercompute.ulg.sph-gpu-render-field.v0',
+          schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
           backend: 'cpu-fallback',
           status: 'render-field-fallback-to-render-rows',
           reason: fieldErrorReason,

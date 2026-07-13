@@ -395,6 +395,6 @@ production-incomplete consumer claims.
 - [x] Dedicated branch and linked worktree created.
 - [x] Active/moot/done planning routes committed (`0131601`).
 - [x] Generic GPU radix/scan/unique primitive committed (`9eb0d6b`).
-- [x] Working GPU cell-directory foundation and native probe green.
+- [x] Working GPU cell-directory foundation and native probe green (`9d48c98`).
 - [ ] First same-epoch pre-integration production consumer migrated and old
   lookup removed.

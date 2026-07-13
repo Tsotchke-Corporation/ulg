@@ -7,8 +7,9 @@ Branch `ss-spatial-authority-refactor` starts at verified recovery checkpoint
 `plan/todo/SS/shared-spatial-authority-refactor-plan.md` now has a standalone,
 caller-owned GPU spatial epoch that emits one particle membership key, builds a
 compact unique cell directory/CSR, publishes reverse particle-to-cell mapping
-and fail-closed capacity evidence, and changes no production consumer. Current
-work moves to Slice 3 only after the Slice 2 commit and ICC durability gates.
+and fail-closed capacity evidence, and changes no production consumer.
+Slice 2 is durably committed as `9d48c98` and ICC-verified; current work is
+Slice 3, the first same-epoch production-consumer migration.
 
 Slice 2 is now executable and native-green. The v1 GPU header carries device,
 lane, lease, source-family/storage, tick/substep, and membership epochs. A

@@ -97,6 +97,9 @@ import {
   uploadSphThermalResponseGraphBuffers
 } from '../runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
+import {
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+} from '../runtime/sph/sphReactionGpuSummary.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../runtime/sph/sphMechanicsMaterialTable.js';
 import {
   ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
@@ -23337,6 +23340,39 @@ fn fs_main() -> @location(0) vec4<f32> {
           let currentPhaseVolumeAssignmentOverlayFeedback =
             cachedSchroederPhaseVolumeAssignmentOverlayFeedback;
           let finalPhaseVolumeAssignmentOverlayFeedback = null;
+          const productPlacementAccumulatorByteLength = Math.max(
+            0,
+            Math.round(Number(baseOptions.reactionTable?.productTermCount) || 0)
+              * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+              * Float32Array.BYTES_PER_ELEMENT
+          );
+          const shouldAccumulateProductPlacement = requestedReadbackMode === 'no-full-readback'
+            && (baseOptions.reactionTable?.reactionCount ?? 0) > 0
+            && Boolean(baseOptions.thermalMaterialTable)
+            && productPlacementAccumulatorByteLength > 0;
+          const productPlacementAccumulatorBuffer = shouldAccumulateProductPlacement
+            ? resolvedDeviceResult.device.createBuffer({
+                label: 'ulg-sph-scene-schroeder-product-placement-sequence-accumulator',
+                size: Math.max(4, productPlacementAccumulatorByteLength),
+                usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+              })
+            : null;
+          let productPlacementAccumulatorDestroyed = false;
+          let productPlacementSuccessfulDispatchCount = 0;
+          let productPlacementDispatchEvidenceComplete = true;
+          const destroyProductPlacementAccumulator = () => {
+            if (!productPlacementAccumulatorBuffer || productPlacementAccumulatorDestroyed) return;
+            productPlacementAccumulatorDestroyed = true;
+            productPlacementAccumulatorBuffer.destroy?.();
+          };
+          if (productPlacementAccumulatorBuffer) {
+            resolvedDeviceResult.device.queue.writeBuffer(
+              productPlacementAccumulatorBuffer,
+              0,
+              new Uint8Array(productPlacementAccumulatorByteLength)
+            );
+          }
+          try {
           markResidentStepsProgress('resident-steps-schroeder-sequence-started', {
             stepCount: count,
             selectedLevel: requestedSchroederSelectedLevel,
@@ -23390,6 +23426,19 @@ fn fs_main() -> @location(0) vec4<f32> {
               compactSummaryScope: requestedCompactSummaryScope,
               sequenceIndex: index,
               sequenceStepCount: count,
+              reactionStepOptions: {
+                ...(baseOptions.reactionStepOptions || {}),
+                ...(productPlacementAccumulatorBuffer ? {
+                  productPlacementAccumulatorBuffer,
+                  readReactionProductPlacementSummary: index === count - 1,
+                  reactionProductPlacementReadbackCadence:
+                    'schroeder-scene-resident-sequence-final-only',
+                  // Only claim prior placement passes that returned evidence
+                  // proving they dispatched into this sequence accumulator.
+                  reactionProductPlacementSourceSummaryCount:
+                    productPlacementSuccessfulDispatchCount + 1
+                } : {})
+              },
               onResidentStageProgress(progress = {}) {
                 markResidentStepsProgress(progress.status || 'resident-steps-schroeder-inner-progress', {
                   innerProgress: progress,
@@ -23485,6 +23534,20 @@ fn fs_main() -> @location(0) vec4<f32> {
             const step = attachSchroederSceneStepArtifacts(schroederResult.residentStep, schroederResult);
             if (!step) {
               throw new Error('Schroeder same-level scene runner did not return a resident step');
+            }
+            const productPlacementDispatchProven = Boolean(
+              Number(step.diagnostics?.reactionProductPlacementAccumulatorByteLength)
+                === productPlacementAccumulatorByteLength
+              && (
+                step.diagnostics?.reactionProductPlacementProvenance?.available === true
+                || step.diagnostics?.reactionProductPlacementProvenanceStatus
+                  === 'product-placement-provenance-gpu-resident-not-read'
+              )
+            );
+            if (productPlacementDispatchProven) {
+              productPlacementSuccessfulDispatchCount += 1;
+            } else if (productPlacementAccumulatorBuffer) {
+              productPlacementDispatchEvidenceComplete = false;
             }
             step.sequenceIndex = index;
             step.schroederSequenceIndex = index;
@@ -23614,6 +23677,39 @@ fn fs_main() -> @location(0) vec4<f32> {
             phaseVolumeAssignmentOverlayFeedbackReady:
               finalPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true
           });
+          const rawFinalProductPlacementProvenance =
+            finalStep?.diagnostics?.reactionProductPlacementProvenance ?? null;
+          const finalProductPlacementSourceCountVerified = Boolean(
+            productPlacementAccumulatorBuffer
+            && productPlacementDispatchEvidenceComplete
+            && rawFinalProductPlacementProvenance?.available === true
+            && productPlacementSuccessfulDispatchCount === count
+            && Number(rawFinalProductPlacementProvenance.sourceSummaryCount)
+              === productPlacementSuccessfulDispatchCount
+          );
+          const finalProductPlacementProvenance = finalProductPlacementSourceCountVerified
+            ? rawFinalProductPlacementProvenance
+            : null;
+          const productPlacementEvidenceIncomplete = Boolean(
+            productPlacementAccumulatorBuffer
+            && !productPlacementDispatchEvidenceComplete
+          );
+          if (productPlacementEvidenceIncomplete && finalStep?.diagnostics) {
+            const status = 'schroeder-scene-product-placement-dispatch-evidence-incomplete';
+            finalStep.diagnostics.reactionProductPlacementProvenance = null;
+            finalStep.diagnostics.reactionProductPlacementProvenanceStatus = status;
+            finalStep.diagnostics.reactionProductPlacementMechanicsRefreshStatus =
+              'product-placement-provenance-not-available-unproven-sequence';
+            finalStep.diagnostics.reactionProductPlacementMechanicsRefreshCarried = false;
+            finalStep.reactionProductPlacementMechanicsRefreshStatus =
+              'product-placement-provenance-not-available-unproven-sequence';
+            finalStep.reactionProductPlacementMechanicsRefreshCarried = false;
+            const finalReactionResult = finalStep.reactionStep?.result || finalStep.reactionStep;
+            if (finalReactionResult?.reactionSummary) {
+              finalReactionResult.reactionSummary.productPlacementProvenance = null;
+              finalReactionResult.reactionSummary.productPlacementProvenanceStatus = status;
+            }
+          }
           const execution = {
             schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
             backend: finalStep?.backend || 'webgpu',
@@ -23702,6 +23798,30 @@ fn fs_main() -> @location(0) vec4<f32> {
             residentBufferLeaseActiveLeaseCount: finalStep?.residentBufferLeaseActiveLeaseCount ?? 0,
             residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
             residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
+            reactionProductPlacementAccumulatorStatus:
+              finalProductPlacementProvenance?.status
+              ?? (productPlacementEvidenceIncomplete
+                  ? 'schroeder-scene-product-placement-dispatch-evidence-incomplete'
+                  : (rawFinalProductPlacementProvenance
+                  ? 'schroeder-scene-product-placement-source-count-unproven'
+                  : (productPlacementAccumulatorBuffer
+                      ? 'schroeder-scene-product-placement-accumulator-not-read'
+                      : 'schroeder-scene-product-placement-accumulator-not-run'))),
+            reactionProductPlacementAccumulatorByteLength:
+              productPlacementAccumulatorBuffer ? productPlacementAccumulatorByteLength : 0,
+            reactionProductPlacementReadbackCadence: productPlacementAccumulatorBuffer
+              ? 'schroeder-scene-resident-sequence-final-only'
+              : null,
+            reactionProductPlacementSuccessfulDispatchCount:
+              productPlacementSuccessfulDispatchCount,
+            reactionProductPlacementDispatchEvidenceComplete:
+              productPlacementAccumulatorBuffer
+                ? productPlacementDispatchEvidenceComplete
+                : null,
+            reactionProductPlacementSourceCountVerified:
+              finalProductPlacementSourceCountVerified,
+            reactionProductPlacementProvenance:
+              finalProductPlacementProvenance,
             gpuAuthoritativeState: false,
             scientificValidation: false,
             sphValidation: false,
@@ -23711,6 +23831,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           execution.schroederPhaseVolumeDiagnostics =
             summarizeSchroederPhaseVolumeDiagnosticStatus(execution);
           return execution;
+          } finally {
+            if (productPlacementAccumulatorBuffer) {
+              deferSubmittedWorkCleanup(
+                resolvedDeviceResult.device,
+                destroyProductPlacementAccumulator
+              );
+            }
+          }
           };
         let execution = null;
         const kernelsStartedAtMs = nowMs();

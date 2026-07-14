@@ -37,7 +37,9 @@ import {
   SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
   SPH_GPU_REACTION_HEADER_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_EVENT_DISPOSITION_IDS,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
   SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT,
@@ -91,6 +93,7 @@ import {
   ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
   ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+  ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
@@ -550,8 +553,23 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   );
   assert.equal(
     ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
-    'peercompute.ulg.sph-gpu-reaction-product-event.v0'
+    'peercompute.ulg.sph-gpu-reaction-product-event.v1'
   );
+  assert.equal(
+    ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
+    'peercompute.ulg.sph-gpu-reaction-product-placement-summary.v0'
+  );
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_EVENT_DISPOSITION_IDS, {
+    invalidOrEmpty: 0,
+    pending: 1,
+    directOnly: 2,
+    spareSlot: 3,
+    radiusCaptureMerge: 4,
+    fallbackMerge: 5,
+    subthresholdUnplaced: 6,
+    noCarrierUnplaced: 7,
+    rejected: 8
+  });
   assert.equal(
     ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
     'peercompute.ulg.sph-gpu-reaction-atom-residual.v0'
@@ -630,7 +648,7 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
     'moles:f32',
     'routingId:f32',
     'phaseId:f32',
-    'visibleMassKg:f32',
+    'placedMassKg:f32',
     'unplacedMassKg:f32',
     'coefficient:f32',
     'molarMassKgPerMol:f32'
@@ -639,7 +657,7 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
     'temperatureK:f32',
     'restDensityKgPerM3:f32',
     'status:f32',
-    'pad0:f32'
+    'specificInternalEnergyJPerKg:f32'
   ]);
   assert.deepEqual(SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.slice(20, 24), [
     'velocityXMPerS:f32',
@@ -655,7 +673,45 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
     'eosModelId:f32',
     'solidFlag:f32',
     'mechanicsStatus:f32',
-    'pad1:f32'
+    'dispositionId:f32'
+  ]);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT.length, 32);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT.slice(0, 16), [
+    'materialId:f32',
+    'productTermIndex:f32',
+    'reactionIndex:f32',
+    'routingId:f32',
+    'phaseId:f32',
+    'status:f32',
+    'readyProductEventCount:f32',
+    'placementCandidateEventCount:f32',
+    'directPlacedEventCount:f32',
+    'sparePlacedEventCount:f32',
+    'captureMergedEventCount:f32',
+    'fallbackMergedEventCount:f32',
+    'unplacedEventCount:f32',
+    'subthresholdEventCount:f32',
+    'rejectedEventCount:f32',
+    'reserved0:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT.slice(16, 32), [
+    'readyProductMassKg:f32',
+    'directPlacedMassKg:f32',
+    'sparePlacedMassKg:f32',
+    'captureMergedMassKg:f32',
+    'fallbackMergedMassKg:f32',
+    'unplacedMassKg:f32',
+    'subthresholdMassKg:f32',
+    'rejectedMassKg:f32',
+    'maxSparePlacedEventMassKg:f32',
+    'maxMergedEventMassKg:f32',
+    'maxPostMergeParticleMassKg:f32',
+    'maxUnplacedEventMassKg:f32',
+    'maxCaptureDistanceM:f32',
+    'maxFallbackDistanceM:f32',
+    'maxSparePlacedSupportRadiusM:f32',
+    'maxReadyProductEventMassKg:f32'
   ]);
   assert.equal(SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT.length, 8);
   assert.deepEqual(SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT, [
@@ -699,6 +755,11 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionProductEventWgsl, /struct ProductMechanics/);
   assert.match(sphReactionProductEventWgsl, /fn product_mechanics_for/);
   assert.match(sphReactionProductEventWgsl, /fn resolved_product_phase_id/);
+  assert.match(sphReactionProductEventWgsl, /fn product_term_index_for_parent_slot/);
+  assert.match(sphReactionProductEventWgsl, /let source_free = source_remaining/);
+  assert.match(sphReactionProductEventWgsl, /product_term_index_for_parent_slot\(reaction_index, 0u\) == product_term_index/);
+  assert.match(sphReactionProductEventWgsl, /let partner_parent_slot = select\(0u, 1u, source_free\)/);
+  assert.doesNotMatch(sphReactionProductEventWgsl, /visible_mass_kg = visible_mass_kg \+/);
   assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 2u\] = vec4<f32>\(f32\(partner_index\), row_moles, routing_id, phase_id\)/);
   assert.match(sphReactionProductEventWgsl, /let event_ready = phase_id > 0\.0/);
   assert.match(sphReactionProductEventWgsl, /select\(0\.0, 1\.0, event_ready\)/);
@@ -713,6 +774,33 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionProductEventPlacementWgsl, /event_row7_header\.z != 1\.0/);
   assert.match(sphReactionProductEventPlacementWgsl, /!\(event_row2_header\.w > 0\.0\)/);
   assert.match(sphReactionProductEventPlacementWgsl, /!\(row4\.y > 0\.0\)/);
+  assert.match(sphReactionProductEventPlacementWgsl, /product_term_count: u32/);
+  assert.match(sphReactionProductEventPlacementWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> placement_summary/);
+  assert.match(sphReactionProductEventPlacementWgsl, /return product_term_index \* 8u/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn record_ready_product/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn record_spare_placement/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn record_capture_merge/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn record_fallback_merge/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn record_unplaced/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn record_rejected_placement/);
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /let rejected_payload_mass_kg = max\(event_product_mass_kg, unplaced_mass_kg\)/
+  );
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /record_rejected_placement\(summary_base, rejected_payload_mass_kg\)/
+  );
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /product_events\[base \+ 4u\] = vec4<f32>\(row4\.x, row4\.y, 0\.0, row4\.w\)/
+  );
+  for (const dispositionId of [2, 3, 4, 5, 6, 7, 8]) {
+    assert.match(
+      sphReactionProductEventPlacementWgsl,
+      new RegExp(`event_row7_header\\.xyz, ${dispositionId}\\.0`)
+    );
+  }
   assert.match(sphReactionAtomResidualWgsl, /atom_term_count: u32/);
   assert.match(sphReactionAtomResidualWgsl, /@group\(0\) @binding\(4\) var<storage, read_write> atom_residuals/);
   assert.match(sphReactionAtomResidualWgsl, /fn atom_term_row/);

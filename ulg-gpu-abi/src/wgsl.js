@@ -2371,7 +2371,7 @@ struct ProductEventPlacementParams {
   thermo_stride_vec4: u32,
   mechanics_stride_vec4: u32,
   min_placed_mass_kg: f32,
-  _pad0: u32,
+  product_term_count: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> product_events: array<vec4<f32>>;
@@ -2379,33 +2379,188 @@ struct ProductEventPlacementParams {
 @group(0) @binding(2) var<storage, read_write> next_thermo: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> next_mechanics: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> params: ProductEventPlacementParams;
+@group(0) @binding(5) var<storage, read_write> placement_summary: array<vec4<f32>>;
+
+fn placement_summary_base(product_term_index: u32) -> u32 {
+  return product_term_index * 8u;
+}
+
+fn record_placement_identity(base: u32, row1: vec4<f32>, row2: vec4<f32>) {
+  placement_summary[base] = vec4<f32>(row1.x, row1.y, row1.z, row2.z);
+  let header = placement_summary[base + 1u];
+  placement_summary[base + 1u] = vec4<f32>(row2.w, 1.0, header.z, header.w);
+}
+
+fn record_ready_product(base: u32, product_mass_kg: f32, direct_placed_mass_kg: f32) {
+  let header = placement_summary[base + 1u];
+  placement_summary[base + 1u] = vec4<f32>(header.x, header.y, header.z + 1.0, header.w);
+  let counts = placement_summary[base + 2u];
+  placement_summary[base + 2u] = vec4<f32>(
+    counts.x + select(0.0, 1.0, direct_placed_mass_kg > 0.0),
+    counts.y,
+    counts.z,
+    counts.w
+  );
+  let masses = placement_summary[base + 4u];
+  placement_summary[base + 4u] = vec4<f32>(
+    masses.x + product_mass_kg,
+    masses.y + direct_placed_mass_kg,
+    masses.z,
+    masses.w
+  );
+  let maxima = placement_summary[base + 7u];
+  placement_summary[base + 7u] = vec4<f32>(maxima.x, maxima.y, maxima.z, max(maxima.w, product_mass_kg));
+}
+
+fn record_placement_candidate(base: u32) {
+  let header = placement_summary[base + 1u];
+  placement_summary[base + 1u] = vec4<f32>(header.x, header.y, header.z, header.w + 1.0);
+}
+
+fn record_rejected_placement(base: u32, rejected_mass_kg: f32) {
+  let counts = placement_summary[base + 3u];
+  placement_summary[base + 3u] = vec4<f32>(counts.x, counts.y, counts.z + 1.0, counts.w);
+  let masses = placement_summary[base + 5u];
+  placement_summary[base + 5u] = vec4<f32>(masses.x, masses.y, masses.z, masses.w + rejected_mass_kg);
+}
+
+fn record_unplaced(base: u32, mass_kg: f32, subthreshold: bool) {
+  let counts = placement_summary[base + 3u];
+  placement_summary[base + 3u] = vec4<f32>(
+    counts.x + 1.0,
+    counts.y + select(0.0, 1.0, subthreshold),
+    counts.z,
+    counts.w
+  );
+  let masses = placement_summary[base + 5u];
+  placement_summary[base + 5u] = vec4<f32>(
+    masses.x,
+    masses.y + mass_kg,
+    masses.z + select(0.0, mass_kg, subthreshold),
+    masses.w
+  );
+  let maxima = placement_summary[base + 6u];
+  placement_summary[base + 6u] = vec4<f32>(maxima.x, maxima.y, maxima.z, max(maxima.w, mass_kg));
+}
+
+fn record_capture_merge(base: u32, mass_kg: f32, post_merge_mass_kg: f32, distance_m: f32) {
+  let counts = placement_summary[base + 2u];
+  placement_summary[base + 2u] = vec4<f32>(counts.x, counts.y, counts.z + 1.0, counts.w);
+  let masses = placement_summary[base + 4u];
+  placement_summary[base + 4u] = vec4<f32>(masses.x, masses.y, masses.z, masses.w + mass_kg);
+  let maxima = placement_summary[base + 6u];
+  placement_summary[base + 6u] = vec4<f32>(
+    maxima.x,
+    max(maxima.y, mass_kg),
+    max(maxima.z, post_merge_mass_kg),
+    maxima.w
+  );
+  let distances = placement_summary[base + 7u];
+  placement_summary[base + 7u] = vec4<f32>(max(distances.x, distance_m), distances.y, distances.z, distances.w);
+}
+
+fn record_fallback_merge(base: u32, mass_kg: f32, post_merge_mass_kg: f32, distance_m: f32) {
+  let counts = placement_summary[base + 2u];
+  placement_summary[base + 2u] = vec4<f32>(counts.x, counts.y, counts.z, counts.w + 1.0);
+  let masses = placement_summary[base + 5u];
+  placement_summary[base + 5u] = vec4<f32>(masses.x + mass_kg, masses.y, masses.z, masses.w);
+  let maxima = placement_summary[base + 6u];
+  placement_summary[base + 6u] = vec4<f32>(
+    maxima.x,
+    max(maxima.y, mass_kg),
+    max(maxima.z, post_merge_mass_kg),
+    maxima.w
+  );
+  let distances = placement_summary[base + 7u];
+  placement_summary[base + 7u] = vec4<f32>(distances.x, max(distances.y, distance_m), distances.z, distances.w);
+}
+
+fn record_spare_placement(base: u32, mass_kg: f32, support_radius_m: f32) {
+  let counts = placement_summary[base + 2u];
+  placement_summary[base + 2u] = vec4<f32>(counts.x, counts.y + 1.0, counts.z, counts.w);
+  let masses = placement_summary[base + 4u];
+  placement_summary[base + 4u] = vec4<f32>(masses.x, masses.y, masses.z + mass_kg, masses.w);
+  let maxima = placement_summary[base + 6u];
+  placement_summary[base + 6u] = vec4<f32>(max(maxima.x, mass_kg), maxima.y, maxima.z, maxima.w);
+  let distances = placement_summary[base + 7u];
+  placement_summary[base + 7u] = vec4<f32>(distances.x, distances.y, max(distances.z, support_radius_m), distances.w);
+}
 
 @compute @workgroup_size(1)
 fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (global_id.x != 0u) {
     return;
   }
-  let stride = max(params.event_stride_vec4, 8u);
+  let stride = params.event_stride_vec4;
+  if (stride < 8u) {
+    return;
+  }
+  // Mark every product-term accumulator row as executed without touching its
+  // accumulated counts/masses. Identity is written only by non-empty events
+  // below; dense empty event rows must not overwrite a real term identity.
+  for (var product_term_index = 0u; product_term_index < params.product_term_count; product_term_index = product_term_index + 1u) {
+    let summary_base = placement_summary_base(product_term_index);
+    let header = placement_summary[summary_base + 1u];
+    placement_summary[summary_base + 1u] = vec4<f32>(header.x, 1.0, header.z, header.w);
+  }
   var cursor = 0u;
   for (var event = 0u; event < params.event_row_count; event = event + 1u) {
     let base = event * stride;
+    let event_row0_header = product_events[base];
+    let event_row1_header = product_events[base + 1u];
     let row3 = product_events[base + 3u];
     let row4 = product_events[base + 4u];
     let event_row2_header = product_events[base + 2u];
     let event_row7_header = product_events[base + 7u];
-    let unplaced_mass_kg = row3.y;
+    let product_term_index = u32(max(event_row1_header.y, 0.0));
+    if (product_term_index >= params.product_term_count) {
+      continue;
+    }
+    let summary_base = placement_summary_base(product_term_index);
+    let unplaced_mass_kg = max(row3.y, 0.0);
+    let event_product_mass_kg = max(event_row0_header.w, 0.0);
+    if (event_product_mass_kg > 0.0 || unplaced_mass_kg > 0.0) {
+      record_placement_identity(summary_base, event_row1_header, event_row2_header);
+    }
     let status = row4.z;
-    if (
+    let event_valid = !(
       status != 1.0
       || event_row7_header.z != 1.0
       || !(event_row2_header.w > 0.0)
       || !(row4.y > 0.0)
-      || unplaced_mass_kg <= params.min_placed_mass_kg
-    ) {
+    );
+    if (!event_valid) {
+      // Reject the whole non-empty event, including a direct-only event whose
+      // unplaced lane is zero. Using only unplaced mass here made an invalid
+      // direct placement disappear from the accumulator while the term still
+      // looked executed and partition-complete.
+      let rejected_payload_mass_kg = max(event_product_mass_kg, unplaced_mass_kg);
+      if (rejected_payload_mass_kg > 0.0) {
+        record_rejected_placement(summary_base, rejected_payload_mass_kg);
+        // Invalid payloads must not remain eligible for the retained grid
+        // splat or compaction consumers after the placement gate rejects them.
+        product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+        product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 8.0);
+      }
       continue;
     }
-    let event_row0 = product_events[base];
-    let event_row1 = product_events[base + 1u];
+    let event_direct_placed_mass_kg = min(max(row3.x, 0.0), event_product_mass_kg);
+    if (event_product_mass_kg > 0.0) {
+      record_ready_product(summary_base, event_product_mass_kg, event_direct_placed_mass_kg);
+    }
+    if (unplaced_mass_kg <= 0.0) {
+      product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+      product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 2.0);
+      continue;
+    }
+    record_placement_candidate(summary_base);
+    if (unplaced_mass_kg <= params.min_placed_mass_kg) {
+      record_unplaced(summary_base, unplaced_mass_kg, true);
+      product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 6.0);
+      continue;
+    }
+    let event_row0 = event_row0_header;
+    let event_row1 = event_row1_header;
     let event_row2 = product_events[base + 2u];
     let event_row4b = product_events[base + 4u];
     let event_row5 = product_events[base + 5u];
@@ -2485,12 +2640,12 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
         merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
       }
       next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
-      // Consume the event with the same convention as the spare-slot path:
-      // the placed share moves into the visible lane, the unplaced share and
-      // status zero, so the compactor and the grid splat drop it and ledger
-      // mass and particle mass never double-count.
-      product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
+      record_capture_merge(summary_base, unplaced_mass_kg, merged_mass, merge_distance);
+      // Consume the event. row3.x remains the direct/spare placed share;
+      // merged mass is derived exactly as total - placed - unplaced.
+      product_events[base + 3u] = vec4<f32>(row3.x, 0.0, row3.z, row3.w);
       product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+      product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 4.0);
       continue;
     }
     // Claim the first spare slot at or after the cursor. Spare slots are
@@ -2529,13 +2684,17 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
           merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
         }
         next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
-        product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
+        record_fallback_merge(summary_base, unplaced_mass_kg, merged_mass, nearest_distance);
+        product_events[base + 3u] = vec4<f32>(row3.x, 0.0, row3.z, row3.w);
         product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+        product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 5.0);
         continue;
       }
       // No spare capacity and no same-material carrier anywhere: the event
       // stays live and keeps feeding the grid splat ledger, so no mass is
       // lost either way.
+      record_unplaced(summary_base, unplaced_mass_kg, false);
+      product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 7.0);
       continue;
     }
     cursor = slot + 1u;
@@ -2586,10 +2745,12 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     next_mechanics[mechanics_base + 5u] = vec4<f32>(row7.y, row7.z, row6.x, row6.y);
     next_mechanics[mechanics_base + 6u] = vec4<f32>(row6.z, row6.w, row7.x, row7.z);
     next_mechanics[mechanics_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    record_spare_placement(summary_base, unplaced_mass_kg, support_radius_m);
     // Consume the event: zero its unplaced share and status so the compactor
     // and the grid splat drop it this substep.
     product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
     product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+    product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 3.0);
   }
 }
 `;
@@ -3674,6 +3835,60 @@ fn reaction_row1(reaction_index: u32) -> vec4<f32> {
   return reaction_records[reaction_index * 3u + 1u];
 }
 
+// Mirrors product_term_for_parent_slot in the apply kernel, but returns the
+// packed product-term index so event provenance can attribute the exact
+// freed-parent assignment. Material matching is not sufficient: distinct
+// terms may share a material, and reactant remainder mass may share it too.
+fn product_term_index_for_parent_slot(reaction_index: u32, parent_slot: u32) -> u32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var condensed_count = 0u;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term1.y < 0.5) {
+      condensed_count = condensed_count + 1u;
+    }
+  }
+  if (parent_slot < condensed_count) {
+    var condensed_index = 0u;
+    for (var local = 0u; local < product_term_count; local = local + 1u) {
+      let term_index = product_term_offset + local;
+      let term1 = product_term_row1(term_index);
+      if (term1.w == 1.0 && term1.y < 0.5) {
+        if (condensed_index == parent_slot) {
+          return term_index;
+        }
+        condensed_index = condensed_index + 1u;
+      }
+    }
+  }
+  var gas_count = 0u;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term1.y >= 0.5) {
+      gas_count = gas_count + 1u;
+    }
+  }
+  if (gas_count == 0u) {
+    return 0xffffffffu;
+  }
+  let gas_slot = min(parent_slot - condensed_count, gas_count - 1u);
+  var gas_index = 0u;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term_index = product_term_offset + local;
+    let term1 = product_term_row1(term_index);
+    if (term1.w == 1.0 && term1.y >= 0.5) {
+      if (gas_index == gas_slot) {
+        return term_index;
+      }
+      gas_index = gas_index + 1u;
+    }
+  }
+  return 0xffffffffu;
+}
+
 fn product_mechanics_for(material_id: f32, phase_id: f32) -> ProductMechanics {
   for (var phase_index = 0u; phase_index < params.product_phase_count; phase_index = phase_index + 1u) {
     let row0 = product_phase_row0(phase_index);
@@ -3872,23 +4087,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let row_moles = row_mass / molar_mass;
 	  let next0 = next_thermo[particle_index * 3u];
 	  let next1 = next_thermo[partner_index * 3u];
-	  var visible_mass_kg = 0.0;
 	  var phase_id = resolved_product_phase_id(product_term_index, target_phase_id, material_id);
 	  var temperature_k = 0.5 * (source_row0.z + partner_source_row0.z);
 	  var rest_density_kg_per_m3 = 0.0;
 	  if (next0.x == material_id) {
-	    visible_mass_kg = visible_mass_kg + next_state[particle_index * 2u].w;
 	    phase_id = select(phase_id, next0.y, phase_id <= 0.0);
 	    temperature_k = next0.z;
 	    rest_density_kg_per_m3 = next0.w;
 	  }
 	  if (next1.x == material_id) {
-	    visible_mass_kg = visible_mass_kg + next_state[partner_index * 2u].w;
 	    phase_id = select(phase_id, next1.y, phase_id <= 0.0);
 	    temperature_k = next1.z;
 	    rest_density_kg_per_m3 = next1.w;
 	  }
-  let unplaced_mass_kg = max(row_mass - visible_mass_kg, 0.0);
+	  let source_remaining = max(source_pos_mass.w - source_consumed, 0.0);
+	  let partner_remaining = max(partner_source_pos_mass.w - partner_consumed, 0.0);
+	  let source_free = source_remaining <= max(source_pos_mass.w, 1.0) * 1.0e-7;
+	  let partner_free = partner_remaining <= max(partner_source_pos_mass.w, 1.0) * 1.0e-7;
+	  let reaction_product_term_count = u32(max(reaction_header_row1(reaction_index).x, 0.0));
+	  var direct_placed_mass_kg = 0.0;
+	  if (source_free && product_term_index_for_parent_slot(reaction_index, 0u) == product_term_index) {
+	    direct_placed_mass_kg = direct_placed_mass_kg + select(
+	      row_mass,
+	      source_consumed,
+	      reaction_product_term_count == 1u && partner_free
+	    );
+	  }
+	  let partner_parent_slot = select(0u, 1u, source_free);
+	  if (partner_free && product_term_index_for_parent_slot(reaction_index, partner_parent_slot) == product_term_index) {
+	    direct_placed_mass_kg = direct_placed_mass_kg + select(
+	      row_mass,
+	      partner_consumed,
+	      reaction_product_term_count == 1u && source_free
+	    );
+	  }
+	  direct_placed_mass_kg = min(max(direct_placed_mass_kg, 0.0), row_mass);
+	  let unplaced_mass_kg = max(row_mass - direct_placed_mass_kg, 0.0);
 	  let product_mechanics = product_mechanics_for(material_id, phase_id);
 	  rest_density_kg_per_m3 = select(
 	    rest_density_kg_per_m3,
@@ -3923,7 +4157,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  product_events[out_base] = vec4<f32>(midpoint.x, midpoint.y, midpoint.z, row_mass);
 	  product_events[out_base + 1u] = vec4<f32>(material_id, f32(product_term_index), f32(reaction_index), f32(particle_index));
 	  product_events[out_base + 2u] = vec4<f32>(f32(partner_index), row_moles, routing_id, phase_id);
-	  product_events[out_base + 3u] = vec4<f32>(visible_mass_kg, unplaced_mass_kg, coefficient, molar_mass);
+	  product_events[out_base + 3u] = vec4<f32>(direct_placed_mass_kg, unplaced_mass_kg, coefficient, molar_mass);
 	  product_events[out_base + 4u] = vec4<f32>(
 	    temperature_k,
 	    rest_density_kg_per_m3,
@@ -3941,7 +4175,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    product_mechanics.eos_model_id,
 	    product_mechanics.solid_flag,
 	    product_mechanics.status,
-	    0.0
+	    select(0.0, 1.0, event_ready)
 	  );
 	}
 `;

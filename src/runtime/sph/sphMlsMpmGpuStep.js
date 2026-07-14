@@ -93,7 +93,8 @@ import {
 } from './sphMechanicsRefreshGpuKernel.js';
 import {
   createResidentProductMassHandle,
-  mergeResidentGasSpeciesLedgers
+  mergeResidentGasSpeciesLedgers,
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
 } from './sphReactionGpuSummary.js';
 import {
   residentProductMassMatchesDevice,
@@ -4960,6 +4961,29 @@ function reactionSummaryDiagnostics(reactionStep) {
     reactionProductEventReadbackByteLength: summary?.productEventReadbackByteLength ?? 0,
     reactionProductEventBufferByteLength: summary?.productEventBufferByteLength ?? 0,
     reactionProductEventBufferRetained: summary?.productEventBufferRetained ?? false,
+    reactionProductPlacementProvenanceStatus:
+      summary?.productPlacementProvenance?.status
+      ?? summary?.productPlacementProvenanceStatus
+      ?? null,
+    reactionProductPlacementProvenanceReadbackByteLength:
+      summary?.productPlacementProvenanceReadbackByteLength ?? 0,
+    reactionProductPlacementAccumulatorByteLength:
+      summary?.productPlacementAccumulatorByteLength ?? 0,
+    reactionProductPlacementReadbackCadence:
+      summary?.productPlacementReadbackCadence ?? null,
+    reactionProductPlacementProvenance: summary?.productPlacementProvenance
+      ? {
+          ...summary.productPlacementProvenance,
+          records: (summary.productPlacementProvenance.records || []).map((row) => ({ ...row })),
+          byMaterial: Object.fromEntries(
+            Object.entries(summary.productPlacementProvenance.byMaterial || {})
+              .map(([key, row]) => [key, {
+                ...row,
+                productTermIndices: [...(row.productTermIndices || [])]
+              }])
+          )
+        }
+      : null,
     reactionResidentProductMassStatus: residentProductMass?.status ?? null,
     reactionResidentProductMassBufferRetained: residentProductMass?.productEventBufferRetained ?? false,
     reactionResidentProductMassBufferByteLength: residentProductMass?.productEventBufferByteLength ?? 0,
@@ -15655,6 +15679,16 @@ async function residentStepEnvelope({
     compactGpuSummary
   });
   const residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(residentBufferLeaseLedger);
+  const reactionProductPlacementProvenanceAvailable =
+    diagnostics.reactionProductPlacementProvenance?.available === true;
+  const reactionProductPlacementMechanicsRefreshStatus =
+    !reactionProductPlacementProvenanceAvailable
+      ? 'product-placement-provenance-not-available'
+      : (mechanicsRefreshTrigger === 'reaction' && nextUsesMechanicsRefresh
+          ? 'product-placement-provenance-carried-through-post-reaction-mechanics-refresh'
+          : (reactionOutputParticleMutation
+              ? 'product-placement-provenance-post-reaction-mechanics-refresh-not-carried'
+              : 'product-placement-provenance-no-reaction-particle-mutation'));
   const diagnosticsWithAuthority = {
     ...diagnostics,
     internalPressureScale,
@@ -15712,6 +15746,11 @@ async function residentStepEnvelope({
     schroederFarAggregateGasCellImportLocalPressureGradientStatus:
       schroederGasCellImportOutput.localPressureGradientStatus,
     thermalMechanicsRefreshStatus,
+    reactionProductPlacementMechanicsRefreshStatus,
+    reactionProductPlacementMechanicsRefreshCarried:
+      reactionProductPlacementProvenanceAvailable
+      && mechanicsRefreshTrigger === 'reaction'
+      && nextUsesMechanicsRefresh,
     ...thermalPhaseTransition,
     thermalPhaseTransitionCouplingStatus,
     residentBufferLeaseLedgerStatus: residentBufferLeaseLedger.status,
@@ -15953,6 +15992,11 @@ async function residentStepEnvelope({
     reactionOutputBuffersRetained,
     mechanicsRefreshOutputBuffersRetained,
     thermalMechanicsRefreshStatus,
+    reactionProductPlacementMechanicsRefreshStatus,
+    reactionProductPlacementMechanicsRefreshCarried:
+      reactionProductPlacementProvenanceAvailable
+      && mechanicsRefreshTrigger === 'reaction'
+      && nextUsesMechanicsRefresh,
     ...thermalPhaseTransition,
     thermalPhaseTransitionCouplingStatus,
     residentBufferMode: residentBuffersRetained ? 'retained-stage-and-output-buffers' : 'cpu-artifact-fallback',
@@ -17876,6 +17920,33 @@ function summarizeResidentStepForSequence(step, index) {
       reactionProductEventReadbackByteLength: step.diagnostics?.reactionProductEventReadbackByteLength ?? 0,
       reactionProductEventBufferByteLength: step.diagnostics?.reactionProductEventBufferByteLength ?? 0,
       reactionProductEventBufferRetained: step.diagnostics?.reactionProductEventBufferRetained ?? false,
+      reactionProductPlacementProvenanceStatus:
+        step.diagnostics?.reactionProductPlacementProvenanceStatus ?? null,
+      reactionProductPlacementProvenanceReadbackByteLength:
+        step.diagnostics?.reactionProductPlacementProvenanceReadbackByteLength ?? 0,
+      reactionProductPlacementAccumulatorByteLength:
+        step.diagnostics?.reactionProductPlacementAccumulatorByteLength ?? 0,
+      reactionProductPlacementReadbackCadence:
+        step.diagnostics?.reactionProductPlacementReadbackCadence ?? null,
+      reactionProductPlacementMechanicsRefreshStatus:
+        step.diagnostics?.reactionProductPlacementMechanicsRefreshStatus ?? null,
+      reactionProductPlacementMechanicsRefreshCarried:
+        step.diagnostics?.reactionProductPlacementMechanicsRefreshCarried === true,
+      reactionProductPlacementProvenance:
+        step.diagnostics?.reactionProductPlacementProvenance
+          ? {
+              ...step.diagnostics.reactionProductPlacementProvenance,
+              records: (step.diagnostics.reactionProductPlacementProvenance.records || [])
+                .map((row) => ({ ...row })),
+              byMaterial: Object.fromEntries(
+                Object.entries(step.diagnostics.reactionProductPlacementProvenance.byMaterial || {})
+                  .map(([key, row]) => [key, {
+                    ...row,
+                    productTermIndices: [...(row.productTermIndices || [])]
+                  }])
+              )
+            }
+          : null,
       reactionResidentProductMassStatus: step.diagnostics?.reactionResidentProductMassStatus ?? null,
       reactionResidentProductMassBufferRetained: step.diagnostics?.reactionResidentProductMassBufferRetained ?? false,
       reactionResidentProductMassBufferByteLength: step.diagnostics?.reactionResidentProductMassBufferByteLength ?? 0,
@@ -17933,6 +18004,19 @@ function summarizeResidentStepForSequence(step, index) {
     gpuAuthoritativeState: step.gpuAuthoritativeState,
     fullPhysicsValidation: false
   };
+}
+
+function residentStepExecutedProductPlacementDispatch(step, expectedAccumulatorByteLength) {
+  if (!(expectedAccumulatorByteLength > 0)) return false;
+  const diagnostics = step?.diagnostics || {};
+  const accumulatorByteLength = Number(
+    diagnostics.reactionProductPlacementAccumulatorByteLength
+  );
+  if (accumulatorByteLength !== expectedAccumulatorByteLength) return false;
+  const provenance = diagnostics.reactionProductPlacementProvenance;
+  if (provenance?.available === true) return true;
+  return diagnostics.reactionProductPlacementProvenanceStatus
+    === 'product-placement-provenance-gpu-resident-not-read';
 }
 
 export async function runMlsMpmResidentStepsWithOptionalWebGpu({
@@ -18178,7 +18262,55 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     });
   }
 
-  for (let index = 0; index < count; index += 1) {
+  // Placement provenance is accumulated on-device for exactly this resident
+  // sequence. Intermediate reaction substeps only write the accumulator; the
+  // final substep performs the compact readback. Keeping this ownership out of
+  // resident-product handles avoids per-step replacement/double-destroy races.
+  const productPlacementAccumulatorByteLength = Math.max(
+    0,
+    Math.round(Number(args.reactionTable?.productTermCount) || 0)
+      * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const suppliedProductPlacementAccumulator =
+    args.reactionStepOptions?.productPlacementAccumulatorBuffer ?? null;
+  const shouldAccumulateProductPlacement = requestedReadbackMode === NO_FULL_READBACK_MODE
+    && args.preferWebGpu === true
+    && (args.reactionTable?.reactionCount ?? 0) > 0
+    && Boolean(args.thermalMaterialTable)
+    && Boolean(resolvedDevice?.createBuffer)
+    && Boolean(resolvedDevice?.queue?.writeBuffer)
+    && productPlacementAccumulatorByteLength > 0;
+  const productPlacementAccumulatorBuffer = shouldAccumulateProductPlacement
+    ? (suppliedProductPlacementAccumulator || tagWebGpuBufferDevice(resolvedDevice.createBuffer({
+        label: 'ulg-sph-reaction-product-placement-resident-sequence-accumulator',
+        size: Math.max(4, productPlacementAccumulatorByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+      }), resolvedDevice))
+    : suppliedProductPlacementAccumulator;
+  const ownsProductPlacementAccumulator = Boolean(
+    shouldAccumulateProductPlacement
+    && productPlacementAccumulatorBuffer
+    && !suppliedProductPlacementAccumulator
+  );
+  let productPlacementAccumulatorDestroyed = false;
+  const destroyOwnedProductPlacementAccumulator = () => {
+    if (!ownsProductPlacementAccumulator || productPlacementAccumulatorDestroyed) return;
+    productPlacementAccumulatorDestroyed = true;
+    productPlacementAccumulatorBuffer.destroy?.();
+  };
+  if (ownsProductPlacementAccumulator) {
+    resolvedDevice.queue.writeBuffer(
+      productPlacementAccumulatorBuffer,
+      0,
+      new Uint8Array(productPlacementAccumulatorByteLength)
+    );
+  }
+  let productPlacementSuccessfulDispatchCount = 0;
+  let productPlacementDispatchEvidenceComplete = true;
+
+  try {
+    for (let index = 0; index < count; index += 1) {
     const summarizeStep = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
       && (resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY || index === count - 1);
     markSequenceProgress(useThermalSidecarDirectRunner
@@ -18216,6 +18348,19 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         : null,
       sequenceIndex: index,
       sequenceStepCount: count,
+      reactionStepOptions: {
+        ...(args.reactionStepOptions || {}),
+        ...(productPlacementAccumulatorBuffer ? {
+          productPlacementAccumulatorBuffer,
+          readReactionProductPlacementSummary: index === count - 1,
+          reactionProductPlacementReadbackCadence: 'resident-sequence-final-only',
+          // Count only prior dispatches proven by returned step evidence. The
+          // current dispatch is included because a decoded final provenance
+          // row can only exist after this call's placement pass ran.
+          reactionProductPlacementSourceSummaryCount:
+            productPlacementSuccessfulDispatchCount + 1
+        } : {})
+      },
       onResidentStageProgress(progress = {}) {
         markSequenceProgress(progress.status || 'resident-stage-progress', {
           ...progress,
@@ -18262,6 +18407,18 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       step.stageTiming.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
       step.stageTiming.sidecarAwareDirectRunnerSelected = useThermalSidecarDirectRunner;
     }
+    const productPlacementDispatchProven = residentStepExecutedProductPlacementDispatch(
+      step,
+      productPlacementAccumulatorByteLength
+    );
+    if (productPlacementDispatchProven) {
+      productPlacementSuccessfulDispatchCount += 1;
+    } else if (productPlacementAccumulatorBuffer && productPlacementAccumulatorByteLength > 0) {
+      // The GPU may have written the shared accumulator before a later
+      // diagnostic/map failure removed the returned evidence. Once that
+      // happens no host-derived source count can certify the buffer contents.
+      productPlacementDispatchEvidenceComplete = false;
+    }
     stepSummaries.push(summarizeResidentStepForSequence(step, index));
     markSequenceProgress(useThermalSidecarDirectRunner
       ? 'resident-sequence-thermal-sidecar-direct-runner-step-complete'
@@ -18302,6 +18459,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     mlsMpmParticleUpload = step.nextParticleUploads?.mlsMpmParticleUpload ?? null;
     residentProductMass = carriedResidentProductMass;
     sourceSlot = step.particlePingPong?.nextSlot ?? (sourceSlot === 0 ? 1 : 0);
+    }
+  } catch (error) {
+    if (ownsProductPlacementAccumulator) {
+      deferSubmittedWorkCleanup(resolvedDevice, destroyOwnedProductPlacementAccumulator);
+    }
+    throw error;
   }
 
   const sidecarAwareResidentSequence = createSidecarAwareResidentSequenceEvidence({
@@ -18350,6 +18513,58 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     }
   }
 
+  const finalReactionResult = finalStep?.reactionStep?.result || finalStep?.reactionStep || null;
+  const rawFinalProductPlacementProvenance =
+    finalStep?.diagnostics?.reactionProductPlacementProvenance
+    || finalReactionResult?.reactionSummary?.productPlacementProvenance
+    || null;
+  const finalProductPlacementSourceCountVerified = Boolean(
+    productPlacementAccumulatorBuffer
+    && productPlacementDispatchEvidenceComplete
+    && rawFinalProductPlacementProvenance?.available === true
+    && productPlacementSuccessfulDispatchCount === count
+    && Number(rawFinalProductPlacementProvenance.sourceSummaryCount)
+      === productPlacementSuccessfulDispatchCount
+  );
+  const finalProductPlacementProvenance = finalProductPlacementSourceCountVerified
+    ? rawFinalProductPlacementProvenance
+    : null;
+  const productPlacementEvidenceIncomplete = Boolean(
+    productPlacementAccumulatorBuffer
+    && productPlacementAccumulatorByteLength > 0
+    && !productPlacementDispatchEvidenceComplete
+  );
+  if (productPlacementEvidenceIncomplete) {
+    const status = 'resident-sequence-product-placement-dispatch-evidence-incomplete';
+    if (finalStep?.diagnostics) {
+      finalStep.diagnostics.reactionProductPlacementProvenance = null;
+      finalStep.diagnostics.reactionProductPlacementProvenanceStatus = status;
+      finalStep.diagnostics.reactionProductPlacementMechanicsRefreshStatus =
+        'product-placement-provenance-not-available-unproven-sequence';
+      finalStep.diagnostics.reactionProductPlacementMechanicsRefreshCarried = false;
+    }
+    if (finalStep) {
+      finalStep.reactionProductPlacementMechanicsRefreshStatus =
+        'product-placement-provenance-not-available-unproven-sequence';
+      finalStep.reactionProductPlacementMechanicsRefreshCarried = false;
+    }
+    if (finalReactionResult?.reactionSummary) {
+      finalReactionResult.reactionSummary.productPlacementProvenance = null;
+      finalReactionResult.reactionSummary.productPlacementProvenanceStatus = status;
+    }
+    const finalStepSummaryDiagnostics = stepSummaries.at(-1)?.diagnostics;
+    if (finalStepSummaryDiagnostics) {
+      finalStepSummaryDiagnostics.reactionProductPlacementProvenance = null;
+      finalStepSummaryDiagnostics.reactionProductPlacementProvenanceStatus = status;
+      finalStepSummaryDiagnostics.reactionProductPlacementMechanicsRefreshStatus =
+        'product-placement-provenance-not-available-unproven-sequence';
+      finalStepSummaryDiagnostics.reactionProductPlacementMechanicsRefreshCarried = false;
+    }
+  }
+  if (ownsProductPlacementAccumulator) {
+    deferSubmittedWorkCleanup(resolvedDevice, destroyOwnedProductPlacementAccumulator);
+  }
+
   return {
     schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
     backend: finalStep?.backend || 'cpu-reference',
@@ -18383,6 +18598,42 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     residentBufferLeaseActiveLeaseCount: finalStep?.residentBufferLeaseActiveLeaseCount ?? 0,
     residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
     residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
+    reactionProductPlacementAccumulatorStatus: finalProductPlacementProvenance?.status
+      ?? (productPlacementEvidenceIncomplete
+          ? 'resident-sequence-product-placement-dispatch-evidence-incomplete'
+          : (rawFinalProductPlacementProvenance
+          ? 'resident-sequence-product-placement-source-count-unproven'
+          : (productPlacementAccumulatorBuffer
+          ? 'resident-sequence-product-placement-accumulator-not-read'
+          : 'resident-sequence-product-placement-accumulator-not-run'))),
+    reactionProductPlacementAccumulatorByteLength: productPlacementAccumulatorBuffer
+      ? productPlacementAccumulatorByteLength
+      : 0,
+    reactionProductPlacementAccumulatorOwned: ownsProductPlacementAccumulator,
+    reactionProductPlacementReadbackCadence: productPlacementAccumulatorBuffer
+      ? 'resident-sequence-final-only'
+      : null,
+    reactionProductPlacementSuccessfulDispatchCount:
+      productPlacementSuccessfulDispatchCount,
+    reactionProductPlacementDispatchEvidenceComplete:
+      productPlacementAccumulatorBuffer && productPlacementAccumulatorByteLength > 0
+        ? productPlacementDispatchEvidenceComplete
+        : null,
+    reactionProductPlacementSourceCountVerified:
+      finalProductPlacementSourceCountVerified,
+    reactionProductPlacementProvenance: finalProductPlacementProvenance
+      ? {
+          ...finalProductPlacementProvenance,
+          records: (finalProductPlacementProvenance.records || []).map((row) => ({ ...row })),
+          byMaterial: Object.fromEntries(
+            Object.entries(finalProductPlacementProvenance.byMaterial || {})
+              .map(([key, row]) => [key, {
+                ...row,
+                productTermIndices: [...(row.productTermIndices || [])]
+              }])
+          )
+        }
+      : null,
     fusedResidentSequencePreflight,
     sidecarAwareResidentSequenceActive: useSidecarAwareResidentSequence,
     sidecarAwareResidentSequenceMode: useSidecarAwareResidentSequence

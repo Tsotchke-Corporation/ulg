@@ -10,6 +10,7 @@ import {
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
   ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
   ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
+  ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
@@ -112,7 +113,10 @@ import {
   MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS,
   runMlsMpmResidentSummaryWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
-import { ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA } from '../src/runtime/sph/sphReactionGpuSummary.js';
+import {
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
+  ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA
+} from '../src/runtime/sph/sphReactionGpuSummary.js';
 import { tagResidentProductMassDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import { buildSphThermalMaterialTable } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
@@ -788,6 +792,170 @@ function fakeSummaryDevice(summaryValues) {
           };
         }
       };
+    }
+  };
+}
+
+function placementAccumulatorSequenceFixture({
+  productTermCount = 2,
+  suppliedAccumulatorBuffer = null,
+  failOnReactionCall = null,
+  includeFinalProvenance = true,
+  finalProvenanceAvailable = true,
+  omitPlacementEvidenceOnReactionCalls = []
+} = {}) {
+  const { buffers, tracker, options } = noFullReadbackResidentStepFixture();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const expectedAccumulatorByteLength = productTermCount
+    * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  let queueFenceCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    queueFenceCount += 1;
+    return Promise.resolve();
+  };
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor) => {
+    const buffer = createBuffer(descriptor);
+    const destroy = buffer.destroy.bind(buffer);
+    buffer.destroyCallCount = 0;
+    buffer.destroy = () => {
+      buffer.destroyCallCount += 1;
+      destroy();
+    };
+    return buffer;
+  };
+
+  const reactionCalls = [];
+  const sequenceOptions = {
+    ...options,
+    device,
+    stepCount: 3,
+    compactSummaryMode: 'none',
+    summaryRunner: null,
+    thermalMaterialTable: {
+      schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0'
+    },
+    thermalStepRunner: null,
+    reactionTable: {
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
+      reactionCount: 1,
+      productTermCount,
+      gasProductCount: 0
+    },
+    reactionStepOptions: suppliedAccumulatorBuffer
+      ? { productPlacementAccumulatorBuffer: suppliedAccumulatorBuffer }
+      : {},
+    reactionStepRunner(args) {
+      const callNumber = reactionCalls.length + 1;
+      reactionCalls.push({
+        productPlacementAccumulatorBuffer: args.productPlacementAccumulatorBuffer,
+        readReactionProductPlacementSummary: args.readReactionProductPlacementSummary,
+        reactionProductPlacementReadbackCadence: args.reactionProductPlacementReadbackCadence,
+        reactionProductPlacementSourceSummaryCount: args.reactionProductPlacementSourceSummaryCount
+      });
+      if (failOnReactionCall === callNumber) {
+        throw new Error(`placement accumulator fixture reaction failure ${callNumber}`);
+      }
+      const stateBuffer = tracker.buffer(`placement-reaction-state-${callNumber}`);
+      const thermoBuffer = tracker.buffer(`placement-reaction-thermo-${callNumber}`);
+      const mechanicsBuffer = tracker.buffer(`placement-reaction-mechanics-${callNumber}`);
+      const includePlacementEvidence = includeFinalProvenance
+        && !omitPlacementEvidenceOnReactionCalls.includes(callNumber);
+      const productPlacementProvenance = includePlacementEvidence
+        && args.readReactionProductPlacementSummary === true
+        ? {
+            schema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
+            status: finalProvenanceAvailable
+              ? 'product-placement-provenance-ready'
+              : 'product-placement-provenance-not-run',
+            available: finalProvenanceAvailable,
+            productTermCount,
+            recordCount: productTermCount,
+            records: Array.from({ length: productTermCount }, (_, productTermIndex) => ({
+              schema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
+              productTermIndex,
+              material: `product-${productTermIndex}`,
+              materialId: 100 + productTermIndex,
+              status: 'product-placement-term-ready',
+              statusCode: 1,
+              readyProductMassKg: productTermIndex + 1,
+              placedMassKg: productTermIndex + 1,
+              mergedMassKg: 0,
+              unplacedMassKg: 0
+            })),
+            byMaterial: Object.fromEntries(
+              Array.from({ length: productTermCount }, (_, productTermIndex) => [
+                `product-${productTermIndex}`,
+                {
+                  material: `product-${productTermIndex}`,
+                  materialId: 100 + productTermIndex,
+                  productTermIndices: [productTermIndex],
+                  placedMassKg: productTermIndex + 1,
+                  mergedMassKg: 0,
+                  unplacedMassKg: 0
+                }
+              ])
+            ),
+            placedMassKg: productTermCount * (productTermCount + 1) / 2,
+            mergedMassKg: 0,
+            unplacedMassKg: 0,
+            sourceSummaryCount: args.reactionProductPlacementSourceSummaryCount,
+            readbackCadence: args.reactionProductPlacementReadbackCadence,
+            readbackFloatCount:
+              productTermCount * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
+            readbackByteLength: expectedAccumulatorByteLength,
+            fullParticleReadbackPerformed: false
+          }
+        : null;
+      return {
+        schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'reaction-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer,
+        thermoBuffer,
+        mechanicsBuffer,
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        reactionSummary: {
+          schema: ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
+          backend: 'webgpu',
+          status: productPlacementProvenance?.status ?? 'reaction-summary-runner-returned-no-placement-evidence',
+          reactionSummaryAvailable: false,
+          ...(includePlacementEvidence ? {
+            productPlacementProvenance,
+            productPlacementProvenanceStatus: productPlacementProvenance?.status
+              ?? 'product-placement-provenance-gpu-resident-not-read',
+            productPlacementProvenanceReadbackByteLength:
+              productPlacementProvenance?.readbackByteLength ?? 0,
+            productPlacementAccumulatorByteLength: expectedAccumulatorByteLength
+          } : {})
+        },
+        destroyOutputParticleBuffers() {
+          stateBuffer.destroy();
+          thermoBuffer.destroy();
+          mechanicsBuffer.destroy();
+        }
+      };
+    }
+  };
+
+  return {
+    device,
+    expectedAccumulatorByteLength,
+    reactionCalls,
+    sequenceOptions,
+    tracker,
+    get queueFenceCount() {
+      return queueFenceCount;
     }
   };
 }
@@ -7430,6 +7598,223 @@ test('MLS-MPM resident steps compactSummaryMode none skips no-full summary readb
   assert.equal(execution.nextMlsMpmParticleState.status, 'gpu-resident-unread-ready');
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.ok(tracker.destroyed > 0);
+});
+
+test('MLS-MPM resident reaction sequence reuses one owned placement accumulator and reads only the final step', async () => {
+  const fixture = placementAccumulatorSequenceFixture({ productTermCount: 3 });
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu(fixture.sequenceOptions);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(fixture.reactionCalls.length, 3);
+  const accumulator = fixture.reactionCalls[0].productPlacementAccumulatorBuffer;
+  assert.ok(accumulator);
+  assert.ok(fixture.reactionCalls.every((call) => (
+    call.productPlacementAccumulatorBuffer === accumulator
+  )));
+  assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.readReactionProductPlacementSummary),
+    [false, false, true]
+  );
+  assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.reactionProductPlacementReadbackCadence),
+    ['resident-sequence-final-only', 'resident-sequence-final-only', 'resident-sequence-final-only']
+  );
+  assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.reactionProductPlacementSourceSummaryCount),
+    [1, 2, 3]
+  );
+  assert.equal(accumulator.size, fixture.expectedAccumulatorByteLength);
+  assert.equal(
+    fixture.expectedAccumulatorByteLength,
+    3 * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(execution.reactionProductPlacementAccumulatorByteLength, fixture.expectedAccumulatorByteLength);
+  assert.equal(execution.reactionProductPlacementAccumulatorOwned, true);
+  assert.equal(execution.reactionProductPlacementReadbackCadence, 'resident-sequence-final-only');
+  assert.equal(execution.reactionProductPlacementAccumulatorStatus, 'product-placement-provenance-ready');
+  assert.equal(execution.reactionProductPlacementSuccessfulDispatchCount, 3);
+  assert.equal(execution.reactionProductPlacementDispatchEvidenceComplete, true);
+  assert.equal(execution.reactionProductPlacementSourceCountVerified, true);
+  assert.equal(execution.reactionProductPlacementProvenance.sourceSummaryCount, 3);
+  assert.equal(
+    execution.reactionProductPlacementProvenance.readbackCadence,
+    'resident-sequence-final-only'
+  );
+  assert.equal(
+    execution.reactionProductPlacementProvenance.readbackByteLength,
+    fixture.expectedAccumulatorByteLength
+  );
+  const accumulatorWrites = fixture.device.writes.filter((write) => (
+    write.label === 'ulg-sph-reaction-product-placement-resident-sequence-accumulator'
+  ));
+  assert.equal(accumulatorWrites.length, 1);
+  assert.equal(accumulatorWrites[0].offset, 0);
+  assert.equal(accumulatorWrites[0].byteLength, fixture.expectedAccumulatorByteLength);
+  assert.equal(fixture.queueFenceCount, 1);
+  assert.equal(accumulator.destroyCallCount, 1);
+
+  destroyMlsMpmResidentStepsBuffers(execution);
+  assert.equal(accumulator.destroyCallCount, 1);
+});
+
+test('MLS-MPM resident reaction sequence borrows a placement accumulator without zeroing or destroying it', async () => {
+  const productTermCount = 2;
+  const expectedAccumulatorByteLength = productTermCount
+    * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const borrowedAccumulator = {
+    label: 'borrowed-product-placement-accumulator',
+    size: expectedAccumulatorByteLength,
+    destroyCallCount: 0,
+    destroy() {
+      this.destroyCallCount += 1;
+    }
+  };
+  const fixture = placementAccumulatorSequenceFixture({
+    productTermCount,
+    suppliedAccumulatorBuffer: borrowedAccumulator
+  });
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu(fixture.sequenceOptions);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(fixture.reactionCalls.length, 3);
+  assert.ok(fixture.reactionCalls.every((call) => (
+    call.productPlacementAccumulatorBuffer === borrowedAccumulator
+  )));
+  assert.equal(execution.reactionProductPlacementAccumulatorByteLength, expectedAccumulatorByteLength);
+  assert.equal(execution.reactionProductPlacementAccumulatorOwned, false);
+  assert.equal(borrowedAccumulator.destroyCallCount, 0);
+  assert.equal(fixture.queueFenceCount, 0);
+  assert.equal(
+    fixture.device.createdBuffers.some((buffer) => (
+      buffer.label === 'ulg-sph-reaction-product-placement-resident-sequence-accumulator'
+    )),
+    false
+  );
+  assert.equal(
+    fixture.device.writes.some((write) => write.label === borrowedAccumulator.label),
+    false
+  );
+
+  destroyMlsMpmResidentStepsBuffers(execution);
+  assert.equal(borrowedAccumulator.destroyCallCount, 0);
+});
+
+test('MLS-MPM resident reaction sequence destroys its owned placement accumulator after a failed step', async () => {
+  const fixture = placementAccumulatorSequenceFixture({
+    productTermCount: 2,
+    failOnReactionCall: 2
+  });
+
+  await assert.rejects(
+    runMlsMpmResidentStepsWithOptionalWebGpu(fixture.sequenceOptions),
+    /placement accumulator fixture reaction failure 2/
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(fixture.reactionCalls.length, 2);
+  const accumulator = fixture.reactionCalls[0].productPlacementAccumulatorBuffer;
+  assert.ok(accumulator);
+  assert.equal(fixture.reactionCalls[1].productPlacementAccumulatorBuffer, accumulator);
+  assert.equal(fixture.queueFenceCount, 1);
+  assert.equal(accumulator.destroyCallCount, 1);
+});
+
+test('MLS-MPM resident reaction sequence does not claim placement readback when a runner returns no evidence', async () => {
+  const fixture = placementAccumulatorSequenceFixture({
+    productTermCount: 2,
+    includeFinalProvenance: false
+  });
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu(fixture.sequenceOptions);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.readReactionProductPlacementSummary),
+    [false, false, true]
+  );
+  assert.equal(execution.reactionProductPlacementProvenance, null);
+  assert.equal(execution.reactionProductPlacementSuccessfulDispatchCount, 0);
+  assert.equal(execution.reactionProductPlacementDispatchEvidenceComplete, false);
+  assert.equal(execution.reactionProductPlacementSourceCountVerified, false);
+  assert.equal(
+    execution.reactionProductPlacementAccumulatorStatus,
+    'resident-sequence-product-placement-dispatch-evidence-incomplete'
+  );
+  const accumulator = fixture.reactionCalls[0].productPlacementAccumulatorBuffer;
+  assert.equal(fixture.queueFenceCount, 1);
+  assert.equal(accumulator.destroyCallCount, 1);
+
+  destroyMlsMpmResidentStepsBuffers(execution);
+  assert.equal(accumulator.destroyCallCount, 1);
+});
+
+test('MLS-MPM resident reaction sequence fails closed when any placement dispatch is unproven', async () => {
+  const fixture = placementAccumulatorSequenceFixture({
+    productTermCount: 2,
+    omitPlacementEvidenceOnReactionCalls: [2]
+  });
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu(fixture.sequenceOptions);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.reactionProductPlacementSourceSummaryCount),
+    [1, 2, 2]
+  );
+  assert.equal(execution.reactionProductPlacementSuccessfulDispatchCount, 2);
+  assert.equal(execution.reactionProductPlacementDispatchEvidenceComplete, false);
+  assert.equal(execution.reactionProductPlacementSourceCountVerified, false);
+  assert.equal(execution.reactionProductPlacementProvenance, null);
+  assert.equal(
+    execution.reactionProductPlacementAccumulatorStatus,
+    'resident-sequence-product-placement-dispatch-evidence-incomplete'
+  );
+  assert.equal(
+    execution.finalStep.diagnostics.reactionProductPlacementProvenanceStatus,
+    'resident-sequence-product-placement-dispatch-evidence-incomplete'
+  );
+  assert.equal(
+    execution.finalStep.diagnostics.reactionProductPlacementMechanicsRefreshCarried,
+    false
+  );
+  assert.equal(
+    execution.finalStep.reactionProductPlacementMechanicsRefreshStatus,
+    'product-placement-provenance-not-available-unproven-sequence'
+  );
+  assert.equal(execution.finalStep.reactionProductPlacementMechanicsRefreshCarried, false);
+  assert.equal(
+    (execution.finalStep.reactionStep.result || execution.finalStep.reactionStep)
+      .reactionSummary.productPlacementProvenance,
+    null
+  );
+
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
+test('MLS-MPM resident reaction step does not call unavailable placement provenance carried', async () => {
+  const fixture = placementAccumulatorSequenceFixture({
+    productTermCount: 2,
+    finalProvenanceAvailable: false
+  });
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu(fixture.sequenceOptions);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    execution.finalStep.diagnostics.reactionProductPlacementMechanicsRefreshStatus,
+    'product-placement-provenance-not-available-unproven-sequence'
+  );
+  assert.equal(
+    execution.finalStep.diagnostics.reactionProductPlacementMechanicsRefreshCarried,
+    false
+  );
+  assert.equal(execution.reactionProductPlacementProvenance, null);
+  assert.equal(execution.reactionProductPlacementDispatchEvidenceComplete, false);
+  assert.equal(execution.reactionProductPlacementSourceCountVerified, false);
+  assert.equal(
+    execution.reactionProductPlacementAccumulatorStatus,
+    'resident-sequence-product-placement-dispatch-evidence-incomplete'
+  );
+
+  destroyMlsMpmResidentStepsBuffers(execution);
 });
 
 test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMode none', async () => {

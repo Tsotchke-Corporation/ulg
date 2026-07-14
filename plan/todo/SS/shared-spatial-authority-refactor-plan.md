@@ -492,7 +492,7 @@ commits:
 
 1. [x] add compact per-material/per-phase speed, `J`, rest-volume,
    represented-volume, and cap-boundary reductions;
-2. publish post-placement placed/merged/unplaced product-mass provenance;
+2. [x] publish post-placement placed/merged/unplaced product-mass provenance;
 3. isolate and bound the condensed-contact energy injection between
    `0.256 s` and `0.512 s`, including a manufactured multi-step contact test;
 4. keep field-resolution/radius-floor classification as a renderer diagnostic
@@ -544,8 +544,45 @@ Water remains green with complete mechanics, `maxSpeed=0.156902 m/s`, and
 speed/expansion gates: nine liquid NaOH rows now have positive rest/current
 volume and zero mechanics problems, while five H2 rows reach
 `89.6172 m/s`, four touch the `J=1000` gas cap, and native browser pixels pass.
-Item 2 is therefore next: publish placed/merged/unplaced product mass across
-placement and the first refresh before changing gas transport.
+Item 2 is complete. The 32-float reaction-product event ABI v1 now retains a
+placement disposition and placed/unplaced mass after the source row is
+consumed. A separate 32-float accumulator per product term remains GPU
+resident for the whole resident batch and is read only after the final step;
+it partitions direct placement, spare-slot placement, radius-capture merge,
+fallback merge, subthreshold/unplaced mass, and rejected mass. Empty term rows
+cannot alias term zero, rejection fails closed, and direct placement is
+attributed from the exact freed parent slot rather than inferred from material
+identity. Invalid consumed rows reject their full payload even if their
+unplaced field is zero. Sequence diagnostics count only placement dispatches
+proven by returned step evidence and only claim a post-reaction mechanics carry
+when the final provenance is available. If any accumulator-bearing step lacks
+evidence after submission, the entire sequence fails closed and suppresses all
+final/step/reaction-summary provenance; a host-inferred count cannot certify a
+shared buffer that the unproven step may already have mutated.
+
+Fresh native Vulkan evidence is at
+`/tmp/ulg-ss-spatial-sodium-placement-provenance-v1-20260713/result.json` and
+`/tmp/ulg-ss-spatial-water-flow-visual-v1-20260713/result.json`. Each sodium
+batch maps only 256 bytes after 256 resident steps. The first batch
+partitions `0.782123461 kg` of product mass with a
+`1.21e-7 kg` residual; the second partitions `0.598155338 kg` with a
+`4.20e-10 kg` residual. Both report zero rejected or unplaced mass and carry
+the evidence through the post-reaction mechanics refresh. This rules out lost
+placement mass as the cause of the remaining visible failure. Sodium still
+reaches `89.6172 m/s` and `J=1000`, with the final frame dominated by large
+H2-derived lobes. A post-hardening one-batch smoke at
+`/tmp/ulg-ss-spatial-sodium-placement-evidence-complete-v4-20260713/result.json`
+proves all 256 dispatches returned evidence, verifies
+`sourceSummaryCount=256`, reports zero rejected/unplaced mass and no
+browser/WebGPU issues; it remains bad only because H2 already reaches
+`J=6.6352` at `0.256 s`. The `1.024 s` water control is mechanically bounded at
+`1.08636 m/s` and `J=0.996426..1.000259`; retained handoff, native visible
+consumption, browser pixels, compact motion, and all automated checks pass.
+Direct interval-frame inspection shows genuine descent and spreading into a
+wider skirt, but the final surface remains a faceted, tiered cohesive mound
+rather than accepted liquid flow. Item 3 is next: isolate the H2
+expansion/contact energy injection before changing the renderer or claiming
+visual acceptance.
 
 Do not widen the reaction radius, globally change the water damping default,
 or treat a deliberately relaxed diagnostic threshold as scientific acceptance.

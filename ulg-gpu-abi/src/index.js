@@ -175,7 +175,20 @@ export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reac
 export const ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-gas-species-summary.v0';
 export const ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-product-inventory.v0';
-export const ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-product-event.v0';
+export const ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-product-event.v1';
+export const ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA =
+  'peercompute.ulg.sph-gpu-reaction-product-placement-summary.v0';
+export const SPH_GPU_REACTION_PRODUCT_EVENT_DISPOSITION_IDS = Object.freeze({
+  invalidOrEmpty: 0,
+  pending: 1,
+  directOnly: 2,
+  spareSlot: 3,
+  radiusCaptureMerge: 4,
+  fallbackMerge: 5,
+  subthresholdUnplaced: 6,
+  noCarrierUnplaced: 7,
+  rejected: 8
+});
 export const ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-atom-residual.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
@@ -1804,14 +1817,14 @@ export const SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT = Object.freeze([
   'moles:f32',
   'routingId:f32',
   'phaseId:f32',
-  'visibleMassKg:f32',
+  'placedMassKg:f32',
   'unplacedMassKg:f32',
   'coefficient:f32',
   'molarMassKgPerMol:f32',
   'temperatureK:f32',
   'restDensityKgPerM3:f32',
   'status:f32',
-  'pad0:f32',
+  'specificInternalEnergyJPerKg:f32',
   'velocityXMPerS:f32',
   'velocityYMPerS:f32',
   'velocityZMPerS:f32',
@@ -1823,7 +1836,41 @@ export const SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT = Object.freeze([
   'eosModelId:f32',
   'solidFlag:f32',
   'mechanicsStatus:f32',
-  'pad1:f32'
+  'dispositionId:f32'
+]);
+export const SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'productTermIndex:f32',
+  'reactionIndex:f32',
+  'routingId:f32',
+  'phaseId:f32',
+  'status:f32',
+  'readyProductEventCount:f32',
+  'placementCandidateEventCount:f32',
+  'directPlacedEventCount:f32',
+  'sparePlacedEventCount:f32',
+  'captureMergedEventCount:f32',
+  'fallbackMergedEventCount:f32',
+  'unplacedEventCount:f32',
+  'subthresholdEventCount:f32',
+  'rejectedEventCount:f32',
+  'reserved0:f32',
+  'readyProductMassKg:f32',
+  'directPlacedMassKg:f32',
+  'sparePlacedMassKg:f32',
+  'captureMergedMassKg:f32',
+  'fallbackMergedMassKg:f32',
+  'unplacedMassKg:f32',
+  'subthresholdMassKg:f32',
+  'rejectedMassKg:f32',
+  'maxSparePlacedEventMassKg:f32',
+  'maxMergedEventMassKg:f32',
+  'maxPostMergeParticleMassKg:f32',
+  'maxUnplacedEventMassKg:f32',
+  'maxCaptureDistanceM:f32',
+  'maxFallbackDistanceM:f32',
+  'maxSparePlacedSupportRadiusM:f32',
+  'maxReadyProductEventMassKg:f32'
 ]);
 export const SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT = Object.freeze([
   'reactionIndex:f32',

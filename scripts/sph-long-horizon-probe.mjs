@@ -1164,7 +1164,15 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
         status: residentSteps.status ?? null,
         backend: residentSteps.backend ?? null,
         completedStepCount: residentSteps.completedStepCount ?? null,
-        readbackMode: residentSteps.readbackMode ?? null
+        readbackMode: residentSteps.readbackMode ?? null,
+        reactionProductPlacementAccumulatorStatus:
+          residentSteps.reactionProductPlacementAccumulatorStatus ?? null,
+        reactionProductPlacementSuccessfulDispatchCount:
+          residentSteps.reactionProductPlacementSuccessfulDispatchCount ?? null,
+        reactionProductPlacementDispatchEvidenceComplete:
+          residentSteps.reactionProductPlacementDispatchEvidenceComplete ?? null,
+        reactionProductPlacementSourceCountVerified:
+          residentSteps.reactionProductPlacementSourceCountVerified ?? null
       } : null,
       residentAuthorityHost: residentAuthorityHost ? {
         schema: residentAuthorityHost.schema ?? null,
@@ -1725,6 +1733,20 @@ async function runBrowserProbe({
           productEventRowCount: diagnostics.reactionProductEventRowCount ?? null,
           productEventActiveEventCount: diagnostics.reactionProductEventActiveEventCount ?? null,
           productEventBufferRetained: diagnostics.reactionProductEventBufferRetained ?? null,
+          productPlacementProvenanceStatus:
+            diagnostics.reactionProductPlacementProvenanceStatus ?? null,
+          productPlacementProvenanceReadbackByteLength:
+            diagnostics.reactionProductPlacementProvenanceReadbackByteLength ?? null,
+          productPlacementAccumulatorByteLength:
+            diagnostics.reactionProductPlacementAccumulatorByteLength ?? null,
+          productPlacementReadbackCadence:
+            diagnostics.reactionProductPlacementReadbackCadence ?? null,
+          productPlacementMechanicsRefreshStatus:
+            diagnostics.reactionProductPlacementMechanicsRefreshStatus ?? null,
+          productPlacementMechanicsRefreshCarried:
+            diagnostics.reactionProductPlacementMechanicsRefreshCarried ?? null,
+          productPlacementProvenance:
+            diagnostics.reactionProductPlacementProvenance ?? null,
           residentProductMassStatus: diagnostics.reactionResidentProductMassStatus ?? null,
           residentProductMassBufferRetained:
             diagnostics.reactionResidentProductMassBufferRetained ?? null,
@@ -3438,6 +3460,14 @@ async function runBrowserProbe({
             compactSummaryScope: steps.compactSummaryScope ?? null,
             continuedFromResidentState: steps.continuedFromResidentState ?? null,
             continuationAvailable: steps.continuationAvailable ?? null,
+            reactionProductPlacementAccumulatorStatus:
+              steps.reactionProductPlacementAccumulatorStatus ?? null,
+            reactionProductPlacementSuccessfulDispatchCount:
+              steps.reactionProductPlacementSuccessfulDispatchCount ?? null,
+            reactionProductPlacementDispatchEvidenceComplete:
+              steps.reactionProductPlacementDispatchEvidenceComplete ?? null,
+            reactionProductPlacementSourceCountVerified:
+              steps.reactionProductPlacementSourceCountVerified ?? null,
             residentStepsTiming: steps.residentStepsTiming ?? null,
             residentStepsStageMs: steps.residentStepsStageMs ?? null,
             residentStepsWallMs: finiteOrNull(steps.residentStepsWallMs),
@@ -5763,6 +5793,20 @@ async function runDirectResidentProbe({
           productEventRowCount: diagnostics.reactionProductEventRowCount ?? null,
           productEventActiveEventCount: diagnostics.reactionProductEventActiveEventCount ?? null,
           productEventBufferRetained: diagnostics.reactionProductEventBufferRetained ?? null,
+          productPlacementProvenanceStatus:
+            diagnostics.reactionProductPlacementProvenanceStatus ?? null,
+          productPlacementProvenanceReadbackByteLength:
+            diagnostics.reactionProductPlacementProvenanceReadbackByteLength ?? null,
+          productPlacementAccumulatorByteLength:
+            diagnostics.reactionProductPlacementAccumulatorByteLength ?? null,
+          productPlacementReadbackCadence:
+            diagnostics.reactionProductPlacementReadbackCadence ?? null,
+          productPlacementMechanicsRefreshStatus:
+            diagnostics.reactionProductPlacementMechanicsRefreshStatus ?? null,
+          productPlacementMechanicsRefreshCarried:
+            diagnostics.reactionProductPlacementMechanicsRefreshCarried ?? null,
+          productPlacementProvenance:
+            diagnostics.reactionProductPlacementProvenance ?? null,
           residentProductMassStatus: diagnostics.reactionResidentProductMassStatus ?? null,
           residentProductMassBufferRetained:
             diagnostics.reactionResidentProductMassBufferRetained ?? null,
@@ -6251,6 +6295,14 @@ async function runDirectResidentProbe({
         nextParticleBufferMode: steps.nextParticleBufferMode ?? null,
         normalHotLoopReadbackFree: steps.normalHotLoopReadbackFree === true,
         renderStateReadbackAvailable: steps.renderStateReadbackAvailable ?? null,
+        reactionProductPlacementAccumulatorStatus:
+          steps.reactionProductPlacementAccumulatorStatus ?? null,
+        reactionProductPlacementSuccessfulDispatchCount:
+          steps.reactionProductPlacementSuccessfulDispatchCount ?? null,
+        reactionProductPlacementDispatchEvidenceComplete:
+          steps.reactionProductPlacementDispatchEvidenceComplete ?? null,
+        reactionProductPlacementSourceCountVerified:
+          steps.reactionProductPlacementSourceCountVerified ?? null,
         residentAuthorityLedgerStatus: steps.residentAuthorityLedgerStatus ?? null,
         residentAuthorityFamilyOwners: steps.residentAuthorityFamilyOwners || null,
         residentAuthorityWarnings: [...(steps.residentAuthorityWarnings || [])],

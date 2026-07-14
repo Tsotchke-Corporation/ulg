@@ -2,12 +2,14 @@ import {
   SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT,
   SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT,
   SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
   ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+  ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
@@ -27,13 +29,18 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
-import { tagResidentProductMassDevice, tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import {
+  tagResidentProductMassDevice,
+  tagWebGpuBufferDevice,
+  webGpuBufferMatchesDevice
+} from './sphGpuDeviceIdentity.js';
 
 export {
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
   ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+  ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
   ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
   sphReactionAtomResidualWgsl,
@@ -52,6 +59,10 @@ export const SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS = SPH_GPU_REACTION_PRODUC
 export const SPH_GPU_REACTION_PRODUCT_INVENTORY_ROWS = SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS / 4;
 export const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
 export const SPH_GPU_REACTION_PRODUCT_EVENT_ROWS = SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4;
+export const SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS =
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT.length;
+export const SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROWS =
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS / 4;
 export const SPH_GPU_REACTION_ATOM_RESIDUAL_FLOATS = SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT.length;
 export const SPH_GPU_REACTION_ATOM_RESIDUAL_ROWS = SPH_GPU_REACTION_ATOM_RESIDUAL_FLOATS / 4;
 
@@ -269,6 +280,22 @@ function routingNameFromId(id, fallback = null) {
   return 'condensed';
 }
 
+const PRODUCT_EVENT_DISPOSITIONS = Object.freeze({
+  0: 'invalid-or-empty',
+  1: 'pending',
+  2: 'direct-only',
+  3: 'spare-slot',
+  4: 'radius-capture-merge',
+  5: 'fallback-merge',
+  6: 'subthreshold-unplaced',
+  7: 'no-carrier-unplaced',
+  8: 'rejected'
+});
+
+function productEventDispositionName(id) {
+  return PRODUCT_EVENT_DISPOSITIONS[Math.round(Number(id) || 0)] || 'unknown';
+}
+
 function sumProductInventoryMass(productInventory, fieldName) {
   if (!Array.isArray(productInventory?.records)) return 0;
   return productInventory.records.reduce((sum, row) => sum + (Number(row?.[fieldName]) || 0), 0);
@@ -375,12 +402,23 @@ export function createResidentProductMassHandle(reactionSummary = null) {
         attemptDestroy();
       }
     : null;
-  const unplacedProductMassKg = Number(reactionSummary.ledgerUnplacedProductMassKg)
+  const productPlacementProvenance = reactionSummary.productPlacementProvenance?.schema
+    === ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA
+    ? { ...reactionSummary.productPlacementProvenance }
+    : null;
+  const prePlacementUnplacedProductMassKg = Number(reactionSummary.ledgerUnplacedProductMassKg)
     || Number(productEvents?.unplacedMassKg)
     || sumProductInventoryMass(productInventory, 'unplacedMassKg');
+  const unplacedProductMassKg = productPlacementProvenance?.available
+    ? (Number(productPlacementProvenance.unplacedMassKg) || 0)
+    : prePlacementUnplacedProductMassKg;
+  const placedProductMassKg = Number(productPlacementProvenance?.placedMassKg) || 0;
+  const mergedProductMassKg = Number(productPlacementProvenance?.mergedMassKg) || 0;
   const visibleProductMassKg = Number(reactionSummary.ledgerVisibleProductMassKg)
     || sumProductInventoryMass(productInventory, 'visibleMassKg');
-  const unplacedGasProductMassKg = Number(reactionSummary.ledgerUnplacedGasProductMassKg) || 0;
+  const unplacedGasProductMassKg = productPlacementProvenance?.available
+    ? (Number(productPlacementProvenance.gasUnplacedMassKg) || 0)
+    : (Number(reactionSummary.ledgerUnplacedGasProductMassKg) || 0);
   const gasSpeciesLedger = mergeResidentGasSpeciesLedgers(reactionSummary.gasSpeciesLedger);
   const handle = {
     schema: ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA,
@@ -417,8 +455,19 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     gasSpeciesLedger,
     gasSpeciesLedgerCount: gasSpeciesLedger?.recordCount ?? reactionSummary.gasSpeciesLedgerCount ?? 0,
     gasSpeciesReadbackByteLength: reactionSummary.gasSpeciesReadbackByteLength ?? 0,
+    productPlacementProvenance,
+    productPlacementProvenanceSchema: productPlacementProvenance?.schema ?? null,
+    productPlacementProvenanceReadbackByteLength:
+      reactionSummary.productPlacementProvenanceReadbackByteLength ?? 0,
     sealedBoxGasProductMoles: Number(reactionSummary.sealedBoxGasProductMoles) || gasSpeciesLedger?.records?.reduce((sum, row) => sum + (Number(row.moles) || 0), 0) || 0,
     visibleProductMassKg,
+    prePlacementVisibleProductMassKg: visibleProductMassKg,
+    prePlacementUnplacedProductMassKg,
+    postPlacementPlacedProductMassKg: placedProductMassKg,
+    postPlacementMergedProductMassKg: mergedProductMassKg,
+    postPlacementUnplacedProductMassKg: unplacedProductMassKg,
+    placedProductMassKg,
+    mergedProductMassKg,
     unplacedProductMassKg,
     unplacedGasProductMassKg,
     consumeMassPolicy: 'unplaced-product-mass-only',
@@ -548,20 +597,33 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
   const byMaterial = {};
   const metadata = Array.isArray(reactionTable?.productTermMetadata) ? reactionTable.productTermMetadata : [];
   let activeMassKg = 0;
+  let activeUnplacedMassKg = 0;
   let unplacedMassKg = 0;
+  let placedMassKg = 0;
+  let mergedMassKg = 0;
+  let consumedEventCount = 0;
+  let rejectedEventCount = 0;
   for (let offset = 0; offset < values.length; offset += SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS) {
     const statusCode = values[offset + 18];
-    if (statusCode !== 1) continue;
+    const dispositionId = Math.round(values[offset + 31] ?? 0);
+    const massKg = Math.max(0, Number(values[offset + 3]) || 0);
+    if (statusCode !== 1 && !(dispositionId > 0 && massKg > 0)) continue;
     const productTermIndex = Math.round(values[offset + 5] ?? 0);
     const meta = metadata.find((item) => item.productTermIndex === productTermIndex) || metadata[productTermIndex] || null;
     const materialId = values[offset + 4];
     const material = meta?.material || String(Math.round(materialId));
-    const massKg = values[offset + 3];
     const moles = values[offset + 9];
     const phaseId = values[offset + 11];
-    const visibleMassKg = values[offset + 12];
-    const rowUnplacedMassKg = values[offset + 13];
+    const rowPlacedMassKg = Math.min(massKg, Math.max(0, Number(values[offset + 12]) || 0));
+    const rowUnplacedMassKg = Math.min(
+      Math.max(0, massKg - rowPlacedMassKg),
+      Math.max(0, Number(values[offset + 13]) || 0)
+    );
+    const rowMergedMassKg = Math.max(0, massKg - rowPlacedMassKg - rowUnplacedMassKg);
+    const visibleMassKg = rowPlacedMassKg + rowMergedMassKg;
     const routingId = values[offset + 10];
+    const active = statusCode === 1;
+    const rejected = dispositionId === 8;
     const record = {
       schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
       material,
@@ -577,11 +639,14 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
       routing: routingNameFromId(routingId, meta?.routing),
       routingId,
       visibleMassKg,
+      placedMassKg: rowPlacedMassKg,
+      mergedMassKg: rowMergedMassKg,
       unplacedMassKg: rowUnplacedMassKg,
       coefficient: meta?.coefficient ?? values[offset + 14],
       molarMassKgPerMol: meta?.molarMassKgPerMol ?? values[offset + 15],
       temperatureK: values[offset + 16],
       restDensityKgPerM3: values[offset + 17],
+      specificInternalEnergyJPerKg: values[offset + 19],
       velocityMPerS: [values[offset + 20], values[offset + 21], values[offset + 22]],
       supportVolumeM3: values[offset + 23],
       effectiveBulkModulusPa: values[offset + 24],
@@ -591,7 +656,10 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
       eosModelId: values[offset + 28],
       solidFlag: values[offset + 29],
       mechanicsStatus: values[offset + 30],
-      status: 'ready',
+      dispositionId,
+      disposition: productEventDispositionName(dispositionId),
+      status: rejected ? 'rejected' : (active ? 'ready' : 'consumed'),
+      lifecycle: rejected ? 'rejected' : (active ? 'active' : 'consumed'),
       statusCode,
       fullParticleReadbackPerformed: false,
       scientificValidation: false,
@@ -599,7 +667,15 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
       fullPhysicsValidation: false
     };
     records.push(record);
-    activeMassKg += massKg;
+    if (active) {
+      activeMassKg += massKg;
+      activeUnplacedMassKg += rowUnplacedMassKg;
+    } else {
+      consumedEventCount += 1;
+    }
+    if (rejected) rejectedEventCount += 1;
+    placedMassKg += rowPlacedMassKg;
+    mergedMassKg += rowMergedMassKg;
     unplacedMassKg += rowUnplacedMassKg;
     const key = String(record.material || Math.round(record.materialId)).toLowerCase();
     const bucket = byMaterial[key] || (byMaterial[key] = {
@@ -608,6 +684,8 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
       massKg: 0,
       moles: 0,
       visibleMassKg: 0,
+      placedMassKg: 0,
+      mergedMassKg: 0,
       unplacedMassKg: 0,
       eventCount: 0,
       productTermIndices: [],
@@ -616,6 +694,8 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
     bucket.massKg += record.massKg;
     bucket.moles += record.moles;
     bucket.visibleMassKg += record.visibleMassKg;
+    bucket.placedMassKg += record.placedMassKg;
+    bucket.mergedMassKg += record.mergedMassKg;
     bucket.unplacedMassKg += record.unplacedMassKg;
     bucket.eventCount += 1;
     if (!bucket.productTermIndices.includes(record.productTermIndex)) {
@@ -625,10 +705,17 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
   return {
     schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
     status: records.length ? 'product-event-sparse-storage-ready' : 'product-event-sparse-storage-empty',
+    placementProvenanceDecoded: true,
     records,
     byMaterial,
-    activeEventCount: records.length,
+    activeEventCount: records.filter((record) => record.statusCode === 1).length,
+    provenanceEventCount: records.length,
+    consumedEventCount,
+    rejectedEventCount,
     activeMassKg,
+    activeUnplacedMassKg,
+    placedMassKg,
+    mergedMassKg,
     unplacedMassKg,
     rowCount: values.length / SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
     materialCount: Object.keys(byMaterial).length,
@@ -640,6 +727,313 @@ export function decodeSphReactionProductEventValues(values, reactionTable = null
     fullParticleReadbackPerformed: false,
     scientificValidation: false,
     chemistryValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function decodeSphReactionProductPlacementSummaryValues(
+  values,
+  reactionTable = null,
+  {
+    readbackMode = 'compact-product-placement-summary-readback',
+    readbackCadence = 'single-step-final',
+    sourceSummaryCount = 1
+  } = {}
+) {
+  if (
+    !(values instanceof Float32Array)
+    || values.length === 0
+    || values.length % SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS !== 0
+  ) {
+    throw new TypeError(
+      'decodeSphReactionProductPlacementSummaryValues requires f32 rows aligned to the product-placement layout'
+    );
+  }
+  const rowCount = values.length / SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS;
+  const expectedRowCount = Math.max(0, Math.round(Number(reactionTable?.productTermCount) || 0));
+  if (expectedRowCount > 0 && rowCount !== expectedRowCount) {
+    throw new RangeError(
+      `product-placement summary row count ${rowCount} does not match product term count ${expectedRowCount}`
+    );
+  }
+  const metadata = Array.isArray(reactionTable?.productTermMetadata)
+    ? reactionTable.productTermMetadata
+    : [];
+  const records = [];
+  const byMaterial = {};
+  const toleranceFor = (massKg) => Math.max(1e-9, Math.abs(massKg) * 1e-5);
+  for (let offset = 0; offset < values.length; offset += SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS) {
+    const fallbackProductTermIndex = offset / SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS;
+    // The accumulator row order is the ABI authority. Empty product terms do
+    // not have an event identity to encode and therefore retain zero in the
+    // identity lane; trusting that zero would alias every empty row to term 0.
+    const productTermIndex = fallbackProductTermIndex;
+    const meta = metadata.find((item) => item.productTermIndex === productTermIndex)
+      || metadata[productTermIndex]
+      || null;
+    const readyProductEventCount = values[offset + 6];
+    const placementCandidateEventCount = values[offset + 7];
+    const directPlacedEventCount = values[offset + 8];
+    const sparePlacedEventCount = values[offset + 9];
+    const captureMergedEventCount = values[offset + 10];
+    const fallbackMergedEventCount = values[offset + 11];
+    const unplacedEventCount = values[offset + 12];
+    const subthresholdEventCount = values[offset + 13];
+    const rejectedEventCount = values[offset + 14];
+    const readyProductMassKg = values[offset + 16];
+    const directPlacedMassKg = values[offset + 17];
+    const sparePlacedMassKg = values[offset + 18];
+    const captureMergedMassKg = values[offset + 19];
+    const fallbackMergedMassKg = values[offset + 20];
+    const unplacedMassKg = values[offset + 21];
+    const subthresholdMassKg = values[offset + 22];
+    const rejectedMassKg = values[offset + 23];
+    const candidateDispositionEventCount = sparePlacedEventCount
+      + captureMergedEventCount
+      + fallbackMergedEventCount
+      + unplacedEventCount;
+    const directOnlyEventCount = Math.max(0, readyProductEventCount - placementCandidateEventCount);
+    const readyEventPartitionResidual = readyProductEventCount
+      - directOnlyEventCount
+      - placementCandidateEventCount;
+    const candidateEventPartitionResidual = placementCandidateEventCount
+      - candidateDispositionEventCount;
+    const placedMassKg = directPlacedMassKg + sparePlacedMassKg;
+    const mergedMassKg = captureMergedMassKg + fallbackMergedMassKg;
+    const massPartitionResidualKg = readyProductMassKg
+      - placedMassKg
+      - mergedMassKg
+      - unplacedMassKg;
+    const massToleranceKg = toleranceFor(readyProductMassKg);
+    const partitionComplete = Math.abs(readyEventPartitionResidual) <= 0.5
+      && Math.abs(candidateEventPartitionResidual) <= 0.5
+      && Math.abs(massPartitionResidualKg) <= massToleranceKg
+      && subthresholdEventCount <= unplacedEventCount + 0.5
+      && subthresholdMassKg <= unplacedMassKg + massToleranceKg;
+    const statusCode = values[offset + 5];
+    const shaderReady = statusCode === 1;
+    const routingId = meta?.routing === 'gas'
+      ? 1
+      : Math.round(Number(values[offset + 3]) || 0);
+    const materialId = Number(meta?.materialId) || Number(values[offset]) || 0;
+    const material = meta?.material || String(Math.round(materialId));
+    const record = {
+      schema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
+      material,
+      materialId,
+      productTermIndex,
+      reactionIndex: meta?.reactionIndex ?? Math.round(Number(values[offset + 2]) || 0),
+      routing: routingNameFromId(routingId, meta?.routing),
+      routingId,
+      phaseId: Number(values[offset + 4]) > 0
+        ? values[offset + 4]
+        : (meta?.targetPhasePolicyId ?? 0),
+      status: !shaderReady
+        ? 'product-placement-term-not-run'
+        : (rejectedEventCount > 0 || rejectedMassKg > 0
+            ? 'product-placement-term-rejected'
+            : (partitionComplete
+                ? 'product-placement-term-ready'
+                : 'product-placement-term-partition-incomplete')),
+      statusCode,
+      shaderReady,
+      partitionComplete,
+      readyProductEventCount,
+      directOnlyEventCount,
+      placementCandidateEventCount,
+      directPlacedEventCount,
+      sparePlacedEventCount,
+      placedEventCount: directOnlyEventCount + sparePlacedEventCount,
+      captureMergedEventCount,
+      fallbackMergedEventCount,
+      mergedEventCount: captureMergedEventCount + fallbackMergedEventCount,
+      unplacedEventCount,
+      subthresholdEventCount,
+      rejectedEventCount,
+      readyProductMassKg,
+      directPlacedMassKg,
+      sparePlacedMassKg,
+      placedMassKg,
+      captureMergedMassKg,
+      fallbackMergedMassKg,
+      mergedMassKg,
+      unplacedMassKg,
+      subthresholdMassKg,
+      rejectedMassKg,
+      maxSparePlacedEventMassKg: values[offset + 24],
+      maxMergedEventMassKg: values[offset + 25],
+      maxPostMergeParticleMassKg: values[offset + 26],
+      maxUnplacedEventMassKg: values[offset + 27],
+      maxCaptureDistanceM: values[offset + 28],
+      maxFallbackDistanceM: values[offset + 29],
+      maxSparePlacedSupportRadiusM: values[offset + 30],
+      maxReadyProductEventMassKg: values[offset + 31],
+      readyEventPartitionResidual,
+      candidateEventPartitionResidual,
+      massPartitionResidualKg,
+      massToleranceKg,
+      fullParticleReadbackPerformed: false
+    };
+    records.push(record);
+    const key = String(material || Math.round(materialId)).toLowerCase();
+    const bucket = byMaterial[key] || (byMaterial[key] = {
+      material: key,
+      materialId,
+      routing: record.routing,
+      productTermIndices: [],
+      readyProductEventCount: 0,
+      placementCandidateEventCount: 0,
+      directPlacedEventCount: 0,
+      sparePlacedEventCount: 0,
+      captureMergedEventCount: 0,
+      fallbackMergedEventCount: 0,
+      unplacedEventCount: 0,
+      subthresholdEventCount: 0,
+      rejectedEventCount: 0,
+      readyProductMassKg: 0,
+      directPlacedMassKg: 0,
+      sparePlacedMassKg: 0,
+      placedMassKg: 0,
+      captureMergedMassKg: 0,
+      fallbackMergedMassKg: 0,
+      mergedMassKg: 0,
+      unplacedMassKg: 0,
+      subthresholdMassKg: 0,
+      rejectedMassKg: 0,
+      fullParticleReadbackPerformed: false
+    });
+    for (const field of [
+      'readyProductEventCount',
+      'placementCandidateEventCount',
+      'directPlacedEventCount',
+      'sparePlacedEventCount',
+      'captureMergedEventCount',
+      'fallbackMergedEventCount',
+      'unplacedEventCount',
+      'subthresholdEventCount',
+      'rejectedEventCount',
+      'readyProductMassKg',
+      'directPlacedMassKg',
+      'sparePlacedMassKg',
+      'placedMassKg',
+      'captureMergedMassKg',
+      'fallbackMergedMassKg',
+      'mergedMassKg',
+      'unplacedMassKg',
+      'subthresholdMassKg',
+      'rejectedMassKg'
+    ]) {
+      bucket[field] += Number(record[field]) || 0;
+    }
+    bucket.productTermIndices.push(productTermIndex);
+    if (bucket.routing !== record.routing) bucket.routing = 'mixed';
+  }
+
+  const sum = (rows, field) => rows.reduce((total, row) => total + (Number(row[field]) || 0), 0);
+  const max = (rows, field) => rows.reduce((largest, row) => Math.max(largest, Number(row[field]) || 0), 0);
+  const gasRecords = records.filter((record) => Math.round(record.routingId) === 1);
+  const aggregate = (rows, prefix = '') => {
+    const key = (field) => prefix
+      ? `${prefix}${field[0].toUpperCase()}${field.slice(1)}`
+      : field;
+    return {
+      [key('readyProductEventCount')]: sum(rows, 'readyProductEventCount'),
+      [key('placementCandidateEventCount')]: sum(rows, 'placementCandidateEventCount'),
+      [key('directPlacedEventCount')]: sum(rows, 'directPlacedEventCount'),
+      [key('sparePlacedEventCount')]: sum(rows, 'sparePlacedEventCount'),
+      [key('captureMergedEventCount')]: sum(rows, 'captureMergedEventCount'),
+      [key('fallbackMergedEventCount')]: sum(rows, 'fallbackMergedEventCount'),
+      [key('mergedEventCount')]: sum(rows, 'mergedEventCount'),
+      [key('unplacedEventCount')]: sum(rows, 'unplacedEventCount'),
+      [key('subthresholdEventCount')]: sum(rows, 'subthresholdEventCount'),
+      [key('rejectedEventCount')]: sum(rows, 'rejectedEventCount'),
+      [key('readyProductMassKg')]: sum(rows, 'readyProductMassKg'),
+      [key('directPlacedMassKg')]: sum(rows, 'directPlacedMassKg'),
+      [key('sparePlacedMassKg')]: sum(rows, 'sparePlacedMassKg'),
+      [key('placedMassKg')]: sum(rows, 'placedMassKg'),
+      [key('captureMergedMassKg')]: sum(rows, 'captureMergedMassKg'),
+      [key('fallbackMergedMassKg')]: sum(rows, 'fallbackMergedMassKg'),
+      [key('mergedMassKg')]: sum(rows, 'mergedMassKg'),
+      [key('unplacedMassKg')]: sum(rows, 'unplacedMassKg'),
+      [key('subthresholdMassKg')]: sum(rows, 'subthresholdMassKg'),
+      [key('rejectedMassKg')]: sum(rows, 'rejectedMassKg')
+    };
+  };
+  const totals = aggregate(records);
+  const gasTotals = aggregate(gasRecords, 'gas');
+  const massPartitionResidualKg = sum(records, 'massPartitionResidualKg');
+  const massToleranceKg = toleranceFor(totals.readyProductMassKg);
+  const rejected = totals.rejectedEventCount > 0 || totals.rejectedMassKg > massToleranceKg;
+  const shaderReady = records.length > 0 && records.every((record) => record.shaderReady);
+  const partitionComplete = records.every((record) => record.partitionComplete)
+    && Math.abs(massPartitionResidualKg) <= massToleranceKg;
+  const available = shaderReady;
+  return {
+    schema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
+    status: !available
+      ? 'product-placement-provenance-not-run'
+      : (rejected
+          ? 'product-placement-provenance-rejected'
+          : (partitionComplete
+              ? 'product-placement-provenance-ready'
+              : 'product-placement-provenance-partition-incomplete')),
+    available,
+    shaderReady,
+    partitionComplete,
+    rejected,
+    records,
+    byMaterial,
+    recordCount: records.length,
+    materialCount: Object.keys(byMaterial).length,
+    productTermCount: records.length,
+    ...totals,
+    ...gasTotals,
+    placementCandidateEventCount: totals.placementCandidateEventCount,
+    placedEventCount: sum(records, 'placedEventCount'),
+    mergedEventCount: totals.mergedEventCount,
+    unplacedEventCount: totals.unplacedEventCount,
+    rejectedEventCount: totals.rejectedEventCount,
+    readyProductMassKg: totals.readyProductMassKg,
+    placedMassKg: totals.placedMassKg,
+    mergedMassKg: totals.mergedMassKg,
+    unplacedMassKg: totals.unplacedMassKg,
+    rejectedMassKg: totals.rejectedMassKg,
+    gasPlacementCandidateEventCount: gasTotals.gasPlacementCandidateEventCount,
+    gasPlacedEventCount: sum(gasRecords, 'placedEventCount'),
+    gasMergedEventCount: gasTotals.gasMergedEventCount,
+    gasUnplacedEventCount: gasTotals.gasUnplacedEventCount,
+    gasRejectedEventCount: gasTotals.gasRejectedEventCount,
+    gasReadyProductMassKg: gasTotals.gasReadyProductMassKg,
+    gasPlacedMassKg: gasTotals.gasPlacedMassKg,
+    gasMergedMassKg: gasTotals.gasMergedMassKg,
+    gasUnplacedMassKg: gasTotals.gasUnplacedMassKg,
+    gasRejectedMassKg: gasTotals.gasRejectedMassKg,
+    condensedPlacedMassKg: Math.max(0, totals.placedMassKg - gasTotals.gasPlacedMassKg),
+    condensedMergedMassKg: Math.max(0, totals.mergedMassKg - gasTotals.gasMergedMassKg),
+    condensedUnplacedMassKg: Math.max(0, totals.unplacedMassKg - gasTotals.gasUnplacedMassKg),
+    maxSparePlacedEventMassKg: max(records, 'maxSparePlacedEventMassKg'),
+    maxMergedEventMassKg: max(records, 'maxMergedEventMassKg'),
+    maxPostMergeParticleMassKg: max(records, 'maxPostMergeParticleMassKg'),
+    maxUnplacedEventMassKg: max(records, 'maxUnplacedEventMassKg'),
+    maxCaptureDistanceM: max(records, 'maxCaptureDistanceM'),
+    maxFallbackDistanceM: max(records, 'maxFallbackDistanceM'),
+    maxSparePlacedSupportRadiusM: max(records, 'maxSparePlacedSupportRadiusM'),
+    maxReadyProductEventMassKg: max(records, 'maxReadyProductEventMassKg'),
+    massPartitionResidualKg,
+    massToleranceKg,
+    sourceSummaryCount,
+    readbackMode,
+    readbackCadence,
+    rowLayout: [...SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
+    rowStrideBytes:
+      SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    readbackFloatCount: values.length,
+    readbackByteLength: values.byteLength,
+    fullParticleReadbackPerformed: false,
+    scientificValidation: false,
+    chemistryValidation: false,
+    sphValidation: false,
     fullPhysicsValidation: false
   };
 }
@@ -799,6 +1193,10 @@ export async function runSphReactionSummaryWebGpu({
   dtSeconds = 0,
   readProductEvents = false,
   retainProductEventBuffer = false,
+  productPlacementAccumulatorBuffer = null,
+  readProductPlacementSummary = true,
+  productPlacementReadbackCadence = 'single-step-final',
+  productPlacementSourceSummaryCount = 1,
   readCompactSummary = true,
   readGasSpeciesSummary = true,
   readProductInventory = true,
@@ -826,6 +1224,9 @@ export async function runSphReactionSummaryWebGpu({
   const useProductEventBuffer = productEventCount > 0 && (readProductEvents || retainProductEventBuffer);
   const productEventWorkgroupCount = Math.max(1, Math.ceil(Math.max(1, productEventCount) / SUMMARY_WORKGROUP_SIZE));
   const productEventByteLength = productEventCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const productPlacementByteLength = productTermCount
+    * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
   const atomResidualCount = Math.max(0, reactionTable.atomTermCount ?? 0);
   const atomResidualByteLength = atomResidualCount * SPH_GPU_REACTION_ATOM_RESIDUAL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const shouldReadCompactSummary = readCompactSummary !== false;
@@ -835,6 +1236,25 @@ export async function runSphReactionSummaryWebGpu({
   const shouldRunProductInventory = productInventoryCount > 0 && shouldReadProductInventory;
   const shouldRunGasSpecies = gasSpeciesCount > 0 && shouldReadGasSpeciesSummary;
   const shouldRunAtomResidual = atomResidualCount > 0 && shouldReadAtomResidual;
+  const shouldRunProductPlacement = useProductEventBuffer
+    && Boolean(nextMechanicsBuffer)
+    && productPlacementByteLength > 0;
+  const shouldReadProductPlacementSummary = shouldRunProductPlacement
+    && readProductPlacementSummary !== false;
+  const borrowedProductPlacementAccumulatorBuffer = Boolean(productPlacementAccumulatorBuffer);
+  if (
+    borrowedProductPlacementAccumulatorBuffer
+    && !webGpuBufferMatchesDevice(productPlacementAccumulatorBuffer, device)
+  ) {
+    throw new TypeError('product placement accumulator belongs to a different WebGPU device');
+  }
+  if (
+    borrowedProductPlacementAccumulatorBuffer
+    && Number.isFinite(Number(productPlacementAccumulatorBuffer?.size))
+    && Number(productPlacementAccumulatorBuffer.size) < productPlacementByteLength
+  ) {
+    throw new RangeError('product placement accumulator is smaller than the per-product-term ABI requires');
+  }
   const borrowedReactionRecordBuffer = Boolean(reactionRecordBuffer);
   const recordsBuffer = reactionRecordBuffer || writeStorageBuffer(
     device,
@@ -901,6 +1321,25 @@ export async function runSphReactionSummaryWebGpu({
     size: Math.max(4, productEventByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
+  const placementAccumulatorBuffer = shouldRunProductPlacement
+    ? (productPlacementAccumulatorBuffer || tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-sph-reaction-product-placement-accumulator',
+        size: Math.max(4, productPlacementByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+      }), device))
+    : null;
+  if (placementAccumulatorBuffer && !borrowedProductPlacementAccumulatorBuffer) {
+    device.queue.writeBuffer(
+      placementAccumulatorBuffer,
+      0,
+      new Uint8Array(productPlacementByteLength)
+    );
+  }
+  const productPlacementReadBuffer = shouldReadProductPlacementSummary ? device.createBuffer({
+    label: 'ulg-sph-reaction-product-placement-readback',
+    size: Math.max(4, productPlacementByteLength),
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  }) : null;
   const atomResidualBuffer = shouldRunAtomResidual ? device.createBuffer({
     label: 'ulg-sph-reaction-atom-residual-out',
     size: Math.max(4, atomResidualByteLength),
@@ -934,6 +1373,8 @@ export async function runSphReactionSummaryWebGpu({
     productInventoryReadBuffer?.destroy?.();
     if (!retainedProductEventBuffer) productEventBuffer?.destroy?.();
     productEventReadBuffer?.destroy?.();
+    if (!borrowedProductPlacementAccumulatorBuffer) placementAccumulatorBuffer?.destroy?.();
+    productPlacementReadBuffer?.destroy?.();
     atomResidualBuffer?.destroy?.();
     atomResidualReadBuffer?.destroy?.();
     paramsBuffer.destroy?.();
@@ -1082,7 +1523,7 @@ export async function runSphReactionSummaryWebGpu({
     }
     let productEventPlacementPipeline = null;
     let productEventPlacementBindGroup = null;
-    if (useProductEventBuffer && nextMechanicsBuffer) {
+    if (shouldRunProductPlacement && placementAccumulatorBuffer) {
       // Placement runs in the same submit right after the event kernel:
       // unplaced product mass claims spare zero-mass particle slots and the
       // consumed events are zeroed before compaction/merge or the grid splat
@@ -1097,7 +1538,8 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(1, 'storage'),
           computeBufferBinding(2, 'storage'),
           computeBufferBinding(3, 'storage'),
-          computeBufferBinding(4, 'uniform')
+          computeBufferBinding(4, 'uniform'),
+          computeBufferBinding(5, 'storage')
         ]
       });
       const placementParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
@@ -1115,6 +1557,7 @@ export async function runSphReactionSummaryWebGpu({
         8
       ]));
       device.queue.writeBuffer(placementParamsBuffer, 24, new Float32Array([1.0e-9]));
+      device.queue.writeBuffer(placementParamsBuffer, 28, new Uint32Array([productTermCount]));
       productEventPlacementPipeline = pipeline;
       productEventPlacementBindGroup = device.createBindGroup({
         layout: bindGroupLayout,
@@ -1123,7 +1566,8 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 1, resource: { buffer: nextStateBuffer } },
           { binding: 2, resource: { buffer: nextThermoBuffer } },
           { binding: 3, resource: { buffer: nextMechanicsBuffer } },
-          { binding: 4, resource: { buffer: placementParamsBuffer } }
+          { binding: 4, resource: { buffer: placementParamsBuffer } },
+          { binding: 5, resource: { buffer: placementAccumulatorBuffer } }
         ]
       });
     }
@@ -1224,6 +1668,15 @@ export async function runSphReactionSummaryWebGpu({
       if (productEventReadBuffer) {
         encoder.copyBufferToBuffer(productEventBuffer, 0, productEventReadBuffer, 0, productEventByteLength);
       }
+      if (productPlacementReadBuffer) {
+        encoder.copyBufferToBuffer(
+          placementAccumulatorBuffer,
+          0,
+          productPlacementReadBuffer,
+          0,
+          productPlacementByteLength
+        );
+      }
     }
     if (atomResidualPipeline && atomResidualBindGroup && shouldRunAtomResidual) {
       const atomResidualPass = encoder.beginComputePass();
@@ -1308,6 +1761,33 @@ export async function runSphReactionSummaryWebGpu({
       chemistryValidation: false,
       fullPhysicsValidation: false
     };
+    let productPlacementProvenance = null;
+    if (productPlacementReadBuffer && productPlacementByteLength > 0) {
+      await productPlacementReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      const placementValues = new Float32Array(productPlacementReadBuffer.getMappedRange())
+        .slice(0, productTermCount * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS);
+      productPlacementReadBuffer.unmap();
+      productPlacementProvenance = decodeSphReactionProductPlacementSummaryValues(
+        placementValues,
+        reactionTable,
+        {
+          readbackMode: borrowedProductPlacementAccumulatorBuffer
+            ? 'resident-sequence-product-placement-accumulator-readback'
+            : 'single-step-product-placement-accumulator-readback',
+          readbackCadence: productPlacementReadbackCadence,
+          sourceSummaryCount: productPlacementSourceSummaryCount
+        }
+      );
+      productPlacementProvenance = {
+        ...productPlacementProvenance,
+        sourceStep: sphParticleState.step ?? null,
+        sourceTime: sphParticleState.time ?? null,
+        sourceParticleCount: particleCount,
+        accumulatorScope: borrowedProductPlacementAccumulatorBuffer
+          ? 'caller-owned-resident-sequence'
+          : 'single-reaction-step'
+      };
+    }
     if (!shouldReadCompactSummary) {
       deferLocalBufferCleanup = true;
       // The gas-species ledger is a fixed-size readback (same budget class
@@ -1400,6 +1880,21 @@ export async function runSphReactionSummaryWebGpu({
         productEventBufferRetained: retainedProductEventBuffer,
         productEventBuffer: retainedProductEventBuffer ? productEventBuffer : null,
         destroyProductEventBuffer,
+        productPlacementProvenance,
+        productPlacementProvenanceSchema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
+        productPlacementProvenanceStatus: productPlacementProvenance?.status
+          ?? (shouldRunProductPlacement
+              ? 'product-placement-provenance-gpu-resident-not-read'
+              : 'product-placement-provenance-not-run'),
+        productPlacementProvenanceReadbackFloatCount:
+          productPlacementProvenance?.readbackFloatCount ?? 0,
+        productPlacementProvenanceReadbackByteLength:
+          productPlacementProvenance?.readbackByteLength ?? 0,
+        productPlacementAccumulatorByteLength: shouldRunProductPlacement
+          ? productPlacementByteLength
+          : 0,
+        productPlacementAccumulatorBorrowed: borrowedProductPlacementAccumulatorBuffer,
+        productPlacementReadbackCadence,
         atomResidualSummary: emptyAtomResidualSummary,
         atomResidualSchema: ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
         atomResidualCount: 0,
@@ -1492,6 +1987,21 @@ export async function runSphReactionSummaryWebGpu({
       productEventBufferRetained: retainedProductEventBuffer,
       productEventBuffer: retainedProductEventBuffer ? productEventBuffer : null,
       destroyProductEventBuffer,
+      productPlacementProvenance,
+      productPlacementProvenanceSchema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
+      productPlacementProvenanceStatus: productPlacementProvenance?.status
+        ?? (shouldRunProductPlacement
+            ? 'product-placement-provenance-gpu-resident-not-read'
+            : 'product-placement-provenance-not-run'),
+      productPlacementProvenanceReadbackFloatCount:
+        productPlacementProvenance?.readbackFloatCount ?? 0,
+      productPlacementProvenanceReadbackByteLength:
+        productPlacementProvenance?.readbackByteLength ?? 0,
+      productPlacementAccumulatorByteLength: shouldRunProductPlacement
+        ? productPlacementByteLength
+        : 0,
+      productPlacementAccumulatorBorrowed: borrowedProductPlacementAccumulatorBuffer,
+      productPlacementReadbackCadence,
       atomResidualSummary,
       atomResidualSchema: ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
       atomResidualCount: atomResidualSummary.recordCount,

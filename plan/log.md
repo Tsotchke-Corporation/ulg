@@ -41558,3 +41558,57 @@ Validation and review:
   regression passed `1094/1097`, zero failures and three intentional opt-in
   skips, in `178260 ms`. Production build passed with 143 transformed modules
   and only the existing large-chunk warning.
+
+## 2026-07-13 AKDT - GPU Product Placement Provenance
+
+- Bumped the 32-float reaction-product event contract to v1 without increasing
+  its stride. Consumed rows now retain direct/spare placed mass, unplaced mass,
+  and a disposition covering pending, direct-only, spare-slot, radius-capture
+  merge, fallback merge, subthreshold/no-carrier unplaced, and rejected paths.
+- Added one 32-float/128-byte GPU accumulator row per product term. A resident
+  sequence zeros it once, shares it across every reaction step, and reads it
+  only after the final step. The manually scheduled Schroeder scene loop uses
+  the same ownership and final-read contract. Owned buffers are fence-deferred
+  and destroyed on success or failure; borrowed buffers are neither zeroed nor
+  destroyed.
+- Direct-placement attribution now follows the exact freed source/partner slot
+  used by mutation. The decoder treats row order as term identity, preserves
+  empty terms without aliasing term zero, partitions every route and mass, and
+  fails closed on rejected rows or an incomplete partition. Invalid consumed
+  rows reject their full product payload even when all mass had been marked
+  direct-only, preventing a zero-unplaced row from disappearing silently.
+  Diagnostics prove whether available provenance crossed the post-reaction
+  mechanics refresh, and sequence source counts include only placement
+  dispatches proven by returned step evidence. If any accumulator-bearing
+  step loses that evidence after submission, the whole batch is tainted and
+  final/step/reaction-summary provenance is suppressed rather than certifying
+  possibly mixed accumulator contents with a host-inferred count.
+- Native Vulkan sodium evidence at
+  `/tmp/ulg-ss-spatial-sodium-placement-provenance-v1-20260713/result.json`
+  executed the new WGSL with no browser/WebGPU issues. Two 256-step batches
+  each mapped 256 bytes: `0.782123461 kg` and `0.598155338 kg` of product mass
+  partitioned with residuals `1.21e-7 kg` and `4.20e-10 kg`, zero rejected or
+  unplaced mass, and explicit mechanics-refresh carry evidence. The visual run
+  remains correctly bad: five H2 rows still reach `89.6172 m/s`, four reach
+  `J=1000`, and large dark lobes dominate the final frame.
+- A post-hardening native Vulkan smoke at
+  `/tmp/ulg-ss-spatial-sodium-placement-evidence-complete-v4-20260713/result.json`
+  repeats 256 resident steps with no browser/WebGPU issues. Its 256-byte final
+  readback proves all 256 dispatches returned evidence,
+  `sourceSummaryCount=256` is verified, `0.782123461 kg` partitions with zero
+  rejected/unplaced mass, and available provenance crosses the mechanics
+  refresh. The automated result remains intentionally bad on the unresolved
+  H2 expansion (`J=6.6352` at `0.256 s`), not on placement.
+- Definitive native water control evidence at
+  `/tmp/ulg-ss-spatial-water-flow-visual-v1-20260713/result.json` has no
+  browser/WebGPU errors, advances to `1.024 s`, remains bounded at
+  `1.08636 m/s` and `J=0.996426..1.000259`, and passes compact motion, retained
+  handoff, native visible-consumer, and browser-pixel checks. Interval frames
+  show real descent and spreading into a wider skirt, but direct inspection is
+  still not visually accepted: the final water surface is a faceted, tiered
+  cohesive mound rather than a believable free surface.
+- Focused ABI, sequence, and summary tests pass `127/127`; the full regression
+  passes `1105/1108` with zero failures and three intentional opt-in skips.
+  Production build passes with 143 transformed modules and only the existing
+  large-chunk warning. Item 3 now owns the next slice: isolate H2
+  expansion/contact energy injection before renderer tuning.

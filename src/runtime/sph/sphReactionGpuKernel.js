@@ -2431,6 +2431,10 @@ export async function runSphReactionStepWebGpu({
   readReactionGasSpeciesSummary = true,
   readReactionProductInventory = true,
   readReactionAtomResidual = true,
+  productPlacementAccumulatorBuffer = null,
+  readReactionProductPlacementSummary = true,
+  reactionProductPlacementReadbackCadence = 'single-step-final',
+  reactionProductPlacementSourceSummaryCount = 1,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null
 } = {}) {
@@ -2813,6 +2817,10 @@ export async function runSphReactionStepWebGpu({
         proposalBuffer,
         readProductEvents: false,
         retainProductEventBuffer: retainOutputParticleBuffers,
+        productPlacementAccumulatorBuffer,
+        readProductPlacementSummary: readReactionProductPlacementSummary,
+        productPlacementReadbackCadence: reactionProductPlacementReadbackCadence,
+        productPlacementSourceSummaryCount: reactionProductPlacementSourceSummaryCount,
         readCompactSummary: readCompactReactionSummary,
         readGasSpeciesSummary: readReactionGasSpeciesSummary,
         readProductInventory: readReactionProductInventory,

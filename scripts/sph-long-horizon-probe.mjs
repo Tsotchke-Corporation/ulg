@@ -470,7 +470,7 @@ function paethPredictor(left, up, upLeft) {
   return upLeft;
 }
 
-function analyzePngFrame(bytes, { region = null } = {}) {
+function analyzePngFrame(bytes, { region = null, includeRgbaPixels = false } = {}) {
   const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   if (!Buffer.isBuffer(bytes) || bytes.length < 33 || !bytes.subarray(0, 8).equals(signature)) {
     return { status: 'unsupported', reason: 'not-png' };
@@ -544,6 +544,9 @@ function analyzePngFrame(bytes, { region = null } = {}) {
     );
     const sampleWidth = sampleX1 - sampleX0;
     const sampleHeight = sampleY1 - sampleY0;
+    const rgbaPixels = includeRgbaPixels
+      ? Buffer.alloc(sampleWidth * sampleHeight * 4)
+      : null;
     let previous = Buffer.alloc(rowBytes);
     let nonzeroRgbPixelCount = 0;
     let nonzeroAlphaPixelCount = 0;
@@ -618,6 +621,13 @@ function analyzePngFrame(bytes, { region = null } = {}) {
           b = row[pixelOffset + 2];
           a = row[pixelOffset + 3];
         }
+        if (rgbaPixels) {
+          const rgbaOffset = ((y - sampleY0) * sampleWidth + (x - sampleX0)) * 4;
+          rgbaPixels[rgbaOffset] = r;
+          rgbaPixels[rgbaOffset + 1] = g;
+          rgbaPixels[rgbaOffset + 2] = b;
+          rgbaPixels[rgbaOffset + 3] = a;
+        }
         if (r > 0 || g > 0 || b > 0) nonzeroRgbPixelCount += 1;
         if (a > 0) nonzeroAlphaPixelCount += 1;
         if (a >= 255) opaquePixelCount += 1;
@@ -671,7 +681,8 @@ function analyzePngFrame(bytes, { region = null } = {}) {
       maxAlpha,
       allTransparentBlack: nonzeroRgbPixelCount === 0 && nonzeroAlphaPixelCount === 0,
       allBlack: nonzeroRgbPixelCount === 0,
-      hasVisiblePixels: nonzeroRgbPixelCount > 0 && nonzeroAlphaPixelCount > 0
+      hasVisiblePixels: nonzeroRgbPixelCount > 0 && nonzeroAlphaPixelCount > 0,
+      rgbaPixels: rgbaPixels || undefined
     };
   } catch (error) {
     return {
@@ -683,6 +694,121 @@ function analyzePngFrame(bytes, { region = null } = {}) {
       colorType
     };
   }
+}
+
+function visualFramePngBytes(frame) {
+  const match = typeof frame?.dataUrl === 'string'
+    ? /^data:image\/png;base64,(.+)$/i.exec(frame.dataUrl)
+    : null;
+  return match ? Buffer.from(match[1], 'base64') : null;
+}
+
+function compareCapturedPngFrames(referenceFrame, candidateFrame, {
+  minChannelDelta = 1
+} = {}) {
+  const referenceBytes = visualFramePngBytes(referenceFrame);
+  const candidateBytes = visualFramePngBytes(candidateFrame);
+  if (!referenceBytes || !candidateBytes) {
+    return {
+      schema: 'peercompute.ulg.sph-probe-png-frame-delta.v0',
+      status: 'not-ready',
+      reason: 'reference or candidate frame did not include PNG bytes'
+    };
+  }
+  const reference = analyzePngFrame(referenceBytes, {
+    region: referenceFrame?.validationRegion || null,
+    includeRgbaPixels: true
+  });
+  const candidate = analyzePngFrame(candidateBytes, {
+    region: candidateFrame?.validationRegion || null,
+    includeRgbaPixels: true
+  });
+  if (
+    reference?.status !== 'ready'
+    || candidate?.status !== 'ready'
+    || !reference.rgbaPixels
+    || !candidate.rgbaPixels
+  ) {
+    return {
+      schema: 'peercompute.ulg.sph-probe-png-frame-delta.v0',
+      status: 'not-ready',
+      reason: `reference=${reference?.status || 'missing'}; candidate=${candidate?.status || 'missing'}`
+    };
+  }
+  if (
+    reference.width !== candidate.width
+    || reference.height !== candidate.height
+    || reference.rgbaPixels.length !== candidate.rgbaPixels.length
+  ) {
+    return {
+      schema: 'peercompute.ulg.sph-probe-png-frame-delta.v0',
+      status: 'dimension-mismatch',
+      reason: `reference=${reference.width}x${reference.height}; candidate=${candidate.width}x${candidate.height}`,
+      referenceWidth: reference.width,
+      referenceHeight: reference.height,
+      candidateWidth: candidate.width,
+      candidateHeight: candidate.height
+    };
+  }
+  const threshold = Math.max(1, Math.min(255, Math.round(Number(minChannelDelta) || 1)));
+  let changedPixelCount = 0;
+  let maxChannelDelta = 0;
+  let totalChangedChannelDelta = 0;
+  let changedChannelCount = 0;
+  let minX = reference.width;
+  let minY = reference.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let pixelIndex = 0; pixelIndex < reference.pixelCount; pixelIndex += 1) {
+    const rgbaOffset = pixelIndex * 4;
+    let pixelMaxDelta = 0;
+    let pixelChannelDelta = 0;
+    for (let channel = 0; channel < 4; channel += 1) {
+      const delta = Math.abs(
+        reference.rgbaPixels[rgbaOffset + channel]
+        - candidate.rgbaPixels[rgbaOffset + channel]
+      );
+      pixelMaxDelta = Math.max(pixelMaxDelta, delta);
+      pixelChannelDelta += delta;
+      if (delta > 0) changedChannelCount += 1;
+    }
+    maxChannelDelta = Math.max(maxChannelDelta, pixelMaxDelta);
+    if (pixelMaxDelta < threshold) continue;
+    changedPixelCount += 1;
+    totalChangedChannelDelta += pixelChannelDelta;
+    const x = pixelIndex % reference.width;
+    const y = Math.floor(pixelIndex / reference.width);
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return {
+    schema: 'peercompute.ulg.sph-probe-png-frame-delta.v0',
+    status: 'ready',
+    reason: null,
+    width: reference.width,
+    height: reference.height,
+    pixelCount: reference.pixelCount,
+    minChannelDelta: threshold,
+    changedPixelCount,
+    changedPixelRatio: reference.pixelCount > 0
+      ? changedPixelCount / reference.pixelCount
+      : 0,
+    changedChannelCount,
+    maxChannelDelta,
+    meanChangedPixelChannelDelta: changedPixelCount > 0
+      ? totalChangedChannelDelta / (changedPixelCount * 4)
+      : 0,
+    changedBounds: changedPixelCount > 0
+      ? {
+          x: minX,
+          y: minY,
+          width: maxX - minX + 1,
+          height: maxY - minY + 1
+        }
+      : null
+  };
 }
 
 function browserFrameValidationFromVisualFrame(
@@ -1077,6 +1203,299 @@ async function capturePlaywrightCanvasCenterFrame({
   }
 }
 
+async function captureNativeH2DiagnosticFrame({
+  page,
+  batchIndex = null,
+  sampleIndex = null,
+  isolatedH2Only = false
+} = {}) {
+  const captureKind = isolatedH2Only ? 'h2-only' : 'h2-ablated';
+  const token = [
+    `sph-probe-native-${captureKind}`,
+    Date.now(),
+    Math.random().toString(16).slice(2)
+  ].join(':');
+  const setup = await page.evaluate(({ expectedToken, isolatedH2Only }) => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const sceneApi = overlay?.__sphScene || null;
+    const bridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+    const drawState = bridge?.drawState || null;
+    const additionalDraws = Array.isArray(drawState?.additionalSurfaceDraws)
+      ? drawState.additionalSurfaceDraws
+      : [];
+    const materialOf = (draw) => {
+      const parts = String(draw?.surfaceKey || '').split('|');
+      return String(parts[1] || parts[0] || '').trim().toLowerCase();
+    };
+    const h2Draws = additionalDraws.filter((draw) => materialOf(draw) === 'h2');
+    const retainedAdditionalDraws = additionalDraws.filter((draw) => materialOf(draw) !== 'h2');
+    if (!sceneApi?.refreshViewportAndOverlay || !drawState || h2Draws.length === 0) {
+      return {
+        schema: 'peercompute.ulg.sph-native-h2-ablation-capture.v0',
+        status: 'not-ready',
+        reason: !drawState
+          ? 'native bridge draw state was unavailable'
+          : 'no retained H2 secondary draw was available',
+        token: expectedToken
+      };
+    }
+    if (
+      overlay.__ulgProbeNativeH2AblationSession
+      || overlay.__ulgProbeNativeProductDrawFilterSession
+      || bridge.__ulgProbeNativeSurfaceDrawFilter
+    ) {
+      return {
+        schema: 'peercompute.ulg.sph-native-h2-ablation-capture.v0',
+        status: 'native-h2-ablation-filter-busy',
+        reason: 'another native diagnostic draw filter owns the active bridge',
+        token: expectedToken
+      };
+    }
+    const retainedSurfaceKeys = retainedAdditionalDraws
+      .map((draw) => String(draw?.surfaceKey || ''))
+      .filter(Boolean);
+    const h2SurfaceKeys = h2Draws
+      .map((draw) => String(draw?.surfaceKey || ''))
+      .filter(Boolean);
+    const h2DrawSummaries = h2Draws.map((draw) => ({
+      surfaceKey: draw?.surfaceKey ?? null,
+      renderOrder: draw?.renderOrder ?? null,
+      transparencyClassId: draw?.transparencyClassId ?? null,
+      depthWriteFlag: draw?.depthWriteFlag ?? null,
+      renderLayer: draw?.renderLayer ?? null,
+      bindGroupPresent: Boolean(draw?.bindGroup),
+      indirectBufferPresent: Boolean(draw?.drawIndirectRowsBuffer)
+    }));
+    const selectedSurfaceKeys = isolatedH2Only ? h2SurfaceKeys : retainedSurfaceKeys;
+    const expectedPrimaryDrawCount = isolatedH2Only
+      ? 0
+      : (Array.isArray(drawState.drawOrder) ? drawState.drawOrder.length : 0);
+    const filter = {
+      enabled: true,
+      token: expectedToken,
+      filterAdditionalSurfaceDraws: true,
+      additionalSurfaceKeys: selectedSurfaceKeys,
+      suppressPrimarySurfaceDraws: isolatedH2Only,
+      suppressBackgroundImage: isolatedH2Only,
+      suppressBoxWireframe: isolatedH2Only,
+      suppressSchroederProxyDraws: isolatedH2Only
+    };
+    bridge.__ulgProbeNativeSurfaceDrawFilter = filter;
+    const session = {
+      bridge,
+      filter,
+      token: expectedToken,
+      expectedPrimaryDrawCount,
+      isolatedH2Only,
+      selectedSurfaceKeys,
+      retainedSurfaceKeys,
+      h2SurfaceKeys
+    };
+    overlay.__ulgProbeNativeH2AblationSession = session;
+    const refresh = sceneApi.refreshViewportAndOverlay({
+      reason: 'sph-probe-native-h2-ablation-filter'
+    });
+    const selectedKeys = [
+      ...(bridge.lastNativeSurfaceDiagnosticSelectedAdditionalSurfaceKeys || [])
+    ].sort();
+    const expectedKeys = [...selectedSurfaceKeys].sort();
+    const filterApplied = Boolean(
+      sceneApi.getSphResidentSurfaceDrawRenderBridge?.() === bridge
+      && bridge.__ulgProbeNativeSurfaceDrawFilter === filter
+      && bridge.lastNativeSurfaceDiagnosticDrawFilterActive === true
+      && bridge.lastNativeSurfaceDiagnosticDrawFilterToken === expectedToken
+      && bridge.lastNativeSurfaceDiagnosticSelectedPrimaryDrawCount
+        === expectedPrimaryDrawCount
+      && JSON.stringify(selectedKeys) === JSON.stringify(expectedKeys)
+      && bridge.lastNativeSurfaceDiagnosticBackgroundSuppressed === isolatedH2Only
+      && bridge.lastNativeSurfaceDiagnosticBoxWireframeSuppressed === isolatedH2Only
+      && bridge.lastNativeSurfaceDiagnosticSchroederProxySuppressed === isolatedH2Only
+    );
+    const overlayRendered = Boolean(
+      refresh?.surfaceOverlayRendered === true
+      && refresh?.surfaceOverlayLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+    );
+    return {
+      schema: 'peercompute.ulg.sph-native-h2-ablation-capture.v0',
+      status: overlayRendered && filterApplied
+        ? (isolatedH2Only
+            ? 'native-h2-only-filter-rendered'
+            : 'native-h2-ablation-filter-rendered')
+        : (isolatedH2Only
+            ? 'native-h2-only-filter-render-failed'
+            : 'native-h2-ablation-filter-render-failed'),
+      reason: overlayRendered && filterApplied
+        ? null
+        : `overlayRendered=${overlayRendered}; filterApplied=${filterApplied}`,
+      token: expectedToken,
+      captureKind: isolatedH2Only ? 'h2-only' : 'h2-ablated',
+      h2SurfaceKeys,
+      h2DrawSummaries,
+      retainedSurfaceKeys,
+      selectedSurfaceKeys,
+      expectedPrimaryDrawCount,
+      filterApplied,
+      refreshStatus: refresh?.status ?? null,
+      refreshSurfaceOverlayRendered: refresh?.surfaceOverlayRendered ?? null,
+      refreshSurfaceOverlayLastRenderStatus: refresh?.surfaceOverlayLastRenderStatus ?? null
+    };
+  }, { expectedToken: token, isolatedH2Only }).catch((error) => ({
+    schema: 'peercompute.ulg.sph-native-h2-ablation-capture.v0',
+    status: 'setup-error',
+    reason: error instanceof Error ? error.message : String(error),
+    token
+  }));
+
+  let frame = null;
+  let continuity = null;
+  let captureError = null;
+  let restore = {
+    status: 'not-needed',
+    reason: 'native H2 ablation filter was not installed'
+  };
+  try {
+    if (
+      setup.status === 'native-h2-ablation-filter-rendered'
+      || setup.status === 'native-h2-only-filter-rendered'
+    ) {
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+      continuity = await page.evaluate((expectedToken) => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const sceneApi = overlay?.__sphScene || null;
+        const bridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+        const session = overlay?.__ulgProbeNativeH2AblationSession || null;
+        const selectedKeys = [
+          ...(bridge?.lastNativeSurfaceDiagnosticSelectedAdditionalSurfaceKeys || [])
+        ].sort();
+        const expectedKeys = [...(session?.selectedSurfaceKeys || [])].sort();
+        const suppressContext = session?.isolatedH2Only === true;
+        const ready = Boolean(
+          session?.token === expectedToken
+          && session.bridge === bridge
+          && bridge?.__ulgProbeNativeSurfaceDrawFilter === session.filter
+          && bridge?.lastNativeSurfaceDiagnosticDrawFilterActive === true
+          && bridge?.lastNativeSurfaceDiagnosticDrawFilterToken === expectedToken
+          && bridge?.lastNativeSurfaceDiagnosticSelectedPrimaryDrawCount
+            === session.expectedPrimaryDrawCount
+          && JSON.stringify(selectedKeys) === JSON.stringify(expectedKeys)
+          && bridge?.lastNativeSurfaceDiagnosticBackgroundSuppressed === suppressContext
+          && bridge?.lastNativeSurfaceDiagnosticBoxWireframeSuppressed === suppressContext
+          && bridge?.lastNativeSurfaceDiagnosticSchroederProxySuppressed === suppressContext
+          && bridge?.lastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+        );
+        return {
+          status: ready
+            ? (suppressContext
+                ? 'h2-only-filter-continuity-proved'
+                : 'h2-ablation-filter-continuity-proved')
+            : (suppressContext
+                ? 'h2-only-filter-continuity-lost'
+                : 'h2-ablation-filter-continuity-lost'),
+          reason: ready
+            ? null
+            : 'active bridge or exact H2 ablation filter changed before capture',
+          activeBridgeMatchesInstalledBridge: session?.bridge === bridge,
+          installedFilterStillOwned: bridge?.__ulgProbeNativeSurfaceDrawFilter === session?.filter,
+          selectedSurfaceKeys: selectedKeys,
+          expectedSurfaceKeys: expectedKeys,
+          lastRenderStatus: bridge?.lastRenderStatus ?? null
+        };
+      }, token);
+      if (
+        continuity.status !== 'h2-ablation-filter-continuity-proved'
+        && continuity.status !== 'h2-only-filter-continuity-proved'
+      ) {
+        throw new Error(continuity.reason);
+      }
+      frame = await capturePlaywrightCanvasCenterFrame({
+        page,
+        batchIndex,
+        phase: isolatedH2Only
+          ? 'post-probe-native-h2-only'
+          : 'post-probe-native-h2-ablated-composited',
+        sampleIndex
+      });
+      frame.diagnosticOnly = true;
+      frame.captureMode = isolatedH2Only
+        ? 'isolated-native-h2-draw-filter'
+        : 'canonical-native-pbr-h2-ablated';
+      frame.omittedSurfaceKeys = isolatedH2Only ? [] : [...(setup.h2SurfaceKeys || [])];
+      frame.selectedSurfaceKeys = [...(setup.selectedSurfaceKeys || [])];
+      if (frame.validationPng?.status === 'ready') {
+        frame.png = frame.validationPng;
+        frame.blankFrame = !frame.validationPng.hasVisiblePixels;
+      }
+    }
+  } catch (error) {
+    captureError = error instanceof Error ? error.message : String(error);
+  } finally {
+    restore = await page.evaluate((expectedToken) => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const sceneApi = overlay?.__sphScene || null;
+      const currentBridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+      const session = overlay?.__ulgProbeNativeH2AblationSession || null;
+      if (!session?.bridge || !session?.filter) {
+        return {
+          status: 'not-needed',
+          reason: 'native H2 ablation filter was not installed'
+        };
+      }
+      if (session.token !== expectedToken) {
+        return {
+          status: 'restore-not-owned',
+          reason: 'active native H2 ablation filter belongs to another capture'
+        };
+      }
+      const installedBridge = session.bridge;
+      const filterStillOwned = installedBridge.__ulgProbeNativeSurfaceDrawFilter === session.filter
+        && session.filter.token === expectedToken;
+      if (filterStillOwned) {
+        delete installedBridge.__ulgProbeNativeSurfaceDrawFilter;
+      }
+      if (overlay.__ulgProbeNativeH2AblationSession === session) {
+        delete overlay.__ulgProbeNativeH2AblationSession;
+      }
+      if (!filterStillOwned) {
+        return {
+          status: 'restore-filter-ownership-lost',
+          reason: 'native H2 ablation filter was replaced before cleanup'
+        };
+      }
+      const refresh = sceneApi?.refreshViewportAndOverlay?.({
+        reason: 'sph-probe-native-h2-ablation-filter-restore'
+      });
+      const restored = Boolean(
+        refresh?.surfaceOverlayRendered === true
+        && refresh?.surfaceOverlayLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+        && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterActive === false
+        && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterToken == null
+      );
+      return {
+        status: restored
+          ? (currentBridge === installedBridge ? 'restored' : 'restored-after-active-bridge-changed')
+          : 'restore-render-failed',
+        reason: restored
+          ? null
+          : `overlayRendered=${refresh?.surfaceOverlayRendered === true}; filterCleared=${currentBridge?.lastNativeSurfaceDiagnosticDrawFilterActive === false}`,
+        activeBridgeMatchesInstalledBridge: currentBridge === installedBridge,
+        refreshStatus: refresh?.status ?? null,
+        refreshSurfaceOverlayRendered: refresh?.surfaceOverlayRendered ?? null,
+        refreshSurfaceOverlayLastRenderStatus: refresh?.surfaceOverlayLastRenderStatus ?? null
+      };
+    }, token).catch((error) => ({
+      status: 'restore-error',
+      reason: error instanceof Error ? error.message : String(error)
+    }));
+  }
+  return {
+    setup,
+    frame,
+    continuity,
+    captureError,
+    restore
+  };
+}
+
 async function exists(filePath) {
   try {
     await access(filePath);
@@ -1348,6 +1767,7 @@ async function runBrowserProbe({
   captureFrames,
   visualIntervalCaptureRequested = captureFrames,
   captureProductSurfacesOnly = false,
+  captureH2VisibilityAblation = false,
   captureFrameEvery,
   captureFrameMax,
   initialResidentWaitMs
@@ -5694,6 +6114,158 @@ async function runBrowserProbe({
               timeline.visualFrameCapture.browserFramePixelValidationPublishedStatus =
                 publishResult.publishStatus?.status ?? null;
             }
+            if (captureH2VisibilityAblation) {
+              const diagnosticFrameArgs = {
+                page,
+                batchIndex: timeline.batchCount ?? batches,
+                sampleIndex: Array.isArray(timeline.metrics)
+                  ? Math.max(0, timeline.metrics.length - 1)
+                  : null
+              };
+              const h2AblatedCapture = await captureNativeH2DiagnosticFrame({
+                ...diagnosticFrameArgs,
+                isolatedH2Only: false
+              });
+              if (h2AblatedCapture.frame) {
+                timeline.visualFrames.push(h2AblatedCapture.frame);
+              }
+              const h2OnlyCapture = await captureNativeH2DiagnosticFrame({
+                ...diagnosticFrameArgs,
+                isolatedH2Only: true
+              });
+              if (h2OnlyCapture.frame) {
+                timeline.visualFrames.push(h2OnlyCapture.frame);
+              }
+              await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+              const restoredCanonicalFrame = await capturePlaywrightCanvasCenterFrame({
+                ...diagnosticFrameArgs,
+                phase: 'post-probe-native-h2-visibility-restored-canonical'
+              });
+              if (restoredCanonicalFrame.validationPng?.status === 'ready') {
+                restoredCanonicalFrame.png = restoredCanonicalFrame.validationPng;
+                restoredCanonicalFrame.blankFrame =
+                  !restoredCanonicalFrame.validationPng.hasVisiblePixels;
+              }
+              restoredCanonicalFrame.diagnosticOnly = true;
+              restoredCanonicalFrame.captureMode = 'restored-canonical-native-pbr';
+              timeline.visualFrames.push(restoredCanonicalFrame);
+
+              const canonicalAblatedDelta = compareCapturedPngFrames(
+                canvasCenterFrame,
+                h2AblatedCapture.frame,
+                { minChannelDelta: 8 }
+              );
+              const canonicalRestoredNoise = compareCapturedPngFrames(
+                canvasCenterFrame,
+                restoredCanonicalFrame,
+                { minChannelDelta: 3 }
+              );
+              const ablationProtocolProved = Boolean(
+                h2AblatedCapture.setup?.status === 'native-h2-ablation-filter-rendered'
+                && h2AblatedCapture.continuity?.status
+                  === 'h2-ablation-filter-continuity-proved'
+                && h2AblatedCapture.restore?.status === 'restored'
+                && h2AblatedCapture.captureError == null
+                && h2AblatedCapture.frame?.status === 'captured'
+              );
+              const h2OnlyProtocolProved = Boolean(
+                h2OnlyCapture.setup?.status === 'native-h2-only-filter-rendered'
+                && h2OnlyCapture.continuity?.status === 'h2-only-filter-continuity-proved'
+                && h2OnlyCapture.restore?.status === 'restored'
+                && h2OnlyCapture.captureError == null
+                && h2OnlyCapture.frame?.status === 'captured'
+              );
+              const nativeCanvasIdentityProved = Boolean(
+                canvasCenterFrame?.canvasSelection?.sameAsRenderBridgeCanvas === true
+                && canvasCenterFrame?.canvasSelection?.sameAsNativeConsumerCanvas === true
+                && h2AblatedCapture.frame?.canvasIndex === canvasCenterFrame?.canvasIndex
+                && h2OnlyCapture.frame?.canvasIndex === canvasCenterFrame?.canvasIndex
+                && restoredCanonicalFrame?.canvasIndex === canvasCenterFrame?.canvasIndex
+                && h2AblatedCapture.frame?.canvasSelection?.sameAsRenderBridgeCanvas === true
+                && h2OnlyCapture.frame?.canvasSelection?.sameAsRenderBridgeCanvas === true
+                && restoredCanonicalFrame?.canvasSelection?.sameAsRenderBridgeCanvas === true
+              );
+              const originalH2DrawStateProved = Boolean(
+                Array.isArray(h2OnlyCapture.setup?.h2DrawSummaries)
+                && h2OnlyCapture.setup.h2DrawSummaries.length > 0
+                && h2OnlyCapture.setup.h2DrawSummaries.every((draw) => (
+                  Number(draw?.depthWriteFlag) === 1
+                  && draw?.bindGroupPresent === true
+                  && draw?.indirectBufferPresent === true
+                ))
+              );
+              const h2OnlyPixelsProved = Boolean(
+                h2OnlyCapture.frame?.png?.status === 'ready'
+                && h2OnlyCapture.frame.png.hasVisiblePixels === true
+                && h2OnlyCapture.frame.png.hasSurfaceLikeVariation === true
+              );
+              const restoredCanonicalProved = Boolean(
+                canonicalRestoredNoise.status === 'ready'
+                && canonicalRestoredNoise.changedPixelCount === 0
+              );
+              const minimumChangedPixelCount = Math.max(
+                4,
+                5 * Number(canonicalRestoredNoise.changedPixelCount || 0)
+              );
+              const compositedH2PixelsProved = Boolean(
+                canonicalAblatedDelta.status === 'ready'
+                && canonicalAblatedDelta.changedPixelCount >= minimumChangedPixelCount
+                && canonicalAblatedDelta.changedBounds != null
+              );
+              const evidenceProved = Boolean(
+                ablationProtocolProved
+                && h2OnlyProtocolProved
+                && nativeCanvasIdentityProved
+                && originalH2DrawStateProved
+                && h2OnlyPixelsProved
+                && restoredCanonicalProved
+                && compositedH2PixelsProved
+              );
+              timeline.nativeH2CompositedVisibilityCapture = {
+                schema: 'peercompute.ulg.sph-native-h2-composited-visibility-capture.v0',
+                status: evidenceProved
+                  ? 'native-h2-composited-visibility-proved'
+                  : 'native-h2-composited-visibility-unproved',
+                reason: evidenceProved
+                  ? null
+                  : [
+                      `ablationProtocol=${ablationProtocolProved}`,
+                      `h2OnlyProtocol=${h2OnlyProtocolProved}`,
+                      `nativeCanvasIdentity=${nativeCanvasIdentityProved}`,
+                      `originalH2DrawState=${originalH2DrawStateProved}`,
+                      `h2OnlyPixels=${h2OnlyPixelsProved}`,
+                      `restoredCanonical=${restoredCanonicalProved}`,
+                      `compositedH2Pixels=${compositedH2PixelsProved}`
+                    ].join('; '),
+                diagnosticOnly: true,
+                physicsStateMutation: false,
+                materialOverrideApplied: false,
+                emissiveOverrideApplied: false,
+                depthWriteOverrideApplied: false,
+                minimumChangedPixelCount,
+                canonicalAblatedDelta,
+                canonicalRestoredNoise,
+                ablationProtocolProved,
+                h2OnlyProtocolProved,
+                nativeCanvasIdentityProved,
+                originalH2DrawStateProved,
+                h2OnlyPixelsProved,
+                restoredCanonicalProved,
+                compositedH2PixelsProved,
+                h2DrawSummaries: h2OnlyCapture.setup?.h2DrawSummaries || [],
+                h2SurfaceKeys: h2OnlyCapture.setup?.h2SurfaceKeys || [],
+                ablatedRetainedSurfaceKeys:
+                  h2AblatedCapture.setup?.retainedSurfaceKeys || [],
+                ablationSetupStatus: h2AblatedCapture.setup?.status ?? null,
+                ablationContinuityStatus: h2AblatedCapture.continuity?.status ?? null,
+                ablationRestoreStatus: h2AblatedCapture.restore?.status ?? null,
+                ablationCaptureError: h2AblatedCapture.captureError,
+                h2OnlySetupStatus: h2OnlyCapture.setup?.status ?? null,
+                h2OnlyContinuityStatus: h2OnlyCapture.continuity?.status ?? null,
+                h2OnlyRestoreStatus: h2OnlyCapture.restore?.status ?? null,
+                h2OnlyCaptureError: h2OnlyCapture.captureError
+              };
+            }
             if (captureProductSurfacesOnly) {
               const productCaptureToken = [
                 'sph-probe-native-product-draw-filter',
@@ -9739,6 +10311,8 @@ async function main() {
     : null;
   const nativeSurfaceFrameValidationRequired =
     surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer';
+  const captureH2VisibilityAblation = probeMode !== 'direct-resident'
+    && booleanEnv(process.env.ULG_PROBE_CAPTURE_H2_VISIBILITY_ABLATION, false);
   const visualIntervalCaptureRequested = probeMode !== 'direct-resident'
     && (
       process.env.ULG_PROBE_CAPTURE_FRAMES === '1'
@@ -9748,6 +10322,7 @@ async function main() {
     && (
       visualIntervalCaptureRequested
       || nativeSurfaceFrameValidationRequired
+      || captureH2VisibilityAblation
     );
   const captureProductSurfacesOnly = probeMode !== 'direct-resident'
     && booleanEnv(process.env.ULG_PROBE_CAPTURE_PRODUCT_SURFACES_ONLY, false);
@@ -9893,6 +10468,7 @@ async function main() {
         captureFrames,
         visualIntervalCaptureRequested,
         captureProductSurfacesOnly,
+        captureH2VisibilityAblation,
         captureFrameEvery,
         captureFrameMax,
         initialResidentWaitMs
@@ -9917,6 +10493,19 @@ async function main() {
           distinctRgbColorCount: productOnlyFrame.png.distinctRgbColorCount,
           hasSurfaceLikeVariation: productOnlyFrame.png.hasSurfaceLikeVariation
         } : null;
+      }
+      if (timeline.nativeH2CompositedVisibilityCapture) {
+        const phasePath = (phase) => timeline.visualFrames.find(
+          (frame) => frame?.phase === phase
+        )?.path ?? null;
+        timeline.nativeH2CompositedVisibilityCapture.canonicalFrameArtifactPath =
+          phasePath('post-probe-canvas-center-crop');
+        timeline.nativeH2CompositedVisibilityCapture.h2AblatedFrameArtifactPath =
+          phasePath('post-probe-native-h2-ablated-composited');
+        timeline.nativeH2CompositedVisibilityCapture.h2OnlyFrameArtifactPath =
+          phasePath('post-probe-native-h2-only');
+        timeline.nativeH2CompositedVisibilityCapture.restoredCanonicalFrameArtifactPath =
+          phasePath('post-probe-native-h2-visibility-restored-canonical');
       }
     }
     if (timeline?.visualFrameCapture) {

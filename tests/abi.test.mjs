@@ -693,7 +693,7 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
     'unplacedEventCount:f32',
     'subthresholdEventCount:f32',
     'rejectedEventCount:f32',
-    'reserved0:f32'
+    'phaseRoutedEventCount:f32'
   ]);
   assert.deepEqual(SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT.slice(16, 32), [
     'readyProductMassKg:f32',
@@ -776,6 +776,8 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionProductEventPlacementWgsl, /!\(row4\.y > 0\.0\)/);
   assert.match(sphReactionProductEventPlacementWgsl, /product_term_count: u32/);
   assert.match(sphReactionProductEventPlacementWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> placement_summary/);
+  assert.match(sphReactionProductEventPlacementWgsl, /@group\(0\) @binding\(6\) var<storage, read> source_state/);
+  assert.match(sphReactionProductEventPlacementWgsl, /@group\(0\) @binding\(7\) var<storage, read> source_thermo/);
   assert.match(sphReactionProductEventPlacementWgsl, /return product_term_index \* 8u/);
   assert.match(sphReactionProductEventPlacementWgsl, /fn record_ready_product/);
   assert.match(sphReactionProductEventPlacementWgsl, /fn record_spare_placement/);
@@ -783,6 +785,44 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionProductEventPlacementWgsl, /fn record_fallback_merge/);
   assert.match(sphReactionProductEventPlacementWgsl, /fn record_unplaced/);
   assert.match(sphReactionProductEventPlacementWgsl, /fn record_rejected_placement/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn record_phase_routed_event/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn placement_gas_target/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn placement_support_fits_box/);
+  assert.match(sphReactionProductEventPlacementWgsl, /let contact_radius_m = min\(source_radius_m, partner_radius_m\)/);
+  assert.match(sphReactionProductEventPlacementWgsl, /var target_position = free_position/);
+  assert.match(sphReactionProductEventPlacementWgsl, /let required_clearance_m = free_radius_m \+ product_radius_m/);
+  assert.match(sphReactionProductEventPlacementWgsl, /final_clearance_m < required_clearance_m - 1\.0e-5/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn placement_route_gas_merge_position/);
+  assert.match(sphReactionProductEventPlacementWgsl, /merged_support_radius_m - event_support_radius_m/);
+  assert.match(sphReactionProductEventPlacementWgsl, /dot\(required_position - fallback_position, outward_normal\)/);
+  assert.match(sphReactionProductEventPlacementWgsl, /dot\(clamped_position - required_position, outward_normal\) < -1\.0e-5/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn placement_particle_rest_volume_m3/);
+  assert.match(sphReactionProductEventPlacementWgsl, /placement_particle_rest_volume_m3\(direct_index\)/);
+  assert.match(sphReactionProductEventPlacementWgsl, /host_is_source = source_liquid/);
+  assert.match(sphReactionProductEventPlacementWgsl, /host_is_source = source_condensed/);
+  assert.match(sphReactionProductEventPlacementWgsl, /host_is_source = source_thermo0\.w > partner_thermo0\.w/);
+  assert.match(sphReactionProductEventPlacementWgsl, /var host_is_source = source_index < partner_index/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn placement_route_direct_gas_carrier/);
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /let pair_support_radius_m = 0\.5 \* sqrt\(dot\(pair_separation, pair_separation\)\)/
+  );
+  assert.match(sphReactionProductEventPlacementWgsl, /\+ direct_support_radius_m/);
+  assert.match(sphReactionProductEventPlacementWgsl, /let pair_support_volume_m3 = pair_support_radius_m/);
+  assert.match(sphReactionProductEventPlacementWgsl, /fn placement_pair_preserving_shift/);
+  assert.match(sphReactionProductEventPlacementWgsl, /let shift_error = bounded_shift - desired_shift/);
+  assert.match(sphReactionProductEventPlacementWgsl, /if \(bounded_shift\.w <= 0\.0\) \{\s*return false;/);
+  assert.doesNotMatch(sphReactionProductEventPlacementWgsl, /if \(bounded_shift\.w > 0\.0\)/);
+  assert.match(sphReactionProductEventPlacementWgsl, /event_phase_route_complete = direct_route_complete/);
+  assert.match(sphReactionProductEventPlacementWgsl, /abs\(particle_thermo0\.y - event_phase_id\) < 0\.5/);
+  assert.match(sphReactionProductEventPlacementWgsl, /placement_clamp_to_box\(target_position, product_radius_m\)/);
+  assert.match(sphReactionProductEventPlacementWgsl, /let pair_indices_valid = source_index_f >= 0\.0/);
+  assert.match(sphReactionProductEventPlacementWgsl, /partner_index_f < f32\(params\.particle_count\)/);
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /placement_route_direct_gas_carrier[\s\S]*if \(unplaced_mass_kg <= 0\.0\)/
+  );
+  assert.match(sphReactionProductEventPlacementWgsl, /product_events\[base\] = vec4<f32>\(event_position, event_row0_header\.w\)/);
   assert.match(
     sphReactionProductEventPlacementWgsl,
     /let rejected_payload_mass_kg = max\(event_product_mass_kg, unplaced_mass_kg\)/

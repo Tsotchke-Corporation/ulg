@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -51,6 +52,11 @@ const materialProperties = {
     transitions: []
   }
 };
+
+const sphReactionGpuKernelSource = readFileSync(
+  new URL('../src/runtime/sph/sphReactionGpuKernel.js', import.meta.url),
+  'utf8'
+);
 
 function packedThreeParticles() {
   const state = new Float32Array(3 * SPH_GPU_PARTICLE_STATE_FLOATS);
@@ -454,6 +460,17 @@ test('SPH reaction WGSL places gas products into freed parent slots after conden
   assert.match(sphReactionStepWgsl, /product_term_for_parent_slot\(reaction_index,\s*local_product_slot\)/);
   // Products launch at the consumed pair's COM velocity (momentum-exact).
   assert.match(sphReactionStepWgsl, /product_com_velocity/);
+});
+
+test('SPH reaction product placement receives simulation-domain dimensions, not translated bin bounds', () => {
+  assert.match(
+    sphReactionGpuKernelSource,
+    /runSphReactionSummaryWebGpu\(\{[\s\S]*?proposalBuffer,[\s\S]*?boxDimsM,[\s\S]*?readProductEvents: false/
+  );
+  assert.doesNotMatch(
+    sphReactionGpuKernelSource,
+    /boxDimsM:\s*reactionParticleBins\.boxDimsM/
+  );
 });
 
 test('SPH reaction WGSL preserves visual particle radius while resolving product thermo rows', () => {

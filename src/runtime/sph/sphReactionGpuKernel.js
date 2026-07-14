@@ -2815,6 +2815,10 @@ export async function runSphReactionStepWebGpu({
         nextMechanicsBuffer: outMechanicsBuffer,
         reactionRecordBuffer,
         proposalBuffer,
+        // Only forward the simulation-domain dimensions. Particle-bin bounds
+        // may be a translated state-bounds fallback, while product placement
+        // clamps in the domain's zero-based coordinate frame.
+        boxDimsM,
         readProductEvents: false,
         retainProductEventBuffer: retainOutputParticleBuffers,
         productPlacementAccumulatorBuffer,

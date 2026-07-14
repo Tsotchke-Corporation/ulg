@@ -275,6 +275,7 @@ function productPlacementRow({
   unplacedEventCount = 0,
   subthresholdEventCount = 0,
   rejectedEventCount = 0,
+  phaseRoutedEventCount = 0,
   readyProductMassKg = 0,
   directPlacedMassKg = 0,
   sparePlacedMassKg = 0,
@@ -296,7 +297,7 @@ function productPlacementRow({
     materialId, productTermIndex, reactionIndex, routingId,
     phaseId, status, readyProductEventCount, placementCandidateEventCount,
     directPlacedEventCount, sparePlacedEventCount, captureMergedEventCount, fallbackMergedEventCount,
-    unplacedEventCount, subthresholdEventCount, rejectedEventCount, 0,
+    unplacedEventCount, subthresholdEventCount, rejectedEventCount, phaseRoutedEventCount,
     readyProductMassKg, directPlacedMassKg, sparePlacedMassKg, captureMergedMassKg,
     fallbackMergedMassKg, unplacedMassKg, subthresholdMassKg, rejectedMassKg,
     maxSparePlacedEventMassKg, maxMergedEventMassKg, maxPostMergeParticleMassKg, maxUnplacedEventMassKg,
@@ -585,6 +586,7 @@ test('SPH reaction product-placement decoder partitions all routes and gas total
       captureMergedEventCount: 1,
       unplacedEventCount: 1,
       rejectedEventCount: 1,
+      phaseRoutedEventCount: 4,
       readyProductMassKg: 8,
       directPlacedMassKg: 2,
       sparePlacedMassKg: 2,
@@ -617,6 +619,10 @@ test('SPH reaction product-placement decoder partitions all routes and gas total
   assert.equal(provenance.records[0].candidateEventPartitionResidual, 0);
   assert.equal(provenance.records[0].massPartitionResidualKg, 0);
   assert.equal(provenance.records[1].status, 'product-placement-term-rejected');
+  assert.equal(provenance.records[1].phaseRoutingComplete, true);
+  assert.equal(provenance.phaseRoutingComplete, true);
+  assert.equal(provenance.phaseRoutedEventCount, 4);
+  assert.equal(provenance.gasPhaseRoutedEventCount, 4);
   assert.equal(provenance.placementCandidateEventCount, 7);
   assert.equal(provenance.placedEventCount, 4);
   assert.equal(provenance.mergedEventCount, 3);
@@ -662,6 +668,34 @@ test('SPH reaction product-placement row order remains authoritative for empty t
   assert.deepEqual(provenance.records.map((record) => record.readyProductEventCount), [0, 0]);
   assert.deepEqual(provenance.byMaterial.ab.productTermIndices, [0]);
   assert.deepEqual(provenance.byMaterial.c2.productTermIndices, [1]);
+});
+
+test('SPH reaction product-placement provenance fails closed when a gas event misses phase routing', () => {
+  const values = concatenateFloat32Rows(
+    productPlacementRow({ status: 1 }),
+    productPlacementRow({
+      materialId: 400,
+      productTermIndex: 1,
+      routingId: 1,
+      phaseId: 3,
+      readyProductEventCount: 2,
+      placementCandidateEventCount: 2,
+      sparePlacedEventCount: 2,
+      phaseRoutedEventCount: 1,
+      readyProductMassKg: 2,
+      sparePlacedMassKg: 2
+    })
+  );
+
+  const provenance = decodeSphReactionProductPlacementSummaryValues(values, reactionTable());
+
+  assert.equal(provenance.partitionComplete, true);
+  assert.equal(provenance.phaseRoutingComplete, false);
+  assert.equal(provenance.status, 'product-placement-provenance-phase-routing-incomplete');
+  assert.equal(provenance.records[1].phaseRoutingRequired, true);
+  assert.equal(provenance.records[1].phaseRoutingComplete, false);
+  assert.equal(provenance.records[1].phaseRoutedEventCount, 1);
+  assert.equal(provenance.records[1].status, 'product-placement-term-phase-routing-incomplete');
 });
 
 test('resident product mass handle preserves positioned product-event records', () => {
@@ -943,6 +977,7 @@ test('SPH reaction product events can remain GPU-resident without product-event 
     nextStateBuffer: buffer('next-state'),
     nextThermoBuffer: buffer('next-thermo'),
     proposalBuffer: buffer('reaction-proposals'),
+    boxDimsM: [3, 4, 5],
     retainProductEventBuffer: true
   });
 
@@ -1039,6 +1074,7 @@ test('SPH reaction host binds and reads the per-term placement accumulator witho
     nextThermoBuffer: buffer('next-thermo'),
     nextMechanicsBuffer: buffer('next-mechanics'),
     proposalBuffer: buffer('reaction-proposals'),
+    boxDimsM: [3, 4, 5],
     retainProductEventBuffer: true,
     readCompactSummary: false,
     readGasSpeciesSummary: false,
@@ -1057,6 +1093,14 @@ test('SPH reaction host binds and reads the per-term placement accumulator witho
     write.label === 'ulg-sph-reaction-product-event-placement-params'
     && write.offset === 28
   ));
+  const placementBoxWrite = device.writes.find((write) => (
+    write.label === 'ulg-sph-reaction-product-event-placement-params'
+    && write.offset === 32
+  ));
+  const placementBoxClampWrite = device.writes.find((write) => (
+    write.label === 'ulg-sph-reaction-product-event-placement-params'
+    && write.offset === 44
+  ));
   const placementCopy = device.copies.find(
     (copy) => copy.destination.label === 'ulg-sph-reaction-product-placement-readback'
   );
@@ -1070,13 +1114,19 @@ test('SPH reaction host binds and reads the per-term placement accumulator witho
   assert.equal(summary.productPlacementProvenanceReadbackByteLength, expectedPlacementByteLength);
   assert.equal(summary.productPlacementAccumulatorByteLength, expectedPlacementByteLength);
   assert.equal(summary.productPlacementReadbackCadence, 'resident-sequence-final');
-  assert.equal(placementBindGroup.entries.length, 6);
+  assert.equal(placementBindGroup.entries.length, 8);
   assert.equal(placementBindGroup.entries[5].binding, 5);
   assert.equal(
     placementBindGroup.entries[5].resource.buffer.label,
     'ulg-sph-reaction-product-placement-accumulator'
   );
+  assert.equal(placementBindGroup.entries[6].binding, 6);
+  assert.equal(placementBindGroup.entries[6].resource.buffer.label, 'source-state');
+  assert.equal(placementBindGroup.entries[7].binding, 7);
+  assert.equal(placementBindGroup.entries[7].resource.buffer.label, 'source-thermo');
   assert.deepEqual(productTermCountWrite.values, [2]);
+  assert.deepEqual(placementBoxWrite.values, [3, 4, 5]);
+  assert.deepEqual(placementBoxClampWrite.values, [1]);
   assert.equal(placementCopy.size, expectedPlacementByteLength);
   assert.equal(placementCopy.source.label, 'ulg-sph-reaction-product-placement-accumulator');
   assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [1, 1]);

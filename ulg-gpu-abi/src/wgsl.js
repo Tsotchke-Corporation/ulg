@@ -2372,6 +2372,10 @@ struct ProductEventPlacementParams {
   mechanics_stride_vec4: u32,
   min_placed_mass_kg: f32,
   product_term_count: u32,
+  box_x_m: f32,
+  box_y_m: f32,
+  box_z_m: f32,
+  box_clamp_enabled: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> product_events: array<vec4<f32>>;
@@ -2380,6 +2384,8 @@ struct ProductEventPlacementParams {
 @group(0) @binding(3) var<storage, read_write> next_mechanics: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> params: ProductEventPlacementParams;
 @group(0) @binding(5) var<storage, read_write> placement_summary: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> source_thermo: array<vec4<f32>>;
 
 fn placement_summary_base(product_term_index: u32) -> u32 {
   return product_term_index * 8u;
@@ -2486,6 +2492,321 @@ fn record_spare_placement(base: u32, mass_kg: f32, support_radius_m: f32) {
   placement_summary[base + 7u] = vec4<f32>(distances.x, distances.y, max(distances.z, support_radius_m), distances.w);
 }
 
+fn record_phase_routed_event(base: u32) {
+  let counts = placement_summary[base + 3u];
+  placement_summary[base + 3u] = vec4<f32>(counts.xyz, counts.w + 1.0);
+}
+
+fn placement_phase_is_liquid(phase_id: f32) -> bool {
+  return phase_id >= 1.5 && phase_id < 2.5;
+}
+
+fn placement_phase_is_condensed(phase_id: f32) -> bool {
+  return phase_id > 0.5 && phase_id < 2.5;
+}
+
+fn placement_phase_is_gas(phase_id: f32) -> bool {
+  return phase_id >= 2.5 && phase_id < 3.5;
+}
+
+fn placement_reactant_radius_m(pos_mass: vec4<f32>, thermo0: vec4<f32>) -> f32 {
+  if (!(pos_mass.w > 0.0) || !(thermo0.w > 0.0)) {
+    return 0.0;
+  }
+  return pow(
+    max(3.0 * pos_mass.w / (12.5663706 * thermo0.w), 1.0e-30),
+    1.0 / 3.0
+  );
+}
+
+fn placement_support_fits_box(support_radius_m: f32) -> bool {
+  if (params.box_clamp_enabled == 0u) {
+    return true;
+  }
+  let box_dims = vec3<f32>(params.box_x_m, params.box_y_m, params.box_z_m);
+  let max_margin_m = 0.5 * min(box_dims.x, min(box_dims.y, box_dims.z));
+  return support_radius_m <= max_margin_m;
+}
+
+fn placement_clamp_to_box(position: vec3<f32>, support_margin_m: f32) -> vec3<f32> {
+  if (params.box_clamp_enabled == 0u) {
+    return position;
+  }
+  let box_dims = vec3<f32>(params.box_x_m, params.box_y_m, params.box_z_m);
+  let max_margin_m = 0.5 * min(box_dims.x, min(box_dims.y, box_dims.z));
+  let margin_m = clamp(support_margin_m, 0.0, max_margin_m);
+  return clamp(
+    position,
+    vec3<f32>(margin_m),
+    box_dims - vec3<f32>(margin_m)
+  );
+}
+
+fn placement_pair_preserving_shift(
+  source_position: vec3<f32>,
+  partner_position: vec3<f32>,
+  desired_shift: vec3<f32>,
+  support_margin_m: f32
+) -> vec4<f32> {
+  if (params.box_clamp_enabled == 0u) {
+    return vec4<f32>(desired_shift, 1.0);
+  }
+  let box_dims = vec3<f32>(params.box_x_m, params.box_y_m, params.box_z_m);
+  let max_margin_m = 0.5 * min(box_dims.x, min(box_dims.y, box_dims.z));
+  if (support_margin_m > max_margin_m) {
+    return vec4<f32>(desired_shift, 0.0);
+  }
+  let margin_m = max(support_margin_m, 0.0);
+  let lower = max(
+    vec3<f32>(margin_m) - source_position,
+    vec3<f32>(margin_m) - partner_position
+  );
+  let upper = min(
+    box_dims - vec3<f32>(margin_m) - source_position,
+    box_dims - vec3<f32>(margin_m) - partner_position
+  );
+  if (!all(lower <= upper)) {
+    return vec4<f32>(desired_shift, 0.0);
+  }
+  let bounded_shift = clamp(desired_shift, lower, upper);
+  let shift_error = bounded_shift - desired_shift;
+  if (dot(shift_error, shift_error) > 1.0e-10) {
+    return vec4<f32>(desired_shift, 0.0);
+  }
+  return vec4<f32>(bounded_shift, 1.0);
+}
+
+// Reaction placement must use the current reacting pair rather than the
+// render-cadence material-interface table: source state is fresh for this
+// reaction tick, deterministic, and already GPU resident. Select the
+// condensed host (liquid first, then any condensed phase, then higher rest
+// density, then lower stable particle index), point toward the other carrier,
+// and route the gas center beyond the other reactant's surface by the gas
+// support radius. As a merged bubble grows, its center advances by the radius
+// growth so its volume does not expand back through the reacting pair.
+// A zero w lane means the derivation failed and callers retain the midpoint.
+fn placement_gas_target(
+  source_index: u32,
+  partner_index: u32,
+  fallback_position: vec3<f32>,
+  product_support_radius_m: f32
+) -> vec4<f32> {
+  if (
+    source_index >= params.particle_count
+    || partner_index >= params.particle_count
+    || source_index == partner_index
+  ) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  let source_pos_mass = source_state[source_index * params.state_stride_vec4];
+  let partner_pos_mass = source_state[partner_index * params.state_stride_vec4];
+  let source_thermo0 = source_thermo[source_index * params.thermo_stride_vec4];
+  let partner_thermo0 = source_thermo[partner_index * params.thermo_stride_vec4];
+  let source_radius_m = placement_reactant_radius_m(source_pos_mass, source_thermo0);
+  let partner_radius_m = placement_reactant_radius_m(partner_pos_mass, partner_thermo0);
+  if (!(source_radius_m > 0.0) || !(partner_radius_m > 0.0)) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+
+  let source_liquid = placement_phase_is_liquid(source_thermo0.y);
+  let partner_liquid = placement_phase_is_liquid(partner_thermo0.y);
+  let source_condensed = placement_phase_is_condensed(source_thermo0.y);
+  let partner_condensed = placement_phase_is_condensed(partner_thermo0.y);
+  var host_is_source = source_index < partner_index;
+  if (source_liquid != partner_liquid) {
+    host_is_source = source_liquid;
+  } else if (source_condensed != partner_condensed) {
+    host_is_source = source_condensed;
+  } else if (abs(source_thermo0.w - partner_thermo0.w) > 1.0e-6) {
+    host_is_source = source_thermo0.w > partner_thermo0.w;
+  }
+
+  let host_position = select(partner_pos_mass.xyz, source_pos_mass.xyz, host_is_source);
+  let free_position = select(source_pos_mass.xyz, partner_pos_mass.xyz, host_is_source);
+  let free_radius_m = select(source_radius_m, partner_radius_m, host_is_source);
+  let host_to_free = free_position - host_position;
+  let separation2 = dot(host_to_free, host_to_free);
+  if (!(separation2 > 1.0e-20)) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  let contact_radius_m = min(source_radius_m, partner_radius_m);
+  let outward_normal = host_to_free / sqrt(separation2);
+  let product_radius_m = max(product_support_radius_m, 0.0);
+  if (!placement_support_fits_box(product_radius_m)) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  let required_clearance_m = free_radius_m + product_radius_m;
+  var target_position = free_position + outward_normal * required_clearance_m;
+  target_position = placement_clamp_to_box(target_position, product_radius_m);
+  let final_clearance_m = dot(target_position - free_position, outward_normal);
+  if (final_clearance_m < required_clearance_m - 1.0e-5) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  return vec4<f32>(target_position, contact_radius_m);
+}
+
+fn placement_route_gas_merge_position(
+  original_event_position: vec3<f32>,
+  routed_event_position: vec3<f32>,
+  phase_id: f32,
+  event_support_radius_m: f32,
+  merged_rest_volume_m3: f32,
+  fallback_position: vec3<f32>
+) -> vec4<f32> {
+  if (!placement_phase_is_gas(phase_id) || !(merged_rest_volume_m3 > 0.0)) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  let route = routed_event_position - original_event_position;
+  let route_length2 = dot(route, route);
+  if (!(route_length2 > 1.0e-20)) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  let merged_support_radius_m = pow(
+    max(merged_rest_volume_m3 * 0.238732414637843, 1.0e-30),
+    1.0 / 3.0
+  );
+  if (!placement_support_fits_box(merged_support_radius_m)) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  let growth_offset_m = max(merged_support_radius_m - event_support_radius_m, 0.0);
+  let outward_normal = route / sqrt(route_length2);
+  let required_position = routed_event_position + outward_normal * growth_offset_m;
+  let outward_penetration_m = max(
+    dot(required_position - fallback_position, outward_normal),
+    0.0
+  );
+  let projected_position = fallback_position + outward_normal * outward_penetration_m;
+  let clamped_position = placement_clamp_to_box(projected_position, merged_support_radius_m);
+  if (dot(clamped_position - required_position, outward_normal) < -1.0e-5) {
+    return vec4<f32>(fallback_position, 0.0);
+  }
+  return vec4<f32>(clamped_position, 1.0);
+}
+
+fn placement_particle_rest_volume_m3(particle_index: u32) -> f32 {
+  if (particle_index >= params.particle_count) {
+    return 0.0;
+  }
+  let mechanics_row4 = next_mechanics[
+    particle_index * params.mechanics_stride_vec4 + 4u
+  ];
+  if (mechanics_row4.w > 0.0) {
+    return mechanics_row4.w;
+  }
+  let state0 = next_state[particle_index * params.state_stride_vec4];
+  let thermo0 = next_thermo[particle_index * params.thermo_stride_vec4];
+  if (state0.w > 0.0 && thermo0.w > 0.0) {
+    return state0.w / thermo0.w;
+  }
+  return 0.0;
+}
+
+fn placement_direct_carrier_matches(
+  particle_index: u32,
+  material_id: f32,
+  phase_id: f32
+) -> bool {
+  if (particle_index >= params.particle_count) {
+    return false;
+  }
+  let state0 = next_state[particle_index * params.state_stride_vec4];
+  let thermo0 = next_thermo[particle_index * params.thermo_stride_vec4];
+  return state0.w > 0.0
+    && abs(thermo0.x - material_id) < 0.5
+    && abs(thermo0.y - phase_id) < 0.5;
+}
+
+// Direct placement can replace one freed parent before this pass. Relocate it
+// only when exactly one endpoint owns this product term; two matching
+// endpoints are a multi-carrier product and must retain their separation.
+fn placement_route_direct_gas_carrier(
+  source_index: u32,
+  partner_index: u32,
+  material_id: f32,
+  phase_id: f32,
+  original_event_position: vec3<f32>,
+  target_position: vec3<f32>,
+  event_support_radius_m: f32
+) -> bool {
+  let source_matches = placement_direct_carrier_matches(source_index, material_id, phase_id);
+  let partner_matches = placement_direct_carrier_matches(partner_index, material_id, phase_id);
+  if (!source_matches && !partner_matches) {
+    return false;
+  }
+  if (source_matches && partner_matches) {
+    let source_state_base = source_index * params.state_stride_vec4;
+    let partner_state_base = partner_index * params.state_stride_vec4;
+    let source_state0 = next_state[source_state_base];
+    let partner_state0 = next_state[partner_state_base];
+    let source_rest_volume_m3 = placement_particle_rest_volume_m3(source_index);
+    let partner_rest_volume_m3 = placement_particle_rest_volume_m3(partner_index);
+    if (!(source_rest_volume_m3 > 0.0) || !(partner_rest_volume_m3 > 0.0)) {
+      return false;
+    }
+    let source_support_radius_m = pow(
+      max(source_rest_volume_m3 * 0.238732414637843, 1.0e-30),
+      1.0 / 3.0
+    );
+    let partner_support_radius_m = pow(
+      max(partner_rest_volume_m3 * 0.238732414637843, 1.0e-30),
+      1.0 / 3.0
+    );
+    let direct_support_radius_m = max(source_support_radius_m, partner_support_radius_m);
+    let current_midpoint = 0.5 * (source_state0.xyz + partner_state0.xyz);
+    let pair_separation = source_state0.xyz - partner_state0.xyz;
+    let pair_support_radius_m = 0.5 * sqrt(dot(pair_separation, pair_separation))
+      + direct_support_radius_m;
+    let pair_support_volume_m3 = pair_support_radius_m
+      * pair_support_radius_m
+      * pair_support_radius_m
+      / 0.238732414637843;
+    let projected_route = placement_route_gas_merge_position(
+      original_event_position,
+      target_position,
+      phase_id,
+      event_support_radius_m,
+      pair_support_volume_m3,
+      current_midpoint
+    );
+    if (projected_route.w <= 0.0) {
+      return false;
+    }
+    let shift = projected_route.xyz - current_midpoint;
+    let bounded_shift = placement_pair_preserving_shift(
+      source_state0.xyz,
+      partner_state0.xyz,
+      shift,
+      direct_support_radius_m
+    );
+    if (bounded_shift.w <= 0.0) {
+      return false;
+    }
+    next_state[source_state_base] = vec4<f32>(source_state0.xyz + bounded_shift.xyz, source_state0.w);
+    next_state[partner_state_base] = vec4<f32>(partner_state0.xyz + bounded_shift.xyz, partner_state0.w);
+    return true;
+  }
+  let direct_index = select(partner_index, source_index, source_matches);
+  let state_base = direct_index * params.state_stride_vec4;
+  let state0 = next_state[state_base];
+  let direct_rest_volume_m3 = placement_particle_rest_volume_m3(direct_index);
+  if (!(direct_rest_volume_m3 > 0.0)) {
+    return false;
+  }
+  let direct_route = placement_route_gas_merge_position(
+    original_event_position,
+    target_position,
+    phase_id,
+    event_support_radius_m,
+    direct_rest_volume_m3,
+    state0.xyz
+  );
+  if (direct_route.w <= 0.0) {
+    return false;
+  }
+  next_state[state_base] = vec4<f32>(direct_route.xyz, state0.w);
+  return true;
+}
+
 @compute @workgroup_size(1)
 fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (global_id.x != 0u) {
@@ -2511,6 +2832,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row3 = product_events[base + 3u];
     let row4 = product_events[base + 4u];
     let event_row2_header = product_events[base + 2u];
+    let event_row5_header = product_events[base + 5u];
     let event_row7_header = product_events[base + 7u];
     let product_term_index = u32(max(event_row1_header.y, 0.0));
     if (product_term_index >= params.product_term_count) {
@@ -2548,7 +2870,54 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (event_product_mass_kg > 0.0) {
       record_ready_product(summary_base, event_product_mass_kg, event_direct_placed_mass_kg);
     }
+    var event_support_radius_m = 0.05;
+    if (event_row5_header.w > 0.0) {
+      event_support_radius_m = pow(
+        event_row5_header.w * 0.238732414637843,
+        1.0 / 3.0
+      );
+    }
+    var event_position = event_row0_header.xyz;
+    var event_phase_route_complete = false;
+    if (placement_phase_is_gas(event_row2_header.w) && event_product_mass_kg > 0.0) {
+      let source_index_f = round(event_row1_header.w);
+      let partner_index_f = round(event_row2_header.x);
+      let pair_indices_valid = source_index_f >= 0.0
+        && partner_index_f >= 0.0
+        && source_index_f < f32(params.particle_count)
+        && partner_index_f < f32(params.particle_count);
+      if (pair_indices_valid) {
+        let source_index = u32(source_index_f);
+        let partner_index = u32(partner_index_f);
+        let gas_target = placement_gas_target(
+          source_index,
+          partner_index,
+          event_position,
+          event_support_radius_m
+        );
+        if (gas_target.w > 0.0) {
+          event_position = gas_target.xyz;
+          product_events[base] = vec4<f32>(event_position, event_row0_header.w);
+          var direct_route_complete = true;
+          if (event_direct_placed_mass_kg > 0.0) {
+            direct_route_complete = placement_route_direct_gas_carrier(
+              source_index,
+              partner_index,
+              event_row1_header.x,
+              event_row2_header.w,
+              event_row0_header.xyz,
+              event_position,
+              event_support_radius_m
+            );
+          }
+          event_phase_route_complete = direct_route_complete;
+        }
+      }
+    }
     if (unplaced_mass_kg <= 0.0) {
+      if (event_phase_route_complete) {
+        record_phase_routed_event(summary_base);
+      }
       product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
       product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 2.0);
       continue;
@@ -2556,6 +2925,9 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     record_placement_candidate(summary_base);
     if (unplaced_mass_kg <= params.min_placed_mass_kg) {
       record_unplaced(summary_base, unplaced_mass_kg, true);
+      if (event_phase_route_complete) {
+        record_phase_routed_event(summary_base);
+      }
       product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 6.0);
       continue;
     }
@@ -2564,13 +2936,8 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let event_row2 = product_events[base + 2u];
     let event_row4b = product_events[base + 4u];
     let event_row5 = product_events[base + 5u];
-    let event_position = event_row0.xyz;
     let event_material_id = event_row1.x;
     let event_phase_id = event_row2.w;
-    var event_support_radius_m = 0.05;
-    if (event_row5.w > 0.0) {
-      event_support_radius_m = pow(event_row5.w * 0.238732414637843, 1.0 / 3.0);
-    }
     // Merge-first: with the interface-flux extent law, burning pairs emit a
     // small product event EVERY substep; minting a spare particle for each
     // would exhaust the spare pool within milliseconds. Physically the new
@@ -2623,9 +2990,30 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let particle_vel_u = next_state[state_base + 1u];
       let merged_mass = particle_pos_mass.w + unplaced_mass_kg;
       let inv_merged = 1.0 / max(merged_mass, 1.0e-20);
-      let merged_position = (particle_pos_mass.xyz * particle_pos_mass.w + event_position * unplaced_mass_kg) * inv_merged;
+      var merged_position = (particle_pos_mass.xyz * particle_pos_mass.w + event_position * unplaced_mass_kg) * inv_merged;
       let merged_velocity = (particle_vel_u.xyz * particle_pos_mass.w + event_row5.xyz * unplaced_mass_kg) * inv_merged;
       let merged_u = (particle_vel_u.w * particle_pos_mass.w + event_row4b.w * unplaced_mass_kg) * inv_merged;
+      let mechanics_base = merge_slot * params.mechanics_stride_vec4;
+      let mechanics_row4 = next_mechanics[mechanics_base + 4u];
+      var merged_rest_volume = mechanics_row4.w;
+      if (event_row4b.y > 0.0) {
+        merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
+      }
+      if (placement_phase_is_gas(event_phase_id)) {
+        let merged_route = placement_route_gas_merge_position(
+          event_row0_header.xyz,
+          event_position,
+          event_phase_id,
+          event_support_radius_m,
+          merged_rest_volume,
+          merged_position
+        );
+        if (merged_route.w > 0.0) {
+          merged_position = merged_route.xyz;
+        } else {
+          event_phase_route_complete = false;
+        }
+      }
       next_state[state_base] = vec4<f32>(merged_position, merged_mass);
       next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
       let thermo_base = merge_slot * params.thermo_stride_vec4;
@@ -2633,14 +3021,11 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
       next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
       // Rest volume grows by the event's share so density stays consistent.
-      let mechanics_base = merge_slot * params.mechanics_stride_vec4;
-      let mechanics_row4 = next_mechanics[mechanics_base + 4u];
-      var merged_rest_volume = mechanics_row4.w;
-      if (event_row4b.y > 0.0) {
-        merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
-      }
       next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
       record_capture_merge(summary_base, unplaced_mass_kg, merged_mass, merge_distance);
+      if (event_phase_route_complete) {
+        record_phase_routed_event(summary_base);
+      }
       // Consume the event. row3.x remains the direct/spare placed share;
       // merged mass is derived exactly as total - placed - unplaced.
       product_events[base + 3u] = vec4<f32>(row3.x, 0.0, row3.z, row3.w);
@@ -2668,23 +3053,48 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let particle_vel_u = next_state[state_base + 1u];
         let merged_mass = particle_pos_mass.w + unplaced_mass_kg;
         let inv_merged = 1.0 / max(merged_mass, 1.0e-20);
-        let merged_position = (particle_pos_mass.xyz * particle_pos_mass.w + event_position * unplaced_mass_kg) * inv_merged;
+        var merged_position = (particle_pos_mass.xyz * particle_pos_mass.w + event_position * unplaced_mass_kg) * inv_merged;
         let merged_velocity = (particle_vel_u.xyz * particle_pos_mass.w + event_row5.xyz * unplaced_mass_kg) * inv_merged;
         let merged_u = (particle_vel_u.w * particle_pos_mass.w + event_row4b.w * unplaced_mass_kg) * inv_merged;
-        next_state[state_base] = vec4<f32>(merged_position, merged_mass);
-        next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
-        let thermo_base = merge_slot * params.thermo_stride_vec4;
-        let particle_thermo0 = next_thermo[thermo_base];
-        let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
-        next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
         let mechanics_base = merge_slot * params.mechanics_stride_vec4;
         let mechanics_row4 = next_mechanics[mechanics_base + 4u];
         var merged_rest_volume = mechanics_row4.w;
         if (event_row4b.y > 0.0) {
           merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
         }
+        let thermo_base = merge_slot * params.thermo_stride_vec4;
+        let particle_thermo0 = next_thermo[thermo_base];
+        if (placement_phase_is_gas(event_phase_id)) {
+          if (abs(particle_thermo0.y - event_phase_id) < 0.5) {
+            let merged_route = placement_route_gas_merge_position(
+              event_row0_header.xyz,
+              event_position,
+              event_phase_id,
+              event_support_radius_m,
+              merged_rest_volume,
+              merged_position
+            );
+            if (merged_route.w > 0.0) {
+              merged_position = merged_route.xyz;
+            } else {
+              event_phase_route_complete = false;
+            }
+          } else {
+            // Preserve the conserving terminal merge but do not teleport a
+            // condensed carrier or claim that the gas reached its interface
+            // route. The thermal solver remains responsible for phase change.
+            event_phase_route_complete = false;
+          }
+        }
+        next_state[state_base] = vec4<f32>(merged_position, merged_mass);
+        next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
+        let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
+        next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
         next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
         record_fallback_merge(summary_base, unplaced_mass_kg, merged_mass, nearest_distance);
+        if (event_phase_route_complete) {
+          record_phase_routed_event(summary_base);
+        }
         product_events[base + 3u] = vec4<f32>(row3.x, 0.0, row3.z, row3.w);
         product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
         product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 5.0);
@@ -2694,6 +3104,9 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // stays live and keeps feeding the grid splat ledger, so no mass is
       // lost either way.
       record_unplaced(summary_base, unplaced_mass_kg, false);
+      if (event_phase_route_complete) {
+        record_phase_routed_event(summary_base);
+      }
       product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 7.0);
       continue;
     }
@@ -2746,6 +3159,9 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     next_mechanics[mechanics_base + 6u] = vec4<f32>(row6.z, row6.w, row7.x, row7.z);
     next_mechanics[mechanics_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     record_spare_placement(summary_base, unplaced_mass_kg, support_radius_m);
+    if (event_phase_route_complete) {
+      record_phase_routed_event(summary_base);
+    }
     // Consume the event: zero its unplaced share and status so the compactor
     // and the grid splat drop it this substep.
     product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);

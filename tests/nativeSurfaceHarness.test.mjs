@@ -229,6 +229,66 @@ test('native product capture draw plan isolates exact product surfaces without m
   assert.equal(inactivePlan.suppressSchroederProxyDraws, false);
 });
 
+test('native H2 visibility plans preserve canonical draw identity for ablation and H2-only evidence', () => {
+  const primary = { surfaceIndex: 0, surfaceKey: 'h2o|h2o|liquid|domain:base' };
+  const waterGas = { surfaceKey: 'steam|h2o|gas' };
+  const naoh = { surfaceKey: 'naoh|naoh|liquid' };
+  const h2 = {
+    surfaceKey: 'h2|h2|gas',
+    depthWriteFlag: 1,
+    bindGroup: { label: 'h2-original-bind-group' },
+    drawIndirectRowsBuffer: { label: 'h2-original-indirect-buffer' }
+  };
+  const primaryDraws = [primary];
+  const additionalSurfaceDraws = [waterGas, naoh, h2];
+
+  const ablated = resolveSphNativeSurfaceDiagnosticDrawPlan({
+    drawOrder: primaryDraws,
+    additionalSurfaceDraws,
+    filter: {
+      enabled: true,
+      token: 'h2-ablated',
+      filterAdditionalSurfaceDraws: true,
+      additionalSurfaceKeys: [waterGas.surfaceKey, naoh.surfaceKey],
+      suppressPrimarySurfaceDraws: false,
+      suppressBackgroundImage: false,
+      suppressBoxWireframe: false,
+      suppressSchroederProxyDraws: false
+    }
+  });
+  assert.deepEqual(ablated.drawOrder, [primary]);
+  assert.deepEqual(ablated.additionalSurfaceDraws, [waterGas, naoh]);
+  assert.equal(ablated.drawOrder[0], primary);
+  assert.equal(ablated.additionalSurfaceDraws[0], waterGas);
+  assert.equal(ablated.additionalSurfaceDraws[1], naoh);
+  assert.equal(ablated.suppressBackgroundImage, false);
+  assert.equal(ablated.suppressBoxWireframe, false);
+  assert.equal(ablated.suppressSchroederProxyDraws, false);
+
+  const h2Only = resolveSphNativeSurfaceDiagnosticDrawPlan({
+    drawOrder: primaryDraws,
+    additionalSurfaceDraws,
+    filter: {
+      enabled: true,
+      token: 'h2-only',
+      filterAdditionalSurfaceDraws: true,
+      additionalSurfaceKeys: [h2.surfaceKey],
+      suppressPrimarySurfaceDraws: true,
+      suppressBackgroundImage: true,
+      suppressBoxWireframe: true,
+      suppressSchroederProxyDraws: true
+    }
+  });
+  assert.deepEqual(h2Only.drawOrder, []);
+  assert.deepEqual(h2Only.additionalSurfaceDraws, [h2]);
+  assert.equal(h2Only.additionalSurfaceDraws[0], h2);
+  assert.equal(h2Only.additionalSurfaceDraws[0].bindGroup, h2.bindGroup);
+  assert.equal(h2Only.additionalSurfaceDraws[0].drawIndirectRowsBuffer, h2.drawIndirectRowsBuffer);
+  assert.equal(h2Only.additionalSurfaceDraws[0].depthWriteFlag, 1);
+  assert.deepEqual(primaryDraws, [primary]);
+  assert.deepEqual(additionalSurfaceDraws, [waterGas, naoh, h2]);
+});
+
 test('native product draw-filter probe uses identity-owned cleanup in a finally path', () => {
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
 
@@ -257,6 +317,24 @@ test('native product draw-filter probe uses identity-owned cleanup in a finally 
   assert.match(probeSource, /suppressedNonProductAdditionalSurfaceDraws: true/);
   assert.match(probeSource, /suppressedBoxWireframe: true/);
   assert.match(probeSource, /suppressedSchroederProxyDraws: true/);
+});
+
+test('native H2 composited visibility probe captures ablation, H2-only, and exact restoration without material overrides', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(probeSource, /ULG_PROBE_CAPTURE_H2_VISIBILITY_ABLATION/);
+  assert.match(probeSource, /post-probe-native-h2-ablated-composited/);
+  assert.match(probeSource, /post-probe-native-h2-only/);
+  assert.match(probeSource, /post-probe-native-h2-visibility-restored-canonical/);
+  assert.match(probeSource, /compareCapturedPngFrames/);
+  assert.match(probeSource, /canonicalAblatedDelta/);
+  assert.match(probeSource, /canonicalRestoredNoise/);
+  assert.match(probeSource, /native-h2-composited-visibility-proved/);
+  assert.match(probeSource, /materialOverrideApplied: false/);
+  assert.match(probeSource, /emissiveOverrideApplied: false/);
+  assert.match(probeSource, /depthWriteOverrideApplied: false/);
+  assert.match(probeSource, /Number\(draw\?\.depthWriteFlag\) === 1/);
+  assert.match(probeSource, /finally \{/);
 });
 
 test('time-zero provenance rejects missing, empty, and non-finite metadata', () => {

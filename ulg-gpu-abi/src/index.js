@@ -1854,7 +1854,9 @@ export const SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT = Object.free
   'unplacedEventCount:f32',
   'subthresholdEventCount:f32',
   'rejectedEventCount:f32',
-  'reserved0:f32',
+  // Gas events whose direct and/or event-mass carriers all received the
+  // deterministic condensed-to-free-side placement target.
+  'phaseRoutedEventCount:f32',
   'readyProductMassKg:f32',
   'directPlacedMassKg:f32',
   'sparePlacedMassKg:f32',

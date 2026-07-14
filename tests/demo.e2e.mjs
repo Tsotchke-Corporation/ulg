@@ -13718,6 +13718,7 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
     const coarseActiveNodeList = { activeNodes: coarseActiveNodes };
 
     const runStep = async (fineSubstepCount, gravityMPerS2 = [0, 0, 0]) => {
+      const ambientPressureInputs = [];
       const step = await coupling.runSchroederTwoLevelMechanicsStepWebGpu({
         device,
         sphParticleState,
@@ -13730,9 +13731,13 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
         boxDimsM,
         dt,
         gravityMPerS2,
+        ambientPressurePa: 101325,
         fineSubstepCount,
         gridSpecFactory: gridKernel.createMlsMpmGridSpec,
-        p2gRunner: gridKernel.runMlsMpmP2gGridProjectionWebGpu,
+        p2gRunner(args) {
+          ambientPressureInputs.push(args.ambientPressurePa);
+          return gridKernel.runMlsMpmP2gGridProjectionWebGpu(args);
+        },
         gridUpdateRunner: gridUpdateKernel.runMlsMpmGridUpdateWebGpu,
         g2pRunner: g2pKernel.runMlsMpmG2pWebGpu
       });
@@ -13791,10 +13796,14 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
         fineSubstepCount: step.fineSubstepCount,
         fineLevel: step.fineLevel,
         coarseLevel: step.coarseLevel,
+        ambientPressurePa: step.ambientPressurePa,
+        ambientPressureAppliedInStressProjection:
+          step.ambientPressureAppliedInStressProjection,
         conservation: step.conservation,
         outMass,
         outMomentum,
         expectedVelocity,
+        ambientPressureInputs,
         maxVelocityError,
         maxPositionError
       };
@@ -13896,6 +13905,10 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
   expect(result.subcycled.fineSubstepCount).toBe(2);
   expect(result.shared.fineLevel).toBe(0);
   expect(result.shared.coarseLevel).toBe(1);
+  expect(result.shared.ambientPressurePa).toBe(101325);
+  expect(result.shared.ambientPressureAppliedInStressProjection).toBe(true);
+  expect(result.shared.ambientPressureInputs).toEqual([101325, 101325]);
+  expect(result.subcycled.ambientPressureInputs).toEqual([101325, 101325, 101325]);
 
   // Continuation envelope: two chained coupled steps advance exactly two
   // dt with the second step consuming retained GPU uploads directly.
@@ -14717,4 +14730,160 @@ test('SPH phase live merged scene conserves total mass across schedules', async 
   expect(first.massKg).toBeGreaterThan(0);
   expect(second.simTime).toBeGreaterThan(first.simTime);
   expect(Math.abs(second.massKg - first.massKg)).toBeLessThan(1e-3 * first.massKg);
+});
+
+test('SPH scene latest ambient intent survives cache hits and cross-family pending joins', async ({ page }) => {
+  test.setTimeout(180_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&mech=mlsmpm&residentAuto=0&dropn=1&basen=2&boxx=3&boxy=3&boxz=3&lawmech=1&lawg=1&laweos=1&lawp=0&lawt=0&lawr=0&lawv=0&lawst=0&visualCapture=1');
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
+  await page.waitForFunction(() => {
+    const scene = document.querySelector('#sph-phase-overlay')?.__sphScene;
+    return Boolean(
+      scene?.getSphGpuParticleState?.()?.schema
+      && scene?.getMlsMpmGpuParticleState?.()?.schema
+      && typeof scene?.refreshMlsMpmResidentSteps === 'function'
+    );
+  }, null, { timeout: 120_000 });
+
+  const result = await page.evaluate(async () => {
+    const scene = document.querySelector('#sph-phase-overlay').__sphScene;
+    const gridKernel = await import('/src/runtime/sph/sphGridGpuKernel.js');
+    let releaseVacuum;
+    let markVacuumEntered;
+    let delayedVacuum = false;
+    const vacuumEntered = new Promise((resolve) => {
+      markVacuumEntered = resolve;
+    });
+    const vacuumRelease = new Promise((resolve) => {
+      releaseVacuum = resolve;
+    });
+    const delayedVacuumP2gRunner = async (args) => {
+      if (!delayedVacuum && args.ambientPressurePa === 0) {
+        delayedVacuum = true;
+        markVacuumEntered();
+        await vacuumRelease;
+      }
+      return gridKernel.runMlsMpmP2gGridProjectionWithOptionalWebGpu(args);
+    };
+    const stepsCommon = {
+      preferWebGpu: true,
+      stepCount: 1,
+      readbackMode: 'no-full-readback',
+      compactSummaryMode: 'none',
+      fuseNoFullResidentMechanicsSequence: false,
+      fuseNoFullResidentMechanicsActiveGrid: false,
+      p2gRunner: delayedVacuumP2gRunner
+    };
+    const prepublishedAtmosphere = await scene.refreshMlsMpmResidentSteps({
+      ...stepsCommon,
+      force: true,
+      ambientPressurePa: 101325
+    });
+    const delayedVacuumPromise = scene.refreshMlsMpmResidentSteps({
+      ...stepsCommon,
+      force: true,
+      ambientPressurePa: 0
+    });
+    await vacuumEntered;
+    let selectedAtmosphere;
+    try {
+      selectedAtmosphere = await scene.refreshMlsMpmResidentSteps({
+        ...stepsCommon,
+        force: false,
+        ambientPressurePa: 101325
+      });
+    } finally {
+      releaseVacuum();
+    }
+    const delayedVacuumResult = await delayedVacuumPromise;
+    const cachePublished = scene.getMlsMpmResidentSteps();
+
+    let releaseSingleAtmosphere;
+    let markSingleAtmosphereEntered;
+    let delayedSingleAtmosphere = false;
+    const singleAtmosphereEntered = new Promise((resolve) => {
+      markSingleAtmosphereEntered = resolve;
+    });
+    const singleAtmosphereRelease = new Promise((resolve) => {
+      releaseSingleAtmosphere = resolve;
+    });
+    const delayedSingleP2gRunner = async (args) => {
+      if (!delayedSingleAtmosphere && args.ambientPressurePa === 101325) {
+        delayedSingleAtmosphere = true;
+        markSingleAtmosphereEntered();
+        await singleAtmosphereRelease;
+      }
+      return gridKernel.runMlsMpmP2gGridProjectionWithOptionalWebGpu(args);
+    };
+    const singleCommon = {
+      preferWebGpu: true,
+      readbackMode: 'no-full-readback',
+      p2gRunner: delayedSingleP2gRunner
+    };
+    const pendingSingleAtmosphere = scene.refreshMlsMpmResidentStep({
+      ...singleCommon,
+      force: true,
+      ambientPressurePa: 101325
+    });
+    await singleAtmosphereEntered;
+    const interveningVacuumSteps = scene.refreshMlsMpmResidentSteps({
+      ...stepsCommon,
+      p2gRunner: delayedSingleP2gRunner,
+      force: true,
+      ambientPressurePa: 0
+    });
+    const joinedSingleAtmosphere = scene.refreshMlsMpmResidentStep({
+      ...singleCommon,
+      force: false,
+      ambientPressurePa: 101325
+    });
+    releaseSingleAtmosphere();
+    const [singleAtmosphere, joinedAtmosphere, vacuumSteps] = await Promise.all([
+      pendingSingleAtmosphere,
+      joinedSingleAtmosphere,
+      interveningVacuumSteps
+    ]);
+    const joinPublished = scene.getMlsMpmResidentStep();
+    return {
+      cacheHit: {
+        vacuumStale: delayedVacuumResult?.stale === true,
+        vacuumStaleReason: delayedVacuumResult?.staleReason ?? null,
+        selectedWasPrepublished: selectedAtmosphere === prepublishedAtmosphere,
+        publishedAmbientPressurePa: cachePublished?.ambientPressurePa ?? null,
+        publishedSignatureMatchesSelected:
+          cachePublished?.signature === selectedAtmosphere?.signature
+      },
+      pendingJoin: {
+        singleStale: singleAtmosphere?.stale === true,
+        joinedStale: joinedAtmosphere?.stale === true,
+        joinedSameExecution: joinedAtmosphere === singleAtmosphere,
+        vacuumStepsStale: vacuumSteps?.stale === true,
+        vacuumStepsStaleReason: vacuumSteps?.staleReason ?? null,
+        publishedAmbientPressurePa: joinPublished?.ambientPressurePa ?? null,
+        publishedSignatureMatchesJoined:
+          joinPublished?.signature === joinedAtmosphere?.signature
+      }
+    };
+  });
+
+  expect(result.cacheHit.vacuumStale).toBe(true);
+  expect(result.cacheHit.vacuumStaleReason).toBe('superseded-by-newer-scene-refresh');
+  expect(result.cacheHit.selectedWasPrepublished).toBe(true);
+  expect(result.cacheHit.publishedAmbientPressurePa).toBe(101325);
+  expect(result.cacheHit.publishedSignatureMatchesSelected).toBe(true);
+  expect(result.pendingJoin.singleStale).toBe(false);
+  expect(result.pendingJoin.joinedStale).toBe(false);
+  expect(result.pendingJoin.joinedSameExecution).toBe(true);
+  expect(result.pendingJoin.vacuumStepsStale).toBe(true);
+  expect(result.pendingJoin.vacuumStepsStaleReason).toBe('superseded-by-newer-scene-refresh');
+  expect(result.pendingJoin.publishedAmbientPressurePa).toBe(101325);
+  expect(result.pendingJoin.publishedSignatureMatchesJoined).toBe(true);
+  expect(consoleIssues).toEqual([]);
 });

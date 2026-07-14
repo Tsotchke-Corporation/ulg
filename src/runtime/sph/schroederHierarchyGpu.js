@@ -13399,6 +13399,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       boxDimsM,
       dt,
       gravityMPerS2,
+      internalPressureScale: residentStepOptions.internalPressureScale ?? 1,
+      ambientPressurePa: residentStepOptions.ambientPressurePa ?? 0,
       fineSubstepCount: twoLevelFineSubstepCount,
       gridSpecFactory: createMlsMpmGridSpec,
       p2gRunner: runMlsMpmP2gGridProjectionWebGpu,
@@ -14241,6 +14243,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       normalHotLoopReadbackFree: true,
       fullParticleReadbackPerformed: false,
       dt,
+      internalPressureScale: resolvedTwoLevelMechanics?.internalPressureScale
+        ?? residentStepOptions.internalPressureScale
+        ?? 1,
+      ambientPressurePa: resolvedTwoLevelMechanics?.ambientPressurePa
+        ?? residentStepOptions.ambientPressurePa
+        ?? 0,
+      ambientPressureAppliedInStressProjection:
+        resolvedTwoLevelMechanics?.ambientPressureAppliedInStressProjection === true,
       stageStatus: { twoLevelMechanics: resolvedTwoLevelMechanics?.status ?? null },
       stageBackends: { twoLevelMechanics: 'webgpu' },
       twoLevelMechanicsAuthority: 'authoritative',
@@ -15008,6 +15018,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       coarseLevel: resolvedTwoLevelMechanics.coarseLevel,
       fineSubstepCount: resolvedTwoLevelMechanics.fineSubstepCount,
       fineSubstepDt: resolvedTwoLevelMechanics.fineSubstepDt,
+      internalPressureScale: resolvedTwoLevelMechanics.internalPressureScale,
+      ambientPressurePa: resolvedTwoLevelMechanics.ambientPressurePa,
+      ambientPressureAppliedInStressProjection:
+        resolvedTwoLevelMechanics.ambientPressureAppliedInStressProjection === true,
       fineGridSpacingM: resolvedTwoLevelMechanics.fineGridSpacingM,
       coarseGridSpacingM: resolvedTwoLevelMechanics.coarseGridSpacingM,
       conservation: resolvedTwoLevelMechanics.conservation,

@@ -4237,6 +4237,73 @@ function pressureFeedbackFromGasPressureSummary(gasPressureSummary) {
   return null;
 }
 
+export function resolveMlsMpmAmbientPressureEvidence({
+  ambientPressurePa = null,
+  pressureFeedback = null,
+  gasPressureSummary = null
+} = {}) {
+  if (ambientPressurePa !== null && ambientPressurePa !== undefined) {
+    const explicitAmbientPressurePa = finiteNumberOrNull(ambientPressurePa);
+    if (explicitAmbientPressurePa !== null && explicitAmbientPressurePa >= 0) {
+      return {
+        schema: 'peercompute.ulg.mls-mpm-ambient-pressure-evidence.v0',
+        status: 'ambient-pressure-ready',
+        source: 'explicit-ambient-pressure-option',
+        ambientPressurePa: explicitAmbientPressurePa
+      };
+    }
+  }
+  const summaryPressureFeedback = pressureFeedbackFromGasPressureSummary(gasPressureSummary);
+  for (const effectivePressureFeedback of [pressureFeedback, summaryPressureFeedback]) {
+    const externalPressurePa = finiteNumberOrNull(effectivePressureFeedback?.externalPressurePa);
+    if (externalPressurePa !== null && externalPressurePa >= 0) {
+      return {
+        schema: 'peercompute.ulg.mls-mpm-ambient-pressure-evidence.v0',
+        status: 'ambient-pressure-ready',
+        source: 'pressure-feedback-external-pressure-pa',
+        ambientPressurePa: externalPressurePa,
+        pressureFeedbackSchema: effectivePressureFeedback?.schema ?? null,
+        pressureFeedbackStatus: effectivePressureFeedback?.status ?? null
+      };
+    }
+  }
+  return {
+    schema: 'peercompute.ulg.mls-mpm-ambient-pressure-evidence.v0',
+    status: 'vacuum-default-ready',
+    source: 'vacuum-default-no-atmospheric-evidence',
+    ambientPressurePa: 0,
+    pressureFeedbackSchema: pressureFeedback?.schema ?? summaryPressureFeedback?.schema ?? null,
+    pressureFeedbackStatus: pressureFeedback?.status ?? summaryPressureFeedback?.status ?? null
+  };
+}
+
+export function createLatestSceneRefreshRequestGate() {
+  let latestRequestToken = 0;
+  return {
+    begin() {
+      latestRequestToken += 1;
+      return latestRequestToken;
+    },
+    invalidate() {
+      latestRequestToken += 1;
+      return latestRequestToken;
+    },
+    isLatest(requestToken) {
+      return requestToken === latestRequestToken;
+    }
+  };
+}
+
+export function mlsMpmAmbientPressureEvidenceSignature(evidence = null) {
+  return [
+    evidence?.schema ?? 'none',
+    evidence?.status ?? 'none',
+    evidence?.source ?? 'none',
+    evidence?.pressureFeedbackSchema ?? 'none',
+    evidence?.pressureFeedbackStatus ?? 'none'
+  ].join(':');
+}
+
 function sceneStringList(value) {
   if (Array.isArray(value)) {
     return value.map((entry) => String(entry ?? '').trim()).filter(Boolean);
@@ -11906,6 +11973,7 @@ export function createSphPhaseScene(container, {
   let mlsMpmP2gGridProjection = null;
   let mlsMpmP2gGridProjectionSignature = null;
   let pendingMlsMpmP2gGridProjection = null;
+  const mlsMpmP2gGridProjectionRequestGate = createLatestSceneRefreshRequestGate();
   let mlsMpmGridUpdate = null;
   let mlsMpmGridUpdateSignature = null;
   let pendingMlsMpmGridUpdate = null;
@@ -11918,6 +11986,7 @@ export function createSphPhaseScene(container, {
   let mlsMpmResidentSteps = null;
   let mlsMpmResidentStepsSignature = null;
   let pendingMlsMpmResidentSteps = null;
+  const mlsMpmResidentPublicationRequestGate = createLatestSceneRefreshRequestGate();
   let mlsMpmResidentExecutionGeneration = 0;
   let schroederPhaseVolumeAssignmentOverlayFeedback = null;
   // Previous adopted merge/split summary for the orchestrator's
@@ -14253,7 +14322,9 @@ export function createSphPhaseScene(container, {
     sphParticleState = sphGpuParticleState,
     mlsMpmParticleState = mlsMpmGpuParticleState,
     gridSpacingM = sphGpuParticleState?.smoothingLengthM ?? 0,
-    internalPressureScale = normalizePhysicalLawGroups(currentPhysicalLawGroups).eos ? 1 : 0
+    internalPressureScale = normalizePhysicalLawGroups(currentPhysicalLawGroups).eos ? 1 : 0,
+    ambientPressurePa = 0,
+    ambientPressureEvidence = null
   } = {}) {
     const sphSignature = sphGpuParticleSignature(sphParticleState);
     const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
@@ -14263,6 +14334,8 @@ export function createSphPhaseScene(container, {
       mlsSignature,
       gridSpacingM,
       internalPressureScale,
+      ambientPressurePa,
+      mlsMpmAmbientPressureEvidenceSignature(ambientPressureEvidence),
       dims.join(',')
     ].join('|');
   }
@@ -14323,6 +14396,8 @@ export function createSphPhaseScene(container, {
     wallTemperaturesK = currentWallTemperaturesK,
     physicalLawGroups = currentPhysicalLawGroups,
     internalPressureScale = normalizePhysicalLawGroups(physicalLawGroups).eos ? 1 : 0,
+    ambientPressurePa = 0,
+    ambientPressureEvidence = null,
     fuseNoFullResidentMechanicsSequence = false,
     fuseNoFullResidentMechanicsActiveGrid = false,
     fuseNoFullResidentActiveGrid = false,
@@ -14353,6 +14428,8 @@ export function createSphPhaseScene(container, {
       cflFactor,
       normalizedReadbackMode,
       internalPressureScale,
+      ambientPressurePa,
+      mlsMpmAmbientPressureEvidenceSignature(ambientPressureEvidence),
       JSON.stringify(wallTemperaturesK || {}),
       physicalLawGroupsSignature(physicalLawGroups),
       sphReactionTableSignature(),
@@ -14606,6 +14683,7 @@ export function createSphPhaseScene(container, {
 
   function advanceMlsMpmResidentExecutionGeneration(reason = 'resident-state-reset') {
     mlsMpmResidentExecutionGeneration += 1;
+    mlsMpmResidentPublicationRequestGate.invalidate();
     pendingMlsMpmResidentStep = null;
     pendingMlsMpmResidentSteps = null;
     schroederPhaseVolumeAssignmentOverlayFeedback = null;
@@ -21458,6 +21536,9 @@ fn fs_main() -> @location(0) vec4<f32> {
     device = null,
     deviceResult = null,
     gridSpacingM = sphGpuParticleState?.smoothingLengthM,
+    ambientPressurePa = null,
+    gasPressureSummary = null,
+    pressureFeedback = null,
     parityTolerance = 5e-2,
     webGpuRunner = undefined
   } = {}) {
@@ -21468,13 +21549,27 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
     const lawGroups = normalizePhysicalLawGroups(currentPhysicalLawGroups);
     const internalPressureScale = lawGroups.eos ? 1 : 0;
-    const signature = mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM, internalPressureScale });
+    const resolvedAmbientPressureEvidence = resolveMlsMpmAmbientPressureEvidence({
+      ambientPressurePa,
+      gasPressureSummary,
+      pressureFeedback
+    });
+    const effectiveAmbientPressurePa = resolvedAmbientPressureEvidence.ambientPressurePa;
+    const signature = mlsMpmP2gGridProjectionSignatureFor({
+      gridSpacingM,
+      internalPressureScale,
+      ambientPressurePa: effectiveAmbientPressurePa,
+      ambientPressureEvidence: resolvedAmbientPressureEvidence
+    });
+    const requestToken = mlsMpmP2gGridProjectionRequestGate.begin();
     if (!force && mlsMpmP2gGridProjectionSignature === signature && mlsMpmP2gGridProjection) {
       return mlsMpmP2gGridProjection;
     }
     if (!force && pendingMlsMpmP2gGridProjection?.signature === signature) {
+      pendingMlsMpmP2gGridProjection.requestState.requestToken = requestToken;
       return pendingMlsMpmP2gGridProjection.promise;
     }
+    const requestState = { requestToken };
     const promise = (async () => {
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
@@ -21503,6 +21598,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         gridSpacingM,
         boxDimsM: dims,
         internalPressureScale,
+        ambientPressurePa: effectiveAmbientPressurePa,
         preferWebGpu,
         navigatorRef: overrideNavigatorRef,
         device,
@@ -21514,14 +21610,27 @@ fn fs_main() -> @location(0) vec4<f32> {
           opticalGpuDeviceResultPromise = null;
         }
       });
+      execution.ambientPressureEvidence = resolvedAmbientPressureEvidence;
+      execution.ambientPressureSource = resolvedAmbientPressureEvidence.source;
+      execution.ambientPressurePa = effectiveAmbientPressurePa;
       execution.signature = signature;
       if (
         !running
-        || mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM, internalPressureScale }) !== signature
+        || !mlsMpmP2gGridProjectionRequestGate.isLatest(requestState.requestToken)
+        || mlsMpmP2gGridProjectionSignatureFor({
+          gridSpacingM,
+          internalPressureScale,
+          ambientPressurePa: effectiveAmbientPressurePa,
+          ambientPressureEvidence: resolvedAmbientPressureEvidence
+        }) !== signature
       ) {
+        execution.destroyGridBuffer?.();
         return {
           ...execution,
-          stale: true
+          stale: true,
+          staleReason: !mlsMpmP2gGridProjectionRequestGate.isLatest(requestState.requestToken)
+            ? 'superseded-by-newer-scene-refresh'
+            : 'scene-input-changed-before-publication'
         };
       }
       mlsMpmP2gGridProjection = execution;
@@ -21529,7 +21638,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       scene.userData.mlsMpmP2gGridProjection = execution;
       return execution;
     })();
-    pendingMlsMpmP2gGridProjection = { signature, promise };
+    pendingMlsMpmP2gGridProjection = { signature, promise, requestState };
     try {
       return await promise;
     } finally {
@@ -21780,6 +21889,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
+    ambientPressurePa = null,
     gasPressureSummary = null,
     pressureFeedback = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
@@ -21798,6 +21908,12 @@ fn fs_main() -> @location(0) vec4<f32> {
     const effectiveDt = lawGroups.mechanics ? dt : 0;
     const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
     const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
+    const resolvedAmbientPressureEvidence = resolveMlsMpmAmbientPressureEvidence({
+      ambientPressurePa,
+      gasPressureSummary,
+      pressureFeedback
+    });
+    const effectiveAmbientPressurePa = resolvedAmbientPressureEvidence.ambientPressurePa;
     const pressureInterfaceForceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
     const pressureInterfaceGridForceApproved = lawGroups.pressure && pressureInterfaceForceRowsUploadApproved({
       pressureInterfaceForceSolver,
@@ -21826,12 +21942,15 @@ fn fs_main() -> @location(0) vec4<f32> {
       pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
       pressureInterfaceGasCellFieldImport,
       internalPressureScale: effectiveInternalPressureScale,
+      ambientPressurePa: effectiveAmbientPressurePa,
+      ambientPressureEvidence: resolvedAmbientPressureEvidence,
       physicalLawGroups: lawGroups,
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback
     });
+    const requestToken = mlsMpmResidentPublicationRequestGate.begin();
     if (!force && mlsMpmResidentStepSignature === signature && mlsMpmResidentStep) {
       return mlsMpmResidentStep;
     }
@@ -21841,8 +21960,10 @@ fn fs_main() -> @location(0) vec4<f32> {
       && pendingMlsMpmResidentStep?.signature === signature
       && pendingMlsMpmResidentStep.generation === executionGeneration
     ) {
+      pendingMlsMpmResidentStep.requestState.requestToken = requestToken;
       return pendingMlsMpmResidentStep.promise;
     }
+    const requestState = { requestToken };
     const releaseResidentGpuWork = beginResidentGpuWork({
       reason: 'mls-mpm-resident-step',
       stage: 'mls-mpm-resident-step'
@@ -21914,6 +22035,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           dt: effectiveDt,
           gravityMPerS2: effectiveGravity,
           internalPressureScale: effectiveInternalPressureScale,
+          ambientPressurePa: effectiveAmbientPressurePa,
           cflFactor,
           preferWebGpu,
           pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer
@@ -21962,6 +22084,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         });
         execution.requestedReadbackMode = requestedReadbackMode;
         execution.physicalLawGroups = { ...lawGroups };
+        execution.ambientPressureEvidence = resolvedAmbientPressureEvidence;
+        execution.ambientPressureSource = resolvedAmbientPressureEvidence.source;
+        execution.ambientPressurePa = effectiveAmbientPressurePa;
         execution.signature = signature;
         execution.residentExecutionGeneration = executionGeneration;
         execution.currentResidentExecutionGeneration = mlsMpmResidentExecutionGeneration;
@@ -21982,6 +22107,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         }
         if (
           residentExecutionGenerationIsStale(executionGeneration)
+          || !mlsMpmResidentPublicationRequestGate.isLatest(requestState.requestToken)
           || mlsMpmResidentStepSignatureFor({
             gridSpacingM,
             dt: effectiveDt,
@@ -21991,6 +22117,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
             pressureInterfaceGasCellFieldImport,
             internalPressureScale: effectiveInternalPressureScale,
+            ambientPressurePa: effectiveAmbientPressurePa,
+            ambientPressureEvidence: resolvedAmbientPressureEvidence,
             physicalLawGroups: lawGroups,
             contactKinematicsParticleBinMetadataReadback:
               requestedContactKinematicsParticleBinMetadataReadback,
@@ -22009,7 +22137,13 @@ fn fs_main() -> @location(0) vec4<f32> {
             destroyInputResidentProductMass: false,
             preserveBuffers: residentContinuationBuffersFromExecution(mlsMpmResidentSteps)
           });
-          return markResidentExecutionStale(execution, executionGeneration);
+          const staleExecution = markResidentExecutionStale(execution, executionGeneration);
+          staleExecution.staleReason = !mlsMpmResidentPublicationRequestGate.isLatest(
+            requestState.requestToken
+          )
+            ? 'superseded-by-newer-scene-refresh'
+            : 'scene-input-changed-before-publication';
+          return staleExecution;
         }
         clearMlsMpmResidentExecutionArtifacts({
           preserveBuffers: residentContinuationBuffersFromExecution(execution),
@@ -22025,7 +22159,12 @@ fn fs_main() -> @location(0) vec4<f32> {
         });
       }
     })().finally(releaseResidentGpuWork);
-    pendingMlsMpmResidentStep = { signature, promise, generation: executionGeneration };
+    pendingMlsMpmResidentStep = {
+      signature,
+      promise,
+      generation: executionGeneration,
+      requestState
+    };
     try {
       return await promise;
     } finally {
@@ -22110,6 +22249,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
+    ambientPressurePa = null,
     gasPressureSummary = null,
     pressureFeedback = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
@@ -22123,6 +22263,12 @@ fn fs_main() -> @location(0) vec4<f32> {
     const effectiveDt = lawGroups.mechanics ? dt : 0;
     const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
     const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
+    const resolvedAmbientPressureEvidence = resolveMlsMpmAmbientPressureEvidence({
+      ambientPressurePa,
+      gasPressureSummary,
+      pressureFeedback
+    });
+    const effectiveAmbientPressurePa = resolvedAmbientPressureEvidence.ambientPressurePa;
     const pressureInterfaceForceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
     const pressureInterfaceGridForceApproved = lawGroups.pressure && pressureInterfaceForceRowsUploadApproved({
       pressureInterfaceForceSolver,
@@ -22852,15 +22998,6 @@ fn fs_main() -> @location(0) vec4<f32> {
           || mlsMpmResidentSteps?.finalStep?.residentProductMass
           || null)
       : null;
-    // Pin the continuation product-mass handle for this refresh: a
-    // concurrent refresh (e.g. a full-parity readback requested mid
-    // playback) shares the same handle, and the first publisher's cleanup
-    // destroys it as consumed input. The borrow makes that destroy re-defer
-    // until every in-flight refresh has submitted against the buffer.
-    if (continuationResidentProductMass) {
-      continuationResidentProductMass.__ulgActiveBorrowCount =
-        (continuationResidentProductMass.__ulgActiveBorrowCount | 0) + 1;
-    }
     const sourceSphParticleState = continuationAvailable
       ? mlsMpmResidentSteps.nextSphParticleState
       : sphGpuParticleState;
@@ -22887,6 +23024,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       pressureInterfaceGasCellFieldImport,
       residentProductMass: continuationResidentProductMass,
       internalPressureScale: effectiveInternalPressureScale,
+      ambientPressurePa: effectiveAmbientPressurePa,
+      ambientPressureEvidence: resolvedAmbientPressureEvidence,
       physicalLawGroups: lawGroups,
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
@@ -22986,15 +23125,29 @@ fn fs_main() -> @location(0) vec4<f32> {
       ].filter(Boolean).join(' ');
       console.debug?.(`[sph-resident-progress] ${status}${progressSuffix ? ` ${progressSuffix}` : ''}`);
     };
+    const requestToken = mlsMpmResidentPublicationRequestGate.begin();
     if (!force && mlsMpmResidentStepsSignature === signature && mlsMpmResidentSteps) {
       markResidentStepsProgress('resident-steps-cache-hit');
       return mlsMpmResidentSteps;
     }
-    if (!force && pendingMlsMpmResidentSteps?.generation === executionGeneration) {
+    if (
+      !force
+      && pendingMlsMpmResidentSteps?.generation === executionGeneration
+      && pendingMlsMpmResidentSteps.signature === signature
+    ) {
       markResidentStepsProgress('resident-steps-joining-pending-promise', {
         pendingSignature: pendingMlsMpmResidentSteps.signature
       });
+      pendingMlsMpmResidentSteps.requestState.requestToken = requestToken;
       return pendingMlsMpmResidentSteps.promise;
+    }
+    const requestState = { requestToken };
+    // Pin only newly submitted work. Cache hits and joins do not create a
+    // second consumer; the operation they reuse already owns any required
+    // continuation borrow.
+    if (continuationResidentProductMass) {
+      continuationResidentProductMass.__ulgActiveBorrowCount =
+        (continuationResidentProductMass.__ulgActiveBorrowCount | 0) + 1;
     }
     markResidentStepsProgress('resident-steps-submitted');
     const releaseResidentGpuWork = beginResidentGpuWork({
@@ -23119,6 +23272,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           dt: effectiveDt,
           gravityMPerS2: effectiveGravity,
           internalPressureScale: effectiveInternalPressureScale,
+          ambientPressurePa: effectiveAmbientPressurePa,
           cflFactor,
           preferWebGpu,
           pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer
@@ -23979,14 +24133,22 @@ fn fs_main() -> @location(0) vec4<f32> {
         execution.continuedFromResidentState = continuationAvailable;
         execution.continuationAvailable = Boolean(execution.nextParticleUploads);
         execution.physicalLawGroups = { ...lawGroups };
+        execution.ambientPressureEvidence = resolvedAmbientPressureEvidence;
+        execution.ambientPressureSource = resolvedAmbientPressureEvidence.source;
+        execution.ambientPressurePa = effectiveAmbientPressurePa;
         execution.residentExecutionPolicy = residentExecutionPolicy;
         if (execution.finalStep) {
           execution.finalStep.requestedReadbackMode = requestedReadbackMode;
           execution.finalStep.compactSummaryMode = requestedCompactSummaryMode;
+          execution.finalStep.ambientPressurePa = effectiveAmbientPressurePa;
+          execution.finalStep.ambientPressureEvidence = resolvedAmbientPressureEvidence;
+          execution.finalStep.ambientPressureSource = resolvedAmbientPressureEvidence.source;
         }
         for (const summary of execution.stepSummaries ?? []) {
           summary.requestedReadbackMode = requestedReadbackMode;
           summary.compactSummaryMode = requestedCompactSummaryMode;
+          summary.ambientPressurePa = effectiveAmbientPressurePa;
+          summary.ambientPressureSource = resolvedAmbientPressureEvidence.source;
         }
         execution.signature = signature;
         const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
@@ -24006,6 +24168,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         }
         if (
           residentExecutionGenerationIsStale(executionGeneration)
+          || !mlsMpmResidentPublicationRequestGate.isLatest(requestState.requestToken)
           || mlsMpmResidentStepsSignatureFor({
             sphParticleState: sourceSphParticleState,
             mlsMpmParticleState: sourceMlsMpmParticleState,
@@ -24023,6 +24186,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             pressureInterfaceGasCellFieldImport,
             residentProductMass: continuationResidentProductMass,
             internalPressureScale: effectiveInternalPressureScale,
+            ambientPressurePa: effectiveAmbientPressurePa,
+            ambientPressureEvidence: resolvedAmbientPressureEvidence,
             physicalLawGroups: lawGroups,
             fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
             fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
@@ -24094,7 +24259,13 @@ fn fs_main() -> @location(0) vec4<f32> {
           destroyMlsMpmResidentStepsBuffers(execution, {
             preserveBuffers: residentContinuationBuffersFromExecution(mlsMpmResidentSteps)
           });
-          return markResidentExecutionStale(execution, executionGeneration);
+          const staleExecution = markResidentExecutionStale(execution, executionGeneration);
+          staleExecution.staleReason = !mlsMpmResidentPublicationRequestGate.isLatest(
+            requestState.requestToken
+          )
+            ? 'superseded-by-newer-scene-refresh'
+            : 'scene-input-changed-before-publication';
+          return staleExecution;
         }
         const sameDeviceHotBufferPublisherFn = sameDeviceHotBufferPublisher
           || residentAuthorityHost?.publishSameDeviceHotBufferSource
@@ -24419,7 +24590,12 @@ fn fs_main() -> @location(0) vec4<f32> {
         });
       }
     })().finally(releaseResidentGpuWork);
-    pendingMlsMpmResidentSteps = { signature, promise, generation: executionGeneration };
+    pendingMlsMpmResidentSteps = {
+      signature,
+      promise,
+      generation: executionGeneration,
+      requestState
+    };
     try {
       const execution = await promise;
       markResidentStepsProgress('resident-steps-complete', {

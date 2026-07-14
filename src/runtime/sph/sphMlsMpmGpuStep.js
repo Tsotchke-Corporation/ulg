@@ -2675,7 +2675,7 @@ function createFusedP2gParamsArray(
   view.setUint32(64, gridDensityPressureEnabled ? 1 : 0, true);
   // ambient_pressure_pa: gauge reference for the ideal-gas partial pressure
   // (0 = vacuum box). See P2gProjectionParams in ulg-gpu-abi/src/wgsl.js.
-  view.setFloat32(68, Number.isFinite(ambientPressurePa) ? ambientPressurePa : 0, true);
+  view.setFloat32(68, Math.max(0, finiteNumber(ambientPressurePa, 0)), true);
   return buffer;
 }
 
@@ -2687,7 +2687,8 @@ function createFusedActiveP2gParamsArray(
   activeGridDispatch,
   schroederLevelFilter = null,
   schroederActiveNodeFilter = null,
-  gridDensityPressureEnabled = false
+  gridDensityPressureEnabled = false,
+  ambientPressurePa = 0
 ) {
   const buffer = new ArrayBuffer(112);
   new Uint8Array(buffer).set(new Uint8Array(createFusedP2gParamsArray(
@@ -2697,7 +2698,8 @@ function createFusedActiveP2gParamsArray(
     internalPressureScale,
     schroederLevelFilter,
     schroederActiveNodeFilter,
-    gridDensityPressureEnabled
+    gridDensityPressureEnabled,
+    ambientPressurePa
   )));
   const view = new DataView(buffer);
   view.setUint32(80, activeGridDispatch.activeStart[0], true);
@@ -3280,6 +3282,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   cflFactor = DEFAULT_CFL_FACTOR,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   fuseActiveGrid = false,
   activeGridSafetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
@@ -3390,7 +3393,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           activeGridDispatch,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          ambientPressurePa
         )
       : createFusedP2gParamsArray(
           gridSpec,
@@ -3399,7 +3403,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           internalPressureScale,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          ambientPressurePa
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -3670,6 +3675,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       gridShift: gridSpec.shift,
       dt: dtSeconds,
       internalPressureScale,
+      ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
+      ambientPressureAppliedInStressProjection: true,
       gridNodes: new Float32Array(),
       gridBuffer,
       gridBufferByteLength: gridByteLength,
@@ -3744,6 +3751,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       gridShift: gridSpec.shift,
       dt: dtSeconds,
       internalPressureScale,
+      ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
       stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
       mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
       state: new Float32Array(),
@@ -3828,6 +3836,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   cflFactor = DEFAULT_CFL_FACTOR,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   stepCount = 1,
   summaryRunner = runMlsMpmResidentSummaryWebGpu,
   compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
@@ -3989,7 +3998,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           activeGridDispatch,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          ambientPressurePa
         )
       : createFusedP2gParamsArray(
           gridSpec,
@@ -3998,7 +4008,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           internalPressureScale,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED,
+          ambientPressurePa
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -4402,6 +4413,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       gridNodeStrideFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
       dt: dtSeconds,
       internalPressureScale,
+      ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
+      ambientPressureAppliedInStressProjection: true,
       gridNodes: new Float32Array(),
       gridBuffer,
       gridBufferByteLength: gridByteLength,
@@ -4726,6 +4739,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       sourceSlot: finalSourceSlot,
       pressureInterfaceForceSolver: null,
       internalPressureScale,
+      ambientPressurePa,
       sidecarFusionPlan,
       stageTiming
     });
@@ -15373,6 +15387,7 @@ async function residentStepEnvelope({
   inputResidentProductMass = null,
   pressureInterfaceForceSolver = null,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   sidecarFusionPlan = null,
   stageTiming = null
 }) {
@@ -15692,6 +15707,9 @@ async function residentStepEnvelope({
   const diagnosticsWithAuthority = {
     ...diagnostics,
     internalPressureScale,
+    ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
+    ambientPressureAppliedInStressProjection:
+      p2gGridProjection?.ambientPressureAppliedInStressProjection === true,
     residentAuthorityLedgerStatus: residentAuthorityLedger.status,
     residentAuthorityFamilyCount: residentAuthorityLedger.familyCount,
     residentAuthorityWarnings: [...residentAuthorityLedger.warnings],
@@ -15947,6 +15965,9 @@ async function residentStepEnvelope({
     wallBarrierContactTotalVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactTotalVelocityCorrectionMPerS ?? 0,
     wallBarrierContactMaxVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactMaxVelocityCorrectionMPerS ?? 0,
     internalPressureScale,
+    ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
+    ambientPressureAppliedInStressProjection:
+      p2gGridProjection?.ambientPressureAppliedInStressProjection === true,
     dispatchTopology,
     dispatchTopologyStatus: dispatchTopology?.status || null,
     p2gBackendPolicy: dispatchTopology?.p2gBackendPolicy || null,
@@ -16111,6 +16132,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   cflFactor = mlsMpmParticleState?.gridCflFactor || DEFAULT_CFL_FACTOR,
   residentProductMass = null,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
   pressureInterfaceGridForceAdmission = null,
@@ -16296,6 +16318,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         gravityMPerS2: gravity,
         cflFactor,
         internalPressureScale,
+        ambientPressurePa,
         fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
         activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
         p2gBackend,
@@ -16320,6 +16343,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     dt: dtSeconds,
     residentProductMass,
     internalPressureScale,
+    ambientPressurePa,
     preferWebGpu,
     navigatorRef,
     device: resolvedDevice,
@@ -16733,6 +16757,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     sourceSlot,
       pressureInterfaceForceSolver,
       internalPressureScale,
+      ambientPressurePa,
       sidecarFusionPlan,
       stageTiming
     }));
@@ -17347,6 +17372,7 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
   gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2 ?? DEFAULT_GRAVITY_M_PER_S2,
   cflFactor = mlsMpmParticleState?.gridCflFactor || DEFAULT_CFL_FACTOR,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   preferWebGpu = true,
   device = null,
   summaryRunner = runMlsMpmResidentSummaryWebGpu,
@@ -17459,6 +17485,7 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     gravityMPerS2: gravity,
     cflFactor,
     internalPressureScale,
+    ambientPressurePa,
     fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
     activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
     p2gBackend,
@@ -17675,6 +17702,7 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     sourceSlot,
     pressureInterfaceForceSolver: null,
     internalPressureScale,
+    ambientPressurePa,
     sidecarFusionPlan,
     stageTiming
   }));
@@ -17837,6 +17865,9 @@ function summarizeResidentStepForSequence(step, index) {
     pressureInterfaceImpulseProofStatus: step.pressureInterfaceImpulseProofStatus ?? null,
     pressureInterfaceForceConsumerStatus: step.pressureInterfaceForceConsumerStatus ?? null,
     internalPressureScale: step.internalPressureScale ?? null,
+    ambientPressurePa: step.ambientPressurePa ?? null,
+    ambientPressureAppliedInStressProjection:
+      step.ambientPressureAppliedInStressProjection === true,
     nextParticleBufferMode: step.nextParticleBufferMode,
     nextParticleCount: step.nextParticleCount ?? step.nextParticleUploads?.sphParticleUpload?.particleCount ?? null,
     particlePingPong: { ...step.particlePingPong },
@@ -17881,6 +17912,9 @@ function summarizeResidentStepForSequence(step, index) {
       compactSummaryScope: step.diagnostics?.compactSummaryScope ?? null,
       reactionSummaryAvailable: step.diagnostics?.reactionSummaryAvailable ?? false,
       internalPressureScale: step.diagnostics?.internalPressureScale ?? null,
+      ambientPressurePa: step.diagnostics?.ambientPressurePa ?? null,
+      ambientPressureAppliedInStressProjection:
+        step.diagnostics?.ambientPressureAppliedInStressProjection === true,
       reactionSummaryStatus: step.diagnostics?.reactionSummaryStatus ?? null,
       reactionCanonicalEventCount: step.diagnostics?.reactionCanonicalEventCount ?? null,
       reactionConsumedReactantMassKg: step.diagnostics?.reactionConsumedReactantMassKg ?? null,
@@ -18147,6 +18181,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       gravityMPerS2: args.gravityMPerS2,
       cflFactor: args.cflFactor,
       internalPressureScale: args.internalPressureScale,
+      ambientPressurePa: args.ambientPressurePa,
       stepCount: count,
       summaryRunner: compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
         ? (args.summaryRunner ?? runMlsMpmResidentSummaryWebGpu)
@@ -18209,6 +18244,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       retainedSteps,
       finalStep,
       stepSummaries,
+      ambientPressurePa: Math.max(0, finiteNumber(finalStep.ambientPressurePa, 0)),
+      ambientPressureAppliedInStressProjection:
+        finalStep.ambientPressureAppliedInStressProjection === true,
       nextSphParticleState,
       nextMlsMpmParticleState,
       nextParticleUploads: finalStep.nextParticleUploads ?? null,
@@ -18579,6 +18617,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     retainedSteps,
     finalStep,
     stepSummaries,
+    ambientPressurePa: Math.max(0, finiteNumber(finalStep?.ambientPressurePa, 0)),
+    ambientPressureAppliedInStressProjection:
+      finalStep?.ambientPressureAppliedInStressProjection === true,
     nextSphParticleState: sphParticleState,
     nextMlsMpmParticleState: mlsMpmParticleState,
     nextParticleUploads: finalStep?.nextParticleUploads ?? null,

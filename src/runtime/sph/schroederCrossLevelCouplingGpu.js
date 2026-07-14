@@ -864,6 +864,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   gravityMPerS2 = [0, -9.80665, 0],
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   fineSubstepCount = 1,
   gridSpecFactory,
   p2gRunner,
@@ -909,6 +910,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     boxDimsM,
     dt: dtFine,
     internalPressureScale,
+    ambientPressurePa,
     retainGridBuffer: true,
     readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
   });
@@ -924,6 +926,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     boxDimsM,
     dt: dtSeconds,
     internalPressureScale,
+    ambientPressurePa,
     retainGridBuffer: true,
     readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
   });
@@ -998,6 +1001,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   // copy-through preserves coarse particles throughout.
   const intermediateBuffers = [];
   const fineGridUpdates = [];
+  const p2gProjections = [fineProjection, coarseProjection];
   let currentSphUpload = sphParticleUpload;
   let currentMlsUpload = mlsMpmParticleUpload;
   let lastFineG2p = null;
@@ -1016,10 +1020,12 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         boxDimsM,
         dt: dtFine,
         internalPressureScale,
+        ambientPressurePa,
         retainGridBuffer: true,
         readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
       });
     if (substep > 0) {
+      p2gProjections.push(substepProjection);
       intermediateBuffers.push(() => substepProjection.destroyGridBuffer?.());
     }
     const substepGridUpdate = await gridUpdateRunner({
@@ -1176,6 +1182,12 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     coarseGridDims: coarseSpec.gridDims,
     dt: dtSeconds,
     particleCount: sphParticleState.particleCount,
+    internalPressureScale,
+    ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
+    ambientPressureAppliedInStressProjection: p2gProjections.length > 0
+      && p2gProjections.every(
+        (projection) => projection?.ambientPressureAppliedInStressProjection === true
+      ),
     readbackMode: conservationSummaryReadback
       ? SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE
       : SCHROEDER_NO_FULL_READBACK_MODE,

@@ -601,6 +601,7 @@ function outputEnvelope({
   gridNodes,
   dt = 0,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   readbackMode = FULL_READBACK_MODE,
   p2gBackendPolicy = null,
   residentProductMass = null,
@@ -645,6 +646,8 @@ function outputEnvelope({
     gridNodeStrideBytes: MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     gridNodes,
     internalPressureScale,
+    ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
+    ambientPressureAppliedInStressProjection: backend === 'webgpu',
     schroederLevelFilter: schroederLevelFilter ? { ...schroederLevelFilter } : null,
     schroederLevelFilterEnabled: schroederLevelFilter?.enabled === true,
     schroederSelectedLevel: schroederLevelFilter?.enabled === true ? schroederLevelFilter.selectedLevel : null,
@@ -687,6 +690,7 @@ export function projectMlsMpmP2gGridCpu({
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   residentProductMass = null,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   p2gBackend = MLS_MPM_P2G_BACKEND_CPU_REFERENCE,
   schroederLevelAssignment = null,
   schroederSelectedLevel = null
@@ -828,6 +832,7 @@ export function projectMlsMpmP2gGridCpu({
     gridNodes,
     dt: dtSeconds,
     internalPressureScale,
+    ambientPressurePa,
     p2gBackendPolicy,
     residentProductMass,
     schroederLevelFilter: schroederFilter,
@@ -885,7 +890,7 @@ function createProjectionParamsArray(
   // ambient_pressure_pa: the gauge reference for the ideal-gas partial
   // pressure. 0 = vacuum box (default); a uniform atmosphere would exert no
   // net force on immersed bodies, so gas stress is measured relative to it.
-  view.setFloat32(68, finiteNumber(ambientPressurePa, 0), true);
+  view.setFloat32(68, Math.max(0, finiteNumber(ambientPressurePa, 0)), true);
   return buffer;
 }
 
@@ -902,6 +907,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   residentProductMass = null,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   retainGridBuffer = false,
   readbackMode = FULL_READBACK_MODE,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
@@ -1005,7 +1011,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       dt,
       productEventCount,
       internalPressureScale,
-      schroederFilter
+      schroederFilter,
+      ambientPressurePa
     ));
     const p2gBindings = [
       computeBufferBinding(0, 'read-only-storage'),
@@ -1094,6 +1101,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       gridNodes,
       dt,
       internalPressureScale,
+      ambientPressurePa,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
       p2gBackendPolicy,
       residentProductMass,
@@ -1231,6 +1239,9 @@ function executionFromProjection(projection, {
     gridNodeStrideFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
     gridNodes: projection?.gridNodes ?? new Float32Array(),
     internalPressureScale: projection?.internalPressureScale ?? 1,
+    ambientPressurePa: projection?.ambientPressurePa ?? 0,
+    ambientPressureAppliedInStressProjection:
+      projection?.ambientPressureAppliedInStressProjection === true,
     schroederLevelFilter: projection?.schroederLevelFilter ?? null,
     schroederLevelFilterEnabled: projection?.schroederLevelFilterEnabled === true,
     schroederSelectedLevel: projection?.schroederSelectedLevel ?? null,
@@ -1286,6 +1297,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   residentProductMass = null,
   internalPressureScale = 1,
+  ambientPressurePa = 0,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -1309,6 +1321,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
         dt,
         residentProductMass,
         internalPressureScale,
+        ambientPressurePa,
         schroederLevelAssignment,
         schroederSelectedLevel,
         p2gBackend: MLS_MPM_P2G_BACKEND_CPU_REFERENCE
@@ -1378,6 +1391,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       dt,
       residentProductMass,
       internalPressureScale,
+      ambientPressurePa,
       retainGridBuffer,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
       p2gBackend

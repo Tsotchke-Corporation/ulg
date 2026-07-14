@@ -5567,6 +5567,7 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
     includePostStageSeed: true,
     residentTaskModulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
     residentPreferWebGpu: false,
+    residentAmbientPressurePa: 101325,
     residentStepCount: 1,
     placementPolicy: {
       requestedPlacement: 'peer',
@@ -5598,6 +5599,9 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   });
   assert.equal(graph.nodes[5].id, 'ulg-sph-mls-mpm-resident-steps');
   assert.deepEqual(graph.nodes[5].dependsOn, ['ulg-sph-mls-mpm-mechanics-stage-state-seed']);
+  assert.equal(graph.nodes[5].task.data.ambientPressurePa, 101325);
+  assert.equal(graph.nodes[5].cacheInput.ambientPressurePa, 101325);
+  assert.equal(graph.cacheInputs.values.residentAmbientPressurePa, 101325);
   assert.equal(graph.nodes[6].id, 'ulg-sph-mls-mpm-post-stage-state-seed');
   assert.deepEqual(graph.nodes[6].dependsOn, ['ulg-sph-mls-mpm-resident-steps']);
   assert.deepEqual(graph.nodes[6].resultInputs, {

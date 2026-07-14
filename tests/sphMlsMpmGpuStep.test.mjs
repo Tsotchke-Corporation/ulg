@@ -2654,6 +2654,8 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(step.stageTiming.stageMs.gridUpdate, 0);
   assert.equal(step.stageTiming.stageMs.g2pReconstruction, 0);
   assert.equal(step.p2gGridProjection.fusedResidentMechanics, true);
+  assert.equal(step.p2gGridProjection.ambientPressureAppliedInStressProjection, true);
+  assert.equal(step.ambientPressureAppliedInStressProjection, true);
   assert.equal(step.gridUpdate.fusedResidentMechanics, true);
   assert.equal(step.g2pReconstruction.fusedResidentMechanics, true);
   assert.equal(step.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
@@ -2741,6 +2743,7 @@ test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder act
     preferWebGpu: true,
     device,
     boxDimsM: [3, 3, 3],
+    ambientPressurePa: 101325,
     readbackMode: 'no-full-readback',
     fuseNoFullResidentMechanics: true,
     summaryRunner({ gridUpdate, g2pReconstruction, summaryScope }) {
@@ -2824,6 +2827,7 @@ test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder act
   assert.equal(p2gParams.getUint32(52, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
   assert.equal(p2gParams.getUint32(56, true), 1);
   assert.equal(p2gParams.getUint32(60, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  assert.equal(p2gParams.getFloat32(68, true), 101325);
   const g2pParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-g2p-params');
   assert.ok(g2pParamWrite);
   const g2pParams = new DataView(g2pParamWrite.data);
@@ -2885,6 +2889,7 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
     device,
     boxDimsM: [3, 3, 3],
     gravityMPerS2: [0, 0, 0],
+    ambientPressurePa: 101325,
     readbackMode: 'no-full-readback',
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
@@ -2932,6 +2937,9 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
     Array(3).fill(Math.ceil(activeGridDispatch.activeNodeCount / 64))
   );
   assert.ok(device.indirectDispatches[0].workgroupCountX < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
+  const p2gParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-p2g-params');
+  assert.ok(p2gParamWrite);
+  assert.equal(new DataView(p2gParamWrite.data).getFloat32(68, true), 101325);
   assert.equal(device.copies.length, 0);
   assert.equal(device.clears.length, 0);
   destroyMlsMpmResidentStepBuffers(step);
@@ -8096,6 +8104,7 @@ test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder ac
     preferWebGpu: true,
     device,
     boxDimsM: [3, 3, 3],
+    ambientPressurePa: 101325,
     readbackMode: 'no-full-readback',
     compactSummaryMode: 'final-only',
     fuseNoFullResidentMechanicsSequence: true,
@@ -8146,6 +8155,8 @@ test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder ac
     }
   });
 
+  assert.equal(execution.ambientPressurePa, 101325);
+  assert.equal(execution.ambientPressureAppliedInStressProjection, true);
   assert.equal(execution.fusedResidentSequence.schroederLevelFilterEnabled, true);
   assert.equal(execution.fusedResidentSequence.schroederSelectedLevel, 2);
   assert.equal(execution.fusedResidentSequence.schroederActiveNodeFilterEnabled, true);
@@ -8164,6 +8175,7 @@ test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder ac
   assert.equal(p2gParams.getUint32(52, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
   assert.equal(p2gParams.getUint32(56, true), 1);
   assert.equal(p2gParams.getUint32(60, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  assert.equal(p2gParams.getFloat32(68, true), 101325);
   const g2pParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-sequence-g2p-params');
   assert.ok(g2pParamWrite);
   const g2pParams = new DataView(g2pParamWrite.data);
@@ -8744,6 +8756,7 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
     device,
     boxDimsM: [3, 3, 3],
     gravityMPerS2: [0, 0, 0],
+    ambientPressurePa: 101325,
     readbackMode: 'no-full-readback',
     compactSummaryMode: 'none',
     fuseNoFullResidentMechanicsSequence: true,
@@ -8925,6 +8938,13 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
   assert.equal(mechanicsRefreshInputs[1].sourceStateBuffer, 'aware-thermal-state-2');
   assert.equal(mechanicsRefreshInputs[0].mechanicsMaterialTable, mechanicsMaterialTable);
   assert.equal(mechanicsRefreshInputs[1].readbackMode, 'no-full-readback');
+  const p2gParamWrites = device.writes.filter((write) => write.label === 'ulg-mls-mpm-fused-p2g-params');
+  assert.equal(p2gParamWrites.length, 2);
+  for (const write of p2gParamWrites) {
+    assert.equal(new DataView(write.data).getFloat32(68, true), 101325);
+  }
+  assert.equal(execution.ambientPressurePa, 101325);
+  assert.equal(execution.ambientPressureAppliedInStressProjection, true);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 

@@ -5196,8 +5196,17 @@ export async function mountSphPhaseDemoOverlay({
     const optionSource = typeof remoteResidentTaskGraphOptions === 'function'
       ? await remoteResidentTaskGraphOptions({ ...context, state: rawState })
       : (remoteResidentTaskGraphOptions || {});
+    const remoteResidentGasPressure = currentGasPressureSummary(
+      overlay.__sphResidentGasPressureSummary
+        || activeViewStateGasPressure
+        || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+    );
     return buildUlgSphMlsMpmRemoteSeedTaskGraph({
       ...optionSource,
+      residentAmbientPressurePa: optionSource?.residentAmbientPressurePa
+        ?? remoteResidentGasPressure?.pressureFeedback?.externalPressurePa
+        ?? remoteResidentGasPressure?.externalPressurePa
+        ?? 0,
       state: optionSource?.state || rawState,
       materialProperties: optionSource?.materialProperties || activeMaterialProperties(),
       extraCacheValues: {

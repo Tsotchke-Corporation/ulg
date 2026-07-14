@@ -13,5 +13,8 @@ are no longer active todo routing.
 - `SS/fable-handoff-2026-07-02.md`, `SS/fable-plan-2026-07-02.md`, and
   `fable-handoff.md` are historical SS handoff/execution snapshots. Landed
   checkpoints remain evidence; they are not current implementation order.
+- `SS/condensed-contact-injection-hypothesis-2026-07-13.md` records the
+  rejected explanation for the sodium/H2 explosion. Correct atmospheric gauge
+  stress removed the divergence without a contact limiter.
 - Older files here may contain valid background, but do not use them as the next
   implementation order without checking `plan/todo/README.md`.

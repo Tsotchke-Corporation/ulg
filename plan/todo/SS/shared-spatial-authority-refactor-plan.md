@@ -493,10 +493,13 @@ commits:
 1. [x] add compact per-material/per-phase speed, `J`, rest-volume,
    represented-volume, and cap-boundary reductions;
 2. [x] publish post-placement placed/merged/unplaced product-mass provenance;
-3. isolate and bound the condensed-contact energy injection between
-   `0.256 s` and `0.512 s`, including a manufactured multi-step contact test;
-4. keep field-resolution/radius-floor classification as a renderer diagnostic
-   follow-up rather than treating it as the current explosion fix;
+3. [x] isolate and bound the apparent condensed-contact energy injection
+   between `0.256 s` and `0.512 s`; the contact hypothesis was rejected and
+   moved to moot after the retained gas stress was found to use a vacuum gauge
+   in an atmospheric scene;
+4. diagnose the coarse water free surface and visually illegible reaction as
+   renderer/material-interface work, including field-resolution, phase-surface,
+   and product-material evidence, without reintroducing a mechanics workaround;
 5. derive ambient-density drag and terminal velocity for gas-only products,
    then couple buoyancy through that closure; and
 6. replace the broad fixed reaction radius with shared-SS support-surface
@@ -583,6 +586,40 @@ wider skirt, but the final surface remains a faceted, tiered cohesive mound
 rather than accepted liquid flow. Item 3 is next: isolate the H2
 expansion/contact energy injection before changing the renderer or claiming
 visual acceptance.
+
+Item 3 is complete. The P2G ideal-gas branch already computes gauge stress as
+`p_ideal - p_ambient`, but every host mechanics route left the ambient lane at
+its vacuum default. Newly placed H2 at `J=1` therefore contributed roughly one
+atmosphere of false positive stress to the shared grid. Scene pressure feedback
+now supplies its external pressure to standalone, fused, active-grid,
+thermal-sidecar, resident-sequence, Schroeder two-level, remote-graph, and probe
+routes. Explicit zero remains a supported vacuum override, and CPU fallback
+reports that ambient pressure was requested without falsely claiming that its
+still-different gas EOS applied the WebGPU gauge closure. Cache identity also
+includes evidence provenance, and latest-request publication gates prevent an
+older delayed vacuum refresh from replacing or clearing a newer atmospheric
+result.
+
+Fresh native Vulkan evidence is at
+`/tmp/ulg-ss-spatial-sodium-atmospheric-gauge-v3-green-20260713/result.json`.
+At `0.512 s`, the same sodium scenario that previously reached `89.6172 m/s`
+and `J=1000` is green at `2.43234 m/s` overall. Its four H2 particles are
+bounded at `0.823205 m/s` and `J=0.976154..0.992270`; no material reaches a
+volume cap. Both resident batches prove a `101325 Pa` external-pressure source
+and actual application in stress projection. Reaction still produces nine
+NaOH particles, four H2 particles, and nine events. Native browser pixels pass
+with no browser/WebGPU issues, and direct frame inspection confirms the giant
+detached lobes and sodium launch are gone. A fresh water control at
+`/tmp/ulg-ss-spatial-water-atmospheric-regression-v1-20260713/result.json` is
+green through `1.024 s` at `1.08636 m/s` and
+`J=0.996426..1.000259`. It still renders as a faceted cohesive mound, while the
+sodium reaction remains numerically authoritative but visually indistinct.
+Item 4 therefore owns the next visual slice; the explosion no longer justifies
+gas damping, contact tuning, or renderer changes disguised as mechanics fixes.
+Focused coverage passes `273/273`, the delayed real-browser publication race
+passes without GPU resource errors, the complete regression passes
+`1111/1114` with zero failures and three opt-in skips, and production build
+passes with the existing large-chunk warning only.
 
 Do not widen the reaction radius, globally change the water damping default,
 or treat a deliberately relaxed diagnostic threshold as scientific acceptance.

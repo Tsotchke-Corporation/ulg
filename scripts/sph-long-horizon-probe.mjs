@@ -3444,6 +3444,10 @@ async function runBrowserProbe({
           status: overlay.__sphResidentGasPressureSummary.status ?? null,
           source: overlay.__sphResidentGasPressureSummary.source ?? null,
           totalPressurePa: finiteOrNull(overlay.__sphResidentGasPressureSummary.totalPressurePa),
+          externalPressurePa: finiteOrNull(
+            overlay.__sphResidentGasPressureSummary.pressureFeedback?.externalPressurePa
+              ?? overlay.__sphResidentGasPressureSummary.externalPressurePa
+          ),
           residentProductMassStatus: overlay.__sphResidentGasPressureSummary.residentProductMassStatus ?? null,
           residentProductMassGasSpeciesLedgerCount: overlay.__sphResidentGasPressureSummary.residentProductMassGasSpeciesLedgerCount ?? null,
           residentLedgerStatus: overlay.__sphResidentGasPressureSummary.residentLedgerStatus ?? null,
@@ -3460,6 +3464,11 @@ async function runBrowserProbe({
             compactSummaryScope: steps.compactSummaryScope ?? null,
             continuedFromResidentState: steps.continuedFromResidentState ?? null,
             continuationAvailable: steps.continuationAvailable ?? null,
+            ambientPressurePa: finiteOrNull(steps.ambientPressurePa),
+            ambientPressureSource: steps.ambientPressureSource ?? null,
+            ambientPressureEvidence: steps.ambientPressureEvidence
+              ? { ...steps.ambientPressureEvidence }
+              : null,
             reactionProductPlacementAccumulatorStatus:
               steps.reactionProductPlacementAccumulatorStatus ?? null,
             reactionProductPlacementSuccessfulDispatchCount:
@@ -3520,6 +3529,13 @@ async function runBrowserProbe({
             status: residentStep.status ?? null,
             readbackMode: residentStep.readbackMode ?? null,
             sequenceIndex: residentStep.sequenceIndex ?? null,
+            ambientPressurePa: finiteOrNull(residentStep.ambientPressurePa),
+            ambientPressureAppliedInStressProjection:
+              residentStep.ambientPressureAppliedInStressProjection === true,
+            ambientPressureSource: residentStep.ambientPressureSource ?? null,
+            ambientPressureEvidence: residentStep.ambientPressureEvidence
+              ? { ...residentStep.ambientPressureEvidence }
+              : null,
             particlePingPong: residentStep.particlePingPong ? {
               sourceStep: residentStep.particlePingPong.sourceStep ?? null,
               nextStep: residentStep.particlePingPong.nextStep ?? null,
@@ -4842,6 +4858,9 @@ async function runBrowserProbe({
           const residentStepsAwaitStartedAtMs = performance.now();
           execution = await sceneApi.refreshMlsMpmResidentSteps({
             preferWebGpu: true,
+            gasPressureSummary: overlay.__sphResidentGasPressureSummary
+              || overlay.__sphPhaseViewState?.gasPressureSummary
+              || null,
             stepCount: requestedBatchSteps,
             readbackMode: requestedReadbackMode,
             compactSummaryMode: requestedCompactSummaryMode,
@@ -6280,6 +6299,13 @@ async function runDirectResidentProbe({
         compactSummaryScope: steps.compactSummaryScope ?? null,
         readbackMode: steps.readbackMode ?? null,
         requestedReadbackMode: requestedReadbackMode,
+        ambientPressurePa: finiteOrNull(steps.ambientPressurePa),
+        ambientPressureAppliedInStressProjection:
+          steps.ambientPressureAppliedInStressProjection === true,
+        ambientPressureSource: steps.ambientPressureSource ?? null,
+        ambientPressureEvidence: steps.ambientPressureEvidence
+          ? { ...steps.ambientPressureEvidence }
+          : null,
         retainedIntermediateStepCount: steps.retainedIntermediateStepCount ?? null,
         continuationAvailable: Boolean(steps.nextParticleUploads),
         nextStep: steps.nextSphParticleState?.step ?? null,
@@ -6371,6 +6397,13 @@ async function runDirectResidentProbe({
         requestedReadbackMode,
         sequenceIndex: step.sequenceIndex ?? null,
         internalPressureScale: finiteOrNull(step.internalPressureScale),
+        ambientPressurePa: finiteOrNull(step.ambientPressurePa),
+        ambientPressureSource: step.ambientPressureSource ?? null,
+        ambientPressureEvidence: step.ambientPressureEvidence
+          ? { ...step.ambientPressureEvidence }
+          : null,
+        ambientPressureAppliedInStressProjection:
+          step.ambientPressureAppliedInStressProjection === true,
         stageStatus: step.stageStatus ? { ...step.stageStatus } : null,
         stageBackends: step.stageBackends ? { ...step.stageBackends } : null,
         particlePingPong: step.particlePingPong ? {
@@ -6670,6 +6703,29 @@ async function runDirectResidentProbe({
         const driver = createSphPhaseDemo(driverOptions);
         const preflight = driver.preflight();
         const viewState = createSphPhaseViewState(driver);
+        const directResidentPressureFeedback = Number.isFinite(
+          Number(viewState.gasPressureFeedback?.externalPressurePa)
+        )
+          ? viewState.gasPressureFeedback
+          : viewState.gasPressureSummary?.pressureFeedback;
+        const directResidentAmbientPressurePa = Math.max(
+          0,
+          Number.isFinite(Number(directResidentPressureFeedback?.externalPressurePa))
+            ? Number(directResidentPressureFeedback.externalPressurePa)
+            : 0
+        );
+        const directResidentAmbientPressureEvidence = {
+          schema: 'peercompute.ulg.mls-mpm-ambient-pressure-evidence.v0',
+          status: directResidentPressureFeedback
+            ? 'ambient-pressure-ready'
+            : 'vacuum-default-ready',
+          source: directResidentPressureFeedback
+            ? 'pressure-feedback-external-pressure-pa'
+            : 'vacuum-default-no-atmospheric-evidence',
+          ambientPressurePa: directResidentAmbientPressurePa,
+          pressureFeedbackSchema: directResidentPressureFeedback?.schema ?? null,
+          pressureFeedbackStatus: directResidentPressureFeedback?.status ?? null
+        };
         activeCohortRanges = cohortRangesFromCounts(viewState.counts);
         const staticTables = sphStaticTableInputsFromViewState(viewState);
         const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable(viewState.materialProperties, {
@@ -6914,6 +6970,7 @@ async function runDirectResidentProbe({
               dt: physicalLawGroups.mechanics ? viewState.gpuMechanics?.dt : 0,
               gravityMPerS2: physicalLawGroups.gravity ? viewState.gpuMechanics?.gravityMPerS2 : [0, 0, 0],
               internalPressureScale: physicalLawGroups.eos ? 1 : 0,
+              ambientPressurePa: directResidentAmbientPressurePa,
               cflFactor: viewState.gpuMechanics?.gridCflFactor,
               preferWebGpu: true,
               navigatorRef: navigator,
@@ -6954,6 +7011,15 @@ async function runDirectResidentProbe({
               reactionParticleBinMetadataReadback:
                 Boolean(requestedReactionBinMetadataReadback)
             });
+            execution.ambientPressurePa = directResidentAmbientPressurePa;
+            execution.ambientPressureSource = directResidentAmbientPressureEvidence.source;
+            execution.ambientPressureEvidence = directResidentAmbientPressureEvidence;
+            if (execution.finalStep) {
+              execution.finalStep.ambientPressureSource =
+                directResidentAmbientPressureEvidence.source;
+              execution.finalStep.ambientPressureEvidence =
+                directResidentAmbientPressureEvidence;
+            }
             progress('resident-batch-execution-complete', {
               batchIndex,
               elapsedMs: performance.now() - started,

@@ -8747,7 +8747,11 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
     enableTwoLevelMechanics: true,
     twoLevelFineSubstepCount: 2,
     twoLevelMechanicsRunner,
-    residentStepRunner
+    residentStepRunner,
+    residentStepOptions: {
+      internalPressureScale: 0.75,
+      ambientPressurePa: 101325
+    }
   });
 
   // The two-level stage received the orchestrated level assignment plus
@@ -8757,6 +8761,8 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
   const call = twoLevelCalls[0];
   assert.equal(call.fineLevel, 2);
   assert.equal(call.fineSubstepCount, 2);
+  assert.equal(call.internalPressureScale, 0.75);
+  assert.equal(call.ambientPressurePa, 101325);
   assert.ok(call.levelAssignment.assignmentBuffer);
   assert.ok(call.fineActiveNodeList.activeNodeBuffer);
   assert.ok(call.coarseActiveNodeList.activeNodeBuffer);
@@ -8820,6 +8826,8 @@ test('Schroeder same-level mechanics can make the two-level step authoritative',
     coarseLevel: options.fineLevel + 1,
     fineSubstepCount: options.fineSubstepCount,
     fineSubstepDt: options.dt / options.fineSubstepCount,
+    internalPressureScale: options.internalPressureScale,
+    ambientPressurePa: options.ambientPressurePa,
     fineGridSpacingM: 0.25,
     coarseGridSpacingM: 0.5,
     conservation: { massResidualKg: 0 },
@@ -8840,6 +8848,10 @@ test('Schroeder same-level mechanics can make the two-level step authoritative',
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
     twoLevelMechanicsRunner,
+    residentStepOptions: {
+      internalPressureScale: 0.75,
+      ambientPressurePa: 101325
+    },
     residentStepRunner: async (options) => {
       residentCalls.push(options);
       return { status: 'resident-step-stubbed' };
@@ -8854,6 +8866,8 @@ test('Schroeder same-level mechanics can make the two-level step authoritative',
   assert.equal(step.backend, 'webgpu');
   assert.equal(step.readbackMode, 'no-full-readback');
   assert.equal(step.twoLevelMechanicsAuthority, 'authoritative');
+  assert.equal(step.internalPressureScale, 0.75);
+  assert.equal(step.ambientPressurePa, 101325);
   assert.equal(step.sidecars, 'none-two-level-mechanics-only');
   assert.equal(step.nextParticleUploads, envelopeUploads);
   assert.equal(step.particlePingPong.nextStep, 1);
@@ -8863,6 +8877,8 @@ test('Schroeder same-level mechanics can make the two-level step authoritative',
     result.twoLevelMechanics.authority,
     'two-level-authoritative-resident-mechanics-replaced'
   );
+  assert.equal(result.twoLevelMechanics.internalPressureScale, 0.75);
+  assert.equal(result.twoLevelMechanics.ambientPressurePa, 101325);
 });
 
 test('Schroeder two-level authoritative mode adopts admitted merged storage over the coupled outputs', async () => {

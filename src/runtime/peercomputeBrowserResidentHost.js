@@ -1049,7 +1049,8 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
   residentStepCount = 1,
   residentReadbackMode = 'full-parity-readback',
   residentPreferWebGpu = true,
-  residentRequireGpuFence = false
+  residentRequireGpuFence = false,
+  residentAmbientPressurePa = 0
 } = {}) {
   if (includePostStageSeed && !includeResidentComputeStage) {
     throw new Error('includePostStageSeed requires includeResidentComputeStage');
@@ -1066,6 +1067,9 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
     stateKey
   });
   const normalizedStateFamilies = uniqueStringList(stateFamilies);
+  const normalizedResidentAmbientPressurePa = Number.isFinite(Number(residentAmbientPressurePa))
+    ? Math.max(0, Number(residentAmbientPressurePa))
+    : 0;
   const seedHash = hashPayload({
     schema: ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_GRAPH_SCHEMA,
     state: seedInput.state,
@@ -1073,7 +1077,10 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
     initialParticleSpacing: seedInput.initialParticleSpacing,
     stateFamilies: normalizedStateFamilies,
     step: seedInput.step,
-    time: seedInput.time
+    time: seedInput.time,
+    residentAmbientPressurePa: includeResidentComputeStage
+      ? normalizedResidentAmbientPressurePa
+      : null
   });
   const resolvedCacheKey = normalizeString(cacheKey, `ulg-sph-mls-mpm-remote-seed:${seedHash}`);
   const resolvedStateKey = normalizeString(stateKey, `remote-state:ulg-sph-mls-mpm:${seedHash}`);
@@ -1241,6 +1248,7 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
       mlsMpmParticleState,
       materialProperties: stateSeedPayload.materialProperties,
       preferWebGpu: residentPreferWebGpu,
+      ambientPressurePa: normalizedResidentAmbientPressurePa,
       stepCount: normalizedResidentStepCount,
       readbackMode: residentReadbackMode,
       laneId: `remote-sph-mls-mpm-resident:${resolvedGraphId}`,
@@ -1279,7 +1287,8 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
         stage: 'resident-steps',
         evidenceOnly: true,
         stepCount: normalizedResidentStepCount,
-        readbackMode: residentReadbackMode
+        readbackMode: residentReadbackMode,
+        ambientPressurePa: normalizedResidentAmbientPressurePa
       },
       task: residentTask
     });
@@ -1341,6 +1350,7 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
         particleCount: stateSeedPayload.state.particles.length,
         step: stateSeedPayload.step,
         time: stateSeedPayload.time,
+        residentAmbientPressurePa: normalizedResidentAmbientPressurePa,
         materialKeys: Object.keys(stateSeedPayload.materialProperties || {}).sort(),
         ...(extraCacheValues && typeof extraCacheValues === 'object' ? extraCacheValues : {})
       }

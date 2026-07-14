@@ -41612,3 +41612,46 @@ Validation and review:
   Production build passes with 143 transformed modules and only the existing
   large-chunk warning. Item 3 now owns the next slice: isolate H2
   expansion/contact energy injection before renderer tuning.
+
+## 2026-07-13 AKDT - Atmospheric Gauge Stress Authority
+
+- Rejected the condensed-contact injection hypothesis. The retained WebGPU gas
+  EOS already subtracts `ambient_pressure_pa`, but host-side mechanics left the
+  uniform at its vacuum default in atmospheric scenes. Newly placed H2 at
+  `J=1` therefore projected roughly one atmosphere of false gauge stress into
+  the shared grid.
+- Added one explicit external-pressure evidence resolver. Explicit nonnegative
+  options win, including a deliberate zero-pressure vacuum; otherwise the
+  scene uses `pressureFeedback.externalPressurePa`, never total gas pressure,
+  and defaults truthfully to vacuum when no atmospheric evidence exists.
+- Plumbed the resolved gauge through standalone, fused, active-grid,
+  thermal-sidecar, resident-sequence, Schroeder two-level, remote resident-graph,
+  mount, and native/direct probe paths. Resident cache signatures distinguish
+  atmosphere from vacuum and preserve evidence-source identity. Monotonic
+  latest-request gates prevent a delayed vacuum refresh from clearing or
+  republishing over a newer atmospheric result; a delayed real-browser
+  regression proves stale cleanup and current publication. Diagnostics state
+  both the numeric pressure and whether the selected backend actually applied
+  it; CPU fallback does not overclaim WebGPU gas-EOS parity.
+- Fresh native Vulkan sodium evidence at
+  `/tmp/ulg-ss-spatial-sodium-atmospheric-gauge-v3-green-20260713/result.json`
+  is green through `0.512 s`: `101325 Pa` is sourced from external-pressure
+  feedback and applied in both batches, overall speed is `2.43234 m/s`, all
+  four H2 particles remain at `0.823205 m/s` and
+  `J=0.976154..0.992270`, and no material reaches a volume cap. Nine reaction
+  events still yield nine NaOH and four H2 particles. Native pixels pass with
+  no browser/WebGPU issues; direct inspection confirms the former giant lobes
+  and sodium launch are gone.
+- Fresh native water evidence at
+  `/tmp/ulg-ss-spatial-water-atmospheric-regression-v1-20260713/result.json`
+  is green through `1.024 s`, with `1.08636 m/s`,
+  `J=0.996426..1.000259`, advancing retained render state, and passed native
+  browser pixels. The water remains a visibly faceted cohesive mound, and the
+  sodium reaction is authoritative numerically but not visually distinguishable.
+  Those are the next renderer/material-interface slice, independent of the
+  repaired gas mechanics.
+- Focused ambient/runtime/remote/Schroeder coverage passes `273/273`. The real
+  browser delayed-publication regression passes without GPU resource errors.
+  The complete regression passes `1111/1114`, with zero failures and three
+  intentional opt-in skips, in `177397 ms`. Production build passes with 143
+  transformed modules and only the existing large-chunk warning.

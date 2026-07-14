@@ -215,12 +215,24 @@ function fakeP2gDevice() {
   const createdBuffers = [];
   const bindGroups = [];
   const dispatches = [];
+  const writes = [];
   const device = {
     createdBuffers,
     bindGroups,
     dispatches,
+    writes,
     queue: {
-      writeBuffer() {},
+      writeBuffer(buffer, offset, data) {
+        const copy = data instanceof ArrayBuffer
+          ? data.slice(0)
+          : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        writes.push({
+          label: buffer.label,
+          offset,
+          byteLength: data.byteLength,
+          data: copy
+        });
+      },
       submit() {},
       async onSubmittedWorkDone() {}
     },
@@ -420,6 +432,7 @@ test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', as
     mlsMpmParticleState,
     gridSpacingM: 1,
     boxDimsM: [2, 2, 2],
+    ambientPressurePa: 101325,
     readbackMode: 'no-full-readback'
   });
   const productEventBuffer = device.createdBuffers.find(
@@ -428,10 +441,14 @@ test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', as
 
   assert.equal(projection.backend, 'webgpu');
   assert.equal(projection.readbackMode, 'no-full-readback');
+  assert.equal(projection.ambientPressureAppliedInStressProjection, true);
   assert.equal(projection.p2gBackendPolicyStatus, 'resident-scatter-backend-selected');
   assert.equal(projection.p2gBackendEffective, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
   assert.equal(projection.residentProductMassInputProductEventCount, 0);
   assert.ok(productEventBuffer);
+  const paramsWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-p2g-params');
+  assert.ok(paramsWrite);
+  assert.equal(new DataView(paramsWrite.data).getFloat32(68, true), 101325);
   assert.equal(
     productEventBuffer.size,
     SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
@@ -805,16 +822,19 @@ test('optional MLS-MPM P2G grid projection forwards resident product mass into W
   const { sphParticleState, mlsMpmParticleState } = manualBuffers();
   const residentProductMass = residentProductMassFromRows(productEventRows());
   let seenResidentProductMass = null;
+  let seenAmbientPressurePa = null;
   const execution = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
     sphParticleState,
     mlsMpmParticleState,
     gridSpacingM: 1,
     boxDimsM: [2, 2, 2],
     residentProductMass,
+    ambientPressurePa: 101325,
     preferWebGpu: true,
     navigatorRef: webGpuNavigator(),
     async webGpuRunner(args) {
       seenResidentProductMass = args.residentProductMass;
+      seenAmbientPressurePa = args.ambientPressurePa;
       const result = projectMlsMpmP2gGridCpu(args);
       return {
         ...result,
@@ -825,6 +845,7 @@ test('optional MLS-MPM P2G grid projection forwards resident product mass into W
   });
 
   assert.equal(seenResidentProductMass, residentProductMass);
+  assert.equal(seenAmbientPressurePa, 101325);
   assert.equal(execution.backend, 'webgpu');
   assert.equal(execution.residentProductMassStatus, 'resident-product-mass-buffer-retained');
   assert.equal(execution.residentProductMassInputProductEventCount, 1);

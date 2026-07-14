@@ -35,6 +35,7 @@ import {
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES,
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
   SPH_SURFACE_RADIUS_SCALE_DEFAULT,
+  SPH_H2O_LIQUID_CONTINUITY_RADIUS_SCALE_MAX,
   SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
   createContinuousSurfaceBatches,
   createNativeWebGpuCanvasRenderer,
@@ -102,6 +103,7 @@ import {
   shouldRetainResidentSurfaceDrawOverlay,
   SPH_SURFACE_INACTIVE_GRACE_FRAMES,
   surfaceRadiusScaleForRenderBatch,
+  resolveRenderFieldParticleRadiusPolicy,
   surfaceRadiusMetersFromRenderFieldRadius,
   surfaceObjectRenderOrder,
   stableSurfaceRenderOrder,
@@ -1516,6 +1518,8 @@ test('continuous liquid surfaces use macro-spacing continuity radius for coarse 
   assert.equal(batch.surfaceKey, 'h2o|h2o|liquid|domain:drop');
   assert.equal(batch.count, 8);
   assert.equal(Number(batch.surfaceRadiusM.toFixed(4)), 0.25);
+  assert.equal(Number(batch.representativeParticleRadiusM.toFixed(4)), 0.1125);
+  assert.equal(batch.smoothingLengthM, 0.45);
 });
 
 test('SPH resident material seed surfaces preserve domains without CPU geometry', () => {
@@ -1554,6 +1558,12 @@ test('SPH resident material seed surfaces preserve domains without CPU geometry'
       ['h2o|h2o|liquid|domain:drop', 2, 2, 0, 0.3, [0.9, 0.4, 0.6]]
     ]
   );
+  const base = batches.find((batch) => batch.renderDomainId === 1);
+  const drop = batches.find((batch) => batch.renderDomainId === 2);
+  assert.equal(Number(base.representativeParticleRadiusM.toFixed(3)), 0.11);
+  assert.equal(Number(drop.representativeParticleRadiusM.toFixed(3)), 0.21);
+  assert.equal(base.smoothingLengthM, 0.3);
+  assert.equal(drop.smoothingLengthM, 0.3);
 });
 
 test('SPH resident render fields merge same-material domains into one visible material field', () => {
@@ -1576,7 +1586,9 @@ test('SPH resident render fields merge same-material domains into one visible ma
       { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 1, renderDomainKey: 'base' },
       { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' },
       { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' }
-    ]
+    ],
+    particleRadiiM: new Float32Array([0.09, 0.11, 0.13, 0.15]),
+    smoothingLengthM: 0.248
   });
 
   const [merged] = mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches);
@@ -1587,6 +1599,8 @@ test('SPH resident render fields merge same-material domains into one visible ma
   assert.equal(merged.count, 4);
   assert.equal(merged.positionsM.length, 12);
   assert.equal(merged.normalizedPositions.length, 12);
+  assert.equal(Number(merged.representativeParticleRadiusM.toFixed(3)), 0.13);
+  assert.equal(merged.smoothingLengthM, 0.248);
   assert.deepEqual(
     merged.mergedRenderDomains.map((domain) => [domain.renderDomainId, domain.renderDomainKey, domain.count]),
     [
@@ -1783,6 +1797,80 @@ test('SPH renderer defaults to a bounded isosurface radius scale', () => {
   );
   assert.ok(cpuMarchingCubesRadiusFloorM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN) < 0.15);
   assert.ok(cpuMarchingCubesRadiusFloorM(5, SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN) < cpuMarchingCubesRadiusFloorM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN));
+});
+
+test('H2O liquid render fields derive a bounded J-aware continuity radius from SPH support and sampling', () => {
+  const batch = {
+    material: 'h2o',
+    phase: 'liquid',
+    source: 'resident-material-domain-seed',
+    count: 125,
+    representativeParticleRadiusM: 0.1,
+    smoothingLengthM: 0.248
+  };
+  const policy = resolveRenderFieldParticleRadiusPolicy({
+    batch,
+    requestedScale: 1,
+    isolation: 80,
+    subtract: 24,
+    resolution: 96,
+    fieldPadding: 0.22,
+    refEdgeM: 3
+  });
+  const supportMultiplier = Math.sqrt(104 / 24);
+  const samplingCellSizeM = 3 / (0.56 * 96);
+  const expectedScale = (0.248 / supportMultiplier + samplingCellSizeM * 0.5) / 0.1;
+  assert.equal(policy.status, 'h2o-liquid-continuity-floor-applied');
+  assert.equal(policy.mode, 'retained-particle-radius-with-h2o-liquid-continuity-floor');
+  assert.equal(policy.eligible, true);
+  assert.equal(policy.floorApplied, true);
+  assert.ok(Math.abs(policy.supportMultiplier - supportMultiplier) < 1e-12);
+  assert.ok(Math.abs(policy.samplingCellSizeM - samplingCellSizeM) < 1e-12);
+  assert.ok(Math.abs(policy.resolvedScale - expectedScale) < 1e-12);
+  assert.ok(policy.resolvedScale > 1.45 && policy.resolvedScale < 1.5);
+  assert.ok(policy.resolvedScale <= SPH_H2O_LIQUID_CONTINUITY_RADIUS_SCALE_MAX);
+
+  const alreadyLarge = resolveRenderFieldParticleRadiusPolicy({
+    batch,
+    requestedScale: 1.6,
+    isolation: 80,
+    subtract: 24,
+    resolution: 96,
+    fieldPadding: 0.22,
+    refEdgeM: 3
+  });
+  assert.equal(alreadyLarge.status, 'h2o-liquid-continuity-floor-not-needed');
+  assert.equal(alreadyLarge.floorApplied, false);
+  assert.equal(alreadyLarge.resolvedScale, 1.6);
+
+  for (const ineligibleBatch of [
+    { ...batch, material: 'naoh' },
+    { ...batch, phase: 'gas' },
+    { ...batch, source: 'reaction-product-event-buffer' },
+    { ...batch, representativeParticleRadiusM: null }
+  ]) {
+    const ineligible = resolveRenderFieldParticleRadiusPolicy({
+      batch: ineligibleBatch,
+      requestedScale: 1,
+      isolation: 80,
+      subtract: 24,
+      resolution: 96,
+      fieldPadding: 0.22,
+      refEdgeM: 3
+    });
+    assert.equal(ineligible.eligible, false);
+    assert.equal(ineligible.floorApplied, false);
+    assert.equal(ineligible.resolvedScale, 1);
+    assert.equal(ineligible.mode, 'retained-particle-physical-radius');
+  }
+
+  const explicit = resolveRenderFieldParticleRadiusPolicy({
+    batch,
+    requestedScale: 1,
+    explicitSurfaceRadius: true
+  });
+  assert.equal(explicit.mode, 'surface-wide-constant-strength');
+  assert.equal(explicit.resolvedScale, 0);
 });
 
 test('SPH phase renderer derives a packed optical GPU table from surface batches', () => {

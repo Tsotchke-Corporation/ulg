@@ -1531,6 +1531,30 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       strength,
       radiusNorm,
       particleRadiusScale: Math.max(0, finiteNumber(descriptor.particleRadiusScale, 0)),
+      particleRadiusPolicyStatus: descriptor.particleRadiusPolicyStatus ?? null,
+      particleRadiusPolicyMode: descriptor.particleRadiusPolicyMode ?? null,
+      particleRadiusContinuityFloorEligible:
+        descriptor.particleRadiusContinuityFloorEligible === true,
+      particleRadiusContinuityFloorApplied:
+        descriptor.particleRadiusContinuityFloorApplied === true,
+      particleRadiusScaleRequested: descriptor.particleRadiusScaleRequested ?? null,
+      particleRadiusContinuityFloorScale: descriptor.particleRadiusContinuityFloorScale ?? null,
+      particleRadiusContinuityFloorScaleUnbounded:
+        descriptor.particleRadiusContinuityFloorScaleUnbounded ?? null,
+      particleRadiusContinuityRepresentativeRadiusM:
+        descriptor.particleRadiusContinuityRepresentativeRadiusM ?? null,
+      particleRadiusContinuitySmoothingLengthM:
+        descriptor.particleRadiusContinuitySmoothingLengthM ?? null,
+      particleRadiusContinuitySupportMultiplier:
+        descriptor.particleRadiusContinuitySupportMultiplier ?? null,
+      particleRadiusContinuitySupportTargetIsoradiusM:
+        descriptor.particleRadiusContinuitySupportTargetIsoradiusM ?? null,
+      particleRadiusContinuitySamplingCellSizeM:
+        descriptor.particleRadiusContinuitySamplingCellSizeM ?? null,
+      particleRadiusContinuitySamplingMarginM:
+        descriptor.particleRadiusContinuitySamplingMarginM ?? null,
+      particleRadiusContinuityTargetIsoradiusM:
+        descriptor.particleRadiusContinuityTargetIsoradiusM ?? null,
       // Physical-radius fields still need a conservative proxy when the
       // requested isosurface is smaller than the farthest interior sample
       // corner. sqrt(3/(4N^2) + kernelEpsilon) is the tight 3-D point-sampling
@@ -3059,6 +3083,42 @@ function renderPolicyFieldsForSurface(surface = {}) {
   };
 }
 
+function particleRadiusPolicyFieldsForSurface(surface = {}) {
+  const finiteOrNull = (value) => {
+    if (value == null || value === '') return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+  return {
+    particleRadiusScale: finiteOrNull(surface.particleRadiusScale),
+    particleRadiusPolicyStatus: surface.particleRadiusPolicyStatus ?? null,
+    particleRadiusPolicyMode: surface.particleRadiusPolicyMode ?? null,
+    particleRadiusContinuityFloorEligible:
+      surface.particleRadiusContinuityFloorEligible ?? null,
+    particleRadiusContinuityFloorApplied:
+      surface.particleRadiusContinuityFloorApplied ?? null,
+    particleRadiusScaleRequested: finiteOrNull(surface.particleRadiusScaleRequested),
+    particleRadiusContinuityFloorScale:
+      finiteOrNull(surface.particleRadiusContinuityFloorScale),
+    particleRadiusContinuityFloorScaleUnbounded:
+      finiteOrNull(surface.particleRadiusContinuityFloorScaleUnbounded),
+    particleRadiusContinuityRepresentativeRadiusM:
+      finiteOrNull(surface.particleRadiusContinuityRepresentativeRadiusM),
+    particleRadiusContinuitySmoothingLengthM:
+      finiteOrNull(surface.particleRadiusContinuitySmoothingLengthM),
+    particleRadiusContinuitySupportMultiplier:
+      finiteOrNull(surface.particleRadiusContinuitySupportMultiplier),
+    particleRadiusContinuitySupportTargetIsoradiusM:
+      finiteOrNull(surface.particleRadiusContinuitySupportTargetIsoradiusM),
+    particleRadiusContinuitySamplingCellSizeM:
+      finiteOrNull(surface.particleRadiusContinuitySamplingCellSizeM),
+    particleRadiusContinuitySamplingMarginM:
+      finiteOrNull(surface.particleRadiusContinuitySamplingMarginM),
+    particleRadiusContinuityTargetIsoradiusM:
+      finiteOrNull(surface.particleRadiusContinuityTargetIsoradiusM)
+  };
+}
+
 function writeSurfaceDrawRow(drawRows, offset, {
   surfaceIndex = 0,
   materialId = 0,
@@ -3430,6 +3490,7 @@ function summarizeRenderFieldSurfaceSummaryRows(summaryRows, sourceSurfaces = []
       material: sourceSurface.material,
       phase: sourceSurface.phase,
       renderKey: sourceSurface.renderKey,
+      ...particleRadiusPolicyFieldsForSurface(sourceSurface),
       surfaceIndex: Math.round(finiteNumber(summaryRows[offset], index)),
       materialId: summaryRows[offset + 1],
       phaseId: summaryRows[offset + 2],

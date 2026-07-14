@@ -2006,6 +2006,7 @@ export const SPH_RENDER_FIELD_VISIBILITY_HYSTERESIS = 0.92;
 export const SPH_SURFACE_INACTIVE_GRACE_FRAMES = 2;
 export const SPH_SURFACE_RADIUS_SCALE_DEFAULT = 0.15;
 export const SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN = 0.2;
+export const SPH_H2O_LIQUID_CONTINUITY_RADIUS_SCALE_MAX = 1.75;
 export const SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES = 27;
 export const SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN = 64;
 export const SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN = 32;
@@ -9524,20 +9525,28 @@ export function createContinuousSurfaceBatches({
     expandBounds(batch.bounds, x, y, z);
     batch.count += 1;
   }
-  return [...batches.values()].map((batch) => ({
-    ...batch,
-    // Particle radii lead; the bounds-based spacing estimate stays a
-    // FALLBACK only - as a floor it overshoots badly for sparse batches
-    // (a 2-particle pair 0.2 m apart estimated 1.8 m). The continuity
-    // floor that fixes boundary flakes is the smoothing-length floor in
-    // the render-row and seed producers, where the fluid's interpolation
-    // scale is known.
-    surfaceRadiusM: Math.max(
-      estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM)
-        ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM),
-      estimateSurfaceRadiusFromParticleRadiiM(batch.liquidContinuityRadiiM) ?? 0
-    )
-  }));
+  return [...batches.values()].map((batch) => {
+    const representativeParticleRadiusM =
+      estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM);
+    return {
+      ...batch,
+      representativeParticleRadiusM,
+      smoothingLengthM: Number.isFinite(smoothingLengthM) && smoothingLengthM > 0
+        ? smoothingLengthM
+        : null,
+      // Particle radii lead; the bounds-based spacing estimate stays a
+      // FALLBACK only - as a floor it overshoots badly for sparse batches
+      // (a 2-particle pair 0.2 m apart estimated 1.8 m). The continuity
+      // floor that fixes boundary flakes is the smoothing-length floor in
+      // the render-row and seed producers, where the fluid's interpolation
+      // scale is known.
+      surfaceRadiusM: Math.max(
+        representativeParticleRadiusM
+          ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM),
+        estimateSurfaceRadiusFromParticleRadiiM(batch.liquidContinuityRadiiM) ?? 0
+      )
+    };
+  });
 }
 
 export function createResidentMaterialSeedSurfaceBatches({
@@ -9618,16 +9627,23 @@ export function createResidentMaterialSeedSurfaceBatches({
     const averageColorRgb = batch.colorCount > 0
       ? batch.averageColorRgb.map((value) => clamp(value / batch.colorCount, 0, 1))
       : [1, 1, 1];
+    const representativeParticleRadiusM = batch.radiusCount > 0
+      ? batch.radiusSumM / batch.radiusCount
+      : null;
     return {
       ...batch,
       averageColorRgb,
       colorsRgb: averageColorRgb,
+      representativeParticleRadiusM,
+      smoothingLengthM: Number.isFinite(smoothingLengthM) && smoothingLengthM > 0
+        ? smoothingLengthM
+        : null,
       // Physical particle radii run ~half the spacing; a metaball union at
       // that scale ripples across the isovalue into boundary flakes. The
       // SPH smoothing length is the fluid's own interpolation support and
       // the physically-derived surface continuity floor.
       surfaceRadiusM: Math.max(
-        batch.radiusCount > 0 ? batch.radiusSumM / batch.radiusCount : 0,
+        representativeParticleRadiusM ?? 0,
         (Number.isFinite(smoothingLengthM) && smoothingLengthM > 0) ? smoothingLengthM : 0.25
       )
     };
@@ -9678,12 +9694,24 @@ export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = [],
     const bounds = emptyBounds();
     let count = 0;
     let surfaceRadiusM = 0;
+    let representativeParticleRadiusWeightedSumM = 0;
+    let representativeParticleRadiusWeight = 0;
+    let smoothingLengthM = 0;
     for (const batch of group) {
       for (const value of batch.positionsM || []) positionsM.push(value);
       for (const value of batch.normalizedPositions || []) normalizedPositions.push(value);
       for (const value of batch.colorsRgb || []) colorsRgb.push(value);
       const batchCount = Math.max(0, Math.round(Number(batch.count) || 0));
       count += batchCount;
+      const representativeParticleRadiusM = Number(batch.representativeParticleRadiusM);
+      if (Number.isFinite(representativeParticleRadiusM) && representativeParticleRadiusM > 0) {
+        const weight = Math.max(1, batchCount);
+        representativeParticleRadiusWeightedSumM += representativeParticleRadiusM * weight;
+        representativeParticleRadiusWeight += weight;
+      }
+      if (Number.isFinite(batch.smoothingLengthM) && batch.smoothingLengthM > smoothingLengthM) {
+        smoothingLengthM = batch.smoothingLengthM;
+      }
       if (Number.isFinite(batch.surfaceRadiusM) && batch.surfaceRadiusM > surfaceRadiusM) {
         surfaceRadiusM = batch.surfaceRadiusM;
       }
@@ -9707,6 +9735,10 @@ export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = [],
       bounds,
       count,
       surfaceRadiusM: surfaceRadiusM > 0 ? surfaceRadiusM : estimateSurfaceRadiusM(bounds, count),
+      representativeParticleRadiusM: representativeParticleRadiusWeight > 0
+        ? representativeParticleRadiusWeightedSumM / representativeParticleRadiusWeight
+        : null,
+      smoothingLengthM: smoothingLengthM > 0 ? smoothingLengthM : null,
       source: 'merged-same-material-phase-render-surface',
       mergedRenderDomains: group.map((batch) => ({
         renderDomainId: Math.max(0, Math.round(Number(batch.renderDomainId) || 0)),
@@ -9972,6 +10004,113 @@ export function surfaceRadiusScaleForRenderBatch(
     return Math.max(scale, SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN);
   }
   return scale;
+}
+
+export function resolveRenderFieldParticleRadiusPolicy({
+  batch = null,
+  requestedScale = SPH_SURFACE_RADIUS_SCALE_DEFAULT,
+  explicitSurfaceRadius = false,
+  isolation = 80,
+  subtract = 24,
+  resolution = 32,
+  fieldPadding = FIELD_PADDING,
+  refEdgeM = 1
+} = {}) {
+  if (explicitSurfaceRadius) {
+    return {
+      status: 'surface-wide-explicit-radius',
+      mode: 'surface-wide-constant-strength',
+      eligible: false,
+      floorApplied: false,
+      requestedScale: 0,
+      resolvedScale: 0,
+      continuityFloorScale: null,
+      continuityFloorScaleUnbounded: null,
+      representativeParticleRadiusM: null,
+      smoothingLengthM: null,
+      supportMultiplier: null,
+      supportTargetIsoradiusM: null,
+      samplingMarginM: null,
+      targetIsoradiusM: null
+    };
+  }
+  const normalizedRequestedScale = surfaceRadiusScaleForRenderBatch(batch, requestedScale, {
+    explicitSurfaceRadius: false
+  });
+  const material = String(batch?.material || '').trim().toLowerCase();
+  const phase = String(batch?.phase || '').trim().toLowerCase();
+  const source = String(batch?.source || '').trim().toLowerCase();
+  const representativeParticleRadiusM = Number(batch?.representativeParticleRadiusM);
+  const smoothingLengthM = Number(batch?.smoothingLengthM);
+  const eligible = material === 'h2o'
+    && phase === 'liquid'
+    && source !== 'reaction-product-event-buffer'
+    && Number.isFinite(representativeParticleRadiusM)
+    && representativeParticleRadiusM > 0
+    && Number.isFinite(smoothingLengthM)
+    && smoothingLengthM > 0;
+  if (!eligible) {
+    return {
+      status: 'retained-particle-radius-no-liquid-continuity-floor',
+      mode: 'retained-particle-physical-radius',
+      eligible: false,
+      floorApplied: false,
+      requestedScale: normalizedRequestedScale,
+      resolvedScale: normalizedRequestedScale,
+      continuityFloorScale: null,
+      continuityFloorScaleUnbounded: null,
+      representativeParticleRadiusM: Number.isFinite(representativeParticleRadiusM)
+        ? representativeParticleRadiusM
+        : null,
+      smoothingLengthM: Number.isFinite(smoothingLengthM) ? smoothingLengthM : null,
+      supportMultiplier: null,
+      supportTargetIsoradiusM: null,
+      samplingMarginM: null,
+      targetIsoradiusM: null
+    };
+  }
+  const resolvedIsolation = Math.max(0, Number(isolation) || 0);
+  const resolvedSubtract = Math.max(1e-12, Number(subtract) || 0);
+  const supportMultiplier = Math.sqrt(
+    (resolvedIsolation + resolvedSubtract) / resolvedSubtract
+  );
+  const supportTargetIsoradiusM = smoothingLengthM / Math.max(supportMultiplier, 1e-12);
+  const resolvedResolution = Math.max(2, Math.round(Number(resolution) || 2));
+  const fieldSpan = Math.max(1e-12, 1 - 2 * Math.max(0, Number(fieldPadding) || 0));
+  const samplingCellSizeM = Math.max(0, Number(refEdgeM) || 0)
+    / (fieldSpan * resolvedResolution);
+  const samplingMarginM = samplingCellSizeM * 0.5;
+  const targetIsoradiusM = Math.max(
+    representativeParticleRadiusM,
+    supportTargetIsoradiusM + samplingMarginM
+  );
+  const continuityFloorScaleUnbounded = targetIsoradiusM / representativeParticleRadiusM;
+  const continuityFloorScale = Math.min(
+    continuityFloorScaleUnbounded,
+    SPH_H2O_LIQUID_CONTINUITY_RADIUS_SCALE_MAX
+  );
+  const resolvedScale = Math.max(normalizedRequestedScale, continuityFloorScale);
+  const floorApplied = resolvedScale > normalizedRequestedScale + 1e-12;
+  return {
+    status: floorApplied
+      ? 'h2o-liquid-continuity-floor-applied'
+      : 'h2o-liquid-continuity-floor-not-needed',
+    mode: 'retained-particle-radius-with-h2o-liquid-continuity-floor',
+    eligible: true,
+    floorApplied,
+    requestedScale: normalizedRequestedScale,
+    resolvedScale,
+    continuityFloorScale,
+    continuityFloorScaleUnbounded,
+    continuityFloorScaleMax: SPH_H2O_LIQUID_CONTINUITY_RADIUS_SCALE_MAX,
+    representativeParticleRadiusM,
+    smoothingLengthM,
+    supportMultiplier,
+    supportTargetIsoradiusM,
+    samplingCellSizeM,
+    samplingMarginM,
+    targetIsoradiusM
+  };
 }
 
 function opticalGpuLookupSignature(table, lookup) {
@@ -25227,11 +25366,17 @@ fn fs_main() -> @location(0) vec4<f32> {
         resolvedMaxResolution
       );
       const explicitSurfaceRadius = Number.isFinite(surfaceRadiusM);
-      const particleRadiusScale = explicitSurfaceRadius
-        ? 0
-        : surfaceRadiusScaleForRenderBatch(batch, radiusScale, {
-          explicitSurfaceRadius: false
-        });
+      const particleRadiusPolicy = resolveRenderFieldParticleRadiusPolicy({
+        batch,
+        requestedScale: radiusScale,
+        explicitSurfaceRadius,
+        isolation: config.isolation,
+        subtract: config.subtract,
+        resolution: effectiveResolution,
+        fieldPadding: FIELD_PADDING,
+        refEdgeM
+      });
+      const particleRadiusScale = particleRadiusPolicy.resolvedScale;
       const radiusM = surfaceRadiusMForBatch(batch);
       const sparseRadiusFloorApplies = batch.count > 0
         && batch.count <= SPH_RENDER_FIELD_RADIUS_FLOOR_MAX_PARTICLES;
@@ -25303,6 +25448,23 @@ fn fs_main() -> @location(0) vec4<f32> {
         // visible liquid. A caller-supplied absolute surface radius keeps the
         // legacy constant-strength path; unplaced product events do too.
         particleRadiusScale,
+        particleRadiusPolicyStatus: particleRadiusPolicy.status,
+        particleRadiusPolicyMode: particleRadiusPolicy.mode,
+        particleRadiusContinuityFloorEligible: particleRadiusPolicy.eligible,
+        particleRadiusContinuityFloorApplied: particleRadiusPolicy.floorApplied,
+        particleRadiusScaleRequested: particleRadiusPolicy.requestedScale,
+        particleRadiusContinuityFloorScale: particleRadiusPolicy.continuityFloorScale,
+        particleRadiusContinuityFloorScaleUnbounded:
+          particleRadiusPolicy.continuityFloorScaleUnbounded,
+        particleRadiusContinuityRepresentativeRadiusM:
+          particleRadiusPolicy.representativeParticleRadiusM,
+        particleRadiusContinuitySmoothingLengthM: particleRadiusPolicy.smoothingLengthM,
+        particleRadiusContinuitySupportMultiplier: particleRadiusPolicy.supportMultiplier,
+        particleRadiusContinuitySupportTargetIsoradiusM:
+          particleRadiusPolicy.supportTargetIsoradiusM,
+        particleRadiusContinuitySamplingCellSizeM: particleRadiusPolicy.samplingCellSizeM ?? null,
+        particleRadiusContinuitySamplingMarginM: particleRadiusPolicy.samplingMarginM,
+        particleRadiusContinuityTargetIsoradiusM: particleRadiusPolicy.targetIsoradiusM,
         strength: (config.isolation + config.subtract) * radiusNorm * radiusNorm,
         colorLinear: averageBatchColor(batch),
         status: 1
@@ -31385,6 +31547,32 @@ fn fs_main() -> @location(0) vec4<f32> {
             material: surface.material ?? null,
             phase: surface.phase ?? null,
             renderKey: surface.renderKey ?? null,
+            particleRadiusScale: surface.particleRadiusScale ?? null,
+            particleRadiusPolicyStatus: surface.particleRadiusPolicyStatus ?? null,
+            particleRadiusPolicyMode: surface.particleRadiusPolicyMode ?? null,
+            particleRadiusContinuityFloorEligible:
+              surface.particleRadiusContinuityFloorEligible ?? null,
+            particleRadiusContinuityFloorApplied:
+              surface.particleRadiusContinuityFloorApplied ?? null,
+            particleRadiusScaleRequested: surface.particleRadiusScaleRequested ?? null,
+            particleRadiusContinuityFloorScale:
+              surface.particleRadiusContinuityFloorScale ?? null,
+            particleRadiusContinuityFloorScaleUnbounded:
+              surface.particleRadiusContinuityFloorScaleUnbounded ?? null,
+            particleRadiusContinuityRepresentativeRadiusM:
+              surface.particleRadiusContinuityRepresentativeRadiusM ?? null,
+            particleRadiusContinuitySmoothingLengthM:
+              surface.particleRadiusContinuitySmoothingLengthM ?? null,
+            particleRadiusContinuitySupportMultiplier:
+              surface.particleRadiusContinuitySupportMultiplier ?? null,
+            particleRadiusContinuitySupportTargetIsoradiusM:
+              surface.particleRadiusContinuitySupportTargetIsoradiusM ?? null,
+            particleRadiusContinuitySamplingCellSizeM:
+              surface.particleRadiusContinuitySamplingCellSizeM ?? null,
+            particleRadiusContinuitySamplingMarginM:
+              surface.particleRadiusContinuitySamplingMarginM ?? null,
+            particleRadiusContinuityTargetIsoradiusM:
+              surface.particleRadiusContinuityTargetIsoradiusM ?? null,
             surfaceIndex: surface.surfaceIndex ?? null,
             activeCellCount: surface.activeCellCount ?? 0,
             maxDensity: surface.maxDensity ?? null,

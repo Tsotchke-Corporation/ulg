@@ -1164,6 +1164,14 @@ test('SPH render field surface table opts into retained physical particle radii 
     subtract: 24,
     radiusNorm: 0.2,
     particleRadiusScale: 0.75,
+    particleRadiusPolicyStatus: 'h2o-liquid-continuity-floor-applied',
+    particleRadiusPolicyMode: 'retained-particle-radius-with-h2o-liquid-continuity-floor',
+    particleRadiusContinuityFloorEligible: true,
+    particleRadiusContinuityFloorApplied: true,
+    particleRadiusScaleRequested: 0.5,
+    particleRadiusContinuityFloorScale: 0.75,
+    particleRadiusContinuityRepresentativeRadiusM: 0.1,
+    particleRadiusContinuitySmoothingLengthM: 0.2,
     transparencyClassId: 2,
     depthWriteFlag: 0
   }]);
@@ -1173,6 +1181,17 @@ test('SPH render field surface table opts into retained physical particle radii 
   assert.equal(table.records[15], 0);
   assert.equal(table.metadata[0].radiusNorm, 0.2);
   assert.equal(table.metadata[0].particleRadiusScale, 0.75);
+  assert.equal(table.metadata[0].particleRadiusPolicyStatus, 'h2o-liquid-continuity-floor-applied');
+  assert.equal(
+    table.metadata[0].particleRadiusPolicyMode,
+    'retained-particle-radius-with-h2o-liquid-continuity-floor'
+  );
+  assert.equal(table.metadata[0].particleRadiusContinuityFloorEligible, true);
+  assert.equal(table.metadata[0].particleRadiusContinuityFloorApplied, true);
+  assert.equal(table.metadata[0].particleRadiusScaleRequested, 0.5);
+  assert.equal(table.metadata[0].particleRadiusContinuityFloorScale, 0.75);
+  assert.equal(table.metadata[0].particleRadiusContinuityRepresentativeRadiusM, 0.1);
+  assert.equal(table.metadata[0].particleRadiusContinuitySmoothingLengthM, 0.2);
   assert.equal(table.metadata[0].particleRadiusFloorNorm, Math.sqrt(0.75 / (16 * 16) + 0.000001));
 });
 
@@ -2140,6 +2159,23 @@ test('SPH render field retained buffers use lease guarded cleanup', async () => 
 
 test('SPH render field surface summary CPU reports active resident surfaces', () => {
   const field = twoSurfaceRenderField();
+  Object.assign(field.surfaceTable.metadata[0], {
+    particleRadiusScale: 1.47,
+    particleRadiusPolicyStatus: 'h2o-liquid-continuity-floor-applied',
+    particleRadiusPolicyMode: 'retained-particle-radius-with-h2o-liquid-continuity-floor',
+    particleRadiusContinuityFloorEligible: true,
+    particleRadiusContinuityFloorApplied: true,
+    particleRadiusScaleRequested: 1,
+    particleRadiusContinuityFloorScale: 1.47,
+    particleRadiusContinuityFloorScaleUnbounded: 1.49,
+    particleRadiusContinuityRepresentativeRadiusM: 0.1,
+    particleRadiusContinuitySmoothingLengthM: 0.248,
+    particleRadiusContinuitySupportMultiplier: 2.0817,
+    particleRadiusContinuitySupportTargetIsoradiusM: 0.1191,
+    particleRadiusContinuitySamplingCellSizeM: 0.0558,
+    particleRadiusContinuitySamplingMarginM: 0.0279,
+    particleRadiusContinuityTargetIsoradiusM: 0.147
+  });
   const summary = summarizeSphRenderFieldSurfacesCpu(field);
 
   assert.equal(summary.schema, ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA);
@@ -2153,6 +2189,22 @@ test('SPH render field surface summary CPU reports active resident surfaces', ()
   assert.ok(activeSurface);
   assert.ok(activeSurface.boundsRadiusM > 0);
   assert.ok(activeSurface.boundsCenterM.every((value) => Number.isFinite(value)));
+  assert.equal(summary.surfaces[0].particleRadiusScale, 1.47);
+  assert.equal(
+    summary.surfaces[0].particleRadiusPolicyStatus,
+    'h2o-liquid-continuity-floor-applied'
+  );
+  assert.equal(summary.surfaces[0].particleRadiusContinuityFloorEligible, true);
+  assert.equal(summary.surfaces[0].particleRadiusContinuityFloorApplied, true);
+  assert.equal(summary.surfaces[0].particleRadiusContinuityFloorScale, 1.47);
+  assert.equal(summary.surfaces[0].particleRadiusContinuityFloorScaleUnbounded, 1.49);
+  assert.equal(summary.surfaces[0].particleRadiusContinuityRepresentativeRadiusM, 0.1);
+  assert.equal(summary.surfaces[0].particleRadiusContinuitySmoothingLengthM, 0.248);
+  assert.equal(summary.surfaces[0].particleRadiusContinuitySupportMultiplier, 2.0817);
+  assert.equal(summary.surfaces[0].particleRadiusContinuitySupportTargetIsoradiusM, 0.1191);
+  assert.equal(summary.surfaces[0].particleRadiusContinuitySamplingCellSizeM, 0.0558);
+  assert.equal(summary.surfaces[0].particleRadiusContinuitySamplingMarginM, 0.0279);
+  assert.equal(summary.surfaces[0].particleRadiusContinuityTargetIsoradiusM, 0.147);
 });
 
 test('SPH render field surface summary WebGPU reads compact summary from retained field buffers', async () => {

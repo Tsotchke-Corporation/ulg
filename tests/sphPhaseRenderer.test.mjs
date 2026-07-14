@@ -1566,6 +1566,52 @@ test('SPH resident material seed surfaces preserve domains without CPU geometry'
   assert.equal(drop.smoothingLengthM, 0.3);
 });
 
+test('SPH resident material seeds exclude zero-mass spare product rows', () => {
+  const batches = createResidentMaterialSeedSurfaceBatches({
+    materials: [
+      {
+        material: 'h2o',
+        phase: 'liquid',
+        renderKey: 'h2o',
+        renderDomainId: 1,
+        renderDomainKey: 'base',
+        particleMassKg: 8
+      },
+      {
+        material: 'Na',
+        phase: 'solid',
+        renderKey: 'Na',
+        renderDomainId: 2,
+        renderDomainKey: 'drop',
+        particleMassKg: 2
+      },
+      {
+        material: 'h2o',
+        phase: 'liquid',
+        renderKey: 'h2o',
+        renderDomainId: 0,
+        renderDomainKey: null,
+        particleMassKg: 0,
+        spareProductSlot: true
+      }
+    ],
+    colorsRgb: new Float32Array([
+      0.2, 0.4, 1,
+      0.8, 0.8, 0.7,
+      0.2, 0.4, 1
+    ]),
+    particleRadiiM: new Float32Array([0.1, 0.1, 0.1]),
+    renderDomainCounts: { base: 1, drop: 1, total: 3 },
+    smoothingLengthM: 0.3
+  });
+
+  assert.deepEqual(
+    batches.map((batch) => batch.surfaceKey).sort(),
+    ['Na|Na|solid|domain:drop', 'h2o|h2o|liquid|domain:base']
+  );
+  assert.equal(batches.some((batch) => batch.surfaceKey === 'h2o|h2o|liquid'), false);
+});
+
 test('SPH resident render fields merge same-material domains into one visible material field', () => {
   const batches = createContinuousSurfaceBatches({
     boxEdgeM: 5,

@@ -1072,6 +1072,13 @@ test('SPH phase view state exposes resolved initial particle spacing', () => {
   assert.equal(viewState.initialParticleSpacing.base.particlesPerEdge, demo.initialParticleSpacing.base.particlesPerEdge);
   assert.equal(viewState.particleRadiiM.length, demo.counts.total);
   assert.ok(viewState.particleRadiiM.every((value) => value > 0));
+  const spareIndex = demo.state.particles.findIndex((particle) => particle.spareProductSlot === true);
+  assert.ok(spareIndex >= 0);
+  assert.equal(viewState.materials[spareIndex].particleMassKg, 0);
+  assert.equal(viewState.materials[spareIndex].spareProductSlot, true);
+  const liveIndex = demo.state.particles.findIndex((particle) => particle.massKg > 0);
+  assert.ok(liveIndex >= 0);
+  assert.ok(viewState.materials[liveIndex].particleMassKg > 0);
   assert.equal(
     viewState.initialParticleSpacing.drop.volumeEquivalentParticleRadiusM,
     demo.initialParticleSpacing.drop.volumeEquivalentParticleRadiusM

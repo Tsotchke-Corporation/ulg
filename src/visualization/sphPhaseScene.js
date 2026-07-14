@@ -9615,6 +9615,12 @@ export function createResidentMaterialSeedSurfaceBatches({
   for (let index = 0; index < materials.length; index += 1) {
     const source = materials[index];
     if (!source) continue;
+    const particleMassKg = Number(source.particleMassKg ?? source.massKg);
+    // Retained product capacity rows clone a real particle descriptor but
+    // carry zero authoritative mass until a GPU reaction claims them. They
+    // must remain in particle buffers, yet must not seed a wildcard material
+    // surface from their placeholder descriptor.
+    if (Number.isFinite(particleMassKg) && particleMassKg <= 0) continue;
     const explicitDomainId = normalizeRenderDomainId(source.renderDomainId);
     const renderDomainId = explicitDomainId > 0
       ? explicitDomainId

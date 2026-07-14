@@ -59,6 +59,8 @@ export function createSphPhaseViewState(driver) {
       : 0;
     materials[i] = {
       ...renderDescriptors[i],
+      particleMassKg: Number.isFinite(Number(p.massKg)) ? Number(p.massKg) : null,
+      spareProductSlot: p.spareProductSlot === true,
       particleRadiusM: particleRadiiM[i],
       currentParticleRadiusM: Number.isFinite(Number(p.currentParticleRadiusM))
         ? Number(p.currentParticleRadiusM)

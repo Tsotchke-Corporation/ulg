@@ -73,8 +73,11 @@ import {
   createMlsMpmResidentStepComputeTask,
   createMlsMpmResidentStepsComputeTask,
   createMlsMpmResidentStepGpuFenceReport,
+  compactResidentProductEventBufferWebGpu,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
+  destroyReactionOutputAfterFailedMechanicsRefresh,
+  reactionOutputMutatesParticles,
   runSphThermalPhaseStageComputeTask,
   runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
@@ -788,6 +791,78 @@ function fakeSummaryDevice(summaryValues) {
     }
   };
 }
+
+test('resident product-event compaction rejects legacy or torn row strides before GPU dispatch', async () => {
+  await assert.rejects(
+    compactResidentProductEventBufferWebGpu({
+      device: null,
+      sourceBuffer: {},
+      rowCount: 1,
+      strideFloats: 20,
+      strideBytes: 80
+    }),
+    /exact current 32-float\/128-byte row stride/
+  );
+  await assert.rejects(
+    compactResidentProductEventBufferWebGpu({
+      device: null,
+      sourceBuffer: {},
+      rowCount: 1,
+      strideFloats: 32,
+      strideBytes: 124
+    }),
+    /exact current 32-float\/128-byte row stride/
+  );
+});
+
+test('reaction mutation authority requires one coherent state thermo mechanics buffer set', () => {
+  const stateBuffer = { label: 'reaction-state' };
+  const thermoBuffer = { label: 'reaction-thermo' };
+  const mechanicsBuffer = { label: 'reaction-mechanics' };
+  assert.equal(reactionOutputMutatesParticles({ stateBuffer }), false);
+  assert.equal(reactionOutputMutatesParticles({ stateBuffer, thermoBuffer }), false);
+  assert.equal(reactionOutputMutatesParticles({ stateBuffer, mechanicsBuffer }), false);
+  assert.equal(reactionOutputMutatesParticles({ thermoBuffer, mechanicsBuffer }), false);
+  assert.equal(reactionOutputMutatesParticles({ stateBuffer, thermoBuffer, mechanicsBuffer }), true);
+  assert.equal(reactionOutputMutatesParticles({
+    stateBuffer,
+    thermoBuffer,
+    mechanicsBuffer,
+    reactionSummary: { reactionSummaryAvailable: true, canonicalReactionEventCount: 0 }
+  }), false);
+});
+
+test('failed post-reaction mechanics refresh destroys retained reaction outputs', () => {
+  const destroyed = [];
+  const buffer = (label) => ({ label, destroy() { destroyed.push(label); } });
+  const residentProductMass = {
+    destroyResidentProductMassBuffers() {
+      destroyed.push('reaction-product-events');
+    }
+  };
+  assert.equal(destroyReactionOutputAfterFailedMechanicsRefresh({
+    stateBuffer: buffer('reaction-state'),
+    thermoBuffer: buffer('reaction-thermo'),
+    mechanicsBuffer: buffer('reaction-mechanics'),
+    residentProductMass
+  }), true);
+  assert.deepEqual(destroyed, [
+    'reaction-state',
+    'reaction-thermo',
+    'reaction-mechanics',
+    'reaction-product-events'
+  ]);
+
+  let ownedDestroyCalls = 0;
+  assert.equal(destroyReactionOutputAfterFailedMechanicsRefresh({
+    stateBuffer: buffer('must-not-destroy-directly'),
+    destroyOutputParticleBuffers() {
+      ownedDestroyCalls += 1;
+    }
+  }), true);
+  assert.equal(ownedDestroyCalls, 1);
+  assert.equal(destroyed.includes('must-not-destroy-directly'), false);
+});
 
 test('Schroeder far-force delta fusion emits retained state without full readback', async () => {
   const buffers = manualBuffers({ velocity: [0, 0, 0] });
@@ -3062,7 +3137,7 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
     byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
   });
   const reactionTable = {
-    schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+    schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
     productTermMetadata: [
       { productTermIndex: 0, material: 'h2', routing: 'gas' }
     ]
@@ -3146,7 +3221,7 @@ test('SPH spatial gas ledger producer blocks cross-device retained product-event
     readbackMode: 'no-full-readback',
     residentProductMass,
     reactionTable: {
-      schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
       productTermMetadata: [
         { productTermIndex: 0, material: 'h2', routing: 'gas' }
       ]
@@ -3193,7 +3268,7 @@ test('SPH spatial gas ledger producer blocks globally tagged cross-device produc
     readbackMode: 'no-full-readback',
     residentProductMass,
     reactionTable: {
-      schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
       productTermMetadata: [
         { productTermIndex: 0, material: 'h2', routing: 'gas' }
       ]
@@ -3221,7 +3296,7 @@ test('SPH spatial gas ledger producer derives positioned gas rows when product s
     productEventStrideFloats: 32,
     boxDimsM: [4, 4, 4],
     reactionTable: {
-      schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
       productTermMetadata: [
         { productTermIndex: 0, material: 'h2', routing: 'gas' }
       ]
@@ -3355,7 +3430,7 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
     byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
   });
   const reactionTable = {
-    schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+    schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
     productTermMetadata: [
       { productTermIndex: 0, material: 'h2', routing: 'gas' }
     ]
@@ -4982,7 +5057,7 @@ test('SPH reaction product stage compute task declares retained product lane out
     preferWebGpu: true,
     sphParticleState: buffers.sphParticleState,
     mlsMpmParticleState: buffers.mlsMpmParticleState,
-    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1, productTermCount: 1, gasProductCount: 0 },
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v1', reactionCount: 1, productTermCount: 1, gasProductCount: 0 },
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
     sphParticleUpload: {
       status: 'webgpu-uploaded',
@@ -5271,7 +5346,7 @@ test('MLS-MPM resident steps compute task blocks fused sequence when sidecars re
     fuseNoFullResidentMechanicsSequence: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
-    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 }
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v1', reactionCount: 1 }
   });
 
   const contract = task.gpuResidentLane.residentSequenceLaneContract;
@@ -6248,7 +6323,16 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
     responseCount: 3,
     graphCount: 3
   };
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 1000, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] }
+      ]
+    }
+  });
   let reactionCalls = 0;
+  let mechanicsRefreshCalls = 0;
   let thermalDestroyCalls = 0;
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
@@ -6268,8 +6352,9 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    mechanicsMaterialTable,
     reactionParticleBinMetadataReadback: true,
-    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 },
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v1', reactionCount: 1 },
     thermalStepOptions: {
       thermalResponseGraphUpload
     },
@@ -6492,19 +6577,55 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
           this.mechanicsBuffer.destroy();
         }
       };
+    },
+    mechanicsRefreshRunner(args) {
+      mechanicsRefreshCalls += 1;
+      assert.equal(args.sourceStateBuffer.label, 'reaction-state-after-thermal');
+      assert.equal(args.sourceThermoBuffer.label, 'reaction-thermo-after-thermal');
+      assert.equal(args.sourceMechanicsBuffer.label, 'reaction-mechanics-after-thermal');
+      assert.equal(args.mechanicsMaterialTable, mechanicsMaterialTable);
+      assert.equal(args.readbackMode, 'no-full-readback');
+      const mechanicsBuffer = tracker.buffer('refreshed-mechanics-after-reaction');
+      return {
+        schema: 'peercompute.ulg.mls-mpm-mechanics-refresh.v0',
+        backend: 'webgpu',
+        status: 'mechanics-constitutive-refresh-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        mechanics: new Float32Array(),
+        mechanicsBuffer,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          mechanicsBuffer.destroy();
+        }
+      };
     }
   });
 
   assert.equal(reactionCalls, 1);
+  assert.equal(mechanicsRefreshCalls, 1);
   assert.equal(step.stageStatus.thermal, 'thermal-step-executed');
   assert.equal(step.stageStatus.reaction, 'reaction-step-executed');
   assert.equal(step.stageBackends.reaction, 'webgpu');
   assert.equal(step.thermalOutputReplacedByReactionStep, true);
-  assert.equal(step.g2pMechanicsBufferReplacedByReactionStep, true);
-  assert.equal(step.nextParticleBufferMode, 'retained-reaction-output-buffers');
+  assert.equal(step.g2pMechanicsBufferReplacedByReactionStep, false);
+  assert.equal(step.g2pMechanicsBufferReplacedByMechanicsRefresh, true);
+  assert.equal(
+    step.thermalMechanicsRefreshStatus,
+    'mechanics-constitutive-refreshed-after-reaction-output'
+  );
+  assert.equal(
+    step.nextParticleBufferMode,
+    'retained-reaction-state-thermo-and-refreshed-mechanics-buffers'
+  );
   assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'reaction-state-after-thermal');
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer.label, 'reaction-thermo-after-thermal');
-  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'reaction-mechanics-after-thermal');
+  assert.equal(
+    step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label,
+    'refreshed-mechanics-after-reaction'
+  );
   assert.equal(step.nextParticleMechanicsBufferByteLength, buffers.mlsMpmParticleState.mechanics.byteLength);
   assert.equal(step.diagnostics.reactionSummaryStatus, 'reaction-compact-summary-ready');
   assert.equal(step.diagnostics.reactionSummaryAvailable, true);
@@ -6555,7 +6676,7 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(thermalDestroyCalls, 1);
-	  assert.equal(tracker.destroyed, 10);
+	  assert.equal(tracker.destroyed, 11);
 });
 
 test('MLS-MPM resident no-full step skips no-op reaction output buffers for next source', async () => {
@@ -6586,7 +6707,7 @@ test('MLS-MPM resident no-full step skips no-op reaction output buffers for next
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
-    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 },
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v1', reactionCount: 1 },
     thermalStepOptions: { thermalResponseGraphUpload },
     reactionStepOptions: { thermalResponseGraphUpload },
     p2gRunner() {
@@ -6805,7 +6926,7 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
     readbackMode: 'no-full-readback',
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
     thermalStepRunner: null,
-    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 },
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v1', reactionCount: 1 },
     summaryRunner: null,
     p2gRunner(args) {
       p2gInputs.push(args.residentProductMass);
@@ -8633,7 +8754,7 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
-    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 },
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v1', reactionCount: 1 },
     p2gRunner(args) {
       p2gInputs.push({
         readbackMode: args.readbackMode,

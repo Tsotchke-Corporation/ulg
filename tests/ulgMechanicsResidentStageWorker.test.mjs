@@ -620,7 +620,7 @@ test('ULG resident stage worker can run spatial gas ledger producer stage', asyn
         productEventStrideFloats: 32
       },
       reactionTable: {
-        schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+        schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
         productTermMetadata: [
           { productTermIndex: 0, material: 'h2', routing: 'gas' }
         ]
@@ -734,7 +734,7 @@ test('ULG resident stage worker can run reaction product stage with retained par
     readbackMode: 'full-parity-readback',
     common: {
       ...buffers,
-      reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1, productTermCount: 1, gasProductCount: 0 },
+      reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v1', reactionCount: 1, productTermCount: 1, gasProductCount: 0 },
       thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
       sphParticleUpload: {
         status: 'webgpu-uploaded',

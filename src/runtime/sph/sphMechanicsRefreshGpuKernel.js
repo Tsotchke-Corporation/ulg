@@ -58,12 +58,18 @@ function resetMechanicsDeformation(mechanics, mechanicsOffset) {
 
 function shouldResetMechanicsForPhaseChange(mechanics, mechanicsOffset, phaseMechanics, nextRestVolumeM3) {
   const previousRestVolumeM3 = finiteNumber(mechanics[mechanicsOffset + 19], 0);
+  if (!(nextRestVolumeM3 > 0)) return false;
+  const previousReferenceValid = previousRestVolumeM3 > 0
+    && finiteNumber(mechanics[mechanicsOffset + 18], 0) > 0
+    && Math.round(finiteNumber(mechanics[mechanicsOffset + 21], 0)) === 1
+    && Math.round(finiteNumber(mechanics[mechanicsOffset + 27], 0)) === 1;
+  if (!previousReferenceValid) return true;
   const previousSolid = finiteNumber(mechanics[mechanicsOffset + 20], 0) > 0.5;
   const nextSolid = finiteNumber(phaseMechanics.solidFlag, 0) > 0.5;
   const previousEosModelId = Math.round(finiteNumber(mechanics[mechanicsOffset + 26], 0));
   const nextEosModelId = Math.round(finiteNumber(phaseMechanics.eosModelId, 0));
   const mechanicsModelChanged = previousSolid !== nextSolid || previousEosModelId !== nextEosModelId;
-  if (!mechanicsModelChanged || !(previousRestVolumeM3 > 0) || !(nextRestVolumeM3 > 0)) return false;
+  if (!mechanicsModelChanged) return false;
   const ratio = Math.max(
     previousRestVolumeM3 / nextRestVolumeM3,
     nextRestVolumeM3 / previousRestVolumeM3

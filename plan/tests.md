@@ -14092,3 +14092,36 @@ Compact material/phase mechanics telemetry, 2026-07-13 AKDT:
     rows are valid at `64.8005 m/s` and `J=1000`. Five frames are nonblank and
     native browser pixel validation passes, so this is a physics rejection,
     not a hidden-render failure.
+
+Reaction product phase/mechanics authority, 2026-07-13 AKDT:
+
+- Focused runtime/ABI/cache/scene/worker regression:
+  `node --test --test-reporter=dot tests/sphReactionGpuKernel.test.mjs tests/sphMechanicsRefreshGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphColdStartCache.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs tests/sphPhaseRenderer.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphAuthoritativeGpuCheckpoint.test.mjs`
+  - Passed `284/284`.
+- Complete regression: `npm test`
+  - Passed `1094/1097`, zero failures, three intentional opt-in skips, duration
+    `178260 ms`.
+- Production build: `npm run build`
+  - Passed with 143 transformed modules. The existing large-chunk warning
+    remains.
+- Syntax and whitespace:
+  `node --check` for every changed JavaScript/MJS module plus
+  `git diff --check`.
+  - Passed.
+- Hardened Vulkan sodium checkpoint:
+  `/tmp/ulg-ss-spatial-sodium-product-mechanics-hardened-vulkan/result.json`
+  - Expected overall status `bad` only for `max-speed>50` and `max-J>5`.
+  - Nine reaction events; final inventory is 27 Na, nine NaOH, five H2, and
+    125 H2O particles.
+  - Authoritative mechanics-incomplete and mapping-incomplete counts are both
+    zero. NaOH is liquid with nine mechanics samples, zero problem rows,
+    `J=0.957472..1.015223`, `V0=0.00140586 m^3`, and
+    `V=0.00137738 m^3`.
+  - H2 remains the isolated failure at `89.6172 m/s`, `J=1000`, with four
+    cap-boundary contributors. Five frames are nonblank and native browser
+    pixel validation passes.
+- Hardened Vulkan water checkpoint:
+  `/tmp/ulg-ss-spatial-water-product-mechanics-hardened-vulkan/result.json`
+  - Status `good`, no issues, zero incomplete mechanics, `0.156902 m/s`,
+    `J=0.999948..1.000004`, four nonblank frames, and passed native browser
+    pixels.

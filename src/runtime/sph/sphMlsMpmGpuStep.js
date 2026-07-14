@@ -5029,10 +5029,16 @@ function nonzeroSummaryValue(value, tolerance = 1e-12) {
 export function reactionOutputMutatesParticles(reactionStep) {
   const reactionResult = reactionStep?.result || reactionStep;
   if (!reactionResult) return false;
-  const hasOutputBuffers = Boolean(
-    reactionResult.stateBuffer || reactionResult.thermoBuffer || reactionResult.mechanicsBuffer
-  );
-  if (!hasOutputBuffers) return false;
+  const outputBufferCount = [
+    reactionResult.stateBuffer,
+    reactionResult.thermoBuffer,
+    reactionResult.mechanicsBuffer
+  ].filter(Boolean).length;
+  if (outputBufferCount === 0) return false;
+  // State, thermo, and mechanics form one generation.  A partial result must
+  // never be mixed with thermal/G2P fallbacks and advertised as a coherent
+  // reaction mutation.
+  if (outputBufferCount !== 3) return false;
   const summary = reactionResult.reactionSummary || null;
   if (!summary?.reactionSummaryAvailable) return true;
   return [
@@ -5860,6 +5866,24 @@ export function retainedReactionOutputBuffers(reactionStep) {
     residentProductMass,
     destroyOutputParticleBuffers: source?.destroyOutputParticleBuffers || null
   };
+}
+
+export function destroyReactionOutputAfterFailedMechanicsRefresh(reactionStep) {
+  const source = reactionStep?.result || reactionStep;
+  if (!source) return false;
+  if (typeof source.destroyOutputParticleBuffers === 'function') {
+    source.destroyOutputParticleBuffers();
+    return true;
+  }
+  const buffers = new Set([
+    source.stateBuffer,
+    source.thermoBuffer,
+    source.mechanicsBuffer
+  ].filter(Boolean));
+  for (const buffer of buffers) buffer.destroy?.();
+  const residentProductMass = source.residentProductMass || null;
+  residentProductMass?.destroyResidentProductMassBuffers?.();
+  return buffers.size > 0 || Boolean(residentProductMass);
 }
 
 function retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep) {
@@ -14851,6 +14875,13 @@ export async function compactResidentProductEventBufferWebGpu({
   strideBytes
 } = {}) {
   if (!(rowCount > 0) || !sourceBuffer) return null;
+  const expectedStrideFloats = SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS;
+  const expectedStrideBytes = expectedStrideFloats * Float32Array.BYTES_PER_ELEMENT;
+  if (strideFloats !== expectedStrideFloats || strideBytes !== expectedStrideBytes) {
+    throw new RangeError(
+      `product-event compaction requires the exact current ${expectedStrideFloats}-float/${expectedStrideBytes}-byte row stride`
+    );
+  }
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
     cacheKey: 'ulg-sph-resident-product-event-compact',
     label: 'ulg-sph-resident-product-event-compact',
@@ -14997,8 +15028,7 @@ async function mergeResidentProductMassBuffersWebGpu({
   let productEventCompactionDroppedRowCount = 0;
   const compactionEligible = mergedByteLength >= RESIDENT_PRODUCT_EVENT_COMPACTION_THRESHOLD_BYTES
     && sourceRowCounts.length >= RESIDENT_PRODUCT_EVENT_COMPACTION_MIN_GENERATIONS
-    && strideFloats >= 20
-    && strideFloats % 4 === 0
+    && strideFloats === SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
     && strideBytes === strideFloats * Float32Array.BYTES_PER_ELEMENT
     && mergedRowCount * strideBytes <= mergedByteLength;
   if (compactionEligible) {
@@ -15235,8 +15265,8 @@ function buildNextParticleUploads({
     || thermal.thermoBuffer
     || (sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null);
   const mechanicsBuffer = schroederParticleStorage?.mechanicsBuffer
-    || (reactionMutatesParticles ? reaction.mechanicsBuffer : null)
     || mechanicsRefresh.mechanicsBuffer
+    || (reactionMutatesParticles ? reaction.mechanicsBuffer : null)
     || retained.mechanicsBuffer;
   const residentProductMass = mergedResidentProductMass || reaction.residentProductMass || inputResidentProductMass || null;
   if (!stateBuffer || !mechanicsBuffer) return null;
@@ -15365,15 +15395,15 @@ async function residentStepEnvelope({
     && reactionOutputParticleMutation
     && reactionOutput.thermoBuffer
   );
-  const nextUsesReactionMechanics = Boolean(
-    !nextUsesSchroederParticleStorageMaterialization
-    && reactionOutputParticleMutation
-    && reactionOutput.mechanicsBuffer
-  );
   const nextUsesMechanicsRefresh = Boolean(
     !nextUsesSchroederParticleStorageMaterialization
-    && !nextUsesReactionMechanics
     && mechanicsRefreshOutput.mechanicsBuffer
+  );
+  const nextUsesReactionMechanics = Boolean(
+    !nextUsesSchroederParticleStorageMaterialization
+    && !nextUsesMechanicsRefresh
+    && reactionOutputParticleMutation
+    && reactionOutput.mechanicsBuffer
   );
   const nextUsesThermalState = Boolean(
     !nextUsesSchroederParticleStorageMaterialization
@@ -15385,18 +15415,25 @@ async function residentStepEnvelope({
     && !nextUsesReactionThermo
     && thermalOutput.thermoBuffer
   );
-  const thermalMechanicsRefreshStatus = thermalStep
-    ? (nextUsesReactionMechanics
-        ? 'mechanics-refreshed-by-reaction-output'
-        : (nextUsesMechanicsRefresh
-            ? 'mechanics-constitutive-refreshed-after-thermal-state'
-            : (nextUsesThermalState
-            ? 'mechanics-constitutive-refresh-pending-after-thermal-state'
-            : 'mechanics-constitutive-refresh-not-required')))
-    : null;
+  const mechanicsRefreshTrigger = reactionOutputParticleMutation
+    ? 'reaction'
+    : (thermalStep ? 'thermal' : null);
+  const thermalMechanicsRefreshStatus = mechanicsRefreshTrigger
+    ? (nextUsesMechanicsRefresh
+        ? (mechanicsRefreshTrigger === 'reaction'
+            ? 'mechanics-constitutive-refreshed-after-reaction-output'
+            : 'mechanics-constitutive-refreshed-after-thermal-state')
+        : (nextUsesReactionMechanics
+            ? 'mechanics-constitutive-refresh-pending-after-reaction-output'
+            : (nextUsesReactionState
+                ? 'mechanics-constitutive-refresh-pending-after-reaction-output'
+                : (nextUsesThermalState
+                    ? 'mechanics-constitutive-refresh-pending-after-thermal-state'
+                    : 'mechanics-constitutive-refresh-not-required'))))
+    : (reactionStep ? 'mechanics-constitutive-refresh-not-required' : null);
   const thermalPhaseTransitionCouplingStatus = thermalStep
     ? (thermalPhaseTransition.thermalPhaseTransitionCount > 0
-        ? (nextUsesThermalState && nextUsesThermalThermo && (nextUsesMechanicsRefresh || nextUsesReactionMechanics)
+        ? (nextUsesThermalState && nextUsesThermalThermo && nextUsesMechanicsRefresh
             ? 'phase-transition-thermal-thermo-mechanics-advanced'
             : 'phase-transition-coupling-incomplete')
         : 'thermal-phase-transition-not-detected')
@@ -15710,9 +15747,9 @@ async function residentStepEnvelope({
           : (schroederFarForceDeltaFusion?.state?.length
               ? schroederFarForceDeltaFusion.state
               : g2pReconstruction?.state))) ?? new Float32Array(),
-    mechanics: (reactionStep?.mechanics?.length
-      ? reactionStep.mechanics
-      : (mechanicsRefreshStep?.mechanics?.length ? mechanicsRefreshStep.mechanics : g2pReconstruction?.mechanics)) ?? new Float32Array(),
+    mechanics: (mechanicsRefreshStep?.mechanics?.length
+      ? mechanicsRefreshStep.mechanics
+      : (reactionStep?.mechanics?.length ? reactionStep.mechanics : g2pReconstruction?.mechanics)) ?? new Float32Array(),
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction,
@@ -15930,7 +15967,9 @@ async function residentStepEnvelope({
       ? (nextUsesSchroederParticleStorageMaterialization
           ? 'retained-schroeder-particle-storage-materialized-buffers'
           : (nextUsesReactionState
-          ? 'retained-reaction-output-buffers'
+          ? (nextUsesMechanicsRefresh
+              ? 'retained-reaction-state-thermo-and-refreshed-mechanics-buffers'
+              : 'retained-reaction-output-buffers')
           : (thermalOutput.stateBuffer
               ? (nextUsesMechanicsRefresh ? 'retained-thermal-output-and-refreshed-mechanics-buffers' : 'retained-thermal-output-and-g2p-mechanics-buffers')
               : (schroederFarForceOutput.stateBuffer
@@ -15955,8 +15994,8 @@ async function residentStepEnvelope({
       (nextUsesSchroederParticleStorageMaterialization
         ? schroederParticleStorageAdoption.mechanicsBufferByteLength
         : 0)
-      || (nextUsesReactionMechanics ? reactionOutput.mechanicsBufferByteLength : 0)
       || (nextUsesMechanicsRefresh ? mechanicsRefreshOutput.mechanicsBufferByteLength : 0)
+      || (nextUsesReactionMechanics ? reactionOutput.mechanicsBufferByteLength : 0)
       || g2pOutput.mechanicsBufferByteLength,
     nextParticleCount: nextParticleUploads?.sphParticleUpload?.particleCount ?? sphParticleState.particleCount,
     g2pStateBufferReplacedBySchroederParticleStorageMaterialization:
@@ -15983,7 +16022,9 @@ async function residentStepEnvelope({
     reactionOutputParticleMutation,
     reactionOutputBufferHandoffStatus: reactionStep
       ? (reactionOutputParticleMutation
-        ? 'reaction-output-buffers-drive-next-particles'
+        ? (nextUsesMechanicsRefresh
+            ? 'reaction-state-thermo-and-refreshed-mechanics-drive-next-particles'
+            : 'reaction-output-buffers-drive-next-particles')
         : 'reaction-output-buffers-skipped-no-particle-mutation')
       : null,
     readbackMode,
@@ -16413,8 +16454,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
 
   let mechanicsRefreshStep = null;
   stageMs.mechanicsRefresh = 0;
+  const reactionMutatesParticles = reactionOutputMutatesParticles(reactionStep);
   if (
-    thermalStep
+    (thermalStep || reactionMutatesParticles)
     && mechanicsMaterialTable
     && typeof mechanicsRefreshRunner === 'function'
     && g2pReconstruction?.backend === 'webgpu'
@@ -16425,8 +16467,6 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
     const thermalOutput = retainedThermalOutputBuffers(thermalStep);
     const reactionOutput = retainedReactionOutputBuffers(reactionStep);
-    const reactionMutatesParticles = reactionOutputMutatesParticles(reactionStep);
-    const reactionHasMechanicsAuthority = Boolean(reactionMutatesParticles && reactionOutput.mechanicsBuffer);
     const sourceStateBuffer = (reactionMutatesParticles ? reactionOutput.stateBuffer : null)
       || thermalOutput.stateBuffer
       || schroederFarForceOutput.stateBuffer
@@ -16434,22 +16474,29 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     const sourceThermoBuffer = (reactionMutatesParticles ? reactionOutput.thermoBuffer : null)
       || thermalOutput.thermoBuffer
       || sphParticleUpload.thermoBuffer;
-    if (!reactionHasMechanicsAuthority && sourceStateBuffer && sourceThermoBuffer && g2pOutput.mechanicsBuffer) {
-      mechanicsRefreshStep = await timedStage('mechanicsRefresh', () => mechanicsRefreshRunner({
-        device: resolvedDevice,
-        sphParticleState,
-        mlsMpmParticleState,
-        mechanicsMaterialTable,
-        sphParticleUpload,
-        mlsMpmParticleUpload,
-        sourceStateBuffer,
-        sourceThermoBuffer,
-        sourceMechanicsBuffer: g2pOutput.mechanicsBuffer,
-        preferWebGpu: preferWebGpu && !lostInfo,
-        retainOutputParticleBuffers: true,
-        readbackMode: requestedReadbackMode,
-        ...mechanicsRefreshOptions
-      }));
+    const sourceMechanicsBuffer = (reactionMutatesParticles ? reactionOutput.mechanicsBuffer : null)
+      || g2pOutput.mechanicsBuffer;
+    if (sourceStateBuffer && sourceThermoBuffer && sourceMechanicsBuffer) {
+      try {
+        mechanicsRefreshStep = await timedStage('mechanicsRefresh', () => mechanicsRefreshRunner({
+          device: resolvedDevice,
+          sphParticleState,
+          mlsMpmParticleState,
+          mechanicsMaterialTable,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          sourceStateBuffer,
+          sourceThermoBuffer,
+          sourceMechanicsBuffer,
+          preferWebGpu: preferWebGpu && !lostInfo,
+          retainOutputParticleBuffers: true,
+          readbackMode: requestedReadbackMode,
+          ...mechanicsRefreshOptions
+        }));
+      } catch (error) {
+        destroyReactionOutputAfterFailedMechanicsRefresh(reactionStep);
+        throw error;
+      }
     }
   }
 
@@ -16592,7 +16639,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     activeGridDispatchPlanRefreshSkippedReason,
     compactSummaryScope: resolvedCompactSummaryScope,
     thermalRequested: Boolean(thermalMaterialTable),
-    mechanicsRefreshRequested: Boolean(thermalStep && mechanicsMaterialTable),
+    mechanicsRefreshRequested: Boolean(
+      (thermalStep || reactionOutputMutatesParticles(reactionStep)) && mechanicsMaterialTable
+    ),
     reactionRequested: Boolean(reactionTable?.reactionCount > 0),
     scientificValidation: false,
     sphValidation: false,

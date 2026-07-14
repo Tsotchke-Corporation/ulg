@@ -6211,3 +6211,33 @@ Still open:
   refreshed buffer authoritative for the next upload.
 - Publish placed/merged/unplaced product mass across placement and the first
   post-reaction mechanics refresh, then rerun the native sodium sequence.
+
+## 2026-07-13 Status Update - Reaction Product Mechanics Authority Repaired
+
+Current state:
+
+- Reaction-table ABI v1 resolves singleton and gas-only product phases,
+  accepts explicit phase policies only when they match a derived positive-
+  density phase, derives gas routing from the resolved phase, and rejects
+  conflicting or ambiguous policies. Phase id zero remains the unspecified
+  sentinel rather than becoming an invalid explicit choice.
+- Persistent v0 reaction-table cache entries no longer enter the scene. Event
+  emission, event compaction, and placement each fail closed on invalid phase,
+  density, mechanics, or row stride.
+- Reaction particle mutation requires one coherent retained state/thermo/
+  mechanics buffer set. The post-reaction constitutive refresh consumes that
+  set, resets invalid newly activated rows to identity deformation and `J=1`,
+  and supplies next-step mechanics. Failed refresh cleanup retires retained
+  reaction outputs.
+- Fresh Vulkan sodium evidence has zero incomplete mechanics rows. Nine NaOH
+  rows are liquid with positive rest/current volumes and `J=0.957472..1.015223`.
+  Water remains green and native-visible after the same changes.
+
+Still open:
+
+- Publish placed/merged/unplaced product mass and generation provenance across
+  placement and the first post-reaction refresh.
+- H2 remains rejected at `89.6172 m/s` and `J=1000`; derive gas drag and
+  terminal velocity only after product-mass provenance localizes the transfer.
+- Smooth-water visual acceptance and the first production shared-directory
+  consumer remain later checkpoints.

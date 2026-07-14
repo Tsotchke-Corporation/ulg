@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ULG_SPH_GPU_REACTION_TABLE_SCHEMA } from '../ulg-gpu-abi/src/index.js';
 import {
   SPH_STATIC_TABLE_CACHE_REHYDRATE_SCHEMA,
   SPH_STATIC_TABLE_CACHE_UPDATE_SCHEMA,
@@ -136,7 +137,7 @@ function fakeTableInputs() {
       colorSpace: 'srgb'
     },
     reactionTable: {
-      schema: 'peercompute.ulg.sph-reaction-table.v0',
+      schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
       records: new Float32Array([1, 2, 3, 4]),
       reactionHeaders: new Float32Array([0, 0, 2, 0, 2, 0, 1, -1000, 0, 0.1, 1, 3, 0, 2, 1, 0]),
       reactantTermRecords: new Float32Array([
@@ -282,4 +283,30 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
     'opticalGpuTable',
     'reactionTable'
   ]));
+});
+
+test('SPH static table cache rejects a persisted v0 reaction table after the phase-policy ABI bump', () => {
+  const update = createSphStaticTableCacheUpdate({
+    tableInputs: fakeTableInputs(),
+    generatorFingerprint
+  });
+  const staleSnapshot = JSON.parse(update.cacheSnapshot);
+  const staleReactionRecord = Object.values(staleSnapshot.tables).find(
+    (record) => record.family === 'sph-reaction-table'
+  );
+  staleReactionRecord.sourceSchema = 'peercompute.ulg.sph-gpu-reaction-table.v0';
+
+  const bundle = rehydrateSphStaticTableBundle(JSON.stringify(staleSnapshot), {
+    generatorFingerprint
+  });
+
+  assert.equal(bundle.reactionTable, null);
+  assert.equal(bundle.hitCount, 4);
+  assert.equal(bundle.staleCount, 1);
+  assert.deepEqual(bundle.staleDerivedFamilies, [{
+    family: 'sph-reaction-table',
+    reason: 'reaction-table-schema-mismatch',
+    sourceSchema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+    requiredSchema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA
+  }]);
 });

@@ -71,7 +71,11 @@ const SPH_REACTION_PACKED_PARTICLE_FLOATS = SPH_REACTION_PACKED_PARTICLE_VEC4S *
 const REACTION_SCOPE = 'sph-reaction-mutual-contact-derived-network';
 const REACTION_STATUS = Object.freeze({ ready: 1, missingProductMaterial: 255, invalidReaction: 254 });
 const PRODUCT_PHASE_STATUS = Object.freeze({ ready: 1, missingPhase: 255 });
-const REACTION_TERM_STATUS = Object.freeze({ ready: 1, missingMaterialProperties: 255 });
+const REACTION_TERM_STATUS = Object.freeze({
+  ready: 1,
+  missingProductPhasePolicy: 254,
+  missingMaterialProperties: 255
+});
 const REACTION_PRODUCT_ROUTING = Object.freeze({ condensed: 0, gas: 1 });
 const REACTION_PRESSURE_ROUTING = Object.freeze({ sealedBoxGasInventory: 1 });
 const REACTION_ROLE_IDS = Object.freeze({ a: 1, b: 2, other: 3 });
@@ -339,6 +343,58 @@ function termIsGas(term, materialProperties = {}) {
     || String(term?.routing || '').toLowerCase() === 'gas';
 }
 
+function resolvedProductTargetPhasePolicyId(term, materialProperties = {}) {
+  const properties = materialPropertiesFor(term?.material, materialProperties);
+  const readyPhases = (properties?.phases || [])
+    .map((phase) => {
+      const name = String(phase?.name || '').trim().toLowerCase();
+      return {
+        id: gpuPhaseId(name),
+        name,
+        restDensityKgPerM3: finiteNumber(phase?.densityKgPerM3, 0)
+      };
+    })
+    .filter((phase) => phase.id > GPU_PHASE_IDS.unknown && phase.restDensityKgPerM3 > 0);
+  const requestedPhaseIds = [];
+  const explicitPolicyId = term?.targetPhasePolicyId;
+  if (typeof explicitPolicyId === 'number') {
+    // Zero is the existing ABI sentinel for "unspecified" and must preserve
+    // singleton/gas-only fallback.  Other malformed numeric policies fail
+    // closed instead of being coerced to a phase id.
+    if (!Number.isInteger(explicitPolicyId) || explicitPolicyId < GPU_PHASE_IDS.unknown) {
+      return GPU_PHASE_IDS.unknown;
+    }
+    if (explicitPolicyId > GPU_PHASE_IDS.unknown) requestedPhaseIds.push(explicitPolicyId);
+  }
+  const explicitPolicies = [term?.targetPhasePolicy, term?.targetPhase, term?.phase]
+    .filter((value) => typeof value === 'string' && value.trim());
+  for (const explicitPolicy of explicitPolicies) {
+    const requestedId = gpuPhaseId(explicitPolicy.trim().toLowerCase());
+    if (!(requestedId > GPU_PHASE_IDS.unknown)) return GPU_PHASE_IDS.unknown;
+    requestedPhaseIds.push(requestedId);
+  }
+  const distinctRequestedPhaseIds = [...new Set(requestedPhaseIds)];
+  if (distinctRequestedPhaseIds.length > 1) return GPU_PHASE_IDS.unknown;
+  const routing = String(term?.routing || '').trim().toLowerCase();
+  if (routing && routing !== 'gas' && routing !== 'condensed') return GPU_PHASE_IDS.unknown;
+  if (distinctRequestedPhaseIds.length === 1) {
+    const requestedId = distinctRequestedPhaseIds[0];
+    if ((routing === 'gas' && requestedId !== GPU_PHASE_IDS.gas)
+      || (routing === 'condensed' && requestedId === GPU_PHASE_IDS.gas)) {
+      return GPU_PHASE_IDS.unknown;
+    }
+    return readyPhases.some((phase) => phase.id === requestedId)
+      ? requestedId
+      : GPU_PHASE_IDS.unknown;
+  }
+  if (termIsGas(term, materialProperties)) {
+    return readyPhases.some((phase) => phase.id === GPU_PHASE_IDS.gas)
+      ? GPU_PHASE_IDS.gas
+      : GPU_PHASE_IDS.unknown;
+  }
+  return readyPhases.length === 1 ? readyPhases[0].id : GPU_PHASE_IDS.unknown;
+}
+
 function atomEntriesForTerm(term) {
   const atomCounts = term?.atomCounts || (() => {
     try {
@@ -502,7 +558,13 @@ export function buildSphReactionTable(reactions = [], {
     const reaction = reactions[reactionIndex];
     const a = reaction?.a;
     const b = reaction?.b;
-    const productTerms = productMassFractions(productTermsForReaction(reaction, materialProperties), materialProperties);
+    const productTerms = productMassFractions(
+      productTermsForReaction(reaction, materialProperties),
+      materialProperties
+    ).map((term) => ({
+      ...term,
+      targetPhasePolicyId: resolvedProductTargetPhasePolicyId(term, materialProperties)
+    }));
     const reactantTerms = reactantTermsForReaction(reaction, materialProperties);
     const primaryProductTerm = productTerms[0] || { material: reaction?.product, coefficient: 1, massFraction: 1 };
     const product = primaryProductTerm.material || reaction?.product;
@@ -523,12 +585,18 @@ export function buildSphReactionTable(reactions = [], {
     const allProductPropertiesReady = productTerms.length > 0 && productTerms.every((term) => (
       materialPropertiesFor(term.material, materialProperties)?.phases?.length
     ));
+    const allProductPhasePoliciesReady = productTerms.length > 0 && productTerms.every((term) => (
+      term.targetPhasePolicyId > GPU_PHASE_IDS.unknown
+    ));
     const activationTemperatureK = finiteNumber(reaction?.activationTemperatureK, 0);
     const specificEnthalpyJPerKg = finiteNumber(reaction?.specificEnthalpyJPerKg, 0);
     const radius = finiteNumber(reaction?.contactRadiusM ?? contactRadiusM, 0);
-    const status = a && b && product && radius > 0 && allProductPropertiesReady
+    const status = a && b && product && radius > 0
+      && allProductPropertiesReady && allProductPhasePoliciesReady
       ? REACTION_STATUS.ready
-      : (!productProperties?.phases?.length || !allProductPropertiesReady ? REACTION_STATUS.missingProductMaterial : REACTION_STATUS.invalidReaction);
+      : (!productProperties?.phases?.length || !allProductPropertiesReady
+          ? REACTION_STATUS.missingProductMaterial
+          : REACTION_STATUS.invalidReaction);
     const phaseMaskA = phaseMask(reaction?.phaseRequirements?.[a]);
     const phaseMaskB = phaseMask(reaction?.phaseRequirements?.[b]);
     const reactantTermOffset = reactantTermRecords.length / SPH_REACTION_REACTANT_TERM_FLOATS;
@@ -615,12 +683,18 @@ export function buildSphReactionTable(reactions = [], {
       const materialId = stableOpticalMaterialId(term.material);
       const properties = materialPropertiesFor(term.material, materialProperties);
       const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
-      const gas = termIsGas(term, materialProperties);
+      // Routing must follow the resolved target phase.  Deriving it again from
+      // the raw term can split a multi-phase gas product between gas mechanics
+      // and the condensed ledger when the closure supplies an explicit phase
+      // policy.
+      const gas = term.targetPhasePolicyId === GPU_PHASE_IDS.gas;
       const phaseRange = productPhaseRangeFor(productPhaseMetadata, term.material);
       const productTermIndex = productTermRecords.length / SPH_REACTION_PRODUCT_TERM_FLOATS;
-      const termStatus = molarMassKgPerMol > 0 && properties?.phases?.length
-        ? REACTION_TERM_STATUS.ready
-        : REACTION_TERM_STATUS.missingMaterialProperties;
+      const termStatus = !(molarMassKgPerMol > 0 && properties?.phases?.length)
+        ? REACTION_TERM_STATUS.missingMaterialProperties
+        : (term.targetPhasePolicyId > GPU_PHASE_IDS.unknown
+            ? REACTION_TERM_STATUS.ready
+            : REACTION_TERM_STATUS.missingProductPhasePolicy);
       productTermRecords.push(
         reactionIndex,
         materialId,
@@ -628,7 +702,7 @@ export function buildSphReactionTable(reactions = [], {
         molarMassKgPerMol,
         term.massFraction,
         gas ? REACTION_PRODUCT_ROUTING.gas : REACTION_PRODUCT_ROUTING.condensed,
-        gas ? GPU_PHASE_IDS.gas : 0,
+        term.targetPhasePolicyId,
         termStatus,
         stableOpticalMaterialId(term.formula || term.material),
         stableOpticalMaterialId(term.material),
@@ -649,6 +723,7 @@ export function buildSphReactionTable(reactions = [], {
         molarMassKgPerMol,
         massFraction: term.massFraction,
         routing: gas ? 'gas' : 'condensed',
+        targetPhasePolicyId: term.targetPhasePolicyId,
         phaseRecordOffset: phaseRange.offset,
         phaseRecordCount: phaseRange.count,
         status: termStatus

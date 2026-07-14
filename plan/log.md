@@ -41519,3 +41519,42 @@ Validation and review:
   phases generically, reject invalid placement events, and run a truthful
   post-reaction mechanics refresh before adding placed/merged/unplaced mass
   provenance.
+
+## 2026-07-13 AKDT - Reaction Product Phase and Mechanics Authority
+
+- Repaired the NaOH producer defect exposed by compact mechanics telemetry.
+  Ready reaction product terms now carry a positive target phase resolved from
+  an explicit closure policy, a single positive-density phase, or a gas-only
+  material. Ambiguous multi-phase terms and phase/routing conflicts are
+  invalid reactions rather than phase-zero events.
+- Bumped the reaction-table ABI to v1 and rejected persisted v0 tables during
+  cold-start rehydration and scene admission. This prevents cached status-1,
+  target-phase-0 rows from bypassing the fresh fail-closed builder.
+- Derived gas routing from the resolved phase, preserved phase id zero as the
+  unspecified sentinel, and added explicit gas-policy, zero-sentinel,
+  conflicting-policy, and stale-cache tests.
+- Event emission now marks rows ready only with positive phase/density and
+  valid product mechanics. Compaction and placement repeat those gates.
+  Compaction accepts only the exact current 32-float/128-byte event ABI; the
+  shader also rejects shorter row strides before reading row 7.
+- Reaction continuation now requires a coherent state/thermo/mechanics output
+  generation. A real mechanics refresh runs after particle mutation, resets an
+  invalid newly activated row to identity deformation and `J=1`, and owns the
+  next mechanics upload. Reaction-only request telemetry is truthful, and a
+  failed refresh destroys retained reaction outputs.
+- Hardened native sodium evidence at
+  `/tmp/ulg-ss-spatial-sodium-product-mechanics-hardened-vulkan/result.json`
+  preserves nine reaction events and ends with nine liquid NaOH particles,
+  positive `0.00140586 m^3` phase-weighted rest volume, positive
+  `0.00137738 m^3` current volume, `J=0.957472..1.015223`, and zero mechanics
+  problems. Overall status remains bad only for H2 speed/expansion:
+  `89.6172 m/s`, `J=1000`, four gas-cap contributors.
+- Hardened native water evidence at
+  `/tmp/ulg-ss-spatial-water-product-mechanics-hardened-vulkan/result.json` is
+  green with complete mechanics, `0.156902 m/s`, `J=0.999948..1.000004`, four
+  nonblank frames, and passed browser pixels. Direct sodium frame inspection
+  still shows large lobe/boulder occlusion; no visual acceptance is claimed.
+- Focused product/ABI/cache/scene/worker gate passed `284/284`. Complete
+  regression passed `1094/1097`, zero failures and three intentional opt-in
+  skips, in `178260 ms`. Production build passed with 143 transformed modules
+  and only the existing large-chunk warning.

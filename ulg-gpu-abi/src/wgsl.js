@@ -2319,13 +2319,28 @@ fn compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (global_id.x != 0u) {
     return;
   }
-  let stride = max(params.row_stride_vec4, 5u);
+  let stride = params.row_stride_vec4;
+  if (stride < 8u) {
+    return;
+  }
   var live_rows = 0u;
   for (var row = 0u; row < params.row_count; row = row + 1u) {
     let base = row * stride;
+    let event_row2 = source_events[base + 2u];
     let unplaced_mass_kg = source_events[base + 3u].y;
-    let status = source_events[base + 4u].z;
-    if (status != 1.0 || unplaced_mass_kg <= 0.0) {
+    let event_row4 = source_events[base + 4u];
+    let event_row7 = source_events[base + 7u];
+    let status = event_row4.z;
+    let phase_id = event_row2.w;
+    let rest_density = event_row4.y;
+    let mechanics_status = event_row7.z;
+    if (
+      status != 1.0
+      || mechanics_status != 1.0
+      || !(phase_id > 0.0)
+      || !(rest_density > 0.0)
+      || unplaced_mass_kg <= 0.0
+    ) {
       continue;
     }
     let out_base = live_rows * stride;
@@ -2376,9 +2391,17 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let base = event * stride;
     let row3 = product_events[base + 3u];
     let row4 = product_events[base + 4u];
+    let event_row2_header = product_events[base + 2u];
+    let event_row7_header = product_events[base + 7u];
     let unplaced_mass_kg = row3.y;
     let status = row4.z;
-    if (status != 1.0 || unplaced_mass_kg <= params.min_placed_mass_kg) {
+    if (
+      status != 1.0
+      || event_row7_header.z != 1.0
+      || !(event_row2_header.w > 0.0)
+      || !(row4.y > 0.0)
+      || unplaced_mass_kg <= params.min_placed_mass_kg
+    ) {
       continue;
     }
     let event_row0 = product_events[base];
@@ -3601,6 +3624,18 @@ fn product_term_row1(term_index: u32) -> vec4<f32> {
   return reaction_records[product_base + term_index * 4u + 1u];
 }
 
+fn product_term_row2(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let product_base = header_base + params.reaction_count * 4u + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 2u];
+}
+
+fn product_term_row3(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let product_base = header_base + params.reaction_count * 4u + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 3u];
+}
+
 fn product_phase_row0(phase_index: u32) -> vec4<f32> {
   let phase_base = params.reaction_count * 3u;
   return reaction_records[phase_base + phase_index * 3u];
@@ -3614,6 +3649,25 @@ fn product_phase_row1(phase_index: u32) -> vec4<f32> {
 fn product_phase_row2(phase_index: u32) -> vec4<f32> {
   let phase_base = params.reaction_count * 3u;
   return reaction_records[phase_base + phase_index * 3u + 2u];
+}
+
+fn resolved_product_phase_id(term_index: u32, target_phase_id: f32, material_id: f32) -> f32 {
+  if (target_phase_id > 0.0) {
+    return target_phase_id;
+  }
+  let term2 = product_term_row2(term_index);
+  let term3 = product_term_row3(term_index);
+  let phase_offset = u32(max(term2.w, 0.0));
+  let phase_count = u32(max(term3.x, 0.0));
+  if (phase_count != 1u || phase_offset >= params.product_phase_count) {
+    return 0.0;
+  }
+  let phase0 = product_phase_row0(phase_offset);
+  let phase2 = product_phase_row2(phase_offset);
+  if (phase0.x != material_id || !(phase0.y > 0.0) || !(phase0.z > 0.0) || phase2.y != 1.0) {
+    return 0.0;
+  }
+  return phase0.y;
 }
 
 fn reaction_row1(reaction_index: u32) -> vec4<f32> {
@@ -3819,7 +3873,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  let next0 = next_thermo[particle_index * 3u];
 	  let next1 = next_thermo[partner_index * 3u];
 	  var visible_mass_kg = 0.0;
-	  var phase_id = target_phase_id;
+	  var phase_id = resolved_product_phase_id(product_term_index, target_phase_id, material_id);
 	  var temperature_k = 0.5 * (source_row0.z + partner_source_row0.z);
 	  var rest_density_kg_per_m3 = 0.0;
 	  if (next0.x == material_id) {
@@ -3861,12 +3915,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    unplaced_mass_kg / max(rest_density_kg_per_m3, 1.0e-20),
 	    unplaced_mass_kg > 0.0 && rest_density_kg_per_m3 > 0.0
 	  );
+	  let event_ready = phase_id > 0.0
+	    && rest_density_kg_per_m3 > 0.0
+	    && product_mechanics.status == 1.0
+	    && (unplaced_mass_kg <= 0.0 || support_volume_m3 > 0.0);
 	  let midpoint = 0.5 * (source_pos_mass.xyz + partner_source_pos_mass.xyz);
 	  product_events[out_base] = vec4<f32>(midpoint.x, midpoint.y, midpoint.z, row_mass);
 	  product_events[out_base + 1u] = vec4<f32>(material_id, f32(product_term_index), f32(reaction_index), f32(particle_index));
 	  product_events[out_base + 2u] = vec4<f32>(f32(partner_index), row_moles, routing_id, phase_id);
 	  product_events[out_base + 3u] = vec4<f32>(visible_mass_kg, unplaced_mass_kg, coefficient, molar_mass);
-	  product_events[out_base + 4u] = vec4<f32>(temperature_k, rest_density_kg_per_m3, 1.0, product_u);
+	  product_events[out_base + 4u] = vec4<f32>(
+	    temperature_k,
+	    rest_density_kg_per_m3,
+	    select(0.0, 1.0, event_ready),
+	    product_u
+	  );
 	  product_events[out_base + 5u] = vec4<f32>(product_velocity.x, product_velocity.y, product_velocity.z, support_volume_m3);
 	  product_events[out_base + 6u] = vec4<f32>(
 	    product_mechanics.effective_bulk,
@@ -8373,8 +8436,15 @@ fn find_phase_mechanics(material_id: f32, phase_id: f32) -> PhaseMechanics {
 
 fn mechanics_refresh_should_reset(row4: vec4<f32>, row5: vec4<f32>, row6: vec4<f32>, phase_mechanics: PhaseMechanics, rest_volume: f32) -> bool {
   let previous_rest_volume = row4.w;
-  if (previous_rest_volume <= 0.0 || rest_volume <= 0.0) {
+  if (!(rest_volume > 0.0)) {
     return false;
+  }
+  let previous_reference_valid = previous_rest_volume > 0.0
+    && row4.z > 0.0
+    && row5.y == 1.0
+    && row6.w == 1.0;
+  if (!previous_reference_valid) {
+    return true;
   }
   let mechanics_model_changed = abs(row5.x - phase_mechanics.solid) > 0.5 || abs(row6.z - phase_mechanics.eos_model) > 0.5;
   if (!mechanics_model_changed) {

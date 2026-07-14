@@ -207,11 +207,55 @@ test('CPU mechanics refresh resets deformation history on large gas to condensed
   assert.equal(result.mechanics[26], MLS_MPM_EOS_MODEL_IDS.taitCondensed);
 });
 
+test('CPU mechanics refresh initializes a newly activated invalid product row', () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    naoh: {
+      molarMassKgPerMol: 0.039997,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 687, bulkModulusPa: 1.5e9, shearModulusPa: 0, cpJPerKgK: 2000, temperatureRange: [273.15, 2000] }
+      ]
+    }
+  });
+  const state = new Float32Array([0, 0, 0, 0.687, 0, 0, 0, 300]);
+  const thermo = new Float32Array(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length);
+  thermo[0] = stableOpticalMaterialId('naoh');
+  thermo[1] = GPU_PHASE_IDS.liquid;
+  thermo[3] = 687;
+  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
+  mechanics.set([9, 8, 7, 6, 5, 4, 3, 2, 1], 0);
+  mechanics[18] = 0;
+  mechanics[19] = 0;
+  mechanics[21] = 0;
+  mechanics[27] = 0;
+
+  const result = refreshMlsMpmMechanicsCpu({
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      state,
+      thermo
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      mechanics
+    },
+    mechanicsMaterialTable: table
+  });
+
+  assert.deepEqual(Array.from(result.mechanics.slice(0, 9)), [1, 0, 0, 0, 1, 0, 0, 0, 1]);
+  assert.equal(result.mechanics[18], 1);
+  nearlyEqual(result.mechanics[19], 0.001, 1e-9);
+  assert.equal(result.mechanics[21], 1);
+  assert.equal(result.mechanics[27], 1);
+});
+
 test('WGSL mechanics refresh updates rest volume and constitutive rows without state readback', () => {
   assert.match(mlsMpmMechanicsRefreshWgsl, /fn find_phase_mechanics/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /@binding\(6\) var<storage, read> material_bank_warm_input_rows/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /fn material_bank_warm_input_anchor/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /mechanics_refresh_should_reset/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /if \(!previous_reference_valid\)/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /rest_ratio >= 2\.0/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /out_mechanics\[mechanics_base \+ row\] = source_mechanics\[mechanics_base \+ row\]/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /out_mechanics\[mechanics_base \+ 4u\]/);

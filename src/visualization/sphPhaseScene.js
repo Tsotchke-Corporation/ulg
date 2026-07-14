@@ -19,6 +19,7 @@ import {
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import {
@@ -25833,7 +25834,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       scene.userData.sphThermalResponseGraphUpload = null;
     }
     sphReactionTable = measure('reactionTable', () => (
-      staticTableCache?.reactionTable?.schema
+      staticTableCache?.reactionTable?.schema === ULG_SPH_GPU_REACTION_TABLE_SCHEMA
         ? staticTableCache.reactionTable
         : materialProperties
         ? buildSphReactionTable(reactions || [], {

@@ -5559,7 +5559,7 @@ test('SPH scene requests spatial gas ledger producer from retained product event
     productEventRowCount: 2
   };
   const reactionTable = {
-    schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+    schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
     productTermMetadata: [
       { productTermIndex: 0, material: 'h2', routing: 'gas' }
     ]

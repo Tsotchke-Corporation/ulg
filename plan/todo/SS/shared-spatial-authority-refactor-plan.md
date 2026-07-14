@@ -526,5 +526,26 @@ gas cap boundary. The next correction is therefore fail-closed product phase
 resolution/placement plus a real post-reaction mechanics refresh; item 2 must
 then publish placed/merged/unplaced mass through that refresh.
 
+That correction is now complete. Reaction-table ABI v1 requires every ready
+product term to resolve one positive-density target phase; phase/routing
+conflicts and ambiguous multi-phase products fail closed, while the existing
+phase-id-zero sentinel still permits singleton and gas-only resolution. Event
+emission, compaction, and placement independently reject phase-zero,
+zero-density, invalid-mechanics, and legacy/torn-stride rows. Persisted v0
+reaction tables are rejected instead of bypassing the fresh builder. Reaction
+state, thermo, and mechanics must also arrive as one coherent buffer set, and a
+constitutive refresh after particle mutation now owns next-step mechanics.
+
+Fresh native evidence is at
+`/tmp/ulg-ss-spatial-water-product-mechanics-hardened-vulkan/result.json` and
+`/tmp/ulg-ss-spatial-sodium-product-mechanics-hardened-vulkan/result.json`.
+Water remains green with complete mechanics, `maxSpeed=0.156902 m/s`, and
+`J=0.999948..1.000004`. Sodium still fails only the independently visible H2
+speed/expansion gates: nine liquid NaOH rows now have positive rest/current
+volume and zero mechanics problems, while five H2 rows reach
+`89.6172 m/s`, four touch the `J=1000` gas cap, and native browser pixels pass.
+Item 2 is therefore next: publish placed/merged/unplaced product mass across
+placement and the first refresh before changing gas transport.
+
 Do not widen the reaction radius, globally change the water damping default,
 or treat a deliberately relaxed diagnostic threshold as scientific acceptance.

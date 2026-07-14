@@ -155,6 +155,8 @@ test('SPH reaction table packs derived reaction and product phase mechanics rows
   assert.equal(table.productPhaseRecords[1], GPU_PHASE_IDS.liquid);
   assert.equal(table.productPhaseRecords[2], 500);
   assert.equal(table.productPhaseRecords[3], 5e5);
+  assert.equal(table.productTermRecords[6], GPU_PHASE_IDS.liquid);
+  assert.equal(table.productTermRecords[7], 1);
   assert.deepEqual(
     Array.from(table.combinedRecords.slice(table.records.length, table.records.length + 4)),
     Array.from(table.productPhaseRecords.slice(0, 4))
@@ -203,8 +205,10 @@ test('SPH reaction table packs balanced reactant/product/gas term rows', () => {
   assert.equal(table.productTermRecords[1], stableOpticalMaterialId('ab'));
   assert.equal(table.productTermRecords[2], 2);
   assert.ok(Math.abs(table.productTermRecords[4] - (0.06 / 0.064)) < 1e-6);
+  assert.equal(table.productTermRecords[6], GPU_PHASE_IDS.liquid);
   assert.equal(table.productTermRecords[16 + 1], stableOpticalMaterialId('c2'));
   assert.equal(table.productTermRecords[16 + 5], 1);
+  assert.equal(table.productTermRecords[16 + 6], GPU_PHASE_IDS.gas);
   assert.equal(table.productTermRecords[16 + 13], stableOpticalMaterialId('c2'));
   assert.equal(table.gasProductRecords[2], stableOpticalMaterialId('c2'));
   assert.equal(table.gasProductRecords[3], 1);
@@ -264,10 +268,116 @@ test('SPH reaction table routes only gas-only or explicitly gas product terms to
 
   assert.equal(table.productTermMetadata[0].material, 'feoh2');
   assert.equal(table.productTermMetadata[0].routing, 'condensed');
+  assert.equal(table.productTermMetadata[0].targetPhasePolicyId, GPU_PHASE_IDS.unknown);
+  assert.equal(table.productTermRecords[7], 254);
+  assert.equal(table.records[8], 254);
   assert.equal(table.productTermMetadata[1].material, 'h2');
   assert.equal(table.productTermMetadata[1].routing, 'gas');
+  assert.equal(table.productTermMetadata[1].targetPhasePolicyId, GPU_PHASE_IDS.gas);
   assert.equal(table.gasProductCount, 1);
   assert.equal(table.gasProductMetadata[0].material, 'h2');
+
+  const explicitLiquidTable = buildSphReactionTable([{
+    a: 'fe',
+    b: 'h2o',
+    product: 'feoh2',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      equation: 'Fe + 2 H2O -> Fe(OH)2 + H2',
+      atomBalance: { balanced: true },
+      reactants: [
+        { coefficient: 1, formula: 'Fe', material: 'fe' },
+        { coefficient: 2, formula: 'H2O', material: 'h2o' }
+      ],
+      products: [
+        { coefficient: 1, formula: 'Fe(OH)2', material: 'feoh2', targetPhase: 'liquid' },
+        { coefficient: 1, formula: 'H2', material: 'h2' }
+      ]
+    }
+  }], {
+    materialProperties: mixedPhaseProperties,
+    contactRadiusM: 0.1
+  });
+  assert.equal(explicitLiquidTable.records[8], 1);
+  assert.equal(explicitLiquidTable.productTermRecords[6], GPU_PHASE_IDS.liquid);
+  assert.equal(explicitLiquidTable.productTermRecords[7], 1);
+
+  const explicitGasTable = buildSphReactionTable([{
+    a: 'fe',
+    b: 'h2o',
+    product: 'feoh2',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      equation: 'Fe + 2 H2O -> Fe(OH)2 + H2',
+      atomBalance: { balanced: true },
+      reactants: [
+        { coefficient: 1, formula: 'Fe', material: 'fe' },
+        { coefficient: 2, formula: 'H2O', material: 'h2o' }
+      ],
+      products: [
+        { coefficient: 1, formula: 'Fe(OH)2', material: 'feoh2', targetPhasePolicy: 'gas' },
+        { coefficient: 1, formula: 'H2', material: 'h2', targetPhasePolicyId: 0 }
+      ]
+    }
+  }], {
+    materialProperties: mixedPhaseProperties,
+    contactRadiusM: 0.1
+  });
+  assert.equal(explicitGasTable.records[8], 1);
+  assert.equal(explicitGasTable.productTermRecords[5], 1);
+  assert.equal(explicitGasTable.productTermRecords[6], GPU_PHASE_IDS.gas);
+  assert.equal(explicitGasTable.productTermMetadata[0].routing, 'gas');
+  assert.equal(explicitGasTable.productTermRecords[16 + 6], GPU_PHASE_IDS.gas);
+  assert.equal(explicitGasTable.gasProductCount, 2);
+
+  const zeroSentinelTable = buildSphReactionTable([{
+    a: 'a',
+    b: 'b',
+    product: 'ab',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      reactants: [
+        { coefficient: 1, material: 'a' },
+        { coefficient: 1, material: 'b' }
+      ],
+      products: [{ coefficient: 1, material: 'ab', targetPhasePolicyId: 0 }]
+    }
+  }], {
+    materialProperties,
+    contactRadiusM: 0.1
+  });
+  assert.equal(zeroSentinelTable.records[8], 1);
+  assert.equal(zeroSentinelTable.productTermRecords[6], GPU_PHASE_IDS.liquid);
+  assert.equal(zeroSentinelTable.productTermRecords[7], 1);
+
+  const conflictingRoutingTable = buildSphReactionTable([{
+    a: 'fe',
+    b: 'h2o',
+    product: 'feoh2',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      reactants: [
+        { coefficient: 1, material: 'fe' },
+        { coefficient: 2, material: 'h2o' }
+      ],
+      products: [
+        { coefficient: 1, material: 'feoh2', targetPhase: 'liquid', routing: 'gas' },
+        { coefficient: 1, material: 'h2' }
+      ]
+    }
+  }], {
+    materialProperties: mixedPhaseProperties,
+    contactRadiusM: 0.1
+  });
+  assert.equal(conflictingRoutingTable.records[8], 254);
+  assert.equal(conflictingRoutingTable.productTermRecords[5], 0);
+  assert.equal(conflictingRoutingTable.productTermRecords[6], GPU_PHASE_IDS.unknown);
+  assert.equal(conflictingRoutingTable.productTermRecords[7], 254);
+  assert.equal(conflictingRoutingTable.gasProductCount, 1);
 });
 
 test('SPH reaction CPU step converts only mutual nearest contact pairs and resets product mechanics', () => {

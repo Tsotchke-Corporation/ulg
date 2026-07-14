@@ -5,6 +5,7 @@ import {
   CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT,
   CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT,
   ULG_CLOSURE_LAW_GRAPH_SCHEMA,
+  ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   hashPayload
@@ -809,6 +810,10 @@ function restoreOpticalGpuTable(record) {
 
 function restoreReactionTable(record) {
   if (!record?.arrays?.records || !record?.arrays?.productPhaseRecords) return null;
+  // v1 makes a positive, coherent product phase policy mandatory for ready
+  // terms.  Restoring a v0 table would bypass the fresh builder and revive
+  // ambiguous phase-zero reactions from persistent storage.
+  if (record.sourceSchema !== ULG_SPH_GPU_REACTION_TABLE_SCHEMA) return null;
   const metadata = record.metadata || {};
   return {
     schema: record.sourceSchema,
@@ -904,7 +909,16 @@ export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
   const thermalClosureGraphSet = restoreThermalClosureGraphSet(derivedThermalRecord('sph-thermal-closure-graph-bank'));
   const thermalPhaseResponseTable = restoreThermalPhaseResponseTable(derivedThermalRecord('sph-thermal-phase-response-table'));
   const opticalGpuTable = restoreOpticalGpuTable(byFamily.get('optical-pbr-table'));
-  const reactionTable = restoreReactionTable(byFamily.get('sph-reaction-table'));
+  const reactionTableRecord = byFamily.get('sph-reaction-table');
+  const reactionTable = restoreReactionTable(reactionTableRecord);
+  if (reactionTableRecord && !reactionTable) {
+    staleDerivedFamilies.push({
+      family: 'sph-reaction-table',
+      reason: 'reaction-table-schema-mismatch',
+      sourceSchema: reactionTableRecord.sourceSchema || null,
+      requiredSchema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA
+    });
+  }
   const restored = {
     thermalMaterialTable,
     thermalClosureGraphSet,

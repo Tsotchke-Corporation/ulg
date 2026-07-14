@@ -7683,6 +7683,60 @@ export function residentSurfaceDrawPipelineKey(draw = {}) {
     : 'opaque-depth-write';
 }
 
+export function resolveSphNativeSurfaceDiagnosticDrawPlan({
+  drawOrder = [],
+  additionalSurfaceDraws = [],
+  filter = null
+} = {}) {
+  const primaryDraws = Array.isArray(drawOrder) ? drawOrder : [];
+  const secondaryDraws = Array.isArray(additionalSurfaceDraws)
+    ? additionalSurfaceDraws
+    : [];
+  const token = typeof filter?.token === 'string' && filter.token.trim()
+    ? filter.token
+    : null;
+  const active = Boolean(token && filter?.enabled === true);
+  if (!active) {
+    return {
+      active: false,
+      token: null,
+      drawOrder: primaryDraws,
+      additionalSurfaceDraws: secondaryDraws,
+      suppressBackgroundImage: false,
+      suppressBoxWireframe: false,
+      suppressSchroederProxyDraws: false,
+      sourcePrimaryDrawCount: primaryDraws.length,
+      sourceAdditionalDrawCount: secondaryDraws.length,
+      selectedPrimaryDrawCount: primaryDraws.length,
+      selectedAdditionalDrawCount: secondaryDraws.length,
+      selectedAdditionalSurfaceKeys: []
+    };
+  }
+  const allowedSurfaceKeys = new Set(
+    (Array.isArray(filter?.additionalSurfaceKeys) ? filter.additionalSurfaceKeys : [])
+      .map((key) => String(key || ''))
+      .filter(Boolean)
+  );
+  const filteredSecondaryDraws = filter?.filterAdditionalSurfaceDraws === true
+    ? secondaryDraws.filter((draw) => allowedSurfaceKeys.has(String(draw?.surfaceKey || '')))
+    : secondaryDraws;
+  return {
+    active: true,
+    token,
+    drawOrder: filter?.suppressPrimarySurfaceDraws === true ? [] : primaryDraws,
+    additionalSurfaceDraws: filteredSecondaryDraws,
+    suppressBackgroundImage: filter?.suppressBackgroundImage === true,
+    suppressBoxWireframe: filter?.suppressBoxWireframe === true,
+    suppressSchroederProxyDraws: filter?.suppressSchroederProxyDraws === true,
+    sourcePrimaryDrawCount: primaryDraws.length,
+    sourceAdditionalDrawCount: secondaryDraws.length,
+    selectedPrimaryDrawCount:
+      filter?.suppressPrimarySurfaceDraws === true ? 0 : primaryDraws.length,
+    selectedAdditionalDrawCount: filteredSecondaryDraws.length,
+    selectedAdditionalSurfaceKeys: filteredSecondaryDraws.map((draw) => draw?.surfaceKey ?? null)
+  };
+}
+
 function finiteNumberOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -20514,9 +20568,40 @@ fn fs_main() -> @location(0) vec4<f32> {
       } else {
         bridge.device.queue.writeBuffer(bridge.cameraBuffer, 0, new Float32Array(viewProjection.elements));
       }
-      const additionalSurfaceDraws = Array.isArray(drawState.additionalSurfaceDraws)
+      const sourceAdditionalSurfaceDraws = Array.isArray(drawState.additionalSurfaceDraws)
         ? drawState.additionalSurfaceDraws
         : [];
+      const sourceDrawOrder = Array.isArray(drawState.drawOrder) && drawState.drawOrder.length
+        ? drawState.drawOrder
+        : residentSurfaceDrawOrder(
+          Array.from({ length: drawState.surfaceCount }, (_, surfaceIndex) => ({ surfaceIndex })),
+          { indirectStrideBytes: drawState.indirectStrideBytes }
+        );
+      const diagnosticDrawPlan = resolveSphNativeSurfaceDiagnosticDrawPlan({
+        drawOrder: sourceDrawOrder,
+        additionalSurfaceDraws: sourceAdditionalSurfaceDraws,
+        filter: bridge.__ulgProbeNativeSurfaceDrawFilter
+      });
+      const additionalSurfaceDraws = diagnosticDrawPlan.additionalSurfaceDraws;
+      const drawOrder = diagnosticDrawPlan.drawOrder;
+      bridge.lastNativeSurfaceDiagnosticDrawFilterActive = diagnosticDrawPlan.active;
+      bridge.lastNativeSurfaceDiagnosticDrawFilterToken = diagnosticDrawPlan.token;
+      bridge.lastNativeSurfaceDiagnosticSourcePrimaryDrawCount =
+        diagnosticDrawPlan.sourcePrimaryDrawCount;
+      bridge.lastNativeSurfaceDiagnosticSourceAdditionalDrawCount =
+        diagnosticDrawPlan.sourceAdditionalDrawCount;
+      bridge.lastNativeSurfaceDiagnosticSelectedPrimaryDrawCount =
+        diagnosticDrawPlan.selectedPrimaryDrawCount;
+      bridge.lastNativeSurfaceDiagnosticSelectedAdditionalDrawCount =
+        diagnosticDrawPlan.selectedAdditionalDrawCount;
+      bridge.lastNativeSurfaceDiagnosticSelectedAdditionalSurfaceKeys =
+        diagnosticDrawPlan.selectedAdditionalSurfaceKeys;
+      bridge.lastNativeSurfaceDiagnosticBackgroundSuppressed =
+        diagnosticDrawPlan.suppressBackgroundImage;
+      bridge.lastNativeSurfaceDiagnosticBoxWireframeSuppressed =
+        diagnosticDrawPlan.suppressBoxWireframe;
+      bridge.lastNativeSurfaceDiagnosticSchroederProxySuppressed =
+        diagnosticDrawPlan.suppressSchroederProxyDraws;
       for (const additionalDraw of additionalSurfaceDraws) {
         bridge.device.queue.writeBuffer(
           additionalDraw.cameraBuffer,
@@ -20533,12 +20618,6 @@ fn fs_main() -> @location(0) vec4<f32> {
         .filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
       const additionalRefractiveDraws = additionalSurfaceDraws
         .filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'refractive-depth-write');
-      const drawOrder = Array.isArray(drawState.drawOrder) && drawState.drawOrder.length
-        ? drawState.drawOrder
-        : residentSurfaceDrawOrder(
-          Array.from({ length: drawState.surfaceCount }, (_, surfaceIndex) => ({ surfaceIndex })),
-          { indirectStrideBytes: drawState.indirectStrideBytes }
-        );
       const opaqueDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
       const refractiveDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'refractive-depth-write');
         updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
@@ -20566,7 +20645,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         bridge.lastRenderSkipStatus = null;
         bridge.lastRenderSkipReason = null;
       const schroederProxyExecutor =
-        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE && !nativeSurfaceClearOnly
+        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          && !nativeSurfaceClearOnly
+          && !diagnosticDrawPlan.suppressSchroederProxyDraws
           ? refreshSchroederRenderProxyNativeExecutorForBridge(bridge, {
             surfaceDraw: sphResidentSurfaceDraw,
             reason: 'native-surface-render-pass'
@@ -20629,6 +20710,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           : undefined
         });
         const backgroundImageDrawn = !nativeSurfaceClearOnly
+          && !diagnosticDrawPlan.suppressBackgroundImage
           && drawSphNativeSurfaceBackgroundImage(bridge, opaquePass);
         bridge.lastBackgroundImageDrawn = Boolean(backgroundImageDrawn);
         opaquePass.setPipeline(bridge.opaquePipeline || bridge.pipeline);
@@ -20644,7 +20726,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             opaquePass.setBindGroup(0, additionalDraw.bindGroup);
             opaquePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
           }
-          if (depthView) {
+          if (depthView && !diagnosticDrawPlan.suppressBoxWireframe) {
             drawSphNativeSurfaceBoxWireframe(bridge, opaquePass, viewProjection);
           }
         }
@@ -32774,7 +32856,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       const resizeStatus = resize({ reason });
       controls.update();
       const rendered = renderSceneFrame({ reason });
-      if (rendered) renderSphResidentSurfaceDrawOverlay({ reason });
+      const surfaceOverlayRendered = rendered
+        ? renderSphResidentSurfaceDrawOverlay({ reason })
+        : false;
       const rect = renderer.domElement?.getBoundingClientRect?.();
       const drawingBufferSize = renderer.getDrawingBufferSize?.(new Three.Vector2());
       const status = {
@@ -32790,6 +32874,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         overlayCanvasWidth: sphResidentSurfaceDrawRenderBridge?.canvas?.width ?? null,
         overlayCanvasHeight: sphResidentSurfaceDrawRenderBridge?.canvas?.height ?? null,
         workerOffscreenPresentation: currentWorkerOffscreenPresentationStatus(),
+        surfaceOverlayRenderAttempted: Boolean(rendered),
+        surfaceOverlayRendered: surfaceOverlayRendered === true,
+        surfaceOverlayLastRenderStatus:
+          sphResidentSurfaceDrawRenderBridge?.lastRenderStatus ?? null,
         updatedAtMs: nowMs(),
         scientificValidation: false,
         sphValidation: false,

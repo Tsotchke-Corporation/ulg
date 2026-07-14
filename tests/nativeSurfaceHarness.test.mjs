@@ -5,7 +5,13 @@ import {
   groupedReactionEventCount,
   reactionLedgerEventCount
 } from '../scripts/sph-probe-reaction-evidence.mjs';
+import {
+  summarizeNativeSurfaceIndirectArgsReadback
+} from '../scripts/sph-native-indirect-evidence.mjs';
 import { validateAuthoritativeGpuUploadPair } from '../scripts/sph-authoritative-gpu-checkpoint.mjs';
+import {
+  resolveSphNativeSurfaceDiagnosticDrawPlan
+} from '../src/visualization/sphPhaseScene.js';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
@@ -71,6 +77,186 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /validationBlockerFamily,/);
   assert.match(probeSource, /textureReadbackUnavailable,/);
   assert.match(probeSource, /gpuBufferHandoffReady,/);
+});
+
+test('native WebGPU probe batches primary and secondary indirect args into one checkpoint readback', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const evidenceSource = readRepoFile('scripts/sph-native-indirect-evidence.mjs');
+
+  assert.match(
+    probeSource,
+    /const additionalEntries = \(Array\.isArray\(drawState\?\.additionalSurfaceDraws\)/,
+    'checkpoint evidence must include retained secondary surface draw buffers'
+  );
+  assert.match(
+    probeSource,
+    /const entries = \[\.\.\.primaryEntries, \.\.\.additionalEntries\]/,
+    'primary and secondary indirect rows must share one readback plan'
+  );
+  assert.match(
+    probeSource,
+    /entries\.forEach\([\s\S]*?encoder\.copyBufferToBuffer\([\s\S]*?device\.queue\.submit\(\[encoder\.finish\(\)\]\)[\s\S]*?await readback\.mapAsync/,
+    'all indirect rows must use one command submission and one map operation'
+  );
+  assert.match(evidenceSource, /additionalDrawableDrawCount/);
+  assert.match(evidenceSource, /aggregateIndirectVertexCount/);
+  assert.match(probeSource, /surfaceKey: entry\.surfaceKey/);
+});
+
+test('native indirect evidence requires a primary draw and reports product geometry separately', () => {
+  const evidence = summarizeNativeSurfaceIndirectArgsReadback({
+    status: 'ready',
+    readbackByteLength: 64,
+    queueSubmitCount: 1,
+    mapAsyncCount: 1,
+    draws: [
+      { source: 'primary', surfaceKey: 'h2o|h2o|liquid', args: [12, 1, 0, 0] },
+      { source: 'additional', surfaceKey: 'naoh|naoh|liquid', args: [6, 1, 0, 0] },
+      { source: 'additional', surfaceKey: 'h2|h2|gas', args: [3, 2, 0, 0] },
+      { source: 'additional', surfaceKey: 'steam|h2o|gas', args: [0, 1, 0, 0] }
+    ]
+  });
+
+  assert.equal(evidence.status, 'passed');
+  assert.equal(evidence.primaryStatus, 'drawable');
+  assert.equal(evidence.secondaryStatus, 'has-drawable-secondary');
+  assert.equal(evidence.productStatus, 'all-attached-products-drawable');
+  assert.equal(evidence.productDrawCount, 2);
+  assert.equal(evidence.productDrawableDrawCount, 2);
+  assert.equal(evidence.aggregateIndirectVertexCount, 21);
+  assert.equal(evidence.aggregateIndirectTriangleCount, 7);
+  assert.equal(evidence.submittedVertexInstanceCount, 24);
+  assert.equal(evidence.submittedTriangleInstanceCount, 8);
+  assert.equal(evidence.queueSubmitCount, 1);
+  assert.equal(evidence.mapAsyncCount, 1);
+});
+
+test('native indirect evidence never substitutes a secondary draw for a missing primary', () => {
+  const evidence = summarizeNativeSurfaceIndirectArgsReadback({
+    status: 'ready',
+    draws: [
+      { source: 'additional', surfaceKey: 'naoh|naoh|liquid', args: [6, 1, 0, 0] }
+    ]
+  });
+
+  assert.equal(evidence.status, 'failed');
+  assert.equal(evidence.primaryStatus, 'missing');
+  assert.equal(evidence.productStatus, 'all-attached-products-drawable');
+  assert.equal(evidence.args, null);
+});
+
+test('native indirect evidence distinguishes attached but empty product surfaces', () => {
+  const evidence = summarizeNativeSurfaceIndirectArgsReadback({
+    status: 'ready',
+    draws: [
+      { source: 'primary', surfaceKey: 'h2o|h2o|liquid', args: [12, 1, 0, 0] },
+      { source: 'additional', surfaceKey: 'naoh|naoh|liquid', args: [0, 1, 0, 0] },
+      { source: 'additional', surfaceKey: 'h2|h2|gas', args: [0, 0, 0, 0] }
+    ]
+  });
+
+  assert.equal(evidence.status, 'passed');
+  assert.equal(evidence.secondaryStatus, 'all-empty');
+  assert.equal(evidence.productStatus, 'all-attached-products-empty');
+  assert.equal(evidence.productDrawableDrawCount, 0);
+  assert.equal(evidence.submittedVertexInstanceCount, 12);
+});
+
+test('native indirect evidence reports missing expected products and every primary row', () => {
+  const evidence = summarizeNativeSurfaceIndirectArgsReadback({
+    status: 'ready',
+    draws: [
+      { source: 'primary', surfaceKey: 'h2o:empty', args: [0, 1, 0, 0] },
+      { source: 'primary', surfaceKey: 'h2o:drawable', args: [9, 1, 0, 0] },
+      { source: 'additional', surfaceKey: 'naoh|naoh|liquid', args: [6, 1, 0, 0] }
+    ]
+  }, {
+    expectedProductMaterials: ['NaOH', 'H2']
+  });
+
+  assert.equal(evidence.status, 'passed');
+  assert.equal(evidence.primaryStatus, 'partial-primary-drawable');
+  assert.equal(evidence.primaryDrawCount, 2);
+  assert.equal(evidence.primaryDrawableDrawCount, 1);
+  assert.deepEqual(evidence.args, [9, 1, 0, 0]);
+  assert.equal(evidence.productStatus, 'some-expected-products-missing');
+  assert.deepEqual(evidence.expectedProductMaterials, ['naoh', 'h2']);
+  assert.deepEqual(evidence.attachedProductMaterials, ['naoh']);
+  assert.deepEqual(evidence.missingExpectedProductMaterials, ['h2']);
+});
+
+test('native product capture draw plan isolates exact product surfaces without mutating draw state', () => {
+  const primaryDraws = [{ surfaceIndex: 0 }, { surfaceIndex: 1 }];
+  const naoh = { surfaceKey: 'product|naoh|liquid' };
+  const h2 = { surfaceKey: 'product|h2|gas' };
+  const water = { surfaceKey: 'generic|h2o|liquid' };
+  const additionalSurfaceDraws = [water, naoh, h2];
+  const plan = resolveSphNativeSurfaceDiagnosticDrawPlan({
+    drawOrder: primaryDraws,
+    additionalSurfaceDraws,
+    filter: {
+      enabled: true,
+      token: 'capture-1',
+      filterAdditionalSurfaceDraws: true,
+      additionalSurfaceKeys: [naoh.surfaceKey, h2.surfaceKey],
+      suppressPrimarySurfaceDraws: true,
+      suppressBackgroundImage: true,
+      suppressBoxWireframe: true,
+      suppressSchroederProxyDraws: true
+    }
+  });
+
+  assert.equal(plan.active, true);
+  assert.equal(plan.token, 'capture-1');
+  assert.deepEqual(plan.drawOrder, []);
+  assert.deepEqual(plan.additionalSurfaceDraws, [naoh, h2]);
+  assert.equal(plan.suppressBackgroundImage, true);
+  assert.equal(plan.suppressBoxWireframe, true);
+  assert.equal(plan.suppressSchroederProxyDraws, true);
+  assert.deepEqual(primaryDraws, [{ surfaceIndex: 0 }, { surfaceIndex: 1 }]);
+  assert.deepEqual(additionalSurfaceDraws, [water, naoh, h2]);
+
+  const inactivePlan = resolveSphNativeSurfaceDiagnosticDrawPlan({
+    drawOrder: primaryDraws,
+    additionalSurfaceDraws,
+    filter: null
+  });
+  assert.equal(inactivePlan.active, false);
+  assert.equal(inactivePlan.drawOrder, primaryDraws);
+  assert.equal(inactivePlan.additionalSurfaceDraws, additionalSurfaceDraws);
+  assert.equal(inactivePlan.suppressBackgroundImage, false);
+  assert.equal(inactivePlan.suppressBoxWireframe, false);
+  assert.equal(inactivePlan.suppressSchroederProxyDraws, false);
+});
+
+test('native product draw-filter probe uses identity-owned cleanup in a finally path', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(probeSource, /ULG_PROBE_CAPTURE_PRODUCT_SURFACES_ONLY/);
+  assert.match(
+    probeSource,
+    /bridge\.__ulgProbeNativeSurfaceDrawFilter = filter[\s\S]*?const session = \{ bridge, filter, token: expectedToken \}/
+  );
+  assert.match(
+    probeSource,
+    /overlay\.__ulgProbeNativeProductDrawFilterSession[\s\S]*?native-product-draw-filter-busy/
+  );
+  assert.match(
+    probeSource,
+    /finally \{[\s\S]*?session\.token !== expectedToken[\s\S]*?installedBridge\.__ulgProbeNativeSurfaceDrawFilter === session\.filter[\s\S]*?delete installedBridge\.__ulgProbeNativeSurfaceDrawFilter/
+  );
+  assert.match(probeSource, /refresh\?\.surfaceOverlayRendered === true/);
+  assert.match(probeSource, /capture-filter-continuity-proved/);
+  assert.match(probeSource, /post-capture-filter-continuity-proved/);
+  assert.match(probeSource, /frameCanvasSelectionProved: productFrameCanvasProved/);
+  assert.match(probeSource, /all-expected-products-drawable/);
+  assert.match(probeSource, /isolated-product-visibility-evidence-proved/);
+  assert.doesNotMatch(probeSource, /drawState\.surfaceCount = 0/);
+  assert.doesNotMatch(probeSource, /drawState\.additionalSurfaceDraws = productDraws/);
+  assert.match(probeSource, /suppressedPrimarySurfaceDraws: true/);
+  assert.match(probeSource, /suppressedNonProductAdditionalSurfaceDraws: true/);
+  assert.match(probeSource, /suppressedBoxWireframe: true/);
+  assert.match(probeSource, /suppressedSchroederProxyDraws: true/);
 });
 
 test('time-zero provenance rejects missing, empty, and non-finite metadata', () => {

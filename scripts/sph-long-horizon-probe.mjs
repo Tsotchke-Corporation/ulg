@@ -7,6 +7,9 @@ import {
   nativeSurfaceVisualIntervalExtractionEnabled
 } from '../src/visualization/nativeSurfaceResourceLifecycle.js';
 import { reactionLedgerEventCount } from './sph-probe-reaction-evidence.mjs';
+import {
+  summarizeNativeSurfaceIndirectArgsReadback
+} from './sph-native-indirect-evidence.mjs';
 
 const DEFAULT_URL = '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0';
 const DEFAULT_WALL_TEMPERATURE_K = 283.15;
@@ -1344,6 +1347,7 @@ async function runBrowserProbe({
   nativeSurfaceValidationWaitMs = 0,
   captureFrames,
   visualIntervalCaptureRequested = captureFrames,
+  captureProductSurfacesOnly = false,
   captureFrameEvery,
   captureFrameMax,
   initialResidentWaitMs
@@ -5305,54 +5309,196 @@ async function runBrowserProbe({
               const readNativeIndirectArgs = async () => {
                 const device = renderBridge?.device || null;
                 const drawState = renderBridge?.drawState || null;
-                const indirectBuffer = drawState?.drawIndirectRowsBuffer || surfaceDraw?.drawIndirectRowsBuffer || null;
-                const byteLength = 4 * Uint32Array.BYTES_PER_ELEMENT;
-                if (!device?.createBuffer || !device?.createCommandEncoder || !device.queue?.submit || !indirectBuffer) {
+                const primaryIndirectBuffer =
+                  drawState?.drawIndirectRowsBuffer || surfaceDraw?.drawIndirectRowsBuffer || null;
+                const indirectStrideBytes = Math.max(
+                  4 * Uint32Array.BYTES_PER_ELEMENT,
+                  Math.round(Number(drawState?.indirectStrideBytes) || 0)
+                );
+                const primarySurfaces = Array.isArray(drawState?.surfaces)
+                  ? drawState.surfaces
+                  : (Array.isArray(surfaceDraw?.surfaceDrawSurfaces)
+                      ? surfaceDraw.surfaceDrawSurfaces
+                      : []);
+                const primaryDrawOrder = Array.isArray(drawState?.drawOrder) && drawState.drawOrder.length
+                  ? drawState.drawOrder
+                  : (primaryIndirectBuffer
+                      ? (primarySurfaces.length > 0
+                          ? primarySurfaces.map((surface, surfaceIndex) => ({
+                              surfaceIndex: surface?.surfaceIndex ?? surfaceIndex,
+                              indirectOffsetBytes: surface?.indirectOffsetBytes,
+                              indirectRowIndex: surface?.indirectRowIndex,
+                              renderOrder: surface?.renderOrder ?? 0,
+                              transparencyClassId: surface?.transparencyClassId ?? 0,
+                              depthWriteFlag: surface?.depthWriteFlag ?? 1,
+                              renderLayer: surface?.renderLayer ?? null
+                            }))
+                          : [{ surfaceIndex: 0, indirectOffsetBytes: 0 }])
+                      : []);
+                const primaryEntries = primaryIndirectBuffer
+                  ? primaryDrawOrder.map((draw, drawIndex) => {
+                      const surfaceIndex = Math.max(
+                        0,
+                        Math.round(Number(draw?.surfaceIndex ?? drawIndex) || 0)
+                      );
+                      const surface = primarySurfaces.find((candidate, surfaceArrayIndex) => (
+                        Math.max(
+                          0,
+                          Math.round(Number(candidate?.surfaceIndex ?? surfaceArrayIndex) || 0)
+                        ) === surfaceIndex
+                      )) || primarySurfaces[drawIndex] || {};
+                      const explicitIndirectOffsetBytes = Number(
+                        draw?.indirectOffsetBytes ?? surface.indirectOffsetBytes
+                      );
+                      const explicitIndirectRowIndex = Number(
+                        draw?.indirectRowIndex ?? surface.indirectRowIndex
+                      );
+                      const indirectOffsetBytes = Number.isFinite(explicitIndirectOffsetBytes)
+                        && explicitIndirectOffsetBytes >= 0
+                        ? Math.round(explicitIndirectOffsetBytes)
+                        : (Number.isFinite(explicitIndirectRowIndex) && explicitIndirectRowIndex >= 0
+                            ? Math.round(explicitIndirectRowIndex) * indirectStrideBytes
+                            : surfaceIndex * indirectStrideBytes);
+                      return {
+                        source: 'primary',
+                        surfaceKey: surface.surfaceKey ?? `surface:${surfaceIndex}`,
+                        surfaceIndex,
+                        renderOrder: Number(draw?.renderOrder ?? surface.renderOrder ?? 0),
+                        transparencyClassId: Number(
+                          draw?.transparencyClassId ?? surface.transparencyClassId ?? 0
+                        ),
+                        depthWriteFlag: Number(draw?.depthWriteFlag ?? surface.depthWriteFlag ?? 1),
+                        renderLayer: draw?.renderLayer ?? surface.renderLayer ?? null,
+                        indirectBuffer: primaryIndirectBuffer,
+                        indirectOffsetBytes
+                      };
+                    })
+                  : [];
+                const additionalEntries = (Array.isArray(drawState?.additionalSurfaceDraws)
+                  ? drawState.additionalSurfaceDraws
+                  : [])
+                  .filter((draw) => draw?.drawIndirectRowsBuffer)
+                  .map((draw, drawIndex) => ({
+                    source: 'additional',
+                    surfaceKey: draw.surfaceKey ?? `additional-surface:${drawIndex}`,
+                    surfaceIndex: Number.isFinite(Number(draw.surfaceIndex))
+                      ? Math.max(0, Math.round(Number(draw.surfaceIndex)))
+                      : null,
+                    renderOrder: Number(draw.renderOrder ?? 0),
+                    transparencyClassId: Number(draw.transparencyClassId ?? 0),
+                    depthWriteFlag: Number(draw.depthWriteFlag ?? 1),
+                    renderLayer: draw.renderLayer ?? null,
+                    indirectBuffer: draw.drawIndirectRowsBuffer,
+                    indirectOffsetBytes: 0
+                  }));
+                const entries = [...primaryEntries, ...additionalEntries];
+                const rowByteLength = 4 * Uint32Array.BYTES_PER_ELEMENT;
+                const byteLength = entries.length * rowByteLength;
+                if (
+                  !device?.createBuffer
+                  || !device?.createCommandEncoder
+                  || !device.queue?.submit
+                  || entries.length === 0
+                ) {
                   return {
-                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-validation.v0',
+                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-readback.v0',
                     status: 'not-run',
-                    reason: 'native bridge indirect GPUBuffer or device queue was unavailable',
-                    args: null
+                    reason: 'native bridge indirect GPUBuffer set or device queue was unavailable',
+                    draws: []
+                  };
+                }
+                const invalidEntry = entries.find((entry) => {
+                  const offset = Number(entry.indirectOffsetBytes);
+                  const bufferSize = Number(entry.indirectBuffer?.size);
+                  return !Number.isInteger(offset)
+                    || offset < 0
+                    || offset % 4 !== 0
+                    || (Number.isFinite(bufferSize) && offset + rowByteLength > bufferSize);
+                });
+                if (invalidEntry) {
+                  return {
+                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-readback.v0',
+                    status: 'error',
+                    reason: `invalid indirect row bounds for ${invalidEntry.surfaceKey}`,
+                    draws: []
                   };
                 }
                 const usage = globalThis.GPUBufferUsage || {};
                 const mapMode = globalThis.GPUMapMode || {};
                 let readback = null;
+                let mapped = false;
                 try {
                   readback = device.createBuffer({
-                    label: 'ulg-sph-probe-native-surface-indirect-args-readback',
+                    label: 'ulg-sph-probe-native-surface-indirect-args-batch-readback',
                     size: byteLength,
                     usage: (usage.MAP_READ ?? 1) | (usage.COPY_DST ?? 8)
                   });
                   const encoder = device.createCommandEncoder({
-                    label: 'ulg-sph-probe-native-surface-indirect-args-readback'
+                    label: 'ulg-sph-probe-native-surface-indirect-args-batch-readback'
                   });
-                  encoder.copyBufferToBuffer(indirectBuffer, 0, readback, 0, byteLength);
+                  entries.forEach((entry, entryIndex) => {
+                    encoder.copyBufferToBuffer(
+                      entry.indirectBuffer,
+                      entry.indirectOffsetBytes,
+                      readback,
+                      entryIndex * rowByteLength,
+                      rowByteLength
+                    );
+                  });
                   device.queue.submit([encoder.finish()]);
                   await Promise.resolve(device.queue.onSubmittedWorkDone?.() ?? undefined);
                   await readback.mapAsync(mapMode.READ ?? 1, 0, byteLength);
-                  const args = Array.from(new Uint32Array(readback.getMappedRange(0, byteLength)).slice(0, 4));
+                  mapped = true;
+                  const packedArgs = new Uint32Array(readback.getMappedRange(0, byteLength));
+                  const draws = entries.map((entry, entryIndex) => {
+                    const args = Array.from(
+                      packedArgs.slice(entryIndex * 4, entryIndex * 4 + 4)
+                    );
+                    const vertexCount = args[0] || 0;
+                    const instanceCount = args[1] || 0;
+                    const pipelineKey = entry.renderLayer === 'refractive-surface'
+                      || entry.transparencyClassId === 2
+                      ? 'refractive-depth-write'
+                      : 'opaque-depth-write';
+                    return {
+                      source: entry.source,
+                      surfaceKey: entry.surfaceKey,
+                      surfaceIndex: entry.surfaceIndex,
+                      pipelineKey,
+                      renderOrder: entry.renderOrder,
+                      transparencyClassId: entry.transparencyClassId,
+                      depthWriteFlag: entry.depthWriteFlag,
+                      indirectOffsetBytes: entry.indirectOffsetBytes,
+                      args,
+                      vertexCount,
+                      triangleCount: Math.floor(vertexCount / 3),
+                      instanceCount,
+                      firstVertex: args[2] || 0,
+                      firstInstance: args[3] || 0,
+                      drawable: vertexCount > 0 && instanceCount > 0
+                    };
+                  });
                   readback.unmap();
+                  mapped = false;
                   readback.destroy?.();
+                  readback = null;
                   return {
-                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-validation.v0',
-                    status: args[0] > 0 && args[1] > 0 ? 'passed' : 'failed',
-                    reason: args[0] > 0 && args[1] > 0
-                      ? `native bridge indirect args are drawable: vertexCount=${args[0]} instanceCount=${args[1]}`
-                      : `native bridge indirect args are not drawable: vertexCount=${args[0]} instanceCount=${args[1]}`,
-                    args,
-                    vertexCount: args[0],
-                    instanceCount: args[1],
-                    firstVertex: args[2],
-                    firstInstance: args[3]
+                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-readback.v0',
+                    status: 'ready',
+                    reason: null,
+                    readbackByteLength: byteLength,
+                    queueSubmitCount: 1,
+                    mapAsyncCount: 1,
+                    draws
                   };
                 } catch (error) {
+                  if (mapped) readback?.unmap?.();
                   readback?.destroy?.();
                   return {
-                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-validation.v0',
+                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-readback.v0',
                     status: 'error',
                     reason: error instanceof Error ? error.message : String(error),
-                    args: null
+                    draws: []
                   };
                 }
               };
@@ -5486,6 +5632,15 @@ async function runBrowserProbe({
               nativeIndirectArgsValidation: null,
               nativeSurfaceValidation: null
             }));
+            publishResult.nativeIndirectArgsValidation =
+              summarizeNativeSurfaceIndirectArgsReadback(
+                publishResult.nativeIndirectArgsValidation,
+                {
+                  expectedProductMaterials: captureProductSurfacesOnly
+                    ? ['naoh', 'h2']
+                    : []
+                }
+              );
             timeline.nativeSurfaceDrawIndirectArgsValidation =
               publishResult.nativeIndirectArgsValidation || null;
             timeline.nativeSurfaceBrowserFrameValidation = {
@@ -5538,6 +5693,386 @@ async function runBrowserProbe({
                 browserFrameValidation.source;
               timeline.visualFrameCapture.browserFramePixelValidationPublishedStatus =
                 publishResult.publishStatus?.status ?? null;
+            }
+            if (captureProductSurfacesOnly) {
+              const productCaptureToken = [
+                'sph-probe-native-product-draw-filter',
+                Date.now(),
+                Math.random().toString(16).slice(2)
+              ].join(':');
+              const productOnlySetup = await page.evaluate((expectedToken) => {
+                const overlay = document.querySelector('#sph-phase-overlay');
+                const sceneApi = overlay?.__sphScene || null;
+                const bridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+                const drawState = bridge?.drawState || null;
+                const additionalDraws = Array.isArray(drawState?.additionalSurfaceDraws)
+                  ? drawState.additionalSurfaceDraws
+                  : [];
+                const productDraws = additionalDraws.filter((draw) => {
+                  const parts = String(draw?.surfaceKey || '').split('|');
+                  const material = String(parts[1] || parts[0] || '').trim().toLowerCase();
+                  return material === 'naoh' || material === 'h2';
+                });
+                if (!sceneApi?.refreshViewportAndOverlay || !drawState || productDraws.length === 0) {
+                  return {
+                    schema: 'peercompute.ulg.sph-native-product-surface-capture.v1',
+                    status: 'not-ready',
+                    reason: !drawState
+                      ? 'native bridge draw state was unavailable'
+                      : 'no retained NaOH or H2 secondary draws were available',
+                    surfaceKeys: []
+                  };
+                }
+                if (
+                  overlay.__ulgProbeNativeProductDrawFilterSession
+                  || bridge.__ulgProbeNativeSurfaceDrawFilter
+                ) {
+                  return {
+                    schema: 'peercompute.ulg.sph-native-product-surface-capture.v1',
+                    status: 'native-product-draw-filter-busy',
+                    reason: 'another native diagnostic draw filter owns the active bridge',
+                    token: expectedToken,
+                    surfaceKeys: []
+                  };
+                }
+                const filter = {
+                  enabled: true,
+                  token: expectedToken,
+                  filterAdditionalSurfaceDraws: true,
+                  additionalSurfaceKeys: productDraws.map((draw) => String(draw.surfaceKey || '')),
+                  suppressPrimarySurfaceDraws: true,
+                  suppressBackgroundImage: true,
+                  suppressBoxWireframe: true,
+                  suppressSchroederProxyDraws: true
+                };
+                bridge.__ulgProbeNativeSurfaceDrawFilter = filter;
+                const session = { bridge, filter, token: expectedToken };
+                overlay.__ulgProbeNativeProductDrawFilterSession = session;
+                const refresh = sceneApi.refreshViewportAndOverlay({
+                  reason: 'sph-probe-native-product-draw-filter'
+                });
+                const filterApplied = Boolean(
+                  sceneApi.getSphResidentSurfaceDrawRenderBridge?.() === bridge
+                  && bridge.__ulgProbeNativeSurfaceDrawFilter === filter
+                  && bridge.lastNativeSurfaceDiagnosticDrawFilterActive === true
+                  && bridge.lastNativeSurfaceDiagnosticDrawFilterToken === expectedToken
+                  && bridge.lastNativeSurfaceDiagnosticSelectedPrimaryDrawCount === 0
+                  && bridge.lastNativeSurfaceDiagnosticSelectedAdditionalDrawCount
+                    === productDraws.length
+                  && JSON.stringify(
+                    [...(bridge.lastNativeSurfaceDiagnosticSelectedAdditionalSurfaceKeys || [])]
+                      .sort()
+                  ) === JSON.stringify(
+                    productDraws.map((draw) => draw.surfaceKey ?? null).sort()
+                  )
+                  && bridge.lastNativeSurfaceDiagnosticBackgroundSuppressed === true
+                  && bridge.lastNativeSurfaceDiagnosticBoxWireframeSuppressed === true
+                  && bridge.lastNativeSurfaceDiagnosticSchroederProxySuppressed === true
+                );
+                const overlayRendered = Boolean(
+                  refresh?.surfaceOverlayRendered === true
+                  && refresh?.surfaceOverlayLastRenderStatus
+                    === 'native-webgpu-surface-consumer-rendered'
+                );
+                return {
+                  schema: 'peercompute.ulg.sph-native-product-surface-capture.v1',
+                  status: overlayRendered && filterApplied
+                    ? 'native-product-draw-filter-rendered'
+                    : 'native-product-draw-filter-render-failed',
+                  reason: overlayRendered && filterApplied
+                    ? null
+                    : `overlayRendered=${overlayRendered}; filterApplied=${filterApplied}`,
+                  token: expectedToken,
+                  surfaceKeys: productDraws.map((draw) => draw.surfaceKey ?? null),
+                  refreshStatus: refresh?.status ?? null,
+                  refreshSurfaceOverlayRendered: refresh?.surfaceOverlayRendered ?? null,
+                  refreshSurfaceOverlayLastRenderStatus:
+                    refresh?.surfaceOverlayLastRenderStatus ?? null,
+                  filterApplied,
+                  selectedPrimaryDrawCount:
+                    bridge.lastNativeSurfaceDiagnosticSelectedPrimaryDrawCount ?? null,
+                  selectedAdditionalDrawCount:
+                    bridge.lastNativeSurfaceDiagnosticSelectedAdditionalDrawCount ?? null,
+                  backgroundImageSuppressed:
+                    bridge.lastNativeSurfaceDiagnosticBackgroundSuppressed ?? null,
+                  boxWireframeSuppressed:
+                    bridge.lastNativeSurfaceDiagnosticBoxWireframeSuppressed ?? null,
+                  schroederProxySuppressed:
+                    bridge.lastNativeSurfaceDiagnosticSchroederProxySuppressed ?? null
+                };
+              }, productCaptureToken).catch((error) => ({
+                schema: 'peercompute.ulg.sph-native-product-surface-capture.v1',
+                status: 'setup-error',
+                reason: error instanceof Error ? error.message : String(error),
+                token: productCaptureToken,
+                surfaceKeys: []
+              }));
+              let productOnlyFrame = null;
+              let productOnlyCaptureError = null;
+              let productOnlyRestore = {
+                status: 'not-needed',
+                reason: 'native product draw filter was not installed'
+              };
+              let productOnlyCaptureContinuity = null;
+              let productOnlyPostCaptureContinuity = null;
+              try {
+                if (productOnlySetup.status === 'native-product-draw-filter-rendered') {
+                  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+                  productOnlyCaptureContinuity = await page.evaluate((expectedToken) => {
+                    const overlay = document.querySelector('#sph-phase-overlay');
+                    const sceneApi = overlay?.__sphScene || null;
+                    const currentBridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+                    const session = overlay?.__ulgProbeNativeProductDrawFilterSession || null;
+                    const selectedKeys = [
+                      ...(currentBridge?.lastNativeSurfaceDiagnosticSelectedAdditionalSurfaceKeys || [])
+                    ].sort();
+                    const expectedKeys = [
+                      ...(session?.filter?.additionalSurfaceKeys || [])
+                    ].sort();
+                    const ready = Boolean(
+                      session?.token === expectedToken
+                      && session.bridge === currentBridge
+                      && currentBridge?.__ulgProbeNativeSurfaceDrawFilter === session.filter
+                      && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterActive === true
+                      && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterToken === expectedToken
+                      && currentBridge?.lastNativeSurfaceDiagnosticSelectedPrimaryDrawCount === 0
+                      && JSON.stringify(selectedKeys) === JSON.stringify(expectedKeys)
+                      && currentBridge?.lastNativeSurfaceDiagnosticBackgroundSuppressed === true
+                      && currentBridge?.lastNativeSurfaceDiagnosticBoxWireframeSuppressed === true
+                      && currentBridge?.lastNativeSurfaceDiagnosticSchroederProxySuppressed === true
+                      && currentBridge?.lastRenderStatus
+                        === 'native-webgpu-surface-consumer-rendered'
+                    );
+                    return {
+                      status: ready ? 'capture-filter-continuity-proved' : 'capture-filter-continuity-lost',
+                      reason: ready
+                        ? null
+                        : 'active bridge or installed native product draw filter changed before capture',
+                      activeBridgeMatchesInstalledBridge: session?.bridge === currentBridge,
+                      installedFilterStillOwned:
+                        currentBridge?.__ulgProbeNativeSurfaceDrawFilter === session?.filter,
+                      selectedSurfaceKeys: selectedKeys,
+                      expectedSurfaceKeys: expectedKeys,
+                      lastRenderStatus: currentBridge?.lastRenderStatus ?? null,
+                      lastFilterToken:
+                        currentBridge?.lastNativeSurfaceDiagnosticDrawFilterToken ?? null
+                    };
+                  }, productOnlySetup.token);
+                  if (productOnlyCaptureContinuity.status !== 'capture-filter-continuity-proved') {
+                    throw new Error(productOnlyCaptureContinuity.reason);
+                  }
+                  productOnlyFrame = await capturePlaywrightCanvasCenterFrame({
+                    page,
+                    batchIndex: timeline.batchCount ?? batches,
+                    phase: 'post-probe-native-product-draw-filter',
+                    sampleIndex: Array.isArray(timeline.metrics)
+                      ? Math.max(0, timeline.metrics.length - 1)
+                      : null
+                  });
+                  productOnlyFrame.diagnosticOnly = true;
+                  productOnlyFrame.captureMode = 'isolated-native-product-draw-filter';
+                  productOnlyFrame.productSurfaceKeys = [...productOnlySetup.surfaceKeys];
+                  if (productOnlyFrame.validationPng?.status === 'ready') {
+                    productOnlyFrame.png = productOnlyFrame.validationPng;
+                    productOnlyFrame.blankFrame = !productOnlyFrame.validationPng.hasVisiblePixels;
+                  }
+                  timeline.visualFrames.push(productOnlyFrame);
+                  productOnlyPostCaptureContinuity = await page.evaluate((expectedToken) => {
+                    const overlay = document.querySelector('#sph-phase-overlay');
+                    const sceneApi = overlay?.__sphScene || null;
+                    const currentBridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+                    const session = overlay?.__ulgProbeNativeProductDrawFilterSession || null;
+                    const selectedKeys = [
+                      ...(currentBridge?.lastNativeSurfaceDiagnosticSelectedAdditionalSurfaceKeys || [])
+                    ].sort();
+                    const expectedKeys = [
+                      ...(session?.filter?.additionalSurfaceKeys || [])
+                    ].sort();
+                    const ready = Boolean(
+                      session?.token === expectedToken
+                      && session.bridge === currentBridge
+                      && currentBridge?.__ulgProbeNativeSurfaceDrawFilter === session.filter
+                      && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterActive === true
+                      && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterToken === expectedToken
+                      && currentBridge?.lastNativeSurfaceDiagnosticSelectedPrimaryDrawCount === 0
+                      && JSON.stringify(selectedKeys) === JSON.stringify(expectedKeys)
+                      && currentBridge?.lastNativeSurfaceDiagnosticBackgroundSuppressed === true
+                      && currentBridge?.lastNativeSurfaceDiagnosticBoxWireframeSuppressed === true
+                      && currentBridge?.lastNativeSurfaceDiagnosticSchroederProxySuppressed === true
+                      && currentBridge?.lastRenderStatus
+                        === 'native-webgpu-surface-consumer-rendered'
+                    );
+                    return {
+                      status: ready
+                        ? 'post-capture-filter-continuity-proved'
+                        : 'post-capture-filter-continuity-lost',
+                      reason: ready
+                        ? null
+                        : 'active bridge or exact native product draw filter changed during capture',
+                      activeBridgeMatchesInstalledBridge: session?.bridge === currentBridge,
+                      installedFilterStillOwned:
+                        currentBridge?.__ulgProbeNativeSurfaceDrawFilter === session?.filter,
+                      selectedSurfaceKeys: selectedKeys,
+                      expectedSurfaceKeys: expectedKeys,
+                      lastRenderStatus: currentBridge?.lastRenderStatus ?? null,
+                      lastFilterToken:
+                        currentBridge?.lastNativeSurfaceDiagnosticDrawFilterToken ?? null
+                    };
+                  }, productCaptureToken);
+                }
+              } catch (error) {
+                productOnlyCaptureError = error instanceof Error ? error.message : String(error);
+              } finally {
+                productOnlyRestore = await page.evaluate((expectedToken) => {
+                  const overlay = document.querySelector('#sph-phase-overlay');
+                  const sceneApi = overlay?.__sphScene || null;
+                  const currentBridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+                  const session = overlay?.__ulgProbeNativeProductDrawFilterSession || null;
+                  if (!session?.bridge || !session?.filter) {
+                    return {
+                      status: 'not-needed',
+                      reason: 'native product draw filter was not installed'
+                    };
+                  }
+                  if (session.token !== expectedToken) {
+                    return {
+                      status: 'restore-not-owned',
+                      reason: 'active native product draw filter belongs to another capture',
+                      activeBridgeMatchesInstalledBridge:
+                        currentBridge === session.bridge
+                    };
+                  }
+                  const installedBridge = session.bridge;
+                  const filterStillOwned =
+                    installedBridge.__ulgProbeNativeSurfaceDrawFilter === session.filter
+                    && session.filter.token === expectedToken;
+                  if (filterStillOwned) {
+                    delete installedBridge.__ulgProbeNativeSurfaceDrawFilter;
+                  }
+                  if (overlay.__ulgProbeNativeProductDrawFilterSession === session) {
+                    delete overlay.__ulgProbeNativeProductDrawFilterSession;
+                  }
+                  if (!filterStillOwned) {
+                    return {
+                      status: 'restore-filter-ownership-lost',
+                      reason: 'native product draw filter was replaced before cleanup',
+                      activeBridgeMatchesInstalledBridge: currentBridge === installedBridge
+                    };
+                  }
+                  const refresh = sceneApi?.refreshViewportAndOverlay?.({
+                    reason: 'sph-probe-native-product-draw-filter-restore'
+                  });
+                  const overlayRestored = Boolean(
+                    refresh?.surfaceOverlayRendered === true
+                    && refresh?.surfaceOverlayLastRenderStatus
+                      === 'native-webgpu-surface-consumer-rendered'
+                    && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterActive === false
+                    && currentBridge?.lastNativeSurfaceDiagnosticDrawFilterToken == null
+                  );
+                  return {
+                    status: overlayRestored
+                      ? (currentBridge === installedBridge
+                          ? 'restored'
+                          : 'restored-after-active-bridge-changed')
+                      : 'restore-render-failed',
+                    reason: overlayRestored
+                      ? null
+                      : `overlayRendered=${refresh?.surfaceOverlayRendered === true}; filterCleared=${currentBridge?.lastNativeSurfaceDiagnosticDrawFilterActive === false}`,
+                    refreshStatus: refresh?.status ?? null,
+                    refreshSurfaceOverlayRendered: refresh?.surfaceOverlayRendered ?? null,
+                    refreshSurfaceOverlayLastRenderStatus:
+                      refresh?.surfaceOverlayLastRenderStatus ?? null,
+                    activeBridgeMatchesInstalledBridge: currentBridge === installedBridge
+                  };
+                }, productCaptureToken).catch((error) => ({
+                  status: 'restore-error',
+                  reason: error instanceof Error ? error.message : String(error)
+                }));
+              }
+              const indirectProductEvidence =
+                timeline.nativeSurfaceDrawIndirectArgsValidation || null;
+              const productGeometryProved = Boolean(
+                indirectProductEvidence?.productStatus === 'all-expected-products-drawable'
+                && Number(indirectProductEvidence?.productDrawableDrawCount) >= 2
+                && indirectProductEvidence?.productDrawableDrawCount
+                  === indirectProductEvidence?.productDrawCount
+                && Array.isArray(indirectProductEvidence?.missingExpectedProductMaterials)
+                && indirectProductEvidence.missingExpectedProductMaterials.length === 0
+              );
+              const productPixelsProved = Boolean(
+                productOnlyFrame?.status === 'captured'
+                && productOnlyFrame?.png?.status === 'ready'
+                && productOnlyFrame.png.hasSurfaceLikeVariation === true
+                && Number(productOnlyFrame.png.rgbChannelSpan) > 0
+                && Number(productOnlyFrame.png.distinctRgbColorCount) > 1
+              );
+              const productFrameCanvasProved = Boolean(
+                productOnlyFrame?.canvasSelection?.sameAsRenderBridgeCanvas === true
+                && productOnlyFrame?.canvasSelection?.sameAsNativeConsumerCanvas === true
+                && productOnlyFrame?.canvasSelection?.rendererBridge
+                  === 'native-webgpu-surface-consumer'
+              );
+              const captureProtocolProved = Boolean(
+                productOnlySetup.status === 'native-product-draw-filter-rendered'
+                && productOnlyCaptureContinuity?.status === 'capture-filter-continuity-proved'
+                && productOnlyPostCaptureContinuity?.status
+                  === 'post-capture-filter-continuity-proved'
+                && productFrameCanvasProved
+                && productOnlyRestore.status === 'restored'
+                && productOnlyCaptureError == null
+              );
+              const productVisibilityProved = Boolean(
+                captureProtocolProved
+                && productGeometryProved
+                && productPixelsProved
+              );
+              timeline.nativeProductSurfaceOnlyCapture = {
+                ...productOnlySetup,
+                diagnosticOnly: true,
+                captureMode: 'isolated-native-product-draw-filter',
+                clearBackgroundRetained: true,
+                suppressedPrimarySurfaceDraws: true,
+                suppressedNonProductAdditionalSurfaceDraws: true,
+                suppressedBackgroundImage: true,
+                suppressedBoxWireframe: true,
+                suppressedSchroederProxyDraws: true,
+                indirectProductStatus:
+                  indirectProductEvidence?.productStatus ?? null,
+                indirectProductDrawableDrawCount:
+                  indirectProductEvidence?.productDrawableDrawCount ?? null,
+                indirectProductGeometryStatus: productGeometryProved
+                  ? 'expected-product-geometry-proved'
+                  : 'expected-product-geometry-unproved',
+                captureContinuityStatus: productOnlyCaptureContinuity?.status ?? null,
+                captureContinuityReason: productOnlyCaptureContinuity?.reason ?? null,
+                postCaptureContinuityStatus:
+                  productOnlyPostCaptureContinuity?.status ?? null,
+                postCaptureContinuityReason:
+                  productOnlyPostCaptureContinuity?.reason ?? null,
+                frameCanvasSelectionProved: productFrameCanvasProved,
+                frameStatus: productOnlyFrame?.status ?? null,
+                frameCaptureSource: productOnlyFrame?.captureSource ?? null,
+                frameCaptureError: productOnlyCaptureError,
+                framePng: productOnlyFrame?.png ? {
+                  status: productOnlyFrame.png.status,
+                  width: productOnlyFrame.png.width,
+                  height: productOnlyFrame.png.height,
+                  rgbChannelSpan: productOnlyFrame.png.rgbChannelSpan,
+                  distinctRgbColorCount: productOnlyFrame.png.distinctRgbColorCount,
+                  hasSurfaceLikeVariation: productOnlyFrame.png.hasSurfaceLikeVariation
+                } : null,
+                restoreStatus: productOnlyRestore.status,
+                restoreReason: productOnlyRestore.reason ?? null,
+                captureProtocolStatus: captureProtocolProved
+                  ? 'isolated-product-capture-protocol-proved'
+                  : 'isolated-product-capture-protocol-unproved',
+                productPixelStatus: productPixelsProved
+                  ? 'isolated-product-pixels-proved'
+                  : 'isolated-product-pixels-unproved',
+                evidenceStatus: productVisibilityProved
+                  ? 'isolated-product-visibility-evidence-proved'
+                  : 'isolated-product-visibility-evidence-unproved'
+              };
             }
           }
           const screenshot = await page.screenshot({ type: 'png', fullPage: false });
@@ -9214,6 +9749,8 @@ async function main() {
       visualIntervalCaptureRequested
       || nativeSurfaceFrameValidationRequired
     );
+  const captureProductSurfacesOnly = probeMode !== 'direct-resident'
+    && booleanEnv(process.env.ULG_PROBE_CAPTURE_PRODUCT_SURFACES_ONLY, false);
   const captureFrameEvery = positiveInteger(process.env.ULG_PROBE_FRAME_EVERY, 1);
   const captureFrameMax = positiveInteger(process.env.ULG_PROBE_FRAME_MAX, 64);
   const initialResidentWaitMs = positiveInteger(
@@ -9353,8 +9890,9 @@ async function main() {
       materialInterfaceCandidateReadbackMode,
       nativeSurfaceDebugMode,
 	        nativeSurfaceValidationWaitMs,
-	        captureFrames,
+        captureFrames,
         visualIntervalCaptureRequested,
+        captureProductSurfacesOnly,
         captureFrameEvery,
         captureFrameMax,
         initialResidentWaitMs
@@ -9365,6 +9903,21 @@ async function main() {
     });
     if (timeline && Array.isArray(timeline.visualFrames)) {
       timeline.visualFrames = visualFrameArtifacts.frames;
+      if (timeline.nativeProductSurfaceOnlyCapture) {
+        const productOnlyFrame = timeline.visualFrames.find(
+          (frame) => frame?.phase === 'post-probe-native-product-draw-filter'
+        ) || null;
+        timeline.nativeProductSurfaceOnlyCapture.frameArtifactPath =
+          productOnlyFrame?.path ?? null;
+        timeline.nativeProductSurfaceOnlyCapture.framePng = productOnlyFrame?.png ? {
+          status: productOnlyFrame.png.status,
+          width: productOnlyFrame.png.width,
+          height: productOnlyFrame.png.height,
+          rgbChannelSpan: productOnlyFrame.png.rgbChannelSpan,
+          distinctRgbColorCount: productOnlyFrame.png.distinctRgbColorCount,
+          hasSurfaceLikeVariation: productOnlyFrame.png.hasSurfaceLikeVariation
+        } : null;
+      }
     }
     if (timeline?.visualFrameCapture) {
       timeline.visualFrameCapture.artifactStatus = visualFrameArtifacts.status;

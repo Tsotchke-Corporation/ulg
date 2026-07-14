@@ -6184,3 +6184,30 @@ Still open:
   gas mechanics.
 - Trace placed/merged/unplaced product mass through the first mechanics refresh
   after reaction placement; sodium remains numerically and visually rejected.
+
+## 2026-07-13 Status Update - Compact Mechanics Evidence Complete
+
+Current state:
+
+- The retained checkpoint now consumes a metadata-coherent state/thermo/
+  mechanics upload triple and performs one fixed-capacity GPU reduction. It
+  reports per-material/per-phase speed, `J`, rest/current/represented volume,
+  and cap-boundary observations while mapping only 7,504 compact bytes.
+- Exact v0 packed schemas and 32/48/128-byte strides are mandatory. Count,
+  capacity, step/time, and available slot metadata fail closed. Initial pairs
+  without shared slots are not mislabeled as a shared generation.
+- Partial mechanics failure no longer suppresses valid evidence from other
+  rows. The sodium gate exposes invalid NaOH and valid cap-hit hydrogen in the
+  same run.
+- Hardened Vulkan water evidence is green and visually nonblank. Hardened
+  sodium evidence is visually nonblank but scientifically rejected with 15
+  invalid NaOH rows, four H2 rows at `J=1000`, and `64.8005 m/s` maximum speed.
+
+Still open:
+
+- Resolve condensed product phase policy before event emission and make
+  placement reject phase-zero, zero-density, or invalid-mechanics events.
+- Run constitutive mechanics refresh after reaction mutation and make that
+  refreshed buffer authoritative for the next upload.
+- Publish placed/merged/unplaced product mass across placement and the first
+  post-reaction mechanics refresh, then rerun the native sodium sequence.

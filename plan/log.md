@@ -41485,3 +41485,37 @@ Validation and review:
   than smooth-water acceptance. A preceding run without the validated
   Vulkan/ANGLE flags failed with an invalid external WebGPU instance and
   transparent frames; it is a launch-backend control, not accepted evidence.
+
+## 2026-07-13 AKDT - Compact Material/Phase Mechanics Telemetry
+
+- Extended the authoritative retained-GPU checkpoint with per-material and
+  per-phase speed, deformation ratio `J`, rest/current/SS-represented volume,
+  and effective-cap boundary evidence. The fixed reduction maps 7,504 bytes at
+  capacity 64 and maps zero state, thermo, or mechanics particle rows.
+- Hardened paired upload admission around exact buffer-set and packed-source
+  schemas, exact v0 row strides, count/capacity equality, strict numeric
+  step/time metadata, and matching resident slots. Initial upload pairs without
+  slot tokens are described as metadata-coherent rather than falsely called a
+  shared generation.
+- Kept speed evidence independent from mechanics completeness and retained
+  valid per-row `J` evidence when another material row is invalid. This closes
+  the prior all-or-nothing fallback that could hide hydrogen failures behind
+  malformed NaOH mechanics.
+- Fresh native Vulkan water evidence at
+  `/tmp/ulg-ss-spatial-water-mechanics-telemetry-hardened-vulkan/result.json`
+  is green: two coherent checkpoints, complete mechanics, final
+  `maxSpeed=0.156902 m/s`, `J=0.999948..1.000004`, 7,504 mapped bytes per
+  checkpoint, four nonblank frames, and passed browser pixels.
+- Fresh sodium evidence at
+  `/tmp/ulg-ss-spatial-sodium-mechanics-telemetry-hardened-vulkan/result.json`
+  is correctly bad for three independent reasons: 15 invalid NaOH mechanics
+  rows, `maxSpeed=64.8005 m/s`, and `maxJ=1000`. All four H2 rows are valid at
+  the gas boundary; NaOH has positive mass but zero rest/current/represented
+  volume.
+- The resulting source trace identifies a deterministic producer defect:
+  condensed NaOH product terms are packed as phase 0, zero-density/invalid
+  events are still admitted to placement, and reaction mechanics are then
+  mistaken for a constitutive refresh. The next slice will resolve product
+  phases generically, reject invalid placement events, and run a truthful
+  post-reaction mechanics refresh before adding placed/merged/unplaced mass
+  provenance.

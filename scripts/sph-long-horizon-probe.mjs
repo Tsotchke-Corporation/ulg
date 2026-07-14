@@ -2527,18 +2527,6 @@ async function runBrowserProbe({
         }
         return authoritativeGpuCheckpointModulePromise;
       };
-      const uploadHasBuffers = (upload) => Boolean(upload?.stateBuffer && upload?.thermoBuffer);
-      const metadataIsExplicitFiniteZero = (value) => (
-        typeof value === 'number'
-        && Number.isFinite(value)
-        && value === 0
-      );
-      const uploadIsVerifiedTimeZero = (upload) => (
-        uploadHasBuffers(upload)
-        && upload?.status === 'webgpu-uploaded'
-        && metadataIsExplicitFiniteZero(upload?.step)
-        && metadataIsExplicitFiniteZero(upload?.time)
-      );
       const captureAuthoritativeGpuCheckpoint = async ({ batchIndex, phase, sampleIndex }) => {
         const checkpointBase = {
           schema: 'peercompute.ulg.sph-authoritative-gpu-material-phase-checkpoint.v1',
@@ -2592,54 +2580,97 @@ async function runBrowserProbe({
         // relabel it as initial state. At phase=initial accept only the upload
         // created by the initial scene/overlay refresh; later checkpoints use
         // only completed resident-step outputs.
+        const checkpointModule = await loadAuthoritativeGpuCheckpointModule();
         const uploadCandidates = phase === 'initial'
           ? [
-              ['scene-initial-particle-upload', sceneApi.getSphGpuParticleUpload?.()],
-              ['overlay-initial-particle-upload', overlay.__sphGpuParticleUpload]
+              {
+                source: 'scene-initial-particle-upload-pair',
+                sphParticleUpload: sceneApi.getSphGpuParticleUpload?.(),
+                mlsMpmParticleUpload: sceneApi.getMlsMpmGpuParticleUpload?.(),
+                expectedStep: 0,
+                expectedTimeS: 0
+              },
+              {
+                source: 'overlay-initial-particle-upload-pair',
+                sphParticleUpload: overlay.__sphGpuParticleUpload,
+                mlsMpmParticleUpload: overlay.__mlsMpmGpuParticleUpload,
+                expectedStep: 0,
+                expectedTimeS: 0
+              }
             ]
           : [
-              ['resident-steps-next-particle-uploads', currentSteps?.nextParticleUploads?.sphParticleUpload],
-              ['resident-steps-final-step-next-particle-uploads', currentSteps?.finalStep?.nextParticleUploads?.sphParticleUpload],
-              ['resident-step-next-particle-uploads', currentStep?.nextParticleUploads?.sphParticleUpload]
+              {
+                source: 'resident-steps-next-particle-upload-pair',
+                sphParticleUpload: currentSteps?.nextParticleUploads?.sphParticleUpload,
+                mlsMpmParticleUpload: currentSteps?.nextParticleUploads?.mlsMpmParticleUpload,
+                expectedStep: currentSteps?.nextSphParticleState?.step,
+                expectedTimeS: currentSteps?.nextSphParticleState?.time,
+                expectedParticleCount: currentSteps?.nextParticleCount
+              },
+              {
+                source: 'resident-steps-final-step-next-particle-upload-pair',
+                sphParticleUpload: currentSteps?.finalStep?.nextParticleUploads?.sphParticleUpload,
+                mlsMpmParticleUpload:
+                  currentSteps?.finalStep?.nextParticleUploads?.mlsMpmParticleUpload,
+                expectedStep: currentSteps?.finalStep?.particlePingPong?.nextStep,
+                expectedTimeS: currentSteps?.finalStep?.particlePingPong?.nextTime,
+                expectedParticleCount: currentSteps?.finalStep?.nextParticleCount
+              },
+              {
+                source: 'resident-step-next-particle-upload-pair',
+                sphParticleUpload: currentStep?.nextParticleUploads?.sphParticleUpload,
+                mlsMpmParticleUpload: currentStep?.nextParticleUploads?.mlsMpmParticleUpload,
+                expectedStep: currentStep?.particlePingPong?.nextStep,
+                expectedTimeS: currentStep?.particlePingPong?.nextTime,
+                expectedParticleCount: currentStep?.nextParticleCount
+              }
             ];
-        const [uploadSource, sphParticleUpload] = uploadCandidates.find(([, upload]) => (
-          phase === 'initial' ? uploadIsVerifiedTimeZero(upload) : uploadHasBuffers(upload)
-        )) || [];
-        if (!sphParticleUpload) {
-          const readyButUnverified = phase === 'initial'
-            ? uploadCandidates.find(([, upload]) => uploadHasBuffers(upload))?.[1]
-            : null;
+        const evaluatedUploadCandidates = uploadCandidates.map((candidate) => ({
+          ...candidate,
+          validation: checkpointModule.validateAuthoritativeGpuUploadPair({
+            sphParticleUpload: candidate.sphParticleUpload,
+            mlsMpmParticleUpload: candidate.mlsMpmParticleUpload,
+            requireTimeZero: phase === 'initial',
+            expectedStep: candidate.expectedStep,
+            expectedTimeS: candidate.expectedTimeS,
+            expectedParticleCount: candidate.expectedParticleCount
+          })
+        }));
+        const selectedUploadPair = evaluatedUploadCandidates.find((candidate) => (
+          candidate.validation.ready
+        ));
+        if (!selectedUploadPair) {
           return {
             ...checkpointBase,
             status: 'unavailable',
-            reason: phase === 'initial' && readyButUnverified
-              ? 'retained upload exists but exact time-zero provenance is not verified'
-              : 'retained resident state and thermo GPUBuffer pair is unavailable',
-            uploadStep: finiteOrNull(Number(readyButUnverified?.step)),
-            uploadTimeS: finiteOrNull(Number(readyButUnverified?.time))
+            reason: 'a metadata-coherent retained state/thermo/mechanics upload pair is unavailable',
+            uploadPairCandidates: evaluatedUploadCandidates.map((candidate) => ({
+              source: candidate.source,
+              status: candidate.validation.status,
+              blockers: [...candidate.validation.blockers],
+              sourceStep: candidate.validation.sourceStep,
+              sourceTimeS: candidate.validation.sourceTimeS
+            }))
           };
         }
 
+        const {
+          source: uploadSource,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          validation: uploadPairValidation
+        } = selectedUploadPair;
         const stateBuffer = sphParticleUpload.stateBuffer;
         const thermoBuffer = sphParticleUpload.thermoBuffer;
-        const stateStrideBytes = Math.max(4, Math.round(Number(sphParticleUpload.stateStrideBytes) || 32));
-        const thermoStrideBytes = Math.max(4, Math.round(Number(sphParticleUpload.thermoStrideBytes) || 48));
+        const mechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
+        const stateStrideBytes = uploadPairValidation.stateStrideBytes;
+        const thermoStrideBytes = uploadPairValidation.thermoStrideBytes;
+        const mechanicsStrideBytes = uploadPairValidation.mechanicsStrideBytes;
         const stateCapacity = Math.floor(Number(stateBuffer.size) / stateStrideBytes);
         const thermoCapacity = Math.floor(Number(thermoBuffer.size) / thermoStrideBytes);
-        const bufferParticleCapacity = Math.min(stateCapacity, thermoCapacity);
-        const requestedParticleCount = Math.round(Number(
-          (phase === 'initial' ? null : currentSteps?.nextParticleCount)
-          ?? (phase === 'initial' ? null : currentStep?.nextParticleCount)
-          ?? sphParticleUpload.authoritativeParticleCount
-          ?? sphParticleUpload.particleCount
-          ?? bufferParticleCapacity
-        ));
-        const particleCount = Math.min(
-          bufferParticleCapacity,
-          Number.isInteger(requestedParticleCount) && requestedParticleCount > 0
-            ? requestedParticleCount
-            : bufferParticleCapacity
-        );
+        const mechanicsCapacity = Math.floor(Number(mechanicsBuffer.size) / mechanicsStrideBytes);
+        const bufferParticleCapacity = Math.min(stateCapacity, thermoCapacity, mechanicsCapacity);
+        const particleCount = uploadPairValidation.particleCount;
         if (!(particleCount > 0)) {
           return {
             ...checkpointBase,
@@ -2669,44 +2700,45 @@ async function runBrowserProbe({
 
         const stateInputByteLength = particleCount * stateStrideBytes;
         const thermoInputByteLength = particleCount * thermoStrideBytes;
+        const mechanicsInputByteLength = particleCount * mechanicsStrideBytes;
         try {
-          const checkpointModule = await loadAuthoritativeGpuCheckpointModule();
           const viewState = overlay.__sphPhaseViewState || null;
           const reduction = await checkpointModule.reduceAuthoritativeGpuMaterialPhaseEvidence({
             device,
             stateBuffer,
             thermoBuffer,
+            mechanicsBuffer,
             particleCount,
             stateStrideBytes,
             thermoStrideBytes,
+            mechanicsStrideBytes,
             materialKeyById: checkpointModule.materialKeyByIdFromSphViewState(viewState),
             label: `ulg-sph-authoritative-checkpoint-${batchIndex}`
           });
           return {
             ...checkpointBase,
             uploadSource,
-            sourceStep: Number.isFinite(Number(sphParticleUpload.step))
-              ? Number(sphParticleUpload.step)
-              : currentStep?.particlePingPong?.nextStep
-                ?? currentSteps?.nextSphParticleState?.step
-                ?? null,
-            sourceTimeS: finiteOrNull(
-              Number.isFinite(Number(sphParticleUpload.time))
-                ? Number(sphParticleUpload.time)
-                : currentStep?.particlePingPong?.nextTime
-                  ?? currentSteps?.nextSphParticleState?.time
-            ),
+            sourceStep: uploadPairValidation.sourceStep,
+            sourceTimeS: uploadPairValidation.sourceTimeS,
+            uploadPairCoherenceStatus: uploadPairValidation.status,
+            uploadPairMetadataCoherent: uploadPairValidation.metadataCoherenceVerified,
+            uploadPairSharedSlotIdentityVerified:
+              uploadPairValidation.sharedSlotIdentityVerified,
+            uploadPairCoherenceLevel: uploadPairValidation.coherenceLevel,
             timeZeroProvenanceVerified: phase === 'initial'
-              ? uploadIsVerifiedTimeZero(sphParticleUpload)
+              ? uploadPairValidation.timeZeroProvenanceVerified
               : null,
             sourceBufferLabels: {
               state: stateBuffer.label || null,
-              thermo: thermoBuffer.label || null
+              thermo: thermoBuffer.label || null,
+              mechanics: mechanicsBuffer.label || null
             },
             retainedInput: {
               stateByteLength: stateInputByteLength,
               thermoByteLength: thermoInputByteLength,
-              totalByteLength: stateInputByteLength + thermoInputByteLength,
+              mechanicsByteLength: mechanicsInputByteLength,
+              totalByteLength:
+                stateInputByteLength + thermoInputByteLength + mechanicsInputByteLength,
               mappedByteLength: 0
             },
             ...reduction
@@ -2721,7 +2753,9 @@ async function runBrowserProbe({
             retainedInput: {
               stateByteLength: stateInputByteLength,
               thermoByteLength: thermoInputByteLength,
-              totalByteLength: stateInputByteLength + thermoInputByteLength,
+              mechanicsByteLength: mechanicsInputByteLength,
+              totalByteLength:
+                stateInputByteLength + thermoInputByteLength + mechanicsInputByteLength,
               mappedByteLength: 0
             }
           };
@@ -4473,18 +4507,39 @@ async function runBrowserProbe({
         // initial render refresh. Materialize its retained upload explicitly
         // before the first checkpoint so time zero is authoritative rather
         // than merely a visual-frame label.
-        const initialUpload = sceneApi.getSphGpuParticleUpload?.()
+        const initialSphUpload = sceneApi.getSphGpuParticleUpload?.()
           || overlay.__sphGpuParticleUpload
           || null;
-        const initialUploadIsVerifiedTimeZero = uploadIsVerifiedTimeZero(initialUpload);
-        if (!initialUploadIsVerifiedTimeZero) {
+        const initialMlsMpmUpload = sceneApi.getMlsMpmGpuParticleUpload?.()
+          || overlay.__mlsMpmGpuParticleUpload
+          || null;
+        const checkpointModule = await loadAuthoritativeGpuCheckpointModule();
+        const initialUploadPairValidation = checkpointModule.validateAuthoritativeGpuUploadPair({
+          sphParticleUpload: initialSphUpload,
+          mlsMpmParticleUpload: initialMlsMpmUpload,
+          requireTimeZero: true,
+          expectedStep: 0,
+          expectedTimeS: 0
+        });
+        if (!initialUploadPairValidation.ready) {
           markProbeProgress('initial-authoritative-upload-started');
           try {
             overlay.__sphGpuParticleUpload = await sceneApi.refreshSphGpuParticleBuffers?.({
               preferWebGpu: true
             }) || overlay.__sphGpuParticleUpload || null;
+            overlay.__mlsMpmGpuParticleUpload = await sceneApi.refreshMlsMpmGpuParticleBuffers?.({
+              preferWebGpu: true
+            }) || overlay.__mlsMpmGpuParticleUpload || null;
+            const refreshedPairValidation = checkpointModule.validateAuthoritativeGpuUploadPair({
+              sphParticleUpload: overlay.__sphGpuParticleUpload,
+              mlsMpmParticleUpload: overlay.__mlsMpmGpuParticleUpload,
+              requireTimeZero: true,
+              expectedStep: 0,
+              expectedTimeS: 0
+            });
             markProbeProgress('initial-authoritative-upload-completed', {
-              ready: uploadIsVerifiedTimeZero(overlay.__sphGpuParticleUpload)
+              ready: refreshedPairValidation.ready,
+              blockers: [...refreshedPairValidation.blockers]
             });
           } catch (error) {
             markProbeProgress('initial-authoritative-upload-skipped', {
@@ -7051,10 +7106,35 @@ function analyzeTimeline(timeline, {
   const finiteSeries = (key) => diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.[key]))
     .filter(Number.isFinite);
-  const maxSpeedSeries = finiteSeries('maxSpeedMPerS');
+  const capturedCheckpointRows = metrics
+    .map((metric) => metric?.authoritativeGpuCheckpoint)
+    .filter((checkpoint) => (
+      checkpoint?.status === 'captured'
+      && Array.isArray(checkpoint.materialPhases)
+    ));
+  const checkpointSpeedRows = capturedCheckpointRows
+    .filter((checkpoint) => checkpoint.speedEvidenceStatus === 'complete')
+    .flatMap((checkpoint) => checkpoint.materialPhases);
+  const checkpointMechanicsRows = capturedCheckpointRows
+    .flatMap((checkpoint) => checkpoint.materialPhases)
+    .filter((row) => (
+      Number(row?.mechanicsSampleCount) > 0
+      && Number(row?.mechanicsProblemParticleCount) === 0
+    ));
+  const checkpointMaxSpeedSeries = checkpointSpeedRows
+    .map((row) => finiteMetric(row?.maxSpeedMPerS))
+    .filter(Number.isFinite);
+  const checkpointMinVolumeSeries = checkpointMechanicsRows
+    .map((row) => finiteMetric(row?.minVolumeRatioJ))
+    .filter(Number.isFinite);
+  const checkpointMaxVolumeSeries = checkpointMechanicsRows
+    .map((row) => finiteMetric(row?.maxVolumeRatioJ))
+    .filter(Number.isFinite);
+  const residentMaxSpeedSeries = finiteSeries('maxSpeedMPerS');
+  const maxSpeedSeries = residentMaxSpeedSeries.concat(checkpointMaxSpeedSeries);
   const maxDisplacementSeries = finiteSeries('maxDisplacementM');
-  const minVolumeSeries = finiteSeries('minVolumeRatioJ');
-  const maxVolumeSeries = finiteSeries('maxVolumeRatioJ');
+  const minVolumeSeries = finiteSeries('minVolumeRatioJ').concat(checkpointMinVolumeSeries);
+  const maxVolumeSeries = finiteSeries('maxVolumeRatioJ').concat(checkpointMaxVolumeSeries);
   const pressureImpulseSeries = finiteSeries('pressureInterfaceAppliedImpulseMagnitudeNSeconds');
   const internalPressureScaleSeries = finiteSeries('internalPressureScale');
   const nextTimeSeries = metrics
@@ -7328,7 +7408,11 @@ function analyzeTimeline(timeline, {
     ?? (compactSummaryDisabled ? renderRowMaxDisplacementM : null)
     ?? (directResidentNoReadbackActiveGridMotionEvidenceAvailable ? activeGridPredictedMaxDisplacementM : null);
   const motionSpeedEvidenceSource = maxSpeedObservedMPerS != null
-    ? 'resident-compact-summary'
+    ? residentMaxSpeedSeries.length > 0 && checkpointMaxSpeedSeries.length > 0
+      ? 'resident-compact-summary+authoritative-gpu-checkpoint'
+      : residentMaxSpeedSeries.length > 0
+        ? 'resident-compact-summary'
+        : 'authoritative-gpu-material-phase-checkpoint'
     : (compactSummaryDisabled && renderRowEstimatedMaxSpeedMPerS != null
         ? 'decoded-render-rows'
         : (
@@ -7876,6 +7960,18 @@ function analyzeTimeline(timeline, {
   const authoritativeGpuCheckpointUnclassifiedCount = capturedMaterialPhaseCheckpoints
     .filter((checkpoint) => Number(checkpoint.unclassifiedMassKg) > 0)
     .length;
+  const authoritativeGpuCheckpointMechanicsIncompleteCount = capturedMaterialPhaseCheckpoints
+    .filter((checkpoint) => checkpoint.mechanicsEvidenceStatus !== 'complete')
+    .length;
+  const authoritativeGpuCheckpointVolumeRatioCapBoundaryCount = capturedMaterialPhaseCheckpoints
+    .filter((checkpoint) => Number(checkpoint.volumeRatioCapBoundaryParticleCount) > 0)
+    .length;
+  const maxAuthoritativeGpuCheckpointVolumeRatioCapBoundaryParticleCount = Math.max(
+    0,
+    ...capturedMaterialPhaseCheckpoints.map((checkpoint) => (
+      Number(checkpoint.volumeRatioCapBoundaryParticleCount) || 0
+    ))
+  );
   const checkpointMaterialEvidenceComplete = (checkpoint) => (
     checkpoint?.status === 'captured'
     && checkpoint.materialPhaseCapacityStatus === 'within-capacity'
@@ -8430,6 +8526,9 @@ function analyzeTimeline(timeline, {
   if (authoritativeGpuCheckpointUnclassifiedCount > 0) {
     issues.push('authoritative-gpu-checkpoint-unclassified-mass');
   }
+  if (authoritativeGpuCheckpointMechanicsIncompleteCount > 0) {
+    issues.push('authoritative-gpu-checkpoint-mechanics-incomplete');
+  }
   const initialPreflightStatus = String(initialPreflight?.status || '');
   const preflightFeasible = initialPreflight?.feasibility?.feasible;
   if (
@@ -8792,6 +8891,9 @@ function analyzeTimeline(timeline, {
     authoritativeGpuCheckpointMappingIncompleteCount,
     authoritativeGpuCheckpointPhaseFractionProblemCount,
     authoritativeGpuCheckpointUnclassifiedCount,
+    authoritativeGpuCheckpointMechanicsIncompleteCount,
+    authoritativeGpuCheckpointVolumeRatioCapBoundaryCount,
+    maxAuthoritativeGpuCheckpointVolumeRatioCapBoundaryParticleCount,
     finalMaterialPhases,
     maxReactionEventsTotal,
     reactionProgressGateEvidenceSource,

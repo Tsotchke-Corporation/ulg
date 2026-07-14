@@ -490,8 +490,8 @@ Visible-loop repair outranks the first production-consumer migration. Before
 accepting Slice 3, close these observability/stability items in small reversible
 commits:
 
-1. add compact per-material/per-phase speed, `J`, rest-volume,
-   represented-volume, and cap-hit reductions;
+1. [x] add compact per-material/per-phase speed, `J`, rest-volume,
+   represented-volume, and cap-boundary reductions;
 2. publish post-placement placed/merged/unplaced product-mass provenance;
 3. isolate and bound the condensed-contact energy injection between
    `0.256 s` and `0.512 s`, including a manufactured multi-step contact test;
@@ -502,6 +502,29 @@ commits:
 6. replace the broad fixed reaction radius with shared-SS support-surface
    contact plus a small declared hysteresis when reaction migrates to the
    canonical spatial epoch.
+
+Item 1 is complete. The authoritative checkpoint now reduces retained
+state/thermo/mechanics buffers into a fixed 7,504-byte GPU evidence table; it
+maps no particle rows. Upload admission requires the exact v0 source schemas,
+exact 32/48/128-byte row strides, equal particle counts and source metadata,
+adequate buffer capacity, and matching slot identity when slots exist. Initial
+uploads are reported honestly as metadata-coherent when no shared slot token is
+available; resident outputs prove shared-slot-and-metadata coherence. The SS
+represented-volume definition is
+`max(V0 * max(J, 1e-6), phaseReferenceMass / restDensity)` with
+`mass / restDensity` as the final positive fallback. Cap evidence is explicitly
+a post-state boundary observation, using `J=1.05` for solid/Tait condensed
+rows, `J=64` for generic mechanics, and `J=1000` for linearized gas.
+
+Fresh Vulkan evidence is recorded at
+`/tmp/ulg-ss-spatial-water-mechanics-telemetry-hardened-vulkan/result.json` and
+`/tmp/ulg-ss-spatial-sodium-mechanics-telemetry-hardened-vulkan/result.json`.
+Water is complete and green. Sodium now fails without suppressing valid partial
+evidence: all 15 NaOH rows have invalid zero-volume mechanics after placement,
+while all four H2 rows remain valid and reach `64.8005 m/s`, `J=1000`, and the
+gas cap boundary. The next correction is therefore fail-closed product phase
+resolution/placement plus a real post-reaction mechanics refresh; item 2 must
+then publish placed/merged/unplaced mass through that refresh.
 
 Do not widen the reaction radius, globally change the water damping default,
 or treat a deliberately relaxed diagnostic threshold as scientific acceptance.

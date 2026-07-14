@@ -5,6 +5,13 @@ import {
   groupedReactionEventCount,
   reactionLedgerEventCount
 } from '../scripts/sph-probe-reaction-evidence.mjs';
+import { validateAuthoritativeGpuUploadPair } from '../scripts/sph-authoritative-gpu-checkpoint.mjs';
+import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
 
 function readRepoFile(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
@@ -31,30 +38,30 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /nativeSurfaceValidation: nativeSurfaceValidationSnapshot\(\)/);
   assert.match(
     probeSource,
-    /phase === 'initial'[\s\S]*?\['scene-initial-particle-upload', sceneApi\.getSphGpuParticleUpload\?\.\(\)\][\s\S]*?: \[[\s\S]*?resident-steps-next-particle-uploads/
+    /phase === 'initial'[\s\S]*?scene-initial-particle-upload-pair[\s\S]*?getSphGpuParticleUpload[\s\S]*?getMlsMpmGpuParticleUpload[\s\S]*?resident-steps-next-particle-upload-pair/
   );
   assert.match(
     probeSource,
-    /metadataIsExplicitFiniteZero[\s\S]*?typeof value === 'number'[\s\S]*?Number\.isFinite\(value\)[\s\S]*?value === 0[\s\S]*?uploadIsVerifiedTimeZero[\s\S]*?metadataIsExplicitFiniteZero\(upload\?\.step\)[\s\S]*?metadataIsExplicitFiniteZero\(upload\?\.time\)/
+    /validateAuthoritativeGpuUploadPair\(\{[\s\S]*?sphParticleUpload: candidate\.sphParticleUpload[\s\S]*?mlsMpmParticleUpload: candidate\.mlsMpmParticleUpload[\s\S]*?requireTimeZero: phase === 'initial'/
   );
   assert.match(
     probeSource,
-    /sourceStep: Number\.isFinite\(Number\(sphParticleUpload\.step\)\)[\s\S]*?sourceTimeS: finiteOrNull\([\s\S]*?sphParticleUpload\.time/
+    /sourceStep: uploadPairValidation\.sourceStep[\s\S]*?sourceTimeS: uploadPairValidation\.sourceTimeS/
   );
   assert.match(
     probeSource,
-    /phase === 'initial' \? null : currentSteps\?\.nextParticleCount[\s\S]*?sphParticleUpload\.particleCount/,
-    'time-zero reduction length must come from the verified initial upload rather than later resident state'
+    /const particleCount = uploadPairValidation\.particleCount/,
+    'reduction length must come from the verified paired upload generation'
   );
   assert.match(
     probeSource,
-    /const initialUpload = sceneApi\.getSphGpuParticleUpload\?\.\(\)[\s\S]*?refreshSphGpuParticleBuffers\?\.\(\{[\s\S]*?preferWebGpu: true[\s\S]*?markProbeProgress\('sampling-initial-state'\)/,
-    'final-only visual probes must materialize a retained initial upload before sampling time zero'
+    /const initialSphUpload = sceneApi\.getSphGpuParticleUpload[\s\S]*?const initialMlsMpmUpload = sceneApi\.getMlsMpmGpuParticleUpload[\s\S]*?refreshSphGpuParticleBuffers[\s\S]*?refreshMlsMpmGpuParticleBuffers[\s\S]*?markProbeProgress\('sampling-initial-state'\)/,
+    'final-only visual probes must materialize a paired retained initial upload before sampling time zero'
   );
   assert.match(
     probeSource,
-    /initialUploadIsVerifiedTimeZero = uploadIsVerifiedTimeZero\(initialUpload\)/,
-    'an existing initial upload is reusable only with explicit zero-step and zero-time provenance'
+    /initialUploadPairValidation = checkpointModule\.validateAuthoritativeGpuUploadPair\(\{[\s\S]*?requireTimeZero: true[\s\S]*?if \(!initialUploadPairValidation\.ready\)/,
+    'an existing initial pair is reusable only with exact paired zero-step and zero-time provenance'
   );
   assert.match(
     sceneSource,
@@ -67,12 +74,24 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
 });
 
 test('time-zero provenance rejects missing, empty, and non-finite metadata', () => {
-  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
-  const predicateSource = probeSource.match(
-    /const metadataIsExplicitFiniteZero = \(value\) => \(([\s\S]*?)\n\s*\);/
-  )?.[1];
-  assert.ok(predicateSource, 'probe must expose the exact finite-zero metadata predicate');
-  const predicate = Function('value', `return (${predicateSource});`);
+  const sphBase = {
+    schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    sourceSchema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+    stateBuffer: { size: 32 },
+    thermoBuffer: { size: 48 },
+    particleCount: 1,
+    stateStrideBytes: 32,
+    thermoStrideBytes: 48
+  };
+  const mechanicsBase = {
+    schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    sourceSchema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+    mechanicsBuffer: { size: 128 },
+    particleCount: 1,
+    mechanicsStrideBytes: 128
+  };
 
   for (const value of [
     null,
@@ -89,10 +108,18 @@ test('time-zero provenance rejects missing, empty, and non-finite metadata', () 
     1,
     -1
   ]) {
-    assert.equal(predicate(value), false, `metadata value ${String(value)} must not prove time zero`);
+    const validation = validateAuthoritativeGpuUploadPair({
+      sphParticleUpload: { ...sphBase, step: value, time: value },
+      mlsMpmParticleUpload: { ...mechanicsBase, step: value, time: value },
+      requireTimeZero: true
+    });
+    assert.equal(validation.ready, false, `metadata value ${String(value)} must not prove time zero`);
   }
-  assert.equal(predicate(0), true);
-  assert.equal(predicate(-0), true);
+  assert.equal(validateAuthoritativeGpuUploadPair({
+    sphParticleUpload: { ...sphBase, step: 0, time: 0 },
+    mlsMpmParticleUpload: { ...mechanicsBase, step: 0, time: 0 },
+    requireTimeZero: true
+  }).timeZeroProvenanceVerified, true);
 });
 
 test('performance benchmark reports worker offscreen frame transport budget', () => {

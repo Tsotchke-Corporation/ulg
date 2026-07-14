@@ -14065,3 +14065,30 @@ Hardened SS baseline follow-up, 2026-07-13 AKDT:
   external WebGPU instance, native readback failed, and canvas captures were
   transparent. It is retained as harness-backend failure evidence and is not
   counted as a source regression.
+
+Compact material/phase mechanics telemetry, 2026-07-13 AKDT:
+
+- Syntax and whitespace:
+  `node --check scripts/sph-authoritative-gpu-checkpoint.mjs`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check scripts/sph-visual-sanity-matrix.mjs`, and `git diff --check`
+  - Passed.
+- Focused checkpoint/harness regression:
+  `node --test tests/sphAuthoritativeGpuCheckpoint.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  - Passed `34/34`, including exact ABI/source-schema rejection, torn
+    count/step/time/slot rejection, numeric-only time zero, fixed reduction
+    layout, and no particle-row mapping.
+- Native Vulkan water checkpoint:
+  `/tmp/ulg-ss-spatial-water-mechanics-telemetry-hardened-vulkan/result.json`
+  - Status `good`, no issues, exact metadata-coherent time zero, shared-slot
+    resident checkpoint, complete speed/mechanics evidence, final
+    `maxSpeed=0.156902 m/s`, `J=0.999948..1.000004`, no cap boundary, four
+    nonblank frames, and passed native browser pixels.
+- Native Vulkan sodium checkpoint:
+  `/tmp/ulg-ss-spatial-sodium-mechanics-telemetry-hardened-vulkan/result.json`
+  - Expected status `bad`; the analyzer simultaneously reports incomplete
+    mechanics, `max-speed>50`, and `max-J>5`. At `0.512 s`, 15 NaOH rows have
+    positive `1.43540 kg` mass but zero valid mechanics volume, while four H2
+    rows are valid at `64.8005 m/s` and `J=1000`. Five frames are nonblank and
+    native browser pixel validation passes, so this is a physics rejection,
+    not a hidden-render failure.

@@ -380,6 +380,20 @@ function compactEvolutionTimeline(probe) {
       finiteOrNull(row?.temperatureMinK),
       finiteOrNull(row?.temperatureMaxK)
     ]).filter(Number.isFinite);
+    const checkpointSpeedReady = checkpoint?.speedEvidenceStatus === 'complete';
+    const checkpointMechanicsRows = checkpointRows.filter((row) => (
+      Number(row?.mechanicsSampleCount) > 0
+      && Number(row?.mechanicsProblemParticleCount) === 0
+    ));
+    const checkpointSpeeds = checkpointSpeedReady
+      ? checkpointRows.map((row) => finiteOrNull(row?.maxSpeedMPerS)).filter(Number.isFinite)
+      : [];
+    const checkpointMinVolumeRatios = checkpointMechanicsRows
+      .map((row) => finiteOrNull(row?.minVolumeRatioJ))
+      .filter(Number.isFinite);
+    const checkpointMaxVolumeRatios = checkpointMechanicsRows
+      .map((row) => finiteOrNull(row?.maxVolumeRatioJ))
+      .filter(Number.isFinite);
     const checkpointParticlesByMaterial = checkpointRows.reduce((result, row) => {
       const material = String(row?.material || '').trim();
       if (!material) return result;
@@ -410,7 +424,32 @@ function compactEvolutionTimeline(probe) {
         diagnostics?.maxTemperatureK
           ?? (checkpointTemperatures.length ? Math.max(...checkpointTemperatures) : null)
       ),
-      maxSpeedMPerS: finiteOrNull(diagnostics?.maxSpeedMPerS),
+      maxSpeedMPerS: finiteOrNull(
+        diagnostics?.maxSpeedMPerS
+          ?? (checkpointSpeeds.length ? Math.max(...checkpointSpeeds) : null)
+      ),
+      minVolumeRatioJ: finiteOrNull(
+        diagnostics?.minVolumeRatioJ
+          ?? (checkpointMinVolumeRatios.length ? Math.min(...checkpointMinVolumeRatios) : null)
+      ),
+      maxVolumeRatioJ: finiteOrNull(
+        diagnostics?.maxVolumeRatioJ
+          ?? (checkpointMaxVolumeRatios.length ? Math.max(...checkpointMaxVolumeRatios) : null)
+      ),
+      checkpointSpeedEvidenceStatus: checkpoint?.speedEvidenceStatus ?? null,
+      checkpointMechanicsEvidenceStatus: checkpoint?.mechanicsEvidenceStatus ?? null,
+      phaseWeightedRestVolumeM3: checkpoint
+        ? finiteOrNull(checkpoint?.totals?.phaseWeightedRestVolumeM3)
+        : null,
+      phaseWeightedCurrentVolumeM3: checkpoint
+        ? finiteOrNull(checkpoint?.totals?.phaseWeightedCurrentVolumeM3)
+        : null,
+      phaseWeightedRepresentedVolumeM3: checkpoint
+        ? finiteOrNull(checkpoint?.totals?.phaseWeightedRepresentedVolumeM3)
+        : null,
+      volumeRatioCapBoundaryParticleCount: checkpoint
+        ? finiteOrNull(checkpoint?.volumeRatioCapBoundaryParticleCount)
+        : null,
       maxDisplacementM: finiteOrNull(diagnostics?.maxDisplacementM),
       reactionEventsTotal: finiteOrNull(
         step?.reactionEventsTotal ?? step?.reactionLedger?.eventCount

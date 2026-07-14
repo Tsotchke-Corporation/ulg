@@ -590,12 +590,14 @@ function resolveAlgorithmSurfaceExtractionPolicy(rows, surfaceRecord) {
   const role = surfacePolicyRole(surfaceRecord);
   const material = normalizeSurfacePolicyMaterial(surfaceRecord?.material);
   const phase = normalizeSurfacePolicyMaterial(surfaceRecord?.phase);
-  const row = policyRows.find((candidate) => role && candidate.role === role)
-    || policyRows.find((candidate) =>
-      normalizeSurfacePolicyMaterial(candidate.material) === material
-      && (!phase || normalizeSurfacePolicyMaterial(candidate.phase) === phase)
-    )
-    || null;
+  const matchesMaterialPhase = (candidate) => (
+    Boolean(material)
+    && normalizeSurfacePolicyMaterial(candidate.material) === material
+    && (!phase || normalizeSurfacePolicyMaterial(candidate.phase) === phase)
+  );
+  const row = role
+    ? policyRows.find((candidate) => candidate.role === role && matchesMaterialPhase(candidate)) || null
+    : policyRows.find(matchesMaterialPhase) || null;
   return {
     status: row ? 'algorithm-surface-policy-row-selected' : 'algorithm-surface-policy-row-not-found',
     row
@@ -725,7 +727,58 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     surfaceRecord
   );
   const surfacePolicyRow = surfacePolicy.row;
-  const resolvedIsovalue = surfacePolicyRow?.isovalue ?? surfaceRecord.isolation ?? null;
+  const renderFieldIsolation = surfaceRecord.isolation == null
+    ? null
+    : Number(surfaceRecord.isolation);
+  const requestedPolicyIsovalue = surfacePolicyRow?.isovalue == null
+    ? null
+    : Number(surfacePolicyRow.isovalue);
+  const hasRenderFieldIsolation = Number.isFinite(renderFieldIsolation);
+  const hasRequestedPolicyIsovalue = Number.isFinite(requestedPolicyIsovalue);
+  const surfaceExtractionPolicyApplied = false;
+  const resolvedIsovalue = hasRenderFieldIsolation ? renderFieldIsolation : null;
+  const surfaceExtractionIsovalueSource = hasRenderFieldIsolation
+    ? 'render-field-surface-isolation'
+    : 'isovalue-unavailable';
+  const surfaceExtractionPolicyApplicationStatus = hasRenderFieldIsolation
+    ? 'algorithm-surface-policy-not-applied-render-field-isolation-authoritative'
+    : 'algorithm-surface-policy-not-applied-render-field-isolation-required';
+  const surfaceExtractionPolicyApplicationReason = hasRenderFieldIsolation
+    ? 'the retained scalar field and its authored isolation share the renderer scalar convention'
+    : 'native extraction requires the retained render-field isolation; policy rows are not renderer-authoritative for this scalar convention';
+  const surfaceExtractionPolicyMetadata = {
+    surfaceExtractionIsovalueSource,
+    surfaceExtractionPolicyStatus: surfacePolicy.status,
+    surfaceExtractionPolicyApplied,
+    surfaceExtractionPolicyApplicationStatus,
+    surfaceExtractionPolicyApplicationReason,
+    surfaceExtractionPolicyRequestedIsovalue: hasRequestedPolicyIsovalue
+      ? requestedPolicyIsovalue
+      : null,
+    surfaceExtractionPolicyRendererAuthority: surfacePolicyRow?.rendererAuthority ?? null,
+    surfaceExtractionPolicyStrictSourceOfTruth: surfacePolicyRow?.strictSourceOfTruth ?? null,
+    surfaceExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null,
+    surfaceExtractionPolicyRowSchema: surfacePolicyRow?.schema ?? null,
+    surfaceExtractionPolicyRole: surfacePolicyRow?.role ?? null,
+    surfaceExtractionPolicyMaterial: surfacePolicyRow?.material ?? null,
+    surfaceExtractionPolicyPhase: surfacePolicyRow?.phase ?? null,
+    surfaceExtractionPolicyIsovaluePolicy: surfacePolicyRow?.isovaluePolicy ?? null,
+    surfaceExtractionPolicySmoothingRadiusM: surfacePolicyRow?.smoothingRadiusM ?? null,
+    surfaceExtractionPolicyVoxelSizeM: surfacePolicyRow?.voxelSizeM ?? null,
+    surfaceExtractionPolicyNormalScaleM: surfacePolicyRow?.normalScaleM ?? null
+  };
+  if (!hasRenderFieldIsolation) {
+    return renderFieldBufferVolumeBlocked(
+      'ulg-render-field-buffer-volume-blocked-missing-isolation',
+      'retained render-field surface metadata must author a finite isolation for native extraction',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        surfaceKey: surfaceRecord.surfaceKey ?? null,
+        ...surfaceExtractionPolicyMetadata
+      }
+    );
+  }
   return {
     schema: ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA,
     ok: true,
@@ -767,16 +820,7 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     fieldCellCount: surfaceRecord.fieldCellCount ?? resolution ** 3,
     isolation: resolvedIsovalue,
     isovalue: resolvedIsovalue,
-    surfaceExtractionPolicyStatus: surfacePolicy.status,
-    surfaceExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null,
-    surfaceExtractionPolicyRowSchema: surfacePolicyRow?.schema ?? null,
-    surfaceExtractionPolicyRole: surfacePolicyRow?.role ?? null,
-    surfaceExtractionPolicyMaterial: surfacePolicyRow?.material ?? null,
-    surfaceExtractionPolicyPhase: surfacePolicyRow?.phase ?? null,
-    surfaceExtractionPolicyIsovaluePolicy: surfacePolicyRow?.isovaluePolicy ?? null,
-    surfaceExtractionPolicySmoothingRadiusM: surfacePolicyRow?.smoothingRadiusM ?? null,
-    surfaceExtractionPolicyVoxelSizeM: surfacePolicyRow?.voxelSizeM ?? null,
-    surfaceExtractionPolicyNormalScaleM: surfacePolicyRow?.normalScaleM ?? null,
+    ...surfaceExtractionPolicyMetadata,
     fieldPadding: field.fieldPadding ?? null,
     refEdgeM: field.refEdgeM ?? null,
     positionTransform,
@@ -1228,6 +1272,17 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
   const extensionOk = execution.ok === true;
   const extensionVertexCount = Math.max(0, Math.round(finiteNumber(result?.vertexCount, 0)));
   const extensionVertexCountMode = result?.vertexCountMode ?? null;
+  const extensionVertexRowsBudget = result?.vertexRowsBudget == null
+    ? null
+    : Math.max(0, Math.round(finiteNumber(result.vertexRowsBudget, 0)));
+  const extensionVertexRowsBudgetClamped = result?.vertexRowsBudgetClamped === true
+    ? true
+    : result?.vertexRowsBudgetClamped === false
+      ? false
+      : null;
+  const extensionConservativeWorstCaseVertexCount = result?.conservativeWorstCaseVertexCount == null
+    ? null
+    : Math.max(0, Math.round(finiteNumber(result.conservativeWorstCaseVertexCount, 0)));
   const extensionActualVertexCounterBuffer = result?.actualVertexCounterBuffer
     || result?.vertexCounterBuffer
     || null;
@@ -1369,6 +1424,9 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionVertexStrideBytes,
     extensionVertexCount,
     extensionVertexCountMode,
+    extensionVertexRowsBudget,
+    extensionVertexRowsBudgetClamped,
+    extensionConservativeWorstCaseVertexCount,
     extensionActualVertexCounterBufferRetained: Boolean(extensionActualVertexCounterBuffer),
     extensionActualVertexCounterBufferByteLength,
     extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),

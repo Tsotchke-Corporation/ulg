@@ -7373,6 +7373,24 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
         renderState?.surfaceDrawNativeMarchingCubesVolumeScalarLayoutName ?? null,
       surfaceDrawNativeMarchingCubesDescriptorPolicyStatus:
         renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.surfaceExtractionPolicyStatus ?? null,
+      surfaceDrawNativeMarchingCubesDescriptorIsovalueSource:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]
+          ?.surfaceExtractionIsovalueSource ?? null,
+      surfaceDrawNativeMarchingCubesDescriptorPolicyApplied:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]
+          ?.surfaceExtractionPolicyApplied ?? null,
+      surfaceDrawNativeMarchingCubesDescriptorPolicyApplicationStatus:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]
+          ?.surfaceExtractionPolicyApplicationStatus ?? null,
+      surfaceDrawNativeMarchingCubesDescriptorPolicyRequestedIsovalue:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]
+          ?.surfaceExtractionPolicyRequestedIsovalue ?? null,
+      surfaceDrawNativeMarchingCubesDescriptorPolicyRendererAuthority:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]
+          ?.surfaceExtractionPolicyRendererAuthority ?? null,
+      surfaceDrawNativeMarchingCubesDescriptorPolicyStrictSourceOfTruth:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]
+          ?.surfaceExtractionPolicyStrictSourceOfTruth ?? null,
       surfaceDrawNativeMarchingCubesDescriptorPolicyRowsSchema:
         renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.surfaceExtractionPolicyRowsSchema ?? null,
       surfaceDrawNativeMarchingCubesDescriptorPolicyRowSchema:
@@ -7554,6 +7572,15 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
     .toBe('peercompute.webgpu-marching-cubes.layout.scalar-field-f32.v0');
   expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyStatus)
     .toBe('algorithm-surface-policy-row-selected');
+  expect(result.surfaceDrawNativeMarchingCubesDescriptorIsovalueSource)
+    .toBe('render-field-surface-isolation');
+  expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyApplied).toBe(false);
+  expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyApplicationStatus)
+    .toBe('algorithm-surface-policy-not-applied-render-field-isolation-authoritative');
+  expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyRequestedIsovalue).toBe(0.5);
+  expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyRendererAuthority)
+    .toBe('not-renderer-authoritative-surface-policy-row');
+  expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyStrictSourceOfTruth).toBe(false);
   expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyRowsSchema)
     .toBe('peercompute.ulg.algorithm-material-surface-extraction-rows.v0');
   expect(result.surfaceDrawNativeMarchingCubesDescriptorPolicyRowSchema)

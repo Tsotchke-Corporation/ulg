@@ -53,6 +53,9 @@ function extensionExecution({
   includeOutputDescriptors = false,
   topLevelBuffer = true,
   vertexCountMode = null,
+  vertexRowsBudget = null,
+  vertexRowsBudgetClamped = null,
+  conservativeWorstCaseVertexCount = null,
   actualVertexCounterBuffer = null,
   actualVertexCounterBufferByteLength = 0,
   drawIndirectBuffer = null,
@@ -221,6 +224,9 @@ function extensionExecution({
       status: ok ? 'surface-ready' : 'surface-device-check-failed',
       vertexCount,
       vertexCountMode,
+      vertexRowsBudget,
+      vertexRowsBudgetClamped,
+      conservativeWorstCaseVertexCount,
       actualVertexCounterBuffer,
       actualVertexCounterBufferByteLength,
       drawIndirectBuffer,
@@ -441,6 +447,12 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
     -0.22 * 5 / (1 - 2 * 0.22)
   ]);
   assert.equal(descriptor.isovalue, 14);
+  assert.equal(descriptor.surfaceExtractionIsovalueSource, 'render-field-surface-isolation');
+  assert.equal(descriptor.surfaceExtractionPolicyApplied, false);
+  assert.equal(
+    descriptor.surfaceExtractionPolicyApplicationStatus,
+    'algorithm-surface-policy-not-applied-render-field-isolation-authoritative'
+  );
   assert.equal(descriptor.surfaceExtractionPolicyStatus, 'algorithm-surface-policy-rows-not-supplied');
   assert.equal(descriptor.sameDeviceStatus, 'same-device');
   assert.equal(descriptor.nativeConsumerKind, 'native-webgpu-marching-cubes-buffer-volume');
@@ -464,7 +476,9 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
           isovaluePolicy: 'density-kernel-half-occupancy',
           smoothingRadiusM: 0.3,
           voxelSizeM: 0.15,
-          normalScaleM: 0.3
+          normalScaleM: 0.3,
+          strictSourceOfTruth: false,
+          rendererAuthority: 'not-renderer-authoritative-surface-policy-row'
         },
         {
           schema: 'peercompute.ulg.algorithm-material-surface-extraction-row.v0',
@@ -475,18 +489,123 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
           isovaluePolicy: 'density-kernel-half-occupancy',
           smoothingRadiusM: 0.2,
           voxelSizeM: 0.1,
-          normalScaleM: 0.2
+          normalScaleM: 0.2,
+          strictSourceOfTruth: false,
+          rendererAuthority: 'not-renderer-authoritative-surface-policy-row'
         }
       ]
     }
   });
   assert.equal(policyDescriptor.ok, true);
-  assert.equal(policyDescriptor.isovalue, 0.5);
-  assert.equal(policyDescriptor.isolation, 0.5);
+  assert.equal(policyDescriptor.isovalue, 14);
+  assert.equal(policyDescriptor.isolation, 14);
+  assert.equal(policyDescriptor.surfaceExtractionIsovalueSource, 'render-field-surface-isolation');
+  assert.equal(policyDescriptor.surfaceExtractionPolicyApplied, false);
+  assert.equal(
+    policyDescriptor.surfaceExtractionPolicyApplicationStatus,
+    'algorithm-surface-policy-not-applied-render-field-isolation-authoritative'
+  );
+  assert.equal(policyDescriptor.surfaceExtractionPolicyRequestedIsovalue, 0.5);
+  assert.equal(
+    policyDescriptor.surfaceExtractionPolicyRendererAuthority,
+    'not-renderer-authoritative-surface-policy-row'
+  );
+  assert.equal(policyDescriptor.surfaceExtractionPolicyStrictSourceOfTruth, false);
   assert.equal(policyDescriptor.surfaceExtractionPolicyStatus, 'algorithm-surface-policy-row-selected');
   assert.equal(policyDescriptor.surfaceExtractionPolicyRole, 'drop');
   assert.equal(policyDescriptor.surfaceExtractionPolicyIsovaluePolicy, 'density-kernel-half-occupancy');
   assert.equal(policyDescriptor.surfaceExtractionPolicySmoothingRadiusM, 0.2);
+
+  const incompatibleRoleDescriptor = createUlgRenderFieldBufferVolumeDescriptor({
+    device,
+    renderField,
+    surfaceIndex: 1,
+    surface: {
+      ...surfaceTable.metadata[1],
+      material: 'naoh',
+      renderKey: 'naoh'
+    },
+    algorithmMaterialSurfaceExtractionRows: {
+      schema: 'peercompute.ulg.algorithm-material-surface-extraction-rows.v0',
+      status: 'algorithm-derived-surface-extraction-rows-ready',
+      rowCount: 1,
+      rows: [{
+        schema: 'peercompute.ulg.algorithm-material-surface-extraction-row.v0',
+        role: 'drop',
+        material: 'Na',
+        phase: 'solid',
+        isovalue: 0.5,
+        strictSourceOfTruth: false,
+        rendererAuthority: 'not-renderer-authoritative-surface-policy-row'
+      }]
+    }
+  });
+  assert.equal(incompatibleRoleDescriptor.ok, true);
+  assert.equal(incompatibleRoleDescriptor.isovalue, 14);
+  assert.equal(
+    incompatibleRoleDescriptor.surfaceExtractionPolicyStatus,
+    'algorithm-surface-policy-row-not-found'
+  );
+  assert.equal(incompatibleRoleDescriptor.surfaceExtractionPolicyRequestedIsovalue, null);
+
+  const wrongRoleDescriptor = createUlgRenderFieldBufferVolumeDescriptor({
+    device,
+    renderField,
+    surfaceIndex: 1,
+    algorithmMaterialSurfaceExtractionRows: {
+      schema: 'peercompute.ulg.algorithm-material-surface-extraction-rows.v0',
+      status: 'algorithm-derived-surface-extraction-rows-ready',
+      rowCount: 1,
+      rows: [{
+        schema: 'peercompute.ulg.algorithm-material-surface-extraction-row.v0',
+        role: 'base',
+        material: 'h2o',
+        phase: 'liquid',
+        isovalue: 0.5,
+        strictSourceOfTruth: false,
+        rendererAuthority: 'not-renderer-authoritative-surface-policy-row'
+      }]
+    }
+  });
+  assert.equal(wrongRoleDescriptor.ok, true);
+  assert.equal(wrongRoleDescriptor.isovalue, 14);
+  assert.equal(wrongRoleDescriptor.surfaceExtractionPolicyStatus, 'algorithm-surface-policy-row-not-found');
+  assert.equal(wrongRoleDescriptor.surfaceExtractionPolicyRole, null);
+
+  const missingIsolationDescriptor = createUlgRenderFieldBufferVolumeDescriptor({
+    device,
+    renderField,
+    surfaceIndex: 1,
+    surface: {
+      ...surfaceTable.metadata[1],
+      isolation: null
+    },
+    algorithmMaterialSurfaceExtractionRows: {
+      schema: 'peercompute.ulg.algorithm-material-surface-extraction-rows.v0',
+      status: 'algorithm-derived-surface-extraction-rows-ready',
+      rowCount: 1,
+      rows: [{
+        schema: 'peercompute.ulg.algorithm-material-surface-extraction-row.v0',
+        role: 'drop',
+        material: 'h2o',
+        phase: 'liquid',
+        isovalue: 0.5,
+        strictSourceOfTruth: false,
+        rendererAuthority: 'not-renderer-authoritative-surface-policy-row'
+      }]
+    }
+  });
+  assert.equal(missingIsolationDescriptor.ok, false);
+  assert.equal(
+    missingIsolationDescriptor.status,
+    'ulg-render-field-buffer-volume-blocked-missing-isolation'
+  );
+  assert.equal(missingIsolationDescriptor.surfaceExtractionPolicyApplied, false);
+  assert.equal(missingIsolationDescriptor.surfaceExtractionPolicyRequestedIsovalue, 0.5);
+  assert.equal(
+    missingIsolationDescriptor.surfaceExtractionPolicyApplicationStatus,
+    'algorithm-surface-policy-not-applied-render-field-isolation-required'
+  );
 
   const tooSmall = createUlgRenderFieldBufferVolumeDescriptor({
     device,
@@ -519,7 +638,11 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
 });
 
 test('ULG summarizes extension compact position buffers as translation-ready but not direct row-compatible', () => {
-  const summary = summarizeWebGpuMarchingCubesExtensionExecution(extensionExecution());
+  const summary = summarizeWebGpuMarchingCubesExtensionExecution(extensionExecution({
+    vertexRowsBudget: 12000,
+    vertexRowsBudgetClamped: true,
+    conservativeWorstCaseVertexCount: 48000
+  }));
 
   assert.equal(summary.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA);
   assert.equal(summary.status, 'extension-surface-ready-needs-ulg-row-translation');
@@ -528,6 +651,9 @@ test('ULG summarizes extension compact position buffers as translation-ready but
   assert.equal(summary.extensionVertexFormat, ULG_MARCHING_CUBES_EXTENSION_POSITION_VERTEX_FORMAT);
   assert.equal(summary.extensionVertexStrideFloats, 4);
   assert.equal(summary.extensionVertexCount, 3);
+  assert.equal(summary.extensionVertexRowsBudget, 12000);
+  assert.equal(summary.extensionVertexRowsBudgetClamped, true);
+  assert.equal(summary.extensionConservativeWorstCaseVertexCount, 48000);
   assert.equal(summary.readyForUlgSurfaceVertexRows, false);
   assert.equal(summary.requiresUlgVertexRowTranslation, true);
   assert.equal(summary.requiresUlgDrawMetadata, true);

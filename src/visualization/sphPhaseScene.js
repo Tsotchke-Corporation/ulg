@@ -26424,7 +26424,19 @@ fn fs_main() -> @location(0) vec4<f32> {
       fieldOffset: descriptor.fieldOffset ?? null,
       fieldCellCount: descriptor.fieldCellCount ?? null,
       isovalue: descriptor.isovalue ?? null,
+      surfaceExtractionIsovalueSource: descriptor.surfaceExtractionIsovalueSource ?? null,
       surfaceExtractionPolicyStatus: descriptor.surfaceExtractionPolicyStatus ?? null,
+      surfaceExtractionPolicyApplied: descriptor.surfaceExtractionPolicyApplied ?? null,
+      surfaceExtractionPolicyApplicationStatus:
+        descriptor.surfaceExtractionPolicyApplicationStatus ?? null,
+      surfaceExtractionPolicyApplicationReason:
+        descriptor.surfaceExtractionPolicyApplicationReason ?? null,
+      surfaceExtractionPolicyRequestedIsovalue:
+        descriptor.surfaceExtractionPolicyRequestedIsovalue ?? null,
+      surfaceExtractionPolicyRendererAuthority:
+        descriptor.surfaceExtractionPolicyRendererAuthority ?? null,
+      surfaceExtractionPolicyStrictSourceOfTruth:
+        descriptor.surfaceExtractionPolicyStrictSourceOfTruth ?? null,
       surfaceExtractionPolicyRowsSchema: descriptor.surfaceExtractionPolicyRowsSchema ?? null,
       surfaceExtractionPolicyRowSchema: descriptor.surfaceExtractionPolicyRowSchema ?? null,
       surfaceExtractionPolicyRole: descriptor.surfaceExtractionPolicyRole ?? null,
@@ -26995,7 +27007,19 @@ fn fs_main() -> @location(0) vec4<f32> {
       volumeSourceType: volume.sourceType,
       volumeScalarLayoutName: volume.scalarLayoutName,
       isovalue: isovalue ?? descriptor.isovalue ?? 0,
+      surfaceExtractionIsovalueSource: descriptor.surfaceExtractionIsovalueSource ?? null,
       surfaceExtractionPolicyStatus: descriptor.surfaceExtractionPolicyStatus ?? null,
+      surfaceExtractionPolicyApplied: descriptor.surfaceExtractionPolicyApplied ?? null,
+      surfaceExtractionPolicyApplicationStatus:
+        descriptor.surfaceExtractionPolicyApplicationStatus ?? null,
+      surfaceExtractionPolicyApplicationReason:
+        descriptor.surfaceExtractionPolicyApplicationReason ?? null,
+      surfaceExtractionPolicyRequestedIsovalue:
+        descriptor.surfaceExtractionPolicyRequestedIsovalue ?? null,
+      surfaceExtractionPolicyRendererAuthority:
+        descriptor.surfaceExtractionPolicyRendererAuthority ?? null,
+      surfaceExtractionPolicyStrictSourceOfTruth:
+        descriptor.surfaceExtractionPolicyStrictSourceOfTruth ?? null,
       surfaceExtractionPolicyRole: descriptor.surfaceExtractionPolicyRole ?? null,
       surfaceExtractionPolicyMaterial: descriptor.surfaceExtractionPolicyMaterial ?? null,
       surfaceExtractionPolicyPhase: descriptor.surfaceExtractionPolicyPhase ?? null,
@@ -30308,7 +30332,13 @@ fn fs_main() -> @location(0) vec4<f32> {
                   dims: nativeDescriptor.dims,
                   scalarLayoutName: nativeDescriptor.scalarLayoutName,
                   isovalue: nativeDescriptor.isovalue,
+                  surfaceExtractionIsovalueSource:
+                    nativeDescriptor.surfaceExtractionIsovalueSource ?? null,
                   surfaceExtractionPolicyStatus: nativeDescriptor.surfaceExtractionPolicyStatus ?? null,
+                  surfaceExtractionPolicyApplied:
+                    nativeDescriptor.surfaceExtractionPolicyApplied ?? null,
+                  surfaceExtractionPolicyApplicationStatus:
+                    nativeDescriptor.surfaceExtractionPolicyApplicationStatus ?? null,
                   surfaceExtractionPolicyRole: nativeDescriptor.surfaceExtractionPolicyRole ?? null,
                   surfaceExtractionPolicyIsovaluePolicy:
                     nativeDescriptor.surfaceExtractionPolicyIsovaluePolicy ?? null
@@ -30429,8 +30459,22 @@ fn fs_main() -> @location(0) vec4<f32> {
                     nativeMarchingCubesVolumeSourceType: nativeExtraction.volumeSourceType,
                     nativeMarchingCubesVolumeScalarLayoutName: nativeExtraction.volumeScalarLayoutName,
                     nativeMarchingCubesExtractionIsovalue: nativeExtraction.isovalue ?? null,
+                    nativeMarchingCubesSurfaceExtractionIsovalueSource:
+                      nativeExtraction.surfaceExtractionIsovalueSource ?? null,
                     nativeMarchingCubesSurfaceExtractionPolicyStatus:
                       nativeExtraction.surfaceExtractionPolicyStatus ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyApplied:
+                      nativeExtraction.surfaceExtractionPolicyApplied ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyApplicationStatus:
+                      nativeExtraction.surfaceExtractionPolicyApplicationStatus ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyApplicationReason:
+                      nativeExtraction.surfaceExtractionPolicyApplicationReason ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyRequestedIsovalue:
+                      nativeExtraction.surfaceExtractionPolicyRequestedIsovalue ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyRendererAuthority:
+                      nativeExtraction.surfaceExtractionPolicyRendererAuthority ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyStrictSourceOfTruth:
+                      nativeExtraction.surfaceExtractionPolicyStrictSourceOfTruth ?? null,
                     nativeMarchingCubesSurfaceExtractionPolicyRole:
                       nativeExtraction.surfaceExtractionPolicyRole ?? null,
                     nativeMarchingCubesSurfaceExtractionPolicyMaterial:

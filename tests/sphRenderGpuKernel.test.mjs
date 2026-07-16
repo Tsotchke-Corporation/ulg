@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
 import {
@@ -69,6 +70,8 @@ import {
   deriveSphMaterialInterfaceCandidateFieldWithOptionalWebGpu,
   deriveSphMaterialInterfaceField,
   decodeSphRenderRows,
+  emissiveByMaterialFromSphRenderRows,
+  emissiveTemperatureByMaterialFromSphRenderRows,
   extractSphRenderRowsCpu,
   extractSphRenderRowsWebGpu,
   extractSphRenderRowsWithOptionalWebGpu,
@@ -565,6 +568,9 @@ test('SPH render row WGSL applies the same particle scale cap as the CPU contrac
   assert.match(sphRenderRowsWgsl, /RENDER_ROW_MAX_VOLUME_RATIO_J:\s*f32\s*=\s*64\.0/);
   assert.match(sphRenderRowsWgsl, /material_bank_particle_size_row_count:\s*u32/);
   assert.match(sphRenderRowsWgsl, /@group\(0\)\s+@binding\(5\)\s+var<storage,\s*read>\s+material_bank_particle_size_rows/);
+  assert.match(sphRenderRowsWgsl, /@group\(0\)\s+@binding\(6\)\s+var<storage,\s*read>\s+particle_identity:\s*array<u32>/);
+  assert.match(sphRenderRowsWgsl, /explicit_render_domain_id\s*=\s*particle_identity\[particle_index\]/);
+  assert.match(sphRenderRowsWgsl, /render_domain_id\s*=\s*f32\(explicit_render_domain_id\)/);
   assert.match(sphRenderRowsWgsl, /fn material_bank_rest_volume_for_role\(role_id:\s*f32\)\s*->\s*f32/);
   assert.match(sphRenderRowsWgsl, /let row_status\s*=\s*u32\(row3\.x\s*\+\s*0\.5\)/);
   assert.match(sphRenderRowsWgsl, /let bank_rest_volume_m3\s*=\s*material_bank_rest_volume_for_role\(render_domain_id\)/);
@@ -629,6 +635,69 @@ test('SPH render row WebGPU extraction binds material-bank particle-size rows fo
   result.destroyRenderRowsBuffer();
 });
 
+test('SPH render row WebGPU extraction binds the uploaded stable particle identity buffer', async () => {
+  const packed = packedRenderParticles();
+  packed.identity = Uint32Array.from([7, 7, 19]);
+  const particleIdentityBuffer = { label: 'test-particle-identity-buffer' };
+  const { device, dispatches } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array()
+  });
+
+  const result = await extractSphRenderRowsWebGpu({
+    device,
+    sphParticleState: packed,
+    sphParticleUpload: {
+      stateBuffer: { label: 'borrowed-state-buffer' },
+      thermoBuffer: { label: 'borrowed-thermo-buffer' },
+      identityBuffer: particleIdentityBuffer,
+      identityRequired: true,
+      identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+      identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+      identityBufferByteLength: packed.identity.byteLength
+    },
+    mlsMpmParticleUpload: {
+      mechanicsBuffer: { label: 'borrowed-mechanics-buffer' }
+    },
+    readbackMode: 'no-full-readback',
+    retainRenderRowsBuffer: true,
+    renderDomainBaseCount: 1,
+    renderDomainDropCount: 2
+  });
+
+  const renderRowsBindGroup = dispatches[0].bindGroup;
+  const entry = renderRowsBindGroup.entries.find((candidate) => candidate.binding === 6);
+  assert.equal(entry.resource.buffer, particleIdentityBuffer);
+  assert.equal(result.renderRowsIncludeParticleIdentity, true);
+  assert.equal(result.particleIdentityBufferSource, 'sph-particle-upload');
+  assert.equal(result.particleIdentityStrideUints, 1);
+  result.destroyRenderRowsBuffer();
+});
+
+test('SPH render row optional WebGPU fails closed instead of rendering stale arbitrary-domain CPU rows', async () => {
+  const packed = packedRenderParticles();
+  packed.identity = Uint32Array.from([7, 7, 19]);
+  packed.identityRequired = true;
+  packed.cpuIdentityStale = true;
+  const execution = await extractSphRenderRowsWithOptionalWebGpu({
+    sphParticleState: packed,
+    preferWebGpu: true,
+    device: {},
+    webGpuRunner() {
+      throw new Error('resident identity buffer unavailable');
+    }
+  });
+
+  assert.equal(execution.backend, 'blocked');
+  assert.equal(execution.status, 'render-rows-authoritative-resident-buffers-required');
+  assert.equal(execution.cpuReference, null);
+  assert.equal(execution.result, null);
+  assert.equal(execution.renderRowsFailClosed, true);
+  assert.equal(
+    execution.webgpuStatus.status,
+    'blocked-webgpu-error-authoritative-resident-render-required'
+  );
+});
+
 test('SPH render rows encode base/drop render domains without changing material identity', () => {
   const packed = packedRenderParticles();
   const result = extractSphRenderRowsCpu({
@@ -653,6 +722,53 @@ test('SPH render rows encode base/drop render domains without changing material 
     renderDomainId: 1,
     renderDomainKey: 'base'
   });
+});
+
+test('SPH render rows prefer stable arbitrary particle identity over legacy contiguous ranges', () => {
+  const packed = packedRenderParticles();
+  packed.identity = Uint32Array.from([7, 19, 0]);
+  const result = extractSphRenderRowsCpu({
+    sphParticleState: packed,
+    renderDomainBaseCount: 1,
+    renderDomainDropCount: 1
+  });
+  const decoded = decodeSphRenderRows(result.renderRows, {
+    materialProperties,
+    reactionTable
+  });
+
+  assert.deepEqual(decoded.rows.map((row) => row.renderDomainId), [7, 19, 0]);
+  assert.deepEqual(decoded.rows.map((row) => row.renderDomainKey), [null, null, null]);
+  assert.deepEqual(decoded.materials.map((descriptor) => descriptor.renderDomainId ?? 0), [7, 19, 0]);
+});
+
+test('SPH render-row incandescence keeps same-material bodies scoped by render domain', () => {
+  const rows = [
+    {
+      material: 'fe',
+      renderKey: 'fe',
+      phase: 'solid',
+      renderDomainId: 11,
+      temperatureK: 300
+    },
+    {
+      material: 'fe',
+      renderKey: 'fe',
+      phase: 'solid',
+      renderDomainId: 12,
+      temperatureK: 1700
+    }
+  ];
+  const emissive = emissiveByMaterialFromSphRenderRows(rows);
+  const emissiveTemperature = emissiveTemperatureByMaterialFromSphRenderRows(rows);
+  const coldKey = 'render-domain:11|material:fe|phase:solid';
+  const hotKey = 'render-domain:12|material:fe|phase:solid';
+
+  assert.ok(emissive.fe, 'legacy material aggregate remains available');
+  assert.ok(emissive[hotKey], 'hot body has exact-domain emissive authority');
+  assert.equal(emissive[coldKey], undefined, 'cold body has no exact-domain glow');
+  assert.ok(Math.abs(emissiveTemperature[hotKey] - 1700) < 1e-9);
+  assert.equal(emissiveTemperature[coldKey], undefined);
 });
 
 test('SPH render row decoding preserves material identity, phase render keys, and incandescence', () => {
@@ -1620,6 +1736,93 @@ test('SPH physics material interface WebGPU wrapper consumes retained field buff
   sourceField.releaseMaterialInterfaceSourceFieldLeases();
   sourceField.destroyMaterialInterfaceSourceFieldBuffers();
   assert.equal(sourceField.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+});
+
+test('SPH compact material-interface overflow destroys its sidecar before dense fallback', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const field = twoSurfaceRenderField();
+  const denseCandidateField = deriveSphMaterialInterfaceCandidateField(field);
+  const sourceKeyRows = new Float32Array([0, 0, 1, 0]);
+  const { device, createdBuffers } = fakeSurfaceDrawDevice({
+    drawRows: denseCandidateField.candidateRows,
+    candidateMetadataRows: new Uint32Array([
+      2,
+      1,
+      1,
+      denseCandidateField.candidateCount
+    ]),
+    sourceKeyRows
+  });
+  const sourceField = await buildSphMaterialInterfaceSourceFieldWebGpu({
+    device,
+    renderRows: extracted.renderRows,
+    surfaceTable: field.surfaceTable,
+    particleCount: packed.particleCount,
+    readbackMode: 'no-full-readback'
+  });
+
+  const interfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+    device,
+    renderField: sourceField,
+    candidateReadbackMode: 'compact-active-readback',
+    compactCandidateCapacity: 1
+  });
+  const compactSidecar = createdBuffers.find(
+    (buffer) => buffer.label === 'ulg-sph-interface-source-keys'
+  );
+
+  assert.equal(interfaceField.candidateCompactFallbackStatus, 'fallback-dense-readback-after-compact-overflow');
+  assert.ok(compactSidecar);
+  assert.equal(compactSidecar.destroyed, true);
+  sourceField.releaseMaterialInterfaceSourceFieldLeases();
+  sourceField.destroyMaterialInterfaceSourceFieldBuffers();
+});
+
+test('SPH compact material-interface overflow forwards sidecar cleanup when dense fallback is blocked', async () => {
+  const baseField = twoSurfaceRenderField();
+  const totalFieldCells = Math.ceil(
+    (SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT + 1)
+      / (3 * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const renderField = {
+    ...baseField,
+    totalFieldCells,
+    maxFieldCellCount: 1,
+    backend: 'webgpu'
+  };
+  const { device, createdBuffers } = fakeSurfaceDrawDevice({
+    candidateMetadataRows: new Uint32Array([2, 1, 1, totalFieldCells * 3]),
+    sourceKeyRows: new Float32Array([0, 0, 1, 0])
+  });
+  const sourceField = {
+    schema: 'peercompute.ulg.sph-material-interface-source-field.v0',
+    status: 'material-interface-source-field-ready',
+    backend: 'webgpu',
+    sourceRenderField: renderField,
+    fieldRowsBuffer: device.createBuffer({ label: 'borrowed-source-field-rows', size: 4, usage: 0 }),
+    surfaceBuffer: device.createBuffer({ label: 'borrowed-source-surfaces', size: 4, usage: 0 }),
+    sourceIndexFieldBuffer: device.createBuffer({ label: 'borrowed-source-index-field', size: 4, usage: 0 })
+  };
+
+  const interfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+    device,
+    renderField: sourceField,
+    candidateReadbackMode: 'compact-active-readback',
+    compactCandidateCapacity: 1
+  });
+  const compactSidecar = createdBuffers.find(
+    (buffer) => buffer.label === 'ulg-sph-interface-source-keys'
+  );
+
+  assert.equal(interfaceField.status, 'material-interface-field-candidate-readback-skipped');
+  assert.equal(interfaceField.candidateCompactStatus, 'material-interface-compact-candidate-field-overflow');
+  assert.equal(interfaceField.interfaceSourceKeyBuffer, compactSidecar);
+  assert.equal(typeof interfaceField.destroyMaterialInterfaceFieldBuffers, 'function');
+  assert.equal(compactSidecar.destroyed, false);
+  const cleanup = interfaceField.destroyMaterialInterfaceFieldBuffers({ reason: 'test-overflow-cleanup' });
+  assert.equal(cleanup.status, 'material-interface-candidate-field-buffers-destroyed');
+  assert.equal(compactSidecar.destroyed, true);
 });
 
 test('SPH physics material interface can publish GPU-resident summary without candidate readback', async () => {

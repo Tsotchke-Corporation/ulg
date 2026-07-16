@@ -38,10 +38,17 @@ export function createSphPhaseViewState(driver) {
   const baseCount = Math.max(0, Math.round(Number(demo.counts?.base) || 0));
   const dropCount = Math.max(0, Math.round(Number(demo.counts?.drop) || 0));
   demo.state.particles.forEach((p, i) => {
-    const renderDomainId = baseCount > 0 && i < baseCount
-      ? 1
-      : (dropCount > 0 && i >= baseCount && i < baseCount + dropCount ? 2 : 0);
-    const renderDomainKey = renderDomainId === 1 ? 'base' : (renderDomainId === 2 ? 'drop' : null);
+    const explicitRenderDomainId = Math.max(
+      0,
+      Math.round(Number(p.renderDomainId ?? p.initialBodyDomainId) || 0)
+    );
+    const renderDomainId = explicitRenderDomainId > 0
+      ? explicitRenderDomainId
+      : (baseCount > 0 && i < baseCount
+          ? 1
+          : (dropCount > 0 && i >= baseCount && i < baseCount + dropCount ? 2 : 0));
+    const renderDomainKey = p.initialBodyId
+      ?? (renderDomainId === 1 ? 'base' : (renderDomainId === 2 ? 'drop' : null));
     positionsM[i * 3] = p.x[0];
     positionsM[i * 3 + 1] = p.x[1];
     positionsM[i * 3 + 2] = p.x[2];
@@ -71,6 +78,8 @@ export function createSphPhaseViewState(driver) {
       initialParticleSpacingM: Number.isFinite(Number(p.initialParticleSpacingM))
         ? Number(p.initialParticleSpacingM)
         : null,
+      initialBodyId: p.initialBodyId ?? null,
+      initialBodyDomainId: Math.max(0, Math.round(Number(p.initialBodyDomainId) || 0)),
       renderDomainId,
       renderDomainKey
     };
@@ -100,15 +109,37 @@ export function createSphPhaseViewState(driver) {
     initialParticleSpacing: demo.initialParticleSpacing
       ? {
           ...demo.initialParticleSpacing,
-          drop: { ...demo.initialParticleSpacing.drop },
-          base: { ...demo.initialParticleSpacing.base }
+          ...(demo.initialParticleSpacing.drop
+            ? { drop: { ...demo.initialParticleSpacing.drop } }
+            : {}),
+          ...(demo.initialParticleSpacing.base
+            ? { base: { ...demo.initialParticleSpacing.base } }
+            : {}),
+          ...(Array.isArray(demo.initialParticleSpacing.bodies)
+            ? { bodies: demo.initialParticleSpacing.bodies.map((body) => ({ ...body })) }
+            : {}),
+          ...(demo.initialParticleSpacing.byBodyId
+            ? {
+                byBodyId: Object.fromEntries(
+                  Object.entries(demo.initialParticleSpacing.byBodyId)
+                    .map(([bodyId, body]) => [bodyId, { ...body }])
+                )
+              }
+            : {})
         }
       : null,
     initialParticleEdgeDiagnostics: demo.initialParticleEdgeDiagnostics
       ? {
           ...demo.initialParticleEdgeDiagnostics,
-          drop: { ...demo.initialParticleEdgeDiagnostics.drop },
-          base: { ...demo.initialParticleEdgeDiagnostics.base },
+          ...(demo.initialParticleEdgeDiagnostics.drop
+            ? { drop: { ...demo.initialParticleEdgeDiagnostics.drop } }
+            : {}),
+          ...(demo.initialParticleEdgeDiagnostics.base
+            ? { base: { ...demo.initialParticleEdgeDiagnostics.base } }
+            : {}),
+          ...(Array.isArray(demo.initialParticleEdgeDiagnostics.bodies)
+            ? { bodies: demo.initialParticleEdgeDiagnostics.bodies.map((body) => ({ ...body })) }
+            : {}),
           rejectedPreservedCandidates: (demo.initialParticleEdgeDiagnostics.rejectedPreservedCandidates || [])
             .map((candidate) => ({ ...candidate }))
         }
@@ -129,6 +160,18 @@ export function createSphPhaseViewState(driver) {
       .map((group) => ({ ...group })),
     gpuMechanics: { ...demo.gpuMechanics },
     initialHydrostaticState: demo.initialHydrostaticState ? { ...demo.initialHydrostaticState } : null,
+    initialBodies: demo.initialBodies
+      ? {
+          schema: demo.initialBodies.schema,
+          bodies: demo.initialBodies.bodies.map((body) => ({
+            ...body,
+            sizeM: [...body.sizeM],
+            centerM: [...body.centerM],
+            particlesPerEdge: [...body.particlesPerEdge],
+            velocityMPerS: [...body.velocityMPerS]
+          }))
+        }
+      : null,
     reactionNote: demo.reactionNote || null,
     dropMaterial: demo.dropMaterial,
     baseMaterial: demo.baseMaterial,

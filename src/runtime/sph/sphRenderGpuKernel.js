@@ -26,6 +26,7 @@ import {
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
@@ -59,8 +60,10 @@ import {
 } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
-  SPH_GPU_PARTICLE_THERMO_FLOATS
+  SPH_GPU_PARTICLE_THERMO_FLOATS,
+  sphParticleStateRequiresExplicitIdentity
 } from './sphGpuBuffers.js';
 import {
   addResidentBufferLease,
@@ -159,6 +162,46 @@ function assertPackedSphParticleState(sphParticleState) {
   }
 }
 
+function packedParticleIdentityRows(sphParticleState) {
+  const requiredLength = Math.max(
+    0,
+    Math.round(finiteNumber(sphParticleState?.particleCount, 0))
+      * SPH_GPU_PARTICLE_IDENTITY_UINTS
+  );
+  if (sphParticleState?.identity == null) return new Uint32Array(requiredLength);
+  if (!(sphParticleState.identity instanceof Uint32Array)) {
+    throw new TypeError('SPH particle identity rows must be a Uint32Array');
+  }
+  if (sphParticleState.identity.length < requiredLength) {
+    throw new RangeError('SPH particle identity rows must cover every particle slot');
+  }
+  return sphParticleState.identity;
+}
+
+function renderRowsRequireResidentAuthority({ sphParticleState = null, sphParticleUpload = null } = {}) {
+  return sphParticleState?.cpuStateStale === true
+    || sphParticleState?.cpuIdentityStale === true
+    || sphParticleUpload?.identityRequired === true
+    || sphParticleStateRequiresExplicitIdentity(sphParticleState);
+}
+
+function blockedResidentRenderRowsExecution({ reason, webgpuStatus = 'blocked-authoritative-resident-render-required' } = {}) {
+  return {
+    schema: ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
+    backend: 'blocked',
+    status: 'render-rows-authoritative-resident-buffers-required',
+    cpuReference: null,
+    result: null,
+    webgpuStatus: { status: webgpuStatus, reason },
+    compactRenderReadback: false,
+    renderRowsFailClosed: true,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -234,6 +277,12 @@ function renderDomainKeyForId(renderDomainId) {
   return null;
 }
 
+function renderDomainEmissiveAuthorityKey({ material, phase, renderDomainId }) {
+  const domainId = Math.max(0, Math.round(finiteNumber(renderDomainId, 0)));
+  if (domainId <= 0) return null;
+  return `render-domain:${domainId}|material:${material || 'unknown'}|phase:${phase || 'unknown'}`;
+}
+
 function canonicalRenderMaterialKey(material) {
   const key = String(material || '').trim();
   if (!key) return 'unknown';
@@ -294,7 +343,11 @@ export function emissiveTemperatureByMaterialFromSphRenderRows(rows = []) {
     const incandescence = incandescentColor(row.temperatureK);
     if (!incandescence.visible) continue;
     const lum = 0.2126 * incandescence.srgb[0] + 0.7152 * incandescence.srgb[1] + 0.0722 * incandescence.srgb[2];
-    const keys = [row.material, row.renderKey].filter(Boolean);
+    const keys = [
+      row.material,
+      row.renderKey,
+      renderDomainEmissiveAuthorityKey(row)
+    ].filter(Boolean);
     for (const key of keys) {
       const entry = acc[key] || (acc[key] = { t: 0, w: 0 });
       entry.t += (Number(row.temperatureK) || 0) * lum;
@@ -314,7 +367,11 @@ export function emissiveByMaterialFromSphRenderRows(rows = []) {
     const incandescence = incandescentColor(row.temperatureK);
     if (!incandescence.visible) continue;
     const lum = 0.2126 * incandescence.srgb[0] + 0.7152 * incandescence.srgb[1] + 0.0722 * incandescence.srgb[2];
-    const keys = [row.material, row.renderKey].filter(Boolean);
+    const keys = [
+      row.material,
+      row.renderKey,
+      renderDomainEmissiveAuthorityKey(row)
+    ].filter(Boolean);
     for (const key of keys) {
       const entry = acc[key] || (acc[key] = { r: 0, g: 0, b: 0, w: 0 });
       entry.r += incandescence.srgb[0] * lum;
@@ -433,8 +490,13 @@ export function decodeSphRenderRows(renderRows, {
 
 function renderDomainIdForParticleIndex(index, {
   renderDomainBaseCount = 0,
-  renderDomainDropCount = 0
+  renderDomainDropCount = 0,
+  particleIdentity = null
 } = {}) {
+  const explicitIdentity = particleIdentity instanceof Uint32Array
+    ? particleIdentity[index * SPH_GPU_PARTICLE_IDENTITY_UINTS]
+    : 0;
+  if (explicitIdentity > 0) return explicitIdentity;
   const baseCount = Math.max(0, Math.round(finiteNumber(renderDomainBaseCount, 0)));
   const dropCount = Math.max(0, Math.round(finiteNumber(renderDomainDropCount, 0)));
   if (baseCount > 0 && index < baseCount) return 1;
@@ -733,7 +795,11 @@ export function extractSphRenderRowsCpu({
       restDensityKgPerM3,
       sphParticleState.thermo[thermoOffset + 6],
       sphParticleState.thermo[thermoOffset + 9],
-      renderDomainIdForParticleIndex(index, { renderDomainBaseCount, renderDomainDropCount }),
+      renderDomainIdForParticleIndex(index, {
+        renderDomainBaseCount,
+        renderDomainDropCount,
+        particleIdentity: sphParticleState.identity
+      }),
       volumeState.currentVolumeM3,
       volumeState.particleRadiusM,
       volumeState.volumeRatioJ,
@@ -856,7 +922,7 @@ function skippedPhysicsMaterialInterfaceField({
   candidateReadbackMode,
   compactCandidateField = null
 }) {
-  return {
+  const field = {
     schema: ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
     status: 'material-interface-field-candidate-readback-skipped',
     reason: candidateReadbackBlocker.reason,
@@ -911,6 +977,23 @@ function skippedPhysicsMaterialInterfaceField({
     forceCouplingValidation: false,
     fullPhysicsValidation: false
   };
+  if (compactCandidateField?.interfaceSourceKeyBuffer) {
+    field.interfaceSourceKeyBuffer = compactCandidateField.interfaceSourceKeyBuffer;
+    field.interfaceSourceKeyBufferRetained = Boolean(
+      compactCandidateField.interfaceSourceKeyBufferRetained
+    );
+    field.interfaceSourceKeyBufferByteLength =
+      compactCandidateField.interfaceSourceKeyBufferByteLength ?? 0;
+  }
+  if (
+    typeof compactCandidateField?.destroyMaterialInterfaceCandidateFieldBuffers
+      === 'function'
+  ) {
+    field.destroyMaterialInterfaceFieldBuffers = ({
+      reason = 'skipped-material-interface-field-buffer-cleanup'
+    } = {}) => compactCandidateField.destroyMaterialInterfaceCandidateFieldBuffers({ reason });
+  }
+  return field;
 }
 
 function gpuResidentSummaryPhysicsMaterialInterfaceField({
@@ -6063,6 +6146,9 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
           compactCandidateField: candidateField
         });
       }
+      candidateField.destroyMaterialInterfaceCandidateFieldBuffers?.({
+        reason: 'compact-candidate-overflow-switching-to-dense-fallback'
+      });
       candidateField = await buildSphMaterialInterfaceCandidateFieldWebGpu({
         device,
         renderField: sourceRenderField,
@@ -6635,6 +6721,7 @@ export async function extractSphRenderRowsWebGpu({
   mlsMpmParticleUpload = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
+  sourceIdentityBuffer = null,
   sourceMechanicsBuffer = null,
   retainRenderRowsBuffer = false,
   readbackMode = FULL_READBACK_MODE,
@@ -6648,9 +6735,50 @@ export async function extractSphRenderRowsWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
+  const borrowedIdentityBuffer = sourceIdentityBuffer || sphParticleUpload?.identityBuffer || null;
   const mechanicsReady = mlsMpmParticleState?.mechanics instanceof Float32Array
     && mlsMpmParticleState.mechanics.length >= sphParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
   const borrowedMechanicsBuffer = sourceMechanicsBuffer || mlsMpmParticleUpload?.mechanicsBuffer || null;
+  const residentAuthorityRequired = renderRowsRequireResidentAuthority({
+    sphParticleState,
+    sphParticleUpload
+  });
+  if (residentAuthorityRequired) {
+    const missingResidentBuffers = [
+      !borrowedStateBuffer ? 'state' : null,
+      !borrowedThermoBuffer ? 'thermo' : null,
+      !borrowedMechanicsBuffer ? 'mechanics' : null,
+      !borrowedIdentityBuffer ? 'identity' : null
+    ].filter(Boolean);
+    if (missingResidentBuffers.length > 0) {
+      throw new TypeError(
+        `SPH render rows require authoritative resident ${missingResidentBuffers.join(', ')} buffers`
+      );
+    }
+    const identitySchema = sphParticleUpload?.identitySchema || sphParticleState?.identitySchema || null;
+    const identityStrideBytes = Math.max(0, Math.round(finiteNumber(
+      sphParticleUpload?.identityStrideBytes ?? sphParticleState?.identityStrideBytes,
+      0
+    )));
+    const identityByteLength = Math.max(0, Math.round(finiteNumber(
+      sphParticleUpload?.identityBufferByteLength
+        ?? borrowedIdentityBuffer?.size
+        ?? sphParticleState?.identityBufferByteLength
+        ?? sphParticleState?.identity?.byteLength,
+      0
+    )));
+    const expectedIdentityStrideBytes = SPH_GPU_PARTICLE_IDENTITY_UINTS
+      * Uint32Array.BYTES_PER_ELEMENT;
+    if (identitySchema !== ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA) {
+      throw new TypeError('SPH render rows require the authoritative particle identity schema');
+    }
+    if (identityStrideBytes !== expectedIdentityStrideBytes) {
+      throw new TypeError('SPH render rows require the authoritative particle identity stride');
+    }
+    if (identityByteLength < sphParticleState.particleCount * expectedIdentityStrideBytes) {
+      throw new RangeError('SPH render rows require identity capacity for every resident particle');
+    }
+  }
   const packedMaterialBankParticleSizeRows = sphParticleState.materialPropertyBankParticleSizeTable?.rows;
   const packedMaterialBankParticleSizeRowCount = Math.max(
     0,
@@ -6671,6 +6799,11 @@ export async function extractSphRenderRowsWebGpu({
   );
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-render-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-render-source-thermo', sphParticleState.thermo);
+  const identityBuffer = borrowedIdentityBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-render-source-identity',
+    packedParticleIdentityRows(sphParticleState)
+  );
   const mechanicsBuffer = borrowedMechanicsBuffer
     || writeStorageBuffer(
       device,
@@ -6734,7 +6867,8 @@ export async function extractSphRenderRowsWebGpu({
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'uniform'),
       computeBufferBinding(4, 'read-only-storage'),
-      computeBufferBinding(5, 'read-only-storage')
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(6, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -6745,7 +6879,8 @@ export async function extractSphRenderRowsWebGpu({
       { binding: 2, resource: { buffer: renderRowsBuffer } },
       { binding: 3, resource: { buffer: paramsBuffer } },
       { binding: 4, resource: { buffer: mechanicsBuffer } },
-      { binding: 5, resource: { buffer: materialBankParticleSizeBuffer } }
+      { binding: 5, resource: { buffer: materialBankParticleSizeBuffer } },
+      { binding: 6, resource: { buffer: identityBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -6809,6 +6944,7 @@ export async function extractSphRenderRowsWebGpu({
   };
   if (!borrowedStateBuffer) destroyOrDefer(stateBuffer);
   if (!borrowedThermoBuffer) destroyOrDefer(thermoBuffer);
+  if (!borrowedIdentityBuffer) destroyOrDefer(identityBuffer);
   if (!borrowedMechanicsBuffer) destroyOrDefer(mechanicsBuffer);
   if (!borrowedMaterialBankParticleSizeBuffer) destroyOrDefer(materialBankParticleSizeBuffer);
   if (useGpuHandoffBuffer) destroyOrDefer(renderRowsBuffer);
@@ -6834,6 +6970,12 @@ export async function extractSphRenderRowsWebGpu({
     fullReadbackPerformed: !noFullReadback,
 	    normalHotLoopReadbackFree: noFullReadback,
 	    renderRowsIncludeMechanicsVolume: Boolean(borrowedMechanicsBuffer || mechanicsReady),
+      renderRowsIncludeParticleIdentity: true,
+      particleIdentityBufferSource: borrowedIdentityBuffer
+        ? (sourceIdentityBuffer ? 'explicit-source-buffer' : 'sph-particle-upload')
+        : 'packed-sph-particle-state',
+      residentParticleAuthorityRequired: residentAuthorityRequired,
+      particleIdentityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
       materialPropertyBankParticleSizeConsumer: materialBankParticleSizeConsumerSummary({
         rowCount: materialBankParticleSizeRowCount,
         bufferSource: borrowedMaterialBankParticleSizeBuffer
@@ -6872,8 +7014,14 @@ export async function extractSphRenderRowsWithOptionalWebGpu({
   webGpuRunner = extractSphRenderRowsWebGpu,
   ...args
 } = {}) {
-  const cpuReference = extractSphRenderRowsCpu(args);
+  const residentAuthorityRequired = renderRowsRequireResidentAuthority(args);
+  const cpuReference = residentAuthorityRequired ? null : extractSphRenderRowsCpu(args);
   if (!preferWebGpu) {
+    if (residentAuthorityRequired) {
+      return blockedResidentRenderRowsExecution({
+        reason: 'CPU render rows are stale or cannot preserve arbitrary particle identity'
+      });
+    }
     return {
       schema: ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
@@ -6892,6 +7040,12 @@ export async function extractSphRenderRowsWithOptionalWebGpu({
     ? { status: 'webgpu-device-ready', device, reason: 'provided device' }
     : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
   if (!resolvedDeviceResult?.device) {
+    if (residentAuthorityRequired) {
+      return blockedResidentRenderRowsExecution({
+        reason: resolvedDeviceResult?.reason || 'WebGPU device unavailable for authoritative resident render rows',
+        webgpuStatus: 'blocked-webgpu-unavailable-authoritative-resident-render-required'
+      });
+    }
     return {
       schema: ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
@@ -6924,6 +7078,12 @@ export async function extractSphRenderRowsWithOptionalWebGpu({
       fullPhysicsValidation: false
     };
   } catch (error) {
+    if (residentAuthorityRequired) {
+      return blockedResidentRenderRowsExecution({
+        reason: error instanceof Error ? error.message : String(error),
+        webgpuStatus: 'blocked-webgpu-error-authoritative-resident-render-required'
+      });
+    }
     return {
       schema: ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
       backend: 'cpu-reference',

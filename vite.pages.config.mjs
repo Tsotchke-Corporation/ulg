@@ -10,7 +10,25 @@ export default defineConfig({
     outDir: 'docs',
     emptyOutDir: true,
     rollupOptions: {
-      input: fileURLToPath(new URL('./pages.html', import.meta.url))
+      input: {
+        pages: fileURLToPath(new URL('./pages.html', import.meta.url)),
+        sphMlsMpmGpuStep: fileURLToPath(
+          new URL('./src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url)
+        ),
+        ulgMechanicsResidentStageRunner: fileURLToPath(
+          new URL('./src/services/ulgMechanicsResidentStage.worker.js', import.meta.url)
+        )
+      },
+      preserveEntrySignatures: 'exports-only',
+      output: {
+        entryFileNames(chunk) {
+          if (chunk.name === 'sphMlsMpmGpuStep') return 'assets/sphMlsMpmGpuStep.js';
+          if (chunk.name === 'ulgMechanicsResidentStageRunner') {
+            return 'assets/ulgMechanicsResidentStage.worker.js';
+          }
+          return 'assets/[name]-[hash].js';
+        }
+      }
     }
   }
 });

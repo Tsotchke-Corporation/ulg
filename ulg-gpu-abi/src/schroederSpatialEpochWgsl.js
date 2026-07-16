@@ -40,6 +40,14 @@ struct SpatialEpochParams {
   key_dispatch_x: u32,
   assemble_dispatch_x: u32,
   consumer_dispatch_x_limit: u32,
+  query_geometry_mode: u32,
+  query_chart_id: u32,
+  query_min_level: i32,
+  query_max_level: i32,
+  query_base_grid_spacing_m: f32,
+  query_pad_0: u32,
+  query_pad_1: u32,
+  query_pad_2: u32,
 };
 
 @group(0) @binding(0) var<storage, read> active_node_rows: array<f32>;
@@ -52,6 +60,8 @@ const ACTIVE_NODE_STRIDE: u32 = 16u;
 const EXACT_KEY_WORDS: u32 = 5u;
 const SORT_MODE_BOUNDED_ATLAS: u32 = 1u;
 const SORT_MODE_LEXICOGRAPHIC: u32 = 2u;
+const QUERY_GEOMETRY_GENERIC: u32 = 0u;
+const QUERY_GEOMETRY_SINGLE_CHART_POW2: u32 = 1u;
 const MAX_EXACT_F32_INTEGER: f32 = 16777215.0;
 const MIN_SAFE_I32_F32: f32 = -2147483520.0;
 const MAX_SAFE_I32_F32: f32 = 2147483520.0;
@@ -72,6 +82,31 @@ fn safe_i32_f32(value: f32) -> bool {
 
 fn signed_order_key(value: i32) -> u32 {
   return bitcast<u32>(value) ^ 0x80000000u;
+}
+
+fn exact_near_query_profile_ready() -> bool {
+  if (params.query_geometry_mode == QUERY_GEOMETRY_GENERIC) {
+    return true;
+  }
+  if (params.query_geometry_mode != QUERY_GEOMETRY_SINGLE_CHART_POW2) {
+    return false;
+  }
+  let min_order = signed_order_key(params.query_min_level);
+  let max_order = signed_order_key(params.query_max_level);
+  if (max_order < min_order || max_order - min_order >= 64u) {
+    return false;
+  }
+  let min_spacing = params.query_base_grid_spacing_m
+    * exp2(f32(params.query_min_level));
+  let max_spacing = params.query_base_grid_spacing_m
+    * exp2(f32(params.query_max_level));
+  return params.query_chart_id <= 0x00ffffffu
+    && finite_f32(params.query_base_grid_spacing_m)
+    && params.query_base_grid_spacing_m > 0.0
+    && finite_f32(min_spacing)
+    && min_spacing >= 0.000001
+    && finite_f32(max_spacing)
+    && max_spacing > 0.0;
 }
 
 fn write_invalid_keys(source_index: u32) {
@@ -127,14 +162,34 @@ fn emit_spatial_keys(
     atomicAdd(&epoch_evidence[0], 1u);
     return;
   }
-  let row_admitted = source_particle_f == f32(source_index)
+  var row_admitted = source_particle_f == f32(source_index)
     && source_index <= 16777215u
-    && status_f > 0.0
-    && status_f < 32.0
+    // Low five bits carry the base assignment status. Bit 6 records an
+    // admitted phase-volume overlay; bit 7 records a rejected/torn overlay.
+    // The generic directory can consume admitted per-row native spacing, but
+    // must fail closed on a rejected overlay.
+    && (u32(round(status_f)) & 31u) > 0u
+    && (u32(round(status_f)) & 128u) == 0u
     && chart_f >= 0.0
     && chart_f <= MAX_EXACT_F32_INTEGER
     && level_f >= MIN_SAFE_I32_F32
     && level_f <= MAX_SAFE_I32_F32;
+  if (row_admitted && params.query_geometry_mode == QUERY_GEOMETRY_SINGLE_CHART_POW2) {
+    let row_chart = u32(round(chart_f));
+    let row_level = i32(round(level_f));
+    let row_level_order = signed_order_key(row_level);
+    let query_min_order = signed_order_key(params.query_min_level);
+    let query_max_order = signed_order_key(params.query_max_level);
+    let expected_spacing = params.query_base_grid_spacing_m * exp2(f32(row_level));
+    row_admitted = exact_near_query_profile_ready()
+      && row_chart == params.query_chart_id
+      && row_level_order >= query_min_order
+      && row_level_order <= query_max_order
+      && bitcast<u32>(native_spacing) == bitcast<u32>(expected_spacing)
+      && (u32(round(status_f)) & 64u) == 0u;
+  } else if (row_admitted && params.query_geometry_mode != QUERY_GEOMETRY_GENERIC) {
+    row_admitted = false;
+  }
   if (!row_admitted) {
     write_invalid_keys(source_index);
     atomicAdd(&epoch_evidence[0], 1u);
@@ -254,6 +309,14 @@ struct SpatialEpochParams {
   key_dispatch_x: u32,
   assemble_dispatch_x: u32,
   consumer_dispatch_x_limit: u32,
+  query_geometry_mode: u32,
+  query_chart_id: u32,
+  query_min_level: i32,
+  query_max_level: i32,
+  query_base_grid_spacing_m: f32,
+  query_pad_0: u32,
+  query_pad_1: u32,
+  query_pad_2: u32,
 };
 
 @group(0) @binding(0) var<storage, read> exact_keys: array<u32>;
@@ -277,6 +340,43 @@ const STATUS_CAPACITY_OVERFLOW: u32 = 16u;
 const PRIMITIVE_STATUS_READY: u32 = 1u;
 const PRIMITIVE_STATUS_FAIL_CLOSED: u32 = 4u;
 const SOURCE_ADAPTER_ACTIVE_NODE_ROWS: u32 = 1u;
+const SOURCE_ADAPTER_EXACT_NEAR_QUERY: u32 = 2u;
+const QUERY_GEOMETRY_GENERIC: u32 = 0u;
+const QUERY_GEOMETRY_SINGLE_CHART_POW2: u32 = 1u;
+const QUERY_EVIDENCE_WORDS: u32 = 4u;
+
+fn finite_f32(value: f32) -> bool {
+  return value == value && abs(value) <= 3.402823e38;
+}
+
+fn signed_order_key(value: i32) -> u32 {
+  return bitcast<u32>(value) ^ 0x80000000u;
+}
+
+fn exact_near_query_profile_ready() -> bool {
+  if (params.query_geometry_mode == QUERY_GEOMETRY_GENERIC) {
+    return true;
+  }
+  if (params.query_geometry_mode != QUERY_GEOMETRY_SINGLE_CHART_POW2) {
+    return false;
+  }
+  let min_order = signed_order_key(params.query_min_level);
+  let max_order = signed_order_key(params.query_max_level);
+  if (max_order < min_order || max_order - min_order >= 64u) {
+    return false;
+  }
+  let min_spacing = params.query_base_grid_spacing_m
+    * exp2(f32(params.query_min_level));
+  let max_spacing = params.query_base_grid_spacing_m
+    * exp2(f32(params.query_max_level));
+  return params.query_chart_id <= 0x00ffffffu
+    && finite_f32(params.query_base_grid_spacing_m)
+    && params.query_base_grid_spacing_m > 0.0
+    && finite_f32(min_spacing)
+    && min_spacing >= 0.000001
+    && finite_f32(max_spacing)
+    && max_spacing > 0.0;
+}
 
 fn saturating_add_u32(left: u32, right: u32) -> u32 {
   if (right > 0xffffffffu - left) {
@@ -381,11 +481,17 @@ fn finalize_directory() {
   let admitted = primitive_ready
     && invalid_source_count == 0u
     && overflow_free
-    && emitted_count == params.source_count;
+    && emitted_count == params.source_count
+    && exact_near_query_profile_ready();
+  let has_query_evidence =
+    params.query_geometry_mode == QUERY_GEOMETRY_SINGLE_CHART_POW2;
   let live_required_words = params.header_words
     + primitive_unique_count * EXACT_KEY_WORDS
     + primitive_unique_count + 1u
-    + params.source_count * 2u;
+    + params.source_count * 2u
+    + select(0u, QUERY_EVIDENCE_WORDS, has_query_evidence);
+  let query_evidence_offset_words = params.particle_to_cell_offset_words
+    + params.source_count;
   let live_physical_high_water_words = max(
     max(
       select(
@@ -401,10 +507,17 @@ fn finalize_directory() {
         params.cell_members_offset_words + params.source_count,
         params.source_count > 0u
       ),
-      select(
-        params.header_words,
-        params.particle_to_cell_offset_words + params.source_count,
-        params.source_count > 0u
+      max(
+        select(
+          params.header_words,
+          params.particle_to_cell_offset_words + params.source_count,
+          params.source_count > 0u
+        ),
+        select(
+          params.header_words,
+          query_evidence_offset_words + QUERY_EVIDENCE_WORDS,
+          has_query_evidence
+        )
       )
     )
   );
@@ -439,6 +552,14 @@ fn finalize_directory() {
   consumer_dispatch[0] = dispatch_x;
   consumer_dispatch[1] = dispatch_y;
   consumer_dispatch[2] = select(0u, 1u, has_consumer_work);
+
+  if (has_query_evidence) {
+    directory[query_evidence_offset_words + 0u] = params.query_chart_id;
+    directory[query_evidence_offset_words + 1u] = bitcast<u32>(params.query_min_level);
+    directory[query_evidence_offset_words + 2u] = bitcast<u32>(params.query_max_level);
+    directory[query_evidence_offset_words + 3u] =
+      bitcast<u32>(params.query_base_grid_spacing_m);
+  }
 
   directory[0] = MAGIC;
   directory[1] = ABI_VERSION;
@@ -489,7 +610,11 @@ fn finalize_directory() {
   // unique primitive additionally clears 8 evidence, 3 dispatch, and the
   // first unique-offset word, for 67 total cleared words per encoded epoch.
   directory[45] = params.header_words + 4u + 3u + 8u + 3u + 1u;
-  directory[46] = SOURCE_ADAPTER_ACTIVE_NODE_ROWS;
+  directory[46] = select(
+    SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
+    SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    has_query_evidence
+  );
   directory[47] = select(
     params.directory_capacity_words,
     live_physical_high_water_words,

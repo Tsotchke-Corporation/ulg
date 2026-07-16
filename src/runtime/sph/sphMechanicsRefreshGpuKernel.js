@@ -17,6 +17,11 @@ import {
   MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS,
   ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA
 } from './sphMechanicsMaterialTable.js';
+import {
+  tagWebGpuBufferDevice,
+  typedArrayContentFingerprint,
+  webGpuBufferDevice
+} from './sphGpuDeviceIdentity.js';
 
 export const ULG_MLS_MPM_MECHANICS_REFRESH_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-refresh.v0';
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-material-phase-upload.v0';
@@ -100,7 +105,7 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
-  return buffer;
+  return tagWebGpuBufferDevice(buffer, device);
 }
 
 function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
@@ -204,6 +209,9 @@ export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMater
     schema: ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
     status: 'webgpu-uploaded',
     sourceMaterialTableSchema: mechanicsMaterialTable.schema,
+    sourceMaterialTableContentFingerprint: typedArrayContentFingerprint(
+      mechanicsMaterialTable.records
+    ),
     phaseRecordCount: mechanicsMaterialTable.phaseRecordCount,
     recordsByteLength: mechanicsMaterialTable.records.byteLength,
     recordsBuffer,
@@ -233,14 +241,24 @@ export function destroyMlsMpmMechanicsMaterialPhaseUpload(upload) {
   upload.destroyed = true;
 }
 
-function uploadedMechanicsMaterialPhaseRecordsMatch(upload, mechanicsMaterialTable) {
+export function uploadedMechanicsMaterialPhaseRecordsMatch(
+  upload,
+  mechanicsMaterialTable,
+  device = null
+) {
   return Boolean(
     upload?.status === 'webgpu-uploaded'
     && upload.destroyed !== true
     && (upload.recordsBuffer || upload.materialPhaseBuffer)
     && upload.sourceMaterialTableSchema === mechanicsMaterialTable?.schema
+    && upload.sourceMaterialTableContentFingerprint === typedArrayContentFingerprint(
+      mechanicsMaterialTable?.records
+    )
     && upload.phaseRecordCount === mechanicsMaterialTable?.phaseRecordCount
     && upload.recordsByteLength === mechanicsMaterialTable?.records?.byteLength
+    && (!device || webGpuBufferDevice(
+      upload.recordsBuffer || upload.materialPhaseBuffer
+    ) === device)
   );
 }
 
@@ -449,7 +467,8 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-mechanics-refresh-source-mechanics', mlsMpmParticleState.mechanics);
   const borrowedMaterialPhaseUpload = uploadedMechanicsMaterialPhaseRecordsMatch(
     mechanicsMaterialPhaseUpload,
-    mechanicsMaterialTable
+    mechanicsMaterialTable,
+    device
   )
     ? mechanicsMaterialPhaseUpload
     : null;

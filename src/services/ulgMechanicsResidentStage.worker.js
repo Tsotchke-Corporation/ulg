@@ -10,8 +10,10 @@ import {
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
-  SPH_GPU_PARTICLE_THERMO_FLOATS
+  SPH_GPU_PARTICLE_THERMO_FLOATS,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
 } from '../runtime/sph/sphGpuBuffers.js';
 import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
 
@@ -1370,7 +1372,14 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
   }
   let retained = record.adoptedStorageRematerialization || null;
   let reused = false;
-  if (retained && retained.hotBufferKey === hotBufferKey) {
+  const identityRequired = seed.identityRequired === true;
+  const identityRevision = normalizeString(seed.identityRevision, null);
+  if (
+    retained
+    && retained.hotBufferKey === hotBufferKey
+    && retained.identityRequired === identityRequired
+    && (!identityRequired || retained.identityRevision === identityRevision)
+  ) {
     reused = true;
   } else {
     const state = data?.sphParticleState?.state;
@@ -1386,6 +1395,10 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     }
     const packedParticleCount = Math.max(0, Math.floor(Number(data?.sphParticleState?.particleCount) || 0));
     const authoritativeParticleCount = Math.max(0, Math.floor(Number(seed.authoritativeParticleCount) || 0));
+    const outputParticleCapacity = Math.max(
+      authoritativeParticleCount,
+      Math.floor(Number(seed.outputParticleCapacity) || authoritativeParticleCount)
+    );
     // The packed rows are the seed's row payload; a count mismatch means the
     // shipped rows do not represent the adopted storage - fail honest rather
     // than rematerialize a stale particle set as authoritative.
@@ -1399,10 +1412,41 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
         authoritativeParticleCount
       };
     }
+    const identity = data?.sphParticleState?.identity;
+    if (identityRequired) {
+      const expectedIdentityStrideBytes = SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT;
+      const fourBufferRowsStale = data?.sphParticleState?.cpuStateStale === true
+        || data?.sphParticleState?.cpuIdentityStale === true
+        || data?.mlsMpmParticleState?.cpuStateStale === true;
+      const fourBufferRowsComplete = state.length
+          >= outputParticleCapacity * SPH_GPU_PARTICLE_STATE_FLOATS
+        && thermo.length >= outputParticleCapacity * SPH_GPU_PARTICLE_THERMO_FLOATS
+        && mechanics.length >= outputParticleCapacity * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+        && identity instanceof Uint32Array
+        && identity.length >= outputParticleCapacity * SPH_GPU_PARTICLE_IDENTITY_UINTS;
+      const identityContractAccepted = seed.particleIdentityMutationApproved === true
+        && seed.requiresAuthoritativeFourBufferRows === true
+        && seed.identitySchema === ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+        && seed.identityStrideBytes === expectedIdentityStrideBytes;
+      if (fourBufferRowsStale || !fourBufferRowsComplete || !identityContractAccepted) {
+        return {
+          status: 'blocked-worker-adopted-storage-rematerialization-authoritative-four-buffer-snapshot-required',
+          requested: true,
+          applied: false,
+          hotBufferKey,
+          identityRequired: true,
+          fourBufferRowsStale,
+          fourBufferRowsComplete,
+          identityContractAccepted,
+          outputParticleCapacity
+        };
+      }
+    }
     if (retained) {
       retained.stateBuffer?.destroy?.();
       retained.thermoBuffer?.destroy?.();
       retained.mechanicsBuffer?.destroy?.();
+      retained.identityBuffer?.destroy?.();
     }
     retained = {
       hotBufferKey,
@@ -1410,17 +1454,32 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
       materializationMode: seed.materializationMode || 'peer-local-gpu-rematerialization-from-descriptor-seed',
       particleCount: packedParticleCount,
       authoritativeParticleCount: authoritativeParticleCount || packedParticleCount,
+      outputParticleCapacity,
+      identityRequired,
+      identityRevision,
+      identitySchema: identityRequired ? seed.identitySchema : null,
+      identityStrideBytes: identityRequired ? seed.identityStrideBytes : 0,
       stateBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-state', state),
       thermoBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-thermo', thermo),
       mechanicsBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-mechanics', mechanics),
+      identityBuffer: identityRequired
+        ? writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-identity', identity)
+        : null,
       stateBufferByteLength: state.byteLength,
       thermoBufferByteLength: thermo.byteLength,
-      mechanicsBufferByteLength: mechanics.byteLength
+      mechanicsBufferByteLength: mechanics.byteLength,
+      identityBufferByteLength: identityRequired ? identity.byteLength : 0
     };
-    if (!retained.stateBuffer || !retained.thermoBuffer || !retained.mechanicsBuffer) {
+    if (
+      !retained.stateBuffer
+      || !retained.thermoBuffer
+      || !retained.mechanicsBuffer
+      || (identityRequired && !retained.identityBuffer)
+    ) {
       retained.stateBuffer?.destroy?.();
       retained.thermoBuffer?.destroy?.();
       retained.mechanicsBuffer?.destroy?.();
+      retained.identityBuffer?.destroy?.();
       return {
         status: 'blocked-worker-adopted-storage-rematerialization-buffer-create-failed',
         requested: true,
@@ -1437,7 +1496,14 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization',
     particleCount: retained.particleCount,
     stateBuffer: retained.stateBuffer,
-    thermoBuffer: retained.thermoBuffer
+    thermoBuffer: retained.thermoBuffer,
+    identityBuffer: retained.identityBuffer,
+    identityRequired: retained.identityRequired,
+    identityRevision: retained.identityRevision,
+    identitySchema: retained.identitySchema,
+    identityStrideBytes: retained.identityStrideBytes,
+    identityBufferByteLength: retained.identityBufferByteLength,
+    renderDomainKeys: { ...(seed.renderDomainKeys || {}) }
   };
   data.mlsMpmParticleUpload = {
     schema: 'peercompute.ulg.worker-rematerialized-adopted-storage-mls-mpm-particle-upload.v0',
@@ -1459,6 +1525,9 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     stateBufferByteLength: retained.stateBufferByteLength,
     thermoBufferByteLength: retained.thermoBufferByteLength,
     mechanicsBufferByteLength: retained.mechanicsBufferByteLength,
+    identityRequired: retained.identityRequired,
+    identityRevision: retained.identityRevision,
+    identityBufferByteLength: retained.identityBufferByteLength,
     rawGpuBufferPeerComputeTransfer: false
   };
 }

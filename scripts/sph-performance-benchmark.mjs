@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const repoDir = path.resolve(process.env.ULG_BENCH_REPO_DIR || process.cwd());
 const profile = String(process.env.ULG_BENCH_PROFILE || 'smoke').trim().toLowerCase();
@@ -106,6 +107,22 @@ const booleanEnv = (name, fallback = false) => {
   if (raw == null || raw === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
 };
+const schroederLawQueueRequested = booleanEnv(
+  'ULG_BENCH_SCHROEDER_LAW_QUEUE',
+  false
+);
+const schroederLawNeighborCandidatesRequested = booleanEnv(
+  'ULG_BENCH_SCHROEDER_LAW_NEIGHBOR_CANDIDATES',
+  false
+);
+const schroederCrossLevelCouplingRequested = booleanEnv(
+  'ULG_BENCH_SCHROEDER_CROSS_LEVEL_COUPLING',
+  false
+);
+const schroederPhaseVolumeMigrationRequested = booleanEnv(
+  'ULG_BENCH_SCHROEDER_PHASE_VOLUME_MIGRATION',
+  false
+);
 const lawThermal = booleanEnv('ULG_BENCH_LAW_THERMAL', probeMode !== 'direct-resident');
 const lawReactions = booleanEnv('ULG_BENCH_LAW_REACTIONS', true);
 const lawViscosity = booleanEnv('ULG_BENCH_LAW_VISCOSITY', true);
@@ -205,7 +222,14 @@ function scenarioUrlForCount(targetCount) {
       ss: '1',
       schroederLevel: String(schroederSelectedLevel),
       schroederPortableSummary: schroederPortableSummaryRequested ? '1' : '0',
-      schroederActiveNodeIndex: schroederActiveNodeIndexRequested ? '1' : '0'
+      schroederActiveNodeIndex: schroederActiveNodeIndexRequested ? '1' : '0',
+      schroederLawQueue: schroederLawQueueRequested ? '1' : '0',
+      schroederLawNeighborCandidates:
+        schroederLawNeighborCandidatesRequested ? '1' : '0',
+      schroederCrossLevelCoupling:
+        schroederCrossLevelCouplingRequested ? '1' : '0',
+      schroederPhaseVolumeMigration:
+        schroederPhaseVolumeMigrationRequested ? '1' : '0'
     } : {}),
     ...(renderOwnershipMode ? { renderOwnership: renderOwnershipMode } : {}),
     ...(renderOwnershipUseCase ? { renderUseCase: renderOwnershipUseCase } : {}),
@@ -359,15 +383,39 @@ function workerOffscreenFrameTransportBudget({
   };
 }
 
-function scenarioPerformanceGate({
+export function scenarioPerformanceGate({
   residentGpuCompletedStageMs,
   residentStageStepsPerSecond,
+  probeWallStepsPerSecond,
+  probeEngineStepsPerSecond,
   estimatedReadbackBytesPerStep,
   activeGridDispatch,
   residentStageTiming,
-  fusedResidentSequenceBlockedForSidecars = false
+  fusedResidentSequenceBlockedForSidecars = false,
+  schroederSimulationRequested = false,
+  schroederSimulationRequestedObserved = null,
+  schroederSimulationActive = null,
+  schroederTransactionCoverageComplete = null
 }) {
   const blockers = [];
+  if (
+    schroederSimulationRequested === true
+    && schroederSimulationRequestedObserved !== true
+  ) {
+    blockers.push('schroeder-simulation-request-not-observed');
+  }
+  if (
+    schroederSimulationRequested === true
+    && schroederSimulationActive !== true
+  ) {
+    blockers.push('schroeder-simulation-requested-but-inactive');
+  }
+  if (
+    schroederSimulationRequested === true
+    && schroederTransactionCoverageComplete !== true
+  ) {
+    blockers.push('schroeder-spatial-transaction-coverage-incomplete');
+  }
   if (requireActiveGridGate && activeGridDispatch?.useActiveGrid !== true) {
     blockers.push('active-grid-dispatch-required');
   }
@@ -419,7 +467,13 @@ function scenarioPerformanceGate({
     observed: {
       residentGpuCompletedStageMs,
       residentStageStepsPerSecond,
+      probeWallStepsPerSecond,
+      probeEngineStepsPerSecond,
       estimatedReadbackBytesPerStep,
+      schroederSimulationRequested,
+      schroederSimulationRequestedObserved,
+      schroederSimulationActive,
+      schroederTransactionCoverageComplete,
       activeGridUsed: activeGridDispatch?.useActiveGrid === true,
       queueFenceStatus: residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence ?? null,
       queueFenceBypassedBySidecarFallback: fusedResidentSequenceBlockedForSidecars === true
@@ -445,6 +499,441 @@ function firstNonNullMetricValue(...values) {
     if (value !== undefined && value !== null) return value;
   }
   return null;
+}
+
+const SCHROEDER_TRANSACTION_COUNTER_KEYS = Object.freeze([
+  'epochCount',
+  'directoryBuildCount',
+  'sortUniqueCount',
+  'privateCanonicalLookupBuildCount',
+  'readerRejectCount',
+  'proposalSealCount',
+  'commitCount',
+  'releaseScheduleCount',
+  'releaseRetryCount',
+  'releaseCount',
+  'staleLawInputForwardCount',
+  'legacyPrivateLookupBuildCount',
+  'legacyExhaustiveTraversalCount'
+]);
+
+function exactNonNegativeIntegerOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : null;
+}
+
+function exactIntegerSequenceEvidence(values, { requireContiguous = true } = {}) {
+  const exact = values.every((value) => Number.isInteger(value) && value >= 0);
+  const unique = exact && new Set(values).size === values.length;
+  const strictlyIncreasing = exact && values.every(
+    (value, index) => index === 0 || value > values[index - 1]
+  );
+  const contiguous = exact && values.every(
+    (value, index) => index === 0 || value === values[index - 1] + 1
+  );
+  return {
+    count: values.length,
+    start: values.length > 0 && exact ? values[0] : null,
+    end: values.length > 0 && exact ? values[values.length - 1] : null,
+    exact,
+    unique,
+    strictlyIncreasing,
+    contiguous,
+    complete: values.length > 0
+      && exact
+      && unique
+      && strictlyIncreasing
+      && (!requireContiguous || contiguous)
+  };
+}
+
+/**
+ * Audit the canonical SS epoch transaction over the complete benchmark run.
+ *
+ * A benchmark metric is a batch snapshot, so looking only at the final metric
+ * can hide an earlier partial, duplicated, or unreleased tick.  Select exactly
+ * one primary resident-batch metric for every requested batch, then flatten its
+ * per-tick transaction and generation summaries in execution order.
+ */
+export function aggregateSchroederResidentBatchEvidence({
+  metrics = [],
+  requestedBatchCount,
+  requestedBatchStepCount,
+  schroederSimulationRequested: simulationRequested = false
+} = {}) {
+  const expectedBatchCount = exactNonNegativeIntegerOrNull(requestedBatchCount);
+  const expectedBatchStepCount = exactNonNegativeIntegerOrNull(requestedBatchStepCount);
+  const requestedShapeValid = Boolean(
+    expectedBatchCount > 0 && expectedBatchStepCount > 0
+  );
+  const expectedStepCount = requestedShapeValid
+    ? expectedBatchCount * expectedBatchStepCount
+    : 0;
+  const residentBatchMetrics = (Array.isArray(metrics) ? metrics : [])
+    .filter((entry) => (
+      entry?.phase === 'resident-batch'
+      && Number.isInteger(Number(entry?.batchIndex))
+      && Number(entry.batchIndex) > 0
+    ))
+    .sort((a, b) => Number(a.batchIndex) - Number(b.batchIndex));
+  const observedBatchIndices = residentBatchMetrics.map((entry) => Number(entry.batchIndex));
+  const expectedBatchIndices = requestedShapeValid
+    ? Array.from({ length: expectedBatchCount }, (_, index) => index + 1)
+    : [];
+  const batchIndexCoverageComplete = requestedShapeValid
+    && observedBatchIndices.length === expectedBatchIndices.length
+    && observedBatchIndices.every((batchIndex, index) => batchIndex === expectedBatchIndices[index]);
+  const batchEvidence = residentBatchMetrics.map((entry) => {
+    const residentSteps = entry?.residentSteps || null;
+    const transactions = Array.isArray(residentSteps?.schroederSpatialEpochTransactionSummaries)
+      ? residentSteps.schroederSpatialEpochTransactionSummaries
+      : [];
+    const generations = Array.isArray(residentSteps?.schroederSpatialEpochGenerationSummaries)
+      ? residentSteps.schroederSpatialEpochGenerationSummaries
+      : [];
+    const artifactLedgers = Array.isArray(
+      residentSteps?.schroederHierarchyArtifactLedgerSummaries
+    ) ? residentSteps.schroederHierarchyArtifactLedgerSummaries : [];
+    const completedStepCount = exactNonNegativeIntegerOrNull(residentSteps?.completedStepCount);
+    const nextStep = exactNonNegativeIntegerOrNull(residentSteps?.nextStep);
+    const releaseSettlementCount = exactNonNegativeIntegerOrNull(
+      residentSteps?.schroederSpatialEpochReleaseSettlementCount
+    );
+    const releaseSettlementComplete =
+      residentSteps?.schroederSpatialEpochReleaseSettlementComplete === true;
+    const artifactLedgerSettlementCount = exactNonNegativeIntegerOrNull(
+      residentSteps?.schroederHierarchyArtifactLedgerSettlementCount
+    );
+    const artifactLedgerSettlementComplete =
+      residentSteps?.schroederHierarchyArtifactLedgerSettlementComplete === true;
+    const physicsTicks = transactions.map(
+      (transaction) => exactNonNegativeIntegerOrNull(transaction?.epochIdentity?.physicsTick)
+    );
+    const positionEpochs = transactions.map(
+      (transaction) => exactNonNegativeIntegerOrNull(transaction?.epochIdentity?.positionEpoch)
+    );
+    const transactionGenerationIds = transactions.map(
+      (transaction) => exactNonNegativeIntegerOrNull(transaction?.generationId)
+    );
+    const generationSummaryIds = generations.map(
+      (generation) => exactNonNegativeIntegerOrNull(generation?.generationId)
+    );
+    const physicsTickSequence = exactIntegerSequenceEvidence(physicsTicks);
+    const positionEpochSequence = exactIntegerSequenceEvidence(positionEpochs);
+    const transactionGenerationSequence = exactIntegerSequenceEvidence(transactionGenerationIds);
+    const generationSummarySequence = exactIntegerSequenceEvidence(generationSummaryIds);
+    const transactionGenerationAlignmentComplete = transactionGenerationIds.length === generationSummaryIds.length
+      && transactionGenerationIds.every(
+        (generationId, index) => generationId === generationSummaryIds[index]
+      );
+    const artifactLedgerGenerationAlignmentComplete =
+      transactionGenerationIds.length === artifactLedgers.length
+      && transactionGenerationIds.every((generationId, index) => (
+        generationId === exactNonNegativeIntegerOrNull(
+          artifactLedgers[index]?.spatialEpochGenerationId
+        )
+      ));
+    const nextStepAlignmentComplete = Number.isInteger(nextStep)
+      && physicsTicks.length > 0
+      && physicsTicks.at(-1) + 1 === nextStep
+      && physicsTicks[0] === nextStep - physicsTicks.length;
+    return {
+      batchIndex: Number(entry.batchIndex),
+      residentStepsStatus: residentSteps?.status ?? null,
+      completedStepCount,
+      nextStep,
+      releaseSettlementCount,
+      releaseSettlementComplete,
+      artifactLedgerSettlementCount,
+      artifactLedgerSettlementComplete,
+      schroederSimulationActive: entry?.schroederTelemetry?.active === true,
+      transactionCount: transactions.length,
+      generationSummaryCount: generations.length,
+      artifactLedgerSummaryCount: artifactLedgers.length,
+      physicsTickSequence,
+      positionEpochSequence,
+      transactionGenerationSequence,
+      generationSummarySequence,
+      transactionGenerationAlignmentComplete,
+      artifactLedgerGenerationAlignmentComplete,
+      nextStepAlignmentComplete,
+      transactions,
+      generations,
+      artifactLedgers
+    };
+  });
+  const completedStepCount = batchEvidence.reduce(
+    (sum, batch) => sum + (batch.completedStepCount ?? 0),
+    0
+  );
+  const completedStepCoverageComplete = requestedShapeValid
+    && batchEvidence.length === expectedBatchCount
+    && batchEvidence.every((batch) => (
+      batch.residentStepsStatus === 'resident-steps-executed'
+      && batch.completedStepCount === expectedBatchStepCount
+    ))
+    && completedStepCount === expectedStepCount;
+  const releaseSettlementCount = batchEvidence.reduce(
+    (sum, batch) => sum + (batch.releaseSettlementCount ?? 0),
+    0
+  );
+  const releaseSettlementCoverageComplete = requestedShapeValid
+    && batchEvidence.length === expectedBatchCount
+    && batchEvidence.every((batch) => (
+      batch.releaseSettlementComplete === true
+      && batch.releaseSettlementCount === expectedBatchStepCount
+      && batch.releaseSettlementCount === batch.completedStepCount
+    ))
+    && releaseSettlementCount === expectedStepCount;
+  const nextStepSequence = exactIntegerSequenceEvidence(
+    batchEvidence.map((batch) => batch.nextStep),
+    { requireContiguous: false }
+  );
+  const nextStepStrideCoverageComplete = nextStepSequence.complete
+    && batchEvidence.every((batch, index) => (
+      batch.nextStepAlignmentComplete
+      && (
+        index === 0
+        || batch.nextStep - batchEvidence[index - 1].nextStep === batch.completedStepCount
+      )
+    ));
+  const transactions = batchEvidence.flatMap((batch) => batch.transactions);
+  const generations = batchEvidence.flatMap((batch) => batch.generations);
+  const artifactLedgers = batchEvidence.flatMap((batch) => batch.artifactLedgers);
+  const transactionGenerationIds = transactions.map(
+    (transaction) => exactNonNegativeIntegerOrNull(transaction?.generationId)
+  );
+  const transactionPhysicsTicks = transactions.map(
+    (transaction) => exactNonNegativeIntegerOrNull(transaction?.epochIdentity?.physicsTick)
+  );
+  const transactionPositionEpochs = transactions.map(
+    (transaction) => exactNonNegativeIntegerOrNull(transaction?.epochIdentity?.positionEpoch)
+  );
+  const generationSummaryIds = generations.map(
+    (generation) => exactNonNegativeIntegerOrNull(generation?.generationId)
+  );
+  const transactionGenerationSequence = exactIntegerSequenceEvidence(transactionGenerationIds);
+  const transactionPhysicsTickSequence = exactIntegerSequenceEvidence(transactionPhysicsTicks);
+  const transactionPositionEpochSequence = exactIntegerSequenceEvidence(transactionPositionEpochs);
+  const generationSummarySequence = exactIntegerSequenceEvidence(generationSummaryIds);
+  const transactionGenerationAlignmentComplete = transactionGenerationIds.length === generationSummaryIds.length
+    && transactionGenerationIds.every(
+      (generationId, index) => generationId === generationSummaryIds[index]
+    );
+  const artifactLedgerGenerationAlignmentComplete =
+    transactionGenerationIds.length === artifactLedgers.length
+    && transactionGenerationIds.every((generationId, index) => (
+      generationId === exactNonNegativeIntegerOrNull(
+        artifactLedgers[index]?.spatialEpochGenerationId
+      )
+    ));
+  const transactionCounterTotals = Object.fromEntries(
+    SCHROEDER_TRANSACTION_COUNTER_KEYS.map((key) => [key, 0])
+  );
+  let transactionCountersComplete = true;
+  for (const transaction of transactions) {
+    const counters = transaction?.counters || null;
+    for (const key of SCHROEDER_TRANSACTION_COUNTER_KEYS) {
+      const value = exactNonNegativeIntegerOrNull(counters?.[key]);
+      if (value === null) {
+        transactionCountersComplete = false;
+      } else {
+        transactionCounterTotals[key] += value;
+      }
+    }
+  }
+  const transactionExactOnceCoverageComplete = transactions.length === expectedStepCount
+    && transactions.every((transaction) => {
+      const counters = transaction?.counters || null;
+      return counters?.epochCount === 1
+        && counters?.directoryBuildCount === 1
+        && counters?.sortUniqueCount === 1
+        && counters?.privateCanonicalLookupBuildCount === 0
+        && counters?.readerRejectCount === 0
+        && counters?.proposalSealCount === 1
+        && counters?.commitCount === 1
+        && counters?.releaseScheduleCount === 1
+        && counters?.releaseRetryCount === 0
+        && counters?.releaseCount === 1
+        && counters?.staleLawInputForwardCount === 0;
+    });
+  const transactionLifecycleCoverageComplete = transactions.length === expectedStepCount
+    && transactions.every((transaction) => transaction?.state === 'released')
+    && transactionCountersComplete
+    && transactionExactOnceCoverageComplete
+    && transactionCounterTotals.epochCount === expectedStepCount
+    && transactionCounterTotals.directoryBuildCount === expectedStepCount
+    && transactionCounterTotals.sortUniqueCount === expectedStepCount
+    && transactionCounterTotals.privateCanonicalLookupBuildCount === 0
+    && transactionCounterTotals.readerRejectCount === 0
+    && transactionCounterTotals.proposalSealCount === expectedStepCount
+    && transactionCounterTotals.commitCount === expectedStepCount
+    && transactionCounterTotals.releaseScheduleCount === expectedStepCount
+    && transactionCounterTotals.releaseRetryCount === 0
+    && transactionCounterTotals.releaseCount === expectedStepCount
+    && transactionCounterTotals.staleLawInputForwardCount === 0;
+  const generationCoverageComplete = generations.length === expectedStepCount
+    && generationSummarySequence.complete
+    && transactionGenerationAlignmentComplete
+    && generations.every((generation) => (
+      generation?.directoryBuildCount === 1
+      && generation?.privateLookupBuildCount === 0
+      && generation?.releaseScheduled === true
+      && generation?.releaseStatus
+        === 'spatial-epoch-generation-released-after-final-consumer'
+      && generation?.releaseAttemptCount === 1
+      && generation?.releaseFailureCount === 0
+    ));
+  const artifactLedgerSettlementCount = batchEvidence.reduce(
+    (sum, batch) => sum + (batch.artifactLedgerSettlementCount ?? 0),
+    0
+  );
+  const artifactLedgerFailedDestroyResourceCount = artifactLedgers.reduce(
+    (sum, ledger) => sum + (exactNonNegativeIntegerOrNull(
+      ledger?.failedDestroyResourceCount
+    ) ?? 0),
+    0
+  );
+  const artifactLedgerBlockerCount = artifactLedgers.reduce(
+    (sum, ledger) => sum + (exactNonNegativeIntegerOrNull(
+      ledger?.blockerCount
+    ) ?? 0),
+    0
+  );
+  const artifactLedgerUnsafeUnretiredOwnedResourceCount = artifactLedgers.reduce(
+    (sum, ledger) => sum + (exactNonNegativeIntegerOrNull(
+      ledger?.unsafeUnretiredOwnedResourceCount
+    ) ?? 0),
+    0
+  );
+  const artifactLedgerCoverageComplete = artifactLedgers.length === expectedStepCount
+    && artifactLedgerSettlementCount === expectedStepCount
+    && artifactLedgerGenerationAlignmentComplete
+    && batchEvidence.every((batch) => (
+      batch.artifactLedgerSettlementComplete === true
+      && batch.artifactLedgerSettlementCount === expectedBatchStepCount
+      && batch.artifactLedgerSummaryCount === batch.completedStepCount
+      && batch.artifactLedgerGenerationAlignmentComplete
+    ))
+    && artifactLedgers.every((ledger) => (
+      ledger?.safe === true
+      && ledger?.retirementScheduled === true
+      && ledger?.retirementCompleted === true
+      && ledger?.failedDestroyResourceCount === 0
+      && ledger?.blockerCount === 0
+      && ledger?.unsafeUnretiredOwnedResourceCount === 0
+      && ledger?.resourceInventoryComplete === true
+      && ledger?.unretiredOwnedResourceCountMatches === true
+    ));
+  const stepIdentityCoverageComplete = transactions.length === expectedStepCount
+    && transactionGenerationSequence.complete
+    && transactionPhysicsTickSequence.complete
+    && transactionPositionEpochSequence.complete
+    && batchEvidence.every((batch) => (
+      batch.transactionCount === batch.completedStepCount
+      && batch.generationSummaryCount === batch.completedStepCount
+      && batch.physicsTickSequence.complete
+      && batch.positionEpochSequence.complete
+      && batch.transactionGenerationSequence.complete
+      && batch.generationSummarySequence.complete
+      && batch.transactionGenerationAlignmentComplete
+    ));
+  const schroederSimulationActiveBatchCount = batchEvidence.filter(
+    (batch) => batch.schroederSimulationActive
+  ).length;
+  const schroederSimulationActive = batchIndexCoverageComplete
+    && schroederSimulationActiveBatchCount === expectedBatchCount;
+  const backpressureWaitCount = generations.reduce(
+    (sum, generation) => sum + (exactNonNegativeIntegerOrNull(generation?.backpressureWaitCount) ?? 0),
+    0
+  );
+  const backpressureWaitMs = generations.reduce(
+    (sum, generation) => sum + (Number(generation?.backpressureWaitMs) || 0),
+    0
+  );
+  const transactionCoverageComplete = simulationRequested !== true
+    ? null
+    : Boolean(
+      requestedShapeValid
+      && schroederSimulationActive
+      && batchIndexCoverageComplete
+      && completedStepCoverageComplete
+      && releaseSettlementCoverageComplete
+      && nextStepStrideCoverageComplete
+      && stepIdentityCoverageComplete
+      && generationCoverageComplete
+      && artifactLedgerCoverageComplete
+      && transactionLifecycleCoverageComplete
+    );
+  return {
+    requestedBatchCount: expectedBatchCount,
+    requestedBatchStepCount: expectedBatchStepCount,
+    expectedStepCount,
+    observedBatchCount: residentBatchMetrics.length,
+    observedBatchIndices,
+    batchIndexCoverageComplete,
+    completedStepCount,
+    completedStepCoverageComplete,
+    releaseSettlementCount,
+    releaseSettlementCoverageComplete,
+    nextStepSequence,
+    nextStepStrideCoverageComplete,
+    transactionMountedCount: transactions.length,
+    transactionGenerationCount: new Set(
+      transactionGenerationIds.filter(Number.isInteger)
+    ).size,
+    transactionPhysicsTickCount: new Set(
+      transactionPhysicsTicks.filter(Number.isInteger)
+    ).size,
+    transactionPositionEpochCount: new Set(
+      transactionPositionEpochs.filter(Number.isInteger)
+    ).size,
+    transactionGenerationSequence,
+    transactionPhysicsTickSequence,
+    transactionPositionEpochSequence,
+    transactionCounterTotals,
+    transactionCountersComplete,
+    transactionExactOnceCoverageComplete,
+    transactionLifecycleCoverageComplete,
+    generationSummaryCount: generations.length,
+    generationSummaryGenerationCount: new Set(
+      generationSummaryIds.filter(Number.isInteger)
+    ).size,
+    generationSummarySequence,
+    generationCoverageComplete,
+    artifactLedgerSummaryCount: artifactLedgers.length,
+    artifactLedgerSettlementCount,
+    artifactLedgerFailedDestroyResourceCount,
+    artifactLedgerBlockerCount,
+    artifactLedgerUnsafeUnretiredOwnedResourceCount,
+    artifactLedgerGenerationAlignmentComplete,
+    artifactLedgerCoverageComplete,
+    transactionGenerationAlignmentComplete,
+    stepIdentityCoverageComplete,
+    schroederSimulationActive,
+    schroederSimulationActiveBatchCount,
+    backpressureWaitCount,
+    backpressureWaitMs,
+    batchCoverage: batchEvidence.map((batch) => ({
+      batchIndex: batch.batchIndex,
+      residentStepsStatus: batch.residentStepsStatus,
+      completedStepCount: batch.completedStepCount,
+      nextStep: batch.nextStep,
+      schroederSimulationActive: batch.schroederSimulationActive,
+      transactionCount: batch.transactionCount,
+      generationSummaryCount: batch.generationSummaryCount,
+      physicsTickStart: batch.physicsTickSequence.start,
+      physicsTickEnd: batch.physicsTickSequence.end,
+      positionEpochStart: batch.positionEpochSequence.start,
+      positionEpochEnd: batch.positionEpochSequence.end,
+      generationIdStart: batch.transactionGenerationSequence.start,
+      generationIdEnd: batch.transactionGenerationSequence.end,
+      transactionGenerationAlignmentComplete: batch.transactionGenerationAlignmentComplete,
+      nextStepAlignmentComplete: batch.nextStepAlignmentComplete
+    })),
+    transactionCoverageComplete
+  };
 }
 
 function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
@@ -655,7 +1144,32 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   });
   const schroederTelemetry = metric?.schroederTelemetry || null;
   const schroederSimulationRequestedMetric = schroederTelemetry?.requested ?? null;
-  const schroederSimulationActive = schroederTelemetry?.active ?? null;
+  const schroederSimulationRequestedObserved = schroederSimulationRequestedMetric;
+  const schroederResidentBatchEvidence = aggregateSchroederResidentBatchEvidence({
+    metrics,
+    requestedBatchCount: batches,
+    requestedBatchStepCount: batchSteps,
+    schroederSimulationRequested
+  });
+  const schroederSimulationActive = schroederSimulationRequested === true
+    ? schroederResidentBatchEvidence.schroederSimulationActive
+    : (schroederTelemetry?.active ?? null);
+  const schroederTransactionCoverageComplete =
+    schroederResidentBatchEvidence.transactionCoverageComplete;
+  const schroederTransactionMountedCount =
+    schroederResidentBatchEvidence.transactionMountedCount;
+  const schroederTransactionGenerationCount =
+    schroederResidentBatchEvidence.transactionGenerationCount;
+  const schroederTransactionPhysicsTickCount =
+    schroederResidentBatchEvidence.transactionPhysicsTickCount;
+  const schroederTransactionPositionEpochCount =
+    schroederResidentBatchEvidence.transactionPositionEpochCount;
+  const schroederTransactionCounterTotals =
+    schroederResidentBatchEvidence.transactionCounterTotals;
+  const schroederBackpressureWaitCount =
+    schroederResidentBatchEvidence.backpressureWaitCount;
+  const schroederBackpressureWaitMs =
+    schroederResidentBatchEvidence.backpressureWaitMs;
   const schroederConfigSource = schroederTelemetry?.configSource ?? null;
   const schroederSelectedLevelMetric = numberOrNull(schroederTelemetry?.selectedLevel);
   const schroederSequenceStatus = schroederTelemetry?.sequenceStatus ?? null;
@@ -2198,10 +2712,16 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const performanceGate = scenarioPerformanceGate({
     residentGpuCompletedStageMs,
     residentStageStepsPerSecond,
+    probeWallStepsPerSecond,
+    probeEngineStepsPerSecond,
     estimatedReadbackBytesPerStep,
     activeGridDispatch,
     residentStageTiming,
-    fusedResidentSequenceBlockedForSidecars
+    fusedResidentSequenceBlockedForSidecars,
+    schroederSimulationRequested,
+    schroederSimulationRequestedObserved,
+    schroederSimulationActive,
+    schroederTransactionCoverageComplete
   });
   const validDirectResidentLoop = effectiveProbeMode === 'direct-resident'
     && residentSteps?.status === 'resident-steps-executed'
@@ -2254,7 +2774,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     completedStepCount,
     meanBatchMs,
     maxBatchMs: analysis.maxBatchMs ?? null,
-    physicsStepsPerSecond: residentStageStepsPerSecond,
+    physicsStepsPerSecond: probeEngineStepsPerSecond ?? probeWallStepsPerSecond,
+    physicsStepsPerSecondSource: probeEngineStepsPerSecond !== null
+      ? 'complete-engine-batch'
+      : 'complete-probe-wall-batch',
     probeWallStepsPerSecond,
     probeEngineStepsPerSecond,
     probeBatchWallMs,
@@ -2440,8 +2963,85 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     activeGridRatio,
     activeGridDispatch,
     schroederTelemetry,
+    schroederSimulationConfiguredRequested: schroederSimulationRequested,
     schroederSimulationRequested: schroederSimulationRequestedMetric,
+    schroederSimulationRequestedObserved,
     schroederSimulationActive,
+    schroederTransactionCoverageComplete,
+    schroederTransactionExpectedStepCount: schroederSimulationRequested === true
+      ? schroederResidentBatchEvidence.expectedStepCount
+      : 0,
+    schroederTransactionCompletedStepCount:
+      schroederResidentBatchEvidence.completedStepCount,
+    schroederTransactionExpectedBatchCount:
+      schroederResidentBatchEvidence.requestedBatchCount,
+    schroederTransactionObservedBatchCount:
+      schroederResidentBatchEvidence.observedBatchCount,
+    schroederTransactionObservedBatchIndices:
+      schroederResidentBatchEvidence.observedBatchIndices,
+    schroederTransactionBatchCoverageComplete:
+      schroederResidentBatchEvidence.batchIndexCoverageComplete,
+    schroederTransactionCompletedStepCoverageComplete:
+      schroederResidentBatchEvidence.completedStepCoverageComplete,
+    schroederSpatialEpochReleaseSettlementCount:
+      schroederResidentBatchEvidence.releaseSettlementCount,
+    schroederSpatialEpochReleaseSettlementCoverageComplete:
+      schroederResidentBatchEvidence.releaseSettlementCoverageComplete,
+    schroederTransactionNextStepStrideCoverageComplete:
+      schroederResidentBatchEvidence.nextStepStrideCoverageComplete,
+    schroederTransactionStepIdentityCoverageComplete:
+      schroederResidentBatchEvidence.stepIdentityCoverageComplete,
+    schroederTransactionLifecycleCoverageComplete:
+      schroederResidentBatchEvidence.transactionLifecycleCoverageComplete,
+    schroederTransactionExactOnceCoverageComplete:
+      schroederResidentBatchEvidence.transactionExactOnceCoverageComplete,
+    schroederTransactionMountedCount,
+    schroederTransactionGenerationCount,
+    schroederTransactionPhysicsTickCount,
+    schroederTransactionPositionEpochCount,
+    schroederTransactionCounterTotals,
+    schroederTransactionReleaseCount:
+      schroederTransactionCounterTotals.releaseCount,
+    schroederTransactionReleaseRetryCount:
+      schroederTransactionCounterTotals.releaseRetryCount,
+    schroederTransactionLegacyPrivateLookupBuildCount:
+      schroederTransactionCounterTotals.legacyPrivateLookupBuildCount,
+    schroederTransactionLegacyExhaustiveTraversalCount:
+      schroederTransactionCounterTotals.legacyExhaustiveTraversalCount,
+    schroederTransactionGenerationSequence:
+      schroederResidentBatchEvidence.transactionGenerationSequence,
+    schroederTransactionPhysicsTickSequence:
+      schroederResidentBatchEvidence.transactionPhysicsTickSequence,
+    schroederTransactionPositionEpochSequence:
+      schroederResidentBatchEvidence.transactionPositionEpochSequence,
+    schroederTransactionGenerationAlignmentComplete:
+      schroederResidentBatchEvidence.transactionGenerationAlignmentComplete,
+    schroederSpatialEpochGenerationSummaryCount:
+      schroederResidentBatchEvidence.generationSummaryCount,
+    schroederSpatialEpochGenerationCount:
+      schroederResidentBatchEvidence.generationSummaryGenerationCount,
+    schroederSpatialEpochGenerationSequence:
+      schroederResidentBatchEvidence.generationSummarySequence,
+    schroederSpatialEpochGenerationCoverageComplete:
+      schroederResidentBatchEvidence.generationCoverageComplete,
+    schroederHierarchyArtifactLedgerSummaryCount:
+      schroederResidentBatchEvidence.artifactLedgerSummaryCount,
+    schroederHierarchyArtifactLedgerSettlementCount:
+      schroederResidentBatchEvidence.artifactLedgerSettlementCount,
+    schroederHierarchyArtifactLedgerFailedDestroyResourceCount:
+      schroederResidentBatchEvidence.artifactLedgerFailedDestroyResourceCount,
+    schroederHierarchyArtifactLedgerBlockerCount:
+      schroederResidentBatchEvidence.artifactLedgerBlockerCount,
+    schroederHierarchyArtifactLedgerUnsafeUnretiredOwnedResourceCount:
+      schroederResidentBatchEvidence.artifactLedgerUnsafeUnretiredOwnedResourceCount,
+    schroederHierarchyArtifactLedgerGenerationAlignmentComplete:
+      schroederResidentBatchEvidence.artifactLedgerGenerationAlignmentComplete,
+    schroederHierarchyArtifactLedgerCoverageComplete:
+      schroederResidentBatchEvidence.artifactLedgerCoverageComplete,
+    schroederBackpressureWaitCount,
+    schroederBackpressureWaitMs,
+    schroederTransactionBatchCoverage:
+      schroederResidentBatchEvidence.batchCoverage,
     schroederConfigSource,
     schroederSelectedLevel: schroederSelectedLevelMetric,
     schroederSequenceStatus,
@@ -2897,6 +3497,10 @@ async function main() {
     schroederSelectedLevel,
     schroederPortableSummaryRequested,
     schroederActiveNodeIndexRequested,
+    schroederLawQueueRequested,
+    schroederLawNeighborCandidatesRequested,
+    schroederCrossLevelCouplingRequested,
+    schroederPhaseVolumeMigrationRequested,
     materialInterfaceDiagnosticRequested,
     materialInterfaceCandidateReadbackMode,
     fusedResidentMechanicsSequence: fuseResidentMechanicsSequence,
@@ -2933,7 +3537,14 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exitCode = 2;
-});
+const invokedAsMain = Boolean(
+  process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+);
+
+if (invokedAsMain) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exitCode = 2;
+  });
+}

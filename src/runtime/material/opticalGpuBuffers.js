@@ -113,6 +113,9 @@ const RENDER_MODEL_IDS = Object.freeze({
   'rayleigh-gas-transparent-spectrum': 5,
   'conductor-drude-free-electron': 6,
   'molecular-condensed-droplet-scattering-pbr': 7,
+  'conductor-reference-complex-index': 8,
+  'molecular-gas-reference-cross-section-pbr': 9,
+  'molecular-gas-electronic-band-absorption-pbr': 10,
   'blocked-missing-optical-closure': 255
 });
 
@@ -202,6 +205,15 @@ function descriptorPhase(descriptor) {
 
 function descriptorOpticalState(descriptor) {
   return typeof descriptor === 'object' && descriptor ? descriptor.opticalState || null : null;
+}
+
+function descriptorOpticalStateId(descriptor, opticalState = descriptorOpticalState(descriptor)) {
+  const explicitId = typeof descriptor === 'object' && descriptor
+    ? Number(descriptor.opticalStateId)
+    : NaN;
+  return Number.isFinite(explicitId)
+    ? explicitId
+    : stableOpticalStateId(opticalState);
 }
 
 function spectralSampleFloats(sample) {
@@ -326,31 +338,16 @@ function pbrNumber(value, fallback = 0) {
 }
 
 function resolveDisplayPbrForOpticalRecord(params, materialPropertyBankPbrWarmInput = null) {
-  const bankColor = srgbTriplet(materialPropertyBankPbrWarmInput?.baseColorSrgb);
   const closureColor = srgbTriplet(params.baseColorSrgb) || [1, 1, 1];
-  // Model-confidence precedence (warm inputs are non-authoritative by design):
-  // bank PBR rows may stand in for BLOCKED closures and for conductor
-  // reflectance estimates (the Drude omega_p/30 damping is a universal
-  // order-of-magnitude estimate that over-brightens e.g. iron), but a
-  // molecular/spectral closure colour (gas electronic band, Beer-Lambert,
-  // molecular gap) is quantitative and must not be overridden — the bank's
-  // generic near-white for F2 was erasing the derived halogen yellow.
-  const closureBlocked = Boolean(params.blocked) || params.provenance?.status === 'blocked';
-  const conductorEstimate = String(params.renderModel || '').startsWith('conductor-');
-  const usesBankPbr = Boolean(bankColor) && (closureBlocked || conductorEstimate);
-  const bankIor = Number(materialPropertyBankPbrWarmInput?.ior);
-  const ior = Number.isFinite(bankIor) && bankIor > 0
-    ? bankIor
-    : (params.ior == null ? 1 : finiteNumber(params.ior, 1));
+  // Material-property-bank PBR rows are bootstrap metadata, never optical
+  // truth. Healthy rows stay closure-owned and blocked rows stay visibly
+  // blocked instead of borrowing a plausible bank color.
+  const ior = params.ior == null ? 1 : finiteNumber(params.ior, 1);
   return {
-    source: usesBankPbr ? 'material-bank-pbr-warm-input' : 'closure-derived-optical-pbr',
-    baseColorSrgb: usesBankPbr ? bankColor : closureColor,
-    metalness: usesBankPbr
-      ? pbrNumber(materialPropertyBankPbrWarmInput.metalness, finiteNumber(params.metalness))
-      : finiteNumber(params.metalness),
-    roughness: usesBankPbr
-      ? pbrNumber(materialPropertyBankPbrWarmInput.roughness, finiteNumber(params.roughness, 0.5))
-      : finiteNumber(params.roughness, 0.5),
+    source: 'closure-derived-optical-pbr',
+    baseColorSrgb: closureColor,
+    metalness: finiteNumber(params.metalness),
+    roughness: finiteNumber(params.roughness, 0.5),
     ior,
     closureBaseColorSrgb: closureColor,
     closureMetalness: finiteNumber(params.metalness),
@@ -379,7 +376,7 @@ function materialBankPbrWarmInputConsumerSummary({
     matchedRecordCount: matchedCount,
     consumer: 'optical-gpu-table',
     consumedAs: matchedCount > 0
-      ? 'non-authoritative-display-pbr-warm-input-over-closure-derived-optical-rows'
+      ? 'non-authoritative-pbr-warm-input-metadata-only-alongside-closure-derived-optical-rows'
       : 'non-authoritative-pbr-warm-input-metadata-before-closure-derived-optical-rows',
     strictSourceOfTruth: false,
     shaderBound: false,
@@ -426,7 +423,7 @@ export function buildOpticalGpuTable(descriptors, {
   const sampleValues = [];
   const records = [];
   const materialIds = new Map();
-  const seen = new Set();
+  const seen = new Map();
   const materialBankWarmInputs = materialBankPbrWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
   let materialBankPbrWarmInputMatchedRecordCount = 0;
 
@@ -441,10 +438,22 @@ export function buildOpticalGpuTable(descriptors, {
     const phase = descriptorPhase(descriptor);
     const opticalState = descriptorOpticalState(descriptor);
     const opticalStateKey = stableOpticalStateKey(opticalState);
-    const opticalStateId = stableOpticalStateId(opticalState);
-    const key = `${material}|${phase}|${opticalStateKey}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    // A caller may provide a stable binding id that is independent of the
+    // continuously changing optical values. This is required by resident
+    // surface geometry: pressure/temperature can update the record contents
+    // without invalidating the vertex rows that reference the record.
+    const opticalStateId = descriptorOpticalStateId(descriptor, opticalState);
+    const key = `${material}|${phase}|${opticalStateId}`;
+    const existingOpticalStateKey = seen.get(key);
+    if (existingOpticalStateKey != null) {
+      if (existingOpticalStateKey !== opticalStateKey) {
+        throw new Error(
+          `conflicting optical states share GPU binding ${key}; assign distinct stable opticalStateId values`
+        );
+      }
+      continue;
+    }
+    seen.set(key, opticalStateKey);
 
     const properties = typeof descriptor === 'object' && descriptor?.properties
       ? descriptor.properties
@@ -591,7 +600,7 @@ function queryDescriptorKey(descriptor) {
     phase: descriptorPhase(descriptor),
     opticalState,
     opticalStateKey: stableOpticalStateKey(opticalState),
-    opticalStateId: stableOpticalStateId(opticalState)
+    opticalStateId: descriptorOpticalStateId(descriptor, opticalState)
   };
 }
 
@@ -842,6 +851,11 @@ export function uploadOpticalGpuTable(device, table) {
   if (table?.schema !== ULG_OPTICAL_GPU_TABLE_SCHEMA) {
     throw new TypeError('uploadOpticalGpuTable requires a table from buildOpticalGpuTable');
   }
+  const spectralSamples = table.spectralSamples.length >= OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS
+    ? table.spectralSamples
+    : EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS;
+  const recordsBufferByteLength = Math.max(16, table.records.byteLength);
+  const spectralSamplesBufferByteLength = Math.max(16, spectralSamples.byteLength);
   return {
     schema: ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
     tableSchema: table.schema,
@@ -850,15 +864,81 @@ export function uploadOpticalGpuTable(device, table) {
     recordStrideBytes: table.recordStrideBytes,
     spectralSampleStrideBytes: table.spectralSampleStrideBytes,
     recordsBuffer: writeStorageBuffer(device, 'ulg-optical-material-records', table.records),
+    recordsBufferByteLength,
     spectralSamplesBuffer: writeStorageBuffer(
       device,
       'ulg-optical-spectral-samples',
-      table.spectralSamples.length >= OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS
-        ? table.spectralSamples
-        : EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS
+      spectralSamples
     ),
+    spectralSamplesBufferByteLength,
     scientificValidation: false,
     fullPhysicsValidation: false
+  };
+}
+
+export function updateUploadedOpticalGpuTable(device, buffers, table) {
+  if (!device?.queue?.writeBuffer) {
+    throw new TypeError('updateUploadedOpticalGpuTable requires a WebGPU-like device with queue.writeBuffer');
+  }
+  if (buffers?.schema !== ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA) {
+    throw new TypeError('updateUploadedOpticalGpuTable requires buffers from uploadOpticalGpuTable');
+  }
+  if (table?.schema !== ULG_OPTICAL_GPU_TABLE_SCHEMA) {
+    throw new TypeError('updateUploadedOpticalGpuTable requires a table from buildOpticalGpuTable');
+  }
+  const spectralSamples = table.spectralSamples.length >= OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS
+    ? table.spectralSamples
+    : EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS;
+  const shapeMatches = buffers.recordCount === table.recordCount
+    && buffers.spectralSampleCount === table.spectralSampleCount
+    && buffers.recordStrideBytes === table.recordStrideBytes
+    && buffers.spectralSampleStrideBytes === table.spectralSampleStrideBytes;
+  if (!shapeMatches) {
+    return {
+      updated: false,
+      status: 'optical-gpu-buffer-update-shape-mismatch',
+      currentRecordCount: buffers.recordCount,
+      requestedRecordCount: table.recordCount,
+      currentSpectralSampleCount: buffers.spectralSampleCount,
+      requestedSpectralSampleCount: table.spectralSampleCount
+    };
+  }
+  const recordsCapacity = Math.max(
+    0,
+    Number(buffers.recordsBufferByteLength ?? buffers.recordsBuffer?.size) || 0
+  );
+  const spectralCapacity = Math.max(
+    0,
+    Number(buffers.spectralSamplesBufferByteLength ?? buffers.spectralSamplesBuffer?.size) || 0
+  );
+  if (table.records.byteLength > recordsCapacity || spectralSamples.byteLength > spectralCapacity) {
+    return {
+      updated: false,
+      status: 'optical-gpu-buffer-update-capacity-mismatch',
+      requiredRecordsByteLength: table.records.byteLength,
+      recordsCapacityByteLength: recordsCapacity,
+      requiredSpectralSamplesByteLength: spectralSamples.byteLength,
+      spectralSamplesCapacityByteLength: spectralCapacity
+    };
+  }
+  if (table.records.byteLength > 0) {
+    device.queue.writeBuffer(buffers.recordsBuffer, 0, table.records);
+  }
+  device.queue.writeBuffer(buffers.spectralSamplesBuffer, 0, spectralSamples);
+  Object.assign(buffers, {
+    tableSchema: table.schema,
+    recordCount: table.recordCount,
+    spectralSampleCount: table.spectralSampleCount,
+    recordStrideBytes: table.recordStrideBytes,
+    spectralSampleStrideBytes: table.spectralSampleStrideBytes
+  });
+  return {
+    updated: true,
+    status: 'optical-gpu-buffers-updated-in-place',
+    recordCount: table.recordCount,
+    spectralSampleCount: table.spectralSampleCount,
+    recordsByteLength: table.records.byteLength,
+    spectralSamplesByteLength: spectralSamples.byteLength
   };
 }
 

@@ -4,10 +4,13 @@
 
 import {
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
+  SPH_SCENE_LIGHTING_MODE_DARK_LAB,
+  SPH_SCENE_LIGHTING_MODE_DEFAULT,
   SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   createSphPhaseScene,
   normalizeSphSceneBackgroundColorHex,
+  normalizeSphSceneLightingMode,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphRendererBackend,
   resolveOpticalSurfaceVisibility
@@ -60,8 +63,19 @@ import {
   SPH_PHASE_SCENARIO_PRESETS,
   sphPhaseScenarioPresetById
 } from '../runtime/sphPhaseScenarioPresets.js';
+import {
+  allocateNextSphInitialBodyIdentity,
+  duplicateSphInitialBody,
+  moveSphInitialBody,
+  normalizeSphInitialBodies,
+  parseSphInitialBodies,
+  preflightSphInitialBodiesForSimulation,
+  serializeSphInitialBodies,
+  sphInitialBodiesFromLegacyDropBase
+} from '../runtime/sphInitialBodies.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
 import { deriveCompoundClosure } from '../runtime/material/compoundClosure.js';
+import { CONDUCTOR_OPTICAL_CONSTANTS_BANK } from '../runtime/material/conductorOpticalConstants.js';
 import { deriveElementProperties } from '../runtime/material/elementClosures.js';
 import {
   deriveFormulaMaterialProperties,
@@ -70,6 +84,7 @@ import {
 } from '../runtime/material/materialDerivation.js';
 import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
 import { materialDerivationSummary } from '../runtime/material/propertyProvenance.js';
+import { MOLECULAR_ELECTRONIC_BANDS_BANK } from '../runtime/material/referenceBankAnchoring.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const PHYSICAL_LAW_GROUPS = Object.freeze([
@@ -96,11 +111,75 @@ const DROP_MATERIAL_DEFAULT = 'Na';
 const BASE_MATERIAL_DEFAULT = 'h2o';
 const PEER_CLOSURE_CACHE_STORAGE_KEY = 'peercompute.ulg.sph-derived-closure-cache.v1';
 export const SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA = 'peercompute.ulg.sph-phase-rebuild-worker-status.v0';
+export const SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE = '__local-background-image__';
+export const SPH_LOCAL_BACKGROUND_IMAGE_MAX_BYTES = 32 * 1024 * 1024;
+export const SPH_LOCAL_BACKGROUND_IMAGE_MIME_TYPES = Object.freeze([
+  'image/avif',
+  'image/jpeg',
+  'image/png',
+  'image/webp'
+]);
+
+export function validateSphLocalBackgroundImageFile(file, {
+  maxBytes = SPH_LOCAL_BACKGROUND_IMAGE_MAX_BYTES
+} = {}) {
+  if (!file || typeof file !== 'object') {
+    return {
+      accepted: false,
+      status: 'local-background-image-missing-file',
+      reason: 'Choose a PNG, JPEG, WebP, or AVIF image.'
+    };
+  }
+  const name = String(file.name || 'local image');
+  const type = String(file.type || '').trim().toLowerCase();
+  const sizeBytes = Math.max(0, Math.floor(Number(file.size) || 0));
+  if (!SPH_LOCAL_BACKGROUND_IMAGE_MIME_TYPES.includes(type)) {
+    return {
+      accepted: false,
+      status: 'local-background-image-unsupported-type',
+      reason: 'Use a PNG, JPEG, WebP, or AVIF image.',
+      name,
+      type,
+      sizeBytes
+    };
+  }
+  if (sizeBytes <= 0) {
+    return {
+      accepted: false,
+      status: 'local-background-image-empty-file',
+      reason: 'The selected image is empty.',
+      name,
+      type,
+      sizeBytes
+    };
+  }
+  const resolvedMaxBytes = Math.max(1, Math.floor(Number(maxBytes) || SPH_LOCAL_BACKGROUND_IMAGE_MAX_BYTES));
+  if (sizeBytes > resolvedMaxBytes) {
+    return {
+      accepted: false,
+      status: 'local-background-image-too-large',
+      reason: `Choose an image no larger than ${Math.round(resolvedMaxBytes / (1024 * 1024))} MiB.`,
+      name,
+      type,
+      sizeBytes,
+      maxBytes: resolvedMaxBytes
+    };
+  }
+  return {
+    accepted: true,
+    status: 'local-background-image-file-accepted',
+    reason: null,
+    name,
+    type,
+    sizeBytes,
+    maxBytes: resolvedMaxBytes
+  };
+}
 const PEER_CLOSURE_CACHE_SCHEMA = 'peercompute.ulg.local-derived-closure-cache.v2';
 const PEER_CLOSURE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.local-derived-material-closure-cache-record.v2';
 const PEER_CLOSURE_CACHE_GENERATOR_SCHEMA = 'peercompute.ulg.material-closure-generator-fingerprint.v1';
 const PEER_CLOSURE_CACHE_APP_VERSION = '0.1.0';
-const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-derivation+reference-bank-anchoring.v1';
+const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-derivation+reference-bank-anchoring.v3';
 const PEER_CLOSURE_CACHE_MAX_RECORDS_PER_MATERIAL = 32;
 const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
   schema: PEER_CLOSURE_CACHE_GENERATOR_SCHEMA,
@@ -114,6 +193,10 @@ const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
     deriveElementProperties: deriveElementProperties.toString(),
     deriveCompoundClosure: deriveCompoundClosure.toString(),
     materialDerivationSummary: materialDerivationSummary.toString()
+  },
+  referenceBanks: {
+    conductorOpticalConstants: CONDUCTOR_OPTICAL_CONSTANTS_BANK,
+    molecularElectronicBands: MOLECULAR_ELECTRONIC_BANDS_BANK
   }
 });
 const PEER_CLOSURE_CACHE_GENERATOR_FINGERPRINT = hashPayload(PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR);
@@ -137,6 +220,11 @@ const BOX_DIM_DEFAULTS_M = { x: 5, y: 5, z: 5 };
 // at a smaller edge; base block fills a larger footprint.
 const DROP_PARTICLE_EDGE_DEFAULT = 3;
 const BASE_PARTICLE_EDGE_DEFAULT = 5;
+// A committed body-card edit updates the authoritative draft immediately,
+// while material/reaction closure rebuilds are coalesced across a short burst
+// of axis edits or card operations. This avoids queueing obsolete expensive
+// rebuilds as somebody tabs through X/Y/Z fields.
+const INITIAL_BODY_EDITOR_REBUILD_DEBOUNCE_MS = 200;
 // Default isosurface blob-size multiplier. The default UI scenario keeps this at the explicit
 // user-facing scale of 1; targeted tests still override it for smaller diagnostic captures.
 const BLOB_SCALE_DEFAULT = 1;
@@ -182,6 +270,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'boxz',
   'dropn',
   'basen',
+  'bodies',
   'mech',
   'lawmech',
   'lawg',
@@ -196,6 +285,8 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'sep',
   'sepVel',
   'bg',
+  'bgimg',
+  'lighting',
   'residentAuto',
   'residentWorkers',
   'residentStageWorkers',
@@ -838,6 +929,7 @@ function materialParticleCountsText(counts = {}) {
 function materialParticleCountsFromMaterials(materials = []) {
   const counts = {};
   for (const descriptor of materials || []) {
+    if (descriptor?.spareProductSlot === true) continue;
     const material = descriptor?.material || descriptor?.renderKey || 'unknown';
     counts[material] = (counts[material] || 0) + 1;
   }
@@ -847,6 +939,7 @@ function materialParticleCountsFromMaterials(materials = []) {
 function materialParticleCountsFromParticles(particles = []) {
   const counts = {};
   for (const particle of particles || []) {
+    if (particle?.spareProductSlot === true || !(Number(particle?.massKg) > 0)) continue;
     const material = particle?.material || 'unknown';
     counts[material] = (counts[material] || 0) + 1;
   }
@@ -864,6 +957,13 @@ function reactionStatusText(note, reactionLedger = null) {
 
 function phaseStatusText(pre = {}, dropMaterial = 'drop', baseMaterial = 'base') {
   const feasibility = pre.feasibility || {};
+  const bodies = pre.materials?.bodies;
+  if (Array.isArray(bodies) && bodies.length > 0 && feasibility.finalPhaseByBodyId) {
+    return bodies.map((body) => (
+      `${body.id}:${materialStatusLabel(body.material)} `
+      + `${feasibility.finalPhaseByBodyId[body.id] || 'pending'}`
+    )).join(' / ');
+  }
   const dropPhase = feasibility.finalDropPhase
     || (String(dropMaterial).toLowerCase() === 'fe' ? feasibility.finalFePhase : null)
     || 'pending';
@@ -875,6 +975,13 @@ function phaseStatusText(pre = {}, dropMaterial = 'drop', baseMaterial = 'base')
 
 function massStatusText(pre = {}, dropMaterial = 'drop', baseMaterial = 'base') {
   const masses = pre.masses || {};
+  const bodies = pre.materials?.bodies;
+  if (Array.isArray(bodies) && bodies.length > 0 && masses.byBodyId) {
+    const bodyText = bodies.map((body) => (
+      `${body.id}:${materialStatusLabel(body.material)} ${fmt(masses.byBodyId[body.id])}`
+    )).join('  ');
+    return `${bodyText}  air ${fmt(masses.airMassKg)}`;
+  }
   const dropMassKg = masses.dropMassKg ?? masses.ironMassKg;
   const baseMassKg = masses.baseMassKg ?? masses.iceMassKg;
   return `${materialStatusLabel(dropMaterial)} ${fmt(dropMassKg)}  ${materialStatusLabel(baseMaterial)} ${fmt(baseMassKg)}  air ${fmt(masses.airMassKg)}`;
@@ -890,6 +997,14 @@ function roleParticleResolution(pre = {}, role, material) {
 }
 
 function moleculesPerMacroStatusText(pre = {}, dropMaterial = 'drop', baseMaterial = 'base') {
+  const bodies = pre.materials?.bodies;
+  const byBodyId = pre.particleResolution?.byBodyId;
+  if (Array.isArray(bodies) && bodies.length > 0 && byBodyId) {
+    return bodies.map((body) => (
+      `${body.id}:${materialStatusLabel(body.material)} `
+      + `${fmt(byBodyId[body.id]?.entitiesPerMacroParticle)}`
+    )).join('  ');
+  }
   const drop = roleParticleResolution(pre, 'drop', dropMaterial);
   const base = roleParticleResolution(pre, 'base', baseMaterial);
   return `${materialStatusLabel(dropMaterial)} ${fmt(drop?.entitiesPerMacroParticle)}  ${materialStatusLabel(baseMaterial)} ${fmt(base?.entitiesPerMacroParticle)}`;
@@ -1230,7 +1345,11 @@ function readSphCacheStorageSnapshots() {
 }
 
 function cacheLookupMaterialsForOptions(options) {
-  return [
+  const initialBodyList = Array.isArray(options.initialBodies)
+    ? options.initialBodies
+    : (options.initialBodies?.bodies || []);
+  return [...new Set([
+    ...initialBodyList.map((body) => body.material),
     options.dropMaterial,
     options.baseMaterial,
     'h2o',
@@ -1238,7 +1357,7 @@ function cacheLookupMaterialsForOptions(options) {
     'air',
     'h2',
     'o2'
-  ];
+  ].filter(Boolean))];
 }
 
 function workerCacheLookupInput(options, snapshots = readSphCacheStorageSnapshots()) {
@@ -1543,6 +1662,26 @@ function buildOverlayShell() {
       #sph-phase-overlay select { width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c; }
       .sph-material-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px;align-items:center; }
       .sph-picker-button { width:42px;padding:8px 0!important;margin:0!important; }
+      .sph-initial-bodies-box { margin:10px 0 8px;padding:8px;border:1px solid #245447;background:rgba(5,18,20,.66); }
+      .sph-initial-bodies-head { display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px; }
+      #sph-phase-overlay .sph-add-body { margin:0!important;min-height:34px;padding:5px 9px; }
+      .sph-initial-bodies-help { color:#75c7f7;font-size:10px;line-height:1.35;opacity:.82;margin:0 0 7px; }
+      .sph-initial-bodies-list { display:flex;flex-direction:column;gap:8px; }
+      .sph-initial-body-card { border:1px solid #14342c;background:#071114;padding:8px; }
+      .sph-initial-body-card-head { display:flex;align-items:flex-start;justify-content:space-between;gap:7px;margin-bottom:7px; }
+      .sph-initial-body-title { color:#75f7b4;font-size:12px;font-weight:700;overflow-wrap:anywhere; }
+      .sph-initial-body-domain { color:#75c7f7;font-size:9px;margin-top:2px; }
+      .sph-initial-body-actions { display:flex;flex-wrap:wrap;justify-content:flex-end;gap:3px; }
+      #sph-phase-overlay .sph-initial-body-action { margin:0!important;min-height:30px;min-width:31px;padding:3px 6px;font-size:11px; }
+      .sph-initial-body-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px; }
+      .sph-initial-body-field { display:flex;flex-direction:column;gap:2px;min-width:0;color:#75c7f7;font-size:9px; }
+      .sph-initial-body-field input { width:100%;padding:3px;background:#0a1418;color:#bfe9d8;border:1px solid #14342c; }
+      .sph-initial-body-row-label { grid-column:1/-1;color:#75c7f7;font-size:10px;margin-top:3px; }
+      .sph-initial-body-material { grid-column:1/-1; }
+      .sph-initial-body-velocity { grid-column:1/-1;border:1px solid #14342c;padding:5px;margin-top:3px; }
+      .sph-initial-body-velocity summary { color:#75c7f7;font-size:10px;cursor:pointer; }
+      .sph-initial-body-error { display:none;border:1px solid #f7c675;background:rgba(46,30,8,.92);color:#ffe7b2;padding:5px;margin:0 0 7px;font-size:10px;line-height:1.35; }
+      .sph-initial-body-error.visible { display:block; }
       .sph-element-picker-overlay { position:fixed;inset:0;z-index:90;background:rgba(2,6,8,.78);display:flex;align-items:center;justify-content:center;padding:14px; }
       .sph-element-picker { width:min(1080px,96vw);max-height:min(760px,92vh);box-sizing:border-box;border:1px solid #1d8b6d;background:#071114;color:#bfe9d8;padding:12px;box-shadow:0 18px 60px rgba(0,0,0,.58);display:flex;flex-direction:column;gap:10px; }
       .sph-picker-head { display:flex;justify-content:space-between;gap:10px;align-items:start; }
@@ -1571,6 +1710,8 @@ function buildOverlayShell() {
       #sph-panel { transition:transform .25s ease; }
       #sph-panel.collapsed { transform:translateX(110%); }
       #sph-toggle { position:absolute;top:12px;left:12px;z-index:72; }
+      #sph-lighting-toggle { position:absolute;bottom:12px;left:12px;z-index:72; }
+      #sph-lighting-toggle[aria-pressed="true"] { border-color:#f7c675;color:#ffe7b2;background:#261d0b; }
       #sph-warning-bar { position:absolute;top:0;left:0;right:0;z-index:65;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;padding:8px 12px 8px 128px;box-sizing:border-box;pointer-events:none; }
       .sph-warning-chip { border:1px solid #f7c675;background:rgba(46,30,8,.92);color:#ffe7b2;padding:4px 7px;font-size:11px;line-height:1.25; }
       .sph-fps-chip { border:1px solid #1d8b6d;background:rgba(4,12,14,.88);color:#75f7b4;padding:4px 7px;font-size:11px;line-height:1.25;max-width:calc(100vw - 152px);white-space:normal;overflow-wrap:anywhere; }
@@ -1581,9 +1722,10 @@ function buildOverlayShell() {
       <span id="sph-fps" class="sph-fps-chip">render fps -- | physics fps --</span>
     </div>
     <button id="sph-toggle" type="button" aria-label="Toggle controls">☰ menu</button>
+    <button id="sph-lighting-toggle" type="button" aria-label="Toggle dark-lab lighting" aria-pressed="false">☾ dark lab</button>
     <aside id="sph-panel" style="position:absolute;top:0;right:0;height:100%;width:min(360px,92vw);box-sizing:border-box;border-left:1px solid #14342c;padding:14px;padding-top:56px;overflow:auto;-webkit-overflow-scrolling:touch;background:rgba(5,11,14,0.96);z-index:55;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-        <strong style="color:#75f7b4;">SPH PHASE — two materials interacting</strong>
+        <strong style="color:#75f7b4;">SPH PHASE — material bodies interacting</strong>
         <button id="sph-close" type="button">close</button>
       </div>
       <p style="opacity:.6;font-size:11px;line-height:1.4;">Strict first-principles mode. The demo will not run reference or reduced material constants as physics; missing condensed, liquid, optical, or product closures are reported as blockers.</p>
@@ -1596,27 +1738,40 @@ function buildOverlayShell() {
       </div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">scenario preset - auto-applies</div>
       <div id="sph-scenario-preset" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">lighting — live</div>
+      <div id="sph-lighting-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">mechanics integrator — auto-applies</div>
       <div id="sph-mechanics-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">physical law groups — auto-applies</div>
       <div id="sph-laws" style="display:grid;grid-template-columns:1fr;gap:4px;margin:4px 0 8px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K)</div>
       <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">materials — auto-applies</div>
-      <div id="sph-elements" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial temperature (K) — auto-applies</div>
-      <div id="sph-temps" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial block height (m, bottom face) — auto-applies</div>
-      <div id="sph-heights" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+      <section class="sph-initial-bodies-box" aria-labelledby="sph-initial-bodies-label">
+        <div class="sph-initial-bodies-head">
+          <strong id="sph-initial-bodies-label" style="font-size:11px;color:#75f7b4;">initial material bodies</strong>
+          <button id="sph-add-body" class="sph-add-body" type="button">+ add body</button>
+        </div>
+        <p class="sph-initial-bodies-help">Each axis is independent. Changes apply when a field is committed; body identity remains stable when reordered. Keep size ÷ particles at roughly the same cell pitch on every axis and across bodies.</p>
+        <div id="sph-initial-bodies-error" class="sph-initial-body-error" role="alert"></div>
+        <div id="sph-initial-bodies" class="sph-initial-bodies-list"></div>
+      </section>
+      <div id="sph-legacy-body-controls" hidden style="display:none;">
+        <div style="font-size:11px;color:#75c7f7;margin-top:6px;">legacy materials</div>
+        <div id="sph-elements" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+        <div style="font-size:11px;color:#75c7f7;margin-top:6px;">legacy initial temperature (K)</div>
+        <div id="sph-temps" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+        <div style="font-size:11px;color:#75c7f7;margin-top:6px;">legacy block height (m, bottom face)</div>
+        <div id="sph-heights" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+        <div style="font-size:11px;color:#75c7f7;margin-top:6px;">legacy particles per block edge</div>
+        <div id="sph-counts" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+      </div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">container box size (m, X·Y·Z) — auto-applies</div>
       <div id="sph-box" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">particles per block edge (N → N³ particles) — auto-applies</div>
-      <div id="sph-counts" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">isosurface blob size (× — independent of box) — live</div>
       <div id="sph-blob" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">render mode — live</div>
       <div id="sph-render-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">background color — live</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">background — live (local images stay on this device)</div>
       <div id="sph-background-color" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
       <pre id="sph-status" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:6px 0;"></pre>
@@ -1654,6 +1809,7 @@ function canonicalMaterialKeyFromUrl(value) {
 function normalizeUrlControlValue(key, value) {
   if (key === 'drop' || key === 'base') return canonicalMaterialKeyFromUrl(value);
   if (key === 'bg') return normalizeSphSceneBackgroundColorHex(value);
+  if (key === 'lighting') return normalizeSphSceneLightingMode(value);
   return value;
 }
 
@@ -1770,8 +1926,10 @@ export async function mountSphPhaseDemoOverlay({
   residentStateManager = null,
   residentAuthorityHost = null,
   enablePeerComputeResidentHost = true,
+  peercomputeModule = undefined,
   peercomputeModuleUrl = undefined,
   residentComputeTaskModulePath = undefined,
+  residentMechanicsStageWorkerModuleUrl = undefined,
   enableRemoteResidentTaskGraphRefresh = false,
   remoteResidentTaskGraph = null,
   remoteResidentTaskGraphFactory = null,
@@ -1922,6 +2080,22 @@ export async function mountSphPhaseDemoOverlay({
   }
   renderModeEl.appendChild(renderModeSelect);
 
+  const lightingModeEl = overlay.querySelector('#sph-lighting-mode');
+  const lightingQuickToggle = overlay.querySelector('#sph-lighting-toggle');
+  const lightingModeSelect = document.createElement('select');
+  lightingModeSelect.title = 'Choose scene lighting';
+  lightingModeSelect.setAttribute('aria-label', 'Choose scene lighting');
+  for (const [value, label] of [
+    [SPH_SCENE_LIGHTING_MODE_DEFAULT, 'Lighting: normal'],
+    ['dark-lab', 'Dark lab — dim ambient only']
+  ]) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    lightingModeSelect.appendChild(option);
+  }
+  lightingModeEl.appendChild(lightingModeSelect);
+
   const backgroundColorEl = overlay.querySelector('#sph-background-color');
   const backgroundColorInput = document.createElement('input');
   backgroundColorInput.type = 'color';
@@ -1949,7 +2123,47 @@ export async function mountSphPhaseDemoOverlay({
     option.textContent = label;
     backgroundImageSelect.appendChild(option);
   }
+  const localBackgroundImageOption = document.createElement('option');
+  localBackgroundImageOption.value = SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE;
+  localBackgroundImageOption.textContent = 'Custom image (local session)';
+  localBackgroundImageOption.hidden = true;
+  localBackgroundImageOption.disabled = true;
+  backgroundImageSelect.appendChild(localBackgroundImageOption);
   backgroundColorEl.appendChild(backgroundImageSelect);
+
+  const localBackgroundImageRow = document.createElement('div');
+  localBackgroundImageRow.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center;';
+  const localBackgroundImageInput = document.createElement('input');
+  localBackgroundImageInput.id = 'sph-background-image-file';
+  localBackgroundImageInput.type = 'file';
+  localBackgroundImageInput.accept = SPH_LOCAL_BACKGROUND_IMAGE_MIME_TYPES.join(',');
+  localBackgroundImageInput.title = 'Choose a local background image; the file stays in this browser session';
+  localBackgroundImageInput.setAttribute('aria-label', 'Choose a local background image');
+  localBackgroundImageInput.style.cssText = 'min-width:0;width:100%;font-size:11px;color:#bfe9d8;';
+  const clearBackgroundImageButton = document.createElement('button');
+  clearBackgroundImageButton.id = 'sph-background-image-clear';
+  clearBackgroundImageButton.type = 'button';
+  clearBackgroundImageButton.textContent = 'clear image';
+  clearBackgroundImageButton.title = 'Restore the solid background color';
+  clearBackgroundImageButton.disabled = true;
+  localBackgroundImageRow.append(localBackgroundImageInput, clearBackgroundImageButton);
+  backgroundColorEl.appendChild(localBackgroundImageRow);
+
+  const localBackgroundImageStatus = document.createElement('output');
+  localBackgroundImageStatus.id = 'sph-background-image-status';
+  localBackgroundImageStatus.setAttribute('role', 'status');
+  localBackgroundImageStatus.setAttribute('aria-live', 'polite');
+  localBackgroundImageStatus.style.cssText = 'min-height:1.25em;font-size:10px;line-height:1.25;color:#8fc7b2;overflow-wrap:anywhere;';
+  localBackgroundImageStatus.textContent = 'Local images stay on this device and last for this session only.';
+  backgroundColorEl.appendChild(localBackgroundImageStatus);
+
+  let localBackgroundImageObjectUrl = null;
+  let pendingLocalBackgroundImageObjectUrl = null;
+  let localBackgroundImageFileName = null;
+  let localBackgroundImageFileType = null;
+  let localBackgroundImageFileSizeBytes = 0;
+  let localBackgroundImageLoadGeneration = 0;
+  const revokedLocalBackgroundImageObjectUrls = new Set();
 
   const elementsEl = overlay.querySelector('#sph-elements');
   const elementSelects = {};
@@ -1997,6 +2211,402 @@ export async function mountSphPhaseDemoOverlay({
     tempInputs[role] = input;
   }
 
+  const initialBodiesEl = overlay.querySelector('#sph-initial-bodies');
+  const initialBodiesErrorEl = overlay.querySelector('#sph-initial-bodies-error');
+  const addInitialBodyButton = overlay.querySelector('#sph-add-body');
+  let currentInitialBodies = null;
+  let initialBodiesEditorReady = false;
+  let stopPlaybackForInvalidInitialBodyDraft = null;
+  addInitialBodyButton.disabled = true;
+  initialBodiesEl.inert = true;
+
+  function setInitialBodiesEditorError(error = null, { blocksSimulation = false } = {}) {
+    const message = error == null
+      ? ''
+      : (error instanceof Error ? error.message : String(error));
+    initialBodiesErrorEl.textContent = message;
+    initialBodiesErrorEl.classList.toggle('visible', message.length > 0);
+    overlay.__sphInitialBodiesEditorError = message || null;
+    const draftInvalid = Boolean(message && blocksSimulation);
+    overlay.__sphInitialBodiesDraftInvalid = draftInvalid;
+    for (const selector of ['#sph-play', '#sph-step']) {
+      const button = overlay.querySelector(selector);
+      if (button) button.disabled = draftInvalid;
+    }
+    if (draftInvalid) stopPlaybackForInvalidInitialBodyDraft?.();
+  }
+
+  function validateInitialBodiesEditorState(value) {
+    const normalized = normalizeSphInitialBodies(value);
+    const preflight = preflightSphInitialBodiesForSimulation(normalized);
+    if (!preflight.feasible) {
+      throw new RangeError(
+        `Initial-body spatial preflight blocked: ${preflight.blockers.join(', ')}`
+      );
+    }
+    const boxDimensionsM = boxDimensionsFromControls();
+    const toleranceM = Math.max(1e-9, Math.max(...boxDimensionsM) * 1e-9);
+    for (const body of normalized.bodies) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        const minM = body.centerM[axis] - body.sizeM[axis] / 2;
+        const maxM = body.centerM[axis] + body.sizeM[axis] / 2;
+        if (minM < -toleranceM || maxM > boxDimensionsM[axis] + toleranceM) {
+          throw new RangeError(
+            `Initial body '${body.id}' is outside container axis ${axis}: `
+            + `[${minM}, ${maxM}] is not within [0, ${boxDimensionsM[axis]}]`
+          );
+        }
+      }
+    }
+    return normalized;
+  }
+
+  function legacyInitialBodiesFromProxyControls() {
+    const scenario = scenarioFromControls();
+    const boxDimensionsM = scenario.box.dimensionsM;
+    // Preserve the legacy runtime's fixed matter quantum exactly: the
+    // reference 1 m base sampled at five cells gives a 0.2 m pitch, and an
+    // N-edge control changes physical block size to N * pitch.
+    const cellPitchM = scenario.ice.edgeM / BASE_PARTICLE_EDGE_DEFAULT;
+    const safeParticleEdge = (input, fallback) => {
+      const value = Math.round(Number(input.value));
+      return Number.isFinite(value) && value >= 1 ? value : fallback;
+    };
+    const safeNumber = (input, fallback) => {
+      const value = Number(input.value);
+      return Number.isFinite(value) ? value : fallback;
+    };
+    const baseParticlesPerEdge = safeParticleEdge(countInputs.base, BASE_PARTICLE_EDGE_DEFAULT);
+    const dropParticlesPerEdge = safeParticleEdge(countInputs.drop, DROP_PARTICLE_EDGE_DEFAULT);
+    const baseEdgeM = cellPitchM * baseParticlesPerEdge;
+    const dropEdgeM = cellPitchM * dropParticlesPerEdge;
+    const baseBottomM = safeNumber(heightInputs.ice, ICE_BASE_DEFAULT_M);
+    const dropBottomM = safeNumber(heightInputs.iron, IRON_BASE_DEFAULT_M);
+    const centerX = boxDimensionsM[0] / 2;
+    const centerZ = boxDimensionsM[2] / 2;
+    return sphInitialBodiesFromLegacyDropBase({
+      baseMaterial: elementSelects.base.value,
+      dropMaterial: elementSelects.drop.value,
+      baseSizeM: [baseEdgeM, baseEdgeM, baseEdgeM],
+      dropSizeM: [dropEdgeM, dropEdgeM, dropEdgeM],
+      baseCenterM: [centerX, baseBottomM + baseEdgeM / 2, centerZ],
+      dropCenterM: [centerX, dropBottomM + dropEdgeM / 2, centerZ],
+      baseTemperatureK: safeNumber(tempInputs.base, BASE_TEMP_DEFAULT_K),
+      dropTemperatureK: safeNumber(tempInputs.drop, DROP_TEMP_DEFAULT_K),
+      baseParticlesPerEdge: [baseParticlesPerEdge, baseParticlesPerEdge, baseParticlesPerEdge],
+      dropParticlesPerEdge: [dropParticlesPerEdge, dropParticlesPerEdge, dropParticlesPerEdge]
+    });
+  }
+
+  function appendInitialBodyNumberField(container, {
+    bodyId,
+    field,
+    axis = null,
+    label,
+    value,
+    min = null,
+    step = 'any'
+  }) {
+    const wrap = document.createElement('label');
+    wrap.className = 'sph-initial-body-field';
+    wrap.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'number';
+    const numericValue = Number(value);
+    input.value = Number.isFinite(numericValue)
+      ? String(Number(numericValue.toPrecision(12)))
+      : String(value);
+    input.step = String(step);
+    if (min != null) input.min = String(min);
+    input.dataset.bodyId = bodyId;
+    input.dataset.bodyField = field;
+    if (axis != null) input.dataset.axis = String(axis);
+    wrap.appendChild(input);
+    container.appendChild(wrap);
+    return input;
+  }
+
+  function createInitialBodyActionButton({ action, bodyId, text, label, disabled = false }) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'sph-initial-body-action';
+    button.dataset.bodyAction = action;
+    button.dataset.bodyId = bodyId;
+    button.textContent = text;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.disabled = disabled;
+    return button;
+  }
+
+  function createInitialBodyCard(body, index, bodyCount) {
+    const card = document.createElement('article');
+    card.className = 'sph-initial-body-card';
+    card.dataset.bodyId = body.id;
+
+    const head = document.createElement('div');
+    head.className = 'sph-initial-body-card-head';
+    const titleWrap = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'sph-initial-body-title';
+    title.textContent = body.legacyRole ? `${body.id} (${body.legacyRole})` : body.id;
+    const domain = document.createElement('div');
+    domain.className = 'sph-initial-body-domain';
+    const bodyParticleCount = body.particlesPerEdge.reduce(
+      (count, particlesPerAxis) => count * particlesPerAxis,
+      1
+    );
+    domain.textContent = `domain ${body.domainId} · ${bodyParticleCount.toLocaleString()} particles`;
+    titleWrap.append(title, domain);
+    const actions = document.createElement('div');
+    actions.className = 'sph-initial-body-actions';
+    actions.append(
+      createInitialBodyActionButton({
+        action: 'move-up', bodyId: body.id, text: '↑',
+        label: `Move ${body.id} up`, disabled: index === 0
+      }),
+      createInitialBodyActionButton({
+        action: 'move-down', bodyId: body.id, text: '↓',
+        label: `Move ${body.id} down`, disabled: index === bodyCount - 1
+      }),
+      createInitialBodyActionButton({
+        action: 'duplicate', bodyId: body.id, text: 'copy',
+        label: `Duplicate ${body.id}`
+      }),
+      createInitialBodyActionButton({
+        action: 'remove', bodyId: body.id, text: '−',
+        label: `Remove ${body.id}`, disabled: bodyCount <= 1
+      })
+    );
+    head.append(titleWrap, actions);
+
+    const grid = document.createElement('div');
+    grid.className = 'sph-initial-body-grid';
+    const materialWrap = document.createElement('label');
+    materialWrap.className = 'sph-initial-body-field sph-initial-body-material';
+    materialWrap.textContent = 'material';
+    const materialRow = document.createElement('div');
+    materialRow.className = 'sph-material-row';
+    const materialSelect = document.createElement('select');
+    materialSelect.className = 'sph-material-select';
+    materialSelect.dataset.bodyId = body.id;
+    materialSelect.dataset.bodyField = 'material';
+    let materialOptionFound = false;
+    for (const option of MATERIAL_OPTIONS) {
+      const item = document.createElement('option');
+      item.value = option.key;
+      item.textContent = option.label;
+      if (option.key === body.material) {
+        item.selected = true;
+        materialOptionFound = true;
+      }
+      materialSelect.appendChild(item);
+    }
+    if (!materialOptionFound) {
+      const item = document.createElement('option');
+      item.value = body.material;
+      item.textContent = `${body.material} (custom)`;
+      item.selected = true;
+      materialSelect.prepend(item);
+    }
+    const pickerButton = document.createElement('button');
+    pickerButton.type = 'button';
+    pickerButton.className = 'sph-picker-button';
+    pickerButton.textContent = 'PT';
+    pickerButton.title = `Open periodic table for ${body.id}`;
+    pickerButton.setAttribute('aria-label', `Open periodic table for ${body.id}`);
+    pickerButton.addEventListener('click', () => openElementPicker({
+      overlay,
+      select: materialSelect,
+      roleLabel: body.id
+    }));
+    materialRow.append(materialSelect, pickerButton);
+    materialWrap.appendChild(materialRow);
+    grid.appendChild(materialWrap);
+
+    const appendVector = ({ title: rowTitle, field, values, labels, min = null, step = 'any' }) => {
+      const rowLabel = document.createElement('div');
+      rowLabel.className = 'sph-initial-body-row-label';
+      rowLabel.textContent = rowTitle;
+      grid.appendChild(rowLabel);
+      values.forEach((value, axis) => appendInitialBodyNumberField(grid, {
+        bodyId: body.id,
+        field,
+        axis,
+        label: labels[axis],
+        value,
+        min,
+        step
+      }));
+    };
+    appendVector({
+      title: 'axis-aligned edge lengths (m)', field: 'sizeM', values: body.sizeM,
+      labels: ['X', 'Y', 'Z'], min: Number.EPSILON
+    });
+    appendVector({
+      title: 'center position (m)', field: 'centerM', values: body.centerM,
+      labels: ['X', 'Y', 'Z']
+    });
+    const temperatureLabel = document.createElement('div');
+    temperatureLabel.className = 'sph-initial-body-row-label';
+    temperatureLabel.textContent = 'temperature';
+    grid.appendChild(temperatureLabel);
+    appendInitialBodyNumberField(grid, {
+      bodyId: body.id,
+      field: 'temperatureK',
+      label: 'K',
+      value: body.temperatureK,
+      min: Number.EPSILON
+    });
+    appendVector({
+      title: 'particles per edge', field: 'particlesPerEdge', values: body.particlesPerEdge,
+      labels: ['X', 'Y', 'Z'], min: 1, step: 1
+    });
+
+    const velocity = document.createElement('details');
+    velocity.className = 'sph-initial-body-velocity';
+    const velocitySummary = document.createElement('summary');
+    velocitySummary.textContent = 'initial velocity (m/s)';
+    const velocityGrid = document.createElement('div');
+    velocityGrid.className = 'sph-initial-body-grid';
+    body.velocityMPerS.forEach((value, axis) => appendInitialBodyNumberField(velocityGrid, {
+      bodyId: body.id,
+      field: 'velocityMPerS',
+      axis,
+      label: ['X', 'Y', 'Z'][axis],
+      value
+    }));
+    velocity.append(velocitySummary, velocityGrid);
+    grid.appendChild(velocity);
+    card.append(head, grid);
+    return card;
+  }
+
+  function renderInitialBodiesEditor() {
+    initialBodiesEl.replaceChildren();
+    const bodies = currentInitialBodies?.bodies || [];
+    if (bodies.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'sph-initial-bodies-help';
+      empty.textContent = 'No initial bodies. Add one to create material in the simulation.';
+      initialBodiesEl.appendChild(empty);
+    }
+    for (let index = 0; index < bodies.length; index += 1) {
+      initialBodiesEl.appendChild(createInitialBodyCard(bodies[index], index, bodies.length));
+    }
+    overlay.__sphInitialBodies = currentInitialBodies;
+  }
+
+  function bodyFromCommittedCard(card) {
+    const bodyId = card.dataset.bodyId;
+    const existing = currentInitialBodies.bodies.find((body) => body.id === bodyId);
+    if (!existing) throw new Error(`Initial body '${bodyId}' no longer exists.`);
+    const valueFor = (field, axis = null) => {
+      const selector = axis == null
+        ? `[data-body-field="${field}"]`
+        : `[data-body-field="${field}"][data-axis="${axis}"]`;
+      return card.querySelector(selector)?.value;
+    };
+    return {
+      ...existing,
+      material: valueFor('material'),
+      sizeM: [0, 1, 2].map((axis) => valueFor('sizeM', axis)),
+      centerM: [0, 1, 2].map((axis) => valueFor('centerM', axis)),
+      temperatureK: valueFor('temperatureK'),
+      particlesPerEdge: [0, 1, 2].map((axis) => valueFor('particlesPerEdge', axis)),
+      velocityMPerS: [0, 1, 2].map((axis) => valueFor('velocityMPerS', axis))
+    };
+  }
+
+  function commitInitialBodyCard(card) {
+    try {
+      const nextBody = bodyFromCommittedCard(card);
+      currentInitialBodies = validateInitialBodiesEditorState(
+        currentInitialBodies.bodies.map((body) => body.id === nextBody.id ? nextBody : body)
+      );
+      setInitialBodiesEditorError();
+      renderInitialBodiesEditor();
+      scenarioPresetSelect.value = 'custom';
+      scheduleDemoRebuild({ delayMs: INITIAL_BODY_EDITOR_REBUILD_DEBOUNCE_MS });
+    } catch (error) {
+      setInitialBodiesEditorError(error, { blocksSimulation: true });
+    }
+  }
+
+  function applyInitialBodiesMutation(mutate) {
+    try {
+      currentInitialBodies = validateInitialBodiesEditorState(mutate(currentInitialBodies));
+      setInitialBodiesEditorError();
+      renderInitialBodiesEditor();
+      scenarioPresetSelect.value = 'custom';
+      scheduleDemoRebuild({ delayMs: INITIAL_BODY_EDITOR_REBUILD_DEBOUNCE_MS });
+    } catch (error) {
+      setInitialBodiesEditorError(error, { blocksSimulation: true });
+    }
+  }
+
+  initialBodiesEl.addEventListener('change', (event) => {
+    if (!initialBodiesEditorReady) return;
+    const input = event.target.closest('[data-body-field]');
+    if (!input || !initialBodiesEl.contains(input)) return;
+    const card = input.closest('.sph-initial-body-card');
+    if (card) commitInitialBodyCard(card);
+  });
+  initialBodiesEl.addEventListener('click', (event) => {
+    if (!initialBodiesEditorReady) return;
+    const button = event.target.closest('[data-body-action]');
+    if (!button || !initialBodiesEl.contains(button)) return;
+    const bodyId = button.dataset.bodyId;
+    const index = currentInitialBodies.bodies.findIndex((body) => body.id === bodyId);
+    if (index < 0) return;
+    if (button.dataset.bodyAction === 'duplicate') {
+      applyInitialBodiesMutation((value) => duplicateSphInitialBody(value, bodyId));
+    } else if (button.dataset.bodyAction === 'remove' && currentInitialBodies.bodies.length > 1) {
+      applyInitialBodiesMutation((value) => value.bodies.filter((body) => body.id !== bodyId));
+    } else if (button.dataset.bodyAction === 'move-up' && index > 0) {
+      applyInitialBodiesMutation((value) => moveSphInitialBody(value, bodyId, index - 1));
+    } else if (button.dataset.bodyAction === 'move-down' && index < currentInitialBodies.bodies.length - 1) {
+      applyInitialBodiesMutation((value) => moveSphInitialBody(value, bodyId, index + 1));
+    }
+  });
+  addInitialBodyButton.addEventListener('click', () => {
+    if (!initialBodiesEditorReady) return;
+    applyInitialBodiesMutation((value) => {
+      const identity = allocateNextSphInitialBodyIdentity(value);
+      const boxDimensionsM = boxDimensionsFromControls();
+      const template = value.bodies[value.bodies.length - 1] || {
+        material: elementSelects.drop.value || DROP_MATERIAL_DEFAULT,
+        sizeM: [0.6, 0.6, 0.6],
+        centerM: [boxDimensionsM[0] / 2, 0.3, boxDimensionsM[2] / 2],
+        temperatureK: DROP_TEMP_DEFAULT_K,
+        particlesPerEdge: [3, 3, 3],
+        velocityMPerS: [0, 0, 0]
+      };
+      const verticalPitchM = template.sizeM[1] / template.particlesPerEdge[1];
+      return [
+        ...value.bodies,
+        {
+          ...template,
+          id: identity.id,
+          domainId: identity.domainId,
+          centerM: [
+            template.centerM[0],
+            template.centerM[1] + template.sizeM[1] + verticalPitchM,
+            template.centerM[2]
+          ],
+          velocityMPerS: [0, 0, 0],
+          legacyRole: undefined
+        }
+      ].map((body) => {
+        if (body.legacyRole == null) {
+          const { legacyRole, ...withoutLegacyRole } = body;
+          return withoutLegacyRole;
+        }
+        return body;
+      });
+    });
+  });
+
   const statusEl = overlay.querySelector('#sph-status');
   const warningBarEl = overlay.querySelector('#sph-warning-bar');
   const fpsEl = overlay.querySelector('#sph-fps');
@@ -2022,10 +2632,18 @@ export async function mountSphPhaseDemoOverlay({
     lawv: lawInputs.viscosity,
     lawst: lawInputs.surfaceTension,
     blob: blobInput,
+    lighting: lightingModeSelect,
     bg: backgroundColorInput,
     bgimg: backgroundImageSelect
   };
-  function urlValueForControl(el) {
+  function urlValueForControl(key, el) {
+    if (
+      key === 'bgimg'
+      && el?.value === SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE
+    ) {
+      // Local object URLs and filenames are intentionally session-only.
+      return '';
+    }
     return el?.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
   }
   function applyUrlValueToControl(key, el, value) {
@@ -2057,14 +2675,39 @@ export async function mountSphPhaseDemoOverlay({
       const v = hash.get(key) ?? query.get(key);
       if (v != null && v !== '') applyUrlValueToControl(key, el, v);
     }
+    const legacyInitialBodies = legacyInitialBodiesFromProxyControls();
+    const serializedInitialBodies = hash.get('bodies') ?? query.get('bodies');
+    let explicitInitialBodiesDifferFromLegacy = false;
+    if (serializedInitialBodies != null && serializedInitialBodies !== '') {
+      try {
+        currentInitialBodies = validateInitialBodiesEditorState(
+          parseSphInitialBodies(serializedInitialBodies)
+        );
+        explicitInitialBodiesDifferFromLegacy =
+          serializeSphInitialBodies(currentInitialBodies)
+          !== serializeSphInitialBodies(legacyInitialBodies);
+        setInitialBodiesEditorError();
+      } catch (error) {
+        currentInitialBodies = legacyInitialBodies;
+        setInitialBodiesEditorError(
+          `The bodies URL value is invalid; legacy controls were restored instead. ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    } else {
+      currentInitialBodies = legacyInitialBodies;
+      setInitialBodiesEditorError();
+    }
+    renderInitialBodiesEditor();
     if (requestedPreset) {
       const presetDiffers = Object.entries(requestedPreset.controls).some(([key, expected]) => {
         const explicitValue = hash.get(key) ?? query.get(key);
         const control = urlControls[key];
         if (explicitValue == null || explicitValue === '' || !control) return false;
-        return urlValueForControl(control) !== String(expected);
+        return urlValueForControl(key, control) !== String(expected);
       });
-      if (presetDiffers) scenarioPresetSelect.value = 'custom';
+      if (presetDiffers || explicitInitialBodiesDifferFromLegacy) {
+        scenarioPresetSelect.value = 'custom';
+      }
     }
   }
   const initialQuery = new URLSearchParams(window.location.search);
@@ -2293,6 +2936,13 @@ export async function mountSphPhaseDemoOverlay({
     ),
     true
   );
+  const initialSchroederPhaseVolumeMigrationEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederPhaseVolumeMigration', 'ssPhaseVolumeMigration'],
+      ['enablePhaseVolumeMigration', 'phaseVolumeMigration', 'schroederEnablePhaseVolumeMigration']
+    ),
+    true
+  );
   const initialSchroederLawQueueEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederLawQueue'],
@@ -2416,6 +3066,7 @@ export async function mountSphPhaseDemoOverlay({
     lawNeighborTraversalPolicyMode: initialSchroederLawNeighborTraversalPolicyMode,
     lawNeighborCandidateReadbackMode: initialSchroederLawNeighborCandidateReadbackMode,
     enableCrossLevelCoupling: initialSchroederCrossLevelCouplingEnabled,
+    enablePhaseVolumeMigration: initialSchroederPhaseVolumeMigrationEnabled,
     enableLawQueue: initialSchroederLawQueueEnabled,
     enableLawNeighborCandidates: initialSchroederLawNeighborCandidatesEnabled,
     enableTwoLevelMechanics: initialSchroederTwoLevelMechanicsEnabled,
@@ -2467,6 +3118,7 @@ export async function mountSphPhaseDemoOverlay({
       schroederLawNeighborTraversalPolicyMode: config.lawNeighborTraversalPolicyMode,
       schroederLawNeighborCandidateReadbackMode: config.lawNeighborCandidateReadbackMode,
       schroederEnableCrossLevelCoupling: config.enableCrossLevelCoupling,
+      schroederEnablePhaseVolumeMigration: config.enablePhaseVolumeMigration,
       schroederEnableLawQueue: config.enableLawQueue,
       schroederEnableLawNeighborCandidates: config.enableLawNeighborCandidates,
       schroederEnableTwoLevelMechanics: config.enableTwoLevelMechanics,
@@ -2852,7 +3504,44 @@ export async function mountSphPhaseDemoOverlay({
   const residentAutoStartEnabled = Boolean(autoStart && initialResidentAutoEnabled);
   function syncUrlFromControls() {
     const q = new URLSearchParams();
-    for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(el));
+    for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(key, el));
+    if (currentInitialBodies) {
+      q.set('bodies', serializeSphInitialBodies(currentInitialBodies));
+    }
+    // These policies have no visible inputs, but they are part of a preset's
+    // simulation state. Keep them in the canonical hash when body edits turn
+    // a preset into `custom`, otherwise the same body URL runs with different
+    // dt/CFL/cadence after a reload.
+    if (initialSimDtS != null) q.set('sdt', String(initialSimDtS));
+    if (initialGridCflFactor != null) q.set('cfl', String(initialGridCflFactor));
+    if (initialCflSafety != null) q.set('cflSafety', String(initialCflSafety));
+    if (initialArtificialViscosityAlpha != null) {
+      q.set('avAlpha', String(initialArtificialViscosityAlpha));
+    }
+    if (initialLiquidVelocityDiffusionAlpha != null) {
+      q.set('diffAlpha', String(initialLiquidVelocityDiffusionAlpha));
+    }
+    if (initialLiquidWallDampingAlpha != null) {
+      q.set('wallAlpha', String(initialLiquidWallDampingAlpha));
+    }
+    if (initialParticleSeparationRelaxation != null) {
+      q.set('sep', String(initialParticleSeparationRelaxation));
+    }
+    if (initialParticleSeparationVelocityDamping != null) {
+      q.set('sepVel', String(initialParticleSeparationVelocityDamping));
+    }
+    if (initialHydrostaticInitialization != null) {
+      q.set('hydroInit', initialHydrostaticInitialization ? '1' : '0');
+    }
+    if (residentStepsPerScheduleOverride != null) {
+      q.set('residentStepsPerSchedule', String(residentStepsPerScheduleOverride));
+    }
+    if (residentInterfaceRefreshMode) {
+      q.set('residentInterfaceRefreshMode', String(residentInterfaceRefreshMode));
+    }
+    if (residentComputeManagerMode) {
+      q.set('residentComputeManagerMode', String(residentComputeManagerMode));
+    }
     if (!initialResidentWorkersEnabled) q.set('residentWorkers', '0');
     if (initialResidentStageWorkersEnabled) q.set('residentStageWorkers', '1');
     q.set('residentFuseSequence', initialResidentFuseSequenceEnabled ? '1' : '0');
@@ -2982,6 +3671,7 @@ export async function mountSphPhaseDemoOverlay({
     const baseEdge = Math.round(Number(countInputs.base.value));
     return {
       scenario: scenarioFromControls(),
+      initialBodies: currentInitialBodies,
       dropMaterial: elementSelects.drop.value,
       baseMaterial: elementSelects.base.value,
       dropTemperatureK: Number.isFinite(dropTemperatureK) ? dropTemperatureK : DROP_TEMP_DEFAULT_K,
@@ -3018,7 +3708,13 @@ export async function mountSphPhaseDemoOverlay({
   }
 
   const blobScaleOf = () => { const v = Number(blobInput.value); return Number.isFinite(v) && v > 0 ? v : BLOB_SCALE_DEFAULT; };
+  const lightingModeOf = () => normalizeSphSceneLightingMode(lightingModeSelect.value);
   const backgroundColorOf = () => normalizeSphSceneBackgroundColorHex(backgroundColorInput.value);
+  const backgroundImageUrlOf = () => (
+    backgroundImageSelect.value === SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE
+      ? localBackgroundImageObjectUrl
+      : (backgroundImageSelect.value || null)
+  );
   let renderModeRefreshToken = 0;
   let peerClosureCacheLookup = null;
   let peerClosureCacheWrite = null;
@@ -3768,9 +4464,14 @@ export async function mountSphPhaseDemoOverlay({
       baselineSummary,
       reactionSummary,
       residentProductMass,
-      pressureInterfaceState: scene.getSphResidentPressureInterfaceState?.()
-        || overlay.__sphResidentPressureInterfaceState
-        || null,
+      // A direct scene refresh must derive pressure from this completed
+      // reaction generation. Supplying the prior interface state here lets a
+      // stale spatial ledger outrank the new compact H2 ledger indefinitely.
+      pressureInterfaceState: currentResidentComputeManagerMode() === 'direct'
+        ? null
+        : (scene.getSphResidentPressureInterfaceState?.()
+          || overlay.__sphResidentPressureInterfaceState
+          || null),
       reactionTable: scene.getSphReactionTable?.() || overlay.__sphReactionTable || null,
       materialProperties: activeMaterialProperties(),
       fallbackTemperatureK: driver?.demo?.scenario?.gas?.initialTemperatureK
@@ -3974,6 +4675,7 @@ export async function mountSphPhaseDemoOverlay({
       status: 'submitted',
       reason: 'initial-load',
       optionsHash: JSON.stringify({
+        bodies: controlOptions.initialBodies,
         drop: controlOptions.dropMaterial,
         base: controlOptions.baseMaterial,
         counts: [controlOptions.dropParticleEdge, controlOptions.baseParticleEdge],
@@ -4030,6 +4732,7 @@ export async function mountSphPhaseDemoOverlay({
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode(),
     backgroundColor: backgroundColorOf(),
+    lightingMode: lightingModeOf(),
     nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
     workerOffscreenPresentation: workerOffscreenPresentationEnabled,
     renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
@@ -4039,9 +4742,8 @@ export async function mountSphPhaseDemoOverlay({
   applySchroederRenderProxyOverlayFlag(scene);
   overlay.__sphScene = scene;
   overlay.__sphSceneBackgroundColor = scene.scene?.userData?.sphSceneBackgroundColor || null;
-  if (backgroundImageSelect.value) {
-    applyBackgroundImageFromControl('initial-url-controls');
-  }
+  overlay.__sphSceneLighting = scene.getLightingMode?.() || null;
+  applyBackgroundImageFromControl('initial-url-controls', { refresh: false });
   overlay.__sphPeerComputeRenderOwnershipPolicy =
     scene.getPeerComputeRenderOwnershipPolicy?.()
     || scene.scene?.userData?.sphPeerComputeRenderOwnershipPolicy
@@ -4161,8 +4863,10 @@ export async function mountSphPhaseDemoOverlay({
     }
     publishPeerComputeResidentAuthorityHostStatus('initializing');
     peerComputeResidentAuthorityHostPromise = ensurePeerComputeResidentAuthorityHost({
+      peercomputeModule,
       peercomputeModuleUrl,
       computeTaskModulePath: residentComputeTaskModulePath,
+      mechanicsResidentStageWorkerModuleUrl: residentMechanicsStageWorkerModuleUrl,
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       enableWorkers: initialResidentWorkersEnabled
     })
@@ -4990,6 +5694,7 @@ export async function mountSphPhaseDemoOverlay({
     schroederLawNeighborTraversalPolicyMode = null,
     schroederLawNeighborCandidateReadbackMode = null,
     schroederEnableCrossLevelCoupling = true,
+    schroederEnablePhaseVolumeMigration = true,
     schroederEnableLawQueue = true,
     schroederEnableLawNeighborCandidates = true,
     schroederEnableParticleStorageMaterialization = false,
@@ -5033,6 +5738,7 @@ export async function mountSphPhaseDemoOverlay({
       `ssTraversal=${schroederLawNeighborTraversalPolicyMode ?? 'default'}`,
       `ssCandidateReadback=${schroederLawNeighborCandidateReadbackMode ?? 'default'}`,
       `ssCross=${Boolean(schroederEnableCrossLevelCoupling) ? 1 : 0}`,
+      `ssPhaseVolume=${Boolean(schroederEnablePhaseVolumeMigration) ? 1 : 0}`,
       `ssLawQueue=${Boolean(schroederEnableLawQueue) ? 1 : 0}`,
       `ssLawNeighbors=${Boolean(schroederEnableLawNeighborCandidates) ? 1 : 0}`,
       `ssParticleStorage=${Boolean(schroederEnableParticleStorageMaterialization) ? 1 : 0}`,
@@ -5228,6 +5934,7 @@ export async function mountSphPhaseDemoOverlay({
     residentProductMassForRefresh,
     residentReactionSummaryForRefresh,
     residentAuthorityHostForSchedule,
+    residentComputeManagerMode = null,
     generation,
     scheduleToken,
     mode,
@@ -5274,6 +5981,7 @@ export async function mountSphPhaseDemoOverlay({
         reactionSummary: residentReactionSummaryForRefresh,
         reactionTable: scene.getSphReactionTable?.() || null,
         residentAuthorityHost: residentAuthorityHostForSchedule,
+        residentComputeManagerMode,
         pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
         pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
         pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
@@ -5415,7 +6123,12 @@ export async function mountSphPhaseDemoOverlay({
       return pendingResidentInterfaceRefreshPromise;
     }
     const residentSubmissionCount = Math.max(0, Math.round(Number(residentPerf.residentSubmissions) || 0));
-    if (mode === 'pipelined' && warmupFrames > 0 && residentSubmissionCount < warmupFrames) {
+    if (
+      mode === 'pipelined'
+      && context.requireBeforeNextResidentContinuation !== true
+      && warmupFrames > 0
+      && residentSubmissionCount < warmupFrames
+    ) {
       overlay.__sphResidentInterfaceRefresh = {
         schema: 'peercompute.ulg.sph-demo-resident-interface-refresh.v0',
         status: 'resident-interface-refresh-deferred-for-presentation-warmup',
@@ -6709,17 +7422,48 @@ export async function mountSphPhaseDemoOverlay({
           || (driver?.demo ? gasPressureSummary(driver.demo) : null)
       );
       const schedulerResidentInterfaceRefreshMode = currentResidentInterfaceRefreshMode();
+      const activePhysicalLawGroups = physicalLawGroupsFromControls();
+      const requireInterfaceBeforeNextResidentContinuation =
+        residentComputeManagerModeForSchedule === 'direct'
+        && activePhysicalLawGroups.pressure !== false
+        && activePhysicalLawGroups.reactions !== false
+        && (scene.getSphReactionTable?.()?.reactionCount ?? 0) > 0;
       const residentInterfaceRefresh = startResidentInterfaceRefresh({
         execution,
         residentGasPressureForRefresh,
         residentProductMassForRefresh,
         residentReactionSummaryForRefresh,
         residentAuthorityHostForSchedule,
+        residentComputeManagerMode: residentComputeManagerModeForSchedule,
+        requireBeforeNextResidentContinuation: requireInterfaceBeforeNextResidentContinuation,
         generation,
         scheduleToken
       });
-      if (schedulerResidentInterfaceRefreshMode === 'blocking') {
-        await residentInterfaceRefresh;
+      let requiredInterfaceRefreshReady = !requireInterfaceBeforeNextResidentContinuation;
+      if (
+        schedulerResidentInterfaceRefreshMode === 'blocking'
+        || requireInterfaceBeforeNextResidentContinuation
+      ) {
+        const interfaceRefreshReport = await residentInterfaceRefresh;
+        if (requireInterfaceBeforeNextResidentContinuation) {
+          const currentPressureInterfaceState =
+            scene.getSphResidentPressureInterfaceState?.()
+            || overlay.__sphResidentPressureInterfaceState
+            || null;
+          requiredInterfaceRefreshReady = Boolean(
+            interfaceRefreshReport?.status === 'resident-interface-refresh-complete'
+            && interfaceRefreshReport?.generation === generation
+            && interfaceRefreshReport?.scheduleToken === scheduleToken
+            && currentPressureInterfaceState?.status
+              === 'resident-pressure-interface-force-rows-ready'
+            && currentPressureInterfaceState?.pressureInterfaceForceRowsBufferRetained === true
+            && currentPressureInterfaceState?.pressureInterfaceGridForceAdmissionApproved === true
+          );
+          if (!requiredInterfaceRefreshReady) {
+            overlay.__sphResidentPressureInterfaceStateError =
+              'current direct resident interface refresh did not publish approved same-device pressure rows';
+          }
+        }
       }
       scheduleContinuation = Boolean(
         execution?.continuationAvailable
@@ -6727,6 +7471,7 @@ export async function mountSphPhaseDemoOverlay({
         && execution?.backend === 'webgpu'
         && continuationBudget > 0
         && generation === particleSyncGeneration
+        && requiredInterfaceRefreshReady
         // Continuation chaining is playback: a paused page runs exactly one
         // bootstrap schedule to materialize resident render state, then
         // holds. Without this gate the paused default page burned its
@@ -7075,13 +7820,200 @@ export async function mountSphPhaseDemoOverlay({
 
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
-  function applyBackgroundImageFromControl(reason = 'background-image-control-input') {
-    overlay.__sphSceneBackgroundImage = scene.setBackgroundImage?.(backgroundImageSelect.value || null, { reason }) || null;
+
+  function revokeLocalBackgroundImageObjectUrl(url, reason = 'local-background-image-retired') {
+    if (!url || revokedLocalBackgroundImageObjectUrls.has(url)) return false;
+    revokedLocalBackgroundImageObjectUrls.add(url);
+    try { URL.revokeObjectURL(url); } catch { /* browser teardown */ }
+    overlay.__sphLocalBackgroundImageLastRevocation = {
+      schema: 'peercompute.ulg.sph-local-background-image-revocation.v0',
+      status: 'local-background-image-object-url-revoked',
+      reason,
+      updatedAtMs: performance.now()
+    };
+    return true;
   }
+
+  function publishLocalBackgroundImageStatus({
+    status,
+    reason = null,
+    message = null,
+    error = null,
+    width = null,
+    height = null
+  } = {}) {
+    const activeUrl = backgroundImageUrlOf();
+    const localActive = backgroundImageSelect.value === SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE
+      && Boolean(localBackgroundImageObjectUrl);
+    const builtInActive = Boolean(activeUrl) && !localActive;
+    const defaultMessage = localActive
+      ? `Using ${localBackgroundImageFileName || 'a local image'} — session only; nothing was uploaded.`
+      : (builtInActive
+          ? `Using ${backgroundImageSelect.selectedOptions?.[0]?.textContent || 'the selected background image'}.`
+          : 'Using the solid background color. Local images stay on this device.');
+    localBackgroundImageStatus.textContent = message || defaultMessage;
+    localBackgroundImageStatus.style.color = error ? '#ffb7a1' : '#8fc7b2';
+    clearBackgroundImageButton.disabled = !activeUrl && !pendingLocalBackgroundImageObjectUrl;
+    overlay.__sphLocalBackgroundImage = {
+      schema: 'peercompute.ulg.sph-local-background-image-control.v0',
+      status: status || (
+        localActive
+          ? 'local-background-image-active'
+          : (builtInActive ? 'bundled-background-image-active' : 'solid-background-active')
+      ),
+      reason,
+      sessionOnly: true,
+      localObjectUrlActive: localActive,
+      localObjectUrlPending: Boolean(pendingLocalBackgroundImageObjectUrl),
+      fileName: localActive ? localBackgroundImageFileName : null,
+      fileType: localActive ? localBackgroundImageFileType : null,
+      fileSizeBytes: localActive ? localBackgroundImageFileSizeBytes : 0,
+      width,
+      height,
+      error: error ? String(error) : null,
+      updatedAtMs: performance.now()
+    };
+    return overlay.__sphLocalBackgroundImage;
+  }
+
+  function applyBackgroundImageFromControl(
+    reason = 'background-image-control-input',
+    { refresh = true } = {}
+  ) {
+    overlay.__sphSceneBackgroundImage = scene.setBackgroundImage?.(
+      backgroundImageUrlOf(),
+      { reason, refresh }
+    ) || null;
+    publishLocalBackgroundImageStatus({ reason });
+    return overlay.__sphSceneBackgroundImage;
+  }
+
+  function cancelPendingLocalBackgroundImage(reason) {
+    localBackgroundImageLoadGeneration += 1;
+    const pendingUrl = pendingLocalBackgroundImageObjectUrl;
+    pendingLocalBackgroundImageObjectUrl = null;
+    revokeLocalBackgroundImageObjectUrl(pendingUrl, reason);
+  }
+
+  function detachActiveLocalBackgroundImage() {
+    const retiredUrl = localBackgroundImageObjectUrl;
+    localBackgroundImageObjectUrl = null;
+    localBackgroundImageFileName = null;
+    localBackgroundImageFileType = null;
+    localBackgroundImageFileSizeBytes = 0;
+    localBackgroundImageOption.hidden = true;
+    localBackgroundImageOption.disabled = true;
+    localBackgroundImageOption.textContent = 'Custom image (local session)';
+    localBackgroundImageInput.value = '';
+    return retiredUrl;
+  }
+
   backgroundImageSelect.addEventListener('change', () => {
+    cancelPendingLocalBackgroundImage('local-background-image-selection-superseded');
+    const retiredLocalUrl = backgroundImageSelect.value === SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE
+      ? null
+      : detachActiveLocalBackgroundImage();
     applyBackgroundImageFromControl('background-image-control-change');
+    revokeLocalBackgroundImageObjectUrl(retiredLocalUrl, 'local-background-image-replaced-by-selector');
     syncUrlFromControls();
   });
+
+  localBackgroundImageInput.addEventListener('change', () => {
+    const file = localBackgroundImageInput.files?.[0] || null;
+    if (!file) return;
+    // Every non-null selection is authoritative, including an invalid file:
+    // a prior candidate must never commit after the user has replaced it.
+    cancelPendingLocalBackgroundImage('local-background-image-new-selection');
+    const validation = validateSphLocalBackgroundImageFile(file);
+    if (!validation.accepted) {
+      localBackgroundImageInput.value = '';
+      publishLocalBackgroundImageStatus({
+        status: validation.status,
+        reason: 'local-background-image-file-validation',
+        message: validation.reason,
+        error: validation.reason
+      });
+      return;
+    }
+
+    const loadGeneration = localBackgroundImageLoadGeneration;
+    let candidateUrl = null;
+    try {
+      candidateUrl = URL.createObjectURL(file);
+    } catch (error) {
+      localBackgroundImageInput.value = '';
+      publishLocalBackgroundImageStatus({
+        status: 'local-background-image-object-url-failed',
+        reason: 'local-background-image-file-selection',
+        message: 'The browser could not open that local image.',
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+    pendingLocalBackgroundImageObjectUrl = candidateUrl;
+    publishLocalBackgroundImageStatus({
+      status: 'local-background-image-loading',
+      reason: 'local-background-image-file-selection',
+      message: `Checking ${validation.name}…`
+    });
+
+    const candidateImage = new Image();
+    candidateImage.onload = () => {
+      if (
+        loadGeneration !== localBackgroundImageLoadGeneration
+        || pendingLocalBackgroundImageObjectUrl !== candidateUrl
+        || !overlay.isConnected
+      ) {
+        revokeLocalBackgroundImageObjectUrl(candidateUrl, 'local-background-image-stale-candidate');
+        return;
+      }
+      pendingLocalBackgroundImageObjectUrl = null;
+      const previousLocalUrl = localBackgroundImageObjectUrl;
+      localBackgroundImageObjectUrl = candidateUrl;
+      localBackgroundImageFileName = validation.name;
+      localBackgroundImageFileType = validation.type;
+      localBackgroundImageFileSizeBytes = validation.sizeBytes;
+      localBackgroundImageOption.hidden = false;
+      localBackgroundImageOption.disabled = false;
+      localBackgroundImageOption.textContent = `Custom: ${validation.name}`;
+      backgroundImageSelect.value = SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE;
+      localBackgroundImageInput.value = '';
+      applyBackgroundImageFromControl('local-background-image-loaded');
+      revokeLocalBackgroundImageObjectUrl(previousLocalUrl, 'local-background-image-replaced');
+      syncUrlFromControls();
+      publishLocalBackgroundImageStatus({
+        status: 'local-background-image-active',
+        reason: 'local-background-image-loaded',
+        width: Math.max(1, Number(candidateImage.naturalWidth || candidateImage.width) || 1),
+        height: Math.max(1, Number(candidateImage.naturalHeight || candidateImage.height) || 1)
+      });
+    };
+    candidateImage.onerror = () => {
+      if (pendingLocalBackgroundImageObjectUrl === candidateUrl) {
+        pendingLocalBackgroundImageObjectUrl = null;
+      }
+      revokeLocalBackgroundImageObjectUrl(candidateUrl, 'local-background-image-decode-failed');
+      localBackgroundImageInput.value = '';
+      if (loadGeneration !== localBackgroundImageLoadGeneration || !overlay.isConnected) return;
+      publishLocalBackgroundImageStatus({
+        status: 'local-background-image-decode-failed',
+        reason: 'local-background-image-file-selection',
+        message: `${validation.name} could not be decoded as an image. The current background was kept.`,
+        error: 'image-decode-failed'
+      });
+    };
+    candidateImage.src = candidateUrl;
+  });
+
+  clearBackgroundImageButton.addEventListener('click', () => {
+    cancelPendingLocalBackgroundImage('local-background-image-cleared');
+    const retiredLocalUrl = detachActiveLocalBackgroundImage();
+    backgroundImageSelect.value = '';
+    applyBackgroundImageFromControl('background-image-clear-button');
+    revokeLocalBackgroundImageObjectUrl(retiredLocalUrl, 'local-background-image-cleared');
+    syncUrlFromControls();
+  });
+
   function applyBackgroundColorFromControl(reason = 'background-color-control-input') {
     overlay.__sphSceneBackgroundColor = scene.setBackgroundColor?.(backgroundColorOf(), { reason }) || null;
     syncUrlFromControls();
@@ -7092,6 +8024,32 @@ export async function mountSphPhaseDemoOverlay({
   backgroundColorInput.addEventListener('input', () => {
     applyBackgroundColorFromControl('background-color-control-input');
   });
+  function applyLightingModeFromControl(reason = 'lighting-mode-control-change') {
+    overlay.__sphSceneLighting = scene.setLightingMode?.(lightingModeOf(), { reason }) || null;
+    syncLightingQuickToggle();
+    syncUrlFromControls();
+    renderStatus();
+    updateWarningBanner();
+    return overlay.__sphSceneLighting;
+  }
+  lightingModeSelect.addEventListener('change', () => {
+    applyLightingModeFromControl('lighting-mode-control-change');
+  });
+  function syncLightingQuickToggle() {
+    const darkLab = lightingModeOf() === SPH_SCENE_LIGHTING_MODE_DARK_LAB;
+    lightingQuickToggle.textContent = darkLab ? '☀ normal lights' : '☾ dark lab';
+    lightingQuickToggle.title = darkLab
+      ? 'Restore normal laboratory lighting'
+      : 'Turn off incident lights and preserve only dim ambient plus physical emission';
+    lightingQuickToggle.setAttribute('aria-pressed', String(darkLab));
+  }
+  lightingQuickToggle.addEventListener('click', () => {
+    lightingModeSelect.value = lightingModeOf() === SPH_SCENE_LIGHTING_MODE_DARK_LAB
+      ? SPH_SCENE_LIGHTING_MODE_DEFAULT
+      : SPH_SCENE_LIGHTING_MODE_DARK_LAB;
+    applyLightingModeFromControl('lighting-mode-quick-toggle');
+  });
+  syncLightingQuickToggle();
   renderModeSelect.addEventListener('change', () => {
     residentSurfaceDrawDiagnosticModeExplicit = true;
     const selectedMode = currentResidentSurfaceDrawDiagnosticMode();
@@ -7195,12 +8153,11 @@ export async function mountSphPhaseDemoOverlay({
         reason: `${resetReason}-scene-reused`,
         refresh: false
       }) || null;
-      if (backgroundImageSelect.value) {
-        overlay.__sphSceneBackgroundImage = scene.setBackgroundImage?.(backgroundImageSelect.value, {
-          reason: `${resetReason}-scene-reused`,
-          refresh: false
-        }) || null;
-      }
+      overlay.__sphSceneLighting = scene.setLightingMode?.(lightingModeOf(), {
+        reason: `${resetReason}-scene-reused`,
+        refresh: false
+      }) || null;
+      applyBackgroundImageFromControl(`${resetReason}-scene-reused`, { refresh: false });
       scene.resetResidentStateForParticleReset?.({
         reason: `${resetReason}-scene-reused`,
         clearOverlay: true
@@ -7243,6 +8200,7 @@ export async function mountSphPhaseDemoOverlay({
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
       residentSurfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode(),
       backgroundColor: backgroundColorOf(),
+      lightingMode: lightingModeOf(),
       nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
       workerOffscreenPresentation: workerOffscreenPresentationEnabled,
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
@@ -7252,6 +8210,8 @@ export async function mountSphPhaseDemoOverlay({
     applySchroederRenderProxyOverlayFlag(scene);
     overlay.__sphScene = scene;
     overlay.__sphSceneBackgroundColor = scene.scene?.userData?.sphSceneBackgroundColor || null;
+    overlay.__sphSceneLighting = scene.getLightingMode?.() || null;
+    applyBackgroundImageFromControl(`${resetReason}-scene-recreated`, { refresh: false });
     overlay.__sphPeerComputeRenderOwnershipPolicy =
       scene.getPeerComputeRenderOwnershipPolicy?.()
       || scene.scene?.userData?.sphPeerComputeRenderOwnershipPolicy
@@ -7497,6 +8457,7 @@ export async function mountSphPhaseDemoOverlay({
       status: 'submitted',
       reason,
       optionsHash: JSON.stringify({
+        bodies: controlOptions.initialBodies,
         drop: controlOptions.dropMaterial,
         base: controlOptions.baseMaterial,
         counts: [controlOptions.dropParticleEdge, controlOptions.baseParticleEdge],
@@ -7564,7 +8525,7 @@ export async function mountSphPhaseDemoOverlay({
     });
   }
 
-  function scheduleDemoRebuild() {
+  function scheduleDemoRebuild({ delayMs = 0 } = {}) {
     syncUrlFromControls();
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     playing = false;
@@ -7595,7 +8556,7 @@ export async function mountSphPhaseDemoOverlay({
         renderStatus();
         updateWarningBanner();
       }
-    }, 0);
+    }, Math.max(0, Number(delayMs) || 0));
   }
 
   function clearLocalDerivedCachesAndRebuild() {
@@ -7626,6 +8587,44 @@ export async function mountSphPhaseDemoOverlay({
     scheduleDemoRebuild();
   }
 
+  const legacyInitialBodyControlKeys = new Set([
+    'drop', 'base', 'dropt', 'baset', 'iceh', 'ironh', 'dropn', 'basen'
+  ]);
+  const initialBodyContainerControlKeys = new Set(['boxx', 'boxy', 'boxz']);
+  function reloadWithScenarioPresetRuntime(entry) {
+    // Runtime tuning (dt/CFL/cadence/manager mode) is resolved while the
+    // resident renderer and authority host are created. Rebuilding only the
+    // particle driver would leave those mount-time policies from the previous
+    // preset alive until the next manual reload. Serialize the selected
+    // preset's runtime alongside its visible controls and reload once so the
+    // controls, driver, renderer, and resident host all share one authority.
+    syncUrlFromControls();
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    for (const key of [
+      'sdt',
+      'cfl',
+      'cflSafety',
+      'avAlpha',
+      'diffAlpha',
+      'wallAlpha',
+      'sep',
+      'sepVel',
+      'hydroInit',
+      'residentStepsPerSchedule',
+      'residentInterfaceRefreshMode',
+      'residentComputeManagerMode'
+    ]) {
+      params.delete(key);
+    }
+    for (const [key, value] of Object.entries(entry.runtime || {})) {
+      if (value != null && value !== '') params.set(key, String(value));
+    }
+    window.history.replaceState(null, '', `#${params.toString()}`);
+    window.location.reload();
+  }
+  initialBodiesEditorReady = true;
+  initialBodiesEl.inert = false;
+  addInitialBodyButton.disabled = false;
   for (const [key, el] of Object.entries(urlControls)) {
     if (key === 'scenario') {
       el.addEventListener('change', () => {
@@ -7638,7 +8637,10 @@ export async function mountSphPhaseDemoOverlay({
           const control = urlControls[controlKey];
           if (control) applyUrlValueToControl(controlKey, control, value);
         }
-        scheduleDemoRebuild();
+        currentInitialBodies = legacyInitialBodiesFromProxyControls();
+        setInitialBodiesEditorError();
+        renderInitialBodiesEditor();
+        reloadWithScenarioPresetRuntime(entry);
       });
     } else if (key === 'blob') {
       el.addEventListener('change', syncUrlFromControls);
@@ -7647,8 +8649,25 @@ export async function mountSphPhaseDemoOverlay({
     } else if (key === 'bgimg') {
       // Background image changes are render-only; the change listener added
       // at control creation already applies + syncs the URL. No demo rebuild.
+    } else if (key === 'lighting') {
+      // Lighting is render-only; the dedicated live listener applies it and
+      // syncs the URL without rebuilding or resetting the physics state.
     } else {
       el.addEventListener('change', () => {
+        if (legacyInitialBodyControlKeys.has(key)) {
+          currentInitialBodies = legacyInitialBodiesFromProxyControls();
+          setInitialBodiesEditorError();
+          renderInitialBodiesEditor();
+        }
+        if (initialBodyContainerControlKeys.has(key)) {
+          try {
+            validateInitialBodiesEditorState(currentInitialBodies);
+            setInitialBodiesEditorError();
+          } catch (error) {
+            setInitialBodiesEditorError(error, { blocksSimulation: true });
+            return;
+          }
+        }
         scenarioPresetSelect.value = 'custom';
         scheduleDemoRebuild();
       });
@@ -8251,6 +9270,11 @@ export async function mountSphPhaseDemoOverlay({
 
   let playing = false;
   let playbackLoopScheduled = false;
+  stopPlaybackForInvalidInitialBodyDraft = () => {
+    playing = false;
+    const playButton = overlay.querySelector('#sph-play');
+    if (playButton) playButton.textContent = 'Play';
+  };
 
   function requestPlaybackTick() {
     if (playbackLoopScheduled) return;
@@ -8286,7 +9310,10 @@ export async function mountSphPhaseDemoOverlay({
 
   function tick() {
     playbackLoopScheduled = false;
-    if (!playing) return;
+    if (!playing || overlay.__sphInitialBodiesDraftInvalid === true) {
+      stopPlaybackForInvalidInitialBodyDraft();
+      return;
+    }
     if (!driver) {
       if (activeViewState) {
         scheduleMlsMpmResidentSteps({
@@ -8336,6 +9363,7 @@ export async function mountSphPhaseDemoOverlay({
 
   overlay.querySelector('#sph-preflight').addEventListener('click', renderStatus);
   overlay.querySelector('#sph-step').addEventListener('click', () => {
+    if (overlay.__sphInitialBodiesDraftInvalid === true) return;
     if (!driver) {
       if (activeViewState?.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
         driver = createDriverFromControls({ preferActiveViewStateCache: true });
@@ -8360,6 +9388,7 @@ export async function mountSphPhaseDemoOverlay({
     driver.step(); recordPhysicsFrame(1); syncParticles(); renderStatus(); updateWarningBanner();
   });
   overlay.querySelector('#sph-play').addEventListener('click', (e) => {
+    if (overlay.__sphInitialBodiesDraftInvalid === true) return;
     if (!driver) {
       if (activeViewState?.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
         driver = createDriverFromControls({ preferActiveViewStateCache: true });
@@ -8436,7 +9465,13 @@ export async function mountSphPhaseDemoOverlay({
     staticTableCacheGeneration += 1;
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     disposeMountedMechanicsStageWorkerRunner('demo-close');
+    cancelPendingLocalBackgroundImage('sph-demo-close-pending-background-image');
+    const retiredLocalBackgroundImageUrl = detachActiveLocalBackgroundImage();
     scene.dispose();
+    revokeLocalBackgroundImageObjectUrl(
+      retiredLocalBackgroundImageUrl,
+      'sph-demo-close-active-background-image'
+    );
     initialRendererWebGpuDeviceResult?.device?.destroy?.();
     overlay.remove();
   }
@@ -8498,12 +9533,32 @@ export async function mountSphPhaseDemoOverlay({
     syncParticles();
     renderStatus();
   }
-  if (residentAutoStartEnabled && driver) {
+  if (residentAutoStartEnabled && driver && overlay.__sphInitialBodiesDraftInvalid !== true) {
     playing = true;
     overlay.querySelector('#sph-play').textContent = 'Pause';
     requestPlaybackTick();
-  } else if (residentAutoStartEnabled) {
+  } else if (residentAutoStartEnabled && overlay.__sphInitialBodiesDraftInvalid !== true) {
     startWorkerResidentPlayback();
   }
-  return { close, overlay };
+  return {
+    close,
+    overlay,
+    setLightingMode(nextMode, options = {}) {
+      lightingModeSelect.value = normalizeSphSceneLightingMode(nextMode);
+      overlay.__sphSceneLighting = scene.setLightingMode?.(lightingModeSelect.value, options) || null;
+      syncLightingQuickToggle();
+      syncUrlFromControls();
+      renderStatus();
+      return overlay.__sphSceneLighting;
+    },
+    getLightingMode() {
+      return scene.getLightingMode?.() || overlay.__sphSceneLighting || null;
+    },
+    getBackgroundImage() {
+      return scene.getBackgroundImage?.() || overlay.__sphSceneBackgroundImage || null;
+    },
+    getLocalBackgroundImageStatus() {
+      return overlay.__sphLocalBackgroundImage || null;
+    }
+  };
 }

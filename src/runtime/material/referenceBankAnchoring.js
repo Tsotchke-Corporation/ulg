@@ -11,11 +11,21 @@
 // residual diagnostics, and stamps the provenance accordingly.
 import compoundMaterialPropertyBank from '../../../data/material-properties/compounds.json' with { type: 'json' };
 import molecularElectronicBandsBank from '../../../data/material-properties/molecular-electronic-bands.json' with { type: 'json' };
+import {
+  CONDUCTOR_OPTICAL_CONSTANTS_BANK,
+  conductorOpticalConstantsRecord
+} from './conductorOpticalConstants.js';
 import { DEFAULT_MATERIAL_PROPERTY_BANK } from './defaultMaterialPropertyBank.js';
+import { referenceConductorColorSrgb } from './opticalClosure.js';
 import {
   PROPERTY_DERIVATION_STATUS,
   propertyProvenanceEntry
 } from './propertyProvenance.js';
+
+// Cache fingerprints must include the bank payload, not only the anchoring
+// function source.  Export the immutable input object so browser closure
+// caches are invalidated when a measured molecular spectrum changes.
+export const MOLECULAR_ELECTRONIC_BANDS_BANK = molecularElectronicBandsBank;
 
 const REFERENCE_ANCHOR_SOURCE = 'crc-standard-reference-data';
 
@@ -85,11 +95,22 @@ function anchorGasElectronicBand(properties, materialKey) {
     'gasElectronicBandFwhmEv',
     'gasElectronicOscillatorStrength'
   ];
+  const absorptionCrossSection = record.absorptionCrossSection
+    ? {
+        ...record.absorptionCrossSection,
+        wavelengthNm: [...(record.absorptionCrossSection.wavelengthNm || [])],
+        crossSectionM2: [...(record.absorptionCrossSection.crossSectionM2 || [])]
+      }
+    : null;
+  if (absorptionCrossSection) anchoredPaths.push('gasElectronicAbsorptionCrossSection');
   const anchored = {
     ...properties,
     gasElectronicExcitationEv: record.bandCenterEv,
     gasElectronicBandFwhmEv: record.bandFwhmEv ?? null,
     gasElectronicOscillatorStrength: record.oscillatorStrength ?? null,
+    ...(absorptionCrossSection
+      ? { gasElectronicAbsorptionCrossSection: absorptionCrossSection }
+      : {}),
     referenceBankAnchoring: {
       schema: 'peercompute.ulg.material-reference-bank-anchoring.v0',
       bank: properties.referenceBankAnchoring?.bank ?? 'molecular-electronic-bands',
@@ -108,13 +129,91 @@ function anchorGasElectronicBand(properties, materialKey) {
           paths: anchoredPaths,
           status: PROPERTY_DERIVATION_STATUS.REFERENCE_FALLBACK,
           source: 'material-property-reference-bank',
-          method: 'gas-phase electronic band centre/FWHM/oscillator strength anchored to spectroscopic absorption maxima; derived ΔSCF value retained as derivationResiduals',
-          inputs: [record.formula]
+          method: absorptionCrossSection
+            ? 'gas-phase band centre plus measured wavelength-resolved absorption cross section; derived ΔSCF/Gaussian values retained as fallbacks and derivationResiduals'
+            : 'gas-phase electronic band centre/FWHM/oscillator strength anchored to spectroscopic absorption maxima; derived ΔSCF value retained as derivationResiduals',
+          inputs: absorptionCrossSection
+            ? [record.formula, absorptionCrossSection.doi]
+            : [record.formula]
         })
       ],
       notes: [
         ...(properties.propertyProvenance?.notes || []),
         `Gas electronic band anchored to spectroscopic reference (${record.formula}); derivation residuals recorded.`
+      ]
+    }
+  };
+  return { properties: anchored, anchored: true, residuals, anchoredPaths };
+}
+
+function anchorConductorOpticalConstants(properties, materialKey) {
+  const record = conductorOpticalConstantsRecord(materialKey);
+  const referenceColor = record ? referenceConductorColorSrgb(record.symbol) : null;
+  if (!record || !referenceColor) {
+    return { properties, anchored: false, residuals: null, anchoredPaths: [] };
+  }
+  const energies = CONDUCTOR_OPTICAL_CONSTANTS_BANK.photonEnergyEv || [];
+  const marker = {
+    schema: CONDUCTOR_OPTICAL_CONSTANTS_BANK.schema,
+    bankVersion: CONDUCTOR_OPTICAL_CONSTANTS_BANK.bankVersion,
+    symbol: record.symbol,
+    source: CONDUCTOR_OPTICAL_CONSTANTS_BANK.source,
+    doi: CONDUCTOR_OPTICAL_CONSTANTS_BANK.doi,
+    referencePhase: CONDUCTOR_OPTICAL_CONSTANTS_BANK.referenceState?.phase ?? 'solid',
+    energyRangeEv: energies.length > 0 ? [energies[0], energies.at(-1)] : null,
+    applicationPolicy: 'measured-solid-spectrum-with-labelled-nearest-condensed-phase-extrapolation'
+  };
+  const anchoredColor = [referenceColor.r, referenceColor.g, referenceColor.b];
+  const residuals = {
+    conductorOpticalConstants: {
+      derivedIntrinsicColorSrgb: properties?.intrinsicColorSrgb ?? null,
+      referenceComplexIndexColorSrgb: anchoredColor,
+      recordSymbol: record.symbol,
+      bankVersion: CONDUCTOR_OPTICAL_CONSTANTS_BANK.bankVersion
+    }
+  };
+  const anchoredPaths = ['conductorOpticalConstants', 'intrinsicColorSrgb'];
+  const referenceDataset = {
+    bank: 'conductor-optical-constants',
+    schema: CONDUCTOR_OPTICAL_CONSTANTS_BANK.schema,
+    bankVersion: CONDUCTOR_OPTICAL_CONSTANTS_BANK.bankVersion,
+    symbol: record.symbol,
+    source: CONDUCTOR_OPTICAL_CONSTANTS_BANK.source,
+    doi: CONDUCTOR_OPTICAL_CONSTANTS_BANK.doi
+  };
+  const anchored = {
+    ...properties,
+    conductorOpticalConstants: marker,
+    intrinsicColorSrgb: anchoredColor,
+    referenceBankAnchoring: {
+      schema: 'peercompute.ulg.material-reference-bank-anchoring.v0',
+      bank: properties.referenceBankAnchoring?.bank ?? 'conductor-optical-constants',
+      recordSchema: properties.referenceBankAnchoring?.recordSchema ?? CONDUCTOR_OPTICAL_CONSTANTS_BANK.schema,
+      source: properties.referenceBankAnchoring?.source ?? CONDUCTOR_OPTICAL_CONSTANTS_BANK.source,
+      referenceDatasets: [
+        ...(properties.referenceBankAnchoring?.referenceDatasets || []),
+        referenceDataset
+      ],
+      derivationResiduals: {
+        ...(properties.referenceBankAnchoring?.derivationResiduals || {}),
+        ...residuals
+      }
+    },
+    propertyProvenance: {
+      ...(properties.propertyProvenance || {}),
+      entries: [
+        ...(properties.propertyProvenance?.entries || []),
+        propertyProvenanceEntry({
+          paths: anchoredPaths,
+          status: PROPERTY_DERIVATION_STATUS.REFERENCE_FALLBACK,
+          source: 'material-property-reference-bank',
+          method: 'measured complex refractive index n,k anchors conductor optics; lower-level Drude-Lorentz color retained as derivationResiduals',
+          inputs: [record.symbol, CONDUCTOR_OPTICAL_CONSTANTS_BANK.bankVersion, CONDUCTOR_OPTICAL_CONSTANTS_BANK.doi]
+        })
+      ],
+      notes: [
+        ...(properties.propertyProvenance?.notes || []),
+        `Conductor optical constants anchored to ${CONDUCTOR_OPTICAL_CONSTANTS_BANK.doi} (${record.symbol}); derived color retained as a residual.`
       ]
     }
   };
@@ -130,13 +229,16 @@ function anchorGasElectronicBand(properties, materialKey) {
 export function anchorDerivedMaterialProperties(properties, materialKey) {
   const phaseAnchoring = anchorDerivedPhaseBoundaries(properties, materialKey);
   const bandAnchoring = anchorGasElectronicBand(phaseAnchoring.properties, materialKey);
-  if (!bandAnchoring.anchored) return phaseAnchoring;
-  if (!phaseAnchoring.anchored) return bandAnchoring;
+  const opticalAnchoring = anchorConductorOpticalConstants(bandAnchoring.properties, materialKey);
+  const applied = [phaseAnchoring, bandAnchoring, opticalAnchoring].filter((result) => result.anchored);
+  if (applied.length === 0) {
+    return { properties, anchored: false, residuals: null, anchoredPaths: [] };
+  }
   return {
-    properties: bandAnchoring.properties,
+    properties: opticalAnchoring.properties,
     anchored: true,
-    residuals: { ...(phaseAnchoring.residuals || {}), ...(bandAnchoring.residuals || {}) },
-    anchoredPaths: [...phaseAnchoring.anchoredPaths, ...bandAnchoring.anchoredPaths]
+    residuals: Object.assign({}, ...applied.map((result) => result.residuals || {})),
+    anchoredPaths: applied.flatMap((result) => result.anchoredPaths || [])
   };
 }
 

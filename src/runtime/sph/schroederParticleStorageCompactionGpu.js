@@ -1,7 +1,8 @@
 import {
   SCHROEDER_PARTICLE_STORAGE_COMPACTION_SUMMARY_ROW_LAYOUT,
   ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_EXECUTION_SCHEMA,
-  ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_SCHEMA
+  ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { schroederParticleStorageCompactionWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
@@ -11,6 +12,7 @@ import {
 } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
@@ -77,6 +79,12 @@ export function createSchroederParticleStorageCompactionPlan({
     stateByteLength: Math.max(16, capacity * stateVec4s * 16),
     thermoByteLength: Math.max(16, capacity * thermoVec4s * 16),
     mechanicsByteLength: Math.max(16, capacity * mechanicsVec4s * 16),
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityStrideBytes: SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    identityByteLength: Math.max(
+      Uint32Array.BYTES_PER_ELEMENT,
+      capacity * SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
+    ),
     summaryRowLayout: [...SCHROEDER_PARTICLE_STORAGE_COMPACTION_SUMMARY_ROW_LAYOUT],
     summaryStrideFloats: SCHROEDER_PARTICLE_STORAGE_COMPACTION_SUMMARY_FLOATS,
     summaryByteLength: SCHROEDER_PARTICLE_STORAGE_COMPACTION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
@@ -133,6 +141,7 @@ export async function runSchroederParticleStorageCompactionWebGpu({
   stateBuffer = particleStorageMaterialization?.particleStateBuffer ?? null,
   thermoBuffer = particleStorageMaterialization?.particleThermoBuffer ?? null,
   mechanicsBuffer = particleStorageMaterialization?.particleMechanicsBuffer ?? null,
+  identityBuffer = particleStorageMaterialization?.particleIdentityBuffer ?? null,
   scanSlotCount = particleStorageMaterialization?.outputParticleCapacity ?? 0,
   sourceParticleCount = particleStorageMaterialization?.sourceParticleCount ?? 0,
   outputParticleCapacity = particleStorageMaterialization?.outputParticleCapacity ?? scanSlotCount,
@@ -144,6 +153,12 @@ export async function runSchroederParticleStorageCompactionWebGpu({
   }
   if (!stateBuffer || !thermoBuffer || !mechanicsBuffer) {
     throw new TypeError('Schroeder particle-storage compaction requires retained state, thermo, and mechanics buffers');
+  }
+  const identityRequired = particleStorageMaterialization?.identityRequired === true;
+  if (identityRequired && !identityBuffer) {
+    throw new TypeError(
+      'Schroeder particle-storage compaction requires retained identity for arbitrary render domains'
+    );
   }
   const plan = createSchroederParticleStorageCompactionPlan({
     scanSlotCount,
@@ -171,6 +186,24 @@ export async function runSchroederParticleStorageCompactionWebGpu({
     size: plan.mechanicsByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
+  const fallbackIdentityBuffer = identityBuffer
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-particle-storage-compaction-identity-legacy-in',
+      size: plan.identityByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    });
+  if (fallbackIdentityBuffer) {
+    device.queue.writeBuffer(fallbackIdentityBuffer, 0, new Uint32Array(
+      plan.outputParticleCapacity * SPH_GPU_PARTICLE_IDENTITY_UINTS
+    ));
+  }
+  const inputIdentityBuffer = identityBuffer || fallbackIdentityBuffer;
+  const outIdentityBuffer = device.createBuffer({
+    label: 'ulg-schroeder-particle-storage-compaction-identity-out',
+    size: plan.identityByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
   const summaryBuffer = device.createBuffer({
     label: 'ulg-schroeder-particle-storage-compaction-summary-out',
     size: plan.summaryByteLength,
@@ -190,7 +223,7 @@ export async function runSchroederParticleStorageCompactionWebGpu({
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederParticleStorageCompactionParamsArray(plan));
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-particle-storage-compaction.v0',
+      cacheKey: 'ulg-schroeder-particle-storage-compaction.v1',
       label: 'ulg-schroeder-particle-storage-compaction',
       code: schroederParticleStorageCompactionWgsl,
       entryPoint: 'main',
@@ -202,7 +235,9 @@ export async function runSchroederParticleStorageCompactionWebGpu({
         computeBufferBinding(4, 'storage'),
         computeBufferBinding(5, 'storage'),
         computeBufferBinding(6, 'storage'),
-        computeBufferBinding(7, 'uniform')
+        computeBufferBinding(7, 'uniform'),
+        computeBufferBinding(8, 'read-only-storage'),
+        computeBufferBinding(9, 'storage')
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -215,7 +250,9 @@ export async function runSchroederParticleStorageCompactionWebGpu({
         { binding: 4, resource: { buffer: outThermoBuffer } },
         { binding: 5, resource: { buffer: outMechanicsBuffer } },
         { binding: 6, resource: { buffer: summaryBuffer } },
-        { binding: 7, resource: { buffer: paramsBuffer } }
+        { binding: 7, resource: { buffer: paramsBuffer } },
+        { binding: 8, resource: { buffer: inputIdentityBuffer } },
+        { binding: 9, resource: { buffer: outIdentityBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -258,11 +295,21 @@ export async function runSchroederParticleStorageCompactionWebGpu({
       stateBufferByteLength: plan.stateByteLength,
       thermoBufferByteLength: plan.thermoByteLength,
       mechanicsBufferByteLength: plan.mechanicsByteLength,
+      identityBufferByteLength: plan.identityByteLength,
+      identityStrideBytes: plan.identityStrideBytes,
+      identitySchema: plan.identitySchema,
+      identityRequired,
+      identityRevision: `${particleStorageMaterialization?.identityRevision
+        || 'particle-identity'}:compacted`,
+      identitySource: identityBuffer ? 'retained-particle-identity-buffer' : 'legacy-zero-identity-fallback',
+      renderDomainKeys: { ...(particleStorageMaterialization?.renderDomainKeys || {}) },
       targetStateFamilies: particleStorageMaterialization?.targetStateFamilies
         ? [...particleStorageMaterialization.targetStateFamilies]
         : undefined,
       particleStorageMaterializationAdmissionApproved:
         particleStorageMaterialization?.particleStorageMaterializationAdmissionApproved === true,
+      particleIdentityMutationApproved:
+        particleStorageMaterialization?.particleIdentityMutationApproved === true,
       particleStorageMaterializationAdmissionSourceHotBufferKey:
         particleStorageMaterialization?.particleStorageMaterializationAdmissionSourceHotBufferKey ?? null,
       materializationBuffer: particleStorageMaterialization?.materializationBuffer ?? null,
@@ -277,10 +324,12 @@ export async function runSchroederParticleStorageCompactionWebGpu({
       result.particleStateBuffer = outStateBuffer;
       result.particleThermoBuffer = outThermoBuffer;
       result.particleMechanicsBuffer = outMechanicsBuffer;
+      result.particleIdentityBuffer = outIdentityBuffer;
       result.destroyParticleBuffers = () => {
         outStateBuffer.destroy?.();
         outThermoBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
+        outIdentityBuffer.destroy?.();
       };
       returnedRetainedBuffers = true;
     }
@@ -291,7 +340,9 @@ export async function runSchroederParticleStorageCompactionWebGpu({
         outStateBuffer.destroy?.();
         outThermoBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
+        outIdentityBuffer.destroy?.();
       }
+      fallbackIdentityBuffer?.destroy?.();
       summaryBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer.destroy?.();

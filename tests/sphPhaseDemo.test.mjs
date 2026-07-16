@@ -11,6 +11,7 @@ import {
   gasPressureInterfaceCouplingSummary,
   gasPressureSummary,
   gasPressureSummaryFromResidentReaction,
+  gasPressureSummaryFromResidentThermalPhase,
   particleRenderDescriptors,
   particleThermalState,
   phaseMassSummary,
@@ -1221,6 +1222,69 @@ test('resident reaction gas pressure prefers merged resident product-mass gas le
   );
 });
 
+test('fresh resident gas ledger outranks a prior pressure-interface spatial generation', () => {
+  const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
+  const baseline = gasPressureSummary(demo);
+  const priorSpatialLedger = {
+    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+    status: 'spatial-gas-species-ledger-ready',
+    source: 'prior-generation',
+    cells: [{
+      gridIndex: [0, 0, 0],
+      centerM: [0.5, 0.5, 0.5],
+      volumeM3: 1,
+      species: [{ material: 'h2', massKg: 0.002016, moles: 1, temperatureK: 300 }]
+    }]
+  };
+  const pressure = gasPressureSummaryFromResidentReaction({
+    baselineSummary: baseline,
+    reactionSummary: {
+      status: 'reaction-compact-summary-ready',
+      compactLedgerAvailable: true,
+      strictReactionGate: {
+        schema: 'peercompute.ulg.sph-reaction-strict-gate.v0',
+        status: 'strict-reaction-gate-pass',
+        strictForceCouplingAllowed: true,
+        blockers: [],
+        provisionalEnergetics: []
+      }
+    },
+    residentProductMass: {
+      status: 'resident-product-mass-merged-gpu-resident',
+      productEventGenerationCount: 2,
+      gasSpeciesLedger: {
+        schema: 'peercompute.ulg.sph-gpu-reaction-gas-species-summary.v0',
+        status: 'gas-species-resident-ledger-ready',
+        bySpecies: {
+          h2: {
+            material: 'h2',
+            massKg: 0.006048,
+            moles: 3,
+            visibleMassKg: 0,
+            unplacedMassKg: 0.006048
+          }
+        }
+      }
+    },
+    pressureInterfaceState: {
+      schema: 'peercompute.ulg.sph-resident-pressure-interface-state.v0',
+      status: 'resident-pressure-interface-force-rows-ready',
+      spatialGasLedgerProducerStageRequest: {
+        spatialGasLedgerProducerStageResultReady: true,
+        spatialGasSpeciesLedger: priorSpatialLedger
+      }
+    },
+    materialProperties: demo.materialProperties,
+    fallbackTemperatureK: 300
+  });
+
+  assert.equal(pressure.source, 'gpu-resident-product-mass-gas-species-ledger');
+  assert.equal(pressure.bySpecies.h2.moles, 3);
+  assert.notEqual(pressure.spatialGasSpeciesLedger, priorSpatialLedger);
+  assert.equal(pressure.strictReactionGateRequired, true);
+  assert.equal(pressure.pressureFeedback.strictReactionGateStatus, 'strict-reaction-gate-pass');
+});
+
 test('resident product-mass gas ledger carries positioned product events into spatial gas pressure', () => {
   const gasR = 8.314462618;
   const supportVolumeM3 = 4;
@@ -1446,7 +1510,11 @@ test('gas pressure feedback consumes spatial gas-cell EOS gradients without aggr
       }
     ]
   };
-  const feedback = gasPressureFeedbackSummary({ pressureSummary, materialInterfaceField });
+  const feedback = gasPressureFeedbackSummary({
+    pressureSummary,
+    materialInterfaceField,
+    externalPressurePa: 0
+  });
   const solver = gasPressureInterfaceForceSolver({
     pressureFeedback: feedback,
     materialInterfaceField,
@@ -1797,7 +1865,8 @@ test('sealed gas pressure feedback derives per-wall gauge loads from box dimensi
   assert.equal(boosted.pressureFeedback.pressureFieldMode, 'uniform-single-cell-sealed-gas');
   assert.equal(boosted.pressureFeedback.localPressureGradientReady, false);
   assert.ok(boosted.pressureFeedback.forceCouplingPrerequisites.includes('material-surface-normals-and-areas'));
-  assert.equal(boosted.pressureFeedback.forceCouplingStatus, 'blocked-material-surface-normals-not-resolved');
+  assert.equal(boosted.pressureFeedback.strictReactionGateRequired, true);
+  assert.equal(boosted.pressureFeedback.forceCouplingStatus, 'blocked-strict-reaction-gate');
   assert.equal(boosted.pressureFeedback.forceCouplingValidation, false);
 
   const blocked = gasPressureSummaryFromResidentReaction({
@@ -1938,7 +2007,11 @@ test('gas pressure interface force preview computes tractions without applying t
       }
     ]
   };
-  const pressureFeedback = gasPressureFeedbackSummary({ pressureSummary, materialInterfaceField });
+  const pressureFeedback = gasPressureFeedbackSummary({
+    pressureSummary,
+    materialInterfaceField,
+    externalPressurePa: 0
+  });
   const preview = gasPressureInterfaceForcePreview({
     pressureFeedback,
     materialInterfaceField,
@@ -1996,6 +2069,28 @@ test('gas pressure interface force preview computes tractions without applying t
   assert.equal(solver.conservationStatus, 'pairwise-equal-opposite-force-conservative');
   assert.equal(solver.forceApplicationTarget, 'pending-mls-mpm-grid-force-consumer');
   assert.equal(solver.forceCouplingValidation, false);
+
+  const atmosphericFeedback = gasPressureFeedbackSummary({
+    pressureSummary: {
+      ...pressureSummary,
+      totalPressurePa: 102000
+    },
+    materialInterfaceField,
+    externalPressurePa: 101325
+  });
+  const atmosphericSolver = gasPressureInterfaceForceSolver({
+    pressureFeedback: atmosphericFeedback,
+    materialInterfaceField,
+    pressureInterfaceCoupling: atmosphericFeedback.pressureInterfaceCoupling
+  });
+  assert.equal(atmosphericSolver.gasInterfacePressurePa, 102000);
+  assert.equal(atmosphericSolver.gasInterfacePressureReferencePa, 101325);
+  assert.equal(atmosphericSolver.gasInterfaceGaugePressurePa, 675);
+  assert.equal(atmosphericSolver.forceRows[0].absoluteGasPressurePa, 102000);
+  assert.equal(atmosphericSolver.forceRows[0].gasGaugePressurePa, 675);
+  assert.equal(atmosphericSolver.forceRows[0].pressurePa, 675);
+  assert.deepEqual(atmosphericSolver.forceRows[0].materialForceN, [-675, 0, 0]);
+  assert.equal(atmosphericSolver.totalAbsMaterialForceN, 1350);
 
   const blocked = gasPressureInterfaceForcePreview({
     pressureFeedback,
@@ -2084,7 +2179,11 @@ test('gas pressure interface solver adds bounded algorithm contact pair response
       }
     ]
   };
-  const pressureFeedback = gasPressureFeedbackSummary({ pressureSummary, materialInterfaceField });
+  const pressureFeedback = gasPressureFeedbackSummary({
+    pressureSummary,
+    materialInterfaceField,
+    externalPressurePa: 0
+  });
   const solver = gasPressureInterfaceForceSolver({
     pressureFeedback,
     materialInterfaceField,
@@ -2182,7 +2281,11 @@ test('gas pressure interface solver samples local gas-cell pressure gradients', 
       }
     ]
   };
-  const pressureFeedback = gasPressureFeedbackSummary({ pressureSummary, materialInterfaceField });
+  const pressureFeedback = gasPressureFeedbackSummary({
+    pressureSummary,
+    materialInterfaceField,
+    externalPressurePa: 0
+  });
   const solver = gasPressureInterfaceForceSolver({
     pressureFeedback,
     materialInterfaceField,
@@ -2273,6 +2376,30 @@ test('water vapor optical state derives condensation microphysics from gas press
   assert.equal(dry.microphysicsStatus, 'subsaturated-pure-vapor');
   assert.equal(dry.condensedMassFraction, 0);
   assert.equal(dry.scatteringCoefficientPerM, 0);
+});
+
+test('resident thermal H2O gas mass reconstructs a species-resolved pressure summary without particle readback', () => {
+  const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
+  const baseline = gasPressureSummary(demo);
+  const pressure = gasPressureSummaryFromResidentThermalPhase({
+    baselineSummary: baseline,
+    gasMassKg: 0.75,
+    material: 'h2o',
+    materialProperties: demo.materialProperties,
+    temperatureK: 390
+  });
+
+  assert.equal(pressure.status, 'gpu-resident-thermal-phase-pressure-summary');
+  assert.equal(pressure.source, 'gpu-resident-compact-thermal-phase-single-species');
+  assert.equal(pressure.fullParticleReadbackPerformed, false);
+  assert.equal(pressure.residentThermalGasMaterial, 'h2o');
+  assert.equal(pressure.residentThermalGasMassKg, 0.75);
+  assert.ok(pressure.bySpecies.h2o.moles > 0);
+  assert.ok(pressure.bySpecies.h2o.partialPressurePa > 0);
+  assert.ok(pressure.bySpecies.h2o.temperatureK >= 390);
+  assert.ok(pressure.bySpecies.air.partialPressurePa > 0);
+  assert.ok(pressure.gasVolumeM3 >= baseline.gasVolumeM3);
+  assert.equal(pressure.strictReactionGateRequired, false);
 });
 
 test('demo driver: preflight feasible, stepping stays bounded and finite', () => {

@@ -37,6 +37,13 @@ export function webGpuDeviceId(device) {
 
 export function tagWebGpuBufferDevice(buffer, device) {
   if (!isObject(buffer) || !isObject(device)) return buffer;
+  const existingDevice = BUFFER_DEVICE.get(buffer)
+    || buffer[DEVICE_TOKEN]
+    || buffer[DEVICE_TOKEN_KEY]
+    || null;
+  // Device ownership is provenance, not mutable metadata. Re-labeling an
+  // existing GPUBuffer would hide an illegal cross-device bind.
+  if (existingDevice && existingDevice !== device) return buffer;
   BUFFER_DEVICE.set(buffer, device);
   assignHidden(buffer, DEVICE_TOKEN, device);
   assignHidden(buffer, DEVICE_TOKEN_KEY, device);
@@ -47,6 +54,13 @@ export function tagWebGpuBufferDevice(buffer, device) {
 
 export function tagResidentProductMassDevice(handle, device) {
   if (!isObject(handle) || !isObject(device)) return handle;
+  const existingDevice = HANDLE_DEVICE.get(handle)
+    || handle[DEVICE_TOKEN]
+    || handle[DEVICE_TOKEN_KEY]
+    || handle.productEventDevice
+    || webGpuBufferDevice(handle.productEventBuffer)
+    || null;
+  if (existingDevice && existingDevice !== device) return handle;
   HANDLE_DEVICE.set(handle, device);
   assignHidden(handle, DEVICE_TOKEN, device);
   assignHidden(handle, DEVICE_TOKEN_KEY, device);
@@ -97,4 +111,22 @@ export function webGpuDeviceMismatchInfo({ buffer = null, residentProductMass = 
     sourceDeviceId: webGpuDeviceId(owner),
     consumerDeviceId: webGpuDeviceId(device)
   };
+}
+
+export function typedArrayContentFingerprint(value) {
+  if (!ArrayBuffer.isView(value)) return 'not-a-typed-array';
+  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  let hashA = 0x811c9dc5;
+  let hashB = 0x9e3779b9;
+  for (const byte of bytes) {
+    hashA = Math.imul(hashA ^ byte, 0x01000193) >>> 0;
+    hashB = Math.imul(hashB ^ (byte + 0x9d), 0x85ebca6b) >>> 0;
+  }
+  const fingerprint = [
+    value.constructor?.name || 'TypedArray',
+    value.byteLength,
+    hashA.toString(16).padStart(8, '0'),
+    hashB.toString(16).padStart(8, '0')
+  ].join(':');
+  return fingerprint;
 }

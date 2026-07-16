@@ -33,6 +33,7 @@ const HEADER = Object.freeze({
   dispatchY: 43,
   dispatchZ: 44,
   clearedWords: 45,
+  sourceAdapter: 46,
   physicalAddressUpperBoundWords: 47
 });
 
@@ -68,7 +69,11 @@ function decodeCase(result, name) {
       cellMembersOffset,
       cellMembersOffset + header[HEADER.sourceCount]
     ),
-    particleToCell: words.slice(reverseOffset, reverseOffset + header[HEADER.sourceCount])
+    particleToCell: words.slice(reverseOffset, reverseOffset + header[HEADER.sourceCount]),
+    queryEvidence: words.slice(
+      reverseOffset + header[HEADER.sourceCount],
+      reverseOffset + header[HEADER.sourceCount] + 4
+    )
   };
 }
 
@@ -79,6 +84,7 @@ function evaluateChecks(raw) {
   const nearIntegral = decodeCase(raw, 'nearIntegralIdentity');
   const atlasOverflow = decodeCase(raw, 'atlasOverflow');
   const capacity = decodeCase(raw, 'capacityOverflow');
+  const queryAuthenticated = decodeCase(raw, 'queryAuthenticated');
   const boundary4097 = decodeCase(raw, 'boundary4097');
   const boundary513 = decodeCase(raw, 'boundary513Reuse');
   const empty = decodeCase(raw, 'emptyReuse');
@@ -114,12 +120,13 @@ function evaluateChecks(raw) {
       && bounded.header[HEADER.cellCapacity] === 8],
     ['bounded-evidence-words', bounded.header[HEADER.logicalRequiredWords] === 101
       && bounded.header[HEADER.logicalAdmittedWords] === 101
-      && bounded.header[HEADER.directoryCapacityWords] === 113
+      && bounded.header[HEADER.directoryCapacityWords] === 117
       && bounded.header[HEADER.physicalAddressUpperBoundWords] === 113
       && bounded.header[HEADER.clearedWords] === 67],
     ['bounded-sort-mode', bounded.header[HEADER.exactKeyWordCount] === 5
       && bounded.header[HEADER.sortKeyWordCount] === 1
-      && bounded.header[HEADER.sortMode] === 1],
+      && bounded.header[HEADER.sortMode] === 1
+      && bounded.header[HEADER.sourceAdapter] === 1],
     ['bounded-completion', bounded.header[HEADER.completionOrdinal] === 21
       && bounded.header[HEADER.primitiveUniqueCount] === 6],
     ['bounded-dispatch', equalArray(bounded.dispatch, [1, 1, 1])],
@@ -129,7 +136,8 @@ function evaluateChecks(raw) {
     ['bounded-reverse-map', equalArray(bounded.particleToCell, expectedReverse)],
     ['exact-header-admitted', exact.header[HEADER.status] === 3],
     ['exact-sort-mode', exact.header[HEADER.sortKeyWordCount] === 5
-      && exact.header[HEADER.sortMode] === 2],
+      && exact.header[HEADER.sortMode] === 2
+      && exact.header[HEADER.sourceAdapter] === 1],
     ['exact-cell-keys-match-bounded', equalArray(exact.cellKeys, bounded.cellKeys)],
     ['exact-offsets-match-bounded', equalArray(exact.cellOffsets, bounded.cellOffsets)],
     ['exact-members-match-bounded', equalArray(exact.cellMembers, bounded.cellMembers)],
@@ -153,6 +161,12 @@ function evaluateChecks(raw) {
       && capacity.header[HEADER.cellCount] === 0
       && capacity.header[HEADER.logicalAdmittedWords] === 0
       && equalArray(capacity.dispatch, [0, 0, 0])],
+    ['query-profile-authenticated', queryAuthenticated.header[HEADER.status] === 3
+      && queryAuthenticated.header[HEADER.sourceAdapter] === 2
+      && queryAuthenticated.header[HEADER.cellCount] === 5
+      && queryAuthenticated.header[HEADER.logicalRequiredWords] === 99
+      && queryAuthenticated.header[HEADER.physicalAddressUpperBoundWords] === 117
+      && equalArray(queryAuthenticated.queryEvidence, [0, 0xffff_ffff, 0, 0x3f00_0000])],
     ['boundary-4097-multilevel-csr', boundary4097.header[HEADER.status] === 3
       && boundary4097.header[HEADER.sourceCount] === 4097
       && boundary4097.header[HEADER.cellCount] === 4097
@@ -195,6 +209,7 @@ function evaluateChecks(raw) {
       nearIntegral,
       atlasOverflow,
       capacity,
+      queryAuthenticated,
       boundary4097,
       boundary513,
       empty
@@ -297,7 +312,11 @@ async function main() {
       const levels = [0, 0, 0, -1, 0, 0, 0, 0];
       const spacings = [0.5, 0.5, 0.5, 0.25, 0.5, 0.5, 0.5, 0.5];
       const charts = [0, 0, 0, 0, 1, 0, 0, 0];
-      const activeRows = ({ invalidStatusIndex = null, nearIntegralIndex = null } = {}) => {
+      const activeRows = ({
+        invalidStatusIndex = null,
+        nearIntegralIndex = null,
+        forceChartId = null
+      } = {}) => {
         const rows = new Float32Array(8 * 16);
         for (let index = 0; index < 8; index += 1) {
           const offset = index * 16;
@@ -309,7 +328,7 @@ async function main() {
           rows[offset + 12] = positions[index][0];
           rows[offset + 13] = positions[index][1];
           rows[offset + 14] = positions[index][2];
-          rows[offset + 15] = charts[index];
+          rows[offset + 15] = forceChartId ?? charts[index];
         }
         return rows;
       };
@@ -331,10 +350,14 @@ async function main() {
         'spatial-probe-near-integral-source',
         activeRows({ nearIntegralIndex: 2 })
       );
+      const querySource = sourceBuffer(
+        'spatial-probe-query-authenticated-source',
+        activeRows({ forceChartId: 0 })
+      );
       const runtime = runtimeModule.createSchroederSpatialEpochGpu(runtimeDevice, {
         maxSourceCount: 8,
         cellCapacity: 8,
-        arenaCount: 5,
+        arenaCount: 6,
         label: 'native-spatial-probe'
       });
       const capacityRuntime = runtimeModule.createSchroederSpatialEpochGpu(runtimeDevice, {
@@ -435,6 +458,26 @@ async function main() {
         generationId: 14,
         buildOrdinal: 24
       });
+      encodeCase('queryAuthenticated', runtime, {
+        activeNodeBuffer: querySource,
+        sourceCount: 8,
+        sortMode: 'lexicographic-u32x5',
+        generationId: 17,
+        buildOrdinal: 27,
+        exactNearQueryProfile: {
+          schema: 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1',
+          status: 'schroeder-spatial-exact-near-query-profile-ready',
+          ready: true,
+          sourceCount: 8,
+          chartId: 0,
+          minLevel: -1,
+          maxLevel: 0,
+          levelCount: 2,
+          baseGridSpacingM: 0.5,
+          levelSpacingMode: 'base-grid-spacing-times-pow2-level',
+          positionAuthority: 'same-epoch-pre-integration-particle-state'
+        }
+      });
       encodeCase('capacityOverflow', capacityRuntime, {
         activeNodeBuffer: validSource,
         sourceCount: 8,
@@ -474,6 +517,7 @@ async function main() {
         entry.dispatchReadback.destroy();
       }
       for (const entry of executions) {
+        entry.runtime.markExecutionSubmitted(entry.execution);
         await entry.runtime.releaseExecutionAfter(entry.execution, submissionFence);
       }
 
@@ -567,6 +611,7 @@ async function main() {
         );
         counters.callerSubmitCount += 1;
         nativeDevice.queue.submit([boundaryEncoder.finish()]);
+        boundaryRuntime.markExecutionSubmitted(execution);
         const fence = nativeDevice.queue.onSubmittedWorkDone();
         await fence;
         await directoryReadback.mapAsync(GPUMapMode.READ);
@@ -607,6 +652,7 @@ async function main() {
       validSource.destroy();
       invalidSource.destroy();
       nearIntegralSource.destroy();
+      querySource.destroy();
 
       const compilationErrors = [];
       for (const { label, module } of shaderModules) {

@@ -10,7 +10,21 @@
     "exponentially sensitive to the centre. Strict mode can rerun the pure delta-SCF path."
   ],
   "records": [
-    { "formula": "F2", "bandCenterEv": 4.34, "bandFwhmEv": 1.6, "oscillatorStrength": 0.0025, "note": "1Pi_u <- X continuum, lambda_max ~285 nm; tail past 450 nm gives the pale yellow" },
+    {
+      "formula": "F2",
+      "bandCenterEv": 4.34,
+      "bandFwhmEv": 1.6,
+      "oscillatorStrength": 0.0025,
+      "absorptionCrossSection": {
+        "schema": "peercompute.ulg.molecular-gas-absorption-cross-section.v0",
+        "source": "R. K. Steunenberg and R. C. Vogel, The Absorption Spectrum of Fluorine, JACS 78, 901-902 (1956)",
+        "doi": "10.1021/ja01586a007",
+        "temperatureK": 298,
+        "wavelengthNm": [380, 390, 400, 410, 420, 430, 440, 450, 500],
+        "crossSectionM2": [2.4e-25, 1.6e-25, 1.1e-25, 8.0e-26, 5.4e-26, 3.8e-26, 2.7e-26, 2.3e-26, 0]
+      },
+      "note": "1Pi_u <- X continuum, lambda_max ~285 nm; measured visible-tail cross sections produce the pale-yellow gas response"
+    },
     { "formula": "Cl2", "bandCenterEv": 3.76, "bandFwhmEv": 1.4, "oscillatorStrength": 0.0025, "note": "1Pi_u <- X continuum, lambda_max ~330 nm; yellow-green" },
     { "formula": "Br2", "bandCenterEv": 2.99, "bandFwhmEv": 1.2, "oscillatorStrength": 0.003, "note": "lambda_max ~415 nm; red-brown vapour" },
     { "formula": "I2", "bandCenterEv": 2.36, "bandFwhmEv": 0.9, "oscillatorStrength": 0.005, "note": "B <- X, lambda_max ~525 nm; violet vapour" },

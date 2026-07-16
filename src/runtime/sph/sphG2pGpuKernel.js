@@ -1,5 +1,6 @@
 import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
@@ -15,6 +16,18 @@ import {
   mlsMpmParticleSeparationBinFillWgsl,
   mlsMpmParticleSeparationComputeWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
+import {
+  mlsMpmG2pReconstructCanonicalSpatialWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl,
+  mlsMpmParticleSeparationApplyCanonicalSpatialWgsl,
+  mlsMpmParticleSeparationApplyCanonicalSpatialUnobservedWgsl,
+  mlsMpmParticleSeparationBinFillCanonicalSpatialWgsl,
+  mlsMpmParticleSeparationBinFillCanonicalSpatialUnobservedWgsl,
+  mlsMpmParticleSeparationComputeCanonicalSpatialWgsl,
+  mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl,
+  SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_BYTES,
+  SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
+} from '../../../ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
@@ -24,6 +37,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { webGpuDeviceMismatchInfo } from './sphGpuDeviceIdentity.js';
 
 export {
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
@@ -69,8 +83,12 @@ export const MLS_MPM_G2P_MAX_VOLUME_RATIO_J = MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATI
 export const ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA =
   'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0';
 const G2P_PARAMS_BYTES = 80;
+const G2P_CANONICAL_PARAMS_BYTES = 144;
 const SEPARATION_PARAMS_BYTES = 48;
 const SEPARATION_BIN_MAX_CELLS = 262144;
+const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.v1';
+const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -490,7 +508,10 @@ function outputEnvelope({
   boxDimsM,
   internalPressureScale = 1,
   readbackMode = FULL_READBACK_MODE,
-  particleScaleStability = null
+  particleScaleStability = null,
+  schroederSpatialAuthority = null,
+  schroederLevelFilter = null,
+  separationCanonicalSpatialAuthorityGate = false
 }) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const particleScaleStabilitySummary = particleScaleStability || summarizeG2pParticleScaleStability({
@@ -531,6 +552,18 @@ function outputEnvelope({
     particleScalePolicyAppliedInG2p: particleScaleStabilitySummary.policyAppliedInG2p === true,
     particleScaleMaxVolumeRatioJAllowed: particleScaleStabilitySummary.maxVolumeRatioJAllowed,
     particleScaleMaxRadiusGrowthRatioAllowed: particleScaleStabilitySummary.maxRadiusGrowthRatioAllowed,
+    schroederSpatialAuthority: schroederSpatialAuthority
+      ? { ...schroederSpatialAuthority }
+      : null,
+    schroederSpatialAuthorityEnabled: schroederSpatialAuthority?.enabled === true,
+    schroederSpatialAuthorityStatus: schroederSpatialAuthority?.status ?? null,
+    schroederLevelFilter: schroederLevelFilter ? { ...schroederLevelFilter } : null,
+    schroederAuthorityBindingMode:
+      schroederLevelFilter?.authorityBindingMode ?? 'precanonical-unfiltered',
+    oldLevelAssignmentLookupRemoved:
+      schroederLevelFilter?.oldLevelAssignmentLookupRemoved === true,
+    separationCanonicalSpatialAuthorityGate:
+      separationCanonicalSpatialAuthorityGate === true,
     p2gProjectionValidation: false,
     stressProjectionValidation: false,
     gridUpdateValidation: false,
@@ -750,6 +783,128 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
+function createSchroederSpatialAuthorityBinding({
+  device,
+  schroederSpatialEpochGeneration = null,
+  canonicalSpatialRequired = false
+} = {}) {
+  const execution = schroederSpatialEpochGeneration?.execution || null;
+  const directoryBuffer = execution?.directoryBuffer || null;
+  const evidenceBuffer = execution?.evidenceBuffer || null;
+  const directoryDeviceMismatch = directoryBuffer
+    ? webGpuDeviceMismatchInfo({ buffer: directoryBuffer, device })
+    : { mismatch: false, sourceDeviceId: null, consumerDeviceId: null };
+  const evidenceDeviceMismatch = evidenceBuffer
+    ? webGpuDeviceMismatchInfo({ buffer: evidenceBuffer, device })
+    : { mismatch: false, sourceDeviceId: null, consumerDeviceId: null };
+  const deviceMismatch = directoryDeviceMismatch.mismatch
+    ? directoryDeviceMismatch
+    : evidenceDeviceMismatch;
+  const evidenceBufferTooSmall = Number.isFinite(Number(evidenceBuffer?.size))
+    && Number(evidenceBuffer.size) < SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES;
+  const schemaRejected = schroederSpatialEpochGeneration != null && (
+    schroederSpatialEpochGeneration?.schema !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
+    || execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+  );
+  const overlayRejected =
+    schroederSpatialEpochGeneration?.source?.phaseVolumeAssignmentOverlayEnabled === true;
+  const released = execution?.released === true;
+  const queryProfileRejected = schroederSpatialEpochGeneration != null && (
+    execution?.sourceAdapterId !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+    || execution?.exactNearQueryProfile?.ready !== true
+    || execution?.queryGeometryEvidence !== execution?.exactNearQueryProfile
+  );
+  const canonicalIntent = canonicalSpatialRequired === true
+    || schroederSpatialEpochGeneration?.selected === true;
+  const enabled = schroederSpatialEpochGeneration?.selected === true
+    && schroederSpatialEpochGeneration?.ready === true
+    && execution?.submitPerformed === true
+    && Boolean(directoryBuffer)
+    && Boolean(evidenceBuffer)
+    && !deviceMismatch.mismatch
+    && !evidenceBufferTooSmall
+    && !schemaRejected
+    && !overlayRejected
+    && !queryProfileRejected
+    && !released;
+  if (!enabled) {
+    const status = deviceMismatch.mismatch
+      ? 'canonical-spatial-directory-rejected-device'
+      : (evidenceBufferTooSmall
+          ? 'canonical-spatial-directory-rejected-evidence-capacity'
+          : (overlayRejected
+              ? 'canonical-spatial-directory-rejected-overlay-authority'
+              : (schemaRejected
+                  ? 'canonical-spatial-directory-rejected-schema'
+                  : (queryProfileRejected
+                      ? 'canonical-spatial-directory-rejected-query-geometry'
+                      : (released
+                          ? 'canonical-spatial-directory-rejected-released-generation'
+                          : (canonicalIntent
+                              ? 'canonical-spatial-directory-requested-but-unavailable'
+                              : 'canonical-spatial-directory-not-provided'))))));
+    if (canonicalIntent) {
+      const error = new Error(
+        `Canonical MLS-MPM G2P spatial authority rejected before submission: ${status}`
+      );
+      error.code = 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED';
+      error.status = status;
+      throw error;
+    }
+    return {
+      enabled: false,
+      required: canonicalSpatialRequired === true,
+      status,
+      directoryBuffer: null,
+      evidenceBuffer: null,
+      retainedDirectoryBuffer: false,
+      oldLevelAssignmentLookupRemoved: false,
+      authorityBindingMode: 'precanonical-level-assignment'
+    };
+  }
+  return {
+    enabled: true,
+    required: canonicalSpatialRequired === true,
+    status: 'canonical-spatial-directory-bound-for-g2p-level-admission',
+    directoryBuffer,
+    evidenceBuffer,
+    retainedDirectoryBuffer: true,
+    oldLevelAssignmentLookupRemoved: true,
+    authorityBindingMode: 'canonical-spatial-epoch',
+    generationId: execution.generationId,
+    storageGeneration: execution.storageGeneration,
+    positionEpoch: execution.positionEpoch,
+    topologyEpoch: execution.topologyEpoch,
+    deviceOrdinal: execution.deviceOrdinal,
+    laneOrdinal: execution.laneOrdinal,
+    leaseToken: execution.leaseToken,
+    sourceFamilyId: execution.sourceFamilyId,
+    physicsTick: execution.physicsTick,
+    physicsSubstep: execution.physicsSubstep,
+    chartEpoch: execution.chartEpoch,
+    levelEpoch: execution.levelEpoch,
+    supportEpoch: execution.supportEpoch,
+    directoryBufferByteLength: execution.layout?.byteLength
+      ?? directoryBuffer.size
+      ?? 0,
+    evidenceBufferByteLength: execution.evidenceBufferByteLength
+      ?? evidenceBuffer.size
+      ?? SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES,
+    sourceDeviceId: deviceMismatch.sourceDeviceId,
+    consumerDeviceId: deviceMismatch.consumerDeviceId
+  };
+}
+
+function schroederSpatialAuthorityMetadata(binding = null) {
+  if (!binding) return null;
+  const {
+    directoryBuffer: _directoryBuffer,
+    evidenceBuffer: _evidenceBuffer,
+    ...metadata
+  } = binding;
+  return metadata;
+}
+
 function createParamsArray({
   particleCount,
   gridUpdate,
@@ -783,6 +938,72 @@ function createParamsArray({
   view.setFloat32(64, Math.max(finiteNumber(liquidWallDampingDistanceM, 0), 0), true);
   view.setUint32(68, SCHROEDER_LEVEL_ASSIGNMENT_FLOATS, true);
   view.setUint32(72, schroederLevelFilterEnabled ? 1 : 0, true);
+  return buffer;
+}
+
+function createCanonicalParamsArray({
+  schroederSpatialDirectory,
+  spatialEvidenceEnabled = false,
+  ...baseParams
+}) {
+  const buffer = new ArrayBuffer(G2P_CANONICAL_PARAMS_BYTES);
+  new Uint8Array(buffer).set(new Uint8Array(createParamsArray(baseParams)));
+  const view = new DataView(buffer);
+  view.setUint32(76, 1, true);
+  view.setUint32(80, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.storageGeneration,
+    0
+  ))), true);
+  view.setUint32(84, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.positionEpoch,
+    0
+  ))), true);
+  view.setUint32(88, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.topologyEpoch,
+    0
+  ))), true);
+  view.setUint32(92, schroederSpatialDirectory?.required === true ? 1 : 0, true);
+  view.setUint32(96, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.generationId,
+    0
+  ))), true);
+  view.setUint32(100, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.deviceOrdinal,
+    0
+  ))), true);
+  view.setUint32(104, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.laneOrdinal,
+    0
+  ))), true);
+  view.setUint32(108, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.leaseToken,
+    0
+  ))), true);
+  view.setUint32(112, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.sourceFamilyId,
+    0
+  ))), true);
+  view.setUint32(116, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.physicsTick,
+    0
+  ))), true);
+  view.setUint32(120, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.physicsSubstep,
+    0
+  ))), true);
+  view.setUint32(124, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.chartEpoch,
+    0
+  ))), true);
+  view.setUint32(128, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.levelEpoch,
+    0
+  ))), true);
+  view.setUint32(132, Math.max(0, Math.round(finiteNumber(
+    schroederSpatialDirectory?.supportEpoch,
+    0
+  ))), true);
+  view.setUint32(136, spatialEvidenceEnabled === true ? 1 : 0, true);
   return buffer;
 }
 
@@ -841,6 +1062,8 @@ function separationBinPlan({ boxDimsM, maxPairRestDistanceM, minCellSizeM = 0 })
 export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   stateBuffer,
   mechanicsBuffer,
+  authorityRestoreStateBuffer = null,
+  authorityRestoreMechanicsBuffer = null,
   particleCount,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
@@ -848,6 +1071,8 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   maxPairRestDistanceM = 0,
   minCellSizeM = 0,
   gridSpacingM = 0,
+  spatialAuthorityEvidenceBuffer = null,
+  spatialAuthorityEvidenceObserved = false,
   scratch = null
 } = {}) {
   const alpha = Math.max(finiteNumber(relaxation, 0), 0);
@@ -856,9 +1081,34 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     return { enabled: false, transientBuffers: scratch?.transientBuffers || [], scratch };
   }
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
+  const canonicalSpatialAuthority = Boolean(spatialAuthorityEvidenceBuffer);
+  const canonicalSpatialAuthorityObserved = canonicalSpatialAuthority
+    && spatialAuthorityEvidenceObserved === true;
   const binPlan = separationBinPlan({ boxDimsM: dims, maxPairRestDistanceM, minCellSizeM });
   if (!binPlan) {
     return { enabled: false, transientBuffers: scratch?.transientBuffers || [], scratch };
+  }
+  if (
+    canonicalSpatialAuthority
+    && (!authorityRestoreStateBuffer || !authorityRestoreMechanicsBuffer)
+  ) {
+    throw new TypeError(
+      'Canonical particle separation requires immutable state and mechanics restore buffers'
+    );
+  }
+  if (
+    canonicalSpatialAuthority
+    && (
+      authorityRestoreStateBuffer === stateBuffer
+      || authorityRestoreStateBuffer === mechanicsBuffer
+      || authorityRestoreMechanicsBuffer === stateBuffer
+      || authorityRestoreMechanicsBuffer === mechanicsBuffer
+      || authorityRestoreStateBuffer === authorityRestoreMechanicsBuffer
+    )
+  ) {
+    throw new TypeError(
+      'Canonical particle separation restore buffers must be distinct immutable inputs'
+    );
   }
   let activeScratch = scratch;
   if (!activeScratch
@@ -919,40 +1169,73 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     };
   }
   const binFillPipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-bin-fill.v3',
+    cacheKey: canonicalSpatialAuthority
+      ? `ulg-mls-mpm-particle-separation-bin-fill.v5.canonical-spatial.${canonicalSpatialAuthorityObserved
+          ? 'observed'
+          : 'unobserved'}`
+      : 'ulg-mls-mpm-particle-separation-bin-fill.v4.precanonical',
     label: 'ulg-mls-mpm-particle-separation-bin-fill',
-    code: mlsMpmParticleSeparationBinFillWgsl,
+    code: canonicalSpatialAuthority
+      ? (canonicalSpatialAuthorityObserved
+          ? mlsMpmParticleSeparationBinFillCanonicalSpatialWgsl
+          : mlsMpmParticleSeparationBinFillCanonicalSpatialUnobservedWgsl)
+      : mlsMpmParticleSeparationBinFillWgsl,
     entryPoint: 'main',
     bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(0, canonicalSpatialAuthority ? 'storage' : 'read-only-storage'),
+      computeBufferBinding(1, canonicalSpatialAuthority ? 'storage' : 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      ...(canonicalSpatialAuthority
+        ? [
+            computeBufferBinding(4, 'read-only-storage'),
+            computeBufferBinding(5, 'read-only-storage'),
+            computeBufferBinding(6, 'read-only-storage')
+          ]
+        : [])
     ]
   });
   const computePipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-compute.v4',
+    cacheKey: canonicalSpatialAuthority
+      ? `ulg-mls-mpm-particle-separation-compute.v6.canonical-spatial.${canonicalSpatialAuthorityObserved
+          ? 'observed'
+          : 'unobserved'}`
+      : 'ulg-mls-mpm-particle-separation-compute.v5.precanonical',
     label: 'ulg-mls-mpm-particle-separation-compute',
-    code: mlsMpmParticleSeparationComputeWgsl,
+    code: canonicalSpatialAuthority
+      ? (canonicalSpatialAuthorityObserved
+          ? mlsMpmParticleSeparationComputeCanonicalSpatialWgsl
+          : mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl)
+      : mlsMpmParticleSeparationComputeWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'uniform'),
-      computeBufferBinding(4, 'read-only-storage')
+      computeBufferBinding(4, 'read-only-storage'),
+      ...(canonicalSpatialAuthority ? [computeBufferBinding(5, 'read-only-storage')] : [])
     ]
   });
   const applyPipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-apply.v3',
+    cacheKey: canonicalSpatialAuthority
+      ? `ulg-mls-mpm-particle-separation-apply.v5.canonical-spatial.${canonicalSpatialAuthorityObserved
+          ? 'observed'
+          : 'unobserved'}`
+      : 'ulg-mls-mpm-particle-separation-apply.v4.precanonical',
     label: 'ulg-mls-mpm-particle-separation-apply',
-    code: mlsMpmParticleSeparationApplyWgsl,
+    code: canonicalSpatialAuthority
+      ? (canonicalSpatialAuthorityObserved
+          ? mlsMpmParticleSeparationApplyCanonicalSpatialWgsl
+          : mlsMpmParticleSeparationApplyCanonicalSpatialUnobservedWgsl)
+      : mlsMpmParticleSeparationApplyWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      ...(canonicalSpatialAuthority ? [computeBufferBinding(4, 'read-only-storage')] : [])
     ]
   });
   const binFillBindGroup = device.createBindGroup({
@@ -961,7 +1244,14 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: mechanicsBuffer } },
       { binding: 2, resource: { buffer: activeScratch.binsBuffer } },
-      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } }
+      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } },
+      ...(canonicalSpatialAuthority
+        ? [
+            { binding: 4, resource: { buffer: spatialAuthorityEvidenceBuffer } },
+            { binding: 5, resource: { buffer: authorityRestoreStateBuffer } },
+            { binding: 6, resource: { buffer: authorityRestoreMechanicsBuffer } }
+          ]
+        : [])
     ]
   });
   const computeBindGroup = device.createBindGroup({
@@ -971,7 +1261,10 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       { binding: 1, resource: { buffer: mechanicsBuffer } },
       { binding: 2, resource: { buffer: activeScratch.correctionsBuffer } },
       { binding: 3, resource: { buffer: activeScratch.paramsBuffer } },
-      { binding: 4, resource: { buffer: activeScratch.binsBuffer } }
+      { binding: 4, resource: { buffer: activeScratch.binsBuffer } },
+      ...(canonicalSpatialAuthority
+        ? [{ binding: 5, resource: { buffer: spatialAuthorityEvidenceBuffer } }]
+        : [])
     ]
   });
   const applyBindGroup = device.createBindGroup({
@@ -980,7 +1273,10 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       { binding: 0, resource: { buffer: activeScratch.correctionsBuffer } },
       { binding: 1, resource: { buffer: mechanicsBuffer } },
       { binding: 2, resource: { buffer: stateBuffer } },
-      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } }
+      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } },
+      ...(canonicalSpatialAuthority
+        ? [{ binding: 4, resource: { buffer: spatialAuthorityEvidenceBuffer } }]
+        : [])
     ]
   });
   encoder.clearBuffer(activeScratch.binsBuffer, 0, Math.max(4, activeScratch.cellCount * 4));
@@ -1000,7 +1296,14 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   applyPass.setBindGroup(0, applyBindGroup);
   applyPass.dispatchWorkgroups(workgroups);
   applyPass.end();
-  return { enabled: true, transientBuffers: activeScratch.transientBuffers, scratch: activeScratch };
+  return {
+    enabled: true,
+    transientBuffers: activeScratch.transientBuffers,
+    scratch: activeScratch,
+    canonicalSpatialAuthorityGate: canonicalSpatialAuthority,
+    canonicalAuthorityRestoreFolded: canonicalSpatialAuthority,
+    canonicalSpatialAuthorityEvidenceObserved: canonicalSpatialAuthorityObserved
+  };
 }
 
 export async function runMlsMpmG2pWebGpu({
@@ -1023,6 +1326,9 @@ export async function runMlsMpmG2pWebGpu({
   schroederLevelAssignment = null,
   schroederActiveNodeList = null,
   schroederSelectedLevel = null,
+  schroederSpatialEpochGeneration = null,
+  canonicalSpatialRequired = false,
+  observeCanonicalSpatialAuthority = false,
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -1038,6 +1344,26 @@ export async function runMlsMpmG2pWebGpu({
     );
   }
   assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
+  // A selected generation is the sole mechanics authority. Resolve and
+  // authenticate it before allocating transient outputs, and never inspect a
+  // legacy assignment payload in canonical mode.
+  const schroederSpatialAuthority = createSchroederSpatialAuthorityBinding({
+    device,
+    schroederSpatialEpochGeneration,
+    canonicalSpatialRequired
+  });
+  const canonicalSpatialAuthority = schroederSpatialAuthority.enabled === true;
+  if (canonicalSpatialAuthority && (
+    typeof schroederSelectedLevel !== 'number'
+    || !Number.isInteger(schroederSelectedLevel)
+    || schroederSelectedLevel < -0x8000_0000
+    || schroederSelectedLevel > 0x7fff_ffff
+  )) {
+    throw canonicalSpatialExecutionError(
+      'canonical-spatial-selected-level-rejected',
+      'Canonical WebGPU MLS-MPM G2P requires an exact i32 selected Schroeder level'
+    );
+  }
   const dtSeconds = finiteNumber(dt, 0);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   // Never size GPU output buffers from the CPU arrays alone: under
@@ -1070,25 +1396,67 @@ export async function runMlsMpmG2pWebGpu({
   const gridBuffer = borrowedGridBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-grid-in', gridUpdate.updatedGridNodes);
   const outStateBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const outMechanicsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
-  const paramsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-params', size: G2P_PARAMS_BYTES, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const borrowedAssignmentBuffer = schroederLevelAssignment?.assignmentBuffer
-    || schroederLevelAssignment?.buffer
-    || null;
-  const assignmentRows = schroederLevelAssignment?.assignments instanceof Float32Array
+  const paramsBuffer = !canonicalSpatialAuthority
+    ? device.createBuffer({
+        label: 'ulg-mls-mpm-g2p-params',
+        size: G2P_PARAMS_BYTES,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      })
+    : device.createBuffer({
+        label: 'ulg-mls-mpm-g2p-params',
+        size: G2P_CANONICAL_PARAMS_BYTES,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      });
+  const borrowedAssignmentBuffer = canonicalSpatialAuthority
+    ? null
+    : (schroederLevelAssignment?.assignmentBuffer
+        || schroederLevelAssignment?.buffer
+        || null);
+  const assignmentRows = !canonicalSpatialAuthority
+    && schroederLevelAssignment?.assignments instanceof Float32Array
     ? schroederLevelAssignment.assignments
     : null;
-  const schroederActiveNodeFilterEnabled = Boolean(
+  const schroederActiveNodeFilterEnabled = canonicalSpatialAuthority || Boolean(
     (borrowedAssignmentBuffer || assignmentRows)
     && Number.isFinite(Number(schroederSelectedLevel))
   );
   const schroederLevelFilterEnabled = schroederActiveNodeFilterEnabled;
-  const schroederActiveNodeBuffer = borrowedAssignmentBuffer || writeStorageBuffer(
-    device,
-    schroederActiveNodeFilterEnabled
-      ? 'ulg-mls-mpm-g2p-schroeder-level-assignments-in'
-      : 'ulg-mls-mpm-g2p-schroeder-level-assignments-dummy',
-    assignmentRows || new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
-  );
+  const ownsSchroederAuthorityBuffer = !canonicalSpatialAuthority
+    && !borrowedAssignmentBuffer;
+  const schroederAuthorityBuffer = canonicalSpatialAuthority
+    ? schroederSpatialAuthority.evidenceBuffer
+    : (borrowedAssignmentBuffer || writeStorageBuffer(
+        device,
+        schroederActiveNodeFilterEnabled
+          ? 'ulg-mls-mpm-g2p-schroeder-level-assignments-in'
+          : 'ulg-mls-mpm-g2p-schroeder-level-assignments-dummy',
+        assignmentRows || new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
+      ));
+  const schroederLevelFilter = {
+    enabled: schroederLevelFilterEnabled,
+    selectedLevel: schroederLevelFilterEnabled ? schroederSelectedLevel : null,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+    retainedAssignmentBuffer: !canonicalSpatialAuthority && Boolean(borrowedAssignmentBuffer),
+    assignmentBufferByteLength: canonicalSpatialAuthority ? 0 : (assignmentRows?.byteLength ?? 0),
+    assignmentBufferSource: canonicalSpatialAuthority
+      ? null
+      : (borrowedAssignmentBuffer
+          ? 'retained-schroeder-level-assignment-buffer'
+          : (schroederLevelFilterEnabled
+              ? 'uploaded-schroeder-level-assignment-rows'
+              : 'dummy-schroeder-level-assignment-row')),
+    authorityBindingMode: canonicalSpatialAuthority
+      ? 'canonical-spatial-epoch'
+      : (schroederLevelFilterEnabled
+          ? 'precanonical-level-assignment'
+          : 'precanonical-unfiltered'),
+    oldLevelAssignmentLookupRemoved: canonicalSpatialAuthority,
+    spatialEvidenceEnabled: canonicalSpatialAuthority
+      && observeCanonicalSpatialAuthority === true,
+    spatialEvidenceBufferByteLength: canonicalSpatialAuthority
+      ? SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_BYTES
+      : 0
+  };
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const stateReadBuffer = noFullReadback
     ? null
@@ -1100,7 +1468,7 @@ export async function runMlsMpmG2pWebGpu({
   let separationTransientBuffers = [];
 
   try {
-    device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
+    const paramsOptions = {
       particleCount: sphParticleState.particleCount,
       gridUpdate,
       dt: dtSeconds,
@@ -1112,37 +1480,76 @@ export async function runMlsMpmG2pWebGpu({
       schroederLevelFilterEnabled,
       schroederSelectedLevel: schroederLevelFilterEnabled
         ? Math.round(Number(schroederSelectedLevel))
-        : -1
-    }));
+        : -1,
+      schroederSpatialDirectory: schroederSpatialAuthority,
+      spatialEvidenceEnabled: canonicalSpatialAuthority
+        && observeCanonicalSpatialAuthority === true
+    };
+    if (!canonicalSpatialAuthority) {
+      device.queue.writeBuffer(paramsBuffer, 0, createParamsArray(paramsOptions));
+    } else {
+      device.queue.writeBuffer(paramsBuffer, 0, createCanonicalParamsArray(paramsOptions));
+    }
+    const g2pShader = canonicalSpatialAuthority
+      ? (observeCanonicalSpatialAuthority === true
+          ? mlsMpmG2pReconstructCanonicalSpatialWgsl
+          : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl)
+      : mlsMpmG2pReconstructWgsl;
+    const g2pVariant = canonicalSpatialAuthority
+      ? `canonical-spatial-epoch.v7.${observeCanonicalSpatialAuthority === true
+          ? 'observed'
+          : 'unobserved'}`
+      : 'precanonical-level-assignment.v5';
+    const g2pBindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'storage'),
+      computeBufferBinding(6, 'uniform'),
+      computeBufferBinding(7, canonicalSpatialAuthority ? 'storage' : 'read-only-storage'),
+      ...(canonicalSpatialAuthority ? [computeBufferBinding(8, 'read-only-storage')] : [])
+    ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v4',
+      cacheKey: `ulg-mls-mpm-g2p-reconstruct.${g2pVariant}`,
       label: 'ulg-mls-mpm-g2p-reconstruct',
-      code: mlsMpmG2pReconstructWgsl,
+      code: g2pShader,
       entryPoint: 'main',
-      bindings: [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(1, 'read-only-storage'),
-        computeBufferBinding(2, 'read-only-storage'),
-        computeBufferBinding(3, 'read-only-storage'),
-        computeBufferBinding(4, 'storage'),
-        computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'uniform'),
-        computeBufferBinding(7, 'read-only-storage')
-      ]
+      bindings: g2pBindings
     });
+    const canonicalFinalize = canonicalSpatialAuthority
+      ? createCachedExplicitComputePipeline(device, {
+        cacheKey: `ulg-mls-mpm-g2p-reconstruct.finalize-authority.${g2pVariant}`,
+        label: 'ulg-mls-mpm-g2p-finalize-spatial-authority',
+        code: g2pShader,
+        entryPoint: 'finalize_canonical_spatial_authority',
+        bindings: g2pBindings
+      })
+      : null;
+    const g2pEntries = [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: thermoBuffer } },
+      { binding: 2, resource: { buffer: mechanicsBuffer } },
+      { binding: 3, resource: { buffer: gridBuffer } },
+      { binding: 4, resource: { buffer: outStateBuffer } },
+      { binding: 5, resource: { buffer: outMechanicsBuffer } },
+      { binding: 6, resource: { buffer: paramsBuffer } },
+      { binding: 7, resource: { buffer: schroederAuthorityBuffer } },
+      ...(canonicalSpatialAuthority
+        ? [{ binding: 8, resource: { buffer: schroederSpatialAuthority.directoryBuffer } }]
+        : [])
+    ];
     const bindGroup = device.createBindGroup({
       layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: stateBuffer } },
-        { binding: 1, resource: { buffer: thermoBuffer } },
-        { binding: 2, resource: { buffer: mechanicsBuffer } },
-        { binding: 3, resource: { buffer: gridBuffer } },
-        { binding: 4, resource: { buffer: outStateBuffer } },
-        { binding: 5, resource: { buffer: outMechanicsBuffer } },
-        { binding: 6, resource: { buffer: paramsBuffer } },
-        { binding: 7, resource: { buffer: schroederActiveNodeBuffer } }
-      ]
+      entries: g2pEntries
     });
+    const canonicalFinalizeBindGroup = canonicalFinalize
+      ? device.createBindGroup({
+        layout: canonicalFinalize.bindGroupLayout,
+        entries: g2pEntries
+      })
+      : null;
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
@@ -1152,6 +1559,8 @@ export async function runMlsMpmG2pWebGpu({
     const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
       stateBuffer: outStateBuffer,
       mechanicsBuffer: outMechanicsBuffer,
+      authorityRestoreStateBuffer: stateBuffer,
+      authorityRestoreMechanicsBuffer: mechanicsBuffer,
       particleCount: sphParticleState.particleCount,
       boxDimsM: dims,
       relaxation: particleSeparationRelaxation,
@@ -1160,9 +1569,23 @@ export async function runMlsMpmG2pWebGpu({
         mlsMpmParticleState.mechanics,
         sphParticleState.particleCount
       ),
-      gridSpacingM: gridUpdate.gridSpacingM
+      gridSpacingM: gridUpdate.gridSpacingM,
+      spatialAuthorityEvidenceBuffer: canonicalSpatialAuthority
+        ? schroederSpatialAuthority.evidenceBuffer
+        : null,
+      spatialAuthorityEvidenceObserved: canonicalSpatialAuthority
+        && observeCanonicalSpatialAuthority === true
     });
     separationTransientBuffers = separation.transientBuffers;
+    if (canonicalFinalize && separation.canonicalAuthorityRestoreFolded !== true) {
+      const finalizePass = encoder.beginComputePass();
+      finalizePass.setPipeline(canonicalFinalize.pipeline);
+      finalizePass.setBindGroup(0, canonicalFinalizeBindGroup);
+      finalizePass.dispatchWorkgroups(
+        Math.max(1, Math.ceil(sphParticleState.particleCount / 64))
+      );
+      finalizePass.end();
+    }
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
       encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
@@ -1188,7 +1611,13 @@ export async function runMlsMpmG2pWebGpu({
       dt: dtSeconds,
       boxDimsM: dims,
       internalPressureScale,
-      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
+      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+      schroederSpatialAuthority: schroederSpatialAuthorityMetadata(
+        schroederSpatialAuthority
+      ),
+      schroederLevelFilter,
+      separationCanonicalSpatialAuthorityGate:
+        separation.canonicalSpatialAuthorityGate === true
     });
     if (retainOutputParticleBuffers) {
       reconstruction.stateBuffer = outStateBuffer;
@@ -1213,7 +1642,7 @@ export async function runMlsMpmG2pWebGpu({
         outStateBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
       }
-      if (!borrowedAssignmentBuffer) schroederActiveNodeBuffer.destroy?.();
+      if (ownsSchroederAuthorityBuffer) schroederAuthorityBuffer.destroy?.();
       paramsBuffer.destroy?.();
       for (const transientBuffer of separationTransientBuffers) transientBuffer.destroy?.();
       stateReadBuffer?.destroy?.();
@@ -1241,6 +1670,30 @@ function createNoFullReadbackParityReport(tolerance = 5e-2) {
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+}
+
+function createCanonicalSpatialParityReport(tolerance = 5e-2) {
+  return {
+    schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
+    status: 'not-run-canonical-spatial-authority',
+    tolerance,
+    maxStateAbs: null,
+    maxMechanicsAbs: null,
+    lengthMismatch: null,
+    reason: 'Unfiltered CPU G2P is not a valid oracle for canonical directory authority',
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function canonicalSpatialExecutionError(status, reason, cause = null) {
+  const error = new Error(`Canonical MLS-MPM G2P execution rejected: ${reason}`);
+  error.code = 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED';
+  error.status = status;
+  if (cause != null) error.cause = cause;
+  return error;
 }
 
 export function createMlsMpmG2pParityReport({ cpuReference, gpuResult, tolerance = 5e-2 } = {}) {
@@ -1304,6 +1757,18 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
     particleScalePolicyAppliedInG2p: reconstruction?.particleScalePolicyAppliedInG2p === true,
     particleScaleMaxVolumeRatioJAllowed: reconstruction?.particleScaleMaxVolumeRatioJAllowed ?? null,
     particleScaleMaxRadiusGrowthRatioAllowed: reconstruction?.particleScaleMaxRadiusGrowthRatioAllowed ?? null,
+    schroederSpatialAuthority: reconstruction?.schroederSpatialAuthority ?? null,
+    schroederSpatialAuthorityEnabled:
+      reconstruction?.schroederSpatialAuthorityEnabled === true,
+    schroederSpatialAuthorityStatus:
+      reconstruction?.schroederSpatialAuthorityStatus ?? null,
+    schroederLevelFilter: reconstruction?.schroederLevelFilter ?? null,
+    schroederAuthorityBindingMode:
+      reconstruction?.schroederAuthorityBindingMode ?? 'precanonical-unfiltered',
+    oldLevelAssignmentLookupRemoved:
+      reconstruction?.oldLevelAssignmentLookupRemoved === true,
+    separationCanonicalSpatialAuthorityGate:
+      reconstruction?.separationCanonicalSpatialAuthorityGate === true,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -1345,6 +1810,11 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
     ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   particleSeparationVelocityDamping = mlsMpmParticleState?.particleSeparationVelocityDamping
     ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null,
+  schroederSpatialEpochGeneration = null,
+  canonicalSpatialRequired = false,
+  observeCanonicalSpatialAuthority = false,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -1356,6 +1826,8 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const canonicalSpatialIntent = canonicalSpatialRequired === true
+    || schroederSpatialEpochGeneration?.selected === true;
   let cpuReference = null;
   const getCpuReference = () => {
     if (!cpuReference) {
@@ -1375,6 +1847,12 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
     return cpuReference;
   };
   if (!preferWebGpu) {
+    if (canonicalSpatialIntent) {
+      throw canonicalSpatialExecutionError(
+        'canonical-spatial-webgpu-not-requested',
+        'canonical directory authority cannot fall back to unfiltered CPU G2P'
+      );
+    }
     const reference = getCpuReference();
     return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'not-requested', reason: 'WebGPU MLS-MPM G2P path not requested' } });
   }
@@ -1395,11 +1873,23 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       });
     }
     if (!resolvedDeviceResult.device) {
+      if (canonicalSpatialIntent) {
+        throw canonicalSpatialExecutionError(
+          'canonical-spatial-webgpu-device-unavailable',
+          resolvedDeviceResult.reason || 'WebGPU device unavailable'
+        );
+      }
       const reference = getCpuReference();
       return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: resolvedDeviceResult.status, reason: resolvedDeviceResult.reason, fallback: 'cpu-reference' } });
     }
     await Promise.resolve();
     if (lostInfo) {
+      if (canonicalSpatialIntent) {
+        throw canonicalSpatialExecutionError(
+          'canonical-spatial-webgpu-device-lost',
+          describeDeviceLost(lostInfo)
+        );
+      }
       const reference = getCpuReference();
       return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
     }
@@ -1418,12 +1908,23 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       liquidWallDampingDistanceM,
       particleSeparationRelaxation,
       particleSeparationVelocityDamping,
+      schroederLevelAssignment,
+      schroederSelectedLevel,
+      schroederSpatialEpochGeneration,
+      canonicalSpatialRequired,
+      observeCanonicalSpatialAuthority,
       retainOutputParticleBuffers,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     await Promise.resolve();
     if (lostInfo) {
       gpuResult.destroyOutputParticleBuffers?.();
+      if (canonicalSpatialIntent) {
+        throw canonicalSpatialExecutionError(
+          'canonical-spatial-webgpu-device-lost',
+          describeDeviceLost(lostInfo)
+        );
+      }
       const reference = getCpuReference();
       return executionFromReconstruction(reference, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
     }
@@ -1438,6 +1939,17 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
         webgpuParity: createNoFullReadbackParityReport(parityTolerance)
       });
     }
+    if (canonicalSpatialIntent) {
+      return executionFromReconstruction(gpuResult, {
+        cpuReference: null,
+        gpuResult,
+        webgpuStatus: {
+          status: 'webgpu-executed-canonical-spatial-authority',
+          reason: 'Canonical directory-authoritative G2P executed without CPU fallback'
+        },
+        webgpuParity: createCanonicalSpatialParityReport(parityTolerance)
+      });
+    }
     const reference = getCpuReference();
     const webgpuParity = createMlsMpmG2pParityReport({ cpuReference: reference, gpuResult, tolerance: parityTolerance });
     if (webgpuParity.status !== 'pass') {
@@ -1446,6 +1958,14 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
     }
     return executionFromReconstruction(gpuResult, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-executed', reason: 'CPU/WebGPU MLS-MPM G2P parity passed' }, webgpuParity });
   } catch (error) {
+    if (canonicalSpatialIntent) {
+      if (error?.code === 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED') throw error;
+      throw canonicalSpatialExecutionError(
+        'canonical-spatial-webgpu-execution-error',
+        error instanceof Error ? error.message : String(error),
+        error
+      );
+    }
     const reference = getCpuReference();
     return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-error-fallback', reason: error instanceof Error ? error.message : String(error), fallback: 'cpu-reference' } });
   }

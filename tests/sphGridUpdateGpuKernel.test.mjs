@@ -13,20 +13,110 @@ import {
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+  ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_AUTHORITY,
+  ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_SCHEMA,
+  ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_STATUS,
+  createDirectResidentPressureInterfaceGridForceAdmission,
   createMlsMpmGridUpdateParityReport,
   estimateMlsMpmWallBarrierElasticStiffness,
   mlsMpmWallBarrierContactResponse,
+  pressureInterfaceGridForceAdmissionAllowsApplication,
   resolveWallBarrierContactMaterialPolicy,
   runMlsMpmGridUpdateWebGpu,
   runMlsMpmGridUpdateWithOptionalWebGpu,
   updateMlsMpmGridCpu
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
+import {
+  tagWebGpuBufferDevice,
+  webGpuDeviceId
+} from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+
+test('direct resident pressure admission requires exact same-device queue authority', () => {
+  const solver = pressureInterfaceForceSolverFixture({
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
+  });
+  const admission = createDirectResidentPressureInterfaceGridForceAdmission({
+    pressureInterfaceForceSolver: solver,
+    strictReactionGate: strictReactionGatePassFixture(),
+    producerDeviceId: 'ulg-webgpu-device:test-direct',
+    residentComputeManagerMode: 'direct'
+  });
+  assert.equal(admission.pressureInterfacePublication.schema, ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_SCHEMA);
+  assert.equal(admission.pressureInterfacePublication.status, ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_STATUS);
+  assert.equal(admission.pressureInterfacePublication.authority, ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_AUTHORITY);
+  assert.equal(admission.committed, false);
+  assert.equal(pressureInterfaceGridForceAdmissionAllowsApplication({
+    pressureInterfaceGridForceAdmission: admission,
+    pressureInterfaceForceSolver: solver,
+    forceRowCount: 1,
+    consumerDeviceId: 'ulg-webgpu-device:test-direct'
+  }).approved, true);
+
+  for (const mutate of [
+    (value) => { value.schema = 'forged'; },
+    (value) => { value.authority = 'forged'; },
+    (value) => { value.residentComputeManagerMode = 'compute-manager'; },
+    (value) => { value.pressureInterfacePublication.authority = 'forged'; },
+    (value) => { value.pressureInterfacePublication.sameDeviceQueueOrdered = false; },
+    (value) => { value.pressureInterfacePublication.pressureInterfaceForceRowCount = 0; },
+    (value) => { value.pressureInterfacePublication.producerDeviceId = 'ulg-webgpu-device:other'; },
+    (value) => { value.strictReactionGate.strictForceCouplingAllowed = false; }
+  ]) {
+    const forged = structuredClone(admission);
+    mutate(forged);
+    assert.equal(pressureInterfaceGridForceAdmissionAllowsApplication({
+      pressureInterfaceGridForceAdmission: forged,
+      pressureInterfaceForceSolver: solver,
+      forceRowCount: 1,
+      consumerDeviceId: 'ulg-webgpu-device:test-direct'
+    }).approved, false);
+  }
+
+  const differentSolver = pressureInterfaceForceSolverFixture({
+    force: [16, 0, 0],
+    reactionForce: [-16, 0, 0],
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
+  });
+  assert.equal(pressureInterfaceGridForceAdmissionAllowsApplication({
+    pressureInterfaceGridForceAdmission: admission,
+    pressureInterfaceForceSolver: differentSolver,
+    forceRowCount: 1,
+    consumerDeviceId: 'ulg-webgpu-device:test-direct'
+  }).approved, false, 'direct admission must be bound to the exact solver rows');
+});
+
+test('self-declared pressure admission status is not publication evidence', () => {
+  const solver = pressureInterfaceForceSolverFixture({
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
+  });
+  const forged = pressureInterfaceGridForceAdmissionFixture();
+  forged.committed = false;
+  assert.equal(pressureInterfaceGridForceAdmissionAllowsApplication({
+    pressureInterfaceGridForceAdmission: forged,
+    pressureInterfaceForceSolver: solver,
+    forceRowCount: 1
+  }).approved, false);
+});
 
 function nearlyEqual(actual, expected, tolerance = 1e-6) {
   assert.ok(
     Math.abs(actual - expected) <= tolerance,
     `expected ${actual} to be within ${tolerance} of ${expected}`
   );
+}
+
+function strictReactionGatePassFixture() {
+  return {
+    schema: 'peercompute.ulg.sph-reaction-strict-gate.v0',
+    status: 'strict-reaction-gate-pass',
+    strictForceCouplingAllowed: true,
+    blockers: [],
+    warnings: [],
+    provisionalEnergetics: []
+  };
 }
 
 function manualP2gProjection({ mass = 2, momentum = [4, 0, 0], nodePosition = [1, 1, 1] } = {}) {
@@ -514,6 +604,40 @@ test('WebGPU MLS-MPM grid update marks approved no-readback pressure impulse as 
   assert.equal(update.pressureInterfaceForceRowCount, 1);
   nearlyEqual(update.pressureInterfaceAppliedImpulseNSeconds[0], 2, 1e-5);
   nearlyEqual(update.pressureInterfaceAppliedImpulseMagnitudeNSeconds, 2, 1e-5);
+});
+
+test('WebGPU direct resident pressure admission remains approved at the exact device consumer', async () => {
+  const device = fakeGridUpdateDevice();
+  const solver = pressureInterfaceForceSolverFixture({
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
+  });
+  const pressureRowsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-scene:test:direct-pressure-force-rows',
+    size: solver.forceRowValues.byteLength,
+    usage: 128
+  }), device);
+  const admission = createDirectResidentPressureInterfaceGridForceAdmission({
+    pressureInterfaceForceSolver: solver,
+    strictReactionGate: strictReactionGatePassFixture(),
+    producerDeviceId: webGpuDeviceId(device),
+    residentComputeManagerMode: 'direct'
+  });
+  const update = await runMlsMpmGridUpdateWebGpu({
+    device,
+    p2gGridProjection: manualP2gProjection(),
+    pressureInterfaceForceRowsBuffer: pressureRowsBuffer,
+    pressureInterfaceForceSolver: solver,
+    pressureInterfaceGridForceAdmission: admission,
+    dt: 0.25,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(update.pressureInterfaceGridForceAdmissionApproved, true);
+  assert.equal(update.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-submitted-unverified');
+  assert.equal(update.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-submitted-unverified-no-full-readback');
+  assert.equal(update.pressureInterfaceForceRowsBufferSubmitted, true);
+  assert.equal(update.pressureInterfaceForceRowCount, 1);
 });
 
 test('WebGPU MLS-MPM grid update blocks approved pressure rows without StateManager admission', async () => {

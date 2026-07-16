@@ -1,6 +1,7 @@
 # Algorithm-Derived Material Properties Plan
 
 Date: 2026-06-18 AKDT
+Updated: 2026-07-14 AKDT
 
 ## Purpose
 
@@ -117,6 +118,24 @@ and contact rows. It carries isovalue, smoothing radius, voxel size, normal
 scale, support radius, and crystal packing metadata while remaining
 non-authoritative for renderer behavior. The next task is binding these rows
 into the active marching-cubes/native surface extraction path.
+
+## Deferred First-Principles Optical Spectrum Closure
+
+Priority: deferred. The reliable SS-owned GPU spatial hierarchy/octree and its
+production-consumer migrations remain ahead of this work.
+
+- [ ] Fix the electronic-structure and electron-density derivation well enough
+  to reproduce wavelength-dependent material spectra without using measured
+  reference spectra as the runtime fallback.
+- Derive the complex dielectric response or equivalent wavelength-dependent
+  `n` and `k` data, then obtain Fresnel response, absorption, and display color
+  through the shared optical closure rather than hand-authored RGB values.
+- Use measured spectra as validation oracles with explicit residual/error
+  evidence while this work is developed; retain the labeled reference fallback
+  until the derived spectra pass their documented validity gates.
+- First acceptance target: distinguish Cu, Ag, and Au across the visible range,
+  including their interband response, from the derived spectrum alone in
+  strict mode.
 
 ## Completion Gates
 

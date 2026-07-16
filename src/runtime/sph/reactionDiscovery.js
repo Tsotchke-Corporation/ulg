@@ -1,6 +1,9 @@
 // General reaction discovery for the two-material demo. Given the two block materials, decide
-// whether they react and into WHAT — with the reaction enthalpy DERIVED from the molecular bonding
-// engine (RHF/UHF energies), never tabulated. Replaces the old hardcoded H2+O2-only network.
+// whether they react and into WHAT. Reaction enthalpy comes from a compatible,
+// phase-explicit standard-formation reference when every balanced term is
+// covered; otherwise discovery falls back to the molecular bonding engine and
+// clearly labels provisional ranking estimates. Replaces the old hardcoded
+// H2+O2-only network.
 //
 // Two layers (per the chosen design):
 //   1. Universal reaction families (templates) — general redox/acid–base patterns whose
@@ -28,6 +31,10 @@ import {
   waterReactiveMetalClass
 } from '../chemistry/reactionCandidates.js';
 import { SEDENION_REACTION_SCOPE_FINGERPRINT } from '../chemistry/sedenionReactionScope.js';
+import {
+  STANDARD_FORMATION_ENTHALPY_FINGERPRINT,
+  standardReactionEnthalpyReference
+} from '../chemistry/standardFormationEnthalpy.js';
 import { deriveElementProperties } from '../material/elementClosures.js';
 import { deriveCompoundClosure } from '../material/compoundClosure.js';
 import { deriveMaterialProperties, formulaMolarMassKgPerMol, formulaUnitGeometry } from '../material/materialDerivation.js';
@@ -151,7 +158,8 @@ export function createReactionDiscoveryCacheKey(keyA, keyB, options = {}) {
     allowReducedProductProperties: options.allowReducedProductProperties === true,
     deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
     strictEnergetics: options.strictEnergetics === true,
-    sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT
+    sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT,
+    standardFormationEnthalpyFingerprint: STANDARD_FORMATION_ENTHALPY_FINGERPRINT
   });
 }
 
@@ -488,8 +496,6 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
   const discovery = discoverReactionCandidates(ca?.formula || keyA, cb?.formula || keyB, options);
   const candidate = discovery.candidates.find((item) => item.atomBalance?.balanced === true) || null;
   if (!candidate) return null;
-  const primaryProduct = candidate.products.find((product) => sameAtomCounts(product.atomCounts, candidate.productAtomCounts))
-    || candidate.products[0];
   const species = [
     ...candidate.reactants.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb)),
     ...candidate.products.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb))
@@ -506,17 +512,34 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
   } catch {
     dHHa = null;
   }
-  const productMolarMass = formulaMolarMassKgPerMol(candidate.productAtomCounts);
-  const derivedSpecificEnthalpyJPerKg = Number.isFinite(dHHa)
-    ? (dHHa * HARTREE_J * AVOGADRO) / (Math.max(1, primaryProduct.coefficient || 1) * productMolarMass)
+  const balancedReactantMassKgPerEquation = candidate.reactants.reduce((sum, term) => (
+    sum + Math.max(0, Number(term.coefficient) || 0) * formulaMolarMassKgPerMol(term.atomCounts)
+  ), 0);
+  const referenceEnergetics = standardReactionEnthalpyReference(candidate);
+  const referenceSpecificEnthalpyJPerKg = referenceEnergetics
+    ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation
+      / balancedReactantMassKgPerEquation
     : null;
-  const candidateSpecificEnthalpyJPerKg = candidate.energetics.specificEnthalpyJPerKgProduct;
-  const useDerivedEnergy = Number.isFinite(derivedSpecificEnthalpyJPerKg)
+  const derivedSpecificEnthalpyJPerKg = Number.isFinite(dHHa)
+    ? (dHHa * HARTREE_J * AVOGADRO) / balancedReactantMassKgPerEquation
+    : null;
+  const candidateSpecificEnthalpyJPerKg = Number.isFinite(candidate.energetics.reactionEnthalpyJPerBalancedEquation)
+    ? candidate.energetics.reactionEnthalpyJPerBalancedEquation / balancedReactantMassKgPerEquation
+    : candidate.energetics.specificEnthalpyJPerKgProduct;
+  const useReferenceEnergy = Number.isFinite(referenceSpecificEnthalpyJPerKg)
+    && referenceSpecificEnthalpyJPerKg < 0;
+  const useDerivedEnergy = !useReferenceEnergy
+    && Number.isFinite(derivedSpecificEnthalpyJPerKg)
     && (derivedSpecificEnthalpyJPerKg < 0 || !(candidateSpecificEnthalpyJPerKg < 0));
-  const provisionalEnergeticsStatus = useDerivedEnergy ? null : PROVISIONAL_ENERGETICS_STATUS;
-  const specificEnthalpyJPerKg = useDerivedEnergy
-    ? derivedSpecificEnthalpyJPerKg
-    : candidateSpecificEnthalpyJPerKg;
+  const provisionalEnergeticsStatus = useReferenceEnergy || useDerivedEnergy
+    ? null
+    : PROVISIONAL_ENERGETICS_STATUS;
+  const specificEnthalpyJPerKg = useReferenceEnergy
+    ? referenceSpecificEnthalpyJPerKg
+    : (useDerivedEnergy ? derivedSpecificEnthalpyJPerKg : candidateSpecificEnthalpyJPerKg);
+  const energyModel = useReferenceEnergy
+    ? referenceEnergetics.model
+    : (useDerivedEnergy ? model : candidate.energetics.model);
   if (options.strictEnergetics === true && provisionalEnergeticsStatus) {
     return {
       dHHa: Number.isFinite(dHHa)
@@ -524,7 +547,7 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
         : null,
       productKey: candidate.productKey,
       closure: null,
-      energyModel: useDerivedEnergy ? model : candidate.energetics.model,
+      energyModel,
       specificEnthalpyJPerKg,
       reactant: keyA,
       partner: keyB,
@@ -539,6 +562,12 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
         atomBalance: candidate.atomBalance,
         sedenionScope: candidate.sedenionScope ?? null,
         provisionalEnergeticsStatus,
+        energeticsStatus: useReferenceEnergy
+          ? referenceEnergetics.status
+          : (useDerivedEnergy ? 'derived-model-energy-ready' : candidate.energetics.status),
+        thermochemicalReference: useReferenceEnergy ? referenceEnergetics : null,
+        balancedReactantMassKgPerEquation,
+        specificEnthalpyBasis: 'consumed-reactant-mass',
         rejectedDerivedEnergyHa: Number.isFinite(dHHa) && !useDerivedEnergy ? dHHa : null,
         scientificValidation: false
       }
@@ -564,12 +593,14 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
   const waterReactiveClass = waterReactiveClassForCandidate(candidate, ca, cb);
   const alkaliHalogenClass = alkaliGasHalogenContactClass(candidate, ca, cb);
   return {
-    dHHa: useDerivedEnergy
+    dHHa: useReferenceEnergy
+      ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation / (HARTREE_J * AVOGADRO)
+      : useDerivedEnergy
       ? dHHa
-      : specificEnthalpyJPerKg * Math.max(1, primaryProduct.coefficient || 1) * productMolarMass / (HARTREE_J * AVOGADRO),
+      : specificEnthalpyJPerKg * balancedReactantMassKgPerEquation / (HARTREE_J * AVOGADRO),
     productKey: candidate.productKey,
     closure,
-    energyModel: useDerivedEnergy ? model : candidate.energetics.model,
+    energyModel,
     specificEnthalpyJPerKg,
     reactant: keyA,
     partner: keyB,
@@ -591,6 +622,12 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
       atomBalance: candidate.atomBalance,
       sedenionScope: candidate.sedenionScope ?? null,
       provisionalEnergeticsStatus,
+      energeticsStatus: useReferenceEnergy
+        ? referenceEnergetics.status
+        : (useDerivedEnergy ? 'derived-model-energy-ready' : candidate.energetics.status),
+      thermochemicalReference: useReferenceEnergy ? referenceEnergetics : null,
+      balancedReactantMassKgPerEquation,
+      specificEnthalpyBasis: 'consumed-reactant-mass',
       rejectedDerivedEnergyHa: Number.isFinite(dHHa) && !useDerivedEnergy ? dHHa : null,
       scientificValidation: false
     }
@@ -721,6 +758,156 @@ export function reactionDiscoveryCacheInfo() {
   };
 }
 
+export const REACTION_NETWORK_DISCOVERY_SCHEMA = 'peercompute.ulg.reaction-network-discovery.v0';
+
+function compareCanonicalText(a, b) {
+  return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+function canonicalMaterialList(materialKeys) {
+  if (!Array.isArray(materialKeys)) {
+    throw new TypeError('discoverReactionNetwork materialKeys must be an array');
+  }
+  return [...new Set(materialKeys
+    .map((key) => normalizeMaterialKeyForCache(key))
+    .filter((key) => key.length > 0))]
+    .sort(compareCanonicalText);
+}
+
+function materialPropertiesWithCanonicalAliases(materialProperties) {
+  if (!materialProperties || typeof materialProperties !== 'object') return materialProperties;
+  const aliased = { ...materialProperties };
+  const entries = Object.entries(materialProperties)
+    .sort(([a], [b]) => compareCanonicalText(a, b));
+  for (const [key, properties] of entries) {
+    const canonicalKey = normalizeMaterialKeyForCache(key);
+    if (!canonicalKey || Object.hasOwn(aliased, canonicalKey)) continue;
+    aliased[canonicalKey] = properties;
+  }
+  return aliased;
+}
+
+function canonicalReactionSpecies(term = {}) {
+  const atomCounts = Object.entries(term.atomCounts || {})
+    .map(([atomicNumber, count]) => [Number(atomicNumber), Number(count)])
+    .filter(([atomicNumber, count]) => Number.isFinite(atomicNumber) && Number.isFinite(count) && count !== 0)
+    .sort(([a], [b]) => a - b);
+  if (atomCounts.length > 0) {
+    return `atoms:${atomCounts.map(([atomicNumber, count]) => `${atomicNumber}:${count}`).join(',')}`;
+  }
+  return `formula:${normalizeMaterialKeyForCache(term.formula)}`;
+}
+
+function greatestCommonDivisor(a, b) {
+  let left = Math.abs(a);
+  let right = Math.abs(b);
+  while (right > 0) [left, right] = [right, left % right];
+  return left;
+}
+
+function canonicalStoichiometrySide(terms, coefficientDivisor) {
+  const coefficientBySpecies = new Map();
+  for (const term of terms || []) {
+    const species = canonicalReactionSpecies(term);
+    const coefficient = Number(term.coefficient);
+    const finiteCoefficient = Number.isFinite(coefficient) ? coefficient : 1;
+    coefficientBySpecies.set(species, (coefficientBySpecies.get(species) || 0) + finiteCoefficient);
+  }
+  return [...coefficientBySpecies.entries()]
+    .sort(([a], [b]) => compareCanonicalText(a, b))
+    .map(([species, coefficient]) => `${coefficient / coefficientDivisor}:${species}`)
+    .join('+');
+}
+
+function canonicalReactionIdentity(reaction) {
+  const reactants = reaction?.stoichiometry?.reactants;
+  const products = reaction?.stoichiometry?.products;
+  if (Array.isArray(reactants) && Array.isArray(products)) {
+    const coefficients = [...reactants, ...products].map((term) => Number(term.coefficient));
+    const integralCoefficients = coefficients.length > 0
+      && coefficients.every((coefficient) => Number.isSafeInteger(coefficient) && coefficient > 0);
+    const coefficientDivisor = integralCoefficients
+      ? coefficients.reduce(greatestCommonDivisor)
+      : 1;
+    return `stoichiometry:${canonicalStoichiometrySide(reactants, coefficientDivisor)}->${canonicalStoichiometrySide(products, coefficientDivisor)}`;
+  }
+  const pair = [
+    normalizeMaterialKeyForCache(reaction?.a),
+    normalizeMaterialKeyForCache(reaction?.b)
+  ].sort(compareCanonicalText);
+  return `reaction:${pair.join('+')}->${normalizeMaterialKeyForCache(reaction?.product)}`;
+}
+
+/**
+ * Discover the complete reaction network for an arbitrary material set. Material keys and pairs
+ * are canonicalized before pair discovery, so results do not depend on block or input ordering.
+ * Equivalent pair results are merged by atom-count stoichiometry while retaining every source pair.
+ * Options are passed through to `discoverReactions`; in particular, `options.materialProperties`
+ * supplies the same property/provenance inputs as pair discovery.
+ */
+export function discoverReactionNetwork(materialKeys, options = {}) {
+  const materials = canonicalMaterialList(materialKeys);
+  const pairOptions = options.materialProperties
+    ? {
+        ...options,
+        materialProperties: materialPropertiesWithCanonicalAliases(options.materialProperties)
+      }
+    : options;
+  const reactionByIdentity = new Map();
+  const productClosureByKey = new Map();
+  const pairDiagnostics = [];
+
+  for (let leftIndex = 0; leftIndex < materials.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < materials.length; rightIndex += 1) {
+      const pair = [materials[leftIndex], materials[rightIndex]];
+      const discovery = discoverReactions(pair[0], pair[1], pairOptions);
+      const reactionIdentities = [];
+      for (const reaction of discovery.reactions || []) {
+        const identity = canonicalReactionIdentity(reaction);
+        reactionIdentities.push(identity);
+        const existing = reactionByIdentity.get(identity);
+        const sourcePairs = existing?.reactionDiscovery?.sourcePairs || [];
+        reactionByIdentity.set(identity, {
+          ...(existing || reaction),
+          reactionDiscovery: {
+            schema: REACTION_NETWORK_DISCOVERY_SCHEMA,
+            canonicalStoichiometryIdentity: identity,
+            sourcePairs: [...sourcePairs, pair]
+          }
+        });
+      }
+      for (const [productKey, closure] of Object.entries(discovery.productClosures || {})) {
+        if (!productClosureByKey.has(productKey)) productClosureByKey.set(productKey, closure);
+      }
+      pairDiagnostics.push({
+        pair,
+        cacheKey: discovery.cache?.cacheKey || null,
+        reactionCount: discovery.reactions?.length || 0,
+        reactionIdentities: reactionIdentities.sort(compareCanonicalText),
+        blockers: [...(discovery.blockers || [])].sort(compareCanonicalText),
+        blockedProduct: discovery.blockedReactionCandidate?.product || null,
+        note: discovery.note || null
+      });
+    }
+  }
+
+  const reactions = [...reactionByIdentity.entries()]
+    .sort(([a], [b]) => compareCanonicalText(a, b))
+    .map(([, reaction]) => reaction);
+  const productClosures = Object.fromEntries(
+    [...productClosureByKey.entries()].sort(([a], [b]) => compareCanonicalText(a, b))
+  );
+  return {
+    schema: REACTION_NETWORK_DISCOVERY_SCHEMA,
+    materials,
+    pairCount: pairDiagnostics.length,
+    reactions,
+    productClosures,
+    pairDiagnostics,
+    note: `${reactions.length} unique reaction${reactions.length === 1 ? '' : 's'} discovered across ${pairDiagnostics.length} material pair${pairDiagnostics.length === 1 ? '' : 's'}`
+  };
+}
+
 export function discoverReactions(keyA, keyB, options = {}) {
   // Cache per unordered pair plus material/provenance digest. The HF/all-element solves are the
   // demo's most expensive synchronous step, and the normal demo path always supplies material
@@ -767,7 +954,8 @@ export function discoverReactions(keyA, keyB, options = {}) {
     allowReducedProductProperties: options.allowReducedProductProperties === true,
     deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
     strictEnergetics: options.strictEnergetics === true,
-    sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT
+    sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT,
+    standardFormationEnthalpyFingerprint: STANDARD_FORMATION_ENTHALPY_FINGERPRINT
   };
   discoveryCache.set(cacheKey, cloneDiscoveryResult(result));
   return result;
@@ -885,9 +1073,11 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     sedenionScope: rx.sedenionScope ?? rx.stoichiometry?.sedenionScope ?? null,
     stoichiometry: rx.stoichiometry ?? null
   });
-  const energySource = rx.stoichiometry?.provisionalEnergeticsStatus
-    ? 'provisional candidate energy'
-    : 'derived';
+  const energySource = rx.stoichiometry?.thermochemicalReference
+    ? 'reference thermochemistry'
+    : (rx.stoichiometry?.provisionalEnergeticsStatus
+        ? 'provisional candidate energy'
+        : 'derived');
   result.note = `${keyA}+${keyB} → ${rx.productKey} (ΔH=${(rx.specificEnthalpyJPerKg / 1e6).toFixed(2)} MJ/kg, ${energySource})`;
   return result;
 }

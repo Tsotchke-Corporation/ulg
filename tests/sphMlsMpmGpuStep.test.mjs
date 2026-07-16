@@ -16,18 +16,21 @@ import {
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
-  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
   ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA,
@@ -117,13 +120,29 @@ import {
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
   ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA
 } from '../src/runtime/sph/sphReactionGpuSummary.js';
-import { tagResidentProductMassDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  tagResidentProductMassDevice,
+  tagWebGpuBufferDevice,
+  webGpuDeviceId
+} from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  createSchroederSpatialEpochTransaction,
+  summarizeSchroederSpatialEpochTransaction
+} from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
 import { buildSphThermalMaterialTable } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
   RESIDENT_STATE_FAMILIES,
   ULG_RESIDENT_STATE_AUTHORITY_LEDGER_SCHEMA
 } from '../src/runtime/residentStateAuthority.js';
+import {
+  createSchroederHierarchyArtifactLedger,
+  registerSchroederHierarchyArtifactFamily,
+  releaseSchroederHierarchyArtifactTransfers,
+  scheduleSchroederHierarchyArtifactRetirement,
+  transferSchroederHierarchyArtifactFamily,
+  summarizeSchroederHierarchyArtifactLedger
+} from '../src/runtime/sph/schroederHierarchyArtifactLedger.js';
 
 function manualBuffers({
   position = [1.25, 1.25, 1.25],
@@ -132,24 +151,33 @@ function manualBuffers({
   smoothingLengthM = 1,
   restDensityKgPerM3 = 8,
   mechanicsDtS = 0.1,
-  algorithmMaterialContactRows = null
+  algorithmMaterialContactRows = null,
+  particleCount = 1
 } = {}) {
-  const state = new Float32Array([
-    position[0], position[1], position[2], massKg,
-    velocity[0], velocity[1], velocity[2], 123
-  ]);
-  const thermo = new Float32Array(12);
-  thermo[3] = restDensityKgPerM3;
-  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
-  mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], 0);
-  mechanics[18] = 1;
-  mechanics[19] = massKg / restDensityKgPerM3;
-  mechanics[20] = 1;
-  mechanics[21] = 1;
+  const boundedParticleCount = Math.max(1, Math.floor(particleCount));
+  const state = new Float32Array(boundedParticleCount * 8);
+  const thermo = new Float32Array(boundedParticleCount * 12);
+  const mechanics = new Float32Array(
+    boundedParticleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+  );
+  for (let index = 0; index < boundedParticleCount; index += 1) {
+    const stateBase = index * 8;
+    state.set([
+      position[0] + index * 0.25, position[1], position[2], massKg,
+      velocity[0], velocity[1], velocity[2], 123
+    ], stateBase);
+    thermo[index * 12 + 3] = restDensityKgPerM3;
+    const mechanicsBase = index * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
+    mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], mechanicsBase);
+    mechanics[mechanicsBase + 18] = 1;
+    mechanics[mechanicsBase + 19] = massKg / restDensityKgPerM3;
+    mechanics[mechanicsBase + 20] = 1;
+    mechanics[mechanicsBase + 21] = 1;
+  }
   return {
     sphParticleState: {
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
-      particleCount: 1,
+      particleCount: boundedParticleCount,
       smoothingLengthM,
       step: 0,
       time: 0,
@@ -158,7 +186,7 @@ function manualBuffers({
     },
     mlsMpmParticleState: {
       schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
-      particleCount: 1,
+      particleCount: boundedParticleCount,
       step: 0,
       time: 0,
       mechanicsDtS,
@@ -214,6 +242,38 @@ function pressureInterfaceForceSolverFixture({
   };
 }
 
+function sharedSpatialPressureSolverAuthorityFixture(overrides = {}) {
+  return {
+    schroederSpatialExactNearViewSchema:
+      ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+    schroederSpatialExactNearGenerationSupplied: true,
+    schroederSpatialExactNearHostAdmissionStatus:
+      'schroeder-spatial-exact-near-shared-generation-selected',
+    schroederSpatialExactNearSelected: true,
+    schroederSpatialExactNearBorrowedGeneration: true,
+    schroederSpatialExactNearDirectoryOwnership:
+      'borrowed-caller-owned-canonical-generation',
+    schroederSpatialExactNearConsumerReleaseAuthority: 'generation-owner',
+    schroederSpatialExactNearGpuQueryEvidenceRequired: true,
+    schroederSpatialExactNearGpuQueryEvidenceSourceAdapterId:
+      SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    schroederSpatialExactNearGpuQueryEvidenceEnforcementStatus:
+      'shader-validates-query-tail-at-dispatch-no-host-readback',
+    schroederSpatialExactNearArenaReleaseStatus:
+      'borrowed-generation-release-owned-by-caller',
+    schroederSpatialExactNearDirectoryBuildCount: 0,
+    schroederSpatialExactNearPrivateParticleBinBuildSuppressed: true,
+    schroederSpatialExactNearPrivateParticleBinBuildCount: 0,
+    schroederSpatialExactNearFixedCandidateBuildCount: 0,
+    schroederSpatialExactNearExhaustiveParticleScanCount: 0,
+    schroederSpatialExactNearGpuFallbackObserved: null,
+    interfaceContactKinematicsParticleBinGridEnabled: false,
+    pressureInterfaceSpatialIndexStatus:
+      'pressure-interface-canonical-spatial-epoch-selected',
+    ...overrides
+  };
+}
+
 function pressureInterfaceGridForceAdmissionFixture({
   forceRowCount = 1,
   sourceHotBufferKey = 'ulg:test:pressure-interface-admitted-hot-buffer'
@@ -223,6 +283,13 @@ function pressureInterfaceGridForceAdmissionFixture({
     status: 'pressure-interface-grid-force-consumption-approved',
     gridForceApplicationApproved: true,
     publicationStatus: 'worker-retained-pressure-interface-output-admitted',
+    pressureInterfacePublication: {
+      status: 'worker-retained-pressure-interface-output-admitted',
+      committed: true,
+      sourceHotBufferKey,
+      pressureInterfaceForceRowCount: forceRowCount,
+      outputFamilies: ['pressure-interface-force-rows']
+    },
     hotBufferKey: sourceHotBufferKey,
     pressureInterfaceForceRowCount: forceRowCount,
     outputFamilies: ['pressure-interface-force-rows']
@@ -477,6 +544,190 @@ function noFullReadbackResidentStepFixture() {
   };
   return { buffers, tracker, sourceThermoBuffer, options };
 }
+
+function residentSpatialEpochTransactionFixture({
+  device,
+  tracker,
+  sphParticleUpload,
+  mlsMpmParticleUpload,
+  generationId = 83,
+  storageGeneration = 12
+}) {
+  const activeNodeBuffer = tracker.buffer(`active-node-${generationId}`);
+  const directoryBuffer = tracker.buffer(`directory-${generationId}`);
+  const evidenceBuffer = tracker.buffer(`evidence-${generationId}`);
+  evidenceBuffer.size = 80;
+  const exactNearQueryProfile = { ready: true };
+  const epochIdentity = {
+    storageGeneration,
+    physicsTick: 21,
+    physicsSubstep: 1,
+    positionEpoch: 22,
+    topologyEpoch: 9,
+    chartEpoch: 3,
+    levelEpoch: 4,
+    supportEpoch: 5
+  };
+  const generation = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    status: 'schroeder-spatial-epoch-generation-submitted',
+    selected: true,
+    ready: true,
+    directoryBuildCount: 1,
+    privateLookupBuildCount: 0,
+    source: {
+      ready: true,
+      activeNodeBuffer,
+      phaseVolumeAssignmentOverlayEnabled: false,
+      ...epochIdentity
+    },
+    execution: {
+      schema: 'peercompute.ulg.schroeder-spatial-epoch.v1',
+      status: 'schroeder-spatial-epoch-gpu-build-submitted',
+      submitPerformed: true,
+      deviceId: webGpuDeviceId(device),
+      activeNodeBuffer,
+      directoryBuffer,
+      evidenceBuffer,
+      evidenceBufferByteLength: 80,
+      sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+      exactNearQueryProfile,
+      queryGeometryEvidence: exactNearQueryProfile,
+      generationId,
+      buildOrdinal: generationId,
+      sortUniqueOrdinal: generationId,
+      deviceOrdinal: 2,
+      laneOrdinal: 3,
+      leaseToken: generationId,
+      sourceFamilyId: 4,
+      layout: { byteLength: 256 },
+      ...epochIdentity
+    }
+  };
+  return {
+    generation,
+    transaction: createSchroederSpatialEpochTransaction({
+      device,
+      generation,
+      sphParticleUpload,
+      mlsMpmParticleUpload
+    })
+  };
+}
+
+test('MLS-MPM spatial epoch transaction admits non-fused readers and quarantines nested stale reaction views', async () => {
+  const { buffers, tracker, options } = noFullReadbackResidentStepFixture();
+  const device = { queue: {}, lost: new Promise(() => {}) };
+  const { generation, transaction } = residentSpatialEpochTransactionFixture({
+    device,
+    tracker,
+    sphParticleUpload: options.sphParticleUpload,
+    mlsMpmParticleUpload: options.mlsMpmParticleUpload
+  });
+  const nestedLawQueue = { id: 'nested-x-n-law-queue' };
+  const nestedCandidates = { id: 'nested-x-n-candidates' };
+  let observedReactionArgs = null;
+
+  await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    device,
+    schroederSpatialEpochGeneration: generation,
+    schroederSpatialEpochTransaction: transaction,
+    canonicalSpatialRequired: false,
+    schroederLawQueue: null,
+    schroederLawNeighborCandidates: null,
+    thermalMaterialTable: { schema: 'test-thermal-table', materialCount: 1 },
+    thermalStepRunner(args) {
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'thermal-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: tracker.buffer('transaction-thermal-state'),
+        thermoBuffer: tracker.buffer('transaction-thermal-thermo'),
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        neighborLookupMode: 'exhaustive-particle-scan',
+        legacyPrivateSpatialBuildCount: 0,
+        legacyExhaustiveTraversalCount: 1
+      };
+    },
+    reactionTable: { schema: 'test-reaction-table', reactionCount: 1, gasProductCount: 0 },
+    reactionStepOptions: {
+      schroederLawQueue: nestedLawQueue,
+      schroederLawNeighborCandidates: nestedCandidates
+    },
+    reactionStepRunner(args) {
+      observedReactionArgs = args;
+      return {
+        schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'reaction-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer: tracker.buffer('transaction-reaction-state'),
+        thermoBuffer: tracker.buffer('transaction-reaction-thermo'),
+        mechanicsBuffer: tracker.buffer('transaction-reaction-mechanics'),
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        reactionProposalNeighborMode: 'fixed-capacity-particle-bin-grid',
+        reactionParticleBins: { enabled: true }
+      };
+    }
+  });
+
+  assert.ok(observedReactionArgs);
+  assert.equal(observedReactionArgs.schroederLawQueue, null);
+  assert.equal(observedReactionArgs.schroederLawNeighborCandidates, null);
+  const summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.state, 'readers-complete');
+  assert.deepEqual(
+    summary.admittedReaders.map(({ readerId }) => readerId),
+    ['mechanics-p2g', 'mechanics-g2p']
+  );
+  assert.equal(summary.counters.quarantinedLawQueueCount, 1);
+  assert.equal(summary.counters.quarantinedCandidateViewCount, 1);
+  assert.equal(summary.counters.staleLawInputForwardCount, 0);
+  assert.equal(summary.counters.legacyPrivateLookupBuildCount, 1);
+  assert.equal(summary.counters.legacyExhaustiveTraversalCount, 1);
+});
+
+test('MLS-MPM spatial epoch transaction records zero law lookup when laws are disabled', async () => {
+  const { tracker, options } = noFullReadbackResidentStepFixture();
+  const device = { queue: {}, lost: new Promise(() => {}) };
+  const { generation, transaction } = residentSpatialEpochTransactionFixture({
+    device,
+    tracker,
+    sphParticleUpload: options.sphParticleUpload,
+    mlsMpmParticleUpload: options.mlsMpmParticleUpload,
+    generationId: 84,
+    storageGeneration: 13
+  });
+
+  await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    device,
+    schroederSpatialEpochGeneration: generation,
+    schroederSpatialEpochTransaction: transaction,
+    canonicalSpatialRequired: false,
+    thermalMaterialTable: null,
+    reactionTable: null,
+    schroederLawQueue: null,
+    schroederLawNeighborCandidates: null
+  });
+
+  const summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.counters.readerAdmissionCount, 2);
+  assert.equal(summary.counters.quarantinedLawQueueCount, 0);
+  assert.equal(summary.counters.quarantinedCandidateViewCount, 0);
+  assert.equal(summary.counters.staleLawInputForwardCount, 0);
+  assert.equal(summary.counters.legacyPrivateLookupBuildCount, 0);
+  assert.equal(summary.counters.legacyExhaustiveTraversalCount, 0);
+});
 
 function residentProductMassHandle({
   label,
@@ -831,7 +1082,7 @@ function placementAccumulatorSequenceFixture({
     ...options,
     device,
     stepCount: 3,
-    compactSummaryMode: 'none',
+    compactSummaryMode: 'final-only',
     summaryRunner: null,
     thermalMaterialTable: {
       schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0'
@@ -852,7 +1103,10 @@ function placementAccumulatorSequenceFixture({
         productPlacementAccumulatorBuffer: args.productPlacementAccumulatorBuffer,
         readReactionProductPlacementSummary: args.readReactionProductPlacementSummary,
         reactionProductPlacementReadbackCadence: args.reactionProductPlacementReadbackCadence,
-        reactionProductPlacementSourceSummaryCount: args.reactionProductPlacementSourceSummaryCount
+        reactionProductPlacementSourceSummaryCount: args.reactionProductPlacementSourceSummaryCount,
+        readCompactReactionSummary: args.readCompactReactionSummary,
+        readReactionProductInventory: args.readReactionProductInventory,
+        readReactionAtomResidual: args.readReactionAtomResidual
       });
       if (failOnReactionCall === callNumber) {
         throw new Error(`placement accumulator fixture reaction failure ${callNumber}`);
@@ -1322,7 +1576,7 @@ test('MLS-MPM grid update optional WebGPU path forwards pressure force rows', as
   nearlyEqual(execution.pressureInterfaceAppliedImpulseNSeconds[0], 2, 1e-5);
 });
 
-test('MLS-MPM resident step routes pressure-interface force solver into grid update', async () => {
+test('MLS-MPM resident step replaces admitted render-surface rows with uniform condensed P2G stress', async () => {
   const buffers = manualBuffers({
     position: [1, 1, 1],
     velocity: [0, 0, 0],
@@ -1332,6 +1586,16 @@ test('MLS-MPM resident step routes pressure-interface force solver into grid upd
     forceApplicationStatus: 'apply-to-mls-mpm-grid',
     gridForceApplicationApproved: true
   });
+  Object.assign(pressureInterfaceForceSolver, {
+    pressureFieldMode: 'uniform-single-cell-sealed-gas',
+    localPressureGradientReady: false,
+    gasInterfaceGaugePressurePa: 100,
+    uniformGaugePressureStressEligible: true,
+    uniformGaugePressureStressPa: 100,
+    uniformGaugePressureStressRangePa: [100, 100],
+    uniformGaugePressureStressSource: 'uniform-sealed-gas-pressure'
+  });
+  buffers.sphParticleState.thermo[4] = 1;
   const pressureInterfaceGridForceAdmission = pressureInterfaceGridForceAdmissionFixture();
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
@@ -1345,26 +1609,22 @@ test('MLS-MPM resident step routes pressure-interface force solver into grid upd
   });
 
   assert.equal(step.schema, ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA);
-  assert.equal(step.gridUpdate.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
-  assert.equal(step.gridUpdate.pressureInterfaceGridForceAdmissionApproved, true);
-  assert.equal(step.gridUpdate.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
-  assert.equal(step.gridUpdate.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
-  assert.equal(step.gridUpdate.pressureInterfaceAppliedImpulseSource, 'grid-node-distributed-impulse');
-  assert.equal(step.gridUpdate.pressureInterfaceImpulseProofStatus, 'actual-grid-node-impulse');
+  assert.equal(step.gridUpdate.pressureInterfaceForceSolverSchema, null);
+  assert.equal(step.gridUpdate.pressureInterfaceGridForceAdmissionApproved, false);
+  assert.equal(step.gridUpdate.pressureInterfaceForceRowCount, 0);
   assert.equal(step.pressureInterfaceForceSolver, pressureInterfaceForceSolver);
   assert.equal(step.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
-  assert.equal(step.pressureInterfaceGridForceAdmissionApproved, true);
-  assert.equal(step.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
-  assert.equal(step.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
-  assert.equal(step.pressureInterfaceAppliedImpulseSource, 'grid-node-distributed-impulse');
-  assert.equal(step.pressureInterfaceImpulseProofStatus, 'actual-grid-node-impulse');
-  assert.equal(step.diagnostics.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
-  assert.equal(step.diagnostics.pressureInterfaceGridForceAdmissionApproved, true);
-  assert.equal(step.diagnostics.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
-  assert.equal(step.diagnostics.pressureInterfaceAppliedImpulseSource, 'grid-node-distributed-impulse');
-  assert.equal(step.diagnostics.pressureInterfaceImpulseProofStatus, 'actual-grid-node-impulse');
-  assert.equal(step.diagnostics.pressureInterfaceForceRowCount, 1);
-  nearlyEqual(step.diagnostics.pressureInterfaceAppliedImpulseNSeconds[0], 2, 1e-5);
+  assert.equal(step.pressureInterfaceGridForceAdmissionApproved, false);
+  assert.equal(step.pressureInterfaceForceApplicationStatus, 'applied-as-condensed-particle-p2g-stress');
+  assert.equal(step.uniformGaugePressureStressAdmissionApproved, true);
+  assert.equal(step.uniformGaugePressureStressPa, 100);
+  assert.equal(step.pressureInterfaceLegacySurfaceTractionSuppressed, true);
+  assert.equal(step.p2gGridProjection.externalGaugePressureEnabled, true);
+  assert.equal(step.p2gGridProjection.externalGaugePressurePa, 100);
+  assert.equal(step.diagnostics.pressureInterfaceForceApplicationStatus, 'applied-as-condensed-particle-p2g-stress');
+  assert.equal(step.diagnostics.uniformGaugePressureStressAdmissionApproved, true);
+  assert.equal(step.diagnostics.pressureInterfaceForceRowCount, 0);
+  nearlyEqual(step.diagnostics.pressureInterfaceAppliedImpulseNSeconds[0], 0, 1e-5);
 });
 
 test('MLS-MPM grid-update stage task consumes admitted pressure-interface rows with evidence', async () => {
@@ -1438,7 +1698,8 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
     7, 8, 9, 2.5,
     4, 4, 5, 6,
     0, 0.5, 1, 10,
-    11, 12, 1.5, 0
+    11, 12, 1.5, 0,
+    1.25, 410, 2.5, 1
   ]);
   const device = fakeSummaryDevice(summaryValues);
   const tracker = fakeBufferTracker();
@@ -1556,6 +1817,14 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
   assert.equal(summary.thermalReadyCount, 65);
   assert.equal(summary.thermalProblemCount, 0);
   assert.equal(summary.thermalPhaseSummaryAvailable, true);
+  assert.equal(summary.residentPhaseGasSpeciesSummary.status, 'resident-phase-gas-species-summary-ready');
+  assert.deepEqual(summary.residentPhaseGasSpeciesSummary.bySpecies.h2o, {
+    material: 'h2o',
+    massKg: 1.25,
+    temperatureK: 410,
+    phaseWeight: 2.5,
+    status: 'resident-phase-gas-species-ready'
+  });
   assert.deepEqual(device.dispatches.map((entry) => entry.count), [5, 1]);
   assert.equal(device.bindGroups.length, 2);
   assert.equal(device.bindGroups[0].entries.length, 8);
@@ -1841,14 +2110,27 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
   const sourceStateBuffer = tracker.buffer('source-state');
   const sourceThermoBuffer = tracker.buffer('source-thermo');
   const sourceMechanicsBuffer = tracker.buffer('source-mechanics');
+  let identityDestroyCount = 0;
+  const sourceIdentityBuffer = {
+    label: 'source-identity',
+    destroy() {
+      identityDestroyCount += 1;
+    }
+  };
+  const sourceSphUpload = {
+    status: 'webgpu-uploaded',
+    stateBuffer: sourceStateBuffer,
+    thermoBuffer: sourceThermoBuffer,
+    identityBuffer: sourceIdentityBuffer,
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+    identityBufferByteLength: buffers.sphParticleState.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    ownsIdentityBuffer: true,
+    slot: 0
+  };
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
-    sphParticleUpload: {
-      status: 'webgpu-uploaded',
-      stateBuffer: sourceStateBuffer,
-      thermoBuffer: sourceThermoBuffer,
-      slot: 0
-    },
+    sphParticleUpload: sourceSphUpload,
     mlsMpmParticleUpload: {
       status: 'webgpu-uploaded',
       mechanicsBuffer: sourceMechanicsBuffer,
@@ -1926,14 +2208,329 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
   assert.equal(step.nextParticleUploads.sphParticleUpload.ownsStateBuffer, true);
   assert.equal(step.nextParticleUploads.sphParticleUpload.ownsThermoBuffer, false);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.identityBuffer, sourceIdentityBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.ownsIdentityBuffer, true);
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.identityOwnership,
+    'owned-source-to-continuation-transfer'
+  );
+  assert.equal(sourceSphUpload.ownsIdentityBuffer, false);
+  assert.equal(sourceSphUpload.identityOwnership, 'transferred-to-next-resident-continuation');
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.slot, 1);
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.ownsMechanicsBuffer, true);
+  const nextParticleDevice = step.nextParticleUploads.sphParticleUpload
+    .stateBuffer.__peercomputeUlgWebGpuDevice;
+  assert.ok(nextParticleDevice);
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.thermoBuffer.__peercomputeUlgWebGpuDevice,
+    nextParticleDevice
+  );
+  assert.equal(
+    step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.__peercomputeUlgWebGpuDevice,
+    nextParticleDevice
+  );
   assert.equal(step.diagnostics.activeGridNodeCount > 0, true);
   assert.equal(step.diagnostics.sourceMomentumKgMPerS[0], 16);
   assert.equal(Number.isFinite(step.diagnostics.maxSpeedMPerS), true);
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 4);
+  assert.equal(identityDestroyCount, 1);
+});
+
+test('MLS-MPM resident step cleanup destroys locally retained hierarchy render buffers', () => {
+  const destroyCounts = { activeNode: 0, aggregateNode: 0 };
+  const activeNodeBuffer = {
+    label: 'locally-retained-active-node-buffer',
+    destroy() {
+      destroyCounts.activeNode += 1;
+    }
+  };
+  const aggregateNodeBuffer = {
+    label: 'locally-retained-hierarchy-aggregate-node-buffer',
+    destroy() {
+      destroyCounts.aggregateNode += 1;
+    }
+  };
+  let resolverDestroyCalls = 0;
+  const localRetainedRenderBuffers = {
+    schema: 'peercompute.ulg.schroeder-local-retained-render-buffer-resolver.v0',
+    buffers: [
+      { buffer: activeNodeBuffer },
+      { gpuBuffer: aggregateNodeBuffer }
+    ],
+    destroyRetainedBuffers() {
+      resolverDestroyCalls += 1;
+      activeNodeBuffer.destroy();
+      aggregateNodeBuffer.destroy();
+      return true;
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers({ localRetainedRenderBuffers });
+
+  assert.equal(resolverDestroyCalls, 1);
+  assert.deepEqual(destroyCounts, { activeNode: 1, aggregateNode: 1 });
+});
+
+test('MLS-MPM resident cleanup retires continuation buffers before finalizing after an earlier destroyer throws', async () => {
+  const buffers = {
+    particleStateBuffer: { label: 'continued-state', destroyCount: 0, destroy() { this.destroyCount += 1; } },
+    particleThermoBuffer: { label: 'continued-thermo', destroyCount: 0, destroy() { this.destroyCount += 1; } },
+    particleMechanicsBuffer: { label: 'continued-mechanics', destroyCount: 0, destroy() { this.destroyCount += 1; } },
+    particleIdentityBuffer: { label: 'continued-identity', destroyCount: 0, destroy() { this.destroyCount += 1; } }
+  };
+  const ledger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'resident-throwing-cleanup-continuation'
+  });
+  registerSchroederHierarchyArtifactFamily(ledger, {
+    family: 'particle-storage-compaction',
+    artifact: buffers
+  });
+  transferSchroederHierarchyArtifactFamily(ledger, 'particle-storage-compaction', {
+    roles: ['particle-state', 'particle-thermo', 'particle-mechanics', 'particle-identity'],
+    transferClass: 'continuation',
+    retirementAuthority: 'external-owner'
+  });
+  await scheduleSchroederHierarchyArtifactRetirement(ledger, {
+    after: Promise.resolve()
+  });
+  const step = {
+    schroederHierarchyArtifactLedger: ledger,
+    nextParticleUploads: {
+      sphParticleUpload: {
+        stateBuffer: buffers.particleStateBuffer,
+        thermoBuffer: buffers.particleThermoBuffer,
+        identityBuffer: buffers.particleIdentityBuffer
+      },
+      mlsMpmParticleUpload: {
+        mechanicsBuffer: buffers.particleMechanicsBuffer
+      }
+    },
+    localRetainedRenderBuffers: {
+      buffers: [{ buffer: { label: 'throwing-render-buffer' } }],
+      destroyRetainedBuffers() {
+        throw new Error('intentional render cleanup failure');
+      }
+    },
+    releaseSchroederHierarchyArtifactTransfers(options) {
+      return releaseSchroederHierarchyArtifactTransfers(ledger, options);
+    }
+  };
+
+  assert.throws(
+    () => destroyMlsMpmResidentStepBuffers(step),
+    /intentional render cleanup failure/
+  );
+  assert.deepEqual(
+    Object.values(buffers).map((buffer) => buffer.destroyCount),
+    [1, 1, 1, 1]
+  );
+  const summary = summarizeSchroederHierarchyArtifactLedger(ledger);
+  assert.equal(summary.pendingTransferCount, 0);
+  assert.equal(summary.unretiredOwnedResourceCount, 0);
+  assert.ok(Object.values(summary.resources).every((resource) => resource.externallyOwned));
+});
+
+test('MLS-MPM resident cleanup finalizes successful continuation siblings once and keeps a failed destroy active', async () => {
+  const buffers = {
+    particleStateBuffer: {
+      label: 'failed-continued-state',
+      destroyCount: 0,
+      destroy() {
+        this.destroyCount += 1;
+        throw new Error('intentional continuation destroy failure');
+      }
+    },
+    particleThermoBuffer: {
+      label: 'continued-thermo-after-failure',
+      destroyCount: 0,
+      destroy() { this.destroyCount += 1; }
+    },
+    particleMechanicsBuffer: {
+      label: 'continued-mechanics-after-failure',
+      destroyCount: 0,
+      destroy() { this.destroyCount += 1; }
+    },
+    particleIdentityBuffer: {
+      label: 'continued-identity-after-failure',
+      destroyCount: 0,
+      destroy() { this.destroyCount += 1; }
+    }
+  };
+  const ledger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'resident-partial-failure-cleanup-continuation'
+  });
+  registerSchroederHierarchyArtifactFamily(ledger, {
+    family: 'particle-storage-compaction',
+    artifact: buffers
+  });
+  transferSchroederHierarchyArtifactFamily(ledger, 'particle-storage-compaction', {
+    roles: ['particle-state', 'particle-thermo', 'particle-mechanics', 'particle-identity'],
+    transferClass: 'continuation',
+    retirementAuthority: 'external-owner'
+  });
+  await scheduleSchroederHierarchyArtifactRetirement(ledger, {
+    after: Promise.resolve()
+  });
+  const step = {
+    schroederHierarchyArtifactLedger: ledger,
+    nextParticleUploads: {
+      sphParticleUpload: {
+        stateBuffer: buffers.particleStateBuffer,
+        thermoBuffer: buffers.particleThermoBuffer,
+        identityBuffer: buffers.particleIdentityBuffer
+      },
+      mlsMpmParticleUpload: {
+        mechanicsBuffer: buffers.particleMechanicsBuffer
+      }
+    },
+    localRetainedRenderBuffers: {
+      buffers: [{ buffer: { label: 'throwing-render-buffer-before-partial-failure' } }],
+      destroyRetainedBuffers() {
+        throw new Error('intentional early render cleanup failure');
+      }
+    },
+    releaseSchroederHierarchyArtifactTransfers(options) {
+      return releaseSchroederHierarchyArtifactTransfers(ledger, options);
+    }
+  };
+
+  assert.throws(
+    () => destroyMlsMpmResidentStepBuffers(step),
+    /intentional early render cleanup failure/
+  );
+  assert.deepEqual(
+    Object.values(buffers).map((buffer) => buffer.destroyCount),
+    [1, 1, 1, 1]
+  );
+  const summary = summarizeSchroederHierarchyArtifactLedger(ledger);
+  assert.equal(summary.pendingTransferCount, 1);
+  assert.equal(summary.unretiredOwnedResourceCount, 1);
+  assert.equal(
+    summary.resources['particle-storage-compaction:particle-state'].transfer.status,
+    'active'
+  );
+  assert.equal(
+    summary.resources['particle-storage-compaction:particle-state'].externallyOwned,
+    false
+  );
+  for (const role of ['particle-thermo', 'particle-mechanics', 'particle-identity']) {
+    const resource = summary.resources[`particle-storage-compaction:${role}`];
+    assert.equal(resource.transfer.status, 'ownership-transferred');
+    assert.equal(resource.externallyOwned, true);
+  }
+});
+
+test('MLS-MPM resident cleanup never destroys ledger-classified borrowed materialization buffers', () => {
+  const tracker = fakeBufferTracker();
+  const materialization = {
+    particleStateBuffer: tracker.buffer('borrowed-materialized-state'),
+    particleThermoBuffer: tracker.buffer('borrowed-materialized-thermo'),
+    particleMechanicsBuffer: tracker.buffer('borrowed-materialized-mechanics'),
+    particleIdentityBuffer: tracker.buffer('borrowed-materialized-identity'),
+    materializationBuffer: tracker.buffer('borrowed-materialization-rows')
+  };
+  const ledger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'resident-borrowed-materialization-cleanup'
+  });
+  registerSchroederHierarchyArtifactFamily(ledger, {
+    family: 'particle-storage-materialization',
+    artifact: materialization,
+    owned: false
+  });
+
+  destroyMlsMpmResidentStepBuffers({
+    schroederHierarchyArtifactLedger: ledger,
+    schroederParticleStorageMaterialization: materialization
+  });
+
+  const summary = summarizeSchroederHierarchyArtifactLedger(ledger);
+  assert.equal(tracker.destroyed, 0);
+  assert.equal(summary.borrowedResourceCount, 5);
+  assert.equal(summary.destroyedResourceCount, 0);
+});
+
+test('MLS-MPM resident step cleanup releases unpreserved hierarchy render families independently', () => {
+  const activeNodeBuffer = { label: 'preserved-active-node-buffer' };
+  const aggregateNodeBuffer = { label: 'retired-aggregate-node-buffer' };
+  const releasedFamilies = [];
+  const localRetainedRenderBuffers = {
+    schema: 'peercompute.ulg.schroeder-local-retained-render-buffer-resolver.v0',
+    scopedFamilyRelease: true,
+    buffers: [
+      { family: 'schroeder-active-node-list', buffer: activeNodeBuffer },
+      { family: 'schroeder-hierarchy-aggregate-node', gpuBuffer: aggregateNodeBuffer }
+    ],
+    destroyRetainedBuffers({ families = [] } = {}) {
+      releasedFamilies.push(...families);
+      return true;
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers(
+    { localRetainedRenderBuffers },
+    { preserveBuffers: [activeNodeBuffer] }
+  );
+
+  assert.deepEqual(releasedFamilies, ['schroeder-hierarchy-aggregate-node']);
+});
+
+test('MLS-MPM resident step cleanup preserves a live level overlay until its consumer releases it', () => {
+  const levelUpdateBuffer = { label: 'next-tick-level-update' };
+  const transferReleases = [];
+  const createStep = () => ({
+    schroederPhaseVolumeNextTickAssignmentOverlay: { levelUpdateBuffer },
+    releaseSchroederHierarchyArtifactTransfers(options) {
+      transferReleases.push(options);
+    }
+  });
+
+  destroyMlsMpmResidentStepBuffers(createStep(), {
+    preserveBuffers: [levelUpdateBuffer]
+  });
+  assert.equal(
+    transferReleases.some((release) => release.families === 'phase-volume-level-update'),
+    false
+  );
+
+  destroyMlsMpmResidentStepBuffers(createStep());
+  const overlayReleases = transferReleases.filter(
+    (release) => release.families === 'phase-volume-level-update'
+  );
+  assert.equal(overlayReleases.length, 1);
+  assert.equal(overlayReleases[0].transferClass, 'next-tick');
+  assert.equal(overlayReleases[0].submitted, true);
+});
+
+test('MLS-MPM resident step cleanup releases intermediate gas but preserves a published gas owner', () => {
+  const gasPressureCellsBuffer = { label: 'next-tick-gas-pressure-cells' };
+  const transferReleases = [];
+  const createStep = () => ({
+    schroederFarAggregateGasCellImport: {
+      gasPressureCellsBuffer,
+      pressureInterfaceGasPressureCellsBuffer: gasPressureCellsBuffer
+    },
+    releaseSchroederHierarchyArtifactTransfers(options) {
+      transferReleases.push(options);
+    }
+  });
+
+  destroyMlsMpmResidentStepBuffers(createStep(), {
+    preserveBuffers: [gasPressureCellsBuffer]
+  });
+  assert.equal(
+    transferReleases.some((release) => release.families === 'far-aggregate-gas-cell-import'),
+    false
+  );
+
+  destroyMlsMpmResidentStepBuffers(createStep());
+  const gasReleases = transferReleases.filter(
+    (release) => release.families === 'far-aggregate-gas-cell-import'
+  );
+  assert.equal(gasReleases.length, 1);
+  assert.equal(gasReleases[0].transferClass, 'next-tick');
+  assert.equal(gasReleases[0].submitted, true);
 });
 
 test('MLS-MPM resident step cleanup preserves continuation buffers requested by the next owner', async () => {
@@ -2399,6 +2996,68 @@ test('MLS-MPM resident step adopts admitted Schroeder materialized particle stor
   assert.equal(tracker.destroyed, 8);
 });
 
+test('MLS-MPM resident step keeps no-full mode when optional Schroeder materialization is admission-blocked', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const schroederParticleStorageMaterialization = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+    backend: 'webgpu',
+    status: 'schroeder-particle-storage-materialization-blocked-admission-required',
+    readbackMode: 'no-full-readback',
+    fullReadbackPerformed: false,
+    fullParticleReadbackPerformed: false,
+    normalHotLoopReadbackFree: true,
+    particleStorageMaterializationAdmissionApproved: false,
+    retainedParticleBuffers: false,
+    retainedMaterializationBuffer: false,
+    stateMutationRequired: false,
+    stateMutationStatus: 'blocked-particle-storage-materialization-admission-required'
+  };
+
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    schroederParticleStorageMaterialization
+  });
+
+  assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.normalHotLoopReadbackFree, true);
+  assert.deepEqual(step.readbackDowngradeReasons, []);
+  assert.equal(step.schroederParticleStorageAdopted, false);
+  assert.equal(step.nextParticleBufferMode, 'retained-g2p-output-buffers');
+  destroyMlsMpmResidentStepBuffers(step);
+});
+
+test('MLS-MPM resident step strictly downgrades admitted Schroeder materialization with missing outputs', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const schroederParticleStorageMaterialization = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+    backend: 'webgpu',
+    status: 'schroeder-particle-storage-materialization-submitted',
+    readbackMode: 'no-full-readback',
+    fullReadbackPerformed: false,
+    fullParticleReadbackPerformed: false,
+    normalHotLoopReadbackFree: true,
+    particleStorageMaterializationAdmissionApproved: true,
+    retainedParticleBuffers: false,
+    retainedMaterializationBuffer: false,
+    stateMutationRequired: true,
+    stateMutationStatus: 'particle-storage-materialization-buffer-submitted'
+  };
+
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    schroederParticleStorageMaterialization
+  });
+
+  assert.equal(step.readbackMode, 'full-parity-readback');
+  assert.equal(step.normalHotLoopReadbackFree, false);
+  assert.deepEqual(step.readbackDowngradeReasons, [
+    'schroeder-particle-storage-not-adopted'
+  ]);
+  assert.equal(step.schroederParticleStorageAdopted, false);
+  assert.equal(step.nextParticleBufferMode, 'retained-g2p-output-buffers');
+  destroyMlsMpmResidentStepBuffers(step);
+});
+
 test('MLS-MPM resident step carries admitted Schroeder gas state deltas as retained pressure descriptors', async () => {
   const { buffers, tracker, sourceThermoBuffer, options } = noFullReadbackResidentStepFixture();
   const gasStateDeltaBuffer = tracker.buffer('schroeder-gas-state-delta');
@@ -2678,6 +3337,7 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.deepEqual(step.stageTiming.dispatchTopology.particleParallelStages, ['p2g', 'g2p']);
   assert.equal(step.stageTiming.dispatchTopology.cpuParticleLoopInHotPath, false);
   assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 4);
+  assert.equal(step.stageTiming.dispatchTopology.g2pAuthorityFinalize.enabled, false);
   assert.equal(step.p2gGridProjection.dispatchTopology.topology, 'particle-parallel-scatter');
   assert.equal(step.p2gGridProjection.residentDispatchTopology, step.stageTiming.dispatchTopology);
   assert.equal(step.diagnostics.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
@@ -2701,45 +3361,100 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(device.dispatches.length, 4);
 });
 
-test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder active nodes', async () => {
-  const buffers = manualBuffers();
+test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G2P', async () => {
+  const buffers = manualBuffers({ particleCount: 2 });
   const tracker = fakeBufferTracker();
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
   const sourceThermoBuffer = tracker.buffer('source-thermo');
   const schroederAssignmentBuffer = tracker.buffer('retained-schroeder-assignment');
-  const schroederActiveNodeBuffer = tracker.buffer('retained-schroeder-active-nodes');
+  const schroederSpatialDirectoryBuffer = tracker.buffer('retained-schroeder-spatial-directory');
+  const schroederSpatialEvidenceBuffer = tracker.buffer('retained-schroeder-spatial-evidence');
+  const schroederActiveNodeBuffer = tracker.buffer('retained-schroeder-active-node');
+  const sourceStateBuffer = tracker.buffer('source-state');
+  const sourceMechanicsBuffer = tracker.buffer('source-mechanics');
+  schroederSpatialEvidenceBuffer.size = 80;
+  const exactNearQueryProfile = { ready: true };
+  const epochIdentity = {
+    storageGeneration: 23,
+    positionEpoch: 29,
+    topologyEpoch: 31,
+    physicsTick: 53,
+    physicsSubstep: 59,
+    chartEpoch: 61,
+    levelEpoch: 67,
+    supportEpoch: 71
+  };
+  const schroederSpatialEpochGeneration = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    selected: true,
+    ready: true,
+    directoryBuildCount: 1,
+    privateLookupBuildCount: 0,
+    source: {
+      ready: true,
+      activeNodeBuffer: schroederActiveNodeBuffer,
+      phaseVolumeAssignmentOverlayEnabled: false,
+      ...epochIdentity
+    },
+    execution: {
+      schema: 'peercompute.ulg.schroeder-spatial-epoch.v1',
+      submitPerformed: true,
+      deviceId: webGpuDeviceId(device),
+      activeNodeBuffer: schroederActiveNodeBuffer,
+      directoryBuffer: schroederSpatialDirectoryBuffer,
+      evidenceBuffer: schroederSpatialEvidenceBuffer,
+      evidenceBufferByteLength: 80,
+      sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+      exactNearQueryProfile,
+      queryGeometryEvidence: exactNearQueryProfile,
+      generationId: 17,
+      buildOrdinal: 17,
+      sortUniqueOrdinal: 17,
+      ...epochIdentity,
+      deviceOrdinal: 37,
+      laneOrdinal: 41,
+      leaseToken: 43,
+      sourceFamilyId: 47,
+      layout: { byteLength: 256 }
+    }
+  };
+  const sphParticleUpload = {
+    status: 'webgpu-uploaded',
+    stateBuffer: sourceStateBuffer,
+    thermoBuffer: sourceThermoBuffer,
+    slot: 0
+  };
+  const mlsMpmParticleUpload = {
+    status: 'webgpu-uploaded',
+    mechanicsBuffer: sourceMechanicsBuffer,
+    slot: 0
+  };
+  const schroederSpatialEpochTransaction =
+    createSchroederSpatialEpochTransaction({
+      device,
+      generation: schroederSpatialEpochGeneration,
+      sphParticleUpload,
+      mlsMpmParticleUpload
+    });
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
-    sphParticleUpload: {
-      status: 'webgpu-uploaded',
-      stateBuffer: tracker.buffer('source-state'),
-      thermoBuffer: sourceThermoBuffer,
-      slot: 0
-    },
-    mlsMpmParticleUpload: {
-      status: 'webgpu-uploaded',
-      mechanicsBuffer: tracker.buffer('source-mechanics'),
-      slot: 0
-    },
+    sphParticleUpload,
+    mlsMpmParticleUpload,
     schroederLevelAssignment: {
       schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
       status: 'schroeder-level-assignment-submitted',
       particleCount: buffers.sphParticleState.particleCount,
-      assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+      // Deliberately contradictory legacy metadata: canonical mode must not
+      // inspect or bind it.
+      assignmentStrideFloats: 0,
       assignmentBuffer: schroederAssignmentBuffer,
       assignmentBufferByteLength: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
       retainedAssignmentBuffer: true
     },
     schroederSelectedLevel: 2,
-    schroederActiveNodeList: {
-      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
-      status: 'schroeder-active-node-list-submitted',
-      particleCount: buffers.sphParticleState.particleCount,
-      activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length,
-      activeNodeBuffer: schroederActiveNodeBuffer,
-      activeNodeBufferByteLength: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
-      retainedActiveNodeBuffer: true
-    },
+    schroederSpatialEpochGeneration,
+    schroederSpatialEpochTransaction,
+    canonicalSpatialRequired: true,
     preferWebGpu: true,
     device,
     boxDimsM: [3, 3, 3],
@@ -2806,30 +3521,90 @@ test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder act
   });
 
   assert.equal(step.stageTiming.fusedResidentMechanics, true);
+  const transactionSummary = summarizeSchroederSpatialEpochTransaction(
+    schroederSpatialEpochTransaction
+  );
+  assert.equal(transactionSummary.state, 'readers-complete');
+  assert.deepEqual(
+    transactionSummary.admittedReaders.map(({ readerId }) => readerId),
+    ['mechanics-p2g', 'mechanics-g2p']
+  );
+  assert.equal(transactionSummary.counters.readerAdmissionCount, 2);
+  assert.equal(transactionSummary.counters.staleReaderRejectCount, 0);
   assert.equal(step.stageTiming.stageMs.p2gGridProjection, 0);
+  assert.equal(step.stageTiming.dispatchTopology.canonicalSpatialAuthority, true);
+  assert.deepEqual(
+    step.stageTiming.dispatchTopology.particleParallelStages,
+    ['p2g', 'g2p']
+  );
+  assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 4);
+  assert.equal(step.stageTiming.dispatchTopology.g2pAuthorityFinalize.enabled, false);
+  assert.equal(
+    step.stageTiming.dispatchTopology.g2pAuthorityFinalize.foldedIntoStage,
+    'particleSeparationBinFill'
+  );
+  assert.equal(
+    step.stageTiming.dispatchTopology.g2pAuthorityFinalize.rejectionPolicy,
+    'global-copy-through-in-ordered-separation-bin-fill'
+  );
+  assert.equal(
+    step.stageTiming.dispatchTopology.canonicalAuthorityRestoreStage,
+    'particleSeparationBinFill'
+  );
   assert.equal(step.p2gGridProjection.fusedResidentMechanics, true);
   assert.equal(step.p2gGridProjection.schroederLevelFilterEnabled, true);
   assert.equal(step.p2gGridProjection.schroederSelectedLevel, 2);
   assert.equal(step.p2gGridProjection.schroederLevelFilter.assignmentStrideFloats, SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
-  assert.equal(step.p2gGridProjection.schroederLevelFilter.retainedAssignmentBuffer, true);
-  assert.equal(step.p2gGridProjection.schroederLevelFilter.assignmentBufferSource, 'retained-schroeder-level-assignment-buffer');
-  assert.equal(step.p2gGridProjection.schroederActiveNodeFilterEnabled, true);
-  assert.equal(step.p2gGridProjection.schroederActiveNodeFilter.activeNodeStrideFloats, SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
-  assert.equal(step.p2gGridProjection.schroederActiveNodeFilter.retainedActiveNodeBuffer, true);
-  assert.equal(step.p2gGridProjection.schroederActiveNodeFilter.activeNodeBufferSource, 'retained-schroeder-active-node-buffer');
-  assert.equal(step.g2pReconstruction.schroederActiveNodeFilterEnabled, true);
-  assert.equal(step.g2pReconstruction.schroederActiveNodeFilter.activeNodeStrideFloats, SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  assert.equal(step.p2gGridProjection.schroederLevelFilter.retainedAssignmentBuffer, false);
+  assert.equal(step.p2gGridProjection.schroederLevelFilter.assignmentBufferSource, null);
+  assert.equal(step.p2gGridProjection.schroederSpatialAuthorityMode, 'canonical-spatial-epoch');
+  assert.equal(step.p2gGridProjection.schroederOldLevelAssignmentLookupRemoved, true);
+  assert.equal(step.p2gGridProjection.schroederSpatialDirectoryEnabled, true);
+  assert.equal(step.p2gGridProjection.schroederSpatialDirectoryFallbackScope, 'host-binding-only');
+  assert.equal(step.p2gGridProjection.schroederSpatialHostBindingAdmitted, true);
+  assert.equal(step.p2gGridProjection.schroederSpatialHostBindingFallback, false);
+  assert.equal(step.p2gGridProjection.schroederSpatialGpuAdmissionObserved, false);
+  assert.equal(
+    step.p2gGridProjection.schroederSpatialGpuAdmissionStatus,
+    'shader-validates-at-dispatch-no-host-readback'
+  );
+  assert.equal(step.p2gGridProjection.schroederSpatialGpuFallbackObserved, null);
+  assert.equal(step.p2gGridProjection.schroederSpatialDirectory.generationId, 17);
+  assert.equal(step.p2gGridProjection.schroederSpatialDirectory.storageGeneration, 23);
+  assert.equal(step.p2gGridProjection.schroederSpatialDirectory.retainedDirectoryBuffer, true);
+  assert.equal(step.p2gGridProjection.schroederSpatialDirectory.directoryBufferSource, 'retained-schroeder-spatial-directory');
+  assert.equal(step.p2gGridProjection.schroederActiveNodeFilterEnabled, false);
+  assert.equal(step.g2pReconstruction.schroederSpatialDirectoryEnabled, true);
+  assert.equal(step.g2pReconstruction.schroederLevelFilterEnabled, true);
+  assert.equal(step.g2pReconstruction.schroederSpatialAuthorityMode, 'canonical-spatial-epoch');
+  assert.equal(step.g2pReconstruction.schroederOldLevelAssignmentLookupRemoved, true);
   const p2gParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-p2g-params');
   assert.ok(p2gParamWrite);
+  assert.equal(p2gParamWrite.byteLength, 144);
   const p2gParams = new DataView(p2gParamWrite.data);
   assert.equal(p2gParams.getUint32(44, true), 1);
   assert.equal(p2gParams.getInt32(48, true), 2);
   assert.equal(p2gParams.getUint32(52, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
   assert.equal(p2gParams.getUint32(56, true), 1);
-  assert.equal(p2gParams.getUint32(60, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  assert.equal(p2gParams.getUint32(60, true), 23);
   assert.equal(p2gParams.getFloat32(68, true), 101325);
+  assert.equal(p2gParams.getUint32(80, true), 29);
+  assert.equal(p2gParams.getUint32(84, true), 31);
+  assert.equal(p2gParams.getUint32(88, true), 1);
+  assert.equal(p2gParams.getUint32(92, true), 17);
+  assert.equal(p2gParams.getUint32(96, true), 37);
+  assert.equal(p2gParams.getUint32(100, true), 41);
+  assert.equal(p2gParams.getUint32(104, true), 43);
+  assert.equal(p2gParams.getUint32(108, true), 47);
+  assert.equal(p2gParams.getUint32(112, true), 53);
+  assert.equal(p2gParams.getUint32(116, true), 59);
+  assert.equal(p2gParams.getUint32(120, true), 61);
+  assert.equal(p2gParams.getUint32(124, true), 67);
+  assert.equal(p2gParams.getUint32(128, true), 71);
+  assert.equal(p2gParams.getUint32(132, true), 0);
   const g2pParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-g2p-params');
   assert.ok(g2pParamWrite);
+  assert.equal(g2pParamWrite.byteLength, 144);
   const g2pParams = new DataView(g2pParamWrite.data);
   assert.equal(g2pParams.getUint32(24, true), 1);
   assert.equal(g2pParams.getInt32(28, true), 2);
@@ -2837,31 +3612,343 @@ test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder act
   // the compacted active-node list must never gate particles.
   assert.equal(g2pParams.getUint32(68, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
   assert.equal(g2pParams.getUint32(72, true), 1);
-  const p2gSchroederBindGroups = device.bindGroups.filter((group) => {
+  assert.equal(g2pParams.getUint32(76, true), 1);
+  assert.equal(g2pParams.getUint32(80, true), 23);
+  assert.equal(g2pParams.getUint32(84, true), 29);
+  assert.equal(g2pParams.getUint32(88, true), 31);
+  assert.equal(g2pParams.getUint32(92, true), 1);
+  assert.equal(g2pParams.getUint32(96, true), 17);
+  assert.equal(g2pParams.getUint32(100, true), 37);
+  assert.equal(g2pParams.getUint32(104, true), 41);
+  assert.equal(g2pParams.getUint32(108, true), 43);
+  assert.equal(g2pParams.getUint32(112, true), 47);
+  assert.equal(g2pParams.getUint32(116, true), 53);
+  assert.equal(g2pParams.getUint32(120, true), 59);
+  assert.equal(g2pParams.getUint32(124, true), 61);
+  assert.equal(g2pParams.getUint32(128, true), 67);
+  assert.equal(g2pParams.getUint32(132, true), 71);
+  assert.equal(g2pParams.getUint32(136, true), 0);
+  const canonicalSchroederBindGroups = device.bindGroups.filter((group) => {
     return group.entries.some((entry) => entry.binding === 8);
   });
-  assert.equal(p2gSchroederBindGroups.length, 2);
-  assert.ok(p2gSchroederBindGroups.every((group) => {
-    return group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederAssignmentBuffer;
+  assert.equal(canonicalSchroederBindGroups.length, 4);
+  assert.ok(canonicalSchroederBindGroups.every((group) => {
+    return group.entries.find((entry) => entry.binding === 7)?.resource?.buffer
+      === schroederSpatialEvidenceBuffer;
   }));
-  assert.ok(p2gSchroederBindGroups.every((group) => {
-    return group.entries.find((entry) => entry.binding === 8)?.resource?.buffer === schroederActiveNodeBuffer;
+  assert.ok(canonicalSchroederBindGroups.every((group) => {
+    return group.entries.find((entry) => entry.binding === 8)?.resource?.buffer === schroederSpatialDirectoryBuffer;
   }));
   const g2pSchroederBindGroups = device.bindGroups.filter((group) => {
-    return group.entries.length === 8
-      && group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederAssignmentBuffer
-      && !group.entries.some((entry) => entry.binding === 8);
+    return group.entries.find((entry) => entry.binding === 4)?.resource?.buffer?.label
+      === 'ulg-mls-mpm-fused-g2p-state-out';
   });
-  assert.equal(g2pSchroederBindGroups.length, 1);
+  assert.equal(g2pSchroederBindGroups.length, 2);
+  const canonicalG2pFinalizeDispatch = device.dispatches.find((dispatch) => (
+    dispatch.pipeline?.compute?.entryPoint === 'finalize_canonical_spatial_authority'
+  ));
+  assert.equal(canonicalG2pFinalizeDispatch, undefined);
+  const canonicalSeparationBinFillDispatch = device.dispatches.find((dispatch) => (
+    /authority_restore_state[\s\S]*authority_restore_mechanics/.test(
+      dispatch.pipeline?.compute?.module?.code || ''
+    )
+  ));
+  assert.ok(canonicalSeparationBinFillDispatch);
+  assert.match(
+    canonicalSeparationBinFillDispatch.pipeline.compute.module.code,
+    /authority_restore_state[\s\S]*authority_restore_mechanics[\s\S]*separation_mechanics_spatial_authority_rejected/
+  );
+  assert.equal(
+    device.bindGroups.some((group) => group.entries.some((entry) => (
+      entry.resource?.buffer === schroederAssignmentBuffer
+    ))),
+    false
+  );
+  assert.ok(device.clears.some((clear) => (
+    clear.buffer === schroederSpatialEvidenceBuffer
+    && clear.offset === 16
+    && clear.size === 64
+  )));
   assert.equal(
     device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-fused-empty-schroeder-level-assignments'),
     false
   );
   assert.equal(
-    device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-fused-empty-schroeder-active-nodes'),
+    device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-fused-empty-schroeder-spatial-directory'),
     false
   );
-  assert.equal(device.dispatches.length, 4);
+  assert.equal(device.dispatches.length, 7);
+  assert.notEqual(schroederSpatialEvidenceBuffer.destroyed, true);
+});
+
+test('MLS-MPM canonical fused cleanup retires separation scratch after evidence readback failure', async () => {
+  const buffers = manualBuffers({ smoothingLengthM: 0.5 });
+  const stateStrideFloats = buffers.sphParticleState.state.length;
+  const duplicateRows = (source) => {
+    const values = new Float32Array(source.length * 2);
+    values.set(source, 0);
+    values.set(source, source.length);
+    return values;
+  };
+  buffers.sphParticleState.particleCount = 2;
+  buffers.sphParticleState.state = duplicateRows(buffers.sphParticleState.state);
+  buffers.sphParticleState.state[stateStrideFloats] += 0.1;
+  buffers.sphParticleState.thermo = duplicateRows(buffers.sphParticleState.thermo);
+  buffers.mlsMpmParticleState.particleCount = 2;
+  buffers.mlsMpmParticleState.mechanics = duplicateRows(
+    buffers.mlsMpmParticleState.mechanics
+  );
+
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor) => {
+    const buffer = createBuffer(descriptor);
+    if (descriptor.label === 'ulg-mls-mpm-fused-canonical-spatial-authority-evidence-readback') {
+      buffer.mapAsync = async () => {
+        throw new Error('synthetic canonical evidence map failure');
+      };
+    }
+    return buffer;
+  };
+  const directoryBuffer = tracker.buffer('retained-schroeder-spatial-directory');
+  const evidenceBuffer = tracker.buffer('retained-schroeder-spatial-evidence');
+  evidenceBuffer.size = 80;
+  const exactNearQueryProfile = { ready: true };
+  const generation = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    selected: true,
+    ready: true,
+    source: { phaseVolumeAssignmentOverlayEnabled: false },
+    execution: {
+      schema: 'peercompute.ulg.schroeder-spatial-epoch.v1',
+      submitPerformed: true,
+      directoryBuffer,
+      evidenceBuffer,
+      evidenceBufferByteLength: 80,
+      sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+      exactNearQueryProfile,
+      queryGeometryEvidence: exactNearQueryProfile,
+      generationId: 17,
+      storageGeneration: 23,
+      positionEpoch: 29,
+      topologyEpoch: 31,
+      deviceOrdinal: 37,
+      laneOrdinal: 41,
+      leaseToken: 43,
+      sourceFamilyId: 47,
+      physicsTick: 53,
+      physicsSubstep: 59,
+      chartEpoch: 61,
+      levelEpoch: 67,
+      supportEpoch: 71,
+      layout: { byteLength: 256 }
+    }
+  };
+
+  await assert.rejects(
+    () => runMlsMpmResidentStepWithOptionalWebGpu({
+      ...buffers,
+      sphParticleUpload: {
+        status: 'webgpu-uploaded',
+        stateBuffer: tracker.buffer('source-state'),
+        thermoBuffer: tracker.buffer('source-thermo'),
+        slot: 0
+      },
+      mlsMpmParticleUpload: {
+        status: 'webgpu-uploaded',
+        mechanicsBuffer: tracker.buffer('source-mechanics'),
+        slot: 0
+      },
+      schroederSelectedLevel: 2,
+      schroederSpatialEpochGeneration: generation,
+      canonicalSpatialRequired: true,
+      observeCanonicalSpatialAuthority: true,
+      preferWebGpu: true,
+      device,
+      boxDimsM: [3, 3, 3],
+      readbackMode: 'no-full-readback',
+      fuseNoFullResidentMechanics: true,
+      summaryRunner: null
+    }),
+    /synthetic canonical evidence map failure/
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const separationScratch = device.createdBuffers.filter((buffer) => (
+    [
+      'ulg-mls-mpm-separation-params',
+      'ulg-mls-mpm-separation-corrections',
+      'ulg-mls-mpm-separation-bins'
+    ].includes(buffer.label)
+  ));
+  assert.equal(separationScratch.length, 3);
+  assert.ok(separationScratch.every((buffer) => buffer.destroyed === true));
+  assert.notEqual(directoryBuffer.destroyed, true);
+  assert.notEqual(evidenceBuffer.destroyed, true);
+});
+
+test('MLS-MPM resident fused P2G rejects host-invalid canonical generations', async (t) => {
+  const cases = [
+    {
+      name: 'released execution',
+      status: 'canonical-spatial-directory-rejected-released-generation',
+      invalidate(generation) {
+        generation.execution.released = true;
+      }
+    },
+    {
+      name: 'wrong generation schema',
+      status: 'canonical-spatial-directory-rejected-schema',
+      invalidate(generation) {
+        generation.schema = 'peercompute.ulg.schroeder-spatial-epoch-generation.invalid';
+      }
+    },
+    {
+      name: 'wrong execution schema',
+      status: 'canonical-spatial-directory-rejected-schema',
+      invalidate(generation) {
+        generation.execution.schema = 'peercompute.ulg.schroeder-spatial-epoch.invalid';
+      }
+    },
+    {
+      name: 'cross-device directory buffer',
+      status: 'canonical-spatial-directory-rejected-device',
+      invalidate(generation) {
+        tagWebGpuBufferDevice(generation.execution.directoryBuffer, {});
+      }
+    },
+    {
+      name: 'cross-device evidence buffer',
+      status: 'canonical-spatial-directory-rejected-device',
+      invalidate(generation) {
+        tagWebGpuBufferDevice(generation.execution.evidenceBuffer, {});
+      }
+    },
+    {
+      name: 'undersized evidence buffer',
+      status: 'canonical-spatial-directory-rejected-evidence-capacity',
+      invalidate(generation) {
+        generation.execution.evidenceBuffer.size = 76;
+      }
+    },
+    {
+      name: 'torn exact-near query profile',
+      status: 'canonical-spatial-directory-rejected-query-geometry',
+      invalidate(generation) {
+        generation.execution.queryGeometryEvidence = { ready: true };
+      }
+    },
+    {
+      name: 'phase-volume overlay authority',
+      status: 'canonical-spatial-directory-rejected-overlay-authority',
+      invalidate(generation) {
+        generation.source.phaseVolumeAssignmentOverlayEnabled = true;
+      }
+    },
+    {
+      name: 'overlay authority takes precedence over a wrong schema',
+      status: 'canonical-spatial-directory-rejected-overlay-authority',
+      invalidate(generation) {
+        generation.source.phaseVolumeAssignmentOverlayEnabled = true;
+        generation.schema = 'peercompute.ulg.schroeder-spatial-epoch-generation.invalid';
+      }
+    },
+    {
+      name: 'selected level is not an exact i32',
+      status: 'canonical-spatial-selected-level-rejected',
+      selectedLevel: Number.NaN,
+      invalidate() {}
+    }
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const buffers = manualBuffers();
+      const tracker = fakeBufferTracker();
+      const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+      const schroederAssignmentBuffer = tracker.buffer('retained-schroeder-assignment');
+      const schroederSpatialDirectoryBuffer = tracker.buffer('retained-schroeder-spatial-directory');
+      const schroederSpatialEvidenceBuffer = tracker.buffer('retained-schroeder-spatial-evidence');
+      schroederSpatialEvidenceBuffer.size = 80;
+      const exactNearQueryProfile = { ready: true };
+      const generation = {
+        schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+        selected: true,
+        ready: true,
+        source: { phaseVolumeAssignmentOverlayEnabled: false },
+        execution: {
+          schema: 'peercompute.ulg.schroeder-spatial-epoch.v1',
+          submitPerformed: true,
+          directoryBuffer: schroederSpatialDirectoryBuffer,
+          evidenceBuffer: schroederSpatialEvidenceBuffer,
+          evidenceBufferByteLength: 80,
+          sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+          exactNearQueryProfile,
+          queryGeometryEvidence: exactNearQueryProfile,
+          generationId: 17,
+          storageGeneration: 23,
+          positionEpoch: 29,
+          topologyEpoch: 31,
+          deviceOrdinal: 37,
+          laneOrdinal: 41,
+          leaseToken: 43,
+          sourceFamilyId: 47,
+          physicsTick: 53,
+          physicsSubstep: 59,
+          chartEpoch: 61,
+          levelEpoch: 67,
+          supportEpoch: 71,
+          layout: { byteLength: 256 }
+        }
+      };
+      testCase.invalidate(generation);
+
+      await assert.rejects(
+        () => runMlsMpmResidentStepWithOptionalWebGpu({
+          ...buffers,
+          sphParticleUpload: {
+            status: 'webgpu-uploaded',
+            stateBuffer: tracker.buffer('source-state'),
+            thermoBuffer: tracker.buffer('source-thermo'),
+            slot: 0
+          },
+          mlsMpmParticleUpload: {
+            status: 'webgpu-uploaded',
+            mechanicsBuffer: tracker.buffer('source-mechanics'),
+            slot: 0
+          },
+          schroederLevelAssignment: {
+            schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+            status: 'schroeder-level-assignment-submitted',
+            particleCount: buffers.sphParticleState.particleCount,
+            assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+            assignmentBuffer: schroederAssignmentBuffer,
+            assignmentBufferByteLength:
+              SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+            retainedAssignmentBuffer: true
+          },
+          schroederSelectedLevel: testCase.selectedLevel ?? 2,
+          schroederSpatialEpochGeneration: generation,
+          canonicalSpatialRequired: true,
+          preferWebGpu: true,
+          device,
+          boxDimsM: [3, 3, 3],
+          readbackMode: 'no-full-readback',
+          fuseNoFullResidentMechanics: true,
+          summaryRunner: null
+        }),
+        (error) => {
+          assert.equal(error.code, 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED');
+          assert.equal(error.status, testCase.status);
+          return true;
+        }
+      );
+      assert.equal(device.submissions.length, 0);
+      assert.equal(device.dispatches.length, 0);
+      assert.equal(device.bindGroups.length, 0);
+    });
+  }
 });
 
 test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', async () => {
@@ -3417,6 +4504,47 @@ test('SPH spatial gas ledger producer blocks cross-device retained product-event
   assert.equal(consumerDevice.dispatches.length, 0);
   assert.equal(result.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
   assert.equal(result.spatialGasSpeciesLedger.cells[0].bySpecies.h2.moles, 1);
+});
+
+test('SPH spatial gas ledger producer pins resident product events before device acquisition awaits', async () => {
+  const device = fakeSummaryDevice(compactSpatialGasRowsFixture());
+  const residentProductMass = residentProductMassHandle({
+    label: 'device-acquisition-borrowed-product-events',
+    rowCount: 2,
+    byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
+  });
+  let resolveAdapter;
+  const adapterPromise = new Promise((resolve) => { resolveAdapter = resolve; });
+  const executionPromise = runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    residentProductMass,
+    boxDimsM: [2, 2, 2],
+    navigatorRef: {
+      gpu: {
+        requestAdapter() {
+          return adapterPromise;
+        }
+      }
+    }
+  });
+
+  await Promise.resolve();
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 1);
+  assert.equal(residentProductMass.productEventBuffer.destroyed, false);
+
+  resolveAdapter({
+    limits: {},
+    async requestDevice() {
+      return device;
+    }
+  });
+  const result = await executionPromise;
+
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 0);
+  assert.equal(residentProductMass.productEventBuffer.destroyed, false);
+  result.destroySpatialGasLedgerRowsBuffer?.();
 });
 
 test('SPH spatial gas ledger producer blocks globally tagged cross-device product-event buffers', async () => {
@@ -4153,6 +5281,499 @@ test('MLS-MPM stage scheduler refuses cross-peer Schroeder adopted storage witho
   );
 });
 
+test('MLS-MPM outer stage chain propagates supplied-generation pressure failures while preserving legacy fallback', async () => {
+  const buffers = manualBuffers();
+  const pressureFailure = new Error('shared-generation pressure/interface GPU failure');
+  const schroederSpatialEpochGeneration = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    generationId: 61
+  };
+  const createThrowingPressureComputeManager = ({
+    expectedGeneration = null,
+    registerResidentExecutors = false
+  } = {}) => {
+    const submittedTaskExports = [];
+    const rejectedLeaseReasons = [];
+    const registeredExecutors = new Map();
+    const workerExecutionStageIds = [];
+    let laneContract = null;
+    const gpuHub = {
+      registerResidentStageExecutor(spec) {
+        registeredExecutors.set(spec.stageId, spec);
+        return {
+          schema: 'peercompute.gpu.resident-stage-executor.v0',
+          stageId: spec.stageId,
+          workerPolicy: { ...spec.workerPolicy }
+        };
+      },
+      hasResidentStageExecutor(stage) {
+        return registeredExecutors.has(stage?.id || stage);
+      },
+      async executeResidentStage(args = {}) {
+        const stageId = args.stage?.id || args.stage;
+        const registration = registeredExecutors.get(stageId);
+        if (!registration) throw new Error(`missing registered stage ${stageId}`);
+        if (registration.workerRunner) {
+          workerExecutionStageIds.push(stageId);
+          return registration.workerRunner(args);
+        }
+        return registration.executor(args);
+      }
+    };
+    const computeManager = {
+      ...(registerResidentExecutors ? { gpuHub } : {}),
+      async submitTask(task) {
+        submittedTaskExports.push(task.exportName);
+        if (task.exportName === 'runSphPressureInterfaceStageComputeTask') {
+          if (expectedGeneration) {
+            assert.equal(task.data.schroederSpatialEpochGeneration, expectedGeneration);
+          }
+          throw pressureFailure;
+        }
+        const data = { ...task.data, preferWebGpu: false };
+        if (task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
+          return runMlsMpmMechanicsP2gStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsGridUpdateStageComputeTask') {
+          return runMlsMpmMechanicsGridUpdateStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsG2pStageComputeTask') {
+          return runMlsMpmMechanicsG2pStageComputeTask(data);
+        }
+        throw new Error(`unexpected task export ${task.exportName}`);
+      },
+      acquireGpuResidentLaneLease(spec) {
+        laneContract = spec.residentSequenceLaneContract;
+        return {
+          leaseId: `${spec.laneId}:lease`,
+          laneId: spec.laneId,
+          stateKey: spec.stateKey,
+          residentSequenceLaneContract: laneContract
+        };
+      },
+      async executeGpuResidentLaneStagePlan(leaseId, options = {}) {
+        let input = options.input || null;
+        const stageResults = [];
+        for (const stage of laneContract.passDagStages) {
+          const stageExecutor = options.stageExecutors?.[stage.id]
+            || ((args) => gpuHub.executeResidentStage(args));
+          const stageResult = await stageExecutor({
+            stage,
+            input,
+            leaseId,
+            context: options.context || {}
+          });
+          stageResults.push({ stageId: stage.id, status: 'completed' });
+          input = stageResult.value;
+        }
+        return {
+          schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+          status: 'completed',
+          completedStageCount: stageResults.length,
+          stageResults,
+          retainedBufferRefs: []
+        };
+      },
+      completeGpuResidentLaneLease() {
+        throw new Error('a failed pressure stage must not complete its lane lease');
+      },
+      rejectGpuResidentLaneLease(leaseId, reason) {
+        rejectedLeaseReasons.push({ leaseId, reason });
+        return { leaseId, status: 'rejected', reason };
+      }
+    };
+    return {
+      computeManager,
+      submittedTaskExports,
+      rejectedLeaseReasons,
+      registeredExecutors,
+      workerExecutionStageIds
+    };
+  };
+
+  const sharedGenerationRun = createThrowingPressureComputeManager({
+    expectedGeneration: schroederSpatialEpochGeneration
+  });
+  await assert.rejects(
+    runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager: sharedGenerationRun.computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix: 'ulg:test:shared-generation-pressure-failure-stage-chain',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      includePressureInterfaceStage: true,
+      preferWebGpu: true,
+      readbackMode: 'full-parity-readback',
+      schroederSpatialEpochGeneration
+    }),
+    (error) => error === pressureFailure
+  );
+  assert.deepEqual(sharedGenerationRun.submittedTaskExports, [
+    'runMlsMpmMechanicsP2gStageComputeTask',
+    'runSphPressureInterfaceStageComputeTask'
+  ]);
+  assert.equal(sharedGenerationRun.rejectedLeaseReasons.length, 1);
+  assert.equal(
+    sharedGenerationRun.rejectedLeaseReasons[0].reason,
+    'mechanics-stage-plan-executor-error'
+  );
+
+  const registeredWorkerRun = createThrowingPressureComputeManager({
+    expectedGeneration: schroederSpatialEpochGeneration,
+    registerResidentExecutors: true
+  });
+  await assert.rejects(
+    runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager: registeredWorkerRun.computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix:
+        'ulg:test:shared-generation-registered-worker-pressure-failure-stage-chain',
+      useNativeTaskGraph: false,
+      includePressureInterfaceStage: true,
+      preferWebGpu: true,
+      readbackMode: 'full-parity-readback',
+      gpuHubResidentStageWorkerRunner() {
+        throw new Error(
+          'caller-owned spatial generation must never cross the dedicated-worker boundary'
+        );
+      },
+      schroederSpatialEpochGeneration
+    }),
+    (error) => error === pressureFailure
+  );
+  assert.deepEqual(registeredWorkerRun.workerExecutionStageIds, []);
+  assert.ok(registeredWorkerRun.registeredExecutors.size > 0);
+  for (const registration of registeredWorkerRun.registeredExecutors.values()) {
+    assert.equal(registration.workerRunner, undefined);
+    assert.equal(registration.workerPolicy.mode, 'inline');
+    assert.equal(registration.workerPolicy.sameDeviceRequired, true);
+  }
+  assert.deepEqual(registeredWorkerRun.submittedTaskExports, [
+    'runMlsMpmMechanicsP2gStageComputeTask',
+    'runSphPressureInterfaceStageComputeTask'
+  ]);
+  assert.equal(registeredWorkerRun.rejectedLeaseReasons.length, 1);
+
+  const disabledLaneRun = createThrowingPressureComputeManager({
+    expectedGeneration: schroederSpatialEpochGeneration
+  });
+  await assert.rejects(
+    runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager: disabledLaneRun.computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix:
+        'ulg:test:shared-generation-disabled-lane-pressure-stage-chain',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      useGpuResidentLaneStagePlan: false,
+      includePressureInterfaceStage: true,
+      preferWebGpu: true,
+      readbackMode: 'full-parity-readback',
+      schroederSpatialEpochGeneration
+    }),
+    /cannot continue without a completed same-device pressure\/interface lane stage/
+  );
+  assert.deepEqual(disabledLaneRun.submittedTaskExports, []);
+
+  const unavailableLaneRun = createThrowingPressureComputeManager({
+    expectedGeneration: schroederSpatialEpochGeneration
+  });
+  delete unavailableLaneRun.computeManager.acquireGpuResidentLaneLease;
+  delete unavailableLaneRun.computeManager.executeGpuResidentLaneStagePlan;
+  delete unavailableLaneRun.computeManager.completeGpuResidentLaneLease;
+  await assert.rejects(
+    runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager: unavailableLaneRun.computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix:
+        'ulg:test:shared-generation-unavailable-lane-pressure-stage-chain',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      includePressureInterfaceStage: true,
+      preferWebGpu: true,
+      readbackMode: 'full-parity-readback',
+      schroederSpatialEpochGeneration
+    }),
+    /cannot continue without a completed same-device pressure\/interface lane stage/
+  );
+  assert.deepEqual(unavailableLaneRun.submittedTaskExports, []);
+
+  const encodedFailedLaneRun = createThrowingPressureComputeManager({
+    expectedGeneration: schroederSpatialEpochGeneration
+  });
+  encodedFailedLaneRun.computeManager.executeGpuResidentLaneStagePlan = async () => ({
+    schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+    status: 'failed',
+    completedStageCount: 0,
+    stageResults: [],
+    retainedBufferRefs: []
+  });
+  await assert.rejects(
+    runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager: encodedFailedLaneRun.computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix:
+        'ulg:test:shared-generation-encoded-failed-lane-pressure-stage-chain',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      includePressureInterfaceStage: true,
+      preferWebGpu: true,
+      readbackMode: 'full-parity-readback',
+      schroederSpatialEpochGeneration
+    }),
+    /requires a completed same-device pressure\/interface lane stage with valid WebGPU evidence/
+  );
+  assert.deepEqual(encodedFailedLaneRun.submittedTaskExports, []);
+  assert.equal(encodedFailedLaneRun.rejectedLeaseReasons.length, 1);
+
+  const legacyRun = createThrowingPressureComputeManager();
+  const legacyStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+    ...buffers,
+    computeManager: legacyRun.computeManager,
+    modulePath: './sphMlsMpmGpuStep.js',
+    stageTaskIdPrefix: 'ulg:test:legacy-pressure-failure-stage-chain',
+    useNativeTaskGraph: false,
+    useGpuHubResidentStageExecutors: false,
+    includePressureInterfaceStage: true,
+    preferWebGpu: true,
+    readbackMode: 'full-parity-readback'
+  });
+  assert.equal(legacyStep.mechanicsStageTaskChain.status, 'compute-manager-stage-task-chain-executed');
+  assert.equal(legacyStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStatus, 'failed');
+  assert.deepEqual(legacyRun.submittedTaskExports, [
+    'runMlsMpmMechanicsP2gStageComputeTask',
+    'runSphPressureInterfaceStageComputeTask',
+    'runMlsMpmMechanicsGridUpdateStageComputeTask',
+    'runMlsMpmMechanicsG2pStageComputeTask'
+  ]);
+});
+
+test('MLS-MPM shared-generation stage chain requires accepted pressure and final lane fences', async () => {
+  const buffers = manualBuffers();
+  const schroederSpatialEpochGeneration = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    generationId: 71
+  };
+  const createManager = ({ malformedCompletion = false, completionOverride = null } = {}) => {
+    let laneContract = null;
+    let completeCount = 0;
+    let rejectCount = 0;
+    const computeManager = {
+      async submitTask(task) {
+        if (task.exportName === 'runSphPressureInterfaceStageComputeTask') {
+          assert.equal(
+            task.data.schroederSpatialEpochGeneration,
+            schroederSpatialEpochGeneration
+          );
+          return {
+            computeTaskResultSchema:
+              ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+            backend: 'webgpu',
+            status: 'pressure-interface-stage-solver-ready',
+            pressureInterfaceStageTask: true,
+            pressureInterfaceStageTaskEvidence: {
+              passed: true,
+              sharedSpatialGenerationRequired: true,
+              sharedSpatialAuthorityPassed: true
+            },
+            gpuFence: {
+              schema: 'peercompute.compute.gpu-fence-report.v0',
+              required: true,
+              fenceSatisfied: true,
+              status: 'gpu-fence-satisfied'
+            },
+            pressureInterfaceForceSolver: {
+              schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+              status: 'pressure-interface-force-solver-ready',
+              backend: 'webgpu',
+              ...sharedSpatialPressureSolverAuthorityFixture()
+            }
+          };
+        }
+        const data = { ...task.data, preferWebGpu: false };
+        if (task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
+          return runMlsMpmMechanicsP2gStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsGridUpdateStageComputeTask') {
+          return runMlsMpmMechanicsGridUpdateStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsG2pStageComputeTask') {
+          return runMlsMpmMechanicsG2pStageComputeTask(data);
+        }
+        throw new Error(`unexpected task export ${task.exportName}`);
+      },
+      acquireGpuResidentLaneLease(spec) {
+        laneContract = spec.residentSequenceLaneContract;
+        return {
+          leaseId: `${spec.laneId}:lease`,
+          laneId: spec.laneId,
+          stateKey: spec.stateKey,
+          residentSequenceLaneContract: laneContract
+        };
+      },
+      async executeGpuResidentLaneStagePlan(leaseId, options = {}) {
+        let input = options.input || null;
+        const stageResults = [];
+        for (const stage of laneContract.passDagStages) {
+          const stageResult = await options.stageExecutors[stage.id]({
+            stage,
+            input,
+            leaseId
+          });
+          stageResults.push({ stageId: stage.id, status: 'completed' });
+          input = stageResult.value;
+        }
+        return {
+          schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+          status: 'completed',
+          completedStageCount: stageResults.length,
+          stageResults,
+          retainedBufferRefs: []
+        };
+      },
+      completeGpuResidentLaneLease() {
+        completeCount += 1;
+        return completionOverride || (malformedCompletion
+          ? {
+              status: 'rejected',
+              gpuFence: {
+                schema: 'peercompute.compute.gpu-fence-report.v0',
+                status: 'gpu-fence-unsatisfied',
+                required: true,
+                fenceSatisfied: false
+              }
+            }
+          : {
+              status: 'queue-work-completed',
+              gpuFence: {
+                schema: 'peercompute.compute.gpu-fence-report.v0',
+                status: 'queue-work-completed',
+                required: true,
+                fenceSatisfied: true
+              }
+            });
+      },
+      rejectGpuResidentLaneLease() {
+        rejectCount += 1;
+        return { status: 'rejected' };
+      }
+    };
+    return {
+      computeManager,
+      counts: () => ({ completeCount, rejectCount })
+    };
+  };
+  const run = (manager, extra = {}) => (
+    runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager: manager.computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix: 'ulg:test:shared-generation-lane-fence-stage-chain',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      includePressureInterfaceStage: true,
+      preferWebGpu: true,
+      readbackMode: 'full-parity-readback',
+      schroederSpatialEpochGeneration,
+      ...extra
+    })
+  );
+
+  const valid = createManager();
+  const validStep = await run(valid);
+  assert.equal(validStep.mechanicsStageTaskChain.status, 'compute-manager-stage-task-chain-executed');
+  assert.deepEqual(valid.counts(), { completeCount: 1, rejectCount: 0 });
+
+  const malformed = createManager({ malformedCompletion: true });
+  await assert.rejects(
+    run(malformed),
+    /requires an accepted lane completion with a satisfied queue fence/
+  );
+  assert.deepEqual(malformed.counts(), { completeCount: 1, rejectCount: 1 });
+
+  const contradictoryTop = createManager({
+    completionOverride: {
+      schema: 'peercompute.compute.gpu-resident-lane-execution.v0',
+      status: 'rejected',
+      lease: { status: 'completed' },
+      gpuFence: {
+        schema: 'peercompute.compute.gpu-fence-report.v0',
+        status: 'queue-work-completed',
+        required: true,
+        fenceSatisfied: true
+      }
+    }
+  });
+  await assert.rejects(
+    run(contradictoryTop),
+    /requires an accepted lane completion with a satisfied queue fence/
+  );
+  assert.deepEqual(contradictoryTop.counts(), { completeCount: 1, rejectCount: 1 });
+
+  const contradictoryLease = createManager({
+    completionOverride: {
+      schema: 'peercompute.compute.gpu-resident-lane-execution.v0',
+      status: 'queue-work-completed',
+      lease: { status: 'rejected' },
+      gpuFence: {
+        schema: 'peercompute.compute.gpu-fence-report.v0',
+        status: 'queue-work-completed',
+        required: true,
+        fenceSatisfied: true
+      }
+    }
+  });
+  await assert.rejects(
+    run(contradictoryLease),
+    /requires an accepted lane completion with a satisfied queue fence/
+  );
+  assert.deepEqual(contradictoryLease.counts(), { completeCount: 1, rejectCount: 1 });
+
+  const omittedRequired = createManager({
+    completionOverride: {
+      schema: 'peercompute.compute.gpu-resident-lane-execution.v0',
+      status: 'queue-work-completed',
+      gpuFence: {
+        schema: 'peercompute.compute.gpu-fence-report.v0',
+        status: 'queue-work-completed',
+        fenceSatisfied: true
+      }
+    }
+  });
+  await assert.rejects(
+    run(omittedRequired),
+    /requires an accepted lane completion with a satisfied queue fence/
+  );
+  assert.deepEqual(omittedRequired.counts(), { completeCount: 1, rejectCount: 1 });
+
+  const remoteRefresh = createManager();
+  const nodeKernel = {
+    async executeGpuResidentLaneStagePlan(leaseId, options) {
+      const execution = await remoteRefresh.computeManager.executeGpuResidentLaneStagePlan(
+        leaseId,
+        options
+      );
+      return {
+        ...execution,
+        nodeKernelGpuResidentStageAuthority: {
+          localHotBufferRefreshRequired: true
+        }
+      };
+    }
+  };
+  await assert.rejects(
+    run(remoteRefresh, { nodeKernel }),
+    /requires an accepted lane completion with a satisfied queue fence/
+  );
+  assert.equal(remoteRefresh.counts().completeCount, 0);
+  assert.ok(remoteRefresh.counts().rejectCount >= 1);
+});
+
 test('SPH pressure interface stage compute task declares retained force-row output without authority mutation', async () => {
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',
@@ -4259,6 +5880,40 @@ test('SPH pressure interface stage compute task declares retained force-row outp
   assert.equal(result.pressureInterfaceStageTaskAuthority.commitDeltaSuppressed, true);
 });
 
+test('SPH pressure interface stage compute task conditionally declares shared Schroeder spatial-epoch reads', () => {
+  const schroederSpatialEpochGeneration = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    generationId: 41
+  };
+  const commonOptions = {
+    modulePath: './sphMlsMpmGpuStep.js',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback'
+  };
+  const taskWithoutGeneration = createSphPressureInterfaceStageComputeTask({
+    ...commonOptions,
+    taskId: 'ulg:test:pressure-interface-stage-without-spatial-epoch'
+  });
+  const taskWithGeneration = createSphPressureInterfaceStageComputeTask({
+    ...commonOptions,
+    taskId: 'ulg:test:pressure-interface-stage-with-spatial-epoch',
+    schroederSpatialEpochGeneration
+  });
+
+  assert.deepEqual(taskWithoutGeneration.readFamilies, [
+    'resident-gas-pressure',
+    'sph-material-interface-field'
+  ]);
+  assert.deepEqual(taskWithGeneration.readFamilies, [
+    'resident-gas-pressure',
+    'sph-material-interface-field',
+    'schroeder-spatial-epoch'
+  ]);
+  assert.deepEqual(taskWithGeneration.lawGraphNode.readFamilies, taskWithGeneration.readFamilies);
+  assert.deepEqual(taskWithGeneration.gpuResidentLane.readFamilies, taskWithGeneration.readFamilies);
+  assert.equal(taskWithGeneration.data.schroederSpatialEpochGeneration, schroederSpatialEpochGeneration);
+});
+
 test('SPH pressure interface stage carries algorithm contact pair response into force rows', async () => {
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',
@@ -4330,12 +5985,14 @@ test('SPH pressure interface stage carries algorithm contact pair response into 
   assert.equal(result.algorithmContactForceRowCount, 2);
   assert.equal(result.interfaceContactKinematicsReadyCount, 2);
   assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'uniform-interface-traction+algorithm-contact-pair-response');
-  nearlyEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0], 245000);
-  nearlyEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1], 245000);
+  assert.equal(result.pressureInterfaceForceSolver.gasInterfacePressureReferencePa, 101325);
+  assert.equal(result.pressureInterfaceForceSolver.gasInterfaceGaugePressurePa, 18675);
+  nearlyEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0], 143675);
+  nearlyEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1], 143675);
   const packedForceRow = [...result.forceRowValues.slice(8, 16)];
-  nearlyEqual(packedForceRow[0], -245000);
-  assert.deepEqual(packedForceRow.slice(1, 6), [0, 0, 245000, 0, 0]);
-  nearlyEqual(packedForceRow[6], 245000);
+  nearlyEqual(packedForceRow[0], -143675);
+  assert.deepEqual(packedForceRow.slice(1, 6), [0, 0, 143675, 0, 0]);
+  nearlyEqual(packedForceRow[6], 143675);
   assert.equal(packedForceRow[7], 1);
   assert.equal(result.pressureInterfaceStageTaskEvidence.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
   assert.equal(result.pressureInterfaceStageTaskEvidence.algorithmContactForceRowCount, 2);
@@ -4345,6 +6002,11 @@ test('SPH pressure interface stage carries algorithm contact pair response into 
 test('SPH pressure interface stage forwards resident particle buffers for contact kinematics', async () => {
   const stateBuffer = { label: 'stage-test-sph-state-buffer' };
   const thermoBuffer = { label: 'stage-test-sph-thermo-buffer' };
+  const identityBuffer = { label: 'stage-test-sph-identity-buffer' };
+  const schroederSpatialEpochGeneration = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    generationId: 43
+  };
   let observedRunnerArgs = null;
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',
@@ -4386,6 +6048,8 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
         readbackMode: 'no-full-readback',
         fullReadbackPerformed: false,
         normalHotLoopReadbackFree: true,
+        queueCompletionStatus: 'queue-work-completed',
+        queueCompletionMethod: 'queue.onSubmittedWorkDone',
         forceRowCount: 1,
         forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
         forceRowByteLength: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
@@ -4393,6 +6057,7 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
         pressureInterfaceForceSolver: {
           schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
           status: 'pressure-interface-force-solver-ready',
+          backend: 'webgpu',
           forceApplicationStatus: 'solver-ready-not-applied',
           forceRowCount: 1,
           forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
@@ -4400,20 +6065,51 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
           forceRowsBufferRetained: true,
           conservationStatus: 'pairwise-equal-opposite-force-conservative',
           conservationResidualMagnitudeN: 0,
+          algorithmContactForceRowCount: null,
+          maxAlgorithmContactPressurePa: null,
+          interfaceContactKinematicsReadyCount: null,
+          interfaceContactKinematicsDomainPairReadyCount: null,
           interfaceContactKinematicsGpuDerivationEligible: true,
           interfaceContactKinematicsGpuDerived: true,
-          interfaceContactKinematicsDerivationStatus: 'interface-contact-kinematics-gpu-derivation-submitted',
+          interfaceContactKinematicsDerivationStatus:
+            'interface-contact-kinematics-spatial-exact-near-submitted',
           interfaceContactKinematicsParticleSourceStatus: 'interface-contact-kinematics-particle-source-ready',
           interfaceContactKinematicsParticleCount: 2,
-          interfaceContactKinematicsParticleBinGridStatus: 'interface-contact-particle-bin-grid-submitted',
-          interfaceContactKinematicsParticleBinGridEnabled: true,
-          interfaceContactKinematicsParticleBinGridCellCount: 8,
-          interfaceContactKinematicsParticleBinGridBinCapacity: 64,
-          interfaceContactKinematicsParticleBinGridAverageOccupancy: 0.25,
+          interfaceContactKinematicsParticleBinGridStatus:
+            'suppressed-canonical-spatial-exact-near-selected',
+          interfaceContactKinematicsParticleBinGridEnabled: false,
+          interfaceContactKinematicsParticleBinGridCellCount: 0,
+          interfaceContactKinematicsParticleBinGridBinCapacity: 0,
+          interfaceContactKinematicsParticleBinGridAverageOccupancy: 0,
           interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: false,
-          interfaceContactKinematicsParticleBinGridIndexBufferByteLength: 2048,
-          interfaceContactKinematicsParticleBinOverflowStatus: 'particle-bin-overflow-readback-completed',
-          interfaceContactKinematicsParticleBinOverflowCount: 0
+          interfaceContactKinematicsParticleBinGridIndexBufferByteLength: 0,
+          interfaceContactKinematicsParticleBinOverflowStatus: null,
+          interfaceContactKinematicsParticleBinOverflowCount: null,
+          schroederSpatialExactNearViewSchema:
+            ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+          schroederSpatialExactNearGenerationSupplied: true,
+          schroederSpatialExactNearHostAdmissionStatus:
+            'schroeder-spatial-exact-near-shared-generation-selected',
+          schroederSpatialExactNearSelected: true,
+          schroederSpatialExactNearBorrowedGeneration: true,
+          schroederSpatialExactNearDirectoryOwnership:
+            'borrowed-caller-owned-canonical-generation',
+          schroederSpatialExactNearConsumerReleaseAuthority: 'generation-owner',
+          schroederSpatialExactNearGpuQueryEvidenceRequired: true,
+          schroederSpatialExactNearGpuQueryEvidenceSourceAdapterId:
+            SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+          schroederSpatialExactNearGpuQueryEvidenceEnforcementStatus:
+            'shader-validates-query-tail-at-dispatch-no-host-readback',
+          schroederSpatialExactNearArenaReleaseStatus:
+            'borrowed-generation-release-owned-by-caller',
+          schroederSpatialExactNearDirectoryBuildCount: 0,
+          schroederSpatialExactNearPrivateParticleBinBuildSuppressed: true,
+          schroederSpatialExactNearPrivateParticleBinBuildCount: 0,
+          schroederSpatialExactNearFixedCandidateBuildCount: 0,
+          schroederSpatialExactNearExhaustiveParticleScanCount: 0,
+          schroederSpatialExactNearGpuFallbackObserved: null,
+          pressureInterfaceSpatialIndexStatus:
+            'pressure-interface-canonical-spatial-epoch-selected'
         }
       };
     },
@@ -4429,6 +6125,7 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
     },
     materialInterfaceField,
     algorithmMaterialContactRows: algorithmContactRowsFixture({ normalStiffnessPa: 4e9 }),
+    schroederSpatialEpochGeneration,
     sphParticleState: {
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
       particleCount: 2,
@@ -4439,7 +6136,8 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
       status: 'webgpu-uploaded',
       particleCount: 2,
       stateBuffer,
-      thermoBuffer
+      thermoBuffer,
+      identityBuffer
     },
     boxDimsM: [4, 4, 4],
     contactKinematicsParticleBinMetadataReadback: true,
@@ -4452,6 +6150,11 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
   assert.equal(observedRunnerArgs.sphParticleUpload.thermoBuffer, thermoBuffer);
   assert.equal(observedRunnerArgs.particleStateBuffer, stateBuffer);
   assert.equal(observedRunnerArgs.particleThermoBuffer, thermoBuffer);
+  assert.equal(observedRunnerArgs.particleIdentityBuffer, identityBuffer);
+  assert.equal(
+    observedRunnerArgs.schroederSpatialEpochGeneration,
+    schroederSpatialEpochGeneration
+  );
   assert.equal(observedRunnerArgs.particleCount, 2);
   assert.deepEqual(observedRunnerArgs.boxDimsM, [4, 4, 4]);
   assert.equal(observedRunnerArgs.contactKinematicsParticleBinMetadataReadback, true);
@@ -4459,20 +6162,343 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsGpuDerived, true);
   assert.equal(
     result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsDerivationStatus,
-    'interface-contact-kinematics-gpu-derivation-submitted'
+    'interface-contact-kinematics-spatial-exact-near-submitted'
   );
   assert.equal(
     result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridStatus,
-    'interface-contact-particle-bin-grid-submitted'
+    'suppressed-canonical-spatial-exact-near-selected'
   );
-  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridEnabled, true);
-  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridCellCount, 8);
-  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridBinCapacity, 64);
-  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridAverageOccupancy, 0.25);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridEnabled, false);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridCellCount, 0);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridBinCapacity, 0);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridAverageOccupancy, 0);
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk, false);
-  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridIndexBufferByteLength, 2048);
-  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinOverflowStatus, 'particle-bin-overflow-readback-completed');
-  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinOverflowCount, 0);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridIndexBufferByteLength, 0);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinOverflowStatus, null);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinOverflowCount, null);
+  assert.equal(result.algorithmContactForceRowCount, null);
+  assert.equal(result.maxAlgorithmContactPressurePa, null);
+  assert.equal(result.interfaceContactKinematicsReadyCount, null);
+  assert.equal(result.interfaceContactKinematicsDomainPairReadyCount, null);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.algorithmContactForceRowCount, null);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.maxAlgorithmContactPressurePa, null);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsReadyCount, null);
+  assert.equal(
+    result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsDomainPairReadyCount,
+    null
+  );
+  assert.equal(result.pressureInterfaceStageTaskEvidence.sharedSpatialGenerationRequired, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.sharedSpatialAuthorityPassed, true);
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.pressureInterfaceStageTaskAuthority.gpuFenceRequired, true);
+});
+
+test('SPH pressure interface stage rethrows supplied-generation WebGPU failures without CPU fallback', async () => {
+  const webGpuFailure = new Error('shared spatial generation rejected by WebGPU runner');
+  const schroederSpatialEpochGeneration = {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    generationId: 47
+  };
+  let webGpuRunnerCalls = 0;
+  let cpuFallbackCalls = 0;
+
+  await assert.rejects(
+    runSphPressureInterfaceStageComputeTask({
+      computeTaskId: 'ulg:test:pressure-interface-stage-shared-generation-rejection',
+      preferWebGpu: true,
+      device: {
+        createBuffer() {},
+        queue: { writeBuffer() {} }
+      },
+      schroederSpatialEpochGeneration,
+      pressureInterfaceForceRowsWebGpuRunner() {
+        webGpuRunnerCalls += 1;
+        throw webGpuFailure;
+      },
+      pressureInterfaceForceSolverRunner() {
+        cpuFallbackCalls += 1;
+        throw new Error('CPU fallback must not run for a supplied spatial generation');
+      }
+    }),
+    (error) => error === webGpuFailure
+  );
+
+  assert.equal(webGpuRunnerCalls, 1);
+  assert.equal(cpuFallbackCalls, 0);
+});
+
+test('SPH pressure interface stage refuses CPU fallback when a shared generation has no local WebGPU device', async () => {
+  let cpuFallbackCalls = 0;
+  await assert.rejects(
+    runSphPressureInterfaceStageComputeTask({
+      computeTaskId: 'ulg:test:pressure-interface-stage-shared-generation-no-device',
+      preferWebGpu: true,
+      navigatorRef: {},
+      schroederSpatialEpochGeneration: {
+        schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+        generationId: 53
+      },
+      pressureInterfaceForceSolverRunner() {
+        cpuFallbackCalls += 1;
+        return null;
+      }
+    }),
+    /cannot fall back without a local WebGPU device|webgpu|navigator/i
+  );
+  assert.equal(cpuFallbackCalls, 0);
+});
+
+test('SPH pressure interface stage rejects incomplete shared-generation WebGPU results without CPU fallback', async () => {
+  const invalidResults = [
+    ['null result', null, /requires a valid local WebGPU pressure\/interface solver result/],
+    ['missing solver', { backend: 'webgpu' }, /requires a valid local WebGPU pressure\/interface solver result/],
+    ['wrong backend', {
+      backend: 'cpu-reference',
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
+      }
+    }, /requires a valid local WebGPU pressure\/interface solver result/],
+    ['blocked solver', {
+      backend: 'webgpu',
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+        status: 'pressure-interface-force-solver-blocked'
+      }
+    }, /requires a valid local WebGPU pressure\/interface solver result/],
+    ['ready solver without force-row evidence', {
+      backend: 'webgpu',
+      status: 'pressure-interface-stage-solver-ready',
+      forceRowCount: 1,
+      forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+      forceRowByteLength:
+        SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+        status: 'pressure-interface-force-solver-ready',
+        backend: 'webgpu',
+        ...sharedSpatialPressureSolverAuthorityFixture(),
+        forceRowCount: 1,
+        forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+        forceRowValues: new Float32Array(0)
+      }
+    }, /requires complete WebGPU pressure\/interface force-row/],
+    ['blocked top-level status', {
+      backend: 'webgpu',
+      status: 'pressure-interface-stage-solver-blocked',
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+        status: 'pressure-interface-force-solver-ready',
+        backend: 'webgpu'
+      }
+    }, /requires a valid local WebGPU pressure\/interface solver result/],
+    ['nested CPU solver backend', {
+      backend: 'webgpu',
+      status: 'pressure-interface-stage-solver-ready',
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+        status: 'pressure-interface-force-solver-ready',
+        backend: 'cpu-reference'
+      }
+    }, /requires a valid local WebGPU pressure\/interface solver result/],
+    ['missing shared-generation authority', {
+      backend: 'webgpu',
+      status: 'pressure-interface-stage-solver-ready',
+      forceRowCount: 1,
+      forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+      forceRowByteLength:
+        SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+        status: 'pressure-interface-force-solver-ready',
+        backend: 'webgpu',
+        forceRowCount: 1,
+        forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+        forceRowValues: new Float32Array(
+          SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length
+        )
+      }
+    }, /requires exact-near borrowed-generation authority/],
+    ['private lookup authority', {
+      backend: 'webgpu',
+      status: 'pressure-interface-stage-solver-ready',
+      forceRowCount: 1,
+      forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+      forceRowByteLength:
+        SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+        status: 'pressure-interface-force-solver-ready',
+        backend: 'webgpu',
+        ...sharedSpatialPressureSolverAuthorityFixture({
+          schroederSpatialExactNearPrivateParticleBinBuildSuppressed: false,
+          schroederSpatialExactNearPrivateParticleBinBuildCount: 1
+        }),
+        forceRowCount: 1,
+        forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+        forceRowValues: new Float32Array(
+          SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length
+        )
+      }
+    }, /requires exact-near borrowed-generation authority/],
+    ['contradictory selected authority', {
+      backend: 'webgpu',
+      status: 'pressure-interface-stage-solver-ready',
+      forceRowCount: 1,
+      forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+      forceRowByteLength:
+        SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+      pressureInterfaceForceSolver: {
+        schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+        status: 'pressure-interface-force-solver-ready',
+        backend: 'webgpu',
+        ...sharedSpatialPressureSolverAuthorityFixture({
+          schroederSpatialExactNearSelected: false
+        }),
+        forceRowCount: 1,
+        forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+        forceRowValues: new Float32Array(
+          SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length
+        )
+      }
+    }, /requires exact-near borrowed-generation authority/]
+  ];
+  for (const [name, invalidResult, expectedError] of invalidResults) {
+    let cpuFallbackCalls = 0;
+    const cleanupCalls = {
+      temporary: 0,
+      forceRows: 0,
+      gasRows: 0
+    };
+    const invalidResultWithCleanup = invalidResult && {
+      ...invalidResult,
+      destroyOwnerScopeTemporaryBuffers() {
+        cleanupCalls.temporary += 1;
+      },
+      destroyForceRowsBuffer() {
+        cleanupCalls.forceRows += 1;
+      },
+      destroyGasPressureCellsBuffer() {
+        cleanupCalls.gasRows += 1;
+      }
+    };
+    await assert.rejects(
+      runSphPressureInterfaceStageComputeTask({
+        computeTaskId: `ulg:test:pressure-interface-stage-invalid-shared-result:${name}`,
+        preferWebGpu: true,
+        device: {
+          createBuffer() {},
+          queue: { writeBuffer() {} }
+        },
+        schroederSpatialEpochGeneration: {
+          schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+          generationId: 59
+        },
+        pressureInterfaceForceRowsWebGpuRunner() {
+          return invalidResultWithCleanup;
+        },
+        pressureInterfaceForceSolverRunner() {
+          cpuFallbackCalls += 1;
+          return null;
+        }
+      }),
+      expectedError,
+      name
+    );
+    assert.equal(cpuFallbackCalls, 0, name);
+    if (invalidResultWithCleanup) {
+      assert.deepEqual(cleanupCalls, {
+        temporary: 1,
+        forceRows: 1,
+        gasRows: 1
+      }, name);
+    }
+  }
+});
+
+test('SPH pressure interface stage preserves malformed falsy supplied generations and never CPU-falls back', async () => {
+  for (const malformedGeneration of [false, 0, '']) {
+    const webGpuFailure = new Error(
+      `malformed supplied generation reached WebGPU runner: ${String(malformedGeneration)}`
+    );
+    let observedGeneration = Symbol('not-observed');
+    let cpuFallbackCalls = 0;
+    await assert.rejects(
+      runSphPressureInterfaceStageComputeTask({
+        computeTaskId: 'ulg:test:pressure-interface-stage-malformed-falsy-shared-generation',
+        preferWebGpu: true,
+        device: {
+          createBuffer() {},
+          queue: { writeBuffer() {} }
+        },
+        schroederSpatialEpochGeneration: malformedGeneration,
+        pressureInterfaceForceRowsWebGpuRunner(args) {
+          observedGeneration = args.schroederSpatialEpochGeneration;
+          throw webGpuFailure;
+        },
+        pressureInterfaceForceSolverRunner() {
+          cpuFallbackCalls += 1;
+          return null;
+        }
+      }),
+      (error) => error === webGpuFailure
+    );
+    assert.equal(observedGeneration, malformedGeneration);
+    assert.equal(cpuFallbackCalls, 0);
+  }
+});
+
+test('SPH pressure interface stage rejects supplied-generation results without the required queue fence', async () => {
+  let cpuFallbackCalls = 0;
+  await assert.rejects(
+    runSphPressureInterfaceStageComputeTask({
+      computeTaskId: 'ulg:test:pressure-interface-stage-shared-generation-unsatisfied-fence',
+      preferWebGpu: true,
+      device: {
+        createBuffer() {},
+        queue: { writeBuffer() {} }
+      },
+      gpuFenceRequirement: {
+        required: true,
+        laneId: 'ulg:test:shared-generation-lane',
+        stateKey: 'ulg:test:shared-generation-state'
+      },
+      schroederSpatialEpochGeneration: {
+        schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+        generationId: 67
+      },
+      pressureInterfaceForceRowsWebGpuRunner() {
+        return {
+          backend: 'webgpu',
+          status: 'pressure-interface-stage-solver-ready',
+          readbackMode: 'no-full-readback',
+          fullReadbackPerformed: false,
+          queueCompletionStatus: 'queue-submitted-cleanup-deferred',
+          forceRowCount: 1,
+          forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+          forceRowByteLength:
+            SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+          pressureInterfaceForceSolver: {
+            schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+            status: 'pressure-interface-force-solver-ready',
+            backend: 'webgpu',
+            ...sharedSpatialPressureSolverAuthorityFixture(),
+            forceRowCount: 1,
+            forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+            forceRowValues: new Float32Array(
+              SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length
+            )
+          }
+        };
+      },
+      pressureInterfaceForceSolverRunner() {
+        cpuFallbackCalls += 1;
+        return null;
+      }
+    }),
+    /requires complete WebGPU pressure\/interface force-row and queue-fence evidence/
+  );
+  assert.equal(cpuFallbackCalls, 0);
 });
 
 test('SPH pressure interface stage requires admission before consuming local gas-cell pressure fields', async () => {
@@ -4805,7 +6831,8 @@ test('SPH pressure interface stage consumes an admitted retained gas-cell field 
   assert.equal(result.status, 'pressure-interface-stage-solver-ready');
   assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
   assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, true);
-  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
+  assert.equal(result.pressureInterfaceForceSolver.gasInterfacePressureReferencePa, 101325);
+  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [18675, 78675]);
   assert.equal(result.pressureInterfaceGasCellFieldAdmissionApproved, true);
   assert.equal(result.pressureInterfaceGasCellFieldImportSchema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
   assert.equal(result.pressureInterfaceGasCellFieldImportStatus, 'pressure-interface-gas-cell-field-import-ready');
@@ -7624,6 +9651,18 @@ test('MLS-MPM resident reaction sequence reuses one owned placement accumulator 
     [false, false, true]
   );
   assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.readCompactReactionSummary),
+    [false, false, true]
+  );
+  assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.readReactionProductInventory),
+    [false, false, true]
+  );
+  assert.deepEqual(
+    fixture.reactionCalls.map((call) => call.readReactionAtomResidual),
+    [false, false, true]
+  );
+  assert.deepEqual(
     fixture.reactionCalls.map((call) => call.reactionProductPlacementReadbackCadence),
     ['resident-sequence-final-only', 'resident-sequence-final-only', 'resident-sequence-final-only']
   );
@@ -8050,7 +10089,7 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
     && buffer.destroyed
   )));
   assert.ok(device.createdBuffers.some((buffer) => (
-    buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-active-nodes'
+    buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-spatial-directory'
     && buffer.destroyed
   )));
   // 11 -> 10: the previous-grid EOS buffer is gone - its binding 9 pushed
@@ -8061,14 +10100,14 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
 });
 
-test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder active nodes', async () => {
+test('MLS-MPM multi-step sequence rejects one canonical generation across position epochs', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
   const sourceThermoBuffer = tracker.buffer('source-thermo');
   const schroederAssignmentBuffer = tracker.buffer('retained-schroeder-sequence-assignment');
-  const schroederActiveNodeBuffer = tracker.buffer('retained-schroeder-sequence-active-nodes');
-  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+  const schroederSpatialDirectoryBuffer = tracker.buffer('retained-schroeder-sequence-spatial-directory');
+  await assert.rejects(() => runMlsMpmResidentStepsWithOptionalWebGpu({
     ...buffers,
     sphParticleUpload: {
       status: 'webgpu-uploaded',
@@ -8091,15 +10130,32 @@ test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder ac
       retainedAssignmentBuffer: true
     },
     schroederSelectedLevel: 2,
-    schroederActiveNodeList: {
-      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
-      status: 'schroeder-active-node-list-submitted',
-      particleCount: buffers.sphParticleState.particleCount,
-      activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length,
-      activeNodeBuffer: schroederActiveNodeBuffer,
-      activeNodeBufferByteLength: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
-      retainedActiveNodeBuffer: true
+    schroederSpatialEpochGeneration: {
+      schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+      selected: true,
+      ready: true,
+      source: { phaseVolumeAssignmentOverlayEnabled: false },
+      execution: {
+        schema: 'peercompute.ulg.schroeder-spatial-epoch.v1',
+        submitPerformed: true,
+        directoryBuffer: schroederSpatialDirectoryBuffer,
+        generationId: 41,
+        storageGeneration: 43,
+        positionEpoch: 47,
+        topologyEpoch: 53,
+        deviceOrdinal: 59,
+        laneOrdinal: 61,
+        leaseToken: 67,
+        sourceFamilyId: 71,
+        physicsTick: 73,
+        physicsSubstep: 79,
+        chartEpoch: 83,
+        levelEpoch: 89,
+        supportEpoch: 97,
+        layout: { byteLength: 256 }
+      }
     },
+    canonicalSpatialRequired: true,
     stepCount: 2,
     preferWebGpu: true,
     device,
@@ -8153,52 +10209,17 @@ test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder ac
         queueFenceAttribution: 'unit-summary-runner'
       };
     }
+  }), (error) => {
+    assert.equal(error.code, 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED');
+    assert.equal(error.status, 'canonical-spatial-generation-cannot-span-position-epochs');
+    return true;
   });
 
-  assert.equal(execution.ambientPressurePa, 101325);
-  assert.equal(execution.ambientPressureAppliedInStressProjection, true);
-  assert.equal(execution.fusedResidentSequence.schroederLevelFilterEnabled, true);
-  assert.equal(execution.fusedResidentSequence.schroederSelectedLevel, 2);
-  assert.equal(execution.fusedResidentSequence.schroederActiveNodeFilterEnabled, true);
-  assert.equal(execution.finalStep.p2gGridProjection.schroederLevelFilterEnabled, true);
-  assert.equal(execution.finalStep.p2gGridProjection.schroederActiveNodeFilterEnabled, true);
-  assert.equal(execution.finalStep.p2gGridProjection.schroederLevelFilter.assignmentBufferSource, 'retained-schroeder-level-assignment-buffer');
-  assert.equal(execution.finalStep.p2gGridProjection.schroederActiveNodeFilter.activeNodeBufferSource, 'retained-schroeder-active-node-buffer');
-  assert.equal(execution.finalStep.g2pReconstruction.schroederActiveNodeFilterEnabled, true);
-  assert.equal(execution.finalStep.stageTiming.schroederLevelFilterEnabled, true);
-  assert.equal(execution.finalStep.stageTiming.schroederActiveNodeFilterEnabled, true);
-  const p2gParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-sequence-p2g-params');
-  assert.ok(p2gParamWrite);
-  const p2gParams = new DataView(p2gParamWrite.data);
-  assert.equal(p2gParams.getUint32(44, true), 1);
-  assert.equal(p2gParams.getInt32(48, true), 2);
-  assert.equal(p2gParams.getUint32(52, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
-  assert.equal(p2gParams.getUint32(56, true), 1);
-  assert.equal(p2gParams.getUint32(60, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
-  assert.equal(p2gParams.getFloat32(68, true), 101325);
-  const g2pParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-sequence-g2p-params');
-  assert.ok(g2pParamWrite);
-  const g2pParams = new DataView(g2pParamWrite.data);
-  assert.equal(g2pParams.getUint32(24, true), 1);
-  assert.equal(g2pParams.getInt32(28, true), 2);
-  // G2P particle filtering reads particle-parallel level-assignment rows.
-  assert.equal(g2pParams.getUint32(68, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
-  assert.equal(g2pParams.getUint32(72, true), 1);
-  const p2gSchroederBindGroups = device.bindGroups.filter((group) => {
-    return group.entries.some((entry) => entry.binding === 8);
-  });
-  assert.equal(p2gSchroederBindGroups.length, 4);
-  assert.ok(p2gSchroederBindGroups.every((group) => {
-    return group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederAssignmentBuffer;
-  }));
-  assert.ok(p2gSchroederBindGroups.every((group) => {
-    return group.entries.find((entry) => entry.binding === 8)?.resource?.buffer === schroederActiveNodeBuffer;
-  }));
+  assert.equal(device.submissions.length, 0);
+  assert.equal(device.dispatches.length, 0);
+  assert.equal(device.createdBuffers.length, 0);
   assert.notEqual(schroederAssignmentBuffer.destroyed, true);
-  assert.notEqual(schroederActiveNodeBuffer.destroyed, true);
-  destroyMlsMpmResidentStepsBuffers(execution);
-  assert.notEqual(schroederAssignmentBuffer.destroyed, true);
-  assert.notEqual(schroederActiveNodeBuffer.destroyed, true);
+  assert.notEqual(schroederSpatialDirectoryBuffer.destroyed, true);
 });
 
 test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatch', async () => {

@@ -1,16 +1,31 @@
 import {
+  createSchroederSpatialEpochLayout,
+  SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS,
+  SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+  SCHROEDER_SPATIAL_EPOCH_MAGIC,
+  SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
+  SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT,
+  SPH_INTERFACE_CONTACT_KINEMATICS_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
+  ULG_SPH_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
+import {
+  sphPressureInterfaceSpatialExactNearContactKinematicsWgsl
+} from '../../../ulg-gpu-abi/src/schroederSpatialExactNearWgsl.js';
 import {
   sphPressureInterfaceContactKinematicsWgsl,
   sphPressureInterfaceParticleBinsWgsl,
@@ -18,17 +33,25 @@ import {
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  ULG_SCHROEDER_SPATIAL_DIRECTORY_SOURCE_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
+} from './schroederSpatialEpochGpu.js';
 import { tagWebGpuBufferDevice, webGpuDeviceMismatchInfo } from './sphGpuDeviceIdentity.js';
 
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
 export const SPH_GAS_PRESSURE_CELL_FLOATS = 12;
 export const SPH_ALGORITHM_CONTACT_POLICY_FLOATS = 16;
-export const SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS = 4;
+// row0: gap, normal velocity, representative mass, ready
+// row1: source domain id, target domain id, exact-pair ready,
+// selected contact-policy row token (one-based; zero means unresolved/legacy)
+export const SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS =
+  SPH_INTERFACE_CONTACT_KINEMATICS_ROW_LAYOUT.length;
 export const ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA =
   'peercompute.ulg.algorithm-material-contact-pair-response.v0';
 export const ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA =
-  'peercompute.ulg.sph-interface-contact-kinematics.v0';
+  ULG_SPH_INTERFACE_CONTACT_KINEMATICS_SCHEMA;
 export const ULG_INTERFACE_SOURCE_KEY_SCHEMA = ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA;
 
 const FULL_READBACK_MODE = 'full-parity-readback';
@@ -56,6 +79,11 @@ const SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS =
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
 const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 const SPH_INTERFACE_SOURCE_KEY_FLOATS = SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT.length;
+const SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS = 16;
+const SCHROEDER_SPATIAL_LEVEL_SPACING_MODE = 'base-grid-spacing-times-pow2-level';
+const SCHROEDER_SPATIAL_POSITION_AUTHORITY = 'same-epoch-pre-integration-particle-state';
+const SCHROEDER_SPATIAL_SOURCE_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-active-node-source.v1';
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -102,6 +130,96 @@ function clamp01(value) {
   return number;
 }
 
+async function readSchroederExactNearDirectoryDiagnostics(device, spatialBuild) {
+  const execution = spatialBuild?.execution || null;
+  const layout = execution?.layout || null;
+  const directoryBuffer = execution?.directoryBuffer || null;
+  const byteLength = Math.max(
+    0,
+    Math.trunc(finiteNumber(layout?.byteLength ?? directoryBuffer?.size, 0))
+  );
+  if (!directoryBuffer || byteLength < SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS * 4) {
+    return {
+      directoryDiagnosticStatus: 'directory-readback-unavailable',
+      actualCellCount: null,
+      keyOrderViolationCount: null,
+      cellOffsetViolationCount: null
+    };
+  }
+  const readback = device.createBuffer({
+    label: 'ulg-sph-pressure-interface-exact-near-directory-diagnostic',
+    size: byteLength,
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  });
+  try {
+    const encoder = device.createCommandEncoder({
+      label: 'ulg-sph-pressure-interface-exact-near-directory-diagnostic'
+    });
+    encoder.copyBufferToBuffer(directoryBuffer, 0, readback, 0, byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPU_MAP_MODE.READ);
+    const words = new Uint32Array(readback.getMappedRange()).slice();
+    readback.unmap();
+    const actualCellCount = words[18] ?? 0;
+    const sourceCount = words[16] ?? 0;
+    const cellKeysOffsetWords = words[29] ?? 0;
+    const cellOffsetsOffsetWords = words[30] ?? 0;
+    let keyOrderViolationCount = 0;
+    let cellOffsetViolationCount = 0;
+    let firstKeyOrderViolationIndex = null;
+    let minimumMemberIndex = null;
+    let maximumMemberIndex = null;
+    const keyAt = (index) => Array.from(
+      words.slice(
+        cellKeysOffsetWords + index * SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+        cellKeysOffsetWords + (index + 1) * SCHROEDER_SPATIAL_EPOCH_KEY_WORDS
+      )
+    );
+    const compareKeys = (left, right) => {
+      for (let index = 0; index < SCHROEDER_SPATIAL_EPOCH_KEY_WORDS; index += 1) {
+        if (left[index] < right[index]) return -1;
+        if (left[index] > right[index]) return 1;
+      }
+      return 0;
+    };
+    let previousKey = null;
+    for (let cellIndex = 0; cellIndex < actualCellCount; cellIndex += 1) {
+      const key = keyAt(cellIndex);
+      if (previousKey && compareKeys(previousKey, key) >= 0) {
+        keyOrderViolationCount += 1;
+        if (firstKeyOrderViolationIndex == null) {
+          firstKeyOrderViolationIndex = cellIndex;
+        }
+      }
+      previousKey = key;
+      const begin = words[cellOffsetsOffsetWords + cellIndex] ?? 0;
+      const end = words[cellOffsetsOffsetWords + cellIndex + 1] ?? 0;
+      if (begin > end || end > sourceCount) cellOffsetViolationCount += 1;
+      for (let memberOffset = begin; memberOffset < end && memberOffset < sourceCount; memberOffset += 1) {
+        const memberIndex = words[(words[31] ?? 0) + memberOffset] ?? 0;
+        minimumMemberIndex = minimumMemberIndex == null
+          ? memberIndex
+          : Math.min(minimumMemberIndex, memberIndex);
+        maximumMemberIndex = maximumMemberIndex == null
+          ? memberIndex
+          : Math.max(maximumMemberIndex, memberIndex);
+      }
+    }
+    return {
+      directoryDiagnosticStatus: 'directory-readback-complete',
+      actualCellCount,
+      sourceCount,
+      keyOrderViolationCount,
+      cellOffsetViolationCount,
+      firstKeyOrderViolationIndex,
+      minimumMemberIndex,
+      maximumMemberIndex
+    };
+  } finally {
+    readback.destroy?.();
+  }
+}
+
 function stableMaterialId(value) {
   const numeric = Number(value);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
@@ -120,6 +238,22 @@ function normalizedKey(value) {
   return String(value ?? '').trim().toLowerCase();
 }
 
+export function gasPressureTractionEligibleForElement(element = {}) {
+  const phase = normalizedKey(element?.phase);
+  const phaseId = Math.round(finiteNumber(element?.phaseId, 0));
+  // The gas EOS is already the stress closure for gas/plasma carriers.
+  // Applying the pressure it produced back onto its own rendered free surface
+  // double-counts that stress and is especially destructive for tiny product
+  // masses. Interface traction is the gas boundary condition on condensed
+  // matter; algorithmic contact pressure remains independent below.
+  return phase !== 'gas'
+    && phase !== 'vapor'
+    && phase !== 'vapour'
+    && phase !== 'plasma'
+    && phaseId !== 3
+    && phaseId !== 4;
+}
+
 function materialPhaseIdsForContactRow(row = {}) {
   const materialIds = Array.isArray(row.materialIds)
     ? row.materialIds.map(stableMaterialId)
@@ -131,6 +265,229 @@ function materialPhaseIdsForContactRow(row = {}) {
     materialIds: [finiteNumber(materialIds[0], 0), finiteNumber(materialIds[1], 0)],
     phaseIds: [finiteNumber(phaseIds[0], 0), finiteNumber(phaseIds[1], 0)]
   };
+}
+
+function stableDomainId(value) {
+  const numeric = Number(value);
+  // Domain ids are u32 in the particle sidecar, but pressure/interface rows
+  // are f32. Keep the shared identifier inside f32's exact integer range so
+  // two distinct initial bodies can never alias during contact selection.
+  return Number.isSafeInteger(numeric) && numeric > 0 && numeric <= 0x00ff_ffff
+    ? numeric
+    : 0;
+}
+
+function normalizedBodyId(value) {
+  const bodyId = String(value ?? '').trim();
+  return bodyId || null;
+}
+
+function pairValues(source, normalize) {
+  if (!Array.isArray(source)) return [normalize(null), normalize(null)];
+  return [normalize(source[0]), normalize(source[1])];
+}
+
+function bodyDomainIdentityForContactRow(row = {}) {
+  const domainIds = pairValues(
+    row.domainIds ?? row.bodyDomainIds ?? row.renderDomainIds,
+    stableDomainId
+  );
+  const bodyIds = pairValues(row.bodyIds, normalizedBodyId);
+  const domainPairReady = domainIds[0] > 0 && domainIds[1] > 0;
+  const bodyPairReady = Boolean(bodyIds[0] && bodyIds[1]);
+  const bodySpecific = domainIds.some((id) => id > 0) || bodyIds.some(Boolean);
+  return {
+    domainIds,
+    bodyIds,
+    domainPairReady,
+    bodyPairReady,
+    bodySpecific,
+    identityStatus: domainPairReady
+      ? 'algorithm-contact-domain-pair-ready'
+      : (bodyPairReady
+          ? 'algorithm-contact-body-pair-ready'
+          : (bodySpecific
+              ? 'algorithm-contact-body-pair-incomplete'
+              : 'algorithm-contact-generic-material-phase-row'))
+  };
+}
+
+function firstPositiveDomainId(...values) {
+  for (const value of values) {
+    const domainId = stableDomainId(value);
+    if (domainId > 0) return domainId;
+  }
+  return 0;
+}
+
+function firstBodyId(...values) {
+  for (const value of values) {
+    const bodyId = normalizedBodyId(value);
+    if (bodyId) return bodyId;
+  }
+  return null;
+}
+
+function firstIdentityPair(sources, normalize, ready) {
+  for (const source of sources) {
+    if (!Array.isArray(source)) continue;
+    const pair = pairValues(source, normalize);
+    if (ready(pair)) return pair;
+  }
+  return null;
+}
+
+function bodyDomainIdentityForInterfaceElement(element = {}) {
+  const contact = element?.contact && typeof element.contact === 'object'
+    ? element.contact
+    : {};
+  const explicitDomainPair = firstIdentityPair([
+    element.domainIds,
+    element.contactDomainIds,
+    element.bodyDomainIds,
+    element.renderDomainIds,
+    element.interfaceDomainIds,
+    contact.domainIds,
+    contact.contactDomainIds,
+    contact.bodyDomainIds,
+    contact.renderDomainIds
+  ], stableDomainId, (pair) => pair[0] > 0 && pair[1] > 0);
+  const explicitBodyPair = firstIdentityPair([
+    element.bodyIds,
+    element.contactBodyIds,
+    element.interfaceBodyIds,
+    contact.bodyIds,
+    contact.contactBodyIds
+  ], normalizedBodyId, (pair) => Boolean(pair[0] && pair[1]));
+  const sourceDomainId = firstPositiveDomainId(
+    element.sourceDomainId,
+    element.domainId,
+    element.renderDomainId,
+    element.initialBodyDomainId,
+    contact.sourceDomainId,
+    contact.domainId
+  );
+  const targetDomainId = firstPositiveDomainId(
+    element.targetDomainId,
+    element.otherDomainId,
+    element.neighborDomainId,
+    element.counterpartyDomainId,
+    contact.targetDomainId,
+    contact.otherDomainId,
+    contact.neighborDomainId
+  );
+  const sourceBodyId = firstBodyId(
+    element.sourceBodyId,
+    element.bodyId,
+    element.initialBodyId,
+    contact.sourceBodyId,
+    contact.bodyId
+  );
+  const targetBodyId = firstBodyId(
+    element.targetBodyId,
+    element.otherBodyId,
+    element.neighborBodyId,
+    element.counterpartyBodyId,
+    contact.targetBodyId,
+    contact.otherBodyId,
+    contact.neighborBodyId
+  );
+  const domainIds = explicitDomainPair
+    ?? (sourceDomainId > 0 && targetDomainId > 0 ? [sourceDomainId, targetDomainId] : null);
+  const bodyIds = explicitBodyPair
+    ?? (sourceBodyId && targetBodyId ? [sourceBodyId, targetBodyId] : null);
+  return {
+    domainIds,
+    bodyIds,
+    sourceDomainId,
+    targetDomainId,
+    sourceBodyId,
+    targetBodyId,
+    domainPairReady: Boolean(domainIds),
+    bodyPairReady: Boolean(bodyIds),
+    bodyIdentityObserved: Boolean(
+      domainIds
+      || bodyIds
+      || sourceDomainId > 0
+      || targetDomainId > 0
+      || sourceBodyId
+      || targetBodyId
+    )
+  };
+}
+
+function unorderedNumberPairMatches(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  if (!(left[0] > 0 && left[1] > 0 && right[0] > 0 && right[1] > 0)) return false;
+  return (left[0] === right[0] && left[1] === right[1])
+    || (left[0] === right[1] && left[1] === right[0]);
+}
+
+function unorderedStringPairMatches(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  if (!(left[0] && left[1] && right[0] && right[1])) return false;
+  return (left[0] === right[0] && left[1] === right[1])
+    || (left[0] === right[1] && left[1] === right[0]);
+}
+
+function contactRowMatchesElementMaterialPhase(row, {
+  elementMaterialId,
+  elementPhaseId,
+  elementMaterial,
+  elementPhase
+}) {
+  const materialIds = Array.isArray(row.materialIds) ? row.materialIds : [];
+  const materials = Array.isArray(row.materials) ? row.materials : [];
+  const phaseIds = Array.isArray(row.phaseIds) ? row.phaseIds : [];
+  const phases = Array.isArray(row.phases) ? row.phases : [];
+  const materialIdMatch = elementMaterialId > 0
+    && materialIds.some((id) => Math.abs(id - elementMaterialId) < 0.5);
+  const materialNameMatch = elementMaterial && materials.map(normalizedKey).includes(elementMaterial);
+  const presentPhaseIds = phaseIds.filter((id) => id > 0);
+  const phaseNames = phases.map(normalizedKey).filter(Boolean);
+  const phaseMatch = presentPhaseIds.length === 0 && phaseNames.length === 0
+    ? true
+    : ((elementPhaseId > 0 && presentPhaseIds.some((id) => Math.abs(id - elementPhaseId) < 0.5))
+        || (elementPhase && phaseNames.includes(elementPhase)));
+  return (materialIdMatch || materialNameMatch) && phaseMatch;
+}
+
+function contactRowMatchesElementAtPairIndex(row, pairIndex, elementIdentity) {
+  if (!(pairIndex === 0 || pairIndex === 1)) return false;
+  const rowMaterialId = finiteNumber(row.materialIds?.[pairIndex], 0);
+  const rowMaterial = normalizedKey(row.materials?.[pairIndex]);
+  const rowPhaseId = finiteNumber(row.phaseIds?.[pairIndex], 0);
+  const rowPhase = normalizedKey(row.phases?.[pairIndex]);
+  const materialMatch = (elementIdentity.elementMaterialId > 0 && rowMaterialId > 0
+    && Math.abs(rowMaterialId - elementIdentity.elementMaterialId) < 0.5)
+    || (elementIdentity.elementMaterial && rowMaterial === elementIdentity.elementMaterial);
+  const phaseMatch = rowPhaseId <= 0 && !rowPhase
+    ? true
+    : ((elementIdentity.elementPhaseId > 0 && rowPhaseId > 0
+        && Math.abs(rowPhaseId - elementIdentity.elementPhaseId) < 0.5)
+      || (elementIdentity.elementPhase && rowPhase === elementIdentity.elementPhase));
+  return materialMatch && phaseMatch;
+}
+
+function sourceSideSpecificRows(rows, elementIdentity, { fallbackToRows = true } = {}) {
+  let sourceIdentityObserved = false;
+  if (elementIdentity.sourceDomainId > 0) {
+    sourceIdentityObserved = true;
+    const matches = rows.filter((row) => {
+      const index = row.domainIds?.findIndex((id) => id === elementIdentity.sourceDomainId) ?? -1;
+      return contactRowMatchesElementAtPairIndex(row, index, elementIdentity);
+    });
+    if (matches.length > 0) return matches;
+  }
+  if (elementIdentity.sourceBodyId) {
+    sourceIdentityObserved = true;
+    const matches = rows.filter((row) => {
+      const index = row.bodyIds?.findIndex((id) => id === elementIdentity.sourceBodyId) ?? -1;
+      return contactRowMatchesElementAtPairIndex(row, index, elementIdentity);
+    });
+    if (matches.length > 0) return matches;
+  }
+  return fallbackToRows || !sourceIdentityObserved ? rows : [];
 }
 
 function contactPressureCap({ algorithmContactMaxPressurePa = null } = {}) {
@@ -270,10 +627,17 @@ export function normalizeAlgorithmContactPairResponsePolicy({
         });
         const contactPressurePa = Math.min(normalStiffnessPa * rowScale, rowMaxPressurePa);
         const { materialIds, phaseIds } = materialPhaseIdsForContactRow(row);
+        const bodyDomainIdentity = bodyDomainIdentityForContactRow(row);
         return {
           index,
           pairKey: row?.pairKey ?? null,
           roles: Array.isArray(row?.roles) ? [...row.roles] : [],
+          bodyIds: bodyDomainIdentity.bodyIds,
+          domainIds: bodyDomainIdentity.domainIds,
+          domainPairReady: bodyDomainIdentity.domainPairReady,
+          bodyPairReady: bodyDomainIdentity.bodyPairReady,
+          bodySpecific: bodyDomainIdentity.bodySpecific,
+          identityStatus: bodyDomainIdentity.identityStatus,
           materials: Array.isArray(row?.materials) ? [...row.materials] : [],
           materialIds,
           phases: Array.isArray(row?.phases) ? [...row.phases] : [],
@@ -293,6 +657,9 @@ export function normalizeAlgorithmContactPairResponsePolicy({
       })
       .filter((row) => row.status === 'algorithm-contact-pair-response-row-ready')
     : [];
+  const domainPairRowCount = rows.filter((row) => row.domainPairReady).length;
+  const bodyPairRowCount = rows.filter((row) => row.bodyPairReady).length;
+  const bodySpecificRowCount = rows.filter((row) => row.bodySpecific).length;
   return {
     schema: ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA,
     status: rows.length > 0
@@ -303,6 +670,13 @@ export function normalizeAlgorithmContactPairResponsePolicy({
     sourceRowsSchema: algorithmMaterialContactRows?.schema ?? null,
     sourceRowsStatus: algorithmMaterialContactRows?.status ?? null,
     rowCount: rows.length,
+    genericMaterialPhaseRowCount: rows.length - bodySpecificRowCount,
+    bodySpecificRowCount,
+    bodyPairRowCount,
+    domainPairRowCount,
+    bodyDomainSelectionStatus: bodySpecificRowCount > 0
+      ? 'algorithm-contact-body-domain-policy-available-to-cpu-selection'
+      : 'algorithm-contact-generic-material-phase-policy',
     rows,
     responseScale: scale,
     maxContactPressurePa,
@@ -323,30 +697,167 @@ export function algorithmContactPairResponseForElement(element = {}, policy = nu
   const elementPhaseId = stablePhaseId(element.phaseId ?? element.phase);
   const elementMaterial = normalizedKey(element.material);
   const elementPhase = normalizedKey(element.phase);
-  for (const row of policy.rows) {
-    const materialIdMatch = elementMaterialId > 0 && row.materialIds.some((id) => Math.abs(id - elementMaterialId) < 0.5);
-    const materialNameMatch = elementMaterial && row.materials.map(normalizedKey).includes(elementMaterial);
-    const phaseIds = row.phaseIds.filter((id) => id > 0);
-    const phaseNames = row.phases.map(normalizedKey).filter(Boolean);
-    const phaseMatch = phaseIds.length === 0 && phaseNames.length === 0
-      ? true
-      : ((elementPhaseId > 0 && phaseIds.some((id) => Math.abs(id - elementPhaseId) < 0.5))
-          || (elementPhase && phaseNames.includes(elementPhase)));
-    if ((materialIdMatch || materialNameMatch) && phaseMatch) {
-      const dynamicPressure = algorithmContactPressureForKinematics({ row, element });
-      return {
-        status: dynamicPressure.status,
-        contactPressurePa: dynamicPressure.contactPressurePa,
-        row,
-        kinematics: dynamicPressure.kinematics,
-        dynamicPressure
-      };
+  const bodyDomainIdentity = bodyDomainIdentityForInterfaceElement(element);
+  const elementIdentity = {
+    ...bodyDomainIdentity,
+    elementMaterialId,
+    elementPhaseId,
+    elementMaterial,
+    elementPhase
+  };
+  const matchingRows = policy.rows.filter((row) => (
+    contactRowMatchesElementMaterialPhase(row, elementIdentity)
+  ));
+  if (matchingRows.length === 0) {
+    return {
+      status: 'algorithm-contact-pair-response-no-matching-row',
+      contactPressurePa: 0,
+      row: null,
+      bodyDomainIdentity
+    };
+  }
+  const normalizedMatchingRows = matchingRows.map((row) => ({
+    row,
+    ...bodyDomainIdentityForContactRow(row)
+  }));
+  const genericRows = normalizedMatchingRows.filter(({ bodySpecific }) => !bodySpecific);
+  const specificRows = normalizedMatchingRows.filter(({ bodySpecific }) => bodySpecific);
+  const selectedResponse = (row, selectionStatus) => {
+    const dynamicPressure = algorithmContactPressureForKinematics({ row, element });
+    return {
+      status: dynamicPressure.status,
+      selectionStatus,
+      contactPressurePa: dynamicPressure.contactPressurePa,
+      row,
+      kinematics: dynamicPressure.kinematics,
+      dynamicPressure,
+      bodyDomainIdentity
+    };
+  };
+  const ambiguousResponse = (rows, reason) => ({
+    status: 'algorithm-contact-pair-response-body-specific-ambiguous',
+    reason,
+    contactPressurePa: 0,
+    row: null,
+    bodyDomainIdentity,
+    ambiguousRowCount: rows.length,
+    ambiguousPairKeys: rows.map((entry) => entry.row.pairKey).filter(Boolean)
+  });
+
+  if (bodyDomainIdentity.domainPairReady) {
+    let exactRows = specificRows.filter(({ domainIds, domainPairReady }) => (
+      domainPairReady && unorderedNumberPairMatches(domainIds, bodyDomainIdentity.domainIds)
+    ));
+    if (bodyDomainIdentity.bodyPairReady && exactRows.length > 1) {
+      const exactBodyRows = exactRows.filter(({ bodyIds, bodyPairReady }) => (
+        bodyPairReady && unorderedStringPairMatches(bodyIds, bodyDomainIdentity.bodyIds)
+      ));
+      if (exactBodyRows.length > 0) exactRows = exactBodyRows;
     }
+    exactRows = sourceSideSpecificRows(
+      exactRows.map(({ row }) => row),
+      elementIdentity,
+      { fallbackToRows: false }
+    ).map((row) => ({ row }));
+    if (exactRows.length === 1) {
+      return selectedResponse(exactRows[0].row, 'algorithm-contact-exact-unordered-domain-pair-selected');
+    }
+    if (exactRows.length > 1) {
+      if (genericRows.length > 0) {
+        return selectedResponse(
+          genericRows[0].row,
+          'algorithm-contact-ambiguous-domain-pair-generic-material-phase-fallback-selected'
+        );
+      }
+      return ambiguousResponse(exactRows, 'multiple-body-specific-rows-match-exact-domain-pair');
+    }
+    if (genericRows.length > 0) {
+      return selectedResponse(genericRows[0].row, 'algorithm-contact-generic-material-phase-fallback-selected');
+    }
+    return {
+      status: 'algorithm-contact-pair-response-no-matching-body-domain-row',
+      reason: 'explicit-element-domain-pair-has-no-policy-row-or-generic-fallback',
+      contactPressurePa: 0,
+      row: null,
+      bodyDomainIdentity
+    };
+  }
+
+  if (bodyDomainIdentity.bodyPairReady) {
+    let exactRows = specificRows.filter(({ bodyIds, bodyPairReady }) => (
+      bodyPairReady && unorderedStringPairMatches(bodyIds, bodyDomainIdentity.bodyIds)
+    ));
+    exactRows = sourceSideSpecificRows(
+      exactRows.map(({ row }) => row),
+      elementIdentity,
+      { fallbackToRows: false }
+    ).map((row) => ({ row }));
+    if (exactRows.length === 1) {
+      return selectedResponse(exactRows[0].row, 'algorithm-contact-exact-unordered-body-pair-selected');
+    }
+    if (exactRows.length > 1) {
+      if (genericRows.length > 0) {
+        return selectedResponse(
+          genericRows[0].row,
+          'algorithm-contact-ambiguous-body-pair-generic-material-phase-fallback-selected'
+        );
+      }
+      return ambiguousResponse(exactRows, 'multiple-body-specific-rows-match-exact-body-pair');
+    }
+    if (genericRows.length > 0) {
+      return selectedResponse(genericRows[0].row, 'algorithm-contact-generic-material-phase-fallback-selected');
+    }
+    return {
+      status: 'algorithm-contact-pair-response-no-matching-body-domain-row',
+      reason: 'explicit-element-body-pair-has-no-policy-row-or-generic-fallback',
+      contactPressurePa: 0,
+      row: null,
+      bodyDomainIdentity
+    };
+  }
+
+  let scopedRows = specificRows;
+  if (bodyDomainIdentity.sourceDomainId > 0 || bodyDomainIdentity.targetDomainId > 0) {
+    const observedDomainIds = [
+      bodyDomainIdentity.sourceDomainId,
+      bodyDomainIdentity.targetDomainId
+    ].filter((id) => id > 0);
+    scopedRows = scopedRows.filter(({ domainIds }) => (
+      observedDomainIds.every((id) => domainIds.includes(id))
+    ));
+  }
+  if (bodyDomainIdentity.sourceBodyId || bodyDomainIdentity.targetBodyId) {
+    const observedBodyIds = [
+      bodyDomainIdentity.sourceBodyId,
+      bodyDomainIdentity.targetBodyId
+    ].filter(Boolean);
+    scopedRows = scopedRows.filter(({ bodyIds }) => (
+      observedBodyIds.every((id) => bodyIds.includes(id))
+    ));
+  }
+  if (scopedRows.length > 1) {
+    scopedRows = sourceSideSpecificRows(scopedRows.map(({ row }) => row), elementIdentity)
+      .map((row) => ({ row }));
+  }
+  if (scopedRows.length === 1) {
+    return selectedResponse(scopedRows[0].row, bodyDomainIdentity.bodyIdentityObserved
+      ? 'algorithm-contact-partial-body-domain-row-selected'
+      : 'algorithm-contact-single-body-specific-material-phase-row-selected');
+  }
+  if (genericRows.length > 0) {
+    return selectedResponse(genericRows[0].row, 'algorithm-contact-generic-material-phase-fallback-selected');
+  }
+  if (scopedRows.length > 1) {
+    return ambiguousResponse(scopedRows, bodyDomainIdentity.bodyIdentityObserved
+      ? 'partial-element-body-domain-identity-matches-multiple-specific-rows'
+      : 'element-has-no-body-domain-pair-and-material-phase-matches-multiple-specific-rows');
   }
   return {
-    status: 'algorithm-contact-pair-response-no-matching-row',
+    status: 'algorithm-contact-pair-response-no-matching-body-domain-row',
+    reason: 'partial-element-body-domain-identity-has-no-policy-row-or-generic-fallback',
     contactPressurePa: 0,
-    row: null
+    row: null,
+    bodyDomainIdentity
   };
 }
 
@@ -354,9 +865,17 @@ export function packAlgorithmContactPolicyRows(policy = null) {
   const rows = policy?.schema === ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA && Array.isArray(policy.rows)
     ? policy.rows
     : [];
+  const domainPairRowCount = rows.filter((row) => (
+    bodyDomainIdentityForContactRow(row).domainPairReady
+  )).length;
+  const bodySpecificWithoutDomainPairRowCount = rows.filter((row) => {
+    const identity = bodyDomainIdentityForContactRow(row);
+    return identity.bodySpecific && !identity.domainPairReady;
+  }).length;
   const values = new Float32Array(rows.length * SPH_ALGORITHM_CONTACT_POLICY_FLOATS);
   for (const [index, row] of rows.entries()) {
     const offset = index * SPH_ALGORITHM_CONTACT_POLICY_FLOATS;
+    const identity = bodyDomainIdentityForContactRow(row);
     values.set([
       finiteNumber(row.materialIds?.[0], 0),
       finiteNumber(row.materialIds?.[1], 0),
@@ -370,10 +889,10 @@ export function packAlgorithmContactPolicyRows(policy = null) {
       1,
       finiteNumber(row.index, index),
       finiteNumber(row.contactPressurePa, 0),
-      0,
-      0,
-      0,
-      0
+      identity.domainIds[0],
+      identity.domainIds[1],
+      identity.bodySpecific ? 1 : 0,
+      identity.domainPairReady ? 1 : 0
     ], offset);
   }
   return {
@@ -384,7 +903,15 @@ export function packAlgorithmContactPolicyRows(policy = null) {
     rows: values,
     rowCount: rows.length,
     rowStrideFloats: SPH_ALGORITHM_CONTACT_POLICY_FLOATS,
-    rowByteLength: values.byteLength
+    rowByteLength: values.byteLength,
+    domainPairRowCount,
+    bodySpecificWithoutDomainPairRowCount,
+    domainPairGpuSelectionReady: bodySpecificWithoutDomainPairRowCount === 0,
+    domainPairGpuSelectionStatus: bodySpecificWithoutDomainPairRowCount > 0
+      ? 'blocked-body-specific-contact-policy-missing-exact-domain-pair'
+      : (domainPairRowCount > 0
+          ? 'algorithm-contact-exact-domain-pairs-encoded-in-gpu-rows'
+          : 'not-required-generic-material-phase-contact-policy')
   };
 }
 
@@ -392,15 +919,25 @@ export function packMaterialInterfaceContactKinematicsRows(materialInterfaceFiel
   const elements = readyInterfaceElements(materialInterfaceField);
   const rows = new Float32Array(elements.length * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS);
   let readyCount = 0;
+  let domainPairReadyCount = 0;
+  let domainIdentityObservedCount = 0;
   for (const [index, element] of elements.entries()) {
     const kinematics = interfaceContactKinematicsForElement(element);
+    const identity = bodyDomainIdentityForInterfaceElement(element);
+    const domainIds = identity.domainIds ?? [identity.sourceDomainId, identity.targetDomainId];
     if (kinematics.status === 'interface-contact-kinematics-ready') readyCount += 1;
+    if (identity.domainPairReady) domainPairReadyCount += 1;
+    if (identity.bodyIdentityObserved) domainIdentityObservedCount += 1;
     const offset = index * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS;
     rows.set([
       kinematics.gapM,
       kinematics.normalVelocityMPerS,
       kinematics.representativeMassKg,
-      kinematics.ready ? 1 : 0
+      kinematics.ready ? 1 : 0,
+      stableDomainId(domainIds?.[0]),
+      stableDomainId(domainIds?.[1]),
+      identity.domainPairReady ? 1 : 0,
+      0
     ], offset);
   }
   return {
@@ -413,6 +950,8 @@ export function packMaterialInterfaceContactKinematicsRows(materialInterfaceFiel
     rows,
     rowCount: elements.length,
     readyCount,
+    domainPairReadyCount,
+    domainIdentityObservedCount,
     rowStrideFloats: SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
     rowByteLength: rows.byteLength
   };
@@ -701,6 +1240,806 @@ function writeStorageBuffer(device, label, data) {
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   }), device);
   if (data?.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
+  return buffer;
+}
+
+function spatialU32(value, fallback = 0) {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= 0
+    && value <= 0xffff_ffff
+    ? value
+    : fallback;
+}
+
+function spatialI32(value, fallback = 0) {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= -0x8000_0000
+    && value <= 0x7fff_ffff
+    ? value
+    : fallback;
+}
+
+function spatialSize(value, fallback = 0) {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 0
+    ? value
+    : fallback;
+}
+
+function unavailableSchroederSpatialSource(source, device, status, reason, extra = {}) {
+  return {
+    schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+    sourceSchema: source?.schema ?? null,
+    sourceStatus: source?.status ?? null,
+    adapterSchema: source?.spatialEpochSourceSchema ?? null,
+    adapterStatus: source?.spatialEpochSourceStatus ?? null,
+    status,
+    reason,
+    ready: false,
+    sourceCount: 0,
+    sourceDeviceId: null,
+    consumerDeviceId: device ? webGpuDeviceMismatchInfo({ device }).consumerDeviceId : null,
+    ...extra
+  };
+}
+
+export function resolveSchroederPressureInterfaceSpatialEpochSource(
+  schroederActiveNodeList = null,
+  { device = null, particleCount = 0 } = {}
+) {
+  const source = schroederActiveNodeList;
+  if (!source) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-unavailable',
+      'No canonical active-node source was provided to the pressure/interface stage'
+    );
+  }
+  if (source.phaseVolumeAssignmentOverlayEnabled === true) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-overlay',
+      'Phase-volume overlays require an explicit per-level spacing sidecar before canonical admission'
+    );
+  }
+  if (
+    source.spatialEpochSourceSchema !== SCHROEDER_SPATIAL_SOURCE_SCHEMA
+    || source.spatialEpochSourceReady !== true
+    || source.spatialEpochSourceStatus !== 'schroeder-spatial-active-node-source-ready'
+  ) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-contract',
+      source.spatialEpochSourceStatus
+        || 'Canonical active-node spacing/source contract is not proven'
+    );
+  }
+  if (
+    source.spatialEpochLevelSpacingMode !== SCHROEDER_SPATIAL_LEVEL_SPACING_MODE
+    || source.spatialEpochPositionAuthority !== SCHROEDER_SPATIAL_POSITION_AUTHORITY
+  ) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-key-profile',
+      'Canonical exact-near requires declared pow2 level spacing and pre-integration position authority'
+    );
+  }
+  const activeNodeBuffer = source.activeNodeBuffer || source.buffer || null;
+  if (!activeNodeBuffer) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-buffer',
+      'Canonical active-node source has no retained GPU buffer'
+    );
+  }
+  const mismatch = webGpuDeviceMismatchInfo({ buffer: activeNodeBuffer, device });
+  if (mismatch.mismatch) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-device',
+      'Canonical active-node source belongs to another WebGPU device',
+      {
+        sourceDeviceId: mismatch.sourceDeviceId,
+        consumerDeviceId: mismatch.consumerDeviceId
+      }
+    );
+  }
+  const sourceCount = spatialU32(
+    source.activeCandidateCount ?? source.activeNodeCount ?? source.particleCount,
+    Number.NaN
+  );
+  const expectedParticleCount = spatialU32(particleCount, Number.NaN);
+  const strideFloats = spatialU32(source.activeNodeStrideFloats, Number.NaN);
+  if (sourceCount <= 0 || sourceCount !== expectedParticleCount) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-count',
+      `Canonical active-node count ${sourceCount} does not match particle count ${expectedParticleCount}`,
+      { sourceCount }
+    );
+  }
+  if (strideFloats !== SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-stride',
+      `Canonical active-node stride ${strideFloats} is not ${SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS}`,
+      { sourceCount }
+    );
+  }
+  const requiredBytes = sourceCount
+    * SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  if (Number.isFinite(Number(activeNodeBuffer.size)) && Number(activeNodeBuffer.size) < requiredBytes) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-buffer-size',
+      `Canonical active-node buffer has ${activeNodeBuffer.size} bytes; ${requiredBytes} required`,
+      { sourceCount }
+    );
+  }
+  const minLevel = spatialI32(source.spatialEpochMinLevel, Number.NaN);
+  const maxLevel = spatialI32(source.spatialEpochMaxLevel, Number.NaN);
+  const chartId = spatialU32(source.spatialEpochChartId, Number.NaN);
+  const baseGridSpacingM = typeof source.spatialEpochBaseGridSpacingM === 'number'
+    && Number.isFinite(source.spatialEpochBaseGridSpacingM)
+    ? source.spatialEpochBaseGridSpacingM
+    : Number.NaN;
+  const levelCount = maxLevel - minLevel + 1;
+  const storageGeneration = spatialU32(source.spatialEpochStorageGeneration, Number.NaN);
+  const physicsTick = spatialU32(source.spatialEpochPhysicsTick, Number.NaN);
+  const physicsSubstep = spatialU32(source.spatialEpochPhysicsSubstep, Number.NaN);
+  const positionEpoch = spatialU32(source.spatialEpochPositionEpoch, Number.NaN);
+  const topologyEpoch = spatialU32(source.spatialEpochTopologyEpoch, Number.NaN);
+  const chartEpoch = spatialU32(source.spatialEpochChartEpoch, Number.NaN);
+  const levelEpoch = spatialU32(source.spatialEpochLevelEpoch, Number.NaN);
+  const supportEpoch = spatialU32(source.spatialEpochSupportEpoch, Number.NaN);
+  if (
+    !Number.isInteger(minLevel)
+    || !Number.isInteger(maxLevel)
+    || levelCount <= 0
+    || levelCount > 64
+    || !Number.isInteger(chartId)
+    || chartId < 0
+    || chartId > 0x00ff_ffff
+    || !(baseGridSpacingM > 0)
+    || !Number.isFinite(baseGridSpacingM * (2 ** minLevel))
+    || !(baseGridSpacingM * (2 ** minLevel) > 0)
+    || !Number.isFinite(baseGridSpacingM * (2 ** maxLevel))
+    || !(baseGridSpacingM * (2 ** maxLevel) > 0)
+    || !Number.isInteger(storageGeneration)
+    || storageGeneration < 1
+    || !Number.isInteger(physicsTick)
+    || !Number.isInteger(physicsSubstep)
+    || !Number.isInteger(positionEpoch)
+    || !Number.isInteger(topologyEpoch)
+    || !Number.isInteger(chartEpoch)
+    || !Number.isInteger(levelEpoch)
+    || !Number.isInteger(supportEpoch)
+  ) {
+    return unavailableSchroederSpatialSource(
+      source,
+      device,
+      'schroeder-spatial-exact-near-source-rejected-level-range',
+      'Canonical active-node level/chart/base-spacing/generation profile is not safely queryable',
+      { sourceCount }
+    );
+  }
+  return {
+    schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+    sourceSchema: source.schema ?? null,
+    sourceStatus: source.status ?? null,
+    adapterSchema: source.spatialEpochSourceSchema,
+    adapterStatus: source.spatialEpochSourceStatus,
+    status: 'schroeder-spatial-exact-near-source-ready',
+    reason: null,
+    ready: true,
+    activeNodeBuffer,
+    sourceCount,
+    activeNodeStrideFloats: strideFloats,
+    chartId,
+    minLevel,
+    maxLevel,
+    levelCount,
+    baseGridSpacingM,
+    levelSpacingMode: source.spatialEpochLevelSpacingMode,
+    positionAuthority: source.spatialEpochPositionAuthority,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch,
+    storageGeneration,
+    sourceDeviceId: mismatch.sourceDeviceId,
+    consumerDeviceId: mismatch.consumerDeviceId
+  };
+}
+
+export function resolveSchroederPressureInterfaceSpatialEpochProvenance({
+  spatialSource = null,
+  materialInterfaceField = null,
+  particleSource = null,
+  particleCount = 0,
+  requireCompleteBufferFamily = false
+} = {}) {
+  const base = {
+    status: 'schroeder-spatial-exact-near-interface-provenance-unavailable',
+    reason: 'Material-interface epoch provenance was not provided',
+    ready: false,
+    sourcePositionEpoch: spatialSource?.positionEpoch ?? null,
+    interfacePositionEpoch: null,
+    sourceTopologyEpoch: spatialSource?.topologyEpoch ?? null,
+    interfaceTopologyEpoch: null,
+    sourceStorageGeneration: spatialSource?.storageGeneration ?? null,
+    interfaceStorageGeneration: null,
+    particleBufferFamilyReady: false
+  };
+  if (spatialSource?.ready !== true || !materialInterfaceField) return base;
+  const positionEpoch = spatialU32(
+    materialInterfaceField.spatialEpochPositionEpoch,
+    Number.NaN
+  );
+  const topologyEpoch = spatialU32(
+    materialInterfaceField.spatialEpochTopologyEpoch,
+    Number.NaN
+  );
+  const sourceCount = spatialU32(
+    materialInterfaceField.spatialEpochSourceCount,
+    Number.NaN
+  );
+  const storageGeneration = spatialU32(
+    materialInterfaceField.spatialEpochStorageGeneration,
+    Number.NaN
+  );
+  const authority = materialInterfaceField.spatialEpochPositionAuthority;
+  const expectedCount = spatialU32(particleCount, Number.NaN);
+  const stateBufferReady = materialInterfaceField.spatialEpochSourceStateBuffer
+    === particleSource?.stateBuffer;
+  const thermoBufferReady = materialInterfaceField.spatialEpochSourceThermoBuffer
+    === particleSource?.thermoBuffer;
+  const identityBufferReady = particleSource?.identityReady === true
+    ? materialInterfaceField.spatialEpochSourceIdentityBuffer
+      === particleSource.identityBuffer
+    : materialInterfaceField.spatialEpochSourceIdentityBuffer == null;
+  const particleBufferFamilyReady = Boolean(
+    particleSource?.ready === true
+    && stateBufferReady
+    && thermoBufferReady
+    && identityBufferReady
+  );
+  const extendedEpochFields = [
+    ['physicsTick', 'spatialEpochPhysicsTick'],
+    ['physicsSubstep', 'spatialEpochPhysicsSubstep'],
+    ['chartEpoch', 'spatialEpochChartEpoch'],
+    ['levelEpoch', 'spatialEpochLevelEpoch'],
+    ['supportEpoch', 'spatialEpochSupportEpoch']
+  ];
+  const extendedEpochsReady = extendedEpochFields.every(([sourceField, interfaceField]) => (
+    spatialU32(materialInterfaceField[interfaceField], Number.NaN)
+      === spatialSource[sourceField]
+  ));
+  const particleEpochsReady = !requireCompleteBufferFamily || [
+    ['storageGeneration', 'storageGeneration'],
+    ['physicsTick', 'physicsTick'],
+    ['physicsSubstep', 'physicsSubstep'],
+    ['positionEpoch', 'positionEpoch'],
+    ['topologyEpoch', 'topologyEpoch'],
+    ['chartEpoch', 'chartEpoch'],
+    ['levelEpoch', 'levelEpoch'],
+    ['supportEpoch', 'supportEpoch']
+  ].every(([particleField, sourceField]) => (
+    particleSource?.[particleField] === spatialSource[sourceField]
+  ));
+  const baseReady = materialInterfaceField.spatialEpochInterfaceProvenanceStatus
+      === 'material-interface-current-particle-epoch-ready'
+    && authority === SCHROEDER_SPATIAL_POSITION_AUTHORITY
+    && positionEpoch === spatialSource.positionEpoch
+    && topologyEpoch === spatialSource.topologyEpoch
+    && sourceCount === spatialSource.sourceCount
+    && sourceCount === expectedCount;
+  const completeBufferFamilyReady = storageGeneration === spatialSource.storageGeneration
+    && particleBufferFamilyReady
+    && extendedEpochsReady
+    && particleEpochsReady;
+  const ready = baseReady && (
+    requireCompleteBufferFamily !== true || completeBufferFamilyReady
+  );
+  return {
+    status: ready
+      ? 'schroeder-spatial-exact-near-interface-provenance-ready'
+      : 'schroeder-spatial-exact-near-interface-provenance-rejected',
+    reason: ready
+      ? null
+      : (baseReady
+          ? 'Material-interface rows do not prove the complete storage/epoch/buffer family consumed by exact-near'
+          : 'Material-interface rows do not prove the same position/topology/count epoch as the canonical directory source'),
+    ready,
+    authority: authority ?? null,
+    sourcePositionEpoch: spatialSource.positionEpoch,
+    interfacePositionEpoch: Number.isInteger(positionEpoch) ? positionEpoch : null,
+    sourceTopologyEpoch: spatialSource.topologyEpoch,
+    interfaceTopologyEpoch: Number.isInteger(topologyEpoch) ? topologyEpoch : null,
+    sourceStorageGeneration: spatialSource.storageGeneration,
+    interfaceStorageGeneration: Number.isInteger(storageGeneration)
+      ? storageGeneration
+      : null,
+    sourceCount: spatialSource.sourceCount,
+    interfaceSourceCount: Number.isInteger(sourceCount) ? sourceCount : null,
+    requireCompleteBufferFamily: requireCompleteBufferFamily === true,
+    particleBufferFamilyReady,
+    stateBufferReady,
+    thermoBufferReady,
+    identityBufferReady,
+    extendedEpochsReady,
+    particleEpochsReady,
+    completeBufferFamilyReady
+  };
+}
+
+function rejectedBorrowedSchroederPressureSpatialGeneration(
+  generation,
+  device,
+  status,
+  reason,
+  extra = {}
+) {
+  return {
+    supplied: generation != null,
+    selected: false,
+    ready: false,
+    borrowed: generation != null,
+    ownsGeneration: false,
+    directoryOwnership: generation != null
+      ? 'borrowed-caller-owned-canonical-generation-rejected'
+      : 'not-supplied',
+    status,
+    reason,
+    source: null,
+    execution: null,
+    runtime: null,
+    directoryBuildCount: 0,
+    sharedGenerationDirectoryBuildCount: Math.max(
+      0,
+      Math.trunc(finiteNumber(generation?.directoryBuildCount, 0))
+    ),
+    privateParticleBinBuildCount: 0,
+    fixedCandidateBuildCount: 0,
+    exhaustiveParticleScanCount: 0,
+    releaseScheduled: false,
+    releaseStatus: generation != null
+      ? 'borrowed-generation-release-owned-by-caller'
+      : 'not-applicable-no-generation',
+    sourceDeviceId: null,
+    consumerDeviceId: device ? webGpuDeviceMismatchInfo({ device }).consumerDeviceId : null,
+    ...extra
+  };
+}
+
+/**
+ * Adapt a caller-owned canonical generation into the pressure exact-near view.
+ * The exact-near source still supplies its chart/level-spacing query profile;
+ * object identity plus every immutable epoch field proves that it is the same
+ * source used to build the borrowed directory.  This consumer never releases
+ * the generation: its owner must fence after the final reader submits.
+ */
+export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
+  generation = null,
+  {
+    device = null,
+    spatialSource = null,
+    spatialProvenance = null,
+    particleSource = null,
+    particleCount = 0
+  } = {}
+) {
+  if (!generation) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-not-supplied',
+      'No caller-owned canonical spatial generation was supplied'
+    );
+  }
+  if (generation.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-schema',
+      'Caller-owned spatial generation schema is not generation.v1'
+    );
+  }
+  if (
+    generation.status !== 'schroeder-spatial-epoch-generation-submitted'
+    || generation.ready !== true
+    || generation.selected !== true
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-state',
+      generation.reason || 'Caller-owned spatial generation is not ready and selected'
+    );
+  }
+  if (generation.releaseScheduled === true) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-release-scheduled',
+      'The owner already captured the final-consumer fence for this generation'
+    );
+  }
+  const execution = generation.execution || null;
+  if (
+    execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || execution.status !== 'schroeder-spatial-epoch-gpu-build-submitted'
+    || execution.submitPerformed !== true
+    || execution.released === true
+    || !execution.directoryBuffer
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-execution',
+      execution?.released === true
+        ? 'Caller-owned spatial generation was already released'
+        : 'Caller-owned spatial execution is incomplete or was not submitted'
+    );
+  }
+  const mismatch = webGpuDeviceMismatchInfo({
+    buffer: execution.directoryBuffer,
+    device
+  });
+  if (mismatch.mismatch) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-device',
+      'Caller-owned spatial directory belongs to another WebGPU device',
+      mismatch
+    );
+  }
+  const ownerRuntime = generation.runtime || null;
+  let ownerRuntimeOwnsExecution = false;
+  let ownerRuntimeSubmissionProven = false;
+  try {
+    ownerRuntimeOwnsExecution = ownerRuntime?.ownsExecution?.(execution) === true;
+    ownerRuntimeSubmissionProven = ownerRuntime?.isExecutionSubmitted?.(execution)
+      === true;
+  } catch {
+    ownerRuntimeOwnsExecution = false;
+    ownerRuntimeSubmissionProven = false;
+  }
+  if (
+    ownerRuntime?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || ownerRuntime.status !== 'schroeder-spatial-epoch-gpu-runtime-ready'
+    || ownerRuntime.deviceId !== mismatch.consumerDeviceId
+    || ownerRuntime !== execution.ownerRuntime
+    || typeof ownerRuntime.releaseExecutionAfter !== 'function'
+    || !ownerRuntimeOwnsExecution
+    || !ownerRuntimeSubmissionProven
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-owner-runtime',
+      'Caller-owned spatial generation lacks a live same-device runtime that owns this execution'
+    );
+  }
+  if (spatialSource?.ready !== true || spatialProvenance?.ready !== true) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-provenance',
+      spatialProvenance?.reason
+        || spatialSource?.reason
+        || 'Exact-near source and interface rows do not prove one immutable epoch'
+    );
+  }
+  const generationSource = generation.source || null;
+  const expectedParticleCount = spatialU32(particleCount, Number.NaN);
+  if (execution.activeNodeBuffer !== spatialSource.activeNodeBuffer) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-execution-source',
+      'Borrowed directory execution was encoded from a different active-node buffer'
+    );
+  }
+  if (
+    generationSource?.schema !== ULG_SCHROEDER_SPATIAL_DIRECTORY_SOURCE_SCHEMA
+    || generationSource.status !== 'schroeder-spatial-directory-source-ready'
+    || generationSource.ready !== true
+    || generationSource.activeNodeBuffer !== spatialSource.activeNodeBuffer
+    || generationSource.sourceCount !== spatialSource.sourceCount
+    || generationSource.sourceCount !== expectedParticleCount
+    || generationSource.activeNodeStrideFloats !== SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS
+    || generationSource.phaseVolumeAssignmentOverlayEnabled === true
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-source',
+      'Borrowed directory source is not the exact active-node source admitted by pressure/contact'
+    );
+  }
+  const queryProfile = generationSource.exactNearQueryProfile || null;
+  if (
+    queryProfile?.schema
+      !== 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1'
+    || queryProfile.status !== 'schroeder-spatial-exact-near-query-profile-ready'
+    || queryProfile.ready !== true
+    || queryProfile.activeNodeBuffer !== spatialSource.activeNodeBuffer
+    || queryProfile.sourceCount !== spatialSource.sourceCount
+    || queryProfile.chartId !== spatialSource.chartId
+    || queryProfile.minLevel !== spatialSource.minLevel
+    || queryProfile.maxLevel !== spatialSource.maxLevel
+    || queryProfile.levelCount !== spatialSource.levelCount
+    || queryProfile.baseGridSpacingM !== spatialSource.baseGridSpacingM
+    || queryProfile.levelSpacingMode !== spatialSource.levelSpacingMode
+    || queryProfile.positionAuthority !== spatialSource.positionAuthority
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-query-profile',
+      'Borrowed generation does not authenticate the exact chart/level/spacing query profile'
+    );
+  }
+  const gpuQueryProfile = execution.exactNearQueryProfile || null;
+  if (
+    execution.sourceAdapterId
+      !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+    || gpuQueryProfile?.schema
+      !== 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1'
+    || gpuQueryProfile.status
+      !== 'schroeder-spatial-exact-near-query-profile-ready'
+    || gpuQueryProfile.ready !== true
+    || gpuQueryProfile.sourceAdapterId
+      !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+    || gpuQueryProfile.sourceCount !== spatialSource.sourceCount
+    || gpuQueryProfile.chartId !== spatialSource.chartId
+    || gpuQueryProfile.minLevel !== spatialSource.minLevel
+    || gpuQueryProfile.maxLevel !== spatialSource.maxLevel
+    || gpuQueryProfile.levelCount !== spatialSource.levelCount
+    || gpuQueryProfile.baseGridSpacingM
+      !== Math.fround(spatialSource.baseGridSpacingM)
+    || gpuQueryProfile.levelSpacingMode !== spatialSource.levelSpacingMode
+    || gpuQueryProfile.positionAuthority !== spatialSource.positionAuthority
+    || execution.queryGeometryEvidence !== gpuQueryProfile
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-gpu-query-evidence',
+      'Borrowed generation is not adapter-2 GPU-authenticated for this exact chart, level range, and f32 spacing profile'
+    );
+  }
+  const epochFields = [
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ];
+  for (const field of epochFields) {
+    if (
+      generationSource[field] !== spatialSource[field]
+      || queryProfile[field] !== spatialSource[field]
+      || execution[field] !== spatialSource[field]
+    ) {
+      return rejectedBorrowedSchroederPressureSpatialGeneration(
+        generation,
+        device,
+        `schroeder-spatial-exact-near-shared-generation-rejected-${field}`,
+        `Borrowed directory ${field} does not match the exact-near source epoch`,
+        {
+          mismatchField: field,
+          expected: spatialSource[field],
+          sourceActual: generationSource[field],
+          queryProfileActual: queryProfile[field],
+          executionActual: execution[field]
+        }
+      );
+    }
+  }
+  const generationId = spatialU32(execution.generationId, Number.NaN);
+  const deviceOrdinal = spatialU32(execution.deviceOrdinal, Number.NaN);
+  const laneOrdinal = spatialU32(execution.laneOrdinal, Number.NaN);
+  const leaseToken = spatialU32(execution.leaseToken, Number.NaN);
+  const sourceFamilyId = spatialU32(execution.sourceFamilyId, Number.NaN);
+  const buildOrdinal = spatialU32(execution.buildOrdinal, Number.NaN);
+  const sortUniqueOrdinal = spatialU32(execution.sortUniqueOrdinal, Number.NaN);
+  const arenaIndex = spatialU32(execution.arenaIndex, Number.NaN);
+  const arenaGeneration = spatialU32(execution.arenaGeneration, Number.NaN);
+  const identityReady = Boolean(
+    generationId > 0
+    && Number.isInteger(deviceOrdinal)
+    && Number.isInteger(laneOrdinal)
+    && leaseToken > 0
+    && sourceFamilyId > 0
+    && execution.sourceFamily === 'schroeder-active-node-particles'
+    && buildOrdinal > 0
+    && sortUniqueOrdinal === buildOrdinal
+    && Number.isInteger(arenaIndex)
+    && arenaGeneration > 0
+    && execution.deviceId === mismatch.consumerDeviceId
+  );
+  if (!identityReady) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-identity',
+      'Borrowed directory execution lacks complete device/lane/lease/source/build identity'
+    );
+  }
+  const sourceCapacity = spatialU32(execution.sourceCapacity, Number.NaN);
+  const cellCapacity = spatialU32(execution.cellCapacity, Number.NaN);
+  let expectedLayout = null;
+  if (
+    Number.isInteger(sourceCapacity)
+    && sourceCapacity >= expectedParticleCount
+    && Number.isInteger(cellCapacity)
+    && cellCapacity >= expectedParticleCount
+  ) {
+    try {
+      expectedLayout = createSchroederSpatialEpochLayout({
+        sourceCapacity,
+        cellCapacity
+      });
+    } catch {
+      expectedLayout = null;
+    }
+  }
+  const layout = execution.layout || null;
+  const layoutFields = [
+    'schema',
+    'headerOffsetWords',
+    'headerWords',
+    'cellKeysOffsetWords',
+    'cellKeyWords',
+    'cellOffsetsOffsetWords',
+    'cellOffsetWords',
+    'cellMembersOffsetWords',
+    'cellMemberWords',
+    'particleToCellOffsetWords',
+    'particleToCellWords',
+    'sourceCapacity',
+    'cellCapacity',
+    'wordLength',
+    'byteLength'
+  ];
+  const layoutReady = expectedLayout != null && layoutFields.every((field) => (
+    layout?.[field] === expectedLayout[field]
+  ));
+  const directoryBufferSize = execution.directoryBuffer?.size;
+  const directoryBufferSizeReady = directoryBufferSize == null || (
+    spatialSize(directoryBufferSize, Number.NaN) === directoryBufferSize
+    && directoryBufferSize >= expectedLayout?.byteLength
+  );
+  if (
+    execution.magic !== SCHROEDER_SPATIAL_EPOCH_MAGIC
+    || execution.abiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+    || execution.exactKeyWordCount !== SCHROEDER_SPATIAL_EPOCH_KEY_WORDS
+    || execution.sortKeyWordCount !== SCHROEDER_SPATIAL_EPOCH_KEY_WORDS
+    || execution.sortMode !== SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5
+    || execution.sourceCount !== expectedParticleCount
+    || !layoutReady
+    || !directoryBufferSizeReady
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-layout',
+      'Borrowed directory is not a complete lexicographic u32x5 generation for this particle count'
+    );
+  }
+  if (
+    particleSource?.ready !== true
+    || particleSource.particleCount !== expectedParticleCount
+    || spatialProvenance.particleBufferFamilyReady !== true
+    || spatialProvenance.completeBufferFamilyReady !== true
+  ) {
+    return rejectedBorrowedSchroederPressureSpatialGeneration(
+      generation,
+      device,
+      'schroeder-spatial-exact-near-shared-generation-rejected-particle-family',
+      'Exact-near particle buffers are not the complete immutable family proven by the interface field'
+    );
+  }
+  return {
+    supplied: true,
+    selected: true,
+    ready: true,
+    borrowed: true,
+    ownsGeneration: false,
+    directoryOwnership: 'borrowed-caller-owned-canonical-generation',
+    status: 'schroeder-spatial-exact-near-shared-generation-selected',
+    reason: null,
+    source: spatialSource,
+    generation,
+    execution,
+    runtime: null,
+    runtimeCapacity: generation.runtimeCapacity ?? execution.sourceCapacity,
+    runtimeCacheHit: generation.runtimeCacheHit === true,
+    directoryBuildCount: 0,
+    sharedGenerationDirectoryBuildCount: Math.max(
+      0,
+      Math.trunc(finiteNumber(generation.directoryBuildCount, 0))
+    ),
+    privateParticleBinBuildCount: 0,
+    fixedCandidateBuildCount: 0,
+    exhaustiveParticleScanCount: 0,
+    queueCompletionStatus: 'borrowed-spatial-directory-already-submitted',
+    queueCompletionMethod: 'caller-owned-queue.submit',
+    releaseScheduled: false,
+    releaseStatus: 'borrowed-generation-release-owned-by-caller',
+    sourceDeviceId: mismatch.sourceDeviceId,
+    consumerDeviceId: mismatch.consumerDeviceId
+  };
+}
+
+export function createPressureInterfaceSpatialExactNearParamsArray({
+  elementCount = 0,
+  particleCount = 0,
+  contactPolicyRowCount = 0,
+  derivationEnabled = false,
+  maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
+  gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
+  spatialBuild = null
+} = {}) {
+  const execution = spatialBuild?.execution || null;
+  const source = spatialBuild?.source || null;
+  const layout = execution?.layout || {};
+  const buffer = new ArrayBuffer(128);
+  const view = new DataView(buffer);
+  view.setUint32(0, spatialU32(elementCount), true);
+  view.setUint32(4, spatialU32(particleCount), true);
+  view.setUint32(8, spatialU32(contactPolicyRowCount), true);
+  view.setUint32(12, derivationEnabled ? 1 : 0, true);
+  view.setUint32(16, spatialU32(source?.chartId), true);
+  view.setUint32(20, spatialU32(source?.levelCount), true);
+  view.setUint32(24, spatialU32(execution?.generationId), true);
+  view.setUint32(28, spatialU32(execution?.deviceOrdinal), true);
+  view.setUint32(32, spatialU32(execution?.laneOrdinal), true);
+  view.setUint32(36, spatialU32(execution?.leaseToken), true);
+  view.setUint32(40, spatialU32(execution?.sourceFamilyId), true);
+  view.setUint32(44, spatialU32(execution?.storageGeneration), true);
+  view.setUint32(48, spatialU32(execution?.physicsTick), true);
+  view.setUint32(52, spatialU32(execution?.physicsSubstep), true);
+  view.setUint32(56, spatialU32(execution?.positionEpoch), true);
+  view.setUint32(60, spatialU32(execution?.topologyEpoch), true);
+  view.setUint32(64, spatialU32(execution?.chartEpoch), true);
+  view.setUint32(68, spatialU32(execution?.levelEpoch), true);
+  view.setUint32(72, spatialU32(execution?.supportEpoch), true);
+  view.setInt32(76, spatialI32(source?.minLevel), true);
+  view.setFloat32(80, clampPositive(source?.baseGridSpacingM, 0), true);
+  view.setFloat32(84, clampPositive(maxSearchRadiusM, 0), true);
+  view.setFloat32(88, clampPositive(gapFloorM, 0), true);
+  view.setFloat32(92, 0, true);
+  view.setUint32(96, spatialU32(layout.cellKeysOffsetWords), true);
+  view.setUint32(100, spatialU32(layout.cellOffsetsOffsetWords), true);
+  view.setUint32(104, spatialU32(layout.cellMembersOffsetWords), true);
+  view.setUint32(108, spatialU32(layout.particleToCellOffsetWords), true);
+  view.setUint32(112, spatialU32(layout.wordLength), true);
+  view.setUint32(116, spatialU32(execution?.sourceCapacity), true);
+  view.setUint32(120, spatialU32(execution?.cellCapacity), true);
+  view.setUint32(124, 0, true);
   return buffer;
 }
 
@@ -1105,6 +2444,7 @@ function resolveParticleKinematicsSource({
   sphParticleUpload = null,
   particleStateBuffer = null,
   particleThermoBuffer = null,
+  particleIdentityBuffer = null,
   particleCount = null
 } = {}) {
   const stateBuffer = particleStateBuffer
@@ -1115,18 +2455,130 @@ function resolveParticleKinematicsSource({
     || sphParticleUpload?.thermoBuffer
     || sphParticleState?.thermoBuffer
     || null;
-  const resolvedParticleCount = Math.max(0, Math.round(finiteNumber(
+  const identityBuffer = particleIdentityBuffer
+    || sphParticleUpload?.identityBuffer
+    || sphParticleState?.identityBuffer
+    || null;
+  const identityRequired = sphParticleUpload?.identityRequired === true
+    || sphParticleState?.identityRequired === true;
+  const storageGeneration = spatialU32(
+    sphParticleUpload?.storageGeneration
+      ?? sphParticleUpload?.bufferFamilyGeneration
+      ?? sphParticleState?.storageGeneration,
+    Number.NaN
+  );
+  const positionEpoch = spatialU32(
+    sphParticleUpload?.positionEpoch ?? sphParticleState?.positionEpoch,
+    Number.NaN
+  );
+  const topologyEpoch = spatialU32(
+    sphParticleUpload?.topologyEpoch ?? sphParticleState?.topologyEpoch,
+    Number.NaN
+  );
+  const chartEpoch = spatialU32(
+    sphParticleUpload?.chartEpoch ?? sphParticleState?.chartEpoch,
+    Number.NaN
+  );
+  const levelEpoch = spatialU32(
+    sphParticleUpload?.levelEpoch ?? sphParticleState?.levelEpoch,
+    Number.NaN
+  );
+  const supportEpoch = spatialU32(
+    sphParticleUpload?.supportEpoch ?? sphParticleState?.supportEpoch,
+    Number.NaN
+  );
+  const physicsTick = spatialU32(
+    sphParticleUpload?.physicsTick
+      ?? sphParticleState?.physicsTick
+      ?? positionEpoch,
+    Number.NaN
+  );
+  const physicsSubstep = spatialU32(
+    sphParticleUpload?.physicsSubstep ?? sphParticleState?.physicsSubstep ?? 0,
+    Number.NaN
+  );
+  const resolvedParticleCount = spatialU32(
     particleCount
       ?? sphParticleUpload?.particleCount
       ?? sphParticleState?.particleCount,
     0
-  )));
+  );
+  const identitySchema = sphParticleUpload?.identitySchema
+    || sphParticleState?.identitySchema
+    || null;
+  const identityStrideValue = sphParticleUpload?.identityStrideBytes
+    ?? sphParticleState?.identityStrideBytes;
+  const declaredIdentityBufferByteLengthValue =
+    sphParticleUpload?.identityBufferByteLength
+      ?? sphParticleState?.identityBufferByteLength;
+  const actualIdentityBufferByteLengthValue = identityBuffer?.byteLength
+    ?? identityBuffer?.size;
+  const identityStrideBytes = spatialU32(identityStrideValue, 0);
+  const declaredIdentityBufferByteLength = spatialSize(
+    declaredIdentityBufferByteLengthValue,
+    0
+  );
+  const actualIdentityBufferByteLength = spatialSize(
+    actualIdentityBufferByteLengthValue,
+    0
+  );
+  const identityBufferByteLength = declaredIdentityBufferByteLengthValue != null
+    ? declaredIdentityBufferByteLength
+    : actualIdentityBufferByteLength;
+  const identityNumericMetadataReady = Boolean(
+    (identityStrideValue == null || identityStrideBytes === identityStrideValue)
+    && (
+      declaredIdentityBufferByteLengthValue == null
+      || declaredIdentityBufferByteLength === declaredIdentityBufferByteLengthValue
+    )
+    && (
+      actualIdentityBufferByteLengthValue == null
+      || actualIdentityBufferByteLength === actualIdentityBufferByteLengthValue
+    )
+  );
+  const identityMetadataObserved = identitySchema != null
+    || identityStrideValue != null
+    || declaredIdentityBufferByteLengthValue != null;
+  const identityContractReady = Boolean(
+    identityBuffer
+    && identityNumericMetadataReady
+    && (
+      (
+        !identityRequired
+        && !identityMetadataObserved
+        && identityBufferByteLength >= resolvedParticleCount * Uint32Array.BYTES_PER_ELEMENT
+      )
+      || (
+        identitySchema === ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+        && identityStrideBytes === Uint32Array.BYTES_PER_ELEMENT
+        && identityBufferByteLength >= resolvedParticleCount * Uint32Array.BYTES_PER_ELEMENT
+        && (
+          actualIdentityBufferByteLengthValue == null
+          || actualIdentityBufferByteLength >= identityBufferByteLength
+        )
+      )
+    )
+  );
   if (!stateBuffer || !thermoBuffer || resolvedParticleCount <= 0) {
     return {
       status: 'interface-contact-kinematics-particle-source-unavailable',
       ready: false,
       stateBuffer: null,
       thermoBuffer: null,
+      identityBuffer: null,
+      identityReady: false,
+      identityRequired,
+      identitySchema,
+      identityStrideBytes,
+      identityBufferByteLength,
+      storageGeneration,
+      physicsTick,
+      physicsSubstep,
+      positionEpoch,
+      topologyEpoch,
+      chartEpoch,
+      levelEpoch,
+      supportEpoch,
       particleCount: resolvedParticleCount,
       sourceDeviceId: null,
       consumerDeviceId: device ? webGpuDeviceMismatchInfo({ device }).consumerDeviceId : null,
@@ -1137,26 +2589,78 @@ function resolveParticleKinematicsSource({
   }
   const stateMismatch = webGpuDeviceMismatchInfo({ buffer: stateBuffer, device });
   const thermoMismatch = webGpuDeviceMismatchInfo({ buffer: thermoBuffer, device });
-  if (stateMismatch.mismatch || thermoMismatch.mismatch) {
+  const identityMismatch = identityBuffer
+    ? webGpuDeviceMismatchInfo({ buffer: identityBuffer, device })
+    : { mismatch: false, sourceDeviceId: null, consumerDeviceId: stateMismatch.consumerDeviceId };
+  if (
+    stateMismatch.mismatch
+    || thermoMismatch.mismatch
+    || (identityRequired && (!identityContractReady || identityMismatch.mismatch))
+  ) {
     return {
-      status: 'blocked-cross-device-interface-contact-kinematics-particle-source',
+      status: identityRequired && !identityContractReady
+        ? 'blocked-interface-contact-kinematics-required-identity-unavailable'
+        : 'blocked-cross-device-interface-contact-kinematics-particle-source',
       ready: false,
       stateBuffer: null,
       thermoBuffer: null,
+      identityBuffer: null,
+      identityReady: false,
+      identityRequired,
+      identitySchema,
+      identityStrideBytes,
+      identityBufferByteLength,
+      storageGeneration,
+      physicsTick,
+      physicsSubstep,
+      positionEpoch,
+      topologyEpoch,
+      chartEpoch,
+      levelEpoch,
+      supportEpoch,
       particleCount: resolvedParticleCount,
-      sourceDeviceId: stateMismatch.sourceDeviceId || thermoMismatch.sourceDeviceId,
-      consumerDeviceId: stateMismatch.consumerDeviceId || thermoMismatch.consumerDeviceId,
-      reason: 'particle state/thermo buffer created on different WebGPU device'
+      sourceDeviceId:
+        stateMismatch.sourceDeviceId
+        || thermoMismatch.sourceDeviceId
+        || identityMismatch.sourceDeviceId,
+      consumerDeviceId:
+        stateMismatch.consumerDeviceId
+        || thermoMismatch.consumerDeviceId
+        || identityMismatch.consumerDeviceId,
+      reason: identityRequired && !identityContractReady
+        ? 'required particle identity WebGPU buffer contract unavailable or invalid'
+        : 'particle state/thermo/identity buffer created on different WebGPU device'
     };
   }
+  const identityReady = Boolean(identityContractReady && !identityMismatch.mismatch);
   return {
     status: 'interface-contact-kinematics-particle-source-ready',
     ready: true,
     stateBuffer,
     thermoBuffer,
+    identityBuffer: identityReady ? identityBuffer : null,
+    identityReady,
+    identityRequired,
+    identitySchema,
+    identityStrideBytes,
+    identityBufferByteLength,
+    storageGeneration,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch,
     particleCount: resolvedParticleCount,
-    sourceDeviceId: stateMismatch.sourceDeviceId || thermoMismatch.sourceDeviceId,
-    consumerDeviceId: stateMismatch.consumerDeviceId || thermoMismatch.consumerDeviceId,
+    sourceDeviceId:
+      stateMismatch.sourceDeviceId
+      || thermoMismatch.sourceDeviceId
+      || identityMismatch.sourceDeviceId,
+    consumerDeviceId:
+      stateMismatch.consumerDeviceId
+      || thermoMismatch.consumerDeviceId
+      || identityMismatch.consumerDeviceId,
     reason: null
   };
 }
@@ -1445,14 +2949,20 @@ export function canDeriveInterfaceContactKinematicsOnGpu({
   packedInterfaceElements = null,
   packedContactPolicy = null,
   packedContactKinematics = null,
-  particleSource = null
+  particleSource = null,
+  canonicalGenerationRequired = false
 } = {}) {
-  const missingRows = (packedContactKinematics?.readyCount ?? 0) < (packedInterfaceElements?.rowCount ?? 0);
+  const missingRows = canonicalGenerationRequired === true
+    || (packedContactKinematics?.readyCount ?? 0) < (packedInterfaceElements?.rowCount ?? 0);
   return Boolean(
     missingRows
     && (packedInterfaceElements?.rowCount ?? 0) > 0
     && (packedContactPolicy?.rowCount ?? 0) > 0
     && particleSource?.ready === true
+    && (
+      (packedContactPolicy?.domainPairRowCount ?? 0) === 0
+      || particleSource?.identityReady === true
+    )
   );
 }
 
@@ -1594,6 +3104,265 @@ export function runSphPressureInterfaceParticleBinsWebGpu({
   };
 }
 
+export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
+  device,
+  packedInterfaceElements,
+  packedContactPolicy,
+  interfaceElementsBuffer,
+  contactPolicyBuffer,
+  particleSource,
+  spatialBuild,
+  maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
+  gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError(
+      'runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu requires a WebGPU-like device'
+    );
+  }
+  if (
+    !packedInterfaceElements?.rows
+    || !packedContactPolicy?.rows
+    || !interfaceElementsBuffer
+    || !contactPolicyBuffer
+    || particleSource?.ready !== true
+    || spatialBuild?.selected !== true
+    || spatialBuild.ready !== true
+    || spatialBuild.borrowed !== true
+    || spatialBuild.ownsGeneration !== false
+    || spatialBuild.directoryOwnership !== 'borrowed-caller-owned-canonical-generation'
+    || spatialBuild.directoryBuildCount !== 0
+    || spatialBuild.sharedGenerationDirectoryBuildCount !== 1
+    || spatialBuild.generation?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
+    || spatialBuild.generation?.status !== 'schroeder-spatial-epoch-generation-submitted'
+    || spatialBuild.generation?.ready !== true
+    || spatialBuild.generation?.selected !== true
+    || spatialBuild.generation?.releaseScheduled === true
+    || spatialBuild.generation?.execution !== spatialBuild.execution
+    || spatialBuild.execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || spatialBuild.execution?.status !== 'schroeder-spatial-epoch-gpu-build-submitted'
+    || spatialBuild.execution?.submitPerformed !== true
+    || spatialBuild.execution?.released === true
+    || spatialBuild.execution?.sourceAdapterId
+      !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+    || spatialBuild.execution?.exactNearQueryProfile?.ready !== true
+    || spatialBuild.execution?.queryGeometryEvidence
+      !== spatialBuild.execution?.exactNearQueryProfile
+    || !spatialBuild.execution?.directoryBuffer
+  ) {
+    throw new TypeError(
+      'canonical pressure/contact kinematics requires packed rows, resident particles, and a live caller-owned borrowed spatial generation'
+    );
+  }
+  if ((packedContactPolicy.domainPairRowCount ?? 0) > 0 && particleSource.identityReady !== true) {
+    throw new TypeError(
+      'canonical pressure/contact kinematics requires resident identity for domain-specific contact rows'
+    );
+  }
+  const outputByteLength = Math.max(
+    4,
+    packedInterfaceElements.rowCount
+      * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const outputBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-pressure-interface-spatial-exact-near-kinematics-derived',
+    size: outputByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  }), device);
+  const paramsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-pressure-interface-spatial-exact-near-params',
+    size: 128,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  }), device);
+  const localParticleIdentityBuffer = particleSource.identityBuffer
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-pressure-interface-spatial-exact-near-identity-disabled',
+      new Uint32Array(Math.max(1, particleSource.particleCount))
+    );
+  const particleIdentityBuffer = particleSource.identityBuffer || localParticleIdentityBuffer;
+  device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceSpatialExactNearParamsArray({
+    elementCount: packedInterfaceElements.rowCount,
+    particleCount: particleSource.particleCount,
+    contactPolicyRowCount: packedContactPolicy.rowCount,
+    derivationEnabled: true,
+    maxSearchRadiusM,
+    gapFloorM,
+    spatialBuild
+  }));
+  const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics.v4',
+    label: 'ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics',
+    code: sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'uniform'),
+      computeBufferBinding(6, 'read-only-storage'),
+      computeBufferBinding(7, 'read-only-storage')
+    ]
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: interfaceElementsBuffer } },
+      { binding: 1, resource: { buffer: particleSource.stateBuffer } },
+      { binding: 2, resource: { buffer: particleSource.thermoBuffer } },
+      { binding: 3, resource: { buffer: contactPolicyBuffer } },
+      { binding: 4, resource: { buffer: outputBuffer } },
+      { binding: 5, resource: { buffer: paramsBuffer } },
+      { binding: 6, resource: { buffer: spatialBuild.execution.directoryBuffer } },
+      { binding: 7, resource: { buffer: particleIdentityBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder({
+    label: 'ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics'
+  });
+  const pass = encoder.beginComputePass({
+    label: 'ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics'
+  });
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(Math.max(1, Math.ceil(packedInterfaceElements.rowCount / 64)));
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  return {
+    schema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
+    spatialViewSchema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+    status: 'interface-contact-kinematics-spatial-exact-near-submitted',
+    buffer: outputBuffer,
+    bufferByteLength: outputByteLength,
+    rowCount: packedInterfaceElements.rowCount,
+    rowStrideFloats: SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
+    particleCount: particleSource.particleCount,
+    contactPolicyRowCount: packedContactPolicy.rowCount,
+    particleIdentityReady: particleSource.identityReady === true,
+    particleIdentityRequired: particleSource.identityRequired === true,
+    particleIdentityBufferConsumed: particleSource.identityReady === true,
+    particleBinGridStatus: 'suppressed-canonical-spatial-exact-near-selected',
+    particleBinGridEnabled: false,
+    particleBinGridCellCount: 0,
+    particleBinGridBinCapacity: 0,
+    particleBinGridAverageOccupancy: 0,
+    particleBinGridEstimatedOverflowRisk: false,
+    particleBinGridIndexBufferByteLength: 0,
+    spatialExactNearStatus: spatialBuild.status,
+    spatialExactNearSourceStatus: spatialBuild.source.status,
+    spatialExactNearDirectoryOwnership: spatialBuild.directoryOwnership ?? null,
+    spatialExactNearBorrowedGeneration: true,
+    spatialExactNearConsumerReleaseAuthority: 'generation-owner',
+    spatialExactNearGenerationId: spatialBuild.execution.generationId,
+    spatialExactNearArenaIndex: spatialBuild.execution.arenaIndex,
+    spatialExactNearRuntimeCapacity: spatialBuild.runtimeCapacity,
+    spatialExactNearRuntimeCacheHit: spatialBuild.runtimeCacheHit === true,
+    spatialExactNearDirectoryBuildCount: spatialBuild.directoryBuildCount,
+    spatialExactNearSharedGenerationDirectoryBuildCount:
+      spatialBuild.sharedGenerationDirectoryBuildCount ?? 0,
+    spatialExactNearDirectoryLookupMode:
+      'exact-cell-key-binary-search-sparse-prefix-csr-range',
+    spatialExactNearCandidateBudget: null,
+    spatialExactNearPrivateParticleBinBuildSuppressed: true,
+    spatialExactNearPrivateParticleBinBuildCount: 0,
+    spatialExactNearFixedCandidateBuildCount: 0,
+    spatialExactNearExhaustiveParticleScanCount: 0,
+    spatialExactNearGpuHeaderAdmission: 'required-fail-closed-zero-contact-rows',
+    spatialExactNearGpuQueryEvidenceRequired: true,
+    spatialExactNearGpuQueryEvidenceSourceAdapterId:
+      SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    spatialExactNearGpuQueryEvidenceEnforcementStatus:
+      'shader-validates-query-tail-at-dispatch-no-host-readback',
+    spatialExactNearGpuAdmissionObserved: false,
+    spatialExactNearGpuAdmissionStatus:
+      'shader-validates-at-dispatch-no-host-readback',
+    spatialExactNearGpuFallbackObserved: null,
+    pressureInterfaceSpatialIndexStatus: 'pressure-interface-canonical-spatial-epoch-selected',
+    pressureInterfaceSpatialIndexMode: 'ss-spatial-epoch-v1-exact-near-csr',
+    queueCompletionStatus: 'queue-submitted',
+    queueCompletionMethod: 'queue.submit',
+    pipelineCacheStatus: cacheStatus,
+    derivation: 'schroeder-spatial-epoch-exact-near-gpu-interface-contact-kinematics',
+    source: particleSource.identityReady
+      ? 'resident-sph-particle-state-thermo-identity-and-canonical-spatial-directory'
+      : 'resident-sph-particle-state-thermo-and-canonical-spatial-directory-with-zero-identity',
+    cleanupBuffers: [paramsBuffer, localParticleIdentityBuffer].filter(Boolean),
+    destroyContactKinematicsBuffer() {
+      outputBuffer.destroy?.();
+    }
+  };
+}
+
+function createFailClosedBorrowedSpatialContactKinematicsWebGpu({
+  device,
+  packedInterfaceElements,
+  particleSource,
+  spatialAdmission
+} = {}) {
+  const rowCount = Math.max(0, Math.trunc(finiteNumber(
+    packedInterfaceElements?.rowCount,
+    0
+  )));
+  const rows = new Float32Array(
+    rowCount * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS
+  );
+  const buffer = writeStorageBuffer(
+    device,
+    'ulg-sph-pressure-interface-spatial-exact-near-fail-closed-zero-rows',
+    rows
+  );
+  return {
+    schema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
+    spatialViewSchema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+    status: 'interface-contact-kinematics-spatial-exact-near-fail-closed',
+    reason: spatialAdmission?.reason || 'Caller-owned spatial generation was rejected',
+    buffer,
+    bufferByteLength: Math.max(16, rows.byteLength),
+    rowCount,
+    rowStrideFloats: SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
+    particleCount: particleSource?.particleCount ?? 0,
+    particleIdentityReady: particleSource?.identityReady === true,
+    particleIdentityRequired: particleSource?.identityRequired === true,
+    particleIdentityBufferConsumed: false,
+    particleBinGridStatus: 'suppressed-borrowed-spatial-generation-fail-closed',
+    particleBinGridEnabled: false,
+    particleBinGridCellCount: 0,
+    particleBinGridBinCapacity: 0,
+    particleBinGridAverageOccupancy: 0,
+    particleBinGridEstimatedOverflowRisk: false,
+    particleBinGridIndexBufferByteLength: 0,
+    spatialExactNearStatus: spatialAdmission?.status ?? null,
+    spatialExactNearDirectoryOwnership:
+      spatialAdmission?.directoryOwnership ?? null,
+    spatialExactNearDirectoryBuildCount: 0,
+    spatialExactNearSharedGenerationDirectoryBuildCount:
+      spatialAdmission?.sharedGenerationDirectoryBuildCount ?? 0,
+    spatialExactNearDirectoryLookupMode: null,
+    spatialExactNearCandidateBudget: null,
+    spatialExactNearPrivateParticleBinBuildSuppressed: true,
+    spatialExactNearPrivateParticleBinBuildCount: 0,
+    spatialExactNearFixedCandidateBuildCount: 0,
+    spatialExactNearExhaustiveParticleScanCount: 0,
+    spatialExactNearGpuHeaderAdmission: 'not-dispatched-host-admission-failed',
+    spatialExactNearGpuAdmissionObserved: false,
+    spatialExactNearGpuAdmissionStatus: 'not-dispatched-host-admission-failed',
+    spatialExactNearGpuFallbackObserved: null,
+    pressureInterfaceSpatialIndexStatus:
+      'pressure-interface-shared-spatial-generation-rejected-fail-closed',
+    pressureInterfaceSpatialIndexMode: null,
+    queueCompletionStatus: 'zero-contact-rows-uploaded',
+    queueCompletionMethod: 'queue.writeBuffer',
+    pipelineCacheStatus: null,
+    derivation: 'fail-closed-zero-contact-kinematics',
+    source: 'host-rejected-caller-owned-canonical-spatial-generation',
+    cleanupBuffers: []
+  };
+}
+
 export function runSphPressureInterfaceContactKinematicsWebGpu({
   device,
   packedInterfaceElements,
@@ -1614,6 +3383,11 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   }
   if (!packedInterfaceElements?.rows || !packedContactPolicy?.rows || !interfaceElementsBuffer || !contactPolicyBuffer || particleSource?.ready !== true) {
     throw new TypeError('runSphPressureInterfaceContactKinematicsWebGpu requires packed interface rows, contact rows, source buffers, and particle buffers');
+  }
+  if ((packedContactPolicy.domainPairRowCount ?? 0) > 0 && particleSource.identityReady !== true) {
+    throw new TypeError(
+      'runSphPressureInterfaceContactKinematicsWebGpu requires resident particle identity for domain-specific contact rows'
+    );
   }
   const outputByteLength = Math.max(
     4,
@@ -1720,6 +3494,14 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       new Float32Array(SPH_INTERFACE_SOURCE_KEY_FLOATS)
     );
   const interfaceSourceKeyBuffer = resolvedInterfaceSourceKeys.sourceKeyBuffer || localInterfaceSourceKeyBuffer;
+  const localParticleIdentityBuffer = particleSource.identityBuffer
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-pressure-interface-particle-identity-disabled',
+      new Uint32Array(1)
+    );
+  const particleIdentityBuffer = particleSource.identityBuffer || localParticleIdentityBuffer;
   const interfaceSourceKeyParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-sph-pressure-interface-source-key-params',
     size: 16,
@@ -1740,7 +3522,7 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     particleBinGrid: resolvedParticleBins.enabled ? resolvedParticleBins.particleBinGrid : null
   }));
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v3',
+    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v5',
     label: 'ulg-sph-pressure-interface-contact-kinematics',
     code: sphPressureInterfaceContactKinematicsWgsl,
     entryPoint: 'main',
@@ -1760,7 +3542,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       computeBufferBinding(12, 'read-only-storage'),
       computeBufferBinding(13, 'uniform'),
       computeBufferBinding(14, 'read-only-storage'),
-      computeBufferBinding(15, 'uniform')
+      computeBufferBinding(15, 'uniform'),
+      computeBufferBinding(16, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1781,7 +3564,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       { binding: 12, resource: { buffer: schroederSourceSpanBuffer } },
       { binding: 13, resource: { buffer: schroederSourceSpanParamsBuffer } },
       { binding: 14, resource: { buffer: interfaceSourceKeyBuffer } },
-      { binding: 15, resource: { buffer: interfaceSourceKeyParamsBuffer } }
+      { binding: 15, resource: { buffer: interfaceSourceKeyParamsBuffer } },
+      { binding: 16, resource: { buffer: particleIdentityBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1800,6 +3584,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     rowStrideFloats: SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
     particleCount: particleSource.particleCount,
     contactPolicyRowCount: packedContactPolicy.rowCount,
+    particleIdentityReady: particleSource.identityReady === true,
+    particleIdentityRequired: particleSource.identityRequired === true,
+    particleIdentityBufferConsumed: particleSource.identityReady === true,
     particleBinGridStatus: resolvedParticleBins.status,
     particleBinGridEnabled: resolvedParticleBins.enabled === true,
     particleBinGrid: resolvedParticleBins.particleBinGrid || null,
@@ -1881,7 +3668,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       : (resolvedParticleBins.enabled
           ? `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-neighbor-bin-contact-kinematics`
           : `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-nearest-particle-contact-kinematics`),
-    source: 'resident-sph-particle-state-and-thermo-buffers',
+    source: particleSource.identityReady
+      ? 'resident-sph-particle-state-thermo-and-identity-buffers'
+      : 'resident-sph-particle-state-and-thermo-buffers-with-zero-identity',
     cleanupBuffers: [
       paramsBuffer,
       localSchroederLawQueueBuffer,
@@ -1892,6 +3681,7 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       schroederSourceSpanParamsBuffer,
       localInterfaceSourceKeyBuffer,
       interfaceSourceKeyParamsBuffer,
+      localParticleIdentityBuffer,
       ...(resolvedInterfaceSourceKeys.cleanupBuffers || []),
       ...(resolvedParticleBins.cleanupBuffers || [])
     ],
@@ -1917,7 +3707,9 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
   let interfaceContactKinematicsReadyCount = 0;
   const algorithmContactPairKeys = new Set();
   for (const element of elements) {
-    const interfacePressurePa = pressureForElementFromCells(element, pressureCells, pressurePa);
+    const interfacePressurePa = gasPressureTractionEligibleForElement(element)
+      ? pressureForElementFromCells(element, pressureCells, pressurePa)
+      : 0;
     const elementKinematics = interfaceContactKinematicsForElement(element);
     if (elementKinematics.status === 'interface-contact-kinematics-ready') {
       interfaceContactKinematicsReadyCount += 1;
@@ -2024,6 +3816,170 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
   };
 }
 
+function summarizeForceRowsFromGpuValues(
+  packedInterfaceElements = null,
+  forceRowValues = null,
+  contactPolicy = null
+) {
+  if (!(forceRowValues instanceof Float32Array)) {
+    throw new TypeError('Shared exact-near full readback requires Float32Array force rows');
+  }
+  const elements = packedInterfaceElements?.elements || [];
+  const packedRows = packedInterfaceElements?.rows;
+  const rowCount = packedInterfaceElements?.rowCount ?? elements.length;
+  if (
+    !(packedRows instanceof Float32Array)
+    || elements.length !== rowCount
+    || forceRowValues.length !== rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS
+  ) {
+    throw new Error('Shared exact-near GPU force-row readback length is inconsistent with the packed interface input');
+  }
+  const forceRows = [];
+  const forceBySurface = new Map();
+  let netMaterialForceN = [0, 0, 0];
+  let netGasReactionForceN = [0, 0, 0];
+  let totalAbsMaterialForceN = 0;
+  let maxPairResidualN = 0;
+  let minTotalInterfacePressurePa = Number.POSITIVE_INFINITY;
+  let maxTotalInterfacePressurePa = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < rowCount; index += 1) {
+    const offset = index * SPH_PRESSURE_INTERFACE_FORCE_FLOATS;
+    const element = elements[index] || {};
+    const rowValues = forceRowValues.subarray(
+      offset,
+      offset + SPH_PRESSURE_INTERFACE_FORCE_FLOATS
+    );
+    if (![...rowValues].every(Number.isFinite)) {
+      throw new Error(`Shared exact-near GPU force row ${index} contains non-finite values`);
+    }
+    for (let component = 0; component < 8; component += 1) {
+      if (rowValues[component] !== packedRows[offset + component]) {
+        throw new Error(`Shared exact-near GPU force row ${index} identity/geometry copy is torn`);
+      }
+    }
+    if (rowValues[15] !== 1) {
+      throw new Error(`Shared exact-near GPU force row ${index} is not exactly ready`);
+    }
+    if (rowValues[7] <= 0 || rowValues[14] < 0) {
+      throw new Error(`Shared exact-near GPU force row ${index} has invalid area or total pressure`);
+    }
+    const centroidM = [
+      forceRowValues[offset + 4],
+      forceRowValues[offset + 5],
+      forceRowValues[offset + 6]
+    ];
+    const materialForceN = [
+      forceRowValues[offset + 8],
+      forceRowValues[offset + 9],
+      forceRowValues[offset + 10]
+    ];
+    const gasReactionForceN = [
+      forceRowValues[offset + 11],
+      forceRowValues[offset + 12],
+      forceRowValues[offset + 13]
+    ];
+    const totalPressurePa = forceRowValues[offset + 14];
+    minTotalInterfacePressurePa = Math.min(minTotalInterfacePressurePa, totalPressurePa);
+    maxTotalInterfacePressurePa = Math.max(maxTotalInterfacePressurePa, totalPressurePa);
+    const pairResidualN = addVector3(materialForceN, gasReactionForceN);
+    maxPairResidualN = Math.max(maxPairResidualN, vectorMagnitude3(pairResidualN));
+    netMaterialForceN = addVector3(netMaterialForceN, materialForceN);
+    netGasReactionForceN = addVector3(netGasReactionForceN, gasReactionForceN);
+    totalAbsMaterialForceN += vectorMagnitude3(materialForceN);
+    const surfaceKey = element.surfaceKey
+      || `${forceRowValues[offset + 1]}|${forceRowValues[offset + 2]}`;
+    const row = {
+      index,
+      surfaceIndex: forceRowValues[offset],
+      surfaceKey,
+      material: element.material ?? null,
+      phase: element.phase ?? null,
+      materialId: forceRowValues[offset + 1],
+      phaseId: forceRowValues[offset + 2],
+      axisId: forceRowValues[offset + 3],
+      centroidM,
+      areaM2: forceRowValues[offset + 7],
+      pressurePa: totalPressurePa,
+      gasInterfacePressurePa: null,
+      algorithmContactPressurePa: null,
+      algorithmContactPairKey: null,
+      algorithmContactPairResponseStatus:
+        'algorithm-contact-pair-response-component-unavailable-total-pressure-only-force-row-abi',
+      interfaceContactKinematicsStatus:
+        'interface-contact-kinematics-component-unavailable-total-pressure-only-force-row-abi',
+      interfaceContactGapM: null,
+      interfaceContactNormalVelocityMPerS: null,
+      interfaceContactPressureDerivation:
+        'authoritative-total-pressure-only-gpu-force-row-contact-component-unavailable',
+      materialForceN,
+      gasReactionForceN,
+      pairResidualN,
+      status: 'pressure-interface-force-row-ready'
+    };
+    forceRows.push(row);
+    const surface = forceBySurface.get(surfaceKey) || {
+      surfaceKey,
+      material: row.material,
+      phase: row.phase,
+      forceRowCount: 0,
+      areaM2: 0,
+      netMaterialForceN: [0, 0, 0],
+      netGasReactionForceN: [0, 0, 0],
+      totalAbsMaterialForceN: 0
+    };
+    surface.forceRowCount += 1;
+    surface.areaM2 += row.areaM2;
+    surface.netMaterialForceN = addVector3(surface.netMaterialForceN, materialForceN);
+    surface.netGasReactionForceN = addVector3(
+      surface.netGasReactionForceN,
+      gasReactionForceN
+    );
+    surface.totalAbsMaterialForceN += vectorMagnitude3(materialForceN);
+    forceBySurface.set(surfaceKey, surface);
+  }
+  netMaterialForceN = cleanVector3(netMaterialForceN);
+  netGasReactionForceN = cleanVector3(netGasReactionForceN);
+  const conservationResidualN = cleanVector3(
+    addVector3(netMaterialForceN, netGasReactionForceN)
+  );
+  const totalInterfacePressureRangePa = forceRows.length > 0
+    ? [minTotalInterfacePressurePa, maxTotalInterfacePressurePa]
+    : null;
+  return {
+    forceAggregateObserved: true,
+    forceRowSummaryStatus: 'authoritative-gpu-force-row-summary-ready',
+    pressureComponentDecompositionStatus:
+      'unavailable-total-pressure-only-force-row-abi',
+    forceRows,
+    surfaceForceCount: forceBySurface.size,
+    surfaceForces: [...forceBySurface.values()],
+    totalInterfaceAreaM2: forceRows.reduce((sum, row) => sum + row.areaM2, 0),
+    totalAbsMaterialForceN,
+    netMaterialForceN,
+    netGasReactionForceN,
+    conservationResidualN,
+    conservationResidualMagnitudeN: vectorMagnitude3(conservationResidualN),
+    maxPairResidualN,
+    totalInterfacePressureRangePa,
+    gasInterfacePressureRangePa: null,
+    algorithmContactPairResponseSchema:
+      contactPolicy?.schema ?? ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA,
+    algorithmContactPairResponseStatus:
+      'algorithm-contact-pair-response-component-unavailable-total-pressure-only-force-row-abi',
+    algorithmContactPairResponseApplied: null,
+    algorithmContactPolicyRowCount: contactPolicy?.rowCount ?? 0,
+    algorithmContactForceRowCount: null,
+    interfaceContactKinematicsSchema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
+    interfaceContactKinematicsStatus:
+      'interface-contact-kinematics-component-unavailable-total-pressure-only-force-row-abi',
+    interfaceContactKinematicsReadyCount: null,
+    interfaceContactKinematicsRowCount: rowCount,
+    algorithmContactPairKeys: [],
+    algorithmContactPressureRangePa: null,
+    maxAlgorithmContactPressurePa: null
+  };
+}
+
 export async function runSphPressureInterfaceForceRowsWebGpu({
   device,
   pressureFeedback = null,
@@ -2037,6 +3993,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   sphParticleUpload = null,
   particleStateBuffer = null,
   particleThermoBuffer = null,
+  particleIdentityBuffer = null,
   particleCount = null,
   contactKinematicsMaxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
   contactKinematicsGapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
@@ -2047,6 +4004,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   readbackMode = FULL_READBACK_MODE,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
+  schroederActiveNodeList = null,
+  schroederSpatialEpochGeneration = null,
+  sharedSpatialFenceAuthority = 'consumer',
   retainedGasPressureCellsBuffer = null,
   retainedGasPressureCellRowCount = 0,
   retainedGasPressureCellRowStrideFloats = SPH_GAS_PRESSURE_CELL_FLOATS,
@@ -2054,11 +4014,17 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   retainedPressureFieldMode = LOCAL_GAS_CELL_PRESSURE_FIELD_MODE,
   retainedPressureFieldResolution = LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
   retainedLocalPressureGradientStatus = 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
-  retainedGasPressureCellImport = null
+  retainedGasPressureCellImport = null,
+  measureGpuQueueFence = false,
+  onGpuStageProgress = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceForceRowsWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  const reportGpuStage = (status, stage, details = {}) => {
+    if (typeof onGpuStageProgress !== 'function') return;
+    onGpuStageProgress({ status, stage, ...details });
+  };
   const retainedGasPressureRowsReady = Boolean(
     retainedGasPressureCellsBuffer
       && Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))) > 0
@@ -2127,6 +4093,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     sphParticleUpload,
     particleStateBuffer,
     particleThermoBuffer,
+    particleIdentityBuffer,
     particleCount
   });
   const schroederPressureInterfaceLawQueue = resolveSchroederPressureInterfaceLawQueue(schroederLawQueue, {
@@ -2137,13 +4104,40 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     schroederLawNeighborCandidates,
     { device }
   );
+  const schroederPressureInterfaceSpatialSource =
+    resolveSchroederPressureInterfaceSpatialEpochSource(schroederActiveNodeList, {
+      device,
+      particleCount: particleSource.particleCount
+    });
+  const schroederPressureInterfaceSpatialProvenance =
+    resolveSchroederPressureInterfaceSpatialEpochProvenance({
+      spatialSource: schroederPressureInterfaceSpatialSource,
+      materialInterfaceField,
+      particleSource,
+      particleCount: particleSource.particleCount,
+      requireCompleteBufferFamily: schroederSpatialEpochGeneration != null
+    });
+  const schroederPressureInterfaceSharedSpatialGeneration =
+    resolveSchroederPressureInterfaceSpatialEpochGeneration(
+      schroederSpatialEpochGeneration,
+      {
+        device,
+        spatialSource: schroederPressureInterfaceSpatialSource,
+        spatialProvenance: schroederPressureInterfaceSpatialProvenance,
+        particleSource,
+        particleCount: particleSource.particleCount
+      }
+    );
+  const sharedSpatialGenerationSupplied = schroederSpatialEpochGeneration != null;
   const contactKinematicsGpuDerivationEligible = canDeriveInterfaceContactKinematicsOnGpu({
     packedInterfaceElements: packed,
     packedContactPolicy,
     packedContactKinematics,
-    particleSource
+    particleSource,
+    canonicalGenerationRequired: sharedSpatialGenerationSupplied
   });
   const contactKinematicsParticleBinGrid = contactKinematicsGpuDerivationEligible
+    && !sharedSpatialGenerationSupplied
     ? resolvePressureInterfaceParticleBinGrid({
         boxDimsM,
         packedContactPolicy,
@@ -2194,13 +4188,26 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         algorithmContactPairResponseStatus: contactPolicy.status,
         algorithmContactPolicyRowsSchema: algorithmMaterialContactRows?.schema ?? null,
         algorithmContactPolicyRowCount: contactPolicy.rowCount,
+        algorithmContactDomainPairRowCount: packedContactPolicy.domainPairRowCount,
+        algorithmContactBodySpecificWithoutDomainPairRowCount:
+          packedContactPolicy.bodySpecificWithoutDomainPairRowCount,
+        algorithmContactDomainPairGpuSelectionReady:
+          packedContactPolicy.domainPairGpuSelectionReady,
+        algorithmContactDomainPairGpuSelectionStatus:
+          packedContactPolicy.domainPairGpuSelectionStatus,
         algorithmContactForceRowCount: 0,
         algorithmContactPressureRangePa: null,
         algorithmContactPairKeys: [],
         interfaceContactKinematicsSchema: packedContactKinematics.schema,
         interfaceContactKinematicsStatus: packedContactKinematics.status,
         interfaceContactKinematicsRowCount: packedContactKinematics.rowCount,
-        interfaceContactKinematicsReadyCount: packedContactKinematics.readyCount,
+        interfaceContactKinematicsReadyCount: sharedSpatialGenerationSupplied
+          ? null
+          : packedContactKinematics.readyCount,
+        interfaceContactKinematicsDomainPairReadyCount:
+          sharedSpatialGenerationSupplied
+            ? null
+            : packedContactKinematics.domainPairReadyCount,
         interfaceContactKinematicsGpuDerivationEligible: false,
         interfaceContactKinematicsDerivationStatus: canDeriveInterfaceContactKinematicsOnGpu({
           packedInterfaceElements: packed,
@@ -2212,6 +4219,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
           : 'interface-contact-kinematics-uses-element-fields-or-unavailable',
         interfaceContactKinematicsParticleSourceStatus: particleSource.status,
         interfaceContactKinematicsParticleCount: particleSource.particleCount,
+        interfaceContactKinematicsParticleIdentityReady: particleSource.identityReady === true,
+        interfaceContactKinematicsParticleIdentityRequired: particleSource.identityRequired === true,
         interfaceContactKinematicsParticleBinGridStatus: contactKinematicsParticleBinGrid?.status || null,
         interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsParticleBinGrid?.enabled === true,
         interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsParticleBinGrid?.cellCount || 0,
@@ -2301,31 +4310,176 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   let contactKinematicsGpuDerivation = null;
   let contactKinematicsGpuDerived = false;
   let contactKinematicsParticleBins = null;
+  let contactKinematicsSpatialBuild = null;
   let particleBinOverflowStatus = null;
   let particleBinOverflowCount = null;
   const contactKinematicsCleanupBuffers = [];
-  if (contactKinematicsGpuDerivationEligible) {
-    contactKinematicsParticleBins = runSphPressureInterfaceParticleBinsWebGpu({
-      device,
-      particleSource,
-      particleBinGrid: contactKinematicsParticleBinGrid,
-      readbackMetadata: contactKinematicsParticleBinMetadataReadback
-    });
-    contactKinematicsGpuDerivation = runSphPressureInterfaceContactKinematicsWebGpu({
-      device,
-      packedInterfaceElements: packed,
-      packedContactPolicy,
-      interfaceElementsBuffer: inputBuffer,
-      contactPolicyBuffer,
-      particleSource,
-      particleBinGrid: contactKinematicsParticleBinGrid,
-      particleBins: contactKinematicsParticleBins,
-      maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
-      gapFloorM: contactKinematicsGapFloorM,
-      schroederLawQueue: schroederPressureInterfaceLawQueue,
-      schroederLawNeighborCandidates: schroederPressureInterfaceLawNeighborCandidates,
-      interfaceSourceKeys: packedInterfaceSourceKeys
-    });
+  if (sharedSpatialGenerationSupplied || contactKinematicsGpuDerivationEligible) {
+    if (sharedSpatialGenerationSupplied) {
+      contactKinematicsSpatialBuild =
+        schroederPressureInterfaceSharedSpatialGeneration;
+    }
+    if (
+      contactKinematicsSpatialBuild?.selected === true
+      && contactKinematicsGpuDerivationEligible
+    ) {
+      Object.assign(schroederPressureInterfaceLawNeighborCandidates, {
+        authoritative: false,
+        neighborCandidateBufferConsumed: false,
+        sourceCandidateSpanBufferConsumed: false,
+        consumerStatus:
+          'schroeder-pressure-interface-law-neighbor-candidates-bypassed-canonical-spatial-epoch',
+        sourceCandidateSpanConsumerStatus:
+          'schroeder-pressure-interface-source-spans-bypassed-canonical-spatial-epoch',
+        pressureInterfaceSpatialIndexStatus:
+          'pressure-interface-canonical-spatial-epoch-selected',
+        pressureInterfaceSpatialIndexMode: 'ss-spatial-epoch-v1-exact-near-csr',
+        broadCandidateScanFallback: false
+      });
+      const exactNearProgress = {
+        elementCount: packed.rowCount,
+        contactPolicyRowCount: packedContactPolicy.rowCount,
+        particleCount: particleSource.particleCount,
+        levelCount: contactKinematicsSpatialBuild.source?.levelCount ?? null,
+        sourceCount: contactKinematicsSpatialBuild.source?.sourceCount ?? null,
+        sourceCapacity: contactKinematicsSpatialBuild.execution?.sourceCapacity ?? null,
+        cellCapacity: contactKinematicsSpatialBuild.execution?.cellCapacity ?? null
+      };
+      const baseGridSpacingM = finiteNumber(
+        contactKinematicsSpatialBuild.source?.baseGridSpacingM,
+        0
+      );
+      const minLevel = finiteNumber(contactKinematicsSpatialBuild.source?.minLevel, 0);
+      const minLevelSpacingM = baseGridSpacingM * (2 ** minLevel);
+      const maxSupportRadiusM = maxContactPolicySupportRadiusM(packedContactPolicy);
+      const resolvedSearchRadiusM = Math.max(
+        maxSupportRadiusM * 2,
+        clampPositive(contactKinematicsMaxSearchRadiusM, 0),
+        1e-6
+      );
+      let maximumCentroidAbsM = 0;
+      for (let rowIndex = 0; rowIndex < packed.rowCount; rowIndex += 1) {
+        const rowOffset = rowIndex * SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS;
+        maximumCentroidAbsM = Math.max(
+          maximumCentroidAbsM,
+          Math.abs(finiteNumber(packed.rows[rowOffset + 4], 0)),
+          Math.abs(finiteNumber(packed.rows[rowOffset + 5], 0)),
+          Math.abs(finiteNumber(packed.rows[rowOffset + 6], 0))
+        );
+      }
+      Object.assign(exactNearProgress, {
+        baseGridSpacingM,
+        minLevel,
+        minLevelSpacingM,
+        maxSupportRadiusM,
+        resolvedSearchRadiusM,
+        maximumCentroidAbsM,
+        maximumCentroidCellMagnitude: minLevelSpacingM > 0
+          ? maximumCentroidAbsM / minLevelSpacingM
+          : null,
+        maximumQueryRadiusCells: minLevelSpacingM > 0
+          ? resolvedSearchRadiusM * Math.SQRT2 / minLevelSpacingM
+          : null
+      });
+      if (measureGpuQueueFence === true) {
+        Object.assign(
+          exactNearProgress,
+          await readSchroederExactNearDirectoryDiagnostics(
+            device,
+            contactKinematicsSpatialBuild
+          )
+        );
+      }
+      reportGpuStage(
+        'pressure-interface-gpu-stage-started',
+        'canonical-exact-near-contact-kinematics',
+        exactNearProgress
+      );
+      contactKinematicsGpuDerivation =
+        runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
+          device,
+          packedInterfaceElements: packed,
+          packedContactPolicy,
+          interfaceElementsBuffer: inputBuffer,
+          contactPolicyBuffer,
+          particleSource,
+          spatialBuild: contactKinematicsSpatialBuild,
+          maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
+          gapFloorM: contactKinematicsGapFloorM
+        });
+      reportGpuStage(
+        'pressure-interface-gpu-stage-submitted',
+        'canonical-exact-near-contact-kinematics',
+        exactNearProgress
+      );
+      if (measureGpuQueueFence === true) {
+        reportGpuStage(
+          'pressure-interface-gpu-stage-started',
+          'canonical-exact-near-contact-kinematics-queue-fence',
+          exactNearProgress
+        );
+        if (typeof device.queue?.onSubmittedWorkDone !== 'function') {
+          throw new Error('Pressure/interface GPU substage measurement requires queue.onSubmittedWorkDone');
+        }
+        await device.queue.onSubmittedWorkDone();
+        reportGpuStage(
+          'pressure-interface-gpu-stage-complete',
+          'canonical-exact-near-contact-kinematics-queue-fence',
+          exactNearProgress
+        );
+      }
+    } else if (sharedSpatialGenerationSupplied) {
+      Object.assign(schroederPressureInterfaceLawNeighborCandidates, {
+        authoritative: false,
+        neighborCandidateBufferConsumed: false,
+        sourceCandidateSpanBufferConsumed: false,
+        consumerStatus:
+          'schroeder-pressure-interface-law-neighbor-candidates-suppressed-shared-generation-rejected',
+        sourceCandidateSpanConsumerStatus:
+          'schroeder-pressure-interface-source-spans-suppressed-shared-generation-rejected',
+        pressureInterfaceSpatialIndexStatus:
+          'pressure-interface-shared-spatial-generation-rejected-fail-closed',
+        pressureInterfaceSpatialIndexMode: null,
+        broadCandidateScanFallback: false
+      });
+      contactKinematicsGpuDerivation =
+        createFailClosedBorrowedSpatialContactKinematicsWebGpu({
+          device,
+          packedInterfaceElements: packed,
+          particleSource,
+          spatialAdmission: contactKinematicsSpatialBuild?.selected === true
+            ? {
+                ...contactKinematicsSpatialBuild,
+                status:
+                  'schroeder-spatial-exact-near-generation-consumer-prerequisites-unavailable',
+                reason:
+                  'Caller-owned spatial generation was selected but canonical contact-kinematics prerequisites were unavailable'
+              }
+            : contactKinematicsSpatialBuild
+        });
+    } else {
+      contactKinematicsParticleBins = runSphPressureInterfaceParticleBinsWebGpu({
+        device,
+        particleSource,
+        particleBinGrid: contactKinematicsParticleBinGrid,
+        readbackMetadata: contactKinematicsParticleBinMetadataReadback
+      });
+      contactKinematicsGpuDerivation = runSphPressureInterfaceContactKinematicsWebGpu({
+        device,
+        packedInterfaceElements: packed,
+        packedContactPolicy,
+        interfaceElementsBuffer: inputBuffer,
+        contactPolicyBuffer,
+        particleSource,
+        particleBinGrid: contactKinematicsParticleBinGrid,
+        particleBins: contactKinematicsParticleBins,
+        maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
+        gapFloorM: contactKinematicsGapFloorM,
+        schroederLawQueue: schroederPressureInterfaceLawQueue,
+        schroederLawNeighborCandidates: schroederPressureInterfaceLawNeighborCandidates,
+        interfaceSourceKeys: packedInterfaceSourceKeys
+      });
+    }
     contactKinematicsBuffer = contactKinematicsGpuDerivation.buffer;
     contactKinematicsGpuDerived = true;
     contactKinematicsCleanupBuffers.push(...(contactKinematicsGpuDerivation.cleanupBuffers || []));
@@ -2355,6 +4509,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       });
   let returnedRetainedForceRowsBuffer = false;
   let returnedRetainedGasPressureCellsBuffer = false;
+  let returnedResultForOwnerCleanup = null;
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
 
@@ -2370,7 +4525,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       algorithmContactPairResponseEnabled: packedContactPolicy.rowCount > 0
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-pressure-interface-force-rows.v3',
+      cacheKey: 'ulg-sph-pressure-interface-force-rows.v4',
       label: 'ulg-sph-pressure-interface-force-rows',
       code: sphPressureInterfaceForceRowsWgsl,
       entryPoint: 'main',
@@ -2394,6 +4549,17 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         { binding: 5, resource: { buffer: contactKinematicsBuffer } }
       ]
     });
+    const forceRowsProgress = {
+      elementCount: packed.rowCount,
+      contactPolicyRowCount: packedContactPolicy.rowCount,
+      particleCount: particleSource.particleCount,
+      pressureModelId
+    };
+    reportGpuStage(
+      'pressure-interface-gpu-stage-started',
+      'force-rows',
+      forceRowsProgress
+    );
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
@@ -2406,6 +4572,27 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     device.queue.submit([encoder.finish()]);
     queueCompletionStatus = 'queue-submitted';
     queueCompletionMethod = 'queue.submit';
+    reportGpuStage(
+      'pressure-interface-gpu-stage-submitted',
+      'force-rows',
+      forceRowsProgress
+    );
+    if (measureGpuQueueFence === true) {
+      reportGpuStage(
+        'pressure-interface-gpu-stage-started',
+        'force-rows-queue-fence',
+        forceRowsProgress
+      );
+      if (typeof device.queue?.onSubmittedWorkDone !== 'function') {
+        throw new Error('Pressure/interface GPU substage measurement requires queue.onSubmittedWorkDone');
+      }
+      await device.queue.onSubmittedWorkDone();
+      reportGpuStage(
+        'pressure-interface-gpu-stage-complete',
+        'force-rows-queue-fence',
+        forceRowsProgress
+      );
+    }
 
     let forceRowValues = new Float32Array(0);
     if (!noFullReadback) {
@@ -2415,12 +4602,28 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceRowValues = new Float32Array(readBuffer.getMappedRange()).slice(0, packed.rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS);
       readBuffer.unmap();
     } else {
-      queueCompletionStatus = device.queue?.onSubmittedWorkDone
-      ? 'queue-submitted-cleanup-deferred'
-      : 'queue-submitted-no-explicit-completion';
-      queueCompletionMethod = device.queue?.onSubmittedWorkDone
-        ? 'deferred queue.onSubmittedWorkDone cleanup'
-        : null;
+      if (
+        schroederSpatialEpochGeneration != null
+        && sharedSpatialFenceAuthority !== 'generation-owner'
+        && typeof device.queue?.onSubmittedWorkDone === 'function'
+      ) {
+        await device.queue.onSubmittedWorkDone();
+        queueCompletionStatus = 'queue-work-completed';
+        queueCompletionMethod = 'queue.onSubmittedWorkDone';
+      } else if (
+        schroederSpatialEpochGeneration != null
+        && sharedSpatialFenceAuthority === 'generation-owner'
+      ) {
+        queueCompletionStatus = 'queue-submitted-generation-owner-fence-pending';
+        queueCompletionMethod = 'generation-owner-final-consumer-fence';
+      } else {
+        queueCompletionStatus = device.queue?.onSubmittedWorkDone
+          ? 'queue-submitted-cleanup-deferred'
+          : 'queue-submitted-no-explicit-completion';
+        queueCompletionMethod = device.queue?.onSubmittedWorkDone
+          ? 'deferred queue.onSubmittedWorkDone cleanup'
+          : null;
+      }
     }
     if (contactKinematicsParticleBins?.metadataReadbackBuffer) {
       await contactKinematicsParticleBins.metadataReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
@@ -2432,13 +4635,129 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       particleBinOverflowStatus = contactKinematicsParticleBins?.overflowMetadataStatus || null;
     }
 
-    const summary = summarizeForceRowsFromElements(packed.elements, pressurePa, pressureFeedback?.gasCellField || null, contactPolicy);
-    const forceDerivationSuffix = summary.algorithmContactPairResponseApplied
+    const sharedSpatialGenerationSupplied = schroederSpatialEpochGeneration != null;
+    const sharedSpatialExactNearFailClosed =
+      sharedSpatialGenerationSupplied
+      && contactKinematicsGpuDerivation?.status
+        === 'interface-contact-kinematics-spatial-exact-near-fail-closed';
+    let summary;
+    let algorithmContactSummarySource;
+    let algorithmContactSummaryObserved;
+    if (!sharedSpatialGenerationSupplied) {
+      const hostSummary = summarizeForceRowsFromElements(
+        packed.elements,
+        pressurePa,
+        pressureFeedback?.gasCellField || null,
+        contactPolicy
+      );
+      summary = {
+        ...hostSummary,
+        forceAggregateObserved: true,
+        forceRowSummaryStatus: 'host-interface-element-force-summary-ready',
+        pressureComponentDecompositionStatus: 'host-interface-element-kinematics',
+        totalInterfacePressureRangePa: hostSummary.gasInterfacePressureRangePa
+      };
+      algorithmContactSummarySource = 'host-interface-element-kinematics';
+      algorithmContactSummaryObserved = true;
+    } else if (!noFullReadback) {
+      const gpuSummary = summarizeForceRowsFromGpuValues(
+        packed,
+        forceRowValues,
+        contactPolicy
+      );
+      if (sharedSpatialExactNearFailClosed) {
+        summary = {
+          ...gpuSummary,
+          pressureComponentDecompositionStatus:
+            'shared-spatial-exact-near-fail-closed-contact-known-zero',
+          gasInterfacePressureRangePa: gpuSummary.totalInterfacePressureRangePa,
+          algorithmContactPairResponseStatus:
+            'algorithm-contact-pair-response-fail-closed-zero',
+          algorithmContactPairResponseApplied: false,
+          algorithmContactForceRowCount: 0,
+          interfaceContactKinematicsStatus:
+            'interface-contact-kinematics-spatial-exact-near-fail-closed',
+          interfaceContactKinematicsReadyCount: 0,
+          algorithmContactPressureRangePa: null,
+          maxAlgorithmContactPressurePa: 0,
+          forceRows: gpuSummary.forceRows.map((row) => ({
+            ...row,
+            gasInterfacePressurePa: row.pressurePa,
+            algorithmContactPressurePa: 0,
+            algorithmContactPairResponseStatus:
+              'algorithm-contact-pair-response-fail-closed-zero',
+            interfaceContactKinematicsStatus:
+              'interface-contact-kinematics-spatial-exact-near-fail-closed',
+            interfaceContactPressureDerivation:
+              'shared-spatial-exact-near-fail-closed-zero-kinematics'
+          }))
+        };
+        algorithmContactSummarySource =
+          'authoritative-gpu-force-row-full-readback-shared-exact-near-fail-closed-zero-contact';
+        algorithmContactSummaryObserved = true;
+      } else {
+        summary = gpuSummary;
+        algorithmContactSummarySource =
+          'authoritative-gpu-force-row-full-readback-total-pressure-only-contact-component-unavailable';
+        algorithmContactSummaryObserved = false;
+      }
+    } else {
+      summary = {
+        forceAggregateObserved: false,
+        forceRowSummaryStatus:
+          'retained-gpu-force-row-summary-unavailable-no-readback',
+        pressureComponentDecompositionStatus: sharedSpatialExactNearFailClosed
+          ? 'shared-spatial-exact-near-fail-closed-contact-known-zero-no-force-readback'
+          : 'unavailable-retained-gpu-force-rows-no-readback',
+        forceRows: [],
+        surfaceForceCount: null,
+        surfaceForces: [],
+        totalInterfaceAreaM2: null,
+        totalAbsMaterialForceN: null,
+        netMaterialForceN: null,
+        netGasReactionForceN: null,
+        conservationResidualN: null,
+        conservationResidualMagnitudeN: null,
+        maxPairResidualN: null,
+        totalInterfacePressureRangePa: null,
+        gasInterfacePressureRangePa: null,
+        algorithmContactPairResponseSchema: contactPolicy.schema,
+        algorithmContactPairResponseStatus: sharedSpatialExactNearFailClosed
+          ? 'algorithm-contact-pair-response-fail-closed-zero'
+          : 'algorithm-contact-pair-response-gpu-summary-unavailable-no-readback',
+        algorithmContactPairResponseApplied: sharedSpatialExactNearFailClosed
+          ? false
+          : null,
+        algorithmContactPolicyRowCount: contactPolicy.rowCount,
+        algorithmContactForceRowCount: sharedSpatialExactNearFailClosed ? 0 : null,
+        interfaceContactKinematicsSchema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
+        interfaceContactKinematicsStatus: sharedSpatialExactNearFailClosed
+          ? 'interface-contact-kinematics-spatial-exact-near-fail-closed'
+          : 'interface-contact-kinematics-gpu-summary-unavailable-no-readback',
+        interfaceContactKinematicsReadyCount: sharedSpatialExactNearFailClosed ? 0 : null,
+        interfaceContactKinematicsRowCount: packed.elements.length,
+        algorithmContactPairKeys: [],
+        algorithmContactPressureRangePa: null,
+        maxAlgorithmContactPressurePa: sharedSpatialExactNearFailClosed ? 0 : null
+      };
+      algorithmContactSummarySource = sharedSpatialExactNearFailClosed
+        ? 'shared-spatial-exact-near-fail-closed-zero-kinematics-no-force-readback'
+        : 'retained-gpu-force-rows-no-readback';
+      algorithmContactSummaryObserved = sharedSpatialExactNearFailClosed;
+    }
+    const contactComponentUnresolved = sharedSpatialGenerationSupplied
+      && !sharedSpatialExactNearFailClosed
+      && contactPolicy.rowCount > 0;
+    const forceDerivationSuffix = summary.algorithmContactPairResponseApplied === true
       ? '-plus-algorithm-contact-pair-response'
-      : '';
-    const forceResolutionSuffix = summary.algorithmContactPairResponseApplied
+      : (contactComponentUnresolved
+          ? '-with-algorithm-contact-component-unresolved'
+          : '');
+    const forceResolutionSuffix = summary.algorithmContactPairResponseApplied === true
       ? '+algorithm-contact-pair-response'
-      : '';
+      : (contactComponentUnresolved
+          ? '+algorithm-contact-component-unresolved'
+          : '');
     const solver = {
       schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
       status: 'pressure-interface-force-solver-ready',
@@ -2448,6 +4767,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
       gasInterfacePressurePa: pressurePa,
       gasInterfacePressureRangePa: summary.gasInterfacePressureRangePa,
+      totalInterfacePressureRangePa: summary.totalInterfacePressureRangePa,
+      pressureComponentDecompositionStatus:
+        summary.pressureComponentDecompositionStatus,
       pressureFieldMode: pressureFieldResolution.pressureFieldMode,
       pressureFieldResolution: pressureFieldResolution.pressureFieldResolution,
       pressureGradientStatus: pressureFieldResolution.pressureGradientStatus,
@@ -2466,9 +4788,20 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       pressureModelId,
       algorithmContactPairResponseSchema: summary.algorithmContactPairResponseSchema,
       algorithmContactPairResponseStatus: summary.algorithmContactPairResponseStatus,
+      algorithmContactSummarySource,
+      algorithmContactSummaryObserved,
+      forceAggregateSummaryObserved: summary.forceAggregateObserved === true,
+      forceRowSummaryStatus: summary.forceRowSummaryStatus,
       algorithmContactPolicyRowsSchema: algorithmMaterialContactRows?.schema ?? null,
       algorithmContactPolicyRowsStatus: algorithmMaterialContactRows?.status ?? null,
       algorithmContactPolicyRowCount: summary.algorithmContactPolicyRowCount,
+      algorithmContactDomainPairRowCount: packedContactPolicy.domainPairRowCount,
+      algorithmContactBodySpecificWithoutDomainPairRowCount:
+        packedContactPolicy.bodySpecificWithoutDomainPairRowCount,
+      algorithmContactDomainPairGpuSelectionReady:
+        packedContactPolicy.domainPairGpuSelectionReady,
+      algorithmContactDomainPairGpuSelectionStatus:
+        packedContactPolicy.domainPairGpuSelectionStatus,
       algorithmContactForceRowCount: summary.algorithmContactForceRowCount,
       algorithmContactPairKeys: summary.algorithmContactPairKeys,
       algorithmContactPressureRangePa: summary.algorithmContactPressureRangePa,
@@ -2479,6 +4812,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsStatus: summary.interfaceContactKinematicsStatus,
       interfaceContactKinematicsRowCount: summary.interfaceContactKinematicsRowCount,
       interfaceContactKinematicsReadyCount: summary.interfaceContactKinematicsReadyCount,
+      interfaceContactKinematicsDomainPairReadyCount:
+        sharedSpatialGenerationSupplied
+          ? (sharedSpatialExactNearFailClosed ? 0 : null)
+          : packedContactKinematics.domainPairReadyCount,
       interfaceContactKinematicsGpuDerivationEligible: contactKinematicsGpuDerivationEligible,
       interfaceContactKinematicsGpuDerived: contactKinematicsGpuDerived,
       interfaceContactKinematicsDerivationStatus: contactKinematicsGpuDerivation?.status
@@ -2488,17 +4825,106 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsDerivation: contactKinematicsGpuDerivation?.derivation || null,
       interfaceContactKinematicsParticleSourceStatus: particleSource.status,
       interfaceContactKinematicsParticleCount: particleSource.particleCount,
+      interfaceContactKinematicsParticleIdentityReady: particleSource.identityReady === true,
+      interfaceContactKinematicsParticleIdentityRequired: particleSource.identityRequired === true,
+      interfaceContactKinematicsParticleIdentityBufferConsumed:
+        contactKinematicsGpuDerivation?.particleIdentityBufferConsumed === true,
       interfaceContactKinematicsParticleSourceDeviceId: particleSource.sourceDeviceId,
       interfaceContactKinematicsConsumerDeviceId: particleSource.consumerDeviceId,
       interfaceContactKinematicsParticleBinGridStatus: contactKinematicsGpuDerivation?.particleBinGridStatus || contactKinematicsParticleBinGrid?.status || null,
       interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsGpuDerivation?.particleBinGridEnabled === true,
-      interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsGpuDerivation?.particleBinGridCellCount || contactKinematicsParticleBinGrid?.cellCount || 0,
-      interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsGpuDerivation?.particleBinGridBinCapacity || contactKinematicsParticleBinGrid?.binCapacity || 0,
-      interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy || contactKinematicsParticleBinGrid?.averageOccupancy || 0,
-      interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsGpuDerivation?.particleBinGridEstimatedOverflowRisk === true || contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
-      interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
+      interfaceContactKinematicsParticleBinGridCellCount:
+        contactKinematicsGpuDerivation?.particleBinGridCellCount
+        ?? contactKinematicsParticleBinGrid?.cellCount
+        ?? 0,
+      interfaceContactKinematicsParticleBinGridBinCapacity:
+        contactKinematicsGpuDerivation?.particleBinGridBinCapacity
+        ?? contactKinematicsParticleBinGrid?.binCapacity
+        ?? 0,
+      interfaceContactKinematicsParticleBinGridAverageOccupancy:
+        contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy
+        ?? contactKinematicsParticleBinGrid?.averageOccupancy
+        ?? 0,
+      interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk:
+        contactKinematicsGpuDerivation
+          ? contactKinematicsGpuDerivation.particleBinGridEstimatedOverflowRisk === true
+          : contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
+      interfaceContactKinematicsParticleBinGridIndexBufferByteLength:
+        contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength
+        ?? contactKinematicsParticleBinGrid?.indexBufferByteLength
+        ?? 0,
       interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
       interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
+      schroederSpatialExactNearViewSchema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+      schroederSpatialExactNearSourceStatus: schroederPressureInterfaceSpatialSource.status,
+      schroederSpatialExactNearSourceReason: schroederPressureInterfaceSpatialSource.reason,
+      schroederSpatialExactNearSourceReady:
+        schroederPressureInterfaceSpatialSource.ready === true,
+      schroederSpatialExactNearInterfaceProvenanceStatus:
+        schroederPressureInterfaceSpatialProvenance.status,
+      schroederSpatialExactNearInterfaceProvenanceReason:
+        schroederPressureInterfaceSpatialProvenance.reason,
+      schroederSpatialExactNearInterfaceProvenanceReady:
+        schroederPressureInterfaceSpatialProvenance.ready === true,
+      schroederSpatialExactNearSelectionStatus: contactKinematicsSpatialBuild?.status
+        ?? (schroederPressureInterfaceSpatialSource.ready
+            ? schroederPressureInterfaceSpatialProvenance.status
+            : schroederPressureInterfaceSpatialSource.status),
+      schroederSpatialExactNearSelected: contactKinematicsSpatialBuild?.selected === true,
+      schroederSpatialExactNearGenerationSupplied:
+        schroederSpatialEpochGeneration != null,
+      schroederSpatialExactNearHostAdmissionStatus:
+        schroederPressureInterfaceSharedSpatialGeneration.status,
+      schroederSpatialExactNearHostAdmissionReason:
+        schroederPressureInterfaceSharedSpatialGeneration.reason,
+      schroederSpatialExactNearBorrowedGeneration:
+        contactKinematicsSpatialBuild?.borrowed === true,
+      schroederSpatialExactNearDirectoryOwnership:
+        contactKinematicsSpatialBuild?.directoryOwnership ?? null,
+      schroederSpatialExactNearConsumerReleaseAuthority:
+        contactKinematicsSpatialBuild?.borrowed === true
+          ? 'generation-owner'
+          : null,
+      schroederSpatialExactNearGenerationId:
+        contactKinematicsSpatialBuild?.execution?.generationId ?? null,
+      schroederSpatialExactNearArenaIndex:
+        contactKinematicsSpatialBuild?.execution?.arenaIndex ?? null,
+      schroederSpatialExactNearRuntimeCapacity:
+        contactKinematicsSpatialBuild?.runtimeCapacity ?? null,
+      schroederSpatialExactNearRuntimeCacheHit:
+        contactKinematicsSpatialBuild?.runtimeCacheHit === true,
+      schroederSpatialExactNearDirectoryBuildCount:
+        contactKinematicsSpatialBuild?.directoryBuildCount ?? 0,
+      schroederSpatialExactNearSharedGenerationDirectoryBuildCount:
+        contactKinematicsSpatialBuild?.sharedGenerationDirectoryBuildCount ?? 0,
+      schroederSpatialExactNearLookupMode:
+        contactKinematicsGpuDerivation?.spatialExactNearDirectoryLookupMode ?? null,
+      schroederSpatialExactNearCandidateBudget:
+        contactKinematicsGpuDerivation?.spatialExactNearCandidateBudget ?? null,
+      schroederSpatialExactNearPrivateParticleBinBuildSuppressed:
+        contactKinematicsGpuDerivation?.spatialExactNearPrivateParticleBinBuildSuppressed === true,
+      schroederSpatialExactNearPrivateParticleBinBuildCount:
+        contactKinematicsSpatialBuild?.selected === true ? 0 : (contactKinematicsParticleBins?.enabled ? 1 : 0),
+      schroederSpatialExactNearFixedCandidateBuildCount: 0,
+      schroederSpatialExactNearExhaustiveParticleScanCount: 0,
+      schroederSpatialExactNearGpuHeaderAdmission:
+        contactKinematicsGpuDerivation?.spatialExactNearGpuHeaderAdmission ?? null,
+      schroederSpatialExactNearGpuQueryEvidenceRequired:
+        contactKinematicsGpuDerivation?.spatialExactNearGpuQueryEvidenceRequired === true,
+      schroederSpatialExactNearGpuQueryEvidenceSourceAdapterId:
+        contactKinematicsGpuDerivation
+          ?.spatialExactNearGpuQueryEvidenceSourceAdapterId ?? null,
+      schroederSpatialExactNearGpuQueryEvidenceEnforcementStatus:
+        contactKinematicsGpuDerivation
+          ?.spatialExactNearGpuQueryEvidenceEnforcementStatus ?? null,
+      schroederSpatialExactNearGpuAdmissionObserved:
+        contactKinematicsGpuDerivation?.spatialExactNearGpuAdmissionObserved === true,
+      schroederSpatialExactNearGpuAdmissionStatus:
+        contactKinematicsGpuDerivation?.spatialExactNearGpuAdmissionStatus ?? null,
+      schroederSpatialExactNearGpuFallbackObserved:
+        contactKinematicsGpuDerivation?.spatialExactNearGpuFallbackObserved ?? null,
+      schroederSpatialExactNearArenaReleaseStatus:
+        contactKinematicsSpatialBuild?.releaseStatus ?? null,
       interfaceSourceKeySchema: contactKinematicsGpuDerivation?.interfaceSourceKeySchema
         ?? packedInterfaceSourceKeys.schema,
       interfaceSourceKeySourceStatus: contactKinematicsGpuDerivation?.interfaceSourceKeySourceStatus
@@ -2594,16 +5020,20 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceRowsBufferRetained: retainForceRowsBuffer === true,
       surfaceForceCount: summary.surfaceForceCount,
       surfaceForces: summary.surfaceForces,
-      totalInterfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? summary.totalInterfaceAreaM2,
+      totalInterfaceAreaM2: sharedSpatialGenerationSupplied
+        ? summary.totalInterfaceAreaM2
+        : (materialInterfaceField?.totalSurfaceAreaM2 ?? summary.totalInterfaceAreaM2),
       totalAbsMaterialForceN: summary.totalAbsMaterialForceN,
       netMaterialForceN: summary.netMaterialForceN,
       netGasReactionForceN: summary.netGasReactionForceN,
       conservationResidualN: summary.conservationResidualN,
       conservationResidualMagnitudeN: summary.conservationResidualMagnitudeN,
       maxPairResidualN: summary.maxPairResidualN,
-      conservationStatus: summary.maxPairResidualN <= 1e-9
-        ? 'pairwise-equal-opposite-force-conservative'
-        : 'pairwise-force-residual-nonzero',
+      conservationStatus: summary.forceAggregateObserved !== true
+        ? 'not-observed-gpu-force-rows-not-read-back'
+        : (summary.maxPairResidualN <= 1e-9
+            ? 'pairwise-equal-opposite-force-conservative'
+            : 'pairwise-force-residual-nonzero'),
       forceDerivation: pressureModelId === 1
         ? `webgpu-local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction${forceDerivationSuffix}`
         : `webgpu-uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction${forceDerivationSuffix}`,
@@ -2642,8 +5072,19 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       retainedGasPressureCellImportStatus: retainedGasPressureCellImport?.status || null,
       algorithmContactPolicyRowCount: packedContactPolicy.rowCount,
       algorithmContactPolicyRowByteLength: packedContactPolicy.rowByteLength,
+      algorithmContactDomainPairRowCount: packedContactPolicy.domainPairRowCount,
+      algorithmContactDomainPairGpuSelectionReady:
+        packedContactPolicy.domainPairGpuSelectionReady,
+      algorithmContactDomainPairGpuSelectionStatus:
+        packedContactPolicy.domainPairGpuSelectionStatus,
       interfaceContactKinematicsRowCount: packedContactKinematics.rowCount,
-      interfaceContactKinematicsReadyCount: packedContactKinematics.readyCount,
+      interfaceContactKinematicsReadyCount: sharedSpatialGenerationSupplied
+        ? summary.interfaceContactKinematicsReadyCount
+        : packedContactKinematics.readyCount,
+      interfaceContactKinematicsDomainPairReadyCount:
+        sharedSpatialGenerationSupplied
+          ? (sharedSpatialExactNearFailClosed ? 0 : null)
+          : packedContactKinematics.domainPairReadyCount,
       interfaceContactKinematicsRowByteLength: packedContactKinematics.rowByteLength,
       interfaceContactKinematicsGpuDerivationEligible: contactKinematicsGpuDerivationEligible,
       interfaceContactKinematicsGpuDerived: contactKinematicsGpuDerived,
@@ -2653,15 +5094,92 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
             : 'interface-contact-kinematics-uses-element-fields-or-unavailable'),
       interfaceContactKinematicsParticleSourceStatus: particleSource.status,
       interfaceContactKinematicsParticleCount: particleSource.particleCount,
+      interfaceContactKinematicsParticleIdentityReady: particleSource.identityReady === true,
+      interfaceContactKinematicsParticleIdentityRequired: particleSource.identityRequired === true,
       interfaceContactKinematicsParticleBinGridStatus: contactKinematicsGpuDerivation?.particleBinGridStatus || contactKinematicsParticleBinGrid?.status || null,
       interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsGpuDerivation?.particleBinGridEnabled === true,
-      interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsGpuDerivation?.particleBinGridCellCount || contactKinematicsParticleBinGrid?.cellCount || 0,
-      interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsGpuDerivation?.particleBinGridBinCapacity || contactKinematicsParticleBinGrid?.binCapacity || 0,
-      interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy || contactKinematicsParticleBinGrid?.averageOccupancy || 0,
-      interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsGpuDerivation?.particleBinGridEstimatedOverflowRisk === true || contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
-      interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
+      interfaceContactKinematicsParticleBinGridCellCount:
+        contactKinematicsGpuDerivation?.particleBinGridCellCount
+        ?? contactKinematicsParticleBinGrid?.cellCount
+        ?? 0,
+      interfaceContactKinematicsParticleBinGridBinCapacity:
+        contactKinematicsGpuDerivation?.particleBinGridBinCapacity
+        ?? contactKinematicsParticleBinGrid?.binCapacity
+        ?? 0,
+      interfaceContactKinematicsParticleBinGridAverageOccupancy:
+        contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy
+        ?? contactKinematicsParticleBinGrid?.averageOccupancy
+        ?? 0,
+      interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk:
+        contactKinematicsGpuDerivation
+          ? contactKinematicsGpuDerivation.particleBinGridEstimatedOverflowRisk === true
+          : contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
+      interfaceContactKinematicsParticleBinGridIndexBufferByteLength:
+        contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength
+        ?? contactKinematicsParticleBinGrid?.indexBufferByteLength
+        ?? 0,
       interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
       interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
+      schroederSpatialExactNearViewSchema: solver.schroederSpatialExactNearViewSchema,
+      schroederSpatialExactNearSourceStatus: solver.schroederSpatialExactNearSourceStatus,
+      schroederSpatialExactNearSourceReason: solver.schroederSpatialExactNearSourceReason,
+      schroederSpatialExactNearSourceReady: solver.schroederSpatialExactNearSourceReady,
+      schroederSpatialExactNearInterfaceProvenanceStatus:
+        solver.schroederSpatialExactNearInterfaceProvenanceStatus,
+      schroederSpatialExactNearInterfaceProvenanceReason:
+        solver.schroederSpatialExactNearInterfaceProvenanceReason,
+      schroederSpatialExactNearInterfaceProvenanceReady:
+        solver.schroederSpatialExactNearInterfaceProvenanceReady,
+      schroederSpatialExactNearSelectionStatus:
+        solver.schroederSpatialExactNearSelectionStatus,
+      schroederSpatialExactNearSelected: solver.schroederSpatialExactNearSelected,
+      schroederSpatialExactNearGenerationSupplied:
+        solver.schroederSpatialExactNearGenerationSupplied,
+      schroederSpatialExactNearHostAdmissionStatus:
+        solver.schroederSpatialExactNearHostAdmissionStatus,
+      schroederSpatialExactNearHostAdmissionReason:
+        solver.schroederSpatialExactNearHostAdmissionReason,
+      schroederSpatialExactNearBorrowedGeneration:
+        solver.schroederSpatialExactNearBorrowedGeneration,
+      schroederSpatialExactNearDirectoryOwnership:
+        solver.schroederSpatialExactNearDirectoryOwnership,
+      schroederSpatialExactNearConsumerReleaseAuthority:
+        solver.schroederSpatialExactNearConsumerReleaseAuthority,
+      schroederSpatialExactNearGenerationId: solver.schroederSpatialExactNearGenerationId,
+      schroederSpatialExactNearArenaIndex: solver.schroederSpatialExactNearArenaIndex,
+      schroederSpatialExactNearRuntimeCapacity: solver.schroederSpatialExactNearRuntimeCapacity,
+      schroederSpatialExactNearRuntimeCacheHit: solver.schroederSpatialExactNearRuntimeCacheHit,
+      schroederSpatialExactNearDirectoryBuildCount:
+        solver.schroederSpatialExactNearDirectoryBuildCount,
+      schroederSpatialExactNearSharedGenerationDirectoryBuildCount:
+        solver.schroederSpatialExactNearSharedGenerationDirectoryBuildCount,
+      schroederSpatialExactNearLookupMode: solver.schroederSpatialExactNearLookupMode,
+      schroederSpatialExactNearCandidateBudget:
+        solver.schroederSpatialExactNearCandidateBudget,
+      schroederSpatialExactNearPrivateParticleBinBuildSuppressed:
+        solver.schroederSpatialExactNearPrivateParticleBinBuildSuppressed,
+      schroederSpatialExactNearPrivateParticleBinBuildCount:
+        solver.schroederSpatialExactNearPrivateParticleBinBuildCount,
+      schroederSpatialExactNearFixedCandidateBuildCount:
+        solver.schroederSpatialExactNearFixedCandidateBuildCount,
+      schroederSpatialExactNearExhaustiveParticleScanCount:
+        solver.schroederSpatialExactNearExhaustiveParticleScanCount,
+      schroederSpatialExactNearGpuHeaderAdmission:
+        solver.schroederSpatialExactNearGpuHeaderAdmission,
+      schroederSpatialExactNearGpuQueryEvidenceRequired:
+        solver.schroederSpatialExactNearGpuQueryEvidenceRequired,
+      schroederSpatialExactNearGpuQueryEvidenceSourceAdapterId:
+        solver.schroederSpatialExactNearGpuQueryEvidenceSourceAdapterId,
+      schroederSpatialExactNearGpuQueryEvidenceEnforcementStatus:
+        solver.schroederSpatialExactNearGpuQueryEvidenceEnforcementStatus,
+      schroederSpatialExactNearGpuAdmissionObserved:
+        solver.schroederSpatialExactNearGpuAdmissionObserved,
+      schroederSpatialExactNearGpuAdmissionStatus:
+        solver.schroederSpatialExactNearGpuAdmissionStatus,
+      schroederSpatialExactNearGpuFallbackObserved:
+        solver.schroederSpatialExactNearGpuFallbackObserved,
+      schroederSpatialExactNearArenaReleaseStatus:
+        contactKinematicsSpatialBuild?.releaseStatus ?? solver.schroederSpatialExactNearArenaReleaseStatus,
       interfaceSourceKeyStatus: solver.interfaceSourceKeyStatus,
       interfaceSourceKeyConsumerStatus: solver.interfaceSourceKeyConsumerStatus,
       interfaceSourceKeyRowCount: solver.interfaceSourceKeyRowCount,
@@ -2715,9 +5233,13 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         : () => gasPressureCellsBuffer.destroy?.();
       returnedRetainedGasPressureCellsBuffer = true;
     }
+    returnedResultForOwnerCleanup = result;
     return result;
   } finally {
+    let cleanupPerformed = false;
     const cleanup = () => {
+      if (cleanupPerformed) return false;
+      cleanupPerformed = true;
       inputBuffer.destroy?.();
       if (!retainedGasPressureRowsReady && !returnedRetainedGasPressureCellsBuffer) {
         gasPressureCellsBuffer.destroy?.();
@@ -2728,8 +5250,28 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
       if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) forceRowsBuffer.destroy?.();
+      return true;
     };
-    if (noFullReadback) {
+    if (
+      noFullReadback
+      && schroederSpatialEpochGeneration != null
+      && sharedSpatialFenceAuthority === 'generation-owner'
+      && returnedResultForOwnerCleanup
+    ) {
+      returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupDelegated = true;
+      returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupStatus =
+        'pending-generation-owner-final-consumer-fence';
+      returnedResultForOwnerCleanup.destroyOwnerScopeTemporaryBuffers = ({
+        reason = 'pressure-interface-generation-owner-scope-temporary-cleanup'
+      } = {}) => {
+        const cleaned = cleanup();
+        returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupStatus = cleaned
+          ? 'destroyed-after-generation-owner-final-consumer-fence'
+          : 'already-destroyed-after-generation-owner-final-consumer-fence';
+        returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupReason = reason;
+        return cleaned;
+      };
+    } else if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);
     } else {
       cleanup();

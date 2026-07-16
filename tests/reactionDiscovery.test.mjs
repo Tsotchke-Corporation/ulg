@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+  REACTION_NETWORK_DISCOVERY_SCHEMA,
   clearReactionDiscoveryCache,
   createReactionDiscoveryCacheKey,
+  discoverReactionNetwork,
   discoverReactions,
   reactionDiscoveryCacheInfo
 } from '../src/runtime/sph/reactionDiscovery.js';
@@ -18,13 +20,23 @@ test('active metal + water is discovered as exothermic, with a derived hydroxide
   assert.equal(rx.stoichiometry.equation, '2 Na + 2 H2O -> 2 NaOH + H2');
   assert.deepEqual(rx.stoichiometry.products.map((term) => term.formula), ['NaOH', 'H2']);
   assert.equal(rx.stoichiometry.atomBalance.balanced, true);
-  assert.equal(rx.stoichiometry.provisionalEnergeticsStatus, 'provisional-heuristic-not-scientifically-validated');
+  assert.equal(rx.stoichiometry.provisionalEnergeticsStatus, null);
+  assert.equal(rx.stoichiometry.energeticsStatus, 'standard-reaction-enthalpy-reference-ready');
+  assert.equal(rx.energyModel, 'nist-janaf-standard-formation-enthalpy-298.15k-v0');
+  assert.equal(
+    rx.stoichiometry.thermochemicalReference.reactionEnthalpyJPerBalancedEquation,
+    -280_200
+  );
+  assert.equal(rx.stoichiometry.specificEnthalpyBasis, 'consumed-reactant-mass');
+  assert.ok(Math.abs(
+    rx.specificEnthalpyJPerKg * rx.stoichiometry.balancedReactantMassKgPerEquation
+      - rx.stoichiometry.thermochemicalReference.reactionEnthalpyJPerBalancedEquation
+  ) < 1e-6);
   assert.ok(rx.specificEnthalpyJPerKg < 0, 'must be exothermic');
   assert.equal(rx.activationTemperatureK, 0);
   assert.equal(rx.activationModel, 'barrier-not-yet-derived-alkali-metal-water-reactive-reacts-on-exothermic-contact-with-liquid-water');
   assert.deepEqual(rx.phaseRequirements, { h2o: ['liquid', 'gas'] });
-  // Order of magnitude (light-element RHF/STO-3G; sign + scale, not a validated value).
-  assert.ok(rx.specificEnthalpyJPerKg < -1e6 && rx.specificEnthalpyJPerKg > -40e6);
+  assert.ok(rx.specificEnthalpyJPerKg < -3.4e6 && rx.specificEnthalpyJPerKg > -3.5e6);
   // The product compound closure is supplied for registration, with a derived colour.
   const closure = r.productClosures['naoh'];
   assert.ok(closure, 'product closure provided');
@@ -105,7 +117,7 @@ test('cesium + fluorine uses elemental F2 and carries sedenion zero-divisor scop
   assert.deepEqual(scope.blockers, []);
 });
 
-test('strict energetics rejects provisional candidate signs but keeps derived family replacements', () => {
+test('strict energetics accepts phase-explicit reference rows and rejects uncovered provisional candidates', () => {
   clearReactionDiscoveryCache();
   const water = discoverReactions('Na', 'h2o', {
     strictEnergetics: true,
@@ -116,10 +128,9 @@ test('strict energetics rejects provisional candidate signs but keeps derived fa
   assert.equal(water.reactions[0].product, 'naoh');
   assert.equal(water.reactions[0].stoichiometry.equation, '2 Na + 2 H2O -> 2 NaOH + H2');
   assert.equal(water.reactions[0].stoichiometry.provisionalEnergeticsStatus, null);
-  assert.equal(
-    water.reactions[0].stoichiometry.replacedProvisionalEnergeticsStatus,
-    'provisional-heuristic-not-scientifically-validated'
-  );
+  assert.equal(water.reactions[0].stoichiometry.energeticsStatus, 'standard-reaction-enthalpy-reference-ready');
+  assert.equal(water.reactions[0].stoichiometry.thermochemicalReference.thermochemicalReferenceValidation, true);
+  assert.equal(water.reactions[0].stoichiometry.thermochemicalReference.simulationPhaseApplicabilityValidation, false);
   assert.ok(water.reactions[0].specificEnthalpyJPerKg < 0);
 
   clearReactionDiscoveryCache();
@@ -156,6 +167,75 @@ test('heavy-element oxygen reactions switch to the all-element molecular solver 
 test('identical materials on both blocks do not react', () => {
   assert.equal(discoverReactions('h2o', 'h2o').reactions.length, 0);
   assert.equal(discoverReactions('Na', 'Na').reactions.length, 0);
+});
+
+test('multi-material reaction discovery canonicalizes materials and evaluates every distinct pair', () => {
+  const result = discoverReactionNetwork(['O2', ' Na ', 'h2o', 'na', 'o2', ''], {
+    allowReducedProductProperties: true
+  });
+
+  assert.equal(result.schema, REACTION_NETWORK_DISCOVERY_SCHEMA);
+  assert.deepEqual(result.materials, ['h2o', 'na', 'o2']);
+  assert.equal(result.pairCount, 3);
+  assert.deepEqual(result.pairDiagnostics.map((diagnostic) => diagnostic.pair), [
+    ['h2o', 'na'],
+    ['h2o', 'o2'],
+    ['na', 'o2']
+  ]);
+  assert.ok(result.reactions.some((reaction) => reaction.product === 'naoh'));
+  assert.ok(result.reactions.some((reaction) => reaction.product === 'na2o'));
+  assert.ok(result.productClosures.naoh);
+  assert.ok(result.productClosures.na2o);
+});
+
+test('multi-material reaction discovery merges equivalent stoichiometries and is input-order independent', () => {
+  const options = { allowReducedProductProperties: true };
+  const forward = discoverReactionNetwork(['Cs', 'F', 'F2'], options);
+  const reverse = discoverReactionNetwork(['f2', 'cs', 'f'], options);
+
+  assert.deepEqual(reverse, forward);
+  assert.deepEqual(forward.materials, ['cs', 'f', 'f2']);
+  assert.equal(forward.pairCount, 3);
+  const cesiumFluoride = forward.reactions.filter((reaction) => reaction.product === 'csf');
+  assert.equal(cesiumFluoride.length, 1);
+  assert.match(
+    cesiumFluoride[0].reactionDiscovery.canonicalStoichiometryIdentity,
+    /^stoichiometry:/
+  );
+  assert.deepEqual(cesiumFluoride[0].reactionDiscovery.sourcePairs, [
+    ['cs', 'f'],
+    ['cs', 'f2']
+  ]);
+});
+
+test('multi-material reaction discovery accepts canonical aliases for supplied material properties', () => {
+  const materialProperties = {
+    Na: deriveMaterialProperties('Na'),
+    H2O: deriveMaterialProperties('h2o')
+  };
+  const result = discoverReactionNetwork(['NA', 'h2o'], {
+    materialProperties,
+    allowReducedProductProperties: true
+  });
+
+  assert.deepEqual(result.materials, ['h2o', 'na']);
+  assert.equal(result.pairCount, 1);
+  assert.equal(result.reactions[0].product, 'naoh');
+  assert.equal(result.pairDiagnostics[0].cacheKey, createReactionDiscoveryCacheKey('h2o', 'na', {
+    materialProperties: {
+      ...materialProperties,
+      h2o: materialProperties.H2O,
+      na: materialProperties.Na
+    },
+    allowReducedProductProperties: true
+  }));
+});
+
+test('multi-material reaction discovery rejects a non-list material input', () => {
+  assert.throws(
+    () => discoverReactionNetwork('na,h2o'),
+    /materialKeys must be an array/
+  );
 });
 
 test('material-property-backed reaction discovery caches memory and persisted records', () => {

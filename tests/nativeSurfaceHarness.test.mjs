@@ -10,6 +10,9 @@ import {
 } from '../scripts/sph-native-indirect-evidence.mjs';
 import { validateAuthoritativeGpuUploadPair } from '../scripts/sph-authoritative-gpu-checkpoint.mjs';
 import {
+  createLatestSceneRefreshRequestGate,
+  createResidentGpuArtifactRetirementBarrier,
+  resolveSphMaterialInterfacePreIntegrationProvenance,
   resolveSphNativeSurfaceDiagnosticDrawPlan
 } from '../src/visualization/sphPhaseScene.js';
 import {
@@ -21,6 +24,61 @@ import {
 
 function readRepoFile(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
+}
+
+function materialInterfacePreIntegrationFixture() {
+  const stateBuffer = { label: 'sph-state' };
+  const thermoBuffer = { label: 'sph-thermo' };
+  const identityBuffer = { label: 'sph-identity' };
+  const mechanicsBuffer = { label: 'mls-mpm-mechanics' };
+  const sphParticleState = {
+    schema: 'peercompute.ulg.sph-gpu-particle-buffer.v1',
+    particleCount: 4,
+    step: 17,
+    physicsSubstep: 2,
+    storageGeneration: 9,
+    positionEpoch: 17,
+    topologyEpoch: 3,
+    chartEpoch: 5,
+    levelEpoch: 17,
+    supportEpoch: 17
+  };
+  const mlsMpmParticleState = {
+    schema: 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v1',
+    particleCount: 4,
+    step: 17,
+    physicsSubstep: 2,
+    storageGeneration: 9
+  };
+  const sphParticleUpload = {
+    status: 'webgpu-uploaded',
+    particleCount: 4,
+    storageGeneration: 9,
+    positionEpoch: 17,
+    topologyEpoch: 3,
+    chartEpoch: 5,
+    levelEpoch: 17,
+    supportEpoch: 17,
+    stateBuffer,
+    thermoBuffer,
+    identityBuffer
+  };
+  const mlsMpmParticleUpload = {
+    status: 'webgpu-uploaded',
+    particleCount: 4,
+    storageGeneration: 9,
+    mechanicsBuffer
+  };
+  return {
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    stateBuffer,
+    thermoBuffer,
+    identityBuffer,
+    mechanicsBuffer
+  };
 }
 
 test('native WebGPU probe and benchmark flatten validation scope diagnostics', () => {
@@ -535,6 +593,51 @@ test('performance benchmark reports Schroeder native render proxy telemetry', ()
     benchmarkSource,
     /schroederActiveLeafProxyCount/,
     'benchmark should expose render LOD active leaf proxy counts'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroeder-simulation-requested-but-inactive/,
+    'an SS benchmark must fail its gate when requested execution was not active'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroeder-spatial-transaction-coverage-incomplete/,
+    'an active SS benchmark must require one complete canonical transaction per tick'
+  );
+  assert.match(
+    benchmarkSource,
+    /entry\?\.phase === 'resident-batch'/,
+    'SS transaction coverage must aggregate every primary resident batch instead of the last metric'
+  );
+  assert.match(
+    benchmarkSource,
+    /transaction\?\.state === 'released'/,
+    'SS transaction coverage must observe confirmed release rather than release scheduling'
+  );
+  assert.match(
+    benchmarkSource,
+    /transactionCounterTotals\.releaseCount === expectedStepCount/,
+    'SS transaction coverage must confirm release for every completed tick'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroederPhaseVolumeMigration:[\s\S]*?schroederPhaseVolumeMigrationRequested \? '1' : '0'/,
+    'the transactional SS benchmark must make its phase-overlay compatibility profile explicit'
+  );
+  assert.match(
+    benchmarkSource,
+    /releaseRetryCount[\s\S]{0,200}legacyPrivateLookupBuildCount[\s\S]{0,100}legacyExhaustiveTraversalCount/,
+    'SS benchmark evidence must include release retry and quarantined legacy lookup counters'
+  );
+  assert.match(
+    benchmarkSource,
+    /physicsStepsPerSecond: probeEngineStepsPerSecond \?\? probeWallStepsPerSecond/,
+    'reported physics throughput must use complete-batch timing rather than the final step'
+  );
+  assert.match(
+    probeSource,
+    /schroederSpatialEpochGenerationSummaries/,
+    'the probe should retain per-tick generation and bounded-backpressure evidence'
   );
 });
 
@@ -1199,6 +1302,21 @@ test('native WebGPU environment loads invalidate one on-demand frame without a s
   );
 });
 
+test('additional native surface publication invalidates the on-demand composite frame', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /bridge\.drawState\.additionalSurfaceDraws = draws;[\s\S]{0,1000}invalidateSphNativeWebGpuSurfaceFrame\(\s*bridge,\s*'additional-native-surface-draws-attached'/,
+    'secondary surfaces published after the primary draw must invalidate the retained water-only frame'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /additional-native-surface-draws-attached'[\s\S]{0,300}scheduleSphNativeWebGpuSurfaceConsumerFrame/,
+    'secondary publication should be consumed by the existing animation loop, not a second RAF loop'
+  );
+});
+
 test('native diagnostics bound prototype trace installation retries', () => {
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
 
@@ -1407,8 +1525,18 @@ test('native WebGPU resident refresh reuses the engine-owned consumer device', (
   );
   assert.match(
     sceneSource,
-    /if \(!result\.device\) \{\s*opticalGpuDeviceResultPromise = null;[\s\S]*?transientDeviceUnavailable/,
+    /function clearCachedOpticalGpuDeviceResult\([\s\S]*?requestPromise && opticalGpuDeviceResultPromise !== requestPromise[\s\S]*?device && opticalGpuDeviceResultDevice !== device[\s\S]*?opticalGpuDeviceResultPromise = null;/,
+    'cached device clearing should reject stale request and stale device owners'
+  );
+  assert.match(
+    sceneSource,
+    /if \(!result\.device\) \{[\s\S]*?clearCachedOpticalGpuDeviceResult\(\{ requestPromise \}\);[\s\S]*?transientDeviceUnavailable/,
     'transient requestAdapter null results should not poison the cached resident WebGPU device'
+  );
+  assert.match(
+    sceneSource,
+    /result\.device\.lost\.finally\(\(\) => \{[\s\S]*?clearCachedOpticalGpuDeviceResult\(\{[\s\S]*?device: result\.device,[\s\S]*?requestPromise/,
+    'a late loss callback may clear only the promise that acquired that device'
   );
 });
 
@@ -1447,17 +1575,455 @@ test('native WebGPU probe retains generation ownership and fence diagnostics', (
   }
 });
 
-test('native WebGPU refresh entry points quarantine a failed surface bridge', () => {
+test('native WebGPU refresh entry points quarantine one device and admit a replacement', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
   assert.match(
     sceneSource,
-    /async function refreshSphResidentSurfaceDrawFromExtension[\s\S]*?nativeBridgeFailure = nativeSurfaceBridgeFailureReason\(previousResidentRenderBridge\)[\s\S]*?resident extension surface refresh blocked/,
-    'direct extension refresh must not replace a failed native bridge'
+    /async function refreshSphResidentSurfaceDrawFromExtension[\s\S]*?resolveNativeSurfaceBridgeDeviceAdmission[\s\S]*?!nativeBridgeAdmission\.admitted[\s\S]*?resident extension surface refresh blocked[\s\S]*?nativeBridgeAdmission\.replacementDevice[\s\S]*?clearSphResidentSurfaceDrawArtifacts/,
+    'direct extension refresh must retain same-device quarantine and clear only for a replacement'
   );
   assert.match(
     sceneSource,
-    /async function refreshSphResidentRenderState[\s\S]*?nativeBridgeFailure = nativeSurfaceBridgeFailureReason\([\s\S]*?resident render refresh blocked/,
-    'resident render refresh must not bypass a failed native bridge'
+    /async function refreshSphResidentRenderStateUnserialized[\s\S]*?nativeBridgeFailure = nativeSurfaceBridgeFailureReason\([\s\S]*?resolveNativeSurfaceBridgeDeviceAdmission[\s\S]*?!nativeBridgeAdmission\.admitted[\s\S]*?resident render refresh blocked[\s\S]*?clearSphResidentSurfaceDrawArtifacts/,
+    'resident render refresh must retain same-device quarantine and clear only after replacement admission'
+  );
+});
+
+test('static scene uploads order replacement-device requests before async acquisition', async () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const thermalStart = sceneSource.indexOf('async function refreshSphThermalResponseGraphBuffers');
+  const mechanicsStart = sceneSource.indexOf('async function refreshMlsMpmMechanicsMaterialPhaseUpload');
+  const mechanicsEnd = sceneSource.indexOf('async function refreshMlsMpmMechanicsPrediction', mechanicsStart);
+  const thermalSource = sceneSource.slice(thermalStart, mechanicsStart);
+  const mechanicsSource = sceneSource.slice(mechanicsStart, mechanicsEnd);
+
+  for (const [label, source] of [
+    ['thermal', thermalSource],
+    ['mechanics', mechanicsSource]
+  ]) {
+    const beginIndex = source.indexOf('UploadRequestGate.begin()');
+    const acquisitionIndex = source.indexOf('await requestCachedOpticalGpuDevice');
+    const latestIndex = source.indexOf('UploadRequestGate.isLatest(requestToken)');
+    assert.ok(beginIndex >= 0, `${label} upload should begin an ordered request`);
+    assert.ok(acquisitionIndex > beginIndex, `${label} request order must precede device acquisition`);
+    assert.ok(latestIndex > acquisitionIndex, `${label} upload must reject stale acquisition completion`);
+    assert.match(
+      source,
+      /pending[\s\S]*?deviceRequestKey === deviceRequestKey[\s\S]*?return pending[^;]+\.promise/,
+      `${label} identical pending requests should coalesce`
+    );
+    assert.match(
+      source,
+      /authorityGeneration[\s\S]*?residentExecutionGenerationIsStale/,
+      `${label} cache mutation should be gated by resident authority generation`
+    );
+  }
+
+  const gate = createLatestSceneRefreshRequestGate();
+  let releaseDeviceA;
+  const delayedDeviceA = new Promise((resolve) => { releaseDeviceA = resolve; });
+  let publishedDevice = null;
+  const refresh = async (devicePromise) => {
+    const requestToken = gate.begin();
+    const device = await devicePromise;
+    if (!gate.isLatest(requestToken)) return 'stale-upload-discarded';
+    publishedDevice = device;
+    return 'published';
+  };
+  const older = refresh(delayedDeviceA);
+  assert.equal(await refresh(Promise.resolve('Device-B')), 'published');
+  releaseDeviceA('Device-A');
+  assert.equal(await older, 'stale-upload-discarded');
+  assert.equal(publishedDevice, 'Device-B');
+});
+
+test('resident GPU artifact retirement waits for all future submitters before fencing cleanup', () => {
+  const scheduled = [];
+  const events = [];
+  const barrier = createResidentGpuArtifactRetirementBarrier({
+    deferCleanup(device, cleanup) {
+      events.push(`fence:${device}`);
+      scheduled.push({ device, cleanup });
+      return true;
+    }
+  });
+  let deviceACleanupCount = 0;
+  const releaseOlder = barrier.acquire();
+  const releaseReplacement = barrier.acquire();
+
+  assert.equal(barrier.retire({
+    device: 'Device-A',
+    cleanup() {
+      deviceACleanupCount += 1;
+    }
+  }), true);
+  assert.equal(barrier.pendingRetirementCount, 1);
+  assert.deepEqual(events, []);
+
+  events.push('later-submit:Device-A');
+  assert.equal(releaseReplacement(), true);
+  assert.deepEqual(events, ['later-submit:Device-A']);
+  assert.equal(releaseOlder(), true);
+  assert.deepEqual(events, ['later-submit:Device-A', 'fence:Device-A']);
+  assert.equal(barrier.pendingRetirementCount, 0);
+  assert.equal(scheduled.length, 1);
+
+  scheduled[0].cleanup();
+  scheduled[0].cleanup();
+  assert.equal(deviceACleanupCount, 1);
+  assert.equal(releaseOlder(), false);
+
+  const releaseBatch = barrier.acquire();
+  barrier.retire({ device: 'Device-B', cleanup() {} });
+  barrier.retire({ device: 'Device-C', cleanup() {} });
+  releaseBatch();
+  assert.deepEqual(events.slice(-2), ['fence:Device-B', 'fence:Device-C']);
+
+  barrier.retire({ device: 'Device-D', cleanup() {} });
+  assert.equal(events.at(-1), 'fence:Device-D');
+});
+
+test('material-interface pre-integration provenance retains one complete epoch and buffer family', () => {
+  const fixture = materialInterfacePreIntegrationFixture();
+  const provenance = resolveSphMaterialInterfacePreIntegrationProvenance(fixture);
+
+  assert.equal(provenance.ready, true);
+  assert.equal(provenance.status, 'material-interface-current-particle-epoch-ready');
+  assert.deepEqual(provenance.blockers, []);
+  assert.deepEqual({
+    storageGeneration: provenance.storageGeneration,
+    physicsTick: provenance.physicsTick,
+    physicsSubstep: provenance.physicsSubstep,
+    positionEpoch: provenance.positionEpoch,
+    topologyEpoch: provenance.topologyEpoch,
+    chartEpoch: provenance.chartEpoch,
+    levelEpoch: provenance.levelEpoch,
+    supportEpoch: provenance.supportEpoch,
+    particleCount: provenance.particleCount
+  }, {
+    storageGeneration: 9,
+    physicsTick: 17,
+    physicsSubstep: 2,
+    positionEpoch: 17,
+    topologyEpoch: 3,
+    chartEpoch: 5,
+    levelEpoch: 17,
+    supportEpoch: 17,
+    particleCount: 4
+  });
+  assert.strictEqual(provenance.sourceStateBuffer, fixture.stateBuffer);
+  assert.strictEqual(provenance.sourceThermoBuffer, fixture.thermoBuffer);
+  assert.strictEqual(provenance.sourceIdentityBuffer, fixture.identityBuffer);
+  assert.strictEqual(provenance.sourceMechanicsBuffer, fixture.mechanicsBuffer);
+});
+
+test('material-interface pre-integration provenance rejects torn epochs and buffer families', () => {
+  const cases = [
+    {
+      blocker: 'storage-generation-mismatch',
+      mutate(fixture) {
+        fixture.mlsMpmParticleUpload.storageGeneration += 1;
+      }
+    },
+    {
+      blocker: 'storage-generation-mismatch',
+      mutate(fixture) {
+        fixture.sphParticleUpload.storageGeneration = '9';
+      }
+    },
+    {
+      blocker: 'chart-epoch-state-upload-mismatch',
+      mutate(fixture) {
+        fixture.sphParticleState.chartEpoch += 1;
+      }
+    },
+    {
+      blocker: 'physics-tick-mismatch',
+      mutate(fixture) {
+        fixture.sphParticleUpload.physicsTick = fixture.sphParticleState.step + 1;
+      }
+    },
+    {
+      blocker: 'physics-substep-mismatch',
+      mutate(fixture) {
+        fixture.sphParticleUpload.physicsSubstep = fixture.sphParticleState.physicsSubstep + 1;
+      }
+    },
+    {
+      blocker: 'sph-buffer-identity-incomplete',
+      mutate(fixture) {
+        fixture.sphParticleUpload.identityBuffer = null;
+      }
+    },
+    {
+      blocker: 'mls-mpm-buffer-identity-incomplete',
+      mutate(fixture) {
+        fixture.mlsMpmParticleUpload.mechanicsBuffer = null;
+      }
+    }
+  ];
+
+  for (const { blocker, mutate } of cases) {
+    const fixture = materialInterfacePreIntegrationFixture();
+    mutate(fixture);
+    const provenance = resolveSphMaterialInterfacePreIntegrationProvenance(fixture);
+    assert.equal(provenance.ready, false, blocker);
+    assert.ok(provenance.blockers.includes(blocker), blocker);
+    assert.equal(provenance.sourceStateBuffer, null, `${blocker}: state identity must fail closed`);
+    assert.equal(provenance.sourceMechanicsBuffer, null, `${blocker}: mechanics identity must fail closed`);
+  }
+});
+
+test('resident material-interface refresh defaults to publishing and supports caller-owned results', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const materialStart = sceneSource.indexOf('async function refreshSphResidentMaterialInterfaceState');
+  const materialEnd = sceneSource.indexOf(
+    'async function refreshSphResidentPressureInterfaceState',
+    materialStart
+  );
+  const materialSource = sceneSource.slice(materialStart, materialEnd);
+  const publisherCalls = materialSource.match(/publishSphResidentMaterialInterfaceState\(/g) || [];
+  const completionCalls = materialSource.match(/return completeMaterialInterfaceState\(/g) || [];
+
+  assert.match(materialSource, /candidateReadbackMode = 'compact-active-readback',\s*publishState = true/);
+  assert.match(
+    materialSource,
+    /publishState === false\s*\? \(state \|\| null\)\s*:\s*publishSphResidentMaterialInterfaceState\(state\)/,
+    'explicit non-publishing refreshes must return caller-owned state without replacing scene state'
+  );
+  assert.equal(publisherCalls.length, 1, 'all refresh exits should use the publication gate');
+  assert.equal(completionCalls.length, 6, 'success and every fail-closed exit should share the gate');
+  assert.match(
+    materialSource,
+    /seedResidentMaterialInterfaceSurfaceTable\(\{[\s\S]*?publishState[\s\S]*?\}\)/,
+    'cold-start surface-table seeding must receive the publication policy'
+  );
+  assert.match(
+    materialSource,
+    /if \(publishState === false\) \{[\s\S]*?readbackSurfaceState = createResidentRenderSurfaceState[\s\S]*?\} else \{[\s\S]*?captureResidentRenderSurfaceState/,
+    'non-published readback fallback must build a caller-local render surface state'
+  );
+  assert.match(
+    sceneSource,
+    /const state = publishState === false[\s\S]*?createResidentRenderSurfaceState[\s\S]*?: captureResidentRenderSurfaceState/,
+    'cold-start seeding must not capture global render state when publication is disabled'
+  );
+  const pureSurfaceStateStart = sceneSource.indexOf('function createResidentRenderSurfaceState');
+  const captureSurfaceStateStart = sceneSource.indexOf(
+    'function captureResidentRenderSurfaceState',
+    pureSurfaceStateStart
+  );
+  const pureSurfaceStateSource = sceneSource.slice(
+    pureSurfaceStateStart,
+    captureSurfaceStateStart
+  );
+  assert.doesNotMatch(pureSurfaceStateSource, /scene\.userData|sphResidentRenderSurfaceState\s*=/);
+  assert.match(materialSource, /sourceIdentityBuffer: nextSphUpload\.identityBuffer \|\| null/);
+  assert.match(materialSource, /sourceMechanicsBuffer: nextMlsMpmUpload\?\.mechanicsBuffer \|\| null/);
+  for (const field of [
+    'spatialEpochPhysicsTick',
+    'spatialEpochPhysicsSubstep',
+    'spatialEpochStorageGeneration',
+    'spatialEpochPositionEpoch',
+    'spatialEpochTopologyEpoch',
+    'spatialEpochChartEpoch',
+    'spatialEpochLevelEpoch',
+    'spatialEpochSupportEpoch',
+    'spatialEpochSourceStateBuffer',
+    'spatialEpochSourceThermoBuffer',
+    'spatialEpochSourceIdentityBuffer',
+    'spatialEpochSourceMechanicsBuffer'
+  ]) {
+    assert.match(materialSource, new RegExp(`materialInterfaceField\\.${field}`), field);
+  }
+});
+
+test('resident GPU consumers lease captured buffers before asynchronous device acquisition', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const materialStart = sceneSource.indexOf('async function refreshSphResidentMaterialInterfaceState');
+  const materialEnd = sceneSource.indexOf('async function refreshSphResidentPressureInterfaceState', materialStart);
+  const renderStart = sceneSource.indexOf('async function refreshSphResidentRenderStateUnserialized');
+  const renderEnd = sceneSource.indexOf('async function debugSphResidentParticleUpload', renderStart);
+
+  const materialSource = sceneSource.slice(materialStart, materialEnd);
+  const materialCaptureIndex = materialSource.indexOf('const nextSphUpload');
+  const materialLeaseIndex = materialSource.indexOf('residentGpuArtifactRetirementBarrier.acquire()');
+  const materialDeviceAwaitIndex = materialSource.indexOf('await requestCachedOpticalGpuDevice');
+  assert.ok(materialCaptureIndex >= 0, 'material interface should capture its retained source');
+  assert.ok(materialLeaseIndex > materialCaptureIndex, 'material interface should lease the captured source');
+  assert.ok(materialDeviceAwaitIndex > materialLeaseIndex, 'material interface must lease before device acquisition');
+  assert.ok(
+    materialSource.lastIndexOf('releaseResidentArtifactLease()') > materialDeviceAwaitIndex,
+    'material interface should release after device-dependent consumption'
+  );
+
+  const renderSource = sceneSource.slice(renderStart, renderEnd);
+  const renderLeaseIndex = renderSource.indexOf('residentGpuArtifactRetirementBarrier.acquire()');
+  const renderFirstDeviceAwaitIndex = renderSource.indexOf('await requestCachedOpticalGpuDevice');
+  assert.ok(renderLeaseIndex >= 0, 'resident render should lease its entry-time residentSteps source');
+  assert.ok(
+    renderFirstDeviceAwaitIndex > renderLeaseIndex,
+    'resident render must lease before every asynchronous device-recovery/acquisition path'
+  );
+  assert.ok(
+    renderSource.lastIndexOf('releaseResidentArtifactLease()') > renderFirstDeviceAwaitIndex,
+    'resident render should release after device-dependent consumption'
+  );
+
+  const serializedRenderStart = sceneSource.indexOf('async function refreshSphResidentRenderState(options');
+  const serializedRenderSource = sceneSource.slice(serializedRenderStart, renderStart);
+  const queuedLeaseIndex = serializedRenderSource.indexOf('residentGpuArtifactRetirementBarrier.acquire()');
+  const serializationAwaitIndex = serializedRenderSource.indexOf('await previous.catch');
+  assert.ok(queuedLeaseIndex >= 0, 'serialized resident render should lease an explicitly queued source');
+  assert.ok(
+    serializationAwaitIndex > queuedLeaseIndex,
+    'serialized resident render must lease before waiting behind an older refresh'
+  );
+  assert.ok(
+    serializedRenderSource.lastIndexOf('releaseQueuedResidentArtifactLease()') > serializationAwaitIndex,
+    'serialized resident render should release its queued-source lease after the inner refresh'
+  );
+
+  const pressureStart = sceneSource.indexOf('async function refreshSphResidentPressureInterfaceState');
+  const pressureEnd = sceneSource.indexOf('function sphThermalResponseGraphSignature', pressureStart);
+  const pressureSource = sceneSource.slice(pressureStart, pressureEnd);
+  const pressureLeaseIndex = pressureSource.indexOf('residentGpuArtifactRetirementBarrier.acquire()');
+  const spatialLedgerAwaitIndex = pressureSource.indexOf(
+    'await submitSceneSpatialGasLedgerProducerStageForPressureInterface'
+  );
+  assert.ok(pressureLeaseIndex >= 0, 'pressure interface should lease its resident product source');
+  assert.ok(
+    spatialLedgerAwaitIndex > pressureLeaseIndex,
+    'pressure interface must lease before a spatial-ledger ComputeManager submission can queue'
+  );
+  assert.ok(
+    pressureSource.lastIndexOf('releasePressureInterfaceArtifactLease()') > spatialLedgerAwaitIndex,
+    'pressure interface should release after queued producer and pressure consumption complete'
+  );
+});
+
+test('scene lifecycle invalidates static uploads and rejects known-lost device reuse', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /nativeWebGpuKnownLostDeviceSet[\s\S]*?device\.lost\.then[\s\S]*?nativeWebGpuKnownLostDeviceSet\?\.add\(device\)/,
+    'the scene must remember devices after their loss promise settles'
+  );
+  assert.match(
+    sceneSource,
+    /resolveNativeSurfaceConsumerDeviceTransition\(\{[\s\S]*?deviceKnownLost:[\s\S]*?if \(deviceTransition\.deviceKnownLost\)/,
+    'consumer recreation must reject an already-lost device'
+  );
+  assert.match(
+    sceneSource,
+    /function dispose\(\)[\s\S]*?clearSphThermalResponseGraphUpload\(\);[\s\S]*?clearMlsMpmMechanicsMaterialPhaseUpload\(\);/,
+    'scene disposal must clear references and invalidate pending static uploads'
+  );
+  assert.match(
+    sceneSource,
+    /async function refreshMlsMpmResidentStep[\s\S]*?refreshSphThermalResponseGraphBuffers\(\{[\s\S]*?authorityGeneration: executionGeneration[\s\S]*?refreshMlsMpmMechanicsMaterialPhaseUpload\(\{[\s\S]*?authorityGeneration: executionGeneration/,
+    'single resident steps must bind static uploads to their captured authority generation'
+  );
+  assert.match(
+    sceneSource,
+    /async function refreshMlsMpmResidentSteps[\s\S]*?refreshSphThermalResponseGraphBuffers\(\{[\s\S]*?authorityGeneration: executionGeneration[\s\S]*?refreshMlsMpmMechanicsMaterialPhaseUpload\(\{[\s\S]*?authorityGeneration: executionGeneration/,
+    'resident step batches must bind static uploads to their captured authority generation'
+  );
+  assert.match(
+    sceneSource,
+    /resident execution invalidated during GPU upload preparation/,
+    'stale resident work must stop before pressure upload and kernel execution'
+  );
+});
+
+test('Schroeder scene samples one non-published pre-integration interface field per resident batch', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const loopStart = sceneSource.indexOf('const runSchroederSceneResidentSteps');
+  const loopEnd = sceneSource.indexOf('const residentStepsRunner', loopStart);
+  const loopSource = sceneSource.slice(loopStart, loopEnd);
+  const forIndex = loopSource.indexOf('for (let index = 0; index < count; index += 1)');
+  const fieldIndex = loopSource.indexOf(
+    'await refreshSphResidentMaterialInterfaceState',
+    forIndex
+  );
+  const hierarchyIndex = loopSource.indexOf(
+    'await runSchroederSameLevelMechanicsWebGpu',
+    fieldIndex
+  );
+
+  assert.ok(forIndex >= 0, 'Schroeder resident sequence must retain its explicit substep loop');
+  assert.ok(fieldIndex > forIndex, 'the sampled field must be produced inside the resident loop');
+  assert.ok(hierarchyIndex > fieldIndex, 'the field must be ready before canonical generation ownership runs');
+  assert.match(
+    loopSource,
+    /pressureInterfaceOwnerScopeDiagnosticRequested[\s\S]*?index === pressureInterfaceOwnerScopeDiagnosticSampleIndex/
+  );
+  assert.match(
+    loopSource,
+    /pressureInterfaceOwnerScopeDiagnosticSampleIndex\s*=\s*\n?\s*pressureInterfaceOwnerScopeDiagnosticRequested \? 0 : null/
+  );
+  assert.match(
+    loopSource,
+    /once-per-resident-batch-first-substep-before-integration/
+  );
+  assert.match(
+    loopSource,
+    /pressureInterfaceOwnerScopeDiagnosticBlockedByOverlay[\s\S]*?stepPhaseVolumeAssignmentOverlay/
+  );
+  assert.match(
+    loopSource,
+    /phase-volume-assignment-overlay-requires-overlay-capable-exact-near-adapter/
+  );
+  assert.match(loopSource, /nextSphParticleState: currentSphParticleState/);
+  assert.match(loopSource, /nextMlsMpmParticleState: currentMlsMpmParticleState/);
+  assert.match(loopSource, /sphParticleUpload: currentSphParticleUpload/);
+  assert.match(loopSource, /mlsMpmParticleUpload: currentMlsMpmParticleUpload/);
+  assert.match(loopSource, /publishState: false/);
+  assert.match(loopSource, /spatialEpochOwnerScopeEphemeral = true/);
+  assert.match(
+    loopSource,
+    /residentStepOptions\.materialInterfaceField\s*=\s*preIntegrationMaterialInterfaceField/
+  );
+  assert.match(
+    loopSource,
+    /enablePressureInterfaceOwnerScope:\s*\n?\s*shouldBuildPreIntegrationMaterialInterfaceField/
+  );
+  assert.match(
+    loopSource,
+    /schroederPressureInterfaceOwnerScopeDiagnosticSampleCount:\s*\n?\s*pressureInterfaceOwnerScopeDiagnosticSample \? 1 : 0/
+  );
+  assert.match(
+    loopSource,
+    /schroederPressureInterfaceOwnerScopeDiagnosticSubmittedCount:[\s\S]*?schroeder-pressure-interface-owner-scope-submitted/
+  );
+  assert.match(
+    loopSource,
+    /schroederPressureInterfaceOwnerScopeDiagnosticBorrowedCount:[\s\S]*?borrowedSpatialGeneration === true/
+  );
+  assert.match(
+    loopSource,
+    /schroederStepSummaries\.every\([\s\S]*?normalHotLoopReadbackFree === true/
+  );
+  assert.match(
+    loopSource,
+    /spatialEpochOwnerScopeCleanupScheduled !== true[\s\S]*?onSubmittedWorkDone[\s\S]*?then\([\s\S]*?cleanupOwnerScopeField,[\s\S]*?blockOwnerScopeCleanup/,
+    'a hierarchy call rejected before ownership transfer must retire the ephemeral field only after a confirmed queue fence'
+  );
+  assert.match(
+    loopSource,
+    /await settleSchroederSpatialEpochBatchEvidence\(\{[\s\S]*?settlements: schroederSpatialEpochReleaseSettlements,[\s\S]*?expectedCount: count/,
+    'the resident batch must settle every generation-owner fence and resample released transactions before publication'
+  );
+  assert.match(
+    loopSource,
+    /schroederSpatialEpochReleaseSettlementComplete:[\s\S]*?spatialEpochTransaction\?\.state === 'released'[\s\S]*?releaseCount === 1/,
+    'batch telemetry must publish exact release completion coverage'
+  );
+  assert.match(
+    loopSource,
+    /schroederHierarchyArtifactLedgerSettlementComplete:[\s\S]*?hierarchyArtifactLedger\?\.safe === true/,
+    'batch telemetry must publish safe artifact-ledger retirement coverage'
   );
 });

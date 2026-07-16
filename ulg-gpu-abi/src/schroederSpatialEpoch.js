@@ -1,13 +1,20 @@
 export const ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch.v1';
+export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-exact-near-view.v1';
 
 export const SCHROEDER_SPATIAL_EPOCH_MAGIC = 0x53534531;
 export const SCHROEDER_SPATIAL_EPOCH_VERSION = 1;
 export const SCHROEDER_SPATIAL_EPOCH_KEY_WORDS = 5;
 export const SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS = 48;
+export const SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS = 4;
 
 export const SCHROEDER_SPATIAL_SORT_BOUNDED_ATLAS_U32 = 1;
 export const SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5 = 2;
+export const SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS = 1;
+export const SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY = 2;
+export const SCHROEDER_SPATIAL_QUERY_GEOMETRY_GENERIC = 0;
+export const SCHROEDER_SPATIAL_QUERY_GEOMETRY_SINGLE_CHART_POW2 = 1;
 
 export const SCHROEDER_SPATIAL_EPOCH_STATUS_READY = 1 << 0;
 export const SCHROEDER_SPATIAL_EPOCH_STATUS_ADMITTED = 1 << 1;
@@ -96,8 +103,42 @@ export const SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI = Object.freeze({
   arenaResidency: 'configurable-complete-fence-leased-generation-arenas',
   submissionOwnership: 'caller',
   readbackPolicy: 'fixed-evidence-or-explicit-probe-only',
+  queryGeometryEvidence: Object.freeze({
+    adapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    wordCount: SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
+    liveOffset: 'particleToCellOffsetWords+sourceCount',
+    layout: Object.freeze([
+      'chartId:u32',
+      'minLevel:i32-bits',
+      'maxLevel:i32-bits',
+      'baseGridSpacingM:f32-bits'
+    ]),
+    rowAdmission:
+      'all-active-rows-match-single-chart-inclusive-level-range-and-exact-f32-pow2-spacing',
+    completionProof:
+      'ready-admitted-no-invalid-source-and-completion-ordinal-equals-build-ordinal'
+  }),
   overflowPolicy: 'fail-closed-zero-consumer-dispatch',
-  productionConsumerStatus: 'standalone-foundation-not-yet-integrated'
+  productionConsumerStatus:
+    'pressure-contact-exact-near-mounted-generation-owner-scope-diagnostic-only'
+});
+
+export const SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_ABI = Object.freeze({
+  schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+  directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  generationAdmission: 'gpu-validates-complete-v1-header-before-first-lookup',
+  lookup: 'exact-cell-key-binary-search-sparse-prefix-csr-range',
+  rangeTraversal:
+    'lexicographic-level-x-y-prefix-bounds-then-complete-occupied-z-csr',
+  emptyCellEnumeration: false,
+  candidateBudget: null,
+  candidateOverflowPolicy: 'not-applicable-no-materialized-candidate-buffer',
+  initialChartPolicy: 'single-declared-chart',
+  levelSpacingPolicy: 'base-grid-spacing-times-pow2-level',
+  overlayPolicy: 'fail-closed-until-explicit-level-spacing-sidecar',
+  fallbackPolicy: 'legacy-lookup-only-before-canonical-generation-selection',
+  mountedInteractiveStatus:
+    'mounted-same-device-pre-integration-generation-owner-scope-diagnostic-only-no-mechanics-authority'
 });
 
 const UINT32_MAX = 0xffff_ffff;
@@ -133,6 +174,108 @@ function checkedMultiply(left, right, label, max = UINT32_MAX) {
     throw new RangeError(`${label} exceeds ${max}`);
   }
   return value;
+}
+
+function canonicalFloat32(value, label) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError(`${label} must be a finite number`);
+  }
+  const canonical = Math.fround(value);
+  if (!Number.isFinite(canonical)) {
+    throw new RangeError(`${label} is not representable as finite f32`);
+  }
+  return canonical;
+}
+
+function float32Bits(value) {
+  const floats = new Float32Array(1);
+  floats[0] = value;
+  return new Uint32Array(floats.buffer)[0] >>> 0;
+}
+
+function normalizeExactNearQueryProfile(queryProfile, sourceCount) {
+  if (queryProfile == null) {
+    return Object.freeze({
+      mode: SCHROEDER_SPATIAL_QUERY_GEOMETRY_GENERIC,
+      modeName: 'generic-per-row-native-spacing',
+      sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
+      chartId: 0,
+      minLevel: 0,
+      maxLevel: 0,
+      levelCount: 0,
+      baseGridSpacingM: 0,
+      baseGridSpacingBits: 0
+    });
+  }
+  if (
+    queryProfile.schema !== 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1'
+    || queryProfile.status !== 'schroeder-spatial-exact-near-query-profile-ready'
+    || queryProfile.ready !== true
+    || queryProfile.levelSpacingMode !== 'base-grid-spacing-times-pow2-level'
+    || queryProfile.positionAuthority !== 'same-epoch-pre-integration-particle-state'
+  ) {
+    throw new TypeError('exact-near query profile is not ready for authenticated GPU admission');
+  }
+  if (queryProfile.sourceCount !== sourceCount) {
+    throw new RangeError('exact-near query profile sourceCount does not match the build source count');
+  }
+  const chartId = nonNegativeInteger(queryProfile.chartId, 'queryProfile.chartId');
+  if (chartId > 0x00ff_ffff) {
+    throw new RangeError('queryProfile.chartId exceeds exact f32 integer identity');
+  }
+  const minLevel = integerInRange(
+    queryProfile.minLevel,
+    'queryProfile.minLevel',
+    -0x8000_0000,
+    0x7fff_ffff
+  );
+  const maxLevel = integerInRange(
+    queryProfile.maxLevel,
+    'queryProfile.maxLevel',
+    -0x8000_0000,
+    0x7fff_ffff
+  );
+  const levelCount = maxLevel - minLevel + 1;
+  if (!Number.isSafeInteger(levelCount) || levelCount < 1 || levelCount > 64) {
+    throw new RangeError('exact-near query profile must contain 1 to 64 contiguous levels');
+  }
+  if (queryProfile.levelCount !== levelCount) {
+    throw new RangeError('exact-near query profile levelCount does not match minLevel/maxLevel');
+  }
+  const baseGridSpacingM = canonicalFloat32(
+    queryProfile.baseGridSpacingM,
+    'queryProfile.baseGridSpacingM'
+  );
+  const minSpacingM = Math.fround(baseGridSpacingM * (2 ** minLevel));
+  const maxSpacingM = Math.fround(baseGridSpacingM * (2 ** maxLevel));
+  if (
+    !(baseGridSpacingM > 0)
+    || !Number.isFinite(minSpacingM)
+    || minSpacingM < 0.000001
+    || !Number.isFinite(maxSpacingM)
+    || !(maxSpacingM > 0)
+  ) {
+    throw new RangeError(
+      'exact-near query profile spacing must remain finite and above the active-row clamp'
+    );
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1',
+    status: 'schroeder-spatial-exact-near-query-profile-ready',
+    ready: true,
+    mode: SCHROEDER_SPATIAL_QUERY_GEOMETRY_SINGLE_CHART_POW2,
+    modeName: 'single-chart-base-grid-spacing-times-pow2-level',
+    sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    sourceCount,
+    chartId,
+    minLevel,
+    maxLevel,
+    levelCount,
+    baseGridSpacingM,
+    baseGridSpacingBits: float32Bits(baseGridSpacingM),
+    levelSpacingMode: 'base-grid-spacing-times-pow2-level',
+    positionAuthority: 'same-epoch-pre-integration-particle-state'
+  });
 }
 
 export function encodeSchroederSignedOrderKey(value) {
@@ -232,9 +375,14 @@ export function createSchroederSpatialEpochLayout({
     resolvedSourceCapacity,
     'particle reverse offset'
   );
-  const wordLength = checkedAdd(
+  const queryEvidenceCapacityOffsetWords = checkedAdd(
     particleToCellOffsetWords,
     resolvedSourceCapacity,
+    'query evidence capacity offset'
+  );
+  const wordLength = checkedAdd(
+    queryEvidenceCapacityOffsetWords,
+    SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
     'directory word length'
   );
   return Object.freeze({
@@ -249,6 +397,8 @@ export function createSchroederSpatialEpochLayout({
     cellMemberWords: resolvedSourceCapacity,
     particleToCellOffsetWords,
     particleToCellWords: resolvedSourceCapacity,
+    queryEvidenceCapacityOffsetWords,
+    queryEvidenceWordCapacity: SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
     sourceCapacity: resolvedSourceCapacity,
     cellCapacity: resolvedCellCapacity,
     wordLength,
@@ -276,10 +426,20 @@ export function createSchroederSpatialEpochBuildPlan({
   physicsTick = 0,
   physicsSubstep = 0,
   buildOrdinal = 1,
-  sortUniqueOrdinal = 1
+  sortUniqueOrdinal = 1,
+  exactNearQueryProfile = null
 } = {}) {
   const layout = createSchroederSpatialEpochLayout({ sourceCapacity, cellCapacity });
   const resolvedSourceCount = nonNegativeInteger(sourceCount, 'sourceCount', layout.sourceCapacity);
+  const queryGeometryEvidence = normalizeExactNearQueryProfile(
+    exactNearQueryProfile,
+    resolvedSourceCount
+  );
+  const queryEvidenceOffsetWords = checkedAdd(
+    layout.particleToCellOffsetWords,
+    resolvedSourceCount,
+    'live query evidence offset'
+  );
   let resolvedSortMode;
   let resolvedAtlas = null;
   let sortKeyWordCount;
@@ -308,6 +468,19 @@ export function createSchroederSpatialEpochBuildPlan({
     sortModeName: resolvedSortMode === SCHROEDER_SPATIAL_SORT_BOUNDED_ATLAS_U32
       ? 'bounded-atlas-u32'
       : 'lexicographic-u32x5',
+    sourceAdapterId: queryGeometryEvidence.sourceAdapterId,
+    queryGeometryMode: queryGeometryEvidence.mode,
+    queryGeometryModeName: queryGeometryEvidence.modeName,
+    queryChartId: queryGeometryEvidence.chartId,
+    queryMinLevel: queryGeometryEvidence.minLevel,
+    queryMaxLevel: queryGeometryEvidence.maxLevel,
+    queryLevelCount: queryGeometryEvidence.levelCount,
+    queryBaseGridSpacingM: queryGeometryEvidence.baseGridSpacingM,
+    queryBaseGridSpacingBits: queryGeometryEvidence.baseGridSpacingBits,
+    queryEvidenceOffsetWords,
+    queryEvidenceWordCount: SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
+    queryGeometryEvidence,
+    exactNearQueryProfile: exactNearQueryProfile == null ? null : queryGeometryEvidence,
     atlas: resolvedAtlas,
     generationId: nonNegativeInteger(generationId, 'generationId'),
     positionEpoch: nonNegativeInteger(positionEpoch, 'positionEpoch'),

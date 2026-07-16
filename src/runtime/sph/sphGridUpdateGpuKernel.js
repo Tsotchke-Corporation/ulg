@@ -12,6 +12,14 @@ import { mlsMpmGridUpdateWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { MLS_MPM_GPU_GRID_NODE_FLOATS } from './sphGridGpuKernel.js';
+import {
+  typedArrayContentFingerprint,
+  webGpuBufferDevice,
+  webGpuDeviceId
+} from './sphGpuDeviceIdentity.js';
+import {
+  strictReactionGateAllowsForceCoupling
+} from './sphReactionGpuSummary.js';
 
 export {
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -23,6 +31,12 @@ export {
 export const MLS_MPM_GPU_GRID_VELOCITY_FLOATS = MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
 export const ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA = 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0';
+export const ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_SCHEMA =
+  'peercompute.ulg.direct-resident-pressure-interface-publication.v0';
+export const ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_STATUS =
+  'direct-resident-pressure-interface-output-published';
+export const ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_AUTHORITY =
+  'scene-local-direct-resident-same-device-queue';
 export const ULG_MLS_MPM_WALL_BARRIER_CONTACT_SCHEMA = 'peercompute.ulg.mls-mpm-wall-barrier-contact.v0';
 
 const GPU_BUFFER_USAGE = {
@@ -54,8 +68,7 @@ const PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES = new Set([
 ]);
 const PRESSURE_INTERFACE_ADMITTED_DESCRIPTOR_STATUSES = new Set([
   'worker-retained-pressure-interface-output-admitted',
-  'worker-retained-pressure-interface-output-published',
-  'pressure-interface-grid-force-consumption-approved'
+  'worker-retained-pressure-interface-output-published'
 ]);
 
 function finiteNumber(value, fallback = 0) {
@@ -462,6 +475,106 @@ function pressureForceRowCountFromSolver(pressureInterfaceForceSolver, rows) {
   return explicit;
 }
 
+export function pressureInterfaceForceSolverFingerprint(pressureInterfaceForceSolver = null) {
+  const rows = pressureForceRowsFromSolver(pressureInterfaceForceSolver);
+  const forceRowCount = pressureForceRowCountFromSolver(pressureInterfaceForceSolver, rows);
+  if (
+    pressureInterfaceForceSolver?.status !== 'pressure-interface-force-solver-ready'
+    || !(rows instanceof Float32Array)
+    || forceRowCount <= 0
+  ) return null;
+  return [
+    pressureInterfaceForceSolver.schema ?? null,
+    pressureInterfaceForceSolver.status,
+    forceRowCount,
+    pressureInterfaceForceSolver.forceRowStrideFloats ?? SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
+    typedArrayContentFingerprint(rows)
+  ].join('|');
+}
+
+function strictReactionGateFingerprint(gate = null) {
+  if (!strictReactionGateAllowsForceCoupling(gate)) return null;
+  return JSON.stringify({
+    schema: gate.schema,
+    status: gate.status,
+    strictForceCouplingAllowed: gate.strictForceCouplingAllowed,
+    readbackMode: gate.readbackMode ?? null,
+    compactSummaryStatus: gate.compactSummaryStatus ?? null,
+    atomResidualStatus: gate.atomResidualStatus ?? null,
+    maxAbsAtomResidualMol: gate.maxAbsAtomResidualMol ?? null,
+    chargeResidualMol: gate.chargeResidualMol ?? null,
+    blockers: [...(gate.blockers || [])],
+    provisionalEnergetics: (gate.provisionalEnergetics || []).map((row) => ({ ...row }))
+  });
+}
+
+export function createDirectResidentPressureInterfaceGridForceAdmission({
+  pressureInterfaceForceSolver = null,
+  strictReactionGate = null,
+  producerDeviceId = null,
+  residentComputeManagerMode = 'direct'
+} = {}) {
+  const rows = pressureForceRowsFromSolver(pressureInterfaceForceSolver);
+  const forceRowCount = pressureForceRowCountFromSolver(pressureInterfaceForceSolver, rows);
+  const solverFingerprint = pressureInterfaceForceSolverFingerprint(pressureInterfaceForceSolver);
+  const gateFingerprint = strictReactionGateFingerprint(strictReactionGate);
+  if (
+    residentComputeManagerMode !== 'direct'
+    || pressureInterfaceForceSolver?.status !== 'pressure-interface-force-solver-ready'
+    || !(rows instanceof Float32Array)
+    || forceRowCount <= 0
+    || !solverFingerprint
+    || !gateFingerprint
+    || !String(producerDeviceId || '').trim()
+  ) return null;
+  const strictReactionGateEvidence = {
+    ...strictReactionGate,
+    blockers: [...(strictReactionGate.blockers || [])],
+    warnings: [...(strictReactionGate.warnings || [])],
+    provisionalEnergetics: (strictReactionGate.provisionalEnergetics || [])
+      .map((row) => ({ ...row }))
+  };
+  const publication = {
+    schema: ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_SCHEMA,
+    status: ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_STATUS,
+    authority: ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_AUTHORITY,
+    residentComputeManagerMode: 'direct',
+    computeManagerOwned: false,
+    stateManagerCommitted: false,
+    sameDeviceQueueOrdered: true,
+    producerDeviceId,
+    sourceKey: solverFingerprint,
+    pressureInterfaceForceSolverFingerprint: solverFingerprint,
+    strictReactionGate: strictReactionGateEvidence,
+    strictReactionGateFingerprint: gateFingerprint,
+    pressureInterfaceForceRowCount: forceRowCount,
+    outputFamilies: ['pressure-interface-force-rows'],
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  return {
+    schema: ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA,
+    status: 'pressure-interface-grid-force-consumption-approved',
+    gridForceApplicationApproved: true,
+    committed: false,
+    publicationStatus: publication.status,
+    authority: publication.authority,
+    residentComputeManagerMode: 'direct',
+    computeManagerOwned: false,
+    stateManagerCommitted: false,
+    sameDeviceQueueOrdered: true,
+    producerDeviceId,
+    sourceKey: publication.sourceKey,
+    pressureInterfaceForceSolverFingerprint: solverFingerprint,
+    strictReactionGate: { ...strictReactionGateEvidence },
+    strictReactionGateFingerprint: gateFingerprint,
+    pressureInterfaceForceRowCount: forceRowCount,
+    outputFamilies: [...publication.outputFamilies],
+    pressureInterfacePublication: publication
+  };
+}
+
 export function pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver) {
   if (!pressureInterfaceForceSolver) return false;
   return pressureInterfaceForceSolver.gridForceApplicationApproved === true
@@ -482,7 +595,8 @@ function pressureInterfaceGridForceAdmissionDescriptor(admission = null) {
 export function pressureInterfaceGridForceAdmissionAllowsApplication({
   pressureInterfaceGridForceAdmission = null,
   pressureInterfaceForceSolver = null,
-  forceRowCount = 0
+  forceRowCount = 0,
+  consumerDeviceId = null
 } = {}) {
   const descriptor = pressureInterfaceGridForceAdmissionDescriptor(pressureInterfaceGridForceAdmission);
   const status = pressureInterfaceGridForceAdmission?.status || descriptor?.status || null;
@@ -503,9 +617,64 @@ export function pressureInterfaceGridForceAdmissionAllowsApplication({
   );
   const solverForceRowCount = Math.max(0, Math.round(finiteNumber(pressureInterfaceForceSolver?.forceRowCount, forceRowCount)));
   const admissionApproved = pressureInterfaceGridForceAdmission?.gridForceApplicationApproved === true;
-  const descriptorAdmitted = PRESSURE_INTERFACE_ADMITTED_DESCRIPTOR_STATUSES.has(descriptorStatus)
-    || descriptor?.committed === true
-    || pressureInterfaceGridForceAdmission?.committed === true;
+  const directDescriptor = descriptor?.schema === ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_SCHEMA;
+  const directDeviceAccepted = Boolean(consumerDeviceId)
+    && descriptor?.producerDeviceId === consumerDeviceId;
+  const directDescriptorForceRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(descriptor?.pressureInterfaceForceRowCount, 0))
+  );
+  const directRowCountAccepted = directDescriptorForceRowCount >= solverForceRowCount
+    && directDescriptorForceRowCount === admittedForceRowCount;
+  const currentSolverFingerprint = pressureInterfaceForceSolverFingerprint(
+    pressureInterfaceForceSolver
+  );
+  const directSolverAccepted = Boolean(currentSolverFingerprint)
+    && descriptor?.pressureInterfaceForceSolverFingerprint === currentSolverFingerprint
+    && pressureInterfaceGridForceAdmission?.pressureInterfaceForceSolverFingerprint
+      === currentSolverFingerprint
+    && descriptor?.sourceKey === currentSolverFingerprint
+    && pressureInterfaceGridForceAdmission?.sourceKey === currentSolverFingerprint;
+  const descriptorGateFingerprint = strictReactionGateFingerprint(
+    descriptor?.strictReactionGate
+  );
+  const outerGateFingerprint = strictReactionGateFingerprint(
+    pressureInterfaceGridForceAdmission?.strictReactionGate
+  );
+  const directStrictGateAccepted = Boolean(descriptorGateFingerprint)
+    && descriptorGateFingerprint === outerGateFingerprint
+    && descriptor?.strictReactionGateFingerprint === descriptorGateFingerprint
+    && pressureInterfaceGridForceAdmission?.strictReactionGateFingerprint
+      === descriptorGateFingerprint;
+  const directOuterAccepted = pressureInterfaceGridForceAdmission?.schema
+      === ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA
+    && pressureInterfaceGridForceAdmission?.status
+      === 'pressure-interface-grid-force-consumption-approved'
+    && pressureInterfaceGridForceAdmission?.authority
+      === ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_AUTHORITY
+    && pressureInterfaceGridForceAdmission?.residentComputeManagerMode === 'direct'
+    && pressureInterfaceGridForceAdmission?.computeManagerOwned === false
+    && pressureInterfaceGridForceAdmission?.stateManagerCommitted === false
+    && pressureInterfaceGridForceAdmission?.sameDeviceQueueOrdered === true;
+  const directDescriptorAdmitted = directDescriptor
+    && descriptorStatus === ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_STATUS
+    && descriptor?.authority === ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_AUTHORITY
+    && descriptor?.residentComputeManagerMode === 'direct'
+    && descriptor?.computeManagerOwned === false
+    && descriptor?.stateManagerCommitted === false
+    && descriptor?.sameDeviceQueueOrdered === true
+    && pressureInterfaceGridForceAdmission?.sameDeviceQueueOrdered === true
+    && pressureInterfaceGridForceAdmission?.producerDeviceId === descriptor?.producerDeviceId
+    && directOuterAccepted
+    && directDeviceAccepted
+    && directRowCountAccepted
+    && directSolverAccepted
+    && directStrictGateAccepted;
+  const descriptorAdmitted = directDescriptor
+    ? directDescriptorAdmitted
+    : (PRESSURE_INTERFACE_ADMITTED_DESCRIPTOR_STATUSES.has(descriptorStatus)
+      || descriptor?.committed === true
+      || pressureInterfaceGridForceAdmission?.committed === true);
   const familyAccepted = outputFamilies.includes('pressure-interface-force-rows');
   const rowCountAccepted = admittedForceRowCount >= solverForceRowCount || solverForceRowCount === 0;
   return {
@@ -516,6 +685,13 @@ export function pressureInterfaceGridForceAdmissionAllowsApplication({
     approved: admissionApproved && descriptorAdmitted && familyAccepted && rowCountAccepted,
     admissionApproved,
     descriptorAdmitted,
+    directDescriptor,
+    directDescriptorAdmitted,
+    directOuterAccepted,
+    directDeviceAccepted,
+    directRowCountAccepted,
+    directSolverAccepted,
+    directStrictGateAccepted,
     descriptorStatus,
     familyAccepted,
     rowCountAccepted,
@@ -533,6 +709,7 @@ export function pressureInterfaceGridForceAdmissionAllowsApplication({
 function pressureInterfaceForceApplicationSummary({
   pressureInterfaceForceSolver = null,
   pressureInterfaceGridForceAdmission = null,
+  consumerDeviceId = null,
   forceRowCount = 0,
   forceRowsSource = null,
   forceRowsBufferSubmitted = false,
@@ -545,7 +722,8 @@ function pressureInterfaceForceApplicationSummary({
   const admission = pressureInterfaceGridForceAdmissionAllowsApplication({
     pressureInterfaceGridForceAdmission,
     pressureInterfaceForceSolver,
-    forceRowCount
+    forceRowCount,
+    consumerDeviceId
   });
   const approvedByAdmission = applicationApproved && admission.approved === true;
   const blockedNotApproved = solverReady && !approvedByAdmission;
@@ -945,11 +1123,23 @@ export async function runMlsMpmGridUpdateWebGpu({
     ? pressureForceRowCountFromSolver(pressureInterfaceForceSolver, candidatePressureForceRows)
     : 0;
   const borrowedPressureForceRowsBuffer = pressureInterfaceForceRowsBuffer || null;
+  const pressureAdmissionDescriptor = pressureInterfaceGridForceAdmissionDescriptor(
+    pressureInterfaceGridForceAdmission
+  );
+  const directPressureRowsBufferDeviceAccepted =
+    pressureAdmissionDescriptor?.schema
+      !== ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_SCHEMA
+    || (
+      Boolean(borrowedPressureForceRowsBuffer)
+      && webGpuBufferDevice(borrowedPressureForceRowsBuffer) === device
+    );
   const pressureForceApplicationApproved = solverGridApplicationApproved
+    && directPressureRowsBufferDeviceAccepted
     && pressureInterfaceGridForceAdmissionAllowsApplication({
       pressureInterfaceGridForceAdmission,
       pressureInterfaceForceSolver,
-      forceRowCount: candidatePressureForceRowCount
+      forceRowCount: candidatePressureForceRowCount,
+      consumerDeviceId: webGpuDeviceId(device)
     }).approved === true;
   const pressureForceRows = pressureForceApplicationApproved ? candidatePressureForceRows : null;
   const pressureForceRowCount = pressureForceApplicationApproved ? candidatePressureForceRowCount : 0;
@@ -1064,6 +1254,7 @@ export async function runMlsMpmGridUpdateWebGpu({
       pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
         pressureInterfaceForceSolver,
         pressureInterfaceGridForceAdmission,
+        consumerDeviceId: webGpuDeviceId(device),
         forceRowCount: pressureForceRowCount,
         forceRowsSource: pressureForceRowsSource,
         forceRowsBufferSubmitted: pressureForceRowsFromBorrowedBuffer,

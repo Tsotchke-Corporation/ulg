@@ -15,6 +15,11 @@ import {
   waterSaturationPressurePa
 } from '../src/runtime/material/opticalClosure.js';
 import { deriveElementProperties } from '../src/runtime/material/elementClosures.js';
+import {
+  conductorOpticalConstantsRecord,
+  interpolateConductorOpticalConstants,
+  normalIncidenceReflectanceFromComplexIndex
+} from '../src/runtime/material/conductorOpticalConstants.js';
 import { SPH_PHASE_CLOSURE_SCHEMAS } from '../ulg-gpu-abi/src/index.js';
 
 const fastHeavyOptics = {
@@ -29,6 +34,76 @@ test('a flat unit reflectance integrates to white; flat zero to black', () => {
   assert.ok(white.r > 0.95 && white.g > 0.95 && white.b > 0.95);
   const black = spectralResponseToSrgb(() => 0);
   assert.ok(black.r < 0.01 && black.g < 0.01 && black.b < 0.01);
+});
+
+test('checked-in conductor complex-index rows interpolate measured n and k', () => {
+  const copper = conductorOpticalConstantsRecord('Cu');
+  assert.ok(copper);
+  const exact = interpolateConductorOpticalConstants(copper, 2.75);
+  assert.ok(Math.abs(exact.n - 1.24) < 1e-12);
+  assert.ok(Math.abs(exact.k - 2.397) < 1e-12);
+  const midpoint = interpolateConductorOpticalConstants(copper, (2.63 + 2.75) / 2);
+  assert.ok(Math.abs(midpoint.n - (1.25 + 1.24) / 2) < 1e-12);
+  assert.ok(Math.abs(midpoint.k - (2.483 + 2.397) / 2) < 1e-12);
+  const reflectance = normalIncidenceReflectanceFromComplexIndex(exact);
+  const expected = (((exact.n - 1) ** 2) + exact.k ** 2)
+    / (((exact.n + 1) ** 2) + exact.k ** 2);
+  assert.ok(Math.abs(reflectance - expected) < 1e-12);
+});
+
+test('reference anchoring makes silver, copper, and gold optically distinct while strict derivation stays pure', async () => {
+  const { deriveMaterialProperties } = await import('../src/runtime/material/materialDerivation.js');
+  const { anchorDerivedMaterialProperties } = await import('../src/runtime/material/referenceBankAnchoring.js');
+  const colors = {};
+  for (const material of ['Cu', 'Ag', 'Au']) {
+    const derived = deriveMaterialProperties(material, {
+      elementOptions: { allowReducedEstimates: true, gridPointsN: 80 }
+    });
+    assert.equal(derived.conductorOpticalConstants, undefined, `${material} strict derivation must not carry a reference anchor`);
+    const anchored = anchorDerivedMaterialProperties(derived, material);
+    assert.equal(anchored.anchored, true);
+    assert.equal(anchored.properties.conductorOpticalConstants.symbol, material);
+    assert.equal(anchored.properties.conductorOpticalConstants.doi, '10.1103/PhysRevB.6.4370');
+    assert.deepEqual(
+      anchored.properties.referenceBankAnchoring.derivationResiduals.conductorOpticalConstants.derivedIntrinsicColorSrgb,
+      derived.intrinsicColorSrgb
+    );
+    const render = opticalRenderParams({
+      material,
+      phase: 'solid',
+      pathLengthM: 0.3,
+      properties: anchored.properties
+    });
+    assert.equal(render.renderModel, 'conductor-reference-complex-index');
+    assert.equal(render.provenance.status, 'reference-fallback');
+    assert.equal(render.provenance.source, 'johnson-christy-1972-complex-index');
+    assert.equal(render.provenance.inputs.phaseApplication, 'within-reference-phase');
+    assert.ok(render.opacity > 0.999);
+    assert.ok(render.spectralSamples.every((sample) => sample.n > 0 && sample.k > 0));
+    assert.deepEqual(render.baseColorSrgb, anchored.properties.intrinsicColorSrgb);
+    colors[material] = render.baseColorSrgb;
+  }
+  const [cuR, cuG, cuB] = colors.Cu;
+  const [agR, agG, agB] = colors.Ag;
+  const [auR, auG, auB] = colors.Au;
+  assert.ok(cuR > cuG && cuG > cuB && cuG - cuB < 0.12, `copper should be rose metallic: ${colors.Cu}`);
+  assert.ok(Math.max(agR, agG, agB) - Math.min(agR, agG, agB) < 0.06, `silver should be neutral: ${colors.Ag}`);
+  assert.ok(auR > auG && auG > auB && auR - auB > 0.3, `gold should be yellow: ${colors.Au}`);
+  const distance = (a, b) => Math.hypot(...a.map((value, index) => value - b[index]));
+  assert.ok(distance(colors.Cu, colors.Au) > 0.1);
+  assert.ok(distance(colors.Ag, colors.Au) > 0.3);
+  assert.ok(distance(colors.Ag, colors.Cu) > 0.2);
+
+  const moltenGold = opticalRenderParams({
+    material: 'Au',
+    phase: 'liquid',
+    pathLengthM: 0.3,
+    properties: anchorDerivedMaterialProperties(
+      deriveMaterialProperties('Au', { elementOptions: { allowReducedEstimates: true, gridPointsN: 80 } }),
+      'Au'
+    ).properties
+  });
+  assert.equal(moltenGold.provenance.inputs.phaseApplication, 'nearest-reference-condensed-phase-extrapolation');
 });
 
 test('Drude metal reflectance is high across the visible (iron is a bright, fairly flat metal)', () => {
@@ -253,7 +328,7 @@ test('interband branch is localized-d/f driven and renderer can use precomputed 
   assert.equal(render.interbandOscillators.length, oscillators.length);
 });
 
-test('gaseous fluorine is visibly yellow from its banked electronic band; H2 stays optically thin', async () => {
+test('gaseous fluorine is subtly yellow from its measured absorption band; H2 stays optically thin', async () => {
   const { deriveMaterialProperties } = await import('../src/runtime/material/materialDerivation.js');
   const { anchorDerivedMaterialProperties } = await import('../src/runtime/material/referenceBankAnchoring.js');
   // Band centre anchored to the spectroscopic maximum (reference-fallback, CRC-anchor policy);
@@ -263,12 +338,18 @@ test('gaseous fluorine is visibly yellow from its banked electronic band; H2 sta
   const f = anchorDerivedMaterialProperties(pureF, 'F').properties;
   assert.ok(Math.abs(f.gasElectronicExcitationEv - 4.34) < 1e-9);
   const render = opticalRenderParams({ material: 'F', phase: 'gas', pathLengthM: 0.3, properties: f });
-  assert.equal(render.renderModel, 'molecular-gas-electronic-band-absorption-pbr');
-  // Visible: past the vapor show threshold (1e-2) with a yellow response
-  // (blue absorbed by the 1Pi_u <- X band tail, red transmitted).
-  assert.ok(render.opticalDepth > 0.05, `optical depth ${render.opticalDepth} should be visible`);
+  assert.equal(render.renderModel, 'molecular-gas-reference-cross-section-pbr');
+  assert.equal(render.provenance.source, 'measured-molecular-gas-absorption-cross-section');
+  assert.equal(render.provenance.inputs.absorptionCrossSectionDoi, '10.1021/ja01586a007');
+  // The measured visible tail is weak but clears the renderer's physical
+  // contrast gate: blue is absorbed more strongly than red, producing F2's
+  // subtle yellow response without an opacity multiplier.
+  assert.ok(render.opticalDepth > 4e-3, `optical depth ${render.opticalDepth} should be visible`);
   const [r, g, b] = render.baseColorSrgb;
-  assert.ok(r > 0.8 && r > g && g > b && b < 0.2, `F2 response should be yellow-orange, got ${render.baseColorSrgb}`);
+  assert.ok(
+    r > 0.95 && r > g && g > b && r - b > 0.1,
+    `F2 response should be subtly yellow, got ${render.baseColorSrgb}`
+  );
 
   const h2 = anchorDerivedMaterialProperties(deriveMaterialProperties('h2'), 'h2').properties;
   // The banked H2 Lyman band sits deep in the vacuum UV, so H2 is correctly near-invisible.

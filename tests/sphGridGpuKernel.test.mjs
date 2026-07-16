@@ -4,6 +4,7 @@ import { mlsMpmP2gGridProjectionWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -16,6 +17,7 @@ import {
   ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
   createMlsMpmGridSpec,
+  createProjectionParamsArray,
   createMlsMpmP2gGridProjectionParityReport,
   projectMlsMpmP2gGridCpu,
   resolveMlsMpmP2gBackendPolicy,
@@ -23,6 +25,7 @@ import {
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   runMlsMpmP2gGridProjectionWithOptionalWebGpu
 } from '../src/runtime/sph/sphGridGpuKernel.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 function nearlyEqual(actual, expected, tolerance = 1e-5) {
   assert.ok(
@@ -47,6 +50,7 @@ function manualBuffers({
   soundSpeedMPerS = 0,
   eosModelId = 0,
   hydrostaticPressurePa = 0,
+  phaseFractions = [0, 0, 0, 0],
   mechanicsDtS = 0
 } = {}) {
   const state = new Float32Array([
@@ -55,6 +59,7 @@ function manualBuffers({
   ]);
   const thermo = new Float32Array(12);
   thermo[3] = restDensityKgPerM3;
+  thermo.set(phaseFractions, 4);
   const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
   mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], 0);
   mechanics.set(affineC, 9);
@@ -216,11 +221,17 @@ function fakeP2gDevice() {
   const bindGroups = [];
   const dispatches = [];
   const writes = [];
+  const clears = [];
+  const submissions = [];
+  const shaderModules = [];
   const device = {
     createdBuffers,
     bindGroups,
     dispatches,
     writes,
+    clears,
+    submissions,
+    shaderModules,
     queue: {
       writeBuffer(buffer, offset, data) {
         const copy = data instanceof ArrayBuffer
@@ -233,7 +244,9 @@ function fakeP2gDevice() {
           data: copy
         });
       },
-      submit() {},
+      submit(commandBuffers) {
+        submissions.push(commandBuffers);
+      },
       async onSubmittedWorkDone() {}
     },
     createBuffer(desc) {
@@ -250,6 +263,7 @@ function fakeP2gDevice() {
       return buffer;
     },
     createShaderModule(desc) {
+      shaderModules.push(desc);
       return { code: desc.code };
     },
     createBindGroupLayout(desc) {
@@ -272,6 +286,9 @@ function fakeP2gDevice() {
     },
     createCommandEncoder() {
       return {
+        clearBuffer(buffer, offset = 0, size = null) {
+          clears.push({ buffer, offset, size });
+        },
         beginComputePass() {
           return {
             setPipeline() {},
@@ -292,6 +309,78 @@ function fakeP2gDevice() {
   return device;
 }
 
+function canonicalSpatialEpochGenerationFixture(device, {
+  directoryBuffer = {
+    label: 'retained-schroeder-spatial-directory',
+    size: 256
+  },
+  evidenceBuffer = {
+    label: 'retained-schroeder-spatial-evidence',
+    size: 80,
+    destroyed: false,
+    destroy() {
+      this.destroyed = true;
+    }
+  }
+} = {}) {
+  const exactNearQueryProfile = Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1',
+    status: 'schroeder-spatial-exact-near-query-profile-ready',
+    ready: true,
+    sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    sourceCount: 1,
+    chartId: 0,
+    minLevel: -2,
+    maxLevel: 2,
+    levelCount: 5,
+    baseGridSpacingM: 0.25,
+    levelSpacingMode: 'base-grid-spacing-times-pow2-level',
+    positionAuthority: 'same-epoch-pre-integration-particle-state',
+    storageGeneration: 23,
+    physicsTick: 53,
+    physicsSubstep: 59,
+    positionEpoch: 29,
+    topologyEpoch: 31,
+    chartEpoch: 61,
+    levelEpoch: 67,
+    supportEpoch: 71
+  });
+  tagWebGpuBufferDevice(directoryBuffer, device);
+  tagWebGpuBufferDevice(evidenceBuffer, device);
+  return {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-generation.v1',
+    selected: true,
+    ready: true,
+    source: { phaseVolumeAssignmentOverlayEnabled: false },
+    execution: {
+      schema: 'peercompute.ulg.schroeder-spatial-epoch.v1',
+      submitPerformed: true,
+      directoryBuffer,
+      evidenceBuffer,
+      evidenceBufferByteLength: 80,
+      mechanicsEvidenceOffsetBytes: 16,
+      mechanicsEvidenceByteLength: 64,
+      sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+      exactNearQueryProfile,
+      queryGeometryEvidence: exactNearQueryProfile,
+      generationId: 17,
+      storageGeneration: 23,
+      positionEpoch: 29,
+      topologyEpoch: 31,
+      deviceOrdinal: 37,
+      laneOrdinal: 41,
+      leaseToken: 43,
+      sourceFamilyId: 47,
+      physicsTick: 53,
+      physicsSubstep: 59,
+      chartEpoch: 61,
+      levelEpoch: 67,
+      supportEpoch: 71,
+      layout: { byteLength: 256 }
+    }
+  };
+}
+
 test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindings', () => {
   assert.match(mlsMpmP2gGridProjectionWgsl, /struct P2gProjectionParams/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> sph_state/);
@@ -303,9 +392,11 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   assert.match(mlsMpmP2gGridProjectionWgsl, /internal_pressure_scale: f32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> product_events/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_level_assignments/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(8\) var<storage, read> schroeder_active_nodes/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(8\) var<storage, read> schroeder_spatial_directory/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_filter_enabled: u32/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_active_node_filter_enabled: u32/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_spatial_directory_enabled: u32/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn p2g_spatial_directory_admitted/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /particle_to_cell_offset_words/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn p2g_particle_enabled/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
   // The depth-frozen hydrostatic prestress (row7.x) must NOT feed the stress:
@@ -455,6 +546,38 @@ test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', as
   );
 });
 
+test('CPU MLS-MPM P2G uses the ambient-referenced ideal-gas closure for admitted gas', () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers({
+    velocity: [0, 0, 0],
+    massKg: 1,
+    restDensityKgPerM3: 1,
+    restVolumeM3: 1,
+    solidFlag: 0,
+    soundSpeedMPerS: 340,
+    eosModelId: 2,
+    phaseFractions: [0, 0, 1, 0],
+    mechanicsDtS: 0.01
+  });
+  const atmosphere = projectMlsMpmP2gGridCpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    ambientPressurePa: 101325
+  });
+  const vacuum = projectMlsMpmP2gGridCpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    ambientPressurePa: 0
+  });
+
+  assert.equal(atmosphere.ambientPressureAppliedInStressProjection, true);
+  nearlyEqual(maxNodeMomentumAbs(atmosphere.gridNodes), 0, 1e-6);
+  assert.ok(maxNodeMomentumAbs(vacuum.gridNodes) > 0);
+});
+
 test('WebGPU MLS-MPM P2G can filter particles by retained Schroeder level assignment', async () => {
   const { sphParticleState, mlsMpmParticleState } = manualBuffers();
   const device = fakeP2gDevice();
@@ -478,6 +601,8 @@ test('WebGPU MLS-MPM P2G can filter particles by retained Schroeder level assign
   assert.equal(projection.schroederLevelFilterEnabled, true);
   assert.equal(projection.schroederSelectedLevel, 2);
   assert.equal(projection.schroederLevelFilter.assignmentStrideFloats, SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
+  assert.equal(projection.schroederLevelFilter.authorityBindingMode, 'precanonical-level-assignment');
+  assert.equal(projection.schroederLevelFilter.oldLevelAssignmentLookupRemoved, false);
   assert.equal(
     device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-p2g-schroeder-level-assignments-dummy'),
     false
@@ -485,6 +610,250 @@ test('WebGPU MLS-MPM P2G can filter particles by retained Schroeder level assign
   assert.ok(device.bindGroups[0].entries.some((entry) => (
     entry.binding === 7 && entry.resource.buffer === assignmentBuffer
   )));
+  assert.equal(
+    device.bindGroups[0].layout.entries.find((entry) => entry.binding === 7)?.buffer?.type,
+    'read-only-storage'
+  );
+  assert.equal(projection.schroederSpatialDirectoryEnabled, false);
+  assert.equal(projection.schroederSpatialDirectoryFallback, true);
+  assert.equal(projection.schroederSpatialDirectoryFallbackScope, 'host-binding-only');
+  assert.equal(projection.schroederSpatialHostBindingAdmitted, false);
+  assert.equal(projection.schroederSpatialHostBindingFallback, true);
+  assert.equal(projection.schroederSpatialGpuAdmissionObserved, false);
+  assert.equal(projection.schroederSpatialGpuAdmissionStatus, 'not-applicable-host-binding-fallback');
+  assert.equal(projection.schroederSpatialGpuFallbackObserved, null);
+});
+
+test('WebGPU MLS-MPM P2G binds canonical evidence and ignores legacy assignment payloads', async () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+  const device = fakeP2gDevice();
+  const generation = canonicalSpatialEpochGenerationFixture(device);
+  const { directoryBuffer, evidenceBuffer } = generation.execution;
+  const legacyAssignment = new Proxy({}, {
+    get() {
+      throw new Error('canonical P2G inspected obsolete level-assignment authority');
+    }
+  });
+  const projection = await runMlsMpmP2gGridProjectionWebGpu({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    readbackMode: 'no-full-readback',
+    schroederLevelAssignment: legacyAssignment,
+    schroederSelectedLevel: 2,
+    schroederSpatialEpochGeneration: generation,
+    canonicalSpatialRequired: true,
+    observeCanonicalSpatialAuthority: true
+  });
+
+  assert.equal(device.submissions.length, 1);
+  assert.equal(projection.schroederSpatialDirectoryEnabled, true);
+  assert.equal(projection.schroederSpatialDirectoryFallback, false);
+  assert.equal(projection.schroederSpatialDirectoryFallbackScope, 'host-binding-only');
+  assert.equal(projection.schroederSpatialHostBindingAdmitted, true);
+  assert.equal(projection.schroederSpatialHostBindingFallback, false);
+  assert.equal(projection.schroederSpatialGpuAdmissionObserved, false);
+  assert.equal(projection.schroederSpatialGpuAdmissionStatus, 'shader-validates-at-dispatch-no-host-readback');
+  assert.equal(projection.schroederSpatialGpuFallbackObserved, null);
+  assert.equal(projection.schroederSpatialDirectory.generationId, 17);
+  assert.equal(projection.schroederSpatialDirectory.storageGeneration, 23);
+  assert.equal(projection.schroederSpatialDirectory.positionEpoch, 29);
+  assert.equal(projection.schroederSpatialDirectory.topologyEpoch, 31);
+  assert.equal(projection.schroederSpatialDirectory.evidenceBufferByteLength, 80);
+  assert.equal(projection.schroederLevelFilter.authorityBindingMode, 'canonical-spatial-epoch');
+  assert.equal(projection.schroederLevelFilter.oldLevelAssignmentLookupRemoved, true);
+  assert.equal(projection.schroederLevelFilter.retainedAssignmentBuffer, false);
+  assert.equal(projection.schroederLevelFilter.assignmentBufferByteLength, 0);
+  assert.equal(projection.schroederLevelFilter.spatialEvidenceEnabled, true);
+  for (const group of device.bindGroups) {
+    assert.equal(
+      group.entries.find((entry) => entry.binding === 7)?.resource?.buffer,
+      evidenceBuffer
+    );
+    assert.equal(
+      group.entries.find((entry) => entry.binding === 8)?.resource?.buffer,
+      directoryBuffer
+    );
+    assert.equal(
+      group.layout.entries.find((entry) => entry.binding === 7)?.buffer?.type,
+      'storage'
+    );
+  }
+  assert.ok(device.shaderModules.length > 0);
+  for (const shader of device.shaderModules) {
+    assert.doesNotMatch(shader.code, /schroeder_level_assignments/);
+    assert.match(shader.code, /schroeder_spatial_authority_evidence/);
+  }
+  assert.deepEqual(
+    device.clears
+      .filter((clear) => clear.buffer === evidenceBuffer)
+      .map(({ offset, size }) => [offset, size]),
+    [[16, 64]]
+  );
+  assert.equal(evidenceBuffer.destroyed, false);
+  const paramsWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-p2g-params');
+  assert.ok(paramsWrite);
+  assert.equal(paramsWrite.byteLength, 144);
+  const params = new DataView(paramsWrite.data);
+  assert.equal(params.getUint32(44, true), 1);
+  assert.equal(params.getInt32(48, true), 2);
+  assert.equal(params.getUint32(52, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
+  const canonicalIdentityWords = new Map([
+    [56, 1],
+    [60, 23],
+    [80, 29],
+    [84, 31],
+    [88, 1],
+    [92, 17],
+    [96, 37],
+    [100, 41],
+    [104, 43],
+    [108, 47],
+    [112, 53],
+    [116, 59],
+    [120, 61],
+    [124, 67],
+    [128, 71],
+    [132, 1],
+    [136, 0],
+    [140, 0]
+  ]);
+  for (const [offset, expected] of canonicalIdentityWords) {
+    assert.equal(params.getUint32(offset, true), expected, `identity word at byte ${offset}`);
+  }
+});
+
+test('WebGPU MLS-MPM P2G rejects host-invalid canonical generations without submission or fallback', async (t) => {
+  const cases = [
+    {
+      name: 'released execution',
+      status: 'canonical-spatial-directory-rejected-released-generation',
+      invalidate(generation) {
+        generation.execution.released = true;
+      }
+    },
+    {
+      name: 'wrong generation schema',
+      status: 'canonical-spatial-directory-rejected-schema',
+      invalidate(generation) {
+        generation.schema = 'peercompute.ulg.schroeder-spatial-epoch-generation.invalid';
+      }
+    },
+    {
+      name: 'wrong execution schema',
+      status: 'canonical-spatial-directory-rejected-schema',
+      invalidate(generation) {
+        generation.execution.schema = 'peercompute.ulg.schroeder-spatial-epoch.invalid';
+      }
+    },
+    {
+      name: 'cross-device directory buffer',
+      status: 'canonical-spatial-directory-rejected-device',
+      invalidate(generation) {
+        const foreignDirectoryBuffer = {
+          label: 'foreign-schroeder-spatial-directory',
+          size: 256
+        };
+        tagWebGpuBufferDevice(foreignDirectoryBuffer, {});
+        generation.execution.directoryBuffer = foreignDirectoryBuffer;
+      }
+    },
+    {
+      name: 'cross-device evidence buffer',
+      status: 'canonical-spatial-directory-rejected-device',
+      invalidate(generation) {
+        const foreignEvidenceBuffer = {
+          label: 'foreign-schroeder-spatial-evidence',
+          size: 80
+        };
+        tagWebGpuBufferDevice(foreignEvidenceBuffer, {});
+        generation.execution.evidenceBuffer = foreignEvidenceBuffer;
+      }
+    },
+    {
+      name: 'undersized evidence buffer',
+      status: 'canonical-spatial-directory-rejected-evidence-capacity',
+      invalidate(generation) {
+        generation.execution.evidenceBuffer.size = 16;
+      }
+    },
+    {
+      name: 'torn exact-near query profile',
+      status: 'canonical-spatial-directory-rejected-query-geometry',
+      invalidate(generation) {
+        generation.execution.queryGeometryEvidence = {
+          ...generation.execution.exactNearQueryProfile
+        };
+      }
+    },
+    {
+      name: 'phase-volume overlay authority',
+      status: 'canonical-spatial-directory-rejected-overlay-authority',
+      invalidate(generation) {
+        generation.source.phaseVolumeAssignmentOverlayEnabled = true;
+      }
+    },
+    {
+      name: 'overlay authority takes precedence over a wrong schema',
+      status: 'canonical-spatial-directory-rejected-overlay-authority',
+      invalidate(generation) {
+        generation.source.phaseVolumeAssignmentOverlayEnabled = true;
+        generation.schema = 'peercompute.ulg.schroeder-spatial-epoch-generation.invalid';
+      }
+    },
+    {
+      name: 'selected level is not an exact i32',
+      status: 'canonical-spatial-selected-level-rejected',
+      selectedLevel: Number.NaN,
+      invalidate() {}
+    },
+    {
+      name: 'required generation is not selected',
+      status: 'canonical-spatial-directory-requested-but-unavailable',
+      invalidate(generation) {
+        generation.selected = false;
+      }
+    }
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+      const device = fakeP2gDevice();
+      const generation = canonicalSpatialEpochGenerationFixture(device);
+      testCase.invalidate(generation);
+
+      await assert.rejects(
+        runMlsMpmP2gGridProjectionWebGpu({
+          device,
+          sphParticleState,
+          mlsMpmParticleState,
+          gridSpacingM: 1,
+          boxDimsM: [2, 2, 2],
+          readbackMode: 'no-full-readback',
+          schroederLevelAssignment: {
+            particleCount: 999,
+            assignmentStrideFloats: 0,
+            assignments: 'malformed-obsolete-authority'
+          },
+          schroederSelectedLevel: testCase.selectedLevel ?? 2,
+          schroederSpatialEpochGeneration: generation,
+          canonicalSpatialRequired: true
+        }),
+        (error) => {
+          assert.equal(error.code, 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED');
+          assert.equal(error.status, testCase.status);
+          return true;
+        }
+      );
+      assert.equal(device.submissions.length, 0);
+      assert.equal(device.bindGroups.length, 0);
+      assert.equal(device.dispatches.length, 0);
+      assert.equal(device.writes.length, 0);
+    });
+  }
 });
 
 test('WebGPU MLS-MPM P2G reports Ocean-tiled fallback before the replacement kernel exists', async () => {
@@ -675,6 +1044,7 @@ test('CPU MLS-MPM P2G grid projection includes derived pressure stress contribut
     solidFlag: 0,
     soundSpeedMPerS: 10,
     eosModelId: 2,
+    phaseFractions: [0, 0, 1, 0],
     mechanicsDtS: 0.1
   });
   const projection = projectMlsMpmP2gGridCpu({
@@ -686,14 +1056,112 @@ test('CPU MLS-MPM P2G grid projection includes derived pressure stress contribut
   const gridSpec = createMlsMpmGridSpec({ gridSpacingM: 1, boxDimsM: [2, 2, 2] });
   const centerOffset = nodeOffset(gridSpec, 1, 1, 1);
   const centerWeight = 0.6875 ** 3;
-  const expectedPressurePa = 400;
+  const expectedPressurePa = 101325 * 2;
   const expectedStressScale = -0.1 * 1 * 4;
   const expectedAffineDiagonal = expectedStressScale * -expectedPressurePa;
   const expectedNodeMomentum = centerWeight * expectedAffineDiagonal * -0.25;
 
-  nearlyEqual(projection.gridNodes[centerOffset + 1], expectedNodeMomentum, 1e-5);
-  nearlyEqual(projection.gridNodes[centerOffset + 2], expectedNodeMomentum, 1e-5);
-  nearlyEqual(projection.gridNodes[centerOffset + 3], expectedNodeMomentum, 1e-5);
+  nearlyEqual(projection.gridNodes[centerOffset + 1], expectedNodeMomentum, 1e-3);
+  nearlyEqual(projection.gridNodes[centerOffset + 2], expectedNodeMomentum, 1e-3);
+  nearlyEqual(projection.gridNodes[centerOffset + 3], expectedNodeMomentum, 1e-3);
+});
+
+test('CPU MLS-MPM P2G applies admitted gauge pressure as inward condensed-particle stress', () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers({
+    velocity: [0, 0, 0],
+    massKg: 8,
+    restDensityKgPerM3: 8,
+    restVolumeM3: 1,
+    volumeRatioJ: 1,
+    solidFlag: 1,
+    shearModulusPa: 10,
+    lameLambdaPa: 10,
+    mechanicsDtS: 0.1
+  });
+  sphParticleState.thermo[4] = 1;
+  const positive = projectMlsMpmP2gGridCpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    externalGaugePressurePa: 100,
+    externalGaugePressureEnabled: true
+  });
+  const negative = projectMlsMpmP2gGridCpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    externalGaugePressurePa: -100,
+    externalGaugePressureEnabled: true
+  });
+  const gridSpec = createMlsMpmGridSpec({ gridSpacingM: 1, boxDimsM: [2, 2, 2] });
+  const lowerNodeOffset = nodeOffset(gridSpec, 1, 1, 1);
+  const centerWeight = 0.6875 ** 3;
+  const expectedInwardMomentum = centerWeight * 10;
+
+  nearlyEqual(positive.gridNodes[lowerNodeOffset + 1], expectedInwardMomentum, 1e-5);
+  nearlyEqual(positive.gridNodes[lowerNodeOffset + 2], expectedInwardMomentum, 1e-5);
+  nearlyEqual(positive.gridNodes[lowerNodeOffset + 3], expectedInwardMomentum, 1e-5);
+  nearlyEqual(negative.gridNodes[lowerNodeOffset + 1], -expectedInwardMomentum, 1e-5);
+  nearlyEqual(summarizeGrid(positive.gridNodes).momentum[0], 0, 1e-5);
+  assert.equal(positive.externalGaugePressureAppliedInStressProjection, true);
+  assert.equal(positive.externalGaugePressureTarget, 'condensed-particle-solid-plus-liquid-fraction');
+});
+
+test('CPU MLS-MPM P2G external gauge pressure excludes gas and plasma carriers', () => {
+  const buffers = manualBuffers({
+    velocity: [0, 0, 0],
+    massKg: 8,
+    restDensityKgPerM3: 8,
+    restVolumeM3: 1,
+    volumeRatioJ: 1,
+    solidFlag: 0,
+    mechanicsDtS: 0.1
+  });
+  const baseline = projectMlsMpmP2gGridCpu({
+    ...buffers,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2]
+  });
+  for (const phaseOffset of [6, 7]) {
+    buffers.sphParticleState.thermo.fill(0, 4, 8);
+    buffers.sphParticleState.thermo[phaseOffset] = 1;
+    const projection = projectMlsMpmP2gGridCpu({
+      ...buffers,
+      gridSpacingM: 1,
+      boxDimsM: [2, 2, 2],
+      externalGaugePressurePa: 100,
+      externalGaugePressureEnabled: true
+    });
+    assert.deepEqual(projection.gridNodes, baseline.gridNodes);
+  }
+});
+
+test('MLS-MPM P2G packs external gauge pressure into the existing uniform padding lanes', () => {
+  const gridSpec = createMlsMpmGridSpec({ gridSpacingM: 1, boxDimsM: [2, 2, 2] });
+  const params = createProjectionParamsArray(
+    gridSpec,
+    7,
+    0.001,
+    0,
+    1,
+    null,
+    101325,
+    -3787.5,
+    true
+  );
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 144);
+  nearlyEqual(view.getFloat32(72, true), -3787.5, 1e-6);
+  assert.equal(view.getUint32(76, true), 1);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /external_gauge_pressure_pa: f32/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /thermo1\.x \+ thermo1\.y/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /sigma\.x \+ vec3<f32>\(external_pressure/);
+  assert.doesNotMatch(
+    mlsMpmP2gGridProjectionWgsl,
+    /schroeder_spatial_required != 0u\) \{\s*return false/
+  );
 });
 
 test('CPU MLS-MPM P2G includes explicit hydrostatic pressure lane', () => {
@@ -795,6 +1263,34 @@ test('optional MLS-MPM P2G grid projection falls back when WebGPU is unavailable
   assert.equal(execution.backend, 'cpu-reference');
   assert.equal(execution.webgpuStatus.status, 'blocked-webgpu-unavailable');
   assert.equal(execution.webgpuStatus.fallback, 'cpu-reference');
+});
+
+test('optional MLS-MPM P2G grid projection never CPU-fallbacks selected canonical intent', async () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+  const generation = canonicalSpatialEpochGenerationFixture(fakeP2gDevice());
+
+  await assert.rejects(
+    runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+      sphParticleState,
+      mlsMpmParticleState,
+      gridSpacingM: 1,
+      boxDimsM: [2, 2, 2],
+      preferWebGpu: true,
+      navigatorRef: {},
+      schroederLevelAssignment: {
+        particleCount: 999,
+        assignmentStrideFloats: 0,
+        assignments: 'malformed-obsolete-authority'
+      },
+      schroederSelectedLevel: 2,
+      schroederSpatialEpochGeneration: generation
+    }),
+    (error) => {
+      assert.equal(error.code, 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED');
+      assert.equal(error.status, 'canonical-spatial-webgpu-device-unavailable');
+      return true;
+    }
+  );
 });
 
 test('optional MLS-MPM P2G grid projection accepts a parity-passing WebGPU result', async () => {

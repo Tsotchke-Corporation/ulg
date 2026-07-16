@@ -71,6 +71,21 @@ const SUMMARY_SCOPE = 'sph-reaction-visible-product-gas-compact-summary';
 export const ULG_SPH_REACTION_STRICT_GATE_SCHEMA = 'peercompute.ulg.sph-reaction-strict-gate.v0';
 export const ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA = 'peercompute.ulg.sph-resident-product-mass.v0';
 
+export function strictReactionGateAllowsForceCoupling(gate = null) {
+  return gate?.schema === ULG_SPH_REACTION_STRICT_GATE_SCHEMA
+    && gate?.status === 'strict-reaction-gate-pass'
+    && gate?.strictForceCouplingAllowed === true;
+}
+
+export function strictReactionGateIsClassified(gate = null) {
+  return strictReactionGateAllowsForceCoupling(gate)
+    || (
+      gate?.schema === ULG_SPH_REACTION_STRICT_GATE_SCHEMA
+      && gate?.status === 'strict-reaction-gate-blocked'
+      && gate?.strictForceCouplingAllowed !== true
+    );
+}
+
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -420,6 +435,15 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     ? (Number(productPlacementProvenance.gasUnplacedMassKg) || 0)
     : (Number(reactionSummary.ledgerUnplacedGasProductMassKg) || 0);
   const gasSpeciesLedger = mergeResidentGasSpeciesLedgers(reactionSummary.gasSpeciesLedger);
+  const strictReactionGate = strictReactionGateIsClassified(reactionSummary.strictReactionGate)
+    ? {
+        ...reactionSummary.strictReactionGate,
+        blockers: [...(reactionSummary.strictReactionGate.blockers || [])],
+        warnings: [...(reactionSummary.strictReactionGate.warnings || [])],
+        provisionalEnergetics: (reactionSummary.strictReactionGate.provisionalEnergetics || [])
+          .map((record) => ({ ...record }))
+      }
+    : null;
   const handle = {
     schema: ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA,
     status: retainedProductEventBuffer
@@ -455,6 +479,10 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     gasSpeciesLedger,
     gasSpeciesLedgerCount: gasSpeciesLedger?.recordCount ?? reactionSummary.gasSpeciesLedgerCount ?? 0,
     gasSpeciesReadbackByteLength: reactionSummary.gasSpeciesReadbackByteLength ?? 0,
+    strictReactionGate,
+    strictReactionGateSchema: strictReactionGate?.schema ?? null,
+    strictReactionGateStatus: strictReactionGate?.status ?? null,
+    strictForceCouplingAllowed: strictReactionGate?.strictForceCouplingAllowed === true,
     productPlacementProvenance,
     productPlacementProvenanceSchema: productPlacementProvenance?.schema ?? null,
     productPlacementProvenanceReadbackByteLength:

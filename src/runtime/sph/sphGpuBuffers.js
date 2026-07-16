@@ -1,9 +1,11 @@
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
@@ -18,19 +20,23 @@ import {
   buildAlgorithmSurfaceExtractionRows
 } from '../material/algorithmMaterialRows.js';
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
+import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
 export {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 };
 
 export const SPH_GPU_PARTICLE_STATE_FLOATS = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
 export const SPH_GPU_PARTICLE_THERMO_FLOATS = SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length;
+export const SPH_GPU_PARTICLE_IDENTITY_UINTS = SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT.length;
 export const MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
 // PBD-style relaxation for the excluded-volume pair separation projection in
 // G2P post-processing; 0 disables the pass.
@@ -60,13 +66,116 @@ const MLS_MPM_EOS_MODEL_IDS = Object.freeze({
 });
 
 const GPU_BUFFER_USAGE = {
+  COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
 };
 
+// Render rows store the domain as f32 for the existing surface ABI, so keep
+// structural ids inside the exact-integer range shared by u32 and f32.  This
+// prevents two distinct body ids from silently aliasing after conversion.
+export const SPH_GPU_RENDER_DOMAIN_ID_MAX = 0x00ff_ffff;
+
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizedRenderDomainId(value, { particleIndex = null } = {}) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  const domainId = Math.round(number);
+  if (domainId > SPH_GPU_RENDER_DOMAIN_ID_MAX) {
+    const suffix = particleIndex == null ? '' : ` for particle ${particleIndex}`;
+    throw new RangeError(
+      `render domain id${suffix} exceeds the exact GPU render range (${SPH_GPU_RENDER_DOMAIN_ID_MAX})`
+    );
+  }
+  return domainId;
+}
+
+function legacyRenderDomainForParticle(particle) {
+  const role = String(particle?.role ?? particle?.legacyRole ?? '').trim().toLowerCase();
+  if (role === 'base') return { renderDomainId: 1, renderDomainKey: 'base' };
+  if (role === 'drop') return { renderDomainId: 2, renderDomainKey: 'drop' };
+  return { renderDomainId: 0, renderDomainKey: null };
+}
+
+export function renderDomainIdentityForSphParticle(particle, particleIndex = null) {
+  const explicitValue = particle?.initialBodyDomainId ?? particle?.renderDomainId;
+  if (explicitValue != null) {
+    const renderDomainId = normalizedRenderDomainId(explicitValue, { particleIndex });
+    return {
+      renderDomainId,
+      renderDomainKey: renderDomainId > 0
+        ? (particle?.initialBodyId ?? particle?.renderDomainKey ?? null)
+        : null,
+      source: particle?.initialBodyDomainId != null
+        ? 'initial-body-domain-id'
+        : 'particle-render-domain-id'
+    };
+  }
+  const legacy = legacyRenderDomainForParticle(particle);
+  return {
+    ...legacy,
+    source: legacy.renderDomainId > 0 ? 'legacy-particle-role' : 'unassigned'
+  };
+}
+
+export function sphParticleStateRequiresExplicitIdentity(sphParticleState = null) {
+  if (sphParticleState?.identityRequired === true) return true;
+  const particleCount = Math.max(0, Math.round(finiteNumber(sphParticleState?.particleCount, 0)));
+  const identity = sphParticleState?.identity;
+  if (identity instanceof Uint32Array) {
+    const count = Math.min(particleCount, identity.length);
+    for (let index = 0; index < count; index += 1) {
+      if (identity[index] > 2) return true;
+    }
+  }
+  const metadata = Array.isArray(sphParticleState?.metadata) ? sphParticleState.metadata : [];
+  if (metadata.some((entry) => (
+    entry?.renderDomainId > 0
+    && entry?.renderDomainIdentitySource !== 'legacy-particle-role'
+    && entry?.renderDomainIdentitySource !== 'unassigned'
+  ))) {
+    return true;
+  }
+  const renderDomainKeys = sphParticleState?.renderDomainKeys;
+  if (renderDomainKeys && typeof renderDomainKeys === 'object') {
+    return Object.entries(renderDomainKeys).some(([domainId, domainKey]) => {
+      if (String(domainId) === '1' && String(domainKey) === 'base') return false;
+      if (String(domainId) === '2' && String(domainKey) === 'drop') return false;
+      return Number(domainId) > 0;
+    });
+  }
+  return false;
+}
+
+function particleIdentityRevision(identity, renderDomainKeys = {}) {
+  let hash = 0x811c9dc5;
+  const updateByte = (value) => {
+    hash ^= value & 0xff;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  };
+  if (identity instanceof Uint32Array) {
+    for (const value of identity) {
+      updateByte(value);
+      updateByte(value >>> 8);
+      updateByte(value >>> 16);
+      updateByte(value >>> 24);
+    }
+  }
+  for (const [domainId, domainKey] of Object.entries(renderDomainKeys).sort((a, b) => (
+    Number(a[0]) - Number(b[0])
+  ))) {
+    const text = `${domainId}:${domainKey};`;
+    for (let index = 0; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      updateByte(code);
+      updateByte(code >>> 8);
+    }
+  }
+  return `fnv1a32:${identity?.length ?? 0}:${hash.toString(16).padStart(8, '0')}`;
 }
 
 function materialPropertiesFor(material, materialProperties) {
@@ -319,6 +428,8 @@ export function buildSphGpuParticleBuffers(state, {
   const particleCount = state.particles.length;
   const stateValues = new Float32Array(particleCount * SPH_GPU_PARTICLE_STATE_FLOATS);
   const thermoValues = new Float32Array(particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS);
+  const identityValues = new Uint32Array(particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS);
+  const renderDomainKeys = {};
   const metadata = [];
   const smoothingLengthM = finiteNumber(state.smoothingLengthM, 0);
 
@@ -331,6 +442,8 @@ export function buildSphGpuParticleBuffers(state, {
     const phaseFractions = phaseFractionsFor(eq);
     const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
     const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
+    const identityOffset = index * SPH_GPU_PARTICLE_IDENTITY_UINTS;
+    const renderDomain = renderDomainIdentityForSphParticle(particle, index);
     stateValues.set([
       finiteNumber(particle.x?.[0]),
       finiteNumber(particle.x?.[1]),
@@ -362,13 +475,29 @@ export function buildSphGpuParticleBuffers(state, {
         0
       )
     ], thermoOffset);
+    identityValues[identityOffset] = renderDomain.renderDomainId;
+    if (renderDomain.renderDomainId > 0 && renderDomain.renderDomainKey != null) {
+      const domainKey = String(renderDomain.renderDomainKey);
+      const priorDomainKey = renderDomainKeys[renderDomain.renderDomainId];
+      if (priorDomainKey != null && priorDomainKey !== domainKey) {
+        throw new RangeError(
+          `render domain id ${renderDomain.renderDomainId} maps to both "${priorDomainKey}" and "${domainKey}"`
+        );
+      }
+      renderDomainKeys[renderDomain.renderDomainId] = domainKey;
+    }
     metadata.push({
       id: particle.id ?? `p${index}`,
       material,
       materialId: properties ? stableOpticalMaterialId(material) : 0,
       phase,
       phaseId: gpuPhaseId(phase),
-      status
+      status,
+      initialBodyId: particle.initialBodyId ?? null,
+      initialBodyDomainId: normalizedRenderDomainId(particle.initialBodyDomainId, { particleIndex: index }),
+      renderDomainId: renderDomain.renderDomainId,
+      renderDomainKey: renderDomain.renderDomainKey,
+      renderDomainIdentitySource: renderDomain.source
     });
   }
 
@@ -386,16 +515,48 @@ export function buildSphGpuParticleBuffers(state, {
     dimension: state.dimension ?? 3,
     step: state.step ?? 0,
     time: state.time ?? 0,
+    positionEpoch: Number.isInteger(Number(state.positionEpoch))
+      ? Number(state.positionEpoch)
+      : Math.max(0, Math.round(Number(state.step) || 0)),
+    topologyEpoch: Number.isInteger(Number(state.topologyEpoch))
+      ? Number(state.topologyEpoch)
+      : 0,
+    chartEpoch: Number.isInteger(Number(state.chartEpoch))
+      ? Number(state.chartEpoch)
+      : 0,
+    levelEpoch: Number.isInteger(Number(state.levelEpoch))
+      ? Number(state.levelEpoch)
+      : Math.max(0, Math.round(Number(state.step) || 0)),
+    supportEpoch: Number.isInteger(Number(state.supportEpoch))
+      ? Number(state.supportEpoch)
+      : Math.max(0, Math.round(Number(state.step) || 0)),
     smoothingLengthM,
     phaseIds: { ...GPU_PHASE_IDS },
     stateLayout: [...SPH_GPU_PARTICLE_STATE_ROW_LAYOUT],
     thermoLayout: [...SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT],
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityLayout: [...SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT],
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     thermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
+    identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
     stateStrideBytes: SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     thermoStrideBytes: SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    identityStrideBytes: SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    identityBufferByteLength: Math.max(
+      Uint32Array.BYTES_PER_ELEMENT,
+      particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
+    ),
     state: stateValues,
     thermo: thermoValues,
+    identity: identityValues,
+    identityRequired: metadata.some((entry) => (
+      entry.renderDomainId > 0
+      && entry.renderDomainIdentitySource !== 'legacy-particle-role'
+      && entry.renderDomainIdentitySource !== 'unassigned'
+    )),
+    renderDomainKeys,
+    identityRevision: particleIdentityRevision(identityValues, renderDomainKeys),
+    cpuIdentityStale: false,
     metadata,
     materialPropertyBankWarmInputTable,
     materialPropertyBankParticleSizeTable,
@@ -406,15 +567,17 @@ export function buildSphGpuParticleBuffers(state, {
   };
 }
 
-function writeStorageBuffer(device, label, data) {
+function writeStorageBuffer(device, label, data, { copySource = false } = {}) {
   const byteLength = Math.max(4, data.byteLength);
   const buffer = device.createBuffer({
     label,
     size: byteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    usage: GPU_BUFFER_USAGE.STORAGE
+      | GPU_BUFFER_USAGE.COPY_DST
+      | (copySource ? GPU_BUFFER_USAGE.COPY_SRC : 0)
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
-  return buffer;
+  return tagWebGpuBufferDevice(buffer, device);
 }
 
 function optionalStorageBuffer(device, label, data) {
@@ -427,6 +590,11 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   }
   if (packed?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('uploadSphGpuParticleBuffers requires a packed SPH GPU particle buffer');
+  }
+  if (packed.cpuIdentityStale === true && sphParticleStateRequiresExplicitIdentity(packed)) {
+    throw new TypeError(
+      'uploadSphGpuParticleBuffers refuses a stale CPU identity mirror for arbitrary render domains'
+    );
   }
   const materialPropertyBankWarmInputBuffer = optionalStorageBuffer(
     device,
@@ -443,16 +611,46 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     status: 'webgpu-uploaded',
     sourceSchema: packed.schema,
     particleCount: packed.particleCount,
+    storageGeneration: Number.isInteger(Number(packed.storageGeneration))
+      && Number(packed.storageGeneration) > 0
+      ? Number(packed.storageGeneration)
+      : null,
+    positionEpoch: packed.positionEpoch ?? null,
+    topologyEpoch: packed.topologyEpoch ?? null,
+    chartEpoch: packed.chartEpoch ?? null,
+    levelEpoch: packed.levelEpoch ?? null,
+    supportEpoch: packed.supportEpoch ?? null,
     stateStrideBytes: packed.stateStrideBytes,
     thermoStrideBytes: packed.thermoStrideBytes,
-    stateBuffer: writeStorageBuffer(device, 'ulg-sph-particle-state', packed.state),
-    thermoBuffer: writeStorageBuffer(device, 'ulg-sph-particle-thermo', packed.thermo),
+    stateBufferByteLength: Math.max(4, packed.state.byteLength),
+    thermoBufferByteLength: Math.max(4, packed.thermo.byteLength),
+    identitySchema: packed.identitySchema ?? ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityStrideBytes: packed.identityStrideBytes
+      ?? (SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT),
+    identityRequired: sphParticleStateRequiresExplicitIdentity(packed),
+    identityRevision: packed.identityRevision ?? null,
+    identityBufferByteLength: Math.max(
+      Uint32Array.BYTES_PER_ELEMENT,
+      packed.particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
+    ),
+    stateBuffer: writeStorageBuffer(device, 'ulg-sph-particle-state', packed.state, { copySource: true }),
+    thermoBuffer: writeStorageBuffer(device, 'ulg-sph-particle-thermo', packed.thermo, { copySource: true }),
+    identityBuffer: writeStorageBuffer(
+      device,
+      'ulg-sph-particle-identity',
+      packed.identity instanceof Uint32Array
+        ? packed.identity
+        : new Uint32Array(packed.particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS),
+      { copySource: true }
+    ),
+    renderDomainKeys: { ...(packed.renderDomainKeys || {}) },
     materialPropertyBankWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer,
     materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,
     materialPropertyBankParticleSizeRowCount: packed.materialPropertyBankParticleSizeTable?.rowCount ?? 0,
     ownsStateBuffer: true,
     ownsThermoBuffer: true,
+    ownsIdentityBuffer: true,
     ownsMaterialPropertyBankWarmInputBuffer: Boolean(materialPropertyBankWarmInputBuffer),
     ownsMaterialPropertyBankParticleSizeBuffer: Boolean(materialPropertyBankParticleSizeBuffer),
     scientificValidation: false,
@@ -460,6 +658,22 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+}
+
+export function sphGpuParticleUploadMatchesDevice(upload, device) {
+  if (upload?.status !== 'webgpu-uploaded' || upload.destroyed || !device) return false;
+  if (
+    !upload.stateBuffer
+    || !upload.thermoBuffer
+    || webGpuBufferDevice(upload.stateBuffer) !== device
+    || webGpuBufferDevice(upload.thermoBuffer) !== device
+  ) return false;
+  const optionalBuffers = [
+    upload.identityBuffer,
+    upload.materialPropertyBankWarmInputBuffer,
+    upload.materialPropertyBankParticleSizeBuffer
+  ].filter(Boolean);
+  return optionalBuffers.every((buffer) => webGpuBufferDevice(buffer) === device);
 }
 
 export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
@@ -606,8 +820,18 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
     status: 'webgpu-uploaded',
     sourceSchema: packed.schema,
     particleCount: packed.particleCount,
+    storageGeneration: Number.isInteger(Number(packed.storageGeneration))
+      && Number(packed.storageGeneration) > 0
+      ? Number(packed.storageGeneration)
+      : null,
     mechanicsStrideBytes: packed.mechanicsStrideBytes,
-    mechanicsBuffer: writeStorageBuffer(device, 'ulg-mls-mpm-particle-mechanics', packed.mechanics),
+    mechanicsBufferByteLength: Math.max(4, packed.mechanics.byteLength),
+    mechanicsBuffer: writeStorageBuffer(
+      device,
+      'ulg-mls-mpm-particle-mechanics',
+      packed.mechanics,
+      { copySource: true }
+    ),
     materialPropertyBankWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer,
     materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,
@@ -622,8 +846,21 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
   };
 }
 
+export function mlsMpmGpuParticleUploadMatchesDevice(upload, device) {
+  if (upload?.status !== 'webgpu-uploaded' || upload.destroyed || !device) return false;
+  if (
+    !upload.mechanicsBuffer
+    || webGpuBufferDevice(upload.mechanicsBuffer) !== device
+  ) return false;
+  const optionalBuffers = [
+    upload.materialPropertyBankWarmInputBuffer,
+    upload.materialPropertyBankParticleSizeBuffer
+  ].filter(Boolean);
+  return optionalBuffers.every((buffer) => webGpuBufferDevice(buffer) === device);
+}
+
 export function destroyMlsMpmGpuParticleBuffers(buffers) {
-  if (!buffers) return;
+  if (!buffers || buffers.destroyed) return;
   if (buffers.ownsMechanicsBuffer !== false) buffers.mechanicsBuffer?.destroy?.();
   if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
     buffers.materialPropertyBankWarmInputBuffer?.destroy?.();
@@ -631,18 +868,21 @@ export function destroyMlsMpmGpuParticleBuffers(buffers) {
   if (buffers.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
     buffers.materialPropertyBankParticleSizeBuffer?.destroy?.();
   }
+  buffers.destroyed = true;
 }
 
 export function destroySphGpuParticleBuffers(buffers) {
-  if (!buffers) return;
+  if (!buffers || buffers.destroyed) return;
   if (buffers.ownsStateBuffer !== false) buffers.stateBuffer?.destroy?.();
   if (buffers.ownsThermoBuffer !== false) buffers.thermoBuffer?.destroy?.();
+  if (buffers.ownsIdentityBuffer !== false) buffers.identityBuffer?.destroy?.();
   if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
     buffers.materialPropertyBankWarmInputBuffer?.destroy?.();
   }
   if (buffers.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
     buffers.materialPropertyBankParticleSizeBuffer?.destroy?.();
   }
+  buffers.destroyed = true;
 }
 
 export function decodeSphGpuParticleRows(packed) {
@@ -653,6 +893,7 @@ export function decodeSphGpuParticleRows(packed) {
   for (let index = 0; index < packed.particleCount; index += 1) {
     const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
     const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
+    const identityOffset = index * SPH_GPU_PARTICLE_IDENTITY_UINTS;
     rows.push({
       index,
       metadata: packed.metadata[index],
@@ -680,7 +921,12 @@ export function decodeSphGpuParticleRows(packed) {
       },
       smoothingLengthM: packed.thermo[thermoOffset + 8],
       representedEntityCount: packed.thermo[thermoOffset + 9],
-      status: packed.thermo[thermoOffset + 10]
+      status: packed.thermo[thermoOffset + 10],
+      visualParticleRadiusM: packed.thermo[thermoOffset + 11],
+      renderDomainId: packed.identity instanceof Uint32Array
+        ? packed.identity[identityOffset]
+        : 0,
+      renderDomainKey: packed.metadata?.[index]?.renderDomainKey ?? null
     });
   }
   return rows;

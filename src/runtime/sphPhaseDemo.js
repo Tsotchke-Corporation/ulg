@@ -35,7 +35,11 @@ import { createMlsMpmCarrier } from './sph/mlsMpmCarrier.js';
 import { elementMaterialClosure } from './material/elementClosures.js';
 import { zForSymbol } from './electronicStructure/periodicTable.js';
 import { reactiveStep } from './sph/reactiveChemistry.js';
-import { discoverReactions } from './sph/reactionDiscovery.js';
+import { discoverReactionNetwork, discoverReactions } from './sph/reactionDiscovery.js';
+import {
+  normalizeSphInitialBodies,
+  preflightSphInitialBodiesForSimulation
+} from './sphInitialBodies.js';
 import { createSphPhaseScenario } from './thermoPreflight.js';
 import { PHYSICAL_CONSTANTS, idealGasDensityKgPerM3 } from './materials/referenceMaterials.js';
 import {
@@ -44,6 +48,8 @@ import {
   requireFirstPrinciplesMaterialProperties
 } from './material/propertyProvenance.js';
 import {
+  buildMaterialPropertyBankInitialBodyGpuWarmInputTable,
+  buildMaterialPropertyBankInitialBodyParticleSizePackingTable,
   buildMaterialPropertyBankGpuWarmInputTable,
   buildMaterialPropertyBankParticleSizePackingTable,
   materialPropertyCrystalStructuresForSymbol,
@@ -56,12 +62,20 @@ import {
   DEFAULT_MATERIAL_PROPERTY_BANK,
   DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK
 } from './material/defaultMaterialPropertyBank.js';
-import { buildAlgorithmMaterialParticleInitializationRows } from './material/algorithmMaterialRows.js';
+import {
+  buildAlgorithmInitialBodyParticleInitializationRows,
+  buildAlgorithmMaterialParticleInitializationRows
+} from './material/algorithmMaterialRows.js';
 import {
   algorithmContactPairResponseForElement,
+  gasPressureTractionEligibleForElement,
   interfaceContactKinematicsForElement,
   normalizeAlgorithmContactPairResponsePolicy
 } from './sph/sphPressureInterfaceGpuKernel.js';
+import {
+  strictReactionGateAllowsForceCoupling,
+  strictReactionGateIsClassified
+} from './sph/sphReactionGpuSummary.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
@@ -1133,6 +1147,661 @@ function resolveInitialParticleSpacingMaterialCrystalStructureWarmInputs({
   };
 }
 
+function resolveInitialBodiesMaterialBankWarmInputs({
+  materialPropertyBank,
+  initialBodies,
+  pressurePa
+} = {}) {
+  if (!materialPropertyBank) return null;
+  const bank = normalizeMaterialPropertyBank(materialPropertyBank);
+  const missingBodies = [];
+  const bodies = [];
+  const byBodyId = {};
+  for (let bodyOrder = 0; bodyOrder < initialBodies.bodies.length; bodyOrder += 1) {
+    const body = initialBodies.bodies[bodyOrder];
+    const record = materialPropertyBankRecordBySymbol(bank, body.material);
+    if (!record) {
+      missingBodies.push({
+        bodyId: body.id,
+        domainId: body.domainId,
+        material: body.material,
+        reason: 'material-bank-row-not-found'
+      });
+      continue;
+    }
+    const warmInput = {
+      ...materialPropertyBankWarmInput(record, {
+        temperatureK: body.temperatureK,
+        pressurePa,
+        bankFamily: bank.bankFamily,
+        bankSchemaVersion: bank.schemaVersion,
+        generatorFingerprint: bank.generatorFingerprint
+      }),
+      bodyId: body.id,
+      domainId: body.domainId,
+      bodyOrder,
+      role: body.legacyRole || body.id,
+      requestedMaterial: body.material
+    };
+    bodies.push({
+      id: body.id,
+      bodyId: body.id,
+      domainId: body.domainId,
+      bodyOrder,
+      warmInput
+    });
+    byBodyId[body.id] = warmInput;
+  }
+  return {
+    schema: 'peercompute.ulg.sph-initial-bodies-material-bank-warm-inputs.v0',
+    status: bodies.length > 0
+      ? 'initial-body-material-bank-warm-inputs-attached'
+      : 'initial-body-material-bank-warm-inputs-no-matching-rows',
+    identityMode: 'initial-bodies',
+    strictSourceOfTruth: false,
+    bankFamily: bank.bankFamily,
+    bankSchemaVersion: bank.schemaVersion,
+    generatorFingerprint: bank.generatorFingerprint,
+    coveredBodyCount: bodies.length,
+    missingBodies,
+    bodies,
+    byBodyId
+  };
+}
+
+function resolveInitialBodiesMaterialCrystalStructureWarmInputs({
+  materialPropertyCrystalStructureBank,
+  initialBodies,
+  pressurePa
+} = {}) {
+  if (!materialPropertyCrystalStructureBank) return null;
+  const bank = normalizeMaterialPropertyCrystalStructureBank(
+    materialPropertyCrystalStructureBank
+  );
+  const missingBodies = [];
+  const bodies = [];
+  const byBodyId = {};
+  for (let bodyOrder = 0; bodyOrder < initialBodies.bodies.length; bodyOrder += 1) {
+    const body = initialBodies.bodies[bodyOrder];
+    const records = materialPropertyCrystalStructuresForSymbol(bank, body.material, {
+      phase: 'solid'
+    });
+    const record = records.find((candidate) => stateInCrystalStructureValidity(candidate, {
+      temperatureK: body.temperatureK,
+      pressurePa
+    }));
+    if (!record) {
+      missingBodies.push({
+        bodyId: body.id,
+        domainId: body.domainId,
+        material: body.material,
+        reason: records.length > 0
+          ? 'material-crystal-structure-row-not-valid-for-state'
+          : 'material-crystal-structure-row-not-found',
+        structureKeys: records.map((candidate) => candidate.structureKey)
+      });
+      continue;
+    }
+    const warmInput = {
+      schema: 'peercompute.ulg.sph-initial-particle-spacing-material-crystal-structure-warm-input.v0',
+      status: 'material-crystal-structure-warm-input-ready',
+      strictSourceOfTruth: false,
+      bodyId: body.id,
+      domainId: body.domainId,
+      bodyOrder,
+      role: body.legacyRole || body.id,
+      requestedMaterial: body.material,
+      material: record.symbol,
+      phase: record.phase,
+      structureKey: record.structureKey,
+      structureName: record.structureName,
+      strukturbericht: record.strukturbericht ?? null,
+      crystalSystem: record.crystalSystem,
+      spaceGroup: cloneJson(record.spaceGroup),
+      latticeConstants: cloneJson(record.latticeConstants),
+      unitCell: cloneJson(record.unitCell),
+      validity: cloneJson(record.validity),
+      fallbackPolicy: cloneJson(record.fallbackPolicy),
+      temperatureK: body.temperatureK,
+      pressurePa,
+      bankFamily: bank.bankFamily,
+      bankSchemaVersion: bank.schemaVersion,
+      generatorFingerprint: bank.generatorFingerprint,
+      provenance: {
+        source: 'precomputed-json-bank-crystal-structure',
+        generatorFingerprint: bank.generatorFingerprint,
+        entries: cloneJson(record.provenance)
+      }
+    };
+    bodies.push({
+      id: body.id,
+      bodyId: body.id,
+      domainId: body.domainId,
+      bodyOrder,
+      warmInput
+    });
+    byBodyId[body.id] = warmInput;
+  }
+  return {
+    schema: 'peercompute.ulg.sph-initial-bodies-material-crystal-structure-warm-inputs.v0',
+    status: bodies.length > 0
+      ? 'initial-body-material-crystal-structure-warm-inputs-attached'
+      : 'initial-body-material-crystal-structure-warm-inputs-no-valid-rows',
+    identityMode: 'initial-bodies',
+    strictSourceOfTruth: false,
+    bankFamily: bank.bankFamily,
+    bankSchemaVersion: bank.schemaVersion,
+    generatorFingerprint: bank.generatorFingerprint,
+    coveredBodyCount: bodies.length,
+    missingBodies,
+    bodies,
+    byBodyId
+  };
+}
+
+const ULG_SPH_INITIAL_BODY_PARTICLE_PLAN_SCHEMA =
+  'peercompute.ulg.sph-initial-body-particle-plan.v0';
+const ULG_SPH_INITIAL_BODIES_PARTICLE_PLAN_SCHEMA =
+  'peercompute.ulg.sph-initial-bodies-particle-plan.v0';
+
+function product3(values) {
+  return Number(values?.[0]) * Number(values?.[1]) * Number(values?.[2]);
+}
+
+function safePositiveIntegerProduct3(values, label) {
+  let product = 1;
+  for (const value of values || []) {
+    const integer = Number(value);
+    if (
+      !Number.isSafeInteger(integer)
+      || integer <= 0
+      || integer > Math.floor(Number.MAX_SAFE_INTEGER / product)
+    ) {
+      throw new RangeError(`${label} product must be a positive safe integer`);
+    }
+    product *= integer;
+  }
+  if (!Array.isArray(values) || values.length !== 3) {
+    throw new RangeError(`${label} must contain exactly three entries`);
+  }
+  return product;
+}
+
+function initialBodyBounds(body) {
+  const minM = body.centerM.map((center, axis) => center - body.sizeM[axis] / 2);
+  const maxM = body.centerM.map((center, axis) => center + body.sizeM[axis] / 2);
+  return { minM, maxM };
+}
+
+function requireInitialBodiesInsideBox(initialBodies, boxDims) {
+  const toleranceM = Math.max(1e-9, Math.max(...boxDims) * 1e-9);
+  for (const body of initialBodies.bodies) {
+    const { minM, maxM } = initialBodyBounds(body);
+    for (let axis = 0; axis < 3; axis += 1) {
+      if (minM[axis] < -toleranceM || maxM[axis] > boxDims[axis] + toleranceM) {
+        throw new RangeError(
+          `Initial body '${body.id}' is outside container axis ${axis}: `
+          + `[${minM[axis]}, ${maxM[axis]}] is not within [0, ${boxDims[axis]}]`
+        );
+      }
+    }
+  }
+}
+
+function initialBodyParticlePlan(body, properties, pressurePa, pitchRecord) {
+  const materialState = materialStateAtTemperaturePressure(
+    properties,
+    body.temperatureK,
+    pressurePa
+  );
+  const spacingByAxisM = [...pitchRecord.cellPitchM];
+  const continuumCellVolumeM3 = product3(spacingByAxisM);
+  const particleCount = safePositiveIntegerProduct3(
+    body.particlesPerEdge,
+    `Initial body '${body.id}' particle count`
+  );
+  const blockVolumeM3 = product3(body.sizeM);
+  const particleMassKg = materialState.densityKgPerM3 * continuumCellVolumeM3;
+  // Surface extraction represents each lattice sample as a support sphere.
+  // Keep the established half-cell visual radius while mechanics continues
+  // to conserve the full rectangular continuum cell volume.
+  const visualParticleRadiusM = pitchRecord.minCellPitchM / 2;
+  const visualRestVolumeM3 = sphereVolumeFromRadiusM(visualParticleRadiusM);
+  const phaseVolumeReferenceDensityKgPerM3 = Math.max(
+    Number(materialState.phaseVolumeReferenceDensityKgPerM3)
+      || Number(materialState.densityKgPerM3)
+      || 0,
+    0
+  );
+  const phaseVolumeReferenceMassKg =
+    phaseVolumeReferenceDensityKgPerM3 * continuumCellVolumeM3;
+  const phaseVolumeReferenceVolumeM3 = materialState.densityKgPerM3 > 0
+    ? phaseVolumeReferenceMassKg / materialState.densityKgPerM3
+    : continuumCellVolumeM3;
+  const phaseVolumeReferenceMassRatio = particleMassKg > 0
+    ? phaseVolumeReferenceMassKg / particleMassKg
+    : null;
+  return {
+    schema: ULG_SPH_INITIAL_BODY_PARTICLE_PLAN_SCHEMA,
+    status: 'initial-body-particle-plan-ready',
+    bodyId: body.id,
+    domainId: body.domainId,
+    role: `body:${body.id}`,
+    material: body.material,
+    temperatureK: body.temperatureK,
+    pressurePa,
+    phase: materialState.phase,
+    densityKgPerM3: materialState.densityKgPerM3,
+    densitySource: materialState.densitySource,
+    phaseVolumeReferenceDensityKgPerM3,
+    phaseVolumeReferenceDensitySource: materialState.phaseVolumeReferenceDensitySource,
+    phaseVolumeReferencePhase: materialState.phaseVolumeReferencePhase,
+    phaseVolumeReferenceMassKg,
+    phaseVolumeReferenceVolumeM3,
+    phaseVolumeReferenceMassRatio,
+    sizeM: [...body.sizeM],
+    centerM: [...body.centerM],
+    boundsM: initialBodyBounds(body),
+    particlesPerEdge: [...body.particlesPerEdge],
+    particleCount,
+    spacingByAxisM,
+    spacingM: pitchRecord.representativeCellPitchM,
+    representativeCellPitchM: pitchRecord.representativeCellPitchM,
+    minCellPitchM: pitchRecord.minCellPitchM,
+    maxCellPitchM: pitchRecord.maxCellPitchM,
+    cellPitchAnisotropyRatio: pitchRecord.anisotropyRatio,
+    blockVolumeM3,
+    continuumCellVolumeM3,
+    restVolumeM3: visualRestVolumeM3,
+    visualRestVolumeM3,
+    particleMassKg,
+    totalMassKg: particleMassKg * particleCount,
+    volumeEquivalentParticleRadiusM: visualParticleRadiusM,
+    particleSizeSource: 'half-minimum-cell-pitch-support-sphere',
+    initialVelocityMPerS: [...body.velocityMPerS]
+  };
+}
+
+function fillAxisAlignedInitialBody({ body, plan, properties }) {
+  const particles = [];
+  const { minM } = initialBodyBounds(body);
+  const cellVolumeM3 = plan.continuumCellVolumeM3;
+  const visualRestVolumeM3 = plan.visualRestVolumeM3;
+  const initialParticleSizeState = particleSizeStateFromVolume({
+    material: body.material,
+    role: plan.role,
+    temperatureK: body.temperatureK,
+    restDensityKgPerM3: plan.densityKgPerM3,
+    pressurePa: plan.pressurePa,
+    restVolumeM3: visualRestVolumeM3,
+    mechanicsRestVolumeM3: cellVolumeM3,
+    source: plan.particleSizeSource
+  });
+  const particleRadiusM = initialParticleSizeState.restParticleRadiusM;
+  const specificEnergy = specificInternalEnergyJPerKg(properties, body.temperatureK);
+  let bodyParticleIndex = 0;
+  for (let i = 0; i < body.particlesPerEdge[0]; i += 1) {
+    for (let j = 0; j < body.particlesPerEdge[1]; j += 1) {
+      for (let k = 0; k < body.particlesPerEdge[2]; k += 1) {
+        const particleSizeState = { ...initialParticleSizeState };
+        particles.push({
+          material: body.material,
+          role: plan.role,
+          initialBodyId: body.id,
+          initialBodyDomainId: body.domainId,
+          renderDomainId: body.domainId,
+          initialBodyParticleIndex: bodyParticleIndex,
+          x: [
+            minM[0] + (i + 0.5) * plan.spacingByAxisM[0],
+            minM[1] + (j + 0.5) * plan.spacingByAxisM[1],
+            minM[2] + (k + 0.5) * plan.spacingByAxisM[2]
+          ],
+          v: [...body.velocityMPerS],
+          massKg: plan.particleMassKg,
+          specificInternalEnergyJPerKg: specificEnergy,
+          temperatureK: body.temperatureK,
+          restDensityKgPerM3: plan.densityKgPerM3,
+          pressurePa: plan.pressurePa,
+          phaseVolumeReferenceDensityKgPerM3: plan.phaseVolumeReferenceDensityKgPerM3,
+          phaseVolumeReferenceMassKg: plan.phaseVolumeReferenceMassKg,
+          phaseVolumeReferenceVolumeM3: plan.phaseVolumeReferenceVolumeM3,
+          phaseVolumeReferenceMassRatio: plan.phaseVolumeReferenceMassRatio,
+          phaseVolumeReferenceDensitySource: plan.phaseVolumeReferenceDensitySource,
+          phaseVolumeReferencePhase: plan.phaseVolumeReferencePhase,
+          initialParticleSpacingM: plan.representativeCellPitchM,
+          initialParticleSpacingByAxisM: [...plan.spacingByAxisM],
+          initialCellVolumeM3: cellVolumeM3,
+          continuumCellVolumeM3: cellVolumeM3,
+          visualRestVolumeM3,
+          visualParticleRadiusM: particleRadiusM,
+          visualRestParticleRadiusM: particleRadiusM,
+          materialReferenceParticleRadiusM: null,
+          materialStateEntityVolumeM3: materialEntityVolumeM3({
+            densityKgPerM3: plan.densityKgPerM3,
+            molarMassKgPerMol: properties?.molarMassKgPerMol
+          }) || null,
+          materialVisualScale: 1,
+          particleRadiusM,
+          restParticleRadiusM: particleRadiusM,
+          currentCellVolumeM3: particleSizeState.currentVolumeM3,
+          currentParticleRadiusM: particleSizeState.currentParticleRadiusM,
+          particleSizeState
+        });
+        bodyParticleIndex += 1;
+      }
+    }
+  }
+  return particles;
+}
+
+function copyInitialParticleMetadataIntoState(state, sourceParticles) {
+  state.particles.forEach((particle, index) => {
+    const source = sourceParticles[index];
+    particle.material = source.material;
+    particle.role = source.role;
+    particle.spareProductSlot = source.spareProductSlot === true;
+    particle.initialBodyId = source.initialBodyId ?? null;
+    particle.initialBodyDomainId = Number(source.initialBodyDomainId) || 0;
+    particle.renderDomainId = Number(source.renderDomainId) || 0;
+    particle.initialBodyParticleIndex = Number.isSafeInteger(source.initialBodyParticleIndex)
+      ? source.initialBodyParticleIndex
+      : null;
+    particle.temperatureK = source.temperatureK;
+    particle.pressurePa = source.pressurePa;
+    particle.restDensityKgPerM3 = source.restDensityKgPerM3;
+    particle.phaseVolumeReferenceDensityKgPerM3 = source.phaseVolumeReferenceDensityKgPerM3;
+    particle.phaseVolumeReferenceMassKg = source.phaseVolumeReferenceMassKg;
+    particle.phaseVolumeReferenceVolumeM3 = source.phaseVolumeReferenceVolumeM3;
+    particle.phaseVolumeReferenceMassRatio = source.phaseVolumeReferenceMassRatio;
+    particle.phaseVolumeReferenceDensitySource = source.phaseVolumeReferenceDensitySource;
+    particle.phaseVolumeReferencePhase = source.phaseVolumeReferencePhase;
+    particle.initialParticleSpacingM = source.initialParticleSpacingM;
+    particle.initialParticleSpacingByAxisM = source.initialParticleSpacingByAxisM
+      ? [...source.initialParticleSpacingByAxisM]
+      : null;
+    particle.initialCellVolumeM3 = source.initialCellVolumeM3;
+    particle.continuumCellVolumeM3 = source.continuumCellVolumeM3;
+    particle.visualRestVolumeM3 = source.visualRestVolumeM3;
+    particle.visualParticleRadiusM = source.visualParticleRadiusM;
+    particle.visualRestParticleRadiusM = source.visualRestParticleRadiusM;
+    particle.materialReferenceParticleRadiusM = source.materialReferenceParticleRadiusM;
+    particle.materialStateEntityVolumeM3 = source.materialStateEntityVolumeM3;
+    particle.materialVisualScale = source.materialVisualScale;
+    particle.particleRadiusM = source.particleRadiusM;
+    particle.restParticleRadiusM = source.restParticleRadiusM;
+    particle.currentCellVolumeM3 = source.currentCellVolumeM3;
+    particle.currentParticleRadiusM = source.currentParticleRadiusM;
+    particle.particleSizeState = source.particleSizeState ? { ...source.particleSizeState } : null;
+  });
+}
+
+function buildSphInitialBodiesDemoState({
+  scenario,
+  closures,
+  allowFixtureMaterialProperties,
+  allowReducedProductProperties,
+  initialBodies,
+  initialTargetNeighborCount,
+  mechanics,
+  materialPropertyBank,
+  materialPropertyCrystalStructureBank
+}) {
+  const normalizedInitialBodies = normalizeSphInitialBodies(initialBodies);
+  const simulationPreflight = preflightSphInitialBodiesForSimulation(normalizedInitialBodies);
+  if (!simulationPreflight.feasible) {
+    throw new RangeError(
+      `Initial-body simulation preflight blocked: ${simulationPreflight.blockers.join(', ')}`
+    );
+  }
+  const boxDims = scenario.box.dimensionsM
+    ?? [scenario.box.edgeM, scenario.box.edgeM, scenario.box.edgeM];
+  requireInitialBodiesInsideBox(normalizedInitialBodies, boxDims);
+
+  const baseClosures = {
+    ...(allowFixtureMaterialProperties ? createReferenceMaterialClosures() : {}),
+    ...(closures || {})
+  };
+  const resolved = { ...baseClosures };
+  const requiredMaterialKeys = [...new Set([
+    ...DEFAULT_RUNTIME_MATERIAL_KEYS,
+    ...normalizedInitialBodies.bodies.map((body) => body.material)
+  ].filter(Boolean))];
+  for (const key of requiredMaterialKeys) {
+    if (resolved[key]) continue;
+    try {
+      resolved[key] = resolveSingleMaterialClosure(key, { allowFixtureMaterialProperties });
+    } catch {
+      throw new MaterialFirstPrinciplesResolutionError(
+        `No first-principles material closure for '${key}'`,
+        {
+          material: key,
+          context: 'buildSphPhaseDemoState.initialBodies',
+          blockers: ['first-principles-material-closure-not-produced']
+        }
+      );
+    }
+  }
+  if (!allowFixtureMaterialProperties) {
+    for (const [key, closure] of Object.entries(resolved)) {
+      requireFirstPrinciplesMaterialProperties(closure.properties, {
+        material: key,
+        context: 'buildSphPhaseDemoState.initialBodies',
+        allowedFallbackSources: [
+          'material-property-reference-bank',
+          ...(allowReducedProductProperties ? ['reactant-packed-product-closure'] : [])
+        ]
+      });
+    }
+  }
+
+  const pressurePa = scenario.gas.pressurePa ?? PHYSICAL_CONSTANTS.standardAtmospherePa;
+  const materialBankWarmInputs = resolveInitialBodiesMaterialBankWarmInputs({
+    materialPropertyBank,
+    initialBodies: normalizedInitialBodies,
+    pressurePa
+  });
+  const materialCrystalStructureWarmInputs =
+    resolveInitialBodiesMaterialCrystalStructureWarmInputs({
+      materialPropertyCrystalStructureBank,
+      initialBodies: normalizedInitialBodies,
+      pressurePa
+    });
+  const pitchByBodyId = Object.fromEntries(
+    simulationPreflight.bodyPitches.map((record) => [record.id, record])
+  );
+  const bodyPlans = normalizedInitialBodies.bodies.map((body) => initialBodyParticlePlan(
+    body,
+    resolved[body.material].properties,
+    pressurePa,
+    pitchByBodyId[body.id]
+  ));
+  const bodyPlanById = Object.fromEntries(bodyPlans.map((plan) => [plan.bodyId, plan]));
+  const smoothingLengthM = simulationPreflight.crossBodyPitch.maxRepresentativeCellPitchM
+    * smoothingLengthRatioForTargetNeighborCount(initialTargetNeighborCount);
+  const liveParticles = [];
+  const bodyRanges = [];
+  const countsByBodyId = {};
+  for (let bodyIndex = 0; bodyIndex < normalizedInitialBodies.bodies.length; bodyIndex += 1) {
+    const body = normalizedInitialBodies.bodies[bodyIndex];
+    const plan = bodyPlans[bodyIndex];
+    const start = liveParticles.length;
+    const particles = fillAxisAlignedInitialBody({
+      body,
+      plan,
+      properties: resolved[body.material].properties
+    });
+    for (const particle of particles) liveParticles.push(particle);
+    countsByBodyId[body.id] = particles.length;
+    bodyRanges.push({
+      bodyId: body.id,
+      domainId: body.domainId,
+      material: body.material,
+      start,
+      count: particles.length,
+      endExclusive: liveParticles.length
+    });
+  }
+
+  const all = [...liveParticles];
+  const gpuResidentMechanics = String(mechanics || 'mlsmpm') !== 'sph';
+  const spareProductSlotCount = gpuResidentMechanics
+    ? Math.max(8, Math.round(liveParticles.length / 8))
+    : 0;
+  const spareTemplate = liveParticles[0];
+  const boxCenterM = boxDims.map((extent) => extent / 2);
+  for (let spare = 0; spare < spareProductSlotCount; spare += 1) {
+    all.push({
+      ...spareTemplate,
+      role: 'spare-product-slot',
+      initialBodyId: null,
+      initialBodyDomainId: 0,
+      renderDomainId: 0,
+      initialBodyParticleIndex: null,
+      x: [...boxCenterM],
+      v: [0, 0, 0],
+      massKg: 0,
+      spareProductSlot: true
+    });
+  }
+  const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
+  copyInitialParticleMetadataIntoState(state, all);
+
+  const totalBlockVolumeM3 = bodyPlans.reduce((sum, plan) => sum + plan.blockVolumeM3, 0);
+  const totalMassKg = bodyPlans.reduce((sum, plan) => sum + plan.totalMassKg, 0);
+  const requestedParticleBudget = liveParticles.length;
+  const scenarioWithBodies = {
+    ...scenario,
+    box: {
+      ...scenario.box,
+      dimensionsM: [...boxDims],
+      volumeM3: product3(boxDims)
+    },
+    initialBodies: {
+      schema: normalizedInitialBodies.schema,
+      bodyCount: normalizedInitialBodies.bodies.length,
+      totalVolumeM3: totalBlockVolumeM3,
+      bodies: normalizedInitialBodies.bodies.map((body) => ({
+        id: body.id,
+        domainId: body.domainId,
+        material: body.material,
+        volumeM3: product3(body.sizeM)
+      }))
+    }
+  };
+  const legacyBase = normalizedInitialBodies.bodies.find((body) => body.legacyRole === 'base') || null;
+  const legacyDrop = normalizedInitialBodies.bodies.find((body) => body.legacyRole === 'drop') || null;
+  const initialParticleSpacing = {
+    schema: ULG_SPH_INITIAL_BODIES_PARTICLE_PLAN_SCHEMA,
+    status: 'initial-bodies-particle-plan-ready',
+    simulationPreflight,
+    smoothingLengthM,
+    targetNeighborCount: initialTargetNeighborCount,
+    requestedParticleBudget,
+    totalBlockVolumeM3,
+    totalMassKg,
+    bodies: bodyPlans,
+    byBodyId: bodyPlanById,
+    ...(legacyBase ? { base: bodyPlanById[legacyBase.id] } : {}),
+    ...(legacyDrop ? { drop: bodyPlanById[legacyDrop.id] } : {})
+  };
+  if (materialBankWarmInputs) {
+    initialParticleSpacing.materialPropertyBankWarmInputs = materialBankWarmInputs;
+    initialParticleSpacing.materialPropertyBankGpuWarmInputTable =
+      buildMaterialPropertyBankInitialBodyGpuWarmInputTable({
+        initialBodies: normalizedInitialBodies,
+        initialParticleSpacing,
+        materialPropertyBankWarmInputs: materialBankWarmInputs
+      });
+  }
+  if (materialCrystalStructureWarmInputs) {
+    initialParticleSpacing.materialPropertyCrystalStructureWarmInputs =
+      materialCrystalStructureWarmInputs;
+  }
+  if (materialBankWarmInputs) {
+    initialParticleSpacing.materialPropertyBankParticleSizePackingTable =
+      buildMaterialPropertyBankInitialBodyParticleSizePackingTable({
+        initialBodies: normalizedInitialBodies,
+        initialParticleSpacing,
+        materialPropertyBankWarmInputs: materialBankWarmInputs,
+        materialPropertyCrystalStructureWarmInputs: materialCrystalStructureWarmInputs
+      });
+  }
+  initialParticleSpacing.algorithmMaterialParticleInitializationRows =
+    buildAlgorithmInitialBodyParticleInitializationRows({
+      initialBodies: normalizedInitialBodies,
+      initialParticleSpacing
+    });
+  initialParticleSpacing.algorithmMaterialParticleInitializationRowCount =
+    initialParticleSpacing.algorithmMaterialParticleInitializationRows.rowCount;
+  initialParticleSpacing.algorithmMaterialParticleInitializationStatus =
+    initialParticleSpacing.algorithmMaterialParticleInitializationRows.status;
+  const bodyDiagnostics = bodyPlans.map((plan) => ({
+    bodyId: plan.bodyId,
+    domainId: plan.domainId,
+    material: plan.material,
+    requestedParticlesPerEdge: [...plan.particlesPerEdge],
+    effectiveParticlesPerEdge: [...plan.particlesPerEdge],
+    expectedParticleCount: plan.particleCount,
+    generatedParticleCount: countsByBodyId[plan.bodyId],
+    particleCountMatchesRequestedResolution:
+      plan.particleCount === countsByBodyId[plan.bodyId],
+    sizeM: [...plan.sizeM],
+    spacingByAxisM: [...plan.spacingByAxisM],
+    continuumCellVolumeM3: plan.continuumCellVolumeM3,
+    particleMassKg: plan.particleMassKg,
+    totalMassKg: plan.totalMassKg
+  }));
+  const diagnosticsByBodyId = Object.fromEntries(
+    bodyDiagnostics.map((diagnostic) => [diagnostic.bodyId, diagnostic])
+  );
+
+  return {
+    scenario: scenarioWithBodies,
+    closures: baseClosures,
+    allowFixtureMaterialProperties,
+    state,
+    box: { dimensionsM: [...boxDims], edgeM: Math.max(...boxDims) },
+    initialBodies: normalizedInitialBodies,
+    bodyRanges,
+    renderDomains: bodyRanges.map((range) => ({
+      bodyId: range.bodyId,
+      domainId: range.domainId,
+      material: range.material
+    })),
+    ...(legacyDrop ? { dropMaterial: legacyDrop.material } : {}),
+    ...(legacyBase ? { baseMaterial: legacyBase.material } : {}),
+    initialTemperaturesK: {
+      gas: scenario.gas.initialTemperatureK,
+      byBodyId: Object.fromEntries(
+        normalizedInitialBodies.bodies.map((body) => [body.id, body.temperatureK])
+      ),
+      ...(legacyDrop ? { drop: legacyDrop.temperatureK } : {}),
+      ...(legacyBase ? { base: legacyBase.temperatureK } : {})
+    },
+    initialParticleSpacing,
+    initialParticleEdgeDiagnostics: {
+      schema: 'peercompute.ulg.sph-initial-bodies-particle-edge-diagnostics.v0',
+      status: 'initial-body-resolutions-realized',
+      bodies: bodyDiagnostics,
+      byBodyId: diagnosticsByBodyId,
+      totalGeneratedParticleCount: liveParticles.length,
+      ...(legacyBase ? { base: diagnosticsByBodyId[legacyBase.id] } : {}),
+      ...(legacyDrop ? { drop: diagnosticsByBodyId[legacyDrop.id] } : {})
+    },
+    counts: {
+      byBodyId: countsByBodyId,
+      live: liveParticles.length,
+      spareProductSlots: spareProductSlotCount,
+      total: all.length,
+      ...(legacyBase ? { base: countsByBodyId[legacyBase.id] } : {}),
+      ...(legacyDrop ? { drop: countsByBodyId[legacyDrop.id] } : {})
+    },
+    materialProperties: Object.fromEntries(
+      Object.entries(resolved).map(([key, closure]) => [key, closure.properties])
+    )
+  };
+}
+
 /**
  * Build the demo's initial SPH state: a `baseMaterial` block resting on the box floor (cold) and a
  * `dropMaterial` block above it (hot, so it starts molten/liquid) that falls onto it. The two
@@ -1153,6 +1822,7 @@ export function buildSphPhaseDemoState({
   baseMaterial = 'h2o',
   dropTemperatureK,
   baseTemperatureK,
+  initialBodies = null,
   dropParticleEdge = 3, // N -> N^3 particles in the drop block
   baseParticleEdge = 5, // N -> N^3 particles in the base block
   adaptiveParticleSpacing = true,
@@ -1164,6 +1834,19 @@ export function buildSphPhaseDemoState({
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {
+  if (initialBodies != null) {
+    return buildSphInitialBodiesDemoState({
+      scenario,
+      closures,
+      allowFixtureMaterialProperties,
+      allowReducedProductProperties,
+      initialBodies,
+      initialTargetNeighborCount,
+      mechanics,
+      materialPropertyBank,
+      materialPropertyCrystalStructureBank
+    });
+  }
   const baseClosures = {
     ...(allowFixtureMaterialProperties ? createReferenceMaterialClosures() : {}),
     ...(closures || {})
@@ -1580,6 +2263,27 @@ export function particleRenderDescriptors(demo, { gasPressure = null } = {}) {
 // counterpart of emissiveTemperatureByMaterialFromSphRenderRows, so the
 // sphere/CPU-mesh lanes can scale emissive intensity with the same
 // Stefan-Boltzmann law the surface WGSL uses above its ramp anchor.
+function initialBodyEmissiveAuthorityKey({ material, phase, renderDomainId }) {
+  const domainId = Math.max(0, Math.round(Number(renderDomainId) || 0));
+  if (domainId <= 0) return null;
+  return `render-domain:${domainId}|material:${material || 'unknown'}|phase:${phase || 'unknown'}`;
+}
+
+function emissiveRenderDomainIdForParticle(particle) {
+  const explicitDomainId = Math.max(
+    0,
+    Math.round(Number(particle?.renderDomainId ?? particle?.initialBodyDomainId) || 0)
+  );
+  if (explicitDomainId > 0) return explicitDomainId;
+  // The legacy two-role view-state adapter has always exposed base/drop as
+  // render domains 1/2. Mirror that authority here so strict domain lookup
+  // does not turn an incandescent legacy body dark before resident rows are
+  // available.
+  if (particle?.role === 'base') return 1;
+  if (particle?.role === 'drop') return 2;
+  return 0;
+}
+
 export function surfaceEmissiveTemperature(demo) {
   const acc = {};
   for (const p of demo.state.particles) {
@@ -1588,9 +2292,16 @@ export function surfaceEmissiveTemperature(demo) {
     const inc = incandescentColor(eq.temperatureK);
     if (!inc.visible) continue;
     const lum = 0.2126 * inc.srgb[0] + 0.7152 * inc.srgb[1] + 0.0722 * inc.srgb[2];
-    const a = acc[p.material] || (acc[p.material] = { t: 0, w: 0 });
-    a.t += eq.temperatureK * lum;
-    a.w += lum;
+    const domainKey = initialBodyEmissiveAuthorityKey({
+      material: p.material,
+      phase: eq.stablePhase,
+      renderDomainId: emissiveRenderDomainIdForParticle(p)
+    });
+    for (const key of [p.material, domainKey].filter(Boolean)) {
+      const a = acc[key] || (acc[key] = { t: 0, w: 0 });
+      a.t += eq.temperatureK * lum;
+      a.w += lum;
+    }
   }
   const out = {};
   for (const [material, a] of Object.entries(acc)) {
@@ -1607,11 +2318,18 @@ export function surfaceEmissive(demo) {
     const inc = incandescentColor(eq.temperatureK);
     if (!inc.visible) continue;
     const lum = 0.2126 * inc.srgb[0] + 0.7152 * inc.srgb[1] + 0.0722 * inc.srgb[2];
-    const a = acc[p.material] || (acc[p.material] = { r: 0, g: 0, b: 0, w: 0 });
-    a.r += inc.srgb[0] * lum;
-    a.g += inc.srgb[1] * lum;
-    a.b += inc.srgb[2] * lum;
-    a.w += lum;
+    const domainKey = initialBodyEmissiveAuthorityKey({
+      material: p.material,
+      phase: eq.stablePhase,
+      renderDomainId: emissiveRenderDomainIdForParticle(p)
+    });
+    for (const key of [p.material, domainKey].filter(Boolean)) {
+      const a = acc[key] || (acc[key] = { r: 0, g: 0, b: 0, w: 0 });
+      a.r += inc.srgb[0] * lum;
+      a.g += inc.srgb[1] * lum;
+      a.b += inc.srgb[2] * lum;
+      a.w += lum;
+    }
   }
   const out = {};
   for (const [material, a] of Object.entries(acc)) {
@@ -1693,6 +2411,11 @@ const PRESSURE_WALL_FACES = Object.freeze([
 function finitePositive(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function finiteNonNegative(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
 function pressureBoxDimensionsM(boxDimsM, boxVolumeM3) {
@@ -2114,7 +2837,7 @@ export function gasPressureCellFieldSummary({
   const workerRetainedGasPressureBufferRefs = localGradientReady
     ? uniqueStringsFrom(effectiveField?.workerRetainedGasPressureBufferRefs)
     : [];
-  const pressureGaugePa = usable ? totalPressurePa - finitePositive(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
+  const pressureGaugePa = usable ? totalPressurePa - finiteNonNegative(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
   const spatialLedger = spatialGasSpeciesLedgerFromPressureSummary(pressureSummary);
   return {
     schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
@@ -2293,6 +3016,78 @@ function cleanVector3(value, epsilon = 1e-12) {
   return value.map((component) => (Math.abs(component) <= epsilon ? 0 : component));
 }
 
+function interfacePressureReferencePa(pressureFeedback = null) {
+  return finiteNonNegative(pressureFeedback?.externalPressurePa, 0);
+}
+
+function uniformGaugePressureStressEvidence({
+  pressureFeedback = null,
+  fallbackPressurePa = Number.NaN,
+  pressureReferencePa = 0
+} = {}) {
+  const gasCellField = pressureFeedback?.gasCellField || null;
+  const localGradientReady = gasCellField?.localPressureGradientReady === true;
+  if (!localGradientReady) {
+    const gaugePressurePa = Number.isFinite(fallbackPressurePa)
+      ? fallbackPressurePa - pressureReferencePa
+      : null;
+    return {
+      schema: 'peercompute.ulg.uniform-gauge-pressure-stress-evidence.v0',
+      status: Number.isFinite(gaugePressurePa)
+        ? 'uniform-gauge-pressure-stress-ready'
+        : 'uniform-gauge-pressure-stress-blocked-pressure-unavailable',
+      eligible: Number.isFinite(gaugePressurePa),
+      pressurePa: gaugePressurePa,
+      pressureRangePa: Number.isFinite(gaugePressurePa)
+        ? [gaugePressurePa, gaugePressurePa]
+        : null,
+      source: 'uniform-sealed-gas-pressure',
+      sourceCellCount: Number.isFinite(gaugePressurePa) ? 1 : 0
+    };
+  }
+
+  const cellPressuresPa = (Array.isArray(gasCellField?.cells) ? gasCellField.cells : [])
+    .filter((cell) => !cell?.status || cell.status === 'local-gas-pressure-cell-ready')
+    .map((cell) => Number(cell?.pressurePa))
+    .filter((pressurePa) => Number.isFinite(pressurePa) && pressurePa >= 0);
+  if (cellPressuresPa.length === 0) {
+    return {
+      schema: 'peercompute.ulg.uniform-gauge-pressure-stress-evidence.v0',
+      status: 'uniform-gauge-pressure-stress-blocked-local-field-not-readable',
+      eligible: false,
+      pressurePa: null,
+      pressureRangePa: null,
+      source: 'local-gas-cell-pressure-gradient',
+      sourceCellCount: 0
+    };
+  }
+  const minAbsolutePressurePa = Math.min(...cellPressuresPa);
+  const maxAbsolutePressurePa = Math.max(...cellPressuresPa);
+  const spanPa = maxAbsolutePressurePa - minAbsolutePressurePa;
+  const tolerancePa = Math.max(1e-3, Math.max(Math.abs(minAbsolutePressurePa), Math.abs(maxAbsolutePressurePa)) * 1e-6);
+  const eligible = spanPa <= tolerancePa;
+  const meanAbsolutePressurePa = cellPressuresPa.reduce((sum, value) => sum + value, 0)
+    / cellPressuresPa.length;
+  return {
+    schema: 'peercompute.ulg.uniform-gauge-pressure-stress-evidence.v0',
+    status: eligible
+      ? 'uniform-gauge-pressure-stress-ready'
+      : 'uniform-gauge-pressure-stress-blocked-nonuniform-field',
+    eligible,
+    pressurePa: eligible ? meanAbsolutePressurePa - pressureReferencePa : null,
+    pressureRangePa: [
+      minAbsolutePressurePa - pressureReferencePa,
+      maxAbsolutePressurePa - pressureReferencePa
+    ],
+    source: eligible
+      ? 'uniform-local-gas-cell-pressure-field'
+      : 'nonuniform-local-gas-cell-pressure-field',
+    sourceCellCount: cellPressuresPa.length,
+    pressureSpanPa: spanPa,
+    uniformityTolerancePa: tolerancePa
+  };
+}
+
 export function gasPressureInterfaceForcePreview({
   pressureFeedback = null,
   materialInterfaceField = null,
@@ -2307,6 +3102,10 @@ export function gasPressureInterfaceForcePreview({
   });
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const fallbackPressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
+  const pressureReferencePa = interfacePressureReferencePa(pressureFeedback);
+  const fallbackPressureGaugePa = Number.isFinite(fallbackPressurePa)
+    ? fallbackPressurePa - pressureReferencePa
+    : null;
   const algorithmContactPolicy = normalizeAlgorithmContactPairResponsePolicy({
     algorithmMaterialContactRows,
     algorithmContactPairResponseScale,
@@ -2342,7 +3141,15 @@ export function gasPressureInterfaceForcePreview({
       }
       const contactResponse = algorithmContactPairResponseForElement(element, algorithmContactPolicy);
       const algorithmContactPressurePa = Math.max(0, Number(contactResponse.contactPressurePa) || 0);
-      const pressurePa = pressureSample.pressurePa + algorithmContactPressurePa;
+      // The condensed MLS-MPM stress is already referenced to the scene's
+      // ambient pressure. Applying absolute gas pressure here would inject an
+      // extra atmosphere on every interface element. Only the gas gauge
+      // pressure, plus the independent contact response, is a physical load.
+      const sampledGasGaugePressurePa = pressureSample.pressurePa - pressureReferencePa;
+      const gasGaugePressurePa = gasPressureTractionEligibleForElement(element)
+        ? sampledGasGaugePressurePa
+        : 0;
+      const pressurePa = gasGaugePressurePa + algorithmContactPressurePa;
       if (algorithmContactPressurePa > 0) {
         algorithmContactForceRowCount += 1;
         maxAlgorithmContactPressurePa = Math.max(maxAlgorithmContactPressurePa, algorithmContactPressurePa);
@@ -2384,6 +3191,10 @@ export function gasPressureInterfaceForcePreview({
     pressureInterfaceCouplingStatus: coupling.status,
     forceCouplingStatus: coupling.forceCouplingStatus,
     gasInterfacePressurePa: Number.isFinite(fallbackPressurePa) ? fallbackPressurePa : null,
+    gasInterfacePressureReferencePa: pressureReferencePa,
+    gasInterfaceGaugePressurePa: Number.isFinite(fallbackPressureGaugePa)
+      ? fallbackPressureGaugePa
+      : null,
     gasInterfacePressureRangePa: previewedElementCount > 0
       ? [minInterfacePressurePa, maxInterfacePressurePa]
       : null,
@@ -2418,8 +3229,8 @@ export function gasPressureInterfaceForcePreview({
     netForceN,
     surfaceForces: [...forceBySurface.values()],
     forceDerivation: pressureFieldResolution.localPressureGradientReady
-      ? `local-gas-cell-pressure-gradient-times-interface-normal-area-vector${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`
-      : `uniform-gas-pressure-times-interface-normal-area-vector${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`,
+      ? `local-gas-cell-gauge-pressure-gradient-times-interface-normal-area-vector${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`
+      : `uniform-gas-gauge-pressure-times-interface-normal-area-vector${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`,
     forceResolution: pressureFieldResolution.localPressureGradientReady
       ? `local-gradient-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`
       : `uniform-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`,
@@ -2446,6 +3257,15 @@ export function gasPressureInterfaceForceSolver({
   });
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const fallbackPressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
+  const pressureReferencePa = interfacePressureReferencePa(pressureFeedback);
+  const fallbackPressureGaugePa = Number.isFinite(fallbackPressurePa)
+    ? fallbackPressurePa - pressureReferencePa
+    : null;
+  const uniformGaugePressureStress = uniformGaugePressureStressEvidence({
+    pressureFeedback,
+    fallbackPressurePa,
+    pressureReferencePa
+  });
   const algorithmContactPolicy = normalizeAlgorithmContactPairResponsePolicy({
     algorithmMaterialContactRows,
     algorithmContactPairResponseScale,
@@ -2484,7 +3304,12 @@ export function gasPressureInterfaceForceSolver({
       }
       const contactResponse = algorithmContactPairResponseForElement(element, algorithmContactPolicy);
       const algorithmContactPressurePa = Math.max(0, Number(contactResponse.contactPressurePa) || 0);
-      const pressurePa = pressureSample.pressurePa + algorithmContactPressurePa;
+      const sampledGasGaugePressurePa = pressureSample.pressurePa - pressureReferencePa;
+      const gasPressureTractionEligible = gasPressureTractionEligibleForElement(element);
+      const gasGaugePressurePa = gasPressureTractionEligible
+        ? sampledGasGaugePressurePa
+        : 0;
+      const pressurePa = gasGaugePressurePa + algorithmContactPressurePa;
       if (algorithmContactPressurePa > 0) {
         algorithmContactForceRowCount += 1;
         maxAlgorithmContactPressurePa = Math.max(maxAlgorithmContactPressurePa, algorithmContactPressurePa);
@@ -2516,6 +3341,11 @@ export function gasPressureInterfaceForceSolver({
         centroidM: [...centroidM],
         areaM2: element.areaM2,
         pressurePa,
+        absoluteGasPressurePa: pressureSample.pressurePa,
+        gasGaugePressurePa,
+        sampledGasGaugePressurePa,
+        gasPressureTractionEligible,
+        pressureReferencePa,
         gasInterfacePressurePa: pressureSample.pressurePa,
         algorithmContactPressurePa,
         algorithmContactPairKey: contactResponse.row?.pairKey ?? null,
@@ -2583,6 +3413,15 @@ export function gasPressureInterfaceForceSolver({
       ? 'pressure-force-solver-ready-not-applied'
       : coupling.forceCouplingStatus,
     gasInterfacePressurePa: Number.isFinite(fallbackPressurePa) ? fallbackPressurePa : null,
+    gasInterfacePressureReferencePa: pressureReferencePa,
+    gasInterfaceGaugePressurePa: Number.isFinite(fallbackPressureGaugePa)
+      ? fallbackPressureGaugePa
+      : null,
+    uniformGaugePressureStressEvidence: uniformGaugePressureStress,
+    uniformGaugePressureStressEligible: uniformGaugePressureStress.eligible === true,
+    uniformGaugePressureStressPa: uniformGaugePressureStress.pressurePa,
+    uniformGaugePressureStressRangePa: uniformGaugePressureStress.pressureRangePa,
+    uniformGaugePressureStressSource: uniformGaugePressureStress.source,
     gasInterfacePressureRangePa: ready
       ? [minInterfacePressurePa, maxInterfacePressurePa]
       : null,
@@ -2628,8 +3467,8 @@ export function gasPressureInterfaceForceSolver({
       ? 'pairwise-equal-opposite-force-conservative'
       : (ready ? 'pairwise-force-residual-nonzero' : 'not-evaluated'),
     forceDerivation: pressureFieldResolution.localPressureGradientReady
-      ? `local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`
-      : `uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`,
+      ? `local-gas-cell-gauge-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`
+      : `uniform-gas-gauge-pressure-interface-normal-area-with-equal-opposite-gas-reaction${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`,
     forceResolution: pressureFieldResolution.localPressureGradientReady
       ? `local-gradient-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`
       : `uniform-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`,
@@ -2652,10 +3491,12 @@ export function gasPressureFeedbackSummary({
 } = {}) {
   const totalPressurePa = Number(pressureSummary?.totalPressurePa);
   const strictReactionGate = pressureSummary?.strictReactionGate || null;
-  const strictGateBlocked = strictReactionGate?.status && strictReactionGate.status !== 'strict-reaction-gate-pass';
+  const strictGateRequired = pressureSummary?.strictReactionGateRequired === true;
+  const strictGateBlocked = strictGateRequired
+    && !strictReactionGateAllowsForceCoupling(strictReactionGate);
   const dims = pressureBoxDimensionsM(boxDimsM || pressureSummary?.boxDimsM, pressureSummary?.boxVolumeM3);
   const usable = Number.isFinite(totalPressurePa) && dims.every((value) => value > 0);
-  const pressureGaugePa = usable ? totalPressurePa - finitePositive(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
+  const pressureGaugePa = usable ? totalPressurePa - finiteNonNegative(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
   const gasCellField = gasPressureCellFieldSummary({
     pressureSummary,
     boxDimsM: dims,
@@ -2685,7 +3526,7 @@ export function gasPressureFeedbackSummary({
     status: usable ? 'wall-pressure-ledger-ready' : 'wall-pressure-ledger-unavailable',
     source: source || pressureSummary?.source || 'gas-pressure-summary',
     totalPressurePa: Number.isFinite(totalPressurePa) ? totalPressurePa : null,
-    externalPressurePa: finitePositive(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa),
+    externalPressurePa: finiteNonNegative(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa),
     pressureGaugePa,
     boxDimsM: dims,
     wallLedger,
@@ -2706,6 +3547,7 @@ export function gasPressureFeedbackSummary({
       'material-surface-normals-and-areas'
     ],
     strictReactionGateStatus: strictReactionGate?.status ?? null,
+    strictReactionGateRequired: strictGateRequired,
     strictReactionGateBlockers: [...(strictReactionGate?.blockers || [])],
     forceCouplingStatus: strictGateBlocked
       ? 'blocked-strict-reaction-gate'
@@ -2737,6 +3579,8 @@ function finalizeGasPressureSummary({
   fullParticleReadbackPerformed = true,
   baselineSummary = null,
   residentLedger = null,
+  strictReactionGate = null,
+  strictReactionGateRequired = residentLedger != null,
   spatialGasSpeciesLedger = null,
   gasCellField = null,
   externalPressurePa = PHYSICAL_CONSTANTS.standardAtmospherePa
@@ -2776,7 +3620,8 @@ function finalizeGasPressureSummary({
       : 'blocked-resident-spatial-gas-species-ledger-required',
     baselineSummaryStatus: baselineSummary?.status ?? null,
     residentLedgerStatus: residentLedger?.status ?? null,
-    strictReactionGate: residentLedger?.strictReactionGate ?? null,
+    strictReactionGate: strictReactionGate ?? residentLedger?.strictReactionGate ?? null,
+    strictReactionGateRequired: strictReactionGateRequired === true,
     scientificValidation: false,
     gasValidation: false,
     sphValidation: false,
@@ -3012,6 +3857,7 @@ function addSpatialGasSpeciesLedgerSpecies(species, spatialGasSpeciesLedger, fal
 function gasPressureSummaryFromSpatialGasSpeciesLedger({
   baselineSummary = null,
   residentLedger = null,
+  strictReactionGate = null,
   spatialGasSpeciesLedger = null,
   gasCellField = null,
   fallbackTemperatureK = 293.15,
@@ -3036,6 +3882,7 @@ function gasPressureSummaryFromSpatialGasSpeciesLedger({
     fullParticleReadbackPerformed: false,
     baselineSummary,
     residentLedger,
+    strictReactionGate,
     spatialGasSpeciesLedger,
     gasCellField
   });
@@ -3079,28 +3926,25 @@ export function gasPressureSummaryFromResidentReaction({
   const residentProductMassGasLedger = residentProductMass?.gasSpeciesLedger?.schema
     ? residentProductMass.gasSpeciesLedger
     : null;
+  const classifiedStrictReactionGate = [
+    reactionSummary?.strictReactionGate,
+    residentProductMass?.strictReactionGate
+  ].find((gate) => strictReactionGateIsClassified(gate)) || null;
   const compactLedgerAvailable = Boolean(reactionSummary?.compactLedgerAvailable || residentProductMassGasLedger);
-  // The spatial gas ledger (per-cell positions from the producer stage) is
-  // the richer pressure authority than the sealed-box reaction totals: try
-  // the promotion FIRST whenever the interface carries a ready ledger, and
-  // only fall back to the species-total ledger when no spatial evidence
-  // exists. Ordering matters - once the reaction gas ledger became available
-  // in the no-full hot loop it short-circuited the promotion entirely.
-  {
-    const pressureInterfaceLedger = spatialGasSpeciesLedger
-      || spatialGasSpeciesLedgerFromPressureInterfaceState(pressureInterfaceState);
-    const pressureInterfaceGasCellField = gasCellField
-      || gasCellFieldFromPressureInterfaceState(pressureInterfaceState);
-    if (spatialGasSpeciesLedgerReady(pressureInterfaceLedger)) {
+  // An explicitly supplied spatial ledger belongs to this request and remains
+  // the richest pressure authority. A ledger found only on the previous
+  // pressure-interface state is not necessarily current; it must not outrank
+  // a newly completed compact/product-mass ledger.
+  if (spatialGasSpeciesLedgerReady(spatialGasSpeciesLedger)) {
       const promotedPressure = gasPressureSummaryFromSpatialGasSpeciesLedger({
         baselineSummary,
         residentLedger: residentProductMass || reactionSummary,
-        spatialGasSpeciesLedger: pressureInterfaceLedger,
-        gasCellField: pressureInterfaceGasCellField,
+        strictReactionGate: classifiedStrictReactionGate,
+        spatialGasSpeciesLedger,
+        gasCellField,
         fallbackTemperatureK
       });
       if (promotedPressure) return promotedPressure;
-    }
   }
   if (!compactLedgerAvailable) {
     const pressureInterfaceLedger = spatialGasSpeciesLedger
@@ -3110,6 +3954,7 @@ export function gasPressureSummaryFromResidentReaction({
     const promotedPressure = gasPressureSummaryFromSpatialGasSpeciesLedger({
       baselineSummary,
       residentLedger: residentProductMass || reactionSummary,
+      strictReactionGate: classifiedStrictReactionGate,
       spatialGasSpeciesLedger: pressureInterfaceLedger,
       gasCellField: pressureInterfaceGasCellField,
       fallbackTemperatureK
@@ -3195,6 +4040,7 @@ export function gasPressureSummaryFromResidentReaction({
         fullParticleReadbackPerformed: false,
         baselineSummary,
         residentLedger: reactionSummary || residentProductMass,
+        strictReactionGate: classifiedStrictReactionGate,
         spatialGasSpeciesLedger
       }),
       residentGasSpeciesCount: residentGasSpecies.length || residentGasRows.length,
@@ -3286,6 +4132,7 @@ export function gasPressureSummaryFromResidentReaction({
         fullParticleReadbackPerformed: false,
         baselineSummary,
         residentLedger: reactionSummary,
+        strictReactionGate: classifiedStrictReactionGate,
         spatialGasSpeciesLedger
       }),
       residentProductGasSource: source,
@@ -3370,7 +4217,8 @@ export function gasPressureSummaryFromResidentReaction({
       source: 'gpu-resident-reaction-summary',
       fullParticleReadbackPerformed: false,
       baselineSummary,
-      residentLedger: reactionSummary
+      residentLedger: reactionSummary,
+      strictReactionGate: classifiedStrictReactionGate
     }),
     residentGasSpeciesMaterial: material,
     residentGasProductMassKg: massKg,
@@ -3378,6 +4226,98 @@ export function gasPressureSummaryFromResidentReaction({
     residentLedgerStatus: reactionSummary.status,
     residentLedgerGasProductMassKg: reactionSummary.ledgerGasProductMassKg ?? null,
     residentLedgerUnplacedGasProductMassKg: reactionSummary.ledgerUnplacedGasProductMassKg ?? null
+  };
+}
+
+/**
+ * Reconstruct a single resolved gas species from the resident compact thermal
+ * phase summary. The compact reduction carries aggregate phase mass rather
+ * than a material histogram, so callers must prove that the gas inventory can
+ * only belong to `material` before using this helper. This keeps the normal
+ * GPU-resident render path readback-free while still giving water vapour the
+ * pressure/temperature state required by its condensation optical closure.
+ */
+export function gasPressureSummaryFromResidentThermalPhase({
+  baselineSummary = null,
+  gasMassKg = null,
+  material = null,
+  materialProperties = {},
+  temperatureK = null
+} = {}) {
+  const materialKey = gasSpeciesKey(material);
+  const resolvedGasMassKg = Number(gasMassKg);
+  const properties = materialProperties?.[materialKey] || materialProperties?.[material] || null;
+  const molarMassKgPerMol = Number(properties?.molarMassKgPerMol);
+  if (
+    !baselineSummary?.schema
+    || !materialKey
+    || !Number.isFinite(resolvedGasMassKg)
+    || resolvedGasMassKg < 0
+    || !(molarMassKgPerMol > 0)
+  ) {
+    return null;
+  }
+
+  const species = {};
+  for (const [baselineMaterial, item] of Object.entries(baselineSummary.bySpecies || {})) {
+    if (gasSpeciesKey(baselineMaterial) === materialKey) continue;
+    addGasSpecies(species, baselineMaterial, {
+      massKg: Number(item.massKg) || 0,
+      moles: Number(item.moles) || 0,
+      temperatureK: Number(item.temperatureK) || 293.15
+    });
+  }
+  const gasTemperatureK = Math.max(
+    gasTemperatureForMaterial(materialKey, materialProperties, temperatureK),
+    Number.isFinite(Number(temperatureK)) ? Number(temperatureK) : 0
+  );
+  addGasSpecies(species, materialKey, {
+    massKg: resolvedGasMassKg,
+    moles: resolvedGasMassKg / molarMassKgPerMol,
+    temperatureK: gasTemperatureK
+  });
+
+  const baselineMaterialGasMassKg = Math.max(
+    0,
+    Number(baselineSummary.bySpecies?.[materialKey]?.massKg) || 0
+  );
+  const condensedDensityKgPerM3 = phaseDensityKgPerM3(properties, 'liquid')
+    || phaseDensityKgPerM3(properties, 'solid');
+  const materialGasMassDeltaKg = resolvedGasMassKg - baselineMaterialGasMassKg;
+  const condensedVolumeDeltaM3 = condensedDensityKgPerM3
+    ? materialGasMassDeltaKg / condensedDensityKgPerM3
+    : 0;
+  const boxVolumeM3 = Math.max(
+    Number(baselineSummary.boxVolumeM3) || 0,
+    Number(baselineSummary.gasVolumeM3) || 0,
+    1e-9
+  );
+  const condensedVolumeM3 = Math.min(
+    boxVolumeM3,
+    Math.max(0, (Number(baselineSummary.condensedVolumeM3) || 0) - condensedVolumeDeltaM3)
+  );
+  const gasVolumeM3 = Math.max(
+    boxVolumeM3 - condensedVolumeM3,
+    Number(baselineSummary.gasVolumeM3) || 0,
+    1e-9
+  );
+  return {
+    ...finalizeGasPressureSummary({
+      species,
+      gasVolumeM3,
+      condensedVolumeM3,
+      boxVolumeM3,
+      boxDimsM: baselineSummary.boxDimsM || null,
+      status: 'gpu-resident-thermal-phase-pressure-summary',
+      source: 'gpu-resident-compact-thermal-phase-single-species',
+      fullParticleReadbackPerformed: false,
+      baselineSummary,
+      strictReactionGateRequired: false
+    }),
+    residentThermalGasMaterial: materialKey,
+    residentThermalGasMassKg: resolvedGasMassKg,
+    residentThermalGasTemperatureK: gasTemperatureK,
+    residentThermalGasSpeciesResolution: 'single-material-compact-phase-mass'
   };
 }
 
@@ -3411,7 +4351,10 @@ export function gasPressureSummary(demo) {
     }
   }
   const airProps = demo.materialProperties.air;
-  const airVolumeM3 = Math.max(boxVolumeM3 - demo.scenario.iron.volumeM3 - demo.scenario.ice.volumeM3, 0);
+  const initialOccupiedVolumeM3 = demo.initialBodies
+    ? Number(demo.initialParticleSpacing?.totalBlockVolumeM3) || 0
+    : demo.scenario.iron.volumeM3 + demo.scenario.ice.volumeM3;
+  const airVolumeM3 = Math.max(boxVolumeM3 - initialOccupiedVolumeM3, 0);
   if (airProps?.molarMassKgPerMol > 0 && airVolumeM3 > 0) {
     const airTemperatureK = demo.initialTemperaturesK?.gas ?? demo.scenario.gas.initialTemperatureK;
     const airDensity = idealGasDensityKgPerM3({
@@ -3461,6 +4404,7 @@ function particleSupportRadiusM(particle) {
 function initialBlockGeometrySummary(demo) {
   const roles = {};
   for (const particle of demo.state.particles) {
+    if (particle.spareProductSlot === true || !(Number(particle.massKg) > 0)) continue;
     const role = particle.role || 'unassigned';
     const radius = particleSupportRadiusM(particle);
     const entry = roles[role] || {
@@ -3541,6 +4485,218 @@ function solveClosureEquilibriumK(parts) {
     else hi = mid;
   }
   return 0.5 * (lo + hi);
+}
+
+function computeDerivedInitialBodiesPreflight(demo) {
+  const scenario = demo.scenario;
+  const airProps = demo.materialProperties.air;
+  const airTemp = demo.initialTemperaturesK?.gas ?? scenario.gas.initialTemperatureK;
+  const wallTemps = Object.values(scenario.walls.faces);
+  const maxWallTempK = Math.max(...wallTemps);
+  const meanWallTempK = wallTemps.reduce((sum, temperatureK) => sum + temperatureK, 0)
+    / wallTemps.length;
+  const adiabatic = scenario.walls.model === 'adiabatic';
+  const boxDims = demo.box?.dimensionsM
+    ?? scenario.box?.dimensionsM
+    ?? [scenario.box.edgeM, scenario.box.edgeM, scenario.box.edgeM];
+  const boxVolumeM3 = product3(boxDims);
+  const totalInitialBodyVolumeM3 = Number(
+    demo.initialParticleSpacing?.totalBlockVolumeM3
+  ) || 0;
+  const airVolumeM3 = Math.max(boxVolumeM3 - totalInitialBodyVolumeM3, 0);
+  const airDensity = airProps
+    ? idealGasDensityKgPerM3({
+      pressurePa: scenario.gas.pressurePa,
+      temperatureK: airTemp,
+      molarMassKgPerMol: airProps.molarMassKgPerMol
+    })
+    : 0;
+  const airMassKg = airVolumeM3 * airDensity;
+
+  const bodyParts = demo.initialBodies.bodies.map((body) => {
+    const plan = demo.initialParticleSpacing.byBodyId[body.id];
+    return {
+      id: body.id,
+      domainId: body.domainId,
+      material: body.material,
+      massKg: plan.totalMassKg,
+      volumeM3: plan.blockVolumeM3,
+      macroParticleCount: demo.counts.byBodyId[body.id],
+      properties: demo.materialProperties[body.material],
+      initialTemperatureK: body.temperatureK,
+      legacyRole: body.legacyRole || null
+    };
+  });
+  const equilibriumParts = bodyParts.map((body) => ({
+    massKg: body.massKg,
+    properties: body.properties,
+    initialTemperatureK: body.initialTemperatureK
+  }));
+  if (airProps && airMassKg > 0) {
+    equilibriumParts.push({
+      massKg: airMassKg,
+      properties: airProps,
+      initialTemperatureK: airTemp
+    });
+  }
+  const adiabaticEquilibriumK = solveClosureEquilibriumK(equilibriumParts);
+  const asymptoticInteriorTempK = adiabatic ? adiabaticEquilibriumK : meanWallTempK;
+  const bindingInteriorTempK = adiabatic ? adiabaticEquilibriumK : maxWallTempK;
+  const initialEnergyJ = equilibriumParts.reduce(
+    (sum, part) => sum + part.massKg * specificInternalEnergyJPerKg(
+      part.properties,
+      part.initialTemperatureK
+    ),
+    0
+  );
+  const finalEnergyJ = equilibriumParts.reduce(
+    (sum, part) => sum + part.massKg * specificInternalEnergyJPerKg(
+      part.properties,
+      asymptoticInteriorTempK
+    ),
+    0
+  );
+  const heatExportedToWallsJ = adiabatic ? 0 : initialEnergyJ - finalEnergyJ;
+  const finalPhaseByBodyId = Object.fromEntries(bodyParts.map((body) => [
+    body.id,
+    equilibriumFromSpecificEnergy(
+      body.properties,
+      specificInternalEnergyJPerKg(body.properties, bindingInteriorTempK)
+    ).stablePhase
+  ]));
+  const thermodynamicFeasible = bodyParts.every((body) => Boolean(finalPhaseByBodyId[body.id]));
+  const initialGeometry = initialBlockGeometrySummary(demo);
+  const geometryBlocked = initialGeometry.blockers.length > 0;
+  const feasible = thermodynamicFeasible && !geometryBlocked;
+  const sinkFaceCount = heatExportedToWallsJ > 0 ? wallTemps.length : 0;
+  const wallAreaM2ByFace = {
+    xMin: boxDims[1] * boxDims[2],
+    xMax: boxDims[1] * boxDims[2],
+    yMin: boxDims[0] * boxDims[2],
+    yMax: boxDims[0] * boxDims[2],
+    zMin: boxDims[0] * boxDims[1],
+    zMax: boxDims[0] * boxDims[1]
+  };
+  const wallLedger = Object.entries(scenario.walls.faces).map(([faceId, temperatureK]) => ({
+    faceId,
+    temperatureK,
+    role: heatExportedToWallsJ > 0 ? 'sink' : 'balanced',
+    areaM2: wallAreaM2ByFace[faceId] ?? 0,
+    areaFraction: 1 / 6,
+    heatJ: sinkFaceCount > 0 ? heatExportedToWallsJ / sinkFaceCount : 0
+  }));
+  const particleResolutionByBodyId = Object.fromEntries(bodyParts.map((body) => [
+    body.id,
+    materialEntities(
+      body.material,
+      body.massKg,
+      body.properties,
+      body.macroParticleCount
+    )
+  ]));
+  const particleResolutionByMaterial = {};
+  for (const body of bodyParts) {
+    const entry = particleResolutionByMaterial[body.material] || {
+      material: body.material,
+      macroParticleCount: 0,
+      totalEntities: 0,
+      entitiesPerMacroParticle: null
+    };
+    const bodyResolution = particleResolutionByBodyId[body.id];
+    entry.macroParticleCount += body.macroParticleCount;
+    entry.totalEntities += Number(bodyResolution.totalEntities) || 0;
+    entry.entitiesPerMacroParticle = entry.macroParticleCount > 0
+      ? entry.totalEntities / entry.macroParticleCount
+      : null;
+    particleResolutionByMaterial[body.material] = entry;
+  }
+  const baseBody = bodyParts.find((body) => body.legacyRole === 'base') || null;
+  const dropBody = bodyParts.find((body) => body.legacyRole === 'drop') || null;
+  const h2oBody = bodyParts.find((body) => String(body.material).toLowerCase() === 'h2o') || null;
+  const feBody = bodyParts.find((body) => String(body.material).toLowerCase() === 'fe') || null;
+  const massesByBodyId = Object.fromEntries(bodyParts.map((body) => [body.id, body.massKg]));
+  const materialsByBodyId = Object.fromEntries(bodyParts.map((body) => [body.id, body.material]));
+  const gasResolution = airProps
+    ? materialEntities('air', airMassKg, airProps, scenario.particleResolution?.gas || 0)
+    : null;
+
+  return {
+    scenarioId: scenario.scenarioId,
+    status: geometryBlocked
+      ? 'preflight-blocked-initial-geometry'
+      : (thermodynamicFeasible
+          ? 'preflight-feasible-derived-closures'
+          : 'preflight-infeasible-derived-closures'),
+    materials: {
+      bodies: bodyParts.map((body) => ({
+        id: body.id,
+        domainId: body.domainId,
+        material: body.material
+      })),
+      byBodyId: materialsByBodyId,
+      gas: 'air',
+      ...(baseBody ? { base: baseBody.material } : {}),
+      ...(dropBody ? { drop: dropBody.material } : {})
+    },
+    masses: {
+      byBodyId: massesByBodyId,
+      initialBodiesMassKg: bodyParts.reduce((sum, body) => sum + body.massKg, 0),
+      initialBodiesVolumeM3: totalInitialBodyVolumeM3,
+      airVolumeM3,
+      airMassKg,
+      airDensityKgPerM3: airDensity,
+      ...(baseBody ? { baseMassKg: baseBody.massKg } : {}),
+      ...(dropBody ? { dropMassKg: dropBody.massKg } : {})
+    },
+    energyBudget: {
+      initialInternalEnergyJ: initialEnergyJ,
+      finalInternalEnergyJ: finalEnergyJ,
+      heatExportedToWallsJ,
+      wallLedger
+    },
+    boundary: {
+      model: scenario.walls.model,
+      wallTemperaturesK: { ...scenario.walls.faces },
+      maxWallTempK,
+      meanWallTempK,
+      asymptoticInteriorTempK,
+      adiabaticEquilibriumK
+    },
+    initialGeometry,
+    feasibility: {
+      feasible,
+      thermodynamicFeasible,
+      geometryBlocked,
+      bindingInteriorTempK,
+      finalPhaseByBodyId,
+      finalH2oPhase: h2oBody ? finalPhaseByBodyId[h2oBody.id] : null,
+      finalFePhase: feBody ? finalPhaseByBodyId[feBody.id] : null,
+      ...(baseBody ? { finalBasePhase: finalPhaseByBodyId[baseBody.id] } : {}),
+      ...(dropBody ? { finalDropPhase: finalPhaseByBodyId[dropBody.id] } : {}),
+      reason: feasible
+        ? `closure-derived wall equilibrium resolves stable phases for ${bodyParts.length} initial bodies`
+        : (geometryBlocked
+            ? 'initial body support extents overlap; move or resize a body before interpreting contact physics'
+            : 'closure-derived wall equilibrium did not resolve a stable phase for every initial body')
+    },
+    particleResolution: {
+      byBodyId: particleResolutionByBodyId,
+      byMaterial: particleResolutionByMaterial,
+      gas: gasResolution,
+      ...(h2oBody ? { h2o: particleResolutionByBodyId[h2oBody.id] } : {}),
+      ...(feBody ? { fe: particleResolutionByBodyId[feBody.id] } : {}),
+      ...(baseBody ? { base: particleResolutionByBodyId[baseBody.id] } : {}),
+      ...(dropBody ? { drop: particleResolutionByBodyId[dropBody.id] } : {})
+    },
+    closureBacked: true,
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    blockers: [...new Set(['derived-material-models-unvalidated', ...initialGeometry.blockers])]
+  };
 }
 
 function computeDerivedDemoPreflight(demo) {
@@ -3991,7 +5147,7 @@ export function createSphPhaseDemo(options = {}) {
   // the activation temperature the reactant particles become the product and release the derived heat
   // (→ temperature → phase change / steam → expansion). Any derived product-compound closure is
   // registered into materialProperties so the product renders and carries thermodynamics.
-  const discovery = discoverReactions(demo.dropMaterial, demo.baseMaterial, {
+  const discoveryOptions = {
     materialProperties: demo.materialProperties,
     reactionDiscoveryCacheRecord: options.reactionDiscoveryCacheRecord,
     cachedReactionDiscoveryRecord: options.cachedReactionDiscoveryRecord,
@@ -4000,7 +5156,13 @@ export function createSphPhaseDemo(options = {}) {
     allowFixtureMaterialProperties: demo.allowFixtureMaterialProperties,
     allowReducedProductProperties: options.allowReducedProductProperties === true
       || demo.allowFixtureMaterialProperties
-  });
+  };
+  const discovery = demo.initialBodies
+    ? discoverReactionNetwork(
+      demo.initialBodies.bodies.map((body) => body.material),
+      discoveryOptions
+    )
+    : discoverReactions(demo.dropMaterial, demo.baseMaterial, discoveryOptions);
   const discoveredReactions = discovery.reactions;
   for (const [key, closure] of Object.entries(discovery.productClosures)) {
     if (!demo.allowFixtureMaterialProperties && options.allowReducedProductProperties !== true) {
@@ -4032,7 +5194,9 @@ export function createSphPhaseDemo(options = {}) {
   return {
     demo,
     preflight() {
-      return computeDerivedDemoPreflight(demo);
+      return demo.initialBodies
+        ? computeDerivedInitialBodiesPreflight(demo)
+        : computeDerivedDemoPreflight(demo);
     },
     step() {
       const startedAtMs = nowMs();

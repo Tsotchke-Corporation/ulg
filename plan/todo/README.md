@@ -39,6 +39,32 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-07-15 AKDT: visible/contact geometry, excessive
+water damping, non-derived heat transfer, delayed local vapor onset, and
+phase-fraction surface appearance now route through
+`plan/todo/surface-contact-transport-phase-closure-plan.md` (ICC task
+`surface-contact-transport-phase-closure-20260715`). The reported `1.9`
+setting is the live blob-radius multiplier, not an isovalue; it closely matches
+the current shared-grid numerical-support ratio (~`1.86`). Do not make it a
+new default. Unify physical/contact/thermal/render geometry, derive viscosity
+and conductivity with provenance, and validate phase/steam onset from the
+energy ledger. This work must consume SS-owned spatial views rather than add a
+new private lookup.
+
+Current routing note, 2026-07-15 AKDT: arbitrary initial material setup routes
+through `plan/todo/dynamic-initial-material-bodies-plan.md`. The fixed base/drop
+controls are now a compatibility adapter, not the simulation authority. Stable
+body/domain identity must survive GPU render production and SS particle-storage
+reordering; do not infer new body identity from material, array position, or a
+new private spatial grid.
+
+Deferred material-physics note, 2026-07-14 AKDT: fixing the electronic-structure
+and electron-density derivation well enough to reproduce wavelength-dependent
+material spectra without a measured-reference fallback is tracked in
+`plan/todo/algorithm-derived-material-properties-plan.md`. It is intentionally
+lower priority than making the SS-owned GPU spatial hierarchy/octree reliable
+and migrating production spatial consumers onto it.
+
 Current routing note, 2026-07-13 AKDT: spatial architecture and performance
 work routes through
 `plan/todo/SS/shared-spatial-authority-refactor-plan.md` on branch

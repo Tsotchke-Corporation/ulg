@@ -15,6 +15,7 @@ import {
   destroyMlsMpmMechanicsMaterialPhaseUpload,
   refreshMlsMpmMechanicsCpu,
   runMlsMpmMechanicsRefreshWebGpu,
+  uploadedMechanicsMaterialPhaseRecordsMatch,
   uploadMlsMpmMechanicsMaterialPhaseRecords
 } from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import {
@@ -522,4 +523,54 @@ test('WebGPU mechanics refresh reuses uploaded material phase records', async ()
   assert.equal(materialPhaseUpload.destroyed, false);
   destroyMlsMpmMechanicsMaterialPhaseUpload(materialPhaseUpload);
   assert.equal(materialPhaseUpload.destroyed, true);
+});
+
+test('mechanics material phase uploads are reusable only on their owning device', () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [{
+        name: 'liquid',
+        densityKgPerM3: 997,
+        bulkModulusPa: 2.2e9,
+        shearModulusPa: 0,
+        cpJPerKgK: 4184,
+        temperatureRange: [273.15, 373.15]
+      }]
+    }
+  });
+  const createDevice = () => ({
+    createBuffer({ label }) {
+      return { label, destroy() {} };
+    },
+    queue: { writeBuffer() {} }
+  });
+  const deviceA = createDevice();
+  const deviceB = createDevice();
+  const upload = uploadMlsMpmMechanicsMaterialPhaseRecords(deviceA, table);
+
+  assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch(upload, table, deviceA), true);
+  assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch(upload, table, deviceB), false);
+  assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch({
+    ...upload,
+    recordsBuffer: { label: 'untagged-mechanics-records' },
+    materialPhaseBuffer: { label: 'untagged-mechanics-records' }
+  }, table, deviceA), false);
+  const changedTable = {
+    ...table,
+    records: Float32Array.from(table.records)
+  };
+  changedTable.records[3] *= 1.1;
+  assert.equal(
+    uploadedMechanicsMaterialPhaseRecordsMatch(upload, changedTable, deviceA),
+    false
+  );
+  const equivalentTable = {
+    ...table,
+    records: Float32Array.from(table.records)
+  };
+  assert.equal(
+    uploadedMechanicsMaterialPhaseRecordsMatch(upload, equivalentTable, deviceA),
+    true
+  );
 });

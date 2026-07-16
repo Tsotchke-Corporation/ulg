@@ -3,11 +3,14 @@ import { test } from 'node:test';
 import {
   createNativeSurfaceResourceOwner,
   installNativeSurfaceResourceOwner,
+  markNativeSurfaceDeviceLostForCurrentOwners,
   nativeSurfaceBridgeFailureReason,
   nativeSurfaceDrawStateUsesExecution,
   nativeSurfaceVisualIntervalExtractionEnabled,
   prepareNativeSurfaceBridgeForForcedDisposal,
   rendererCanvasResizeRequired,
+  resolveNativeSurfaceBridgeDeviceAdmission,
+  resolveNativeSurfaceConsumerDeviceTransition,
   retireNativeRefractionTargetSet,
   resolveAdditionalNativeSurfaceGenerationAttempt,
   resolveNativeRefractionTargetSetAction,
@@ -446,4 +449,140 @@ test('native bridge device loss and release are sticky across refresh and requir
   assert.equal(bridge.pixelValidationPending, false);
   assert.equal(bridge.offscreenValidationPending, false);
   assert.deepEqual(prepareNativeSurfaceBridgeForForcedDisposal(bridge), []);
+});
+
+test('native consumer keeps same-device quarantine and resets replacement-device state', () => {
+  const lostDevice = {};
+  const replacementDevice = {};
+  const previous = {
+    device: lostDevice,
+    deviceLost: true,
+    deviceLostReason: 'device removed',
+    deviceLostInfo: { reason: 'destroyed', message: 'device removed' },
+    pixelValidationStatus: 'passed',
+    readbackSmokeValidationStatus: 'passed',
+    readbackSmokeValidationReason: 'old device validated',
+    readbackSmokeValidationSample: [1, 2, 3, 4],
+    offscreenValidationStatus: 'passed',
+    offscreenValidationReason: 'old device validated',
+    offscreenValidationSample: [5, 6, 7, 8],
+    offscreenValidationNonzeroPixelCount: 4,
+    offscreenValidationPixelCount: 4,
+    offscreenValidationWidth: 2,
+    offscreenValidationHeight: 2
+  };
+
+  const retained = resolveNativeSurfaceConsumerDeviceTransition({
+    previous,
+    device: lostDevice
+  });
+  assert.equal(retained.status, 'native-surface-consumer-same-device');
+  assert.equal(retained.deviceLost, true);
+  assert.equal(retained.pixelValidationStatus, 'passed');
+  assert.deepEqual(retained.readbackSmokeValidationSample, [1, 2, 3, 4]);
+  assert.notEqual(retained.readbackSmokeValidationSample, previous.readbackSmokeValidationSample);
+
+  const reconfigured = resolveNativeSurfaceConsumerDeviceTransition({
+    previous,
+    device: lostDevice,
+    presentationReconfigured: true
+  });
+  assert.equal(reconfigured.status, 'native-surface-consumer-same-device-reconfigured');
+  assert.equal(reconfigured.deviceLost, true);
+  assert.equal(reconfigured.pixelValidationStatus, 'not-run');
+  assert.equal(reconfigured.offscreenValidationSample, null);
+
+  const replacement = resolveNativeSurfaceConsumerDeviceTransition({
+    previous,
+    device: replacementDevice
+  });
+  assert.equal(replacement.status, 'native-surface-consumer-replacement-device');
+  assert.equal(replacement.sameDevice, false);
+  assert.equal(replacement.deviceLost, false);
+  assert.equal(replacement.deviceLostReason, null);
+  assert.equal(replacement.pixelValidationStatus, 'not-run');
+  assert.equal(replacement.readbackSmokeValidationSample, null);
+  assert.equal(replacement.offscreenValidationSample, null);
+
+  const resurrectedLostDevice = resolveNativeSurfaceConsumerDeviceTransition({
+    previous: { device: replacementDevice },
+    device: lostDevice,
+    deviceKnownLost: true
+  });
+  assert.equal(
+    resurrectedLostDevice.status,
+    'native-surface-consumer-known-lost-device-quarantined'
+  );
+  assert.equal(resurrectedLostDevice.deviceKnownLost, true);
+  assert.equal(resurrectedLostDevice.deviceLost, true);
+  assert.equal(
+    resurrectedLostDevice.deviceLostReason,
+    'native WebGPU device is already known lost'
+  );
+});
+
+test('device-loss notification quarantines current owners without poisoning a replacement', () => {
+  const lostDevice = {};
+  const replacementDevice = {};
+  const rendererConsumer = { device: lostDevice };
+  const sceneConsumer = { device: lostDevice };
+  const replacementConsumer = { device: replacementDevice, deviceLost: false };
+  const bridge = {
+    rendererBridge: 'native-webgpu-surface-consumer',
+    device: lostDevice
+  };
+  const loss = markNativeSurfaceDeviceLostForCurrentOwners({
+    device: lostDevice,
+    consumers: [rendererConsumer, sceneConsumer, replacementConsumer],
+    renderBridge: bridge,
+    reason: 'device removed',
+    info: { reason: 'destroyed', message: 'device removed' },
+    updatedAtMs: 42
+  });
+  assert.equal(loss.status, 'native-surface-current-device-owners-quarantined');
+  assert.equal(loss.consumerUpdateCount, 2);
+  assert.equal(loss.renderBridgeUpdated, true);
+  assert.equal(rendererConsumer.deviceLost, true);
+  assert.equal(sceneConsumer.deviceLostReason, 'device removed');
+  assert.equal(sceneConsumer.updatedAtMs, 42);
+  assert.equal(bridge.deviceLost, true);
+  assert.equal(replacementConsumer.deviceLost, false);
+});
+
+test('failed native bridge admits only a distinct replacement device', () => {
+  const lostDevice = {};
+  const replacementDevice = {};
+  const bridge = {
+    rendererBridge: 'native-webgpu-surface-consumer',
+    device: lostDevice,
+    deviceLost: true,
+    deviceLostReason: 'device removed'
+  };
+  const quarantined = resolveNativeSurfaceBridgeDeviceAdmission({
+    renderBridge: bridge,
+    device: lostDevice
+  });
+  assert.equal(quarantined.admitted, false);
+  assert.equal(quarantined.replacementDevice, false);
+  assert.equal(quarantined.failureReason, 'device removed');
+
+  const admitted = resolveNativeSurfaceBridgeDeviceAdmission({
+    renderBridge: bridge,
+    device: replacementDevice
+  });
+  assert.equal(admitted.admitted, true);
+  assert.equal(admitted.replacementDevice, true);
+  assert.equal(admitted.failureReason, 'device removed');
+
+  const resurrectedLostDevice = resolveNativeSurfaceBridgeDeviceAdmission({
+    renderBridge: bridge,
+    device: replacementDevice,
+    deviceKnownLost: true
+  });
+  assert.equal(resurrectedLostDevice.admitted, false);
+  assert.equal(resurrectedLostDevice.replacementDevice, false);
+  assert.equal(
+    resurrectedLostDevice.status,
+    'native-surface-known-lost-device-quarantined'
+  );
 });

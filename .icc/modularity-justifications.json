@@ -24,7 +24,7 @@
       ],
       "status": "temporary_runtime_integration_boundary",
       "task_id": "ulg-webgpu-resident-hot-loop-modularization",
-      "reason": "These files are current architecture-bearing integration surfaces for the SPH/MLS-MPM resident chain, render-field ABI, browser demo mount, and long-running project evidence logs. They are allowed to remain large only while the GPU-resident hot-loop, reaction, and material closure contracts are still being stabilized.",
+      "reason": "These files remain temporary architecture-bearing integration surfaces for the SPH/MLS-MPM resident chain, render-field ABI, browser demo mount, and long-running project evidence logs. They are allowed to remain large only while the GPU-resident hot-loop, reaction, and material closure contracts are still being stabilized.",
       "mitigation": "New behavior should move into focused runtime modules, kernels, or tests when practical. Split these files behind existing public APIs as the WebGPU marching-cubes, closure graph, reaction, and material resolver boundaries stabilize."
     },
     {
@@ -42,4 +42,3 @@
     }
   ]
 }
-

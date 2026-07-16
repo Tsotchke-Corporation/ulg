@@ -45,6 +45,7 @@ import {
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -52,6 +53,7 @@ import {
   buildMlsMpmGpuParticleBuffers,
   buildSphGpuParticleBuffers,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -713,6 +715,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(passDag.metadata.lawGraphNode.nodeId, ULG_RESIDENT_PASS_DAG_NODE_ID);
   assert.equal(passDag.metadata.stateFamilyContract.schema, ULG_RESIDENT_LAW_STATE_FAMILY_CONTRACT_SCHEMA);
   assert.equal(passDag.metadata.stateFamilyContract.currentAuthority, true);
+  assert.ok(passDag.webgpu.retainedBufferRefs.includes('sph-particle-identity-buffer'));
   assert.ok(passDag.metadata.stateFamilyContract.authoritativeWriteFamilies.includes(RESIDENT_STATE_FAMILIES.PRESSURE_INTERFACE));
   assert.ok(passDag.metadata.stateFamilyContract.transientWriteFamilies.includes(RESIDENT_STATE_FAMILIES.GRID_UPDATE));
   assert.deepEqual(lawFamilies.map((solver) => solver.id), expectedLawFamilyIds);
@@ -3270,10 +3273,12 @@ test('ULG remote warm seed refresh rebuilds real SPH/MLS-MPM hot buffers through
   assert.equal(refresh.refreshResult.packedSchemas.mlsMpm, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA);
   assert.ok(refresh.refreshResult.bytes.sphStateBytes > 0);
   assert.ok(refresh.refreshResult.bytes.sphThermoBytes > 0);
+  assert.ok(refresh.refreshResult.bytes.sphIdentityBytes > 0);
   assert.ok(refresh.refreshResult.bytes.mlsMpmMechanicsBytes > 0);
   assert.deepEqual(refresh.localBufferRefs, [
     `${refresh.refreshResult.hotBufferKey}:sph-state-buffer`,
     `${refresh.refreshResult.hotBufferKey}:sph-thermo-buffer`,
+    `${refresh.refreshResult.hotBufferKey}:sph-particle-identity-buffer`,
     `${refresh.refreshResult.hotBufferKey}:mls-mpm-mechanics-buffer`
   ]);
   assert.deepEqual(refresh.retainedBufferRefs, refresh.localBufferRefs);
@@ -3286,11 +3291,13 @@ test('ULG remote warm seed refresh rebuilds real SPH/MLS-MPM hot buffers through
   assert.deepEqual(device.createdBuffers.map((buffer) => buffer.label), [
     'ulg-sph-particle-state',
     'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
     'ulg-mls-mpm-particle-mechanics'
   ]);
   assert.deepEqual(device.writes.map((write) => write.label), [
     'ulg-sph-particle-state',
     'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
     'ulg-mls-mpm-particle-mechanics'
   ]);
   assert.equal(device.writes.every((write) => write.byteLength > 0), true);
@@ -3437,12 +3444,14 @@ test('ULG resident authority host refreshes admitted remote seeds into local SPH
   assert.deepEqual(report.localBufferRefs, [
     `${report.hotBufferKey}:sph-state-buffer`,
     `${report.hotBufferKey}:sph-thermo-buffer`,
+    `${report.hotBufferKey}:sph-particle-identity-buffer`,
     `${report.hotBufferKey}:mls-mpm-mechanics-buffer`
   ]);
   assert.equal(report.localBufferRefs.some((ref) => ref.startsWith('remote-host:')), false);
   assert.deepEqual(device.createdBuffers.map((buffer) => buffer.label), [
     'ulg-sph-particle-state',
     'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
     'ulg-mls-mpm-particle-mechanics'
   ]);
   const hotBufferRecord = host.stateManager.getHotBuffer(report.hotBufferKey);
@@ -3727,7 +3736,12 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   );
   assert.deepEqual(
     particleStorageAllocatorAdmissionPublication.schroederParticleStorageAllocatorAdmission.targetStateFamilies,
-    ['sph-particle-state', 'mls-mpm-particle-mechanics', 'sph-particle-thermo']
+    [
+      'sph-particle-state',
+      'mls-mpm-particle-mechanics',
+      'sph-particle-thermo',
+      'sph-particle-identity'
+    ]
   );
   assert.equal(
     host.stateManager
@@ -3788,6 +3802,10 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   );
   assert.equal(
     particleStorageMaterializationAdmissionPublication.schroederParticleStorageMaterializationAdmission.slotAssignmentDescriptorApproved,
+    true
+  );
+  assert.equal(
+    particleStorageMaterializationAdmissionPublication.schroederParticleStorageMaterializationAdmission.particleIdentityMutationApproved,
     true
   );
   assert.equal(
@@ -3957,6 +3975,83 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     'sph-thermo-buffer',
     'mls-mpm-mechanics-buffer'
   ]);
+  const arbitraryDomainDescriptor = {
+    ...adoptedParticleStorageDescriptor,
+    cacheKey: 'ulg:test:schroeder-adopted-storage-identity-cache',
+    stateKey: 'ulg:test:schroeder-adopted-storage-identity-state',
+    outputParticleCapacity: 4,
+    identityRequired: true,
+    particleIdentityMutationApproved: true,
+    identityBufferRef: 'sph-particle-identity-buffer',
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityStrideBytes: SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    identityBufferByteLength: 4 * SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    retainedBufferRefs: [
+      ...adoptedParticleStorageDescriptor.retainedBufferRefs,
+      'sph-particle-identity-buffer'
+    ],
+    retainedRefs: [
+      ...adoptedParticleStorageDescriptor.retainedRefs,
+      {
+        ref: 'sph-particle-identity-buffer',
+        role: 'particle-identity',
+        family: 'sph-particle-identity',
+        retained: true,
+        transferMode: 'descriptor-only-no-raw-gpubuffer-transfer'
+      }
+    ],
+    outputFamilies: [
+      ...adoptedParticleStorageDescriptor.outputFamilies,
+      'sph-particle-identity'
+    ]
+  };
+  const localAdoptedIdentityBuffer = { label: 'local-adopted-identity-buffer' };
+  const arbitraryDomainPublication = host.publishSchroederAdoptedParticleStorageDescriptor({
+    descriptor: arbitraryDomainDescriptor,
+    localRetainedBuffers: [
+      { retainedBufferRef: 'sph-state-buffer', buffer: localAdoptedStateBuffer },
+      { retainedBufferRef: 'sph-thermo-buffer', buffer: localAdoptedThermoBuffer },
+      { retainedBufferRef: 'mls-mpm-mechanics-buffer', buffer: localAdoptedMechanicsBuffer },
+      {
+        retainedBufferRef: 'sph-particle-identity-buffer',
+        buffer: localAdoptedIdentityBuffer,
+        byteLength: arbitraryDomainDescriptor.identityBufferByteLength,
+        strideBytes: arbitraryDomainDescriptor.identityStrideBytes,
+        particleCount: 4
+      }
+    ]
+  });
+  assert.equal(arbitraryDomainPublication.accepted, true);
+  assert.equal(
+    arbitraryDomainPublication.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady,
+    true
+  );
+  assert.equal(
+    arbitraryDomainPublication.schroederAdoptedParticleStorageLocalRetainedBufferResolvedRefCount,
+    4
+  );
+  const arbitraryDomainPlan = host.planSchroederAdoptedParticleStorageContinuation({
+    hotBufferKey: arbitraryDomainPublication.hotBufferKey,
+    consumerMode: 'same-device'
+  });
+  assert.equal(arbitraryDomainPlan.ready, true);
+  assert.equal(arbitraryDomainPlan.identityRequired, true);
+  assert.equal(arbitraryDomainPlan.workerRematerializationSeed.identityRequired, true);
+  assert.equal(arbitraryDomainPlan.workerRematerializationSeed.requiresAuthoritativeFourBufferRows, true);
+
+  const ambiguousIdentityPublication = host.publishSchroederAdoptedParticleStorageDescriptor({
+    descriptor: {
+      ...arbitraryDomainDescriptor,
+      cacheKey: 'ulg:test:schroeder-adopted-storage-identity-invalid-cache',
+      stateKey: 'ulg:test:schroeder-adopted-storage-identity-invalid-state',
+      particleIdentityMutationApproved: false
+    }
+  });
+  assert.equal(ambiguousIdentityPublication.accepted, false);
+  assert.equal(
+    ambiguousIdentityPublication.reason,
+    'schroeder-adopted-particle-storage-identity-mutation-not-admitted'
+  );
   const adoptedStorageMechanicsStageChain = await host.runMechanicsStageTaskChain({
     ...packedSingleMechanicsParticle(),
     stageTaskIdPrefix: 'ulg:test:schroeder-adopted-storage-local-resolver-chain',
@@ -4838,7 +4933,8 @@ test('ULG resident authority host publishes admitted pressure/interface gas-cell
   assert.equal(stageResult.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
   assert.equal(stageResult.pressureInterfaceGasCellFieldImportReady, true);
   assert.equal(stageResult.pressureInterfaceGasCellFieldImportSourceHotBufferKey, publication.hotBufferKey);
-  assert.deepEqual(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
+  assert.equal(stageResult.pressureInterfaceForceSolver.gasInterfacePressureReferencePa, 101325);
+  assert.deepEqual(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [18675, 78675]);
 });
 
 test('ULG resident authority host publishes gas-cell imports from resident EOS producer output', async (t) => {
@@ -5004,8 +5100,13 @@ test('ULG resident authority host publishes gas-cell imports from resident EOS p
   });
   assert.equal(stageResult.pressureInterfaceGasCellFieldImportReady, true);
   assert.equal(stageResult.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
-  assert.ok(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0] > 119000);
-  assert.ok(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1] > 179000);
+  assert.equal(stageResult.pressureInterfaceForceSolver.gasInterfacePressureReferencePa, 101325);
+  assert.ok(Math.abs(
+    stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0] - 18675
+  ) < 1e-3);
+  assert.ok(Math.abs(
+    stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1] - 78675
+  ) < 1e-3);
 
   eosResult.destroyGasPressureCellsBuffer?.();
 });
@@ -5364,12 +5465,14 @@ test('ULG resident authority host auto-refreshes local hot buffers after admitte
   assert.deepEqual(report.localBufferRefs, [
     `${report.hotBufferKey}:sph-state-buffer`,
     `${report.hotBufferKey}:sph-thermo-buffer`,
+    `${report.hotBufferKey}:sph-particle-identity-buffer`,
     `${report.hotBufferKey}:mls-mpm-mechanics-buffer`
   ]);
   assert.equal(report.localBufferRefs.some((ref) => ref.startsWith('remote-auto:')), false);
   assert.deepEqual(device.createdBuffers.map((buffer) => buffer.label), [
     'ulg-sph-particle-state',
     'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
     'ulg-mls-mpm-particle-mechanics'
   ]);
   const hotBufferRecord = host.stateManager.getHotBuffer(report.hotBufferKey);
@@ -5848,11 +5951,13 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   assert.deepEqual(compactSnapshotResult.localBufferRefs, [
     `${compactSnapshotResult.hotBufferKey}:sph-state-buffer`,
     `${compactSnapshotResult.hotBufferKey}:sph-thermo-buffer`,
+    `${compactSnapshotResult.hotBufferKey}:sph-particle-identity-buffer`,
     `${compactSnapshotResult.hotBufferKey}:mls-mpm-mechanics-buffer`
   ]);
   assert.deepEqual(compactSnapshotDevice.createdBuffers.map((buffer) => buffer.label), [
     'ulg-sph-particle-state',
     'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
     'ulg-mls-mpm-particle-mechanics'
   ]);
   const compactSnapshotHotBuffer = host.stateManager.getHotBuffer(compactSnapshotResult.hotBufferKey);
@@ -6216,12 +6321,14 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   assert.deepEqual(report.localBufferRefs, [
     `${report.hotBufferKey}:sph-state-buffer`,
     `${report.hotBufferKey}:sph-thermo-buffer`,
+    `${report.hotBufferKey}:sph-particle-identity-buffer`,
     `${report.hotBufferKey}:mls-mpm-mechanics-buffer`
   ]);
   assert.equal(report.localBufferRefs.some((ref) => ref.startsWith('remote-state:')), false);
   assert.deepEqual(device.createdBuffers.map((buffer) => buffer.label), [
     'ulg-sph-particle-state',
     'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
     'ulg-mls-mpm-particle-mechanics'
   ]);
   const hotBufferRecord = host.stateManager.getHotBuffer(report.hotBufferKey);

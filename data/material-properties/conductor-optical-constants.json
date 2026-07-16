@@ -1,0 +1,56 @@
+{
+  "schema": "peercompute.ulg.conductor-optical-constants.v0",
+  "schemaVersion": 1,
+  "bankVersion": "johnson-christy-1972-visible-v1",
+  "source": "P. B. Johnson and R. W. Christy, Optical Constants of the Noble Metals, Physical Review B 6, 4370-4379 (1972)",
+  "doi": "10.1103/PhysRevB.6.4370",
+  "referenceState": {
+    "phase": "solid",
+    "temperature": "room-temperature laboratory measurement; numeric temperature not reported",
+    "sample": "bulk-like evaporated films above the reported critical thickness"
+  },
+  "notes": [
+    "The checked-in values are measured complex refractive indices n + i*k, not selected display RGB colors.",
+    "Only the rows spanning the visible spectrum are retained. Runtime reflectance, absorption, spectral samples, and CIE/sRGB color are derived from n and k.",
+    "Use for liquid or elevated-temperature condensed phases is an explicitly labelled nearest-reference extrapolation until phase-specific optical constants are available."
+  ],
+  "photonEnergyEv": [
+    1.51, 1.64, 1.76, 1.88, 2.01, 2.13, 2.26, 2.38, 2.50, 2.63,
+    2.75, 2.88, 3.00, 3.12, 3.25, 3.37, 3.50
+  ],
+  "records": [
+    {
+      "symbol": "Cu",
+      "n": [
+        0.26, 0.24, 0.21, 0.22, 0.30, 0.70, 1.02, 1.18, 1.22, 1.25,
+        1.24, 1.25, 1.28, 1.32, 1.33, 1.36, 1.37
+      ],
+      "k": [
+        5.180, 4.665, 4.205, 3.747, 3.205, 2.704, 2.577, 2.608, 2.564, 2.483,
+        2.397, 2.305, 2.207, 2.116, 2.045, 1.975, 1.916
+      ]
+    },
+    {
+      "symbol": "Ag",
+      "n": [
+        0.04, 0.03, 0.04, 0.05, 0.06, 0.05, 0.06, 0.05, 0.05, 0.05,
+        0.04, 0.04, 0.05, 0.05, 0.05, 0.07, 0.10
+      ],
+      "k": [
+        5.727, 5.242, 4.838, 4.483, 4.152, 3.858, 3.586, 3.324, 3.093, 2.869,
+        2.657, 2.462, 2.275, 2.070, 1.864, 1.657, 1.419
+      ]
+    },
+    {
+      "symbol": "Au",
+      "n": [
+        0.16, 0.14, 0.13, 0.14, 0.21, 0.29, 0.43, 0.62, 1.04, 1.31,
+        1.38, 1.45, 1.46, 1.47, 1.46, 1.48, 1.50
+      ],
+      "k": [
+        5.083, 4.542, 4.103, 3.697, 3.272, 2.863, 2.455, 2.081, 1.833, 1.849,
+        1.914, 1.948, 1.958, 1.952, 1.933, 1.895, 1.866
+      ]
+    }
+  ]
+}

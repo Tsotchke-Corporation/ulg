@@ -5,20 +5,29 @@ import { equilibriumFromSpecificEnergy } from '../src/runtime/material/phaseEqui
 import { buildSphPhaseDemoState, createSphPhaseDemo } from '../src/runtime/sphPhaseDemo.js';
 import { createSphState } from '../src/runtime/sph/sphState.js';
 import {
+  tagWebGpuBufferDevice,
+  webGpuBufferDevice
+} from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_STATUS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
+  SPH_GPU_RENDER_DOMAIN_ID_MAX,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   buildMlsMpmGpuParticleBuffers,
   buildSphGpuParticleBuffers,
   decodeMlsMpmGpuParticleRows,
   decodeSphGpuParticleRows,
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
+  mlsMpmGpuParticleUploadMatchesDevice,
+  sphGpuParticleUploadMatchesDevice,
   uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
 } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -29,6 +38,30 @@ function nearlyEqual(actual, expected, tolerance = 1e-3) {
     `expected ${actual} to be within ${tolerance} of ${expected}`
   );
 }
+
+test('GPU buffer device provenance cannot be relabeled', () => {
+  const buffer = {};
+  const deviceA = {};
+  const deviceB = {};
+  tagWebGpuBufferDevice(buffer, deviceA);
+  tagWebGpuBufferDevice(buffer, deviceB);
+  assert.equal(webGpuBufferDevice(buffer), deviceA);
+});
+
+test('particle upload device matchers require their primary buffers', () => {
+  const device = {};
+  const optionalA = tagWebGpuBufferDevice({}, device);
+  const optionalB = tagWebGpuBufferDevice({}, device);
+  assert.equal(sphGpuParticleUploadMatchesDevice({
+    status: 'webgpu-uploaded',
+    materialPropertyBankWarmInputBuffer: optionalA,
+    materialPropertyBankParticleSizeBuffer: optionalB
+  }, device), false);
+  assert.equal(mlsMpmGpuParticleUploadMatchesDevice({
+    status: 'webgpu-uploaded',
+    materialPropertyBankWarmInputBuffer: optionalA
+  }, device), false);
+});
 
 test('SPH GPU particle buffers pack CPU-authoritative particle state', () => {
   const demo = buildSphPhaseDemoState();
@@ -43,6 +76,8 @@ test('SPH GPU particle buffers pack CPU-authoritative particle state', () => {
   assert.equal(packed.particleCount, demo.state.particles.length);
   assert.equal(packed.state.length, packed.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS);
   assert.equal(packed.thermo.length, packed.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS);
+  assert.equal(packed.identitySchema, ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA);
+  assert.equal(packed.identity.length, packed.particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS);
   nearlyEqual(rows[0].positionM[0], first.x[0]);
   nearlyEqual(rows[0].positionM[1], first.x[1]);
   nearlyEqual(rows[0].positionM[2], first.x[2]);
@@ -52,6 +87,72 @@ test('SPH GPU particle buffers pack CPU-authoritative particle state', () => {
   assert.equal(packed.scientificValidation, false);
   assert.equal(packed.sphValidation, false);
   assert.equal(packed.phaseChangeValidation, false);
+});
+
+test('SPH GPU particle identity rows preserve arbitrary body domains without using thermo lanes', () => {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [0, 1, 2, 3].map((index) => ({
+      material: 'unknownium',
+      x: [index, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0
+    }))
+  });
+  Object.assign(state.particles[0], {
+    initialBodyId: 'left-water',
+    initialBodyDomainId: 7,
+    role: 'body:left-water'
+  });
+  Object.assign(state.particles[1], {
+    initialBodyId: 'left-water',
+    initialBodyDomainId: 7,
+    role: 'body:left-water'
+  });
+  Object.assign(state.particles[2], {
+    initialBodyId: 'right-water',
+    initialBodyDomainId: 19,
+    role: 'body:right-water'
+  });
+  state.particles[3].role = 'spare-product-slot';
+
+  const packed = buildSphGpuParticleBuffers(state, { materialProperties: {} });
+  const decoded = decodeSphGpuParticleRows(packed);
+
+  assert.deepEqual([...packed.identity], [7, 7, 19, 0]);
+  assert.deepEqual(packed.identityLayout, ['renderDomainId:u32']);
+  assert.deepEqual(packed.renderDomainKeys, {
+    7: 'left-water',
+    19: 'right-water'
+  });
+  assert.deepEqual(decoded.map((row) => row.renderDomainId), [7, 7, 19, 0]);
+  assert.deepEqual(decoded.map((row) => row.renderDomainKey), [
+    'left-water',
+    'left-water',
+    'right-water',
+    null
+  ]);
+  assert.equal(packed.thermo.length, 4 * SPH_GPU_PARTICLE_THERMO_FLOATS);
+  assert.equal(packed.thermo[10], SPH_GPU_PARTICLE_STATUS.missingMaterialProperties);
+});
+
+test('SPH GPU particle identity rejects ids that would alias in f32 render rows', () => {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [{
+      material: 'unknownium',
+      x: [0, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0
+    }]
+  });
+  state.particles[0].initialBodyDomainId = SPH_GPU_RENDER_DOMAIN_ID_MAX + 1;
+  assert.throws(
+    () => buildSphGpuParticleBuffers(state, { materialProperties: {} }),
+    /exceeds the exact GPU render range/
+  );
 });
 
 test('SPH GPU particle buffers derive material ids, phase ids, and temperature from closures', () => {
@@ -137,15 +238,24 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
   assert.equal(buffers.particleCount, packed.particleCount);
   assert.deepEqual(
     writes.map((write) => write.label),
-    ['ulg-sph-particle-state', 'ulg-sph-particle-thermo']
+    ['ulg-sph-particle-state', 'ulg-sph-particle-thermo', 'ulg-sph-particle-identity']
   );
   assert.equal(writes[0].byteLength, packed.state.byteLength);
   assert.equal(writes[1].byteLength, packed.thermo.byteLength);
+  assert.equal(writes[2].byteLength, packed.identity.byteLength);
   assert.equal((writes[0].usage & 128) !== 0, true);
   assert.equal((writes[0].usage & 8) !== 0, true);
+  assert.equal(sphGpuParticleUploadMatchesDevice(buffers, device), true);
+  assert.equal(sphGpuParticleUploadMatchesDevice(buffers, { ...device }), false);
 
   destroySphGpuParticleBuffers(buffers);
-  assert.deepEqual(destroyed, ['ulg-sph-particle-state', 'ulg-sph-particle-thermo']);
+  destroySphGpuParticleBuffers(buffers);
+  assert.equal(sphGpuParticleUploadMatchesDevice(buffers, device), false);
+  assert.deepEqual(destroyed, [
+    'ulg-sph-particle-state',
+    'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity'
+  ]);
 });
 
 test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size rows when supplied', () => {
@@ -254,6 +364,7 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
       'ulg-sph-material-bank-particle-size-rows',
       'ulg-sph-particle-state',
       'ulg-sph-particle-thermo',
+      'ulg-sph-particle-identity',
       'ulg-mls-mpm-material-bank-warm-input-rows',
       'ulg-mls-mpm-material-bank-particle-size-rows',
       'ulg-mls-mpm-particle-mechanics'
@@ -271,6 +382,7 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
     [
       'ulg-sph-particle-state',
       'ulg-sph-particle-thermo',
+      'ulg-sph-particle-identity',
       'ulg-sph-material-bank-warm-input-rows',
       'ulg-sph-material-bank-particle-size-rows',
       'ulg-mls-mpm-particle-mechanics',
@@ -424,8 +536,12 @@ test('MLS-MPM GPU mechanics buffer upload writes and destroys storage buffers', 
   assert.equal(writes[0].byteLength, packed.mechanics.byteLength);
   assert.equal((writes[0].usage & 128) !== 0, true);
   assert.equal((writes[0].usage & 8) !== 0, true);
+  assert.equal(mlsMpmGpuParticleUploadMatchesDevice(buffers, device), true);
+  assert.equal(mlsMpmGpuParticleUploadMatchesDevice(buffers, { ...device }), false);
 
   destroyMlsMpmGpuParticleBuffers(buffers);
+  destroyMlsMpmGpuParticleBuffers(buffers);
+  assert.equal(mlsMpmGpuParticleUploadMatchesDevice(buffers, device), false);
   assert.deepEqual(destroyed, ['ulg-mls-mpm-particle-mechanics']);
 });
 

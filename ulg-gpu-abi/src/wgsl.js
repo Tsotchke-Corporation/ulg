@@ -5163,6 +5163,7 @@ struct RenderRowsParams {
 @group(0) @binding(3) var<uniform> params: RenderRowsParams;
 @group(0) @binding(4) var<storage, read> mls_mpm_mechanics: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> material_bank_particle_size_rows: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> particle_identity: array<u32>;
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 const MATERIAL_BANK_PARTICLE_SIZE_ROW_VEC4_STRIDE: u32 = 4u;
@@ -5233,6 +5234,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     && particle_index < params.render_domain_base_count + params.render_domain_drop_count
   ) {
     render_domain_id = 2.0;
+  }
+  // Stable body identity is independent of mutable thermodynamic/mechanics
+  // state. Positive explicit ids override the legacy contiguous base/drop
+  // ranges; zero preserves that fallback and is the required spare/product
+  // slot identity.
+  let explicit_render_domain_id = particle_identity[particle_index];
+  if (explicit_render_domain_id > 0u) {
+    render_domain_id = f32(explicit_render_domain_id);
   }
   var volume_ratio_j = 1.0;
   var rest_volume_m3 = 0.0;
@@ -6905,12 +6914,28 @@ struct P2gProjectionParams {
   schroeder_filter_enabled: u32,
   schroeder_selected_level: i32,
   schroeder_assignment_stride_floats: u32,
-  schroeder_active_node_filter_enabled: u32,
-  schroeder_active_node_stride_floats: u32,
+  schroeder_spatial_directory_enabled: u32,
+  schroeder_spatial_storage_generation: u32,
   grid_density_pressure_enabled: u32,
   ambient_pressure_pa: f32,
-  p2g_params_pad1: u32,
-  p2g_params_pad2: u32,
+  external_gauge_pressure_pa: f32,
+  external_gauge_pressure_enabled: u32,
+  schroeder_spatial_position_epoch: u32,
+  schroeder_spatial_topology_epoch: u32,
+  schroeder_spatial_required: u32,
+  schroeder_spatial_generation_id: u32,
+  schroeder_spatial_device_ordinal: u32,
+  schroeder_spatial_lane_ordinal: u32,
+  schroeder_spatial_lease_token: u32,
+  schroeder_spatial_source_family_id: u32,
+  schroeder_spatial_physics_tick: u32,
+  schroeder_spatial_physics_substep: u32,
+  schroeder_spatial_chart_epoch: u32,
+  schroeder_spatial_level_epoch: u32,
+  schroeder_spatial_support_epoch: u32,
+  schroeder_spatial_pad0: u32,
+  schroeder_spatial_pad1: u32,
+  schroeder_spatial_pad2: u32,
 };
 
 struct StressRows {
@@ -6927,7 +6952,7 @@ struct StressRows {
 @group(0) @binding(5) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> grid_nodes: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;
-@group(0) @binding(8) var<storage, read> schroeder_active_nodes: array<f32>;
+@group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;
 // NOTE: P2G must stay at <= 8 storage buffers so it runs on DEFAULT WebGPU
 // device limits (maxStorageBuffersPerShaderStage = 8). A binding 9 for the
 // (disabled, superseded-by-separation-pass) spatial-density EOS previously
@@ -6967,12 +6992,182 @@ fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
   return true;
 }
 
-// Particle filtering is by level ASSIGNMENT rows only: assignment rows are
-// particle-parallel. The compacted active-node list is tile/node-aligned
-// (its rows do not correspond to particle indices) and must never be used
-// as a per-particle filter - doing so silently drops nearly every particle
-// from P2G and freezes the simulation.
+const SCHROEDER_SPATIAL_MAGIC: u32 = 0x53534531u;
+const SCHROEDER_SPATIAL_VERSION: u32 = 1u;
+const SCHROEDER_SPATIAL_STATUS_READY: u32 = 1u;
+const SCHROEDER_SPATIAL_STATUS_ADMITTED: u32 = 2u;
+const SCHROEDER_SPATIAL_STATUS_FAIL_CLOSED: u32 = 4u;
+const SCHROEDER_SPATIAL_STATUS_INVALID_SOURCE: u32 = 8u;
+const SCHROEDER_SPATIAL_STATUS_CAPACITY_OVERFLOW: u32 = 16u;
+const SCHROEDER_SPATIAL_PRIMITIVE_STATUS_READY: u32 = 1u;
+const SCHROEDER_SPATIAL_PRIMITIVE_STATUS_FAIL_CLOSED: u32 = 4u;
+const SCHROEDER_SPATIAL_HEADER_WORDS: u32 = 48u;
+const SCHROEDER_SPATIAL_KEY_WORDS: u32 = 5u;
+const SCHROEDER_SPATIAL_SORT_BOUNDED_ATLAS_U32: u32 = 1u;
+const SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5: u32 = 2u;
+const SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS: u32 = 1u;
+const SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY: u32 = 2u;
+
+fn p2g_spatial_range_within(start: u32, count: u32, limit: u32) -> bool {
+  return start <= limit && count <= limit - start;
+}
+
+fn p2g_spatial_directory_admitted() -> bool {
+  if (params.schroeder_spatial_directory_enabled == 0u) {
+    return false;
+  }
+  let bound_words = arrayLength(&schroeder_spatial_directory);
+  if (bound_words < SCHROEDER_SPATIAL_HEADER_WORDS) {
+    return false;
+  }
+  let flags = schroeder_spatial_directory[2u];
+  let source_count = schroeder_spatial_directory[16u];
+  let source_capacity = schroeder_spatial_directory[17u];
+  let cell_count = schroeder_spatial_directory[18u];
+  let cell_capacity = schroeder_spatial_directory[19u];
+  let logical_required_words = schroeder_spatial_directory[20u];
+  let logical_admitted_words = schroeder_spatial_directory[21u];
+  let directory_capacity_words = schroeder_spatial_directory[22u];
+  let cell_keys_offset_words = schroeder_spatial_directory[29u];
+  let cell_offsets_offset_words = schroeder_spatial_directory[30u];
+  let cell_members_offset_words = schroeder_spatial_directory[31u];
+  let particle_to_cell_offset_words = schroeder_spatial_directory[32u];
+  let physical_upper_bound_words = schroeder_spatial_directory[47u];
+  let rejected_flags = SCHROEDER_SPATIAL_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_STATUS_CAPACITY_OVERFLOW;
+  let sort_key_words = schroeder_spatial_directory[26u];
+  let sort_mode = schroeder_spatial_directory[27u];
+  let sort_mode_admitted = (
+    sort_mode == SCHROEDER_SPATIAL_SORT_BOUNDED_ATLAS_U32
+      && sort_key_words == 1u
+  ) || (
+    sort_mode == SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5
+      && sort_key_words == SCHROEDER_SPATIAL_KEY_WORDS
+  );
+  let build_ordinal = schroeder_spatial_directory[33u];
+  let primitive_status = schroeder_spatial_directory[41u];
+  if (
+    directory_capacity_words > bound_words
+    || directory_capacity_words < SCHROEDER_SPATIAL_HEADER_WORDS
+    || cell_keys_offset_words > directory_capacity_words
+    || cell_offsets_offset_words > directory_capacity_words
+    || cell_members_offset_words > directory_capacity_words
+    || particle_to_cell_offset_words > directory_capacity_words
+    || cell_capacity > (directory_capacity_words - cell_keys_offset_words)
+      / SCHROEDER_SPATIAL_KEY_WORDS
+    || cell_offsets_offset_words < cell_keys_offset_words
+      + cell_capacity * SCHROEDER_SPATIAL_KEY_WORDS
+    || cell_capacity + 1u > directory_capacity_words - cell_offsets_offset_words
+    || cell_members_offset_words < cell_offsets_offset_words + cell_capacity + 1u
+    || source_capacity > directory_capacity_words - cell_members_offset_words
+    || particle_to_cell_offset_words < cell_members_offset_words + source_capacity
+    || source_capacity > directory_capacity_words - particle_to_cell_offset_words
+  ) {
+    return false;
+  }
+  return schroeder_spatial_directory[0u] == SCHROEDER_SPATIAL_MAGIC
+    && schroeder_spatial_directory[1u] == SCHROEDER_SPATIAL_VERSION
+    && (flags & (SCHROEDER_SPATIAL_STATUS_READY | SCHROEDER_SPATIAL_STATUS_ADMITTED))
+      == (SCHROEDER_SPATIAL_STATUS_READY | SCHROEDER_SPATIAL_STATUS_ADMITTED)
+    && (flags & rejected_flags) == 0u
+    && schroeder_spatial_directory[3u] == params.schroeder_spatial_generation_id
+    && params.schroeder_spatial_generation_id > 0u
+    && schroeder_spatial_directory[4u] == params.schroeder_spatial_device_ordinal
+    && schroeder_spatial_directory[5u] == params.schroeder_spatial_lane_ordinal
+    && schroeder_spatial_directory[6u] == params.schroeder_spatial_lease_token
+    && schroeder_spatial_directory[7u] == params.schroeder_spatial_source_family_id
+    && schroeder_spatial_directory[8u] == params.schroeder_spatial_storage_generation
+    && schroeder_spatial_directory[9u] == params.schroeder_spatial_physics_tick
+    && schroeder_spatial_directory[10u] == params.schroeder_spatial_physics_substep
+    && schroeder_spatial_directory[11u] == params.schroeder_spatial_position_epoch
+    && schroeder_spatial_directory[12u] == params.schroeder_spatial_topology_epoch
+    && schroeder_spatial_directory[13u] == params.schroeder_spatial_chart_epoch
+    && schroeder_spatial_directory[14u] == params.schroeder_spatial_level_epoch
+    && schroeder_spatial_directory[15u] == params.schroeder_spatial_support_epoch
+    && source_count == params.particle_count
+    && source_count > 0u
+    && source_count <= source_capacity
+    && cell_count > 0u
+    && cell_count <= source_count
+    && cell_count <= cell_capacity
+    && logical_required_words == logical_admitted_words
+    && logical_admitted_words >= SCHROEDER_SPATIAL_HEADER_WORDS
+    && logical_admitted_words <= physical_upper_bound_words
+    && schroeder_spatial_directory[23u] == 0u
+    && schroeder_spatial_directory[24u] == 0u
+    && schroeder_spatial_directory[25u] == SCHROEDER_SPATIAL_KEY_WORDS
+    && sort_mode_admitted
+    && schroeder_spatial_directory[28u] == SCHROEDER_SPATIAL_HEADER_WORDS
+    && cell_keys_offset_words == SCHROEDER_SPATIAL_HEADER_WORDS
+    && build_ordinal != 0u
+    && schroeder_spatial_directory[34u] == build_ordinal
+    && schroeder_spatial_directory[35u] == build_ordinal
+    && schroeder_spatial_directory[36u] == params.schroeder_spatial_generation_id
+    && schroeder_spatial_directory[37u] == source_count
+    && schroeder_spatial_directory[38u] == cell_count
+    && schroeder_spatial_directory[39u] != 0u
+    && schroeder_spatial_directory[40u] == 0u
+    && (primitive_status & SCHROEDER_SPATIAL_PRIMITIVE_STATUS_READY) != 0u
+    && (primitive_status & SCHROEDER_SPATIAL_PRIMITIVE_STATUS_FAIL_CLOSED) == 0u
+    && schroeder_spatial_directory[45u] >= SCHROEDER_SPATIAL_HEADER_WORDS
+    && (
+      schroeder_spatial_directory[46u]
+        == SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS
+      || schroeder_spatial_directory[46u]
+        == SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+    )
+    && physical_upper_bound_words <= directory_capacity_words
+    && p2g_spatial_range_within(
+      cell_keys_offset_words,
+      cell_count * SCHROEDER_SPATIAL_KEY_WORDS,
+      physical_upper_bound_words
+    )
+    && p2g_spatial_range_within(
+      cell_offsets_offset_words,
+      cell_count + 1u,
+      physical_upper_bound_words
+    )
+    && p2g_spatial_range_within(
+      cell_members_offset_words,
+      source_count,
+      physical_upper_bound_words
+    )
+    && p2g_spatial_range_within(
+      particle_to_cell_offset_words,
+      source_count,
+      physical_upper_bound_words
+    );
+}
+
+fn p2g_spatial_particle_level(particle_index: u32) -> i32 {
+  let cell_count = schroeder_spatial_directory[18u];
+  let cell_keys_offset_words = schroeder_spatial_directory[29u];
+  let particle_to_cell_offset_words = schroeder_spatial_directory[32u];
+  let cell_index = schroeder_spatial_directory[particle_to_cell_offset_words + particle_index];
+  if (cell_index >= cell_count) {
+    return bitcast<i32>(0x80000000u);
+  }
+  let level_order_key = schroeder_spatial_directory[
+    cell_keys_offset_words + cell_index * SCHROEDER_SPATIAL_KEY_WORDS + 1u
+  ];
+  return bitcast<i32>(level_order_key ^ 0x80000000u);
+}
+
+// Canonical SS mechanics admits particles through the directory reverse map.
+// The assignment-row lookup remains the safe fallback for explicitly
+// noncanonical callers and for any malformed/stale GPU generation. Never turn
+// a provenance failure into a zero-physics frame.
 fn p2g_particle_enabled(particle_index: u32) -> bool {
+  let spatial_admitted = p2g_spatial_directory_admitted();
+  if (spatial_admitted) {
+    let spatial_level = p2g_spatial_particle_level(particle_index);
+    // A malformed reverse-map entry is a provenance failure for this
+    // particle, not authority to remove it from mechanics.
+    if (spatial_level != bitcast<i32>(0x80000000u)) {
+      return spatial_level == params.schroeder_selected_level;
+    }
+  }
   if (params.schroeder_filter_enabled == 0u) {
     return true;
   }
@@ -7173,6 +7368,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let row5 = mls_mechanics[mechanics_base + 5u];
   let row6 = mls_mechanics[mechanics_base + 6u];
   let row7 = mls_mechanics[mechanics_base + 7u];
+  let thermo1 = sph_thermo[thermo_base + 1u];
   let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
   let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
   let f20 = row1.z; let f21 = row1.w; let f22 = row2.x;
@@ -7213,13 +7409,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // params.ambient_pressure_pa, so a uniform atmosphere exerts no net
       // force on immersed bodies (Archimedes) and a solid cannot rest on a
       // gas cushion in a vacuum box.
-      let thermo1 = sph_thermo[thermo_base + 1u];
       let gas_fraction = clamp(thermo1.z, 0.0, 1.0);
       let gas_density_ratio = density / max(thermo0.w, 1.0e-9);
       let gas_partial_pressure = 101325.0 * gas_density_ratio - params.ambient_pressure_pa;
-      let pressure = params.internal_pressure_scale
-        * (packed_pressure(density, thermo0.w, row6.y, row6.z)
-          + gas_fraction * gas_partial_pressure);
+      let packed_material_pressure = packed_pressure(density, thermo0.w, row6.y, row6.z);
+      let gas_eos = row6.z > 1.5 && row6.z < 2.5;
+      // gasLinearized and the ideal-gas term are two closures for the same
+      // compressibility, not independent pressures.  Adding them made a pure
+      // gas parcel roughly (gamma + 1) times too stiff and turned a compact
+      // gas volume into a false spring under condensed matter.  Admitted gas
+      // particles use the ambient-referenced ideal-gas closure; the packed
+      // linearized branch remains available for positionless product-event
+      // sidecars that do not carry the ambient-pressure inputs yet.
+      let pressure = params.internal_pressure_scale * select(
+        packed_material_pressure,
+        gas_fraction * gas_partial_pressure,
+        gas_eos
+      );
       let dynamic_viscosity = max(row7.y, 0.0);
       let div_third = (c00 + c11 + c22) / 3.0;
       let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
@@ -7232,6 +7438,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         vec3<f32>(-pressure + visc00, visc01, visc02),
         vec3<f32>(visc01, -pressure + visc11, visc12),
         vec3<f32>(visc02, visc12, -pressure + visc22)
+      );
+    }
+    if (params.external_gauge_pressure_enabled != 0u) {
+      // The interface gas load is an external boundary traction. Internal EOS
+      // pressure is represented by -pI and expands a free body in this P2G
+      // weak form; the equivalent inward gas traction therefore adds +pI.
+      // solid+liquid excludes gas and plasma while remaining continuous
+      // through a phase transition.
+      let condensed_fraction = clamp(thermo1.x + thermo1.y, 0.0, 1.0);
+      let external_pressure = params.external_gauge_pressure_pa * condensed_fraction;
+      sigma = StressRows(
+        sigma.x + vec3<f32>(external_pressure, 0.0, 0.0),
+        sigma.y + vec3<f32>(0.0, external_pressure, 0.0),
+        sigma.z + vec3<f32>(0.0, 0.0, external_pressure)
       );
     }
   }
@@ -7610,54 +7830,180 @@ fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
   return best_pressure;
 }
 
-fn contact_pressure_for_element(material_id: f32, phase_id: f32, area_m2: f32, kinematics: vec4<f32>) -> f32 {
+fn contact_policy_element_side(row_index: u32, material_id: f32, phase_id: f32) -> u32 {
+  let row0 = contact_policy_rows[row_index * 4u];
+  let row2 = contact_policy_rows[row_index * 4u + 2u];
+  if (row2.y <= 0.0) {
+    return 0u;
+  }
+  let endpoint_a_match = abs(material_id - row0.x) < 0.5
+    && (row0.z <= 0.5 || abs(phase_id - row0.z) < 0.5);
+  let endpoint_b_match = abs(material_id - row0.y) < 0.5
+    && (row0.w <= 0.5 || abs(phase_id - row0.w) < 0.5);
+  let exact_phase_a = row0.z > 0.5 && abs(phase_id - row0.z) < 0.5;
+  let exact_phase_b = row0.w > 0.5 && abs(phase_id - row0.w) < 0.5;
+  if (endpoint_a_match && endpoint_b_match && exact_phase_b && !exact_phase_a) {
+    return 2u;
+  }
+  if (endpoint_a_match) {
+    return 1u;
+  }
+  return select(0u, 2u, endpoint_b_match);
+}
+
+fn contact_policy_matches_element(row_index: u32, material_id: f32, phase_id: f32) -> bool {
+  return contact_policy_element_side(row_index, material_id, phase_id) != 0u;
+}
+
+fn contact_domain_pair_matches(policy_identity: vec4<f32>, element_identity: vec4<f32>) -> bool {
+  if (policy_identity.w <= 0.5 || element_identity.z <= 0.5) {
+    return false;
+  }
+  return (abs(policy_identity.x - element_identity.x) < 0.5
+      && abs(policy_identity.y - element_identity.y) < 0.5)
+    || (abs(policy_identity.x - element_identity.y) < 0.5
+      && abs(policy_identity.y - element_identity.x) < 0.5);
+}
+
+fn contact_selected_domain_pair_matches(
+  policy_identity: vec4<f32>,
+  element_identity: vec4<f32>,
+  element_side: u32
+) -> bool {
+  if (policy_identity.z <= 0.5) {
+    return true;
+  }
+  if (policy_identity.w <= 0.5 || element_identity.z <= 0.5) {
+    return false;
+  }
+  let expected_source_domain = select(policy_identity.y, policy_identity.x, element_side == 1u);
+  let expected_target_domain = select(policy_identity.x, policy_identity.y, element_side == 1u);
+  return abs(expected_source_domain - element_identity.x) < 0.5
+    && abs(expected_target_domain - element_identity.y) < 0.5;
+}
+
+fn contact_pressure_for_policy_row(row_index: u32, area_m2: f32, kinematics: vec4<f32>) -> f32 {
+  let row1 = contact_policy_rows[row_index * 4u + 1u];
+  let row2 = contact_policy_rows[row_index * 4u + 2u];
+  let support_radius_m = max(row1.z, 1.0e-6);
+  let gap_m = max(kinematics.x, 0.0);
+  let normal_velocity_m_per_s = kinematics.y;
+  let closing_speed_m_per_s = max(-normal_velocity_m_per_s, 0.0);
+  if (gap_m > support_radius_m && (closing_speed_m_per_s <= 0.0 || gap_m > support_radius_m * 2.0)) {
+    return 0.0;
+  }
+  let effective_gap_m = max(gap_m, max(support_radius_m * 0.001, 1.0e-9));
+  let proximity = clamp((support_radius_m - gap_m) / support_radius_m, 0.0, 1.0);
+  let barrier_gain = proximity * min((support_radius_m / effective_gap_m) * (support_radius_m / effective_gap_m), 1000000.0);
+  let elastic_pressure_pa = max(row1.x, 0.0) * max(row1.w, 0.0) * barrier_gain;
+  let damping_pressure_pa = max(row1.y, 0.0) * closing_speed_m_per_s / support_radius_m;
+  var inertial_pressure_pa = 0.0;
+  if (kinematics.z > 0.0 && area_m2 > 0.0 && closing_speed_m_per_s > 0.0) {
+    inertial_pressure_pa = kinematics.z * closing_speed_m_per_s * closing_speed_m_per_s / max(area_m2 * effective_gap_m, 1.0e-12);
+  }
+  var row_cap_pa = params.contact_max_pressure_pa;
+  if (row2.x > 0.0) {
+    row_cap_pa = min(row2.x, params.contact_max_pressure_pa);
+  }
+  return min(
+    max(elastic_pressure_pa + damping_pressure_pa + inertial_pressure_pa, 0.0),
+    row_cap_pa
+  );
+}
+
+fn contact_pressure_for_element(
+  material_id: f32,
+  phase_id: f32,
+  area_m2: f32,
+  kinematics: vec4<f32>,
+  element_identity: vec4<f32>
+) -> f32 {
   if (params.contact_pair_response_enabled <= 0.0 || params.contact_policy_row_count == 0u) {
     return 0.0;
   }
-  if (kinematics.w <= 0.0) {
+  if (kinematics.w != kinematics.w) {
     return 0.0;
   }
-  var selected_pressure = 0.0;
+  // Exact-near and resident GPU derivations carry the selected policy as a
+  // one-based token in element_identity.w.  Once present it is authoritative:
+  // never reselect a different row or fall back after a malformed token.
+  let selected_policy_token = element_identity.w;
+  if (kinematics.w == 2.0) {
+    if (
+      selected_policy_token != selected_policy_token
+      || abs(selected_policy_token) > 16777216.0
+    ) {
+      return 0.0;
+    }
+    if (
+      selected_policy_token != trunc(selected_policy_token)
+      || selected_policy_token < 1.0
+      || selected_policy_token > f32(params.contact_policy_row_count)
+    ) {
+      return 0.0;
+    }
+    let selected_policy_row = u32(selected_policy_token) - 1u;
+    let selected_element_side = contact_policy_element_side(
+      selected_policy_row,
+      material_id,
+      phase_id
+    );
+    if (selected_element_side == 0u) {
+      return 0.0;
+    }
+    let selected_policy_identity = contact_policy_rows[selected_policy_row * 4u + 3u];
+    if (!contact_selected_domain_pair_matches(
+      selected_policy_identity,
+      element_identity,
+      selected_element_side
+    )) {
+      return 0.0;
+    }
+    return contact_pressure_for_policy_row(selected_policy_row, area_m2, kinematics);
+  }
+  if (
+    kinematics.w != 1.0
+    || selected_policy_token != selected_policy_token
+    || selected_policy_token != 0.0
+  ) {
+    return 0.0;
+  }
+  var generic_row = 4294967295u;
+  var generic_count = 0u;
+  var exact_domain_row = 4294967295u;
+  var exact_domain_count = 0u;
   for (var row_index = 0u; row_index < params.contact_policy_row_count; row_index = row_index + 1u) {
-    let row0 = contact_policy_rows[row_index * 4u];
-    let row1 = contact_policy_rows[row_index * 4u + 1u];
-    let row2 = contact_policy_rows[row_index * 4u + 2u];
-    let status = row2.y;
-    let material_match = abs(material_id - row0.x) < 0.5 || abs(material_id - row0.y) < 0.5;
-    let phase_row_a = row0.z;
-    let phase_row_b = row0.w;
-    let phase_match = (phase_row_a <= 0.5 && phase_row_b <= 0.5)
-      || abs(phase_id - phase_row_a) < 0.5
-      || abs(phase_id - phase_row_b) < 0.5;
-    if (status > 0.0 && material_match && phase_match) {
-      let support_radius_m = max(row1.z, 1.0e-6);
-      let gap_m = max(kinematics.x, 0.0);
-      let normal_velocity_m_per_s = kinematics.y;
-      let closing_speed_m_per_s = max(-normal_velocity_m_per_s, 0.0);
-      if (gap_m > support_radius_m && (closing_speed_m_per_s <= 0.0 || gap_m > support_radius_m * 2.0)) {
-        continue;
+    if (!contact_policy_matches_element(row_index, material_id, phase_id)) {
+      continue;
+    }
+    let policy_identity = contact_policy_rows[row_index * 4u + 3u];
+    let body_specific = policy_identity.z > 0.5;
+    if (!body_specific) {
+      if (generic_count == 0u) {
+        generic_row = row_index;
       }
-      let effective_gap_m = max(gap_m, max(support_radius_m * 0.001, 1.0e-9));
-      let proximity = clamp((support_radius_m - gap_m) / support_radius_m, 0.0, 1.0);
-      let barrier_gain = proximity * min((support_radius_m / effective_gap_m) * (support_radius_m / effective_gap_m), 1000000.0);
-      let elastic_pressure_pa = max(row1.x, 0.0) * max(row1.w, 0.0) * barrier_gain;
-      let damping_pressure_pa = max(row1.y, 0.0) * closing_speed_m_per_s / support_radius_m;
-      var inertial_pressure_pa = 0.0;
-      if (kinematics.z > 0.0 && area_m2 > 0.0 && closing_speed_m_per_s > 0.0) {
-        inertial_pressure_pa = kinematics.z * closing_speed_m_per_s * closing_speed_m_per_s / max(area_m2 * effective_gap_m, 1.0e-12);
+      generic_count = generic_count + 1u;
+    } else if (contact_domain_pair_matches(policy_identity, element_identity)) {
+      if (exact_domain_count == 0u) {
+        exact_domain_row = row_index;
       }
-      var row_cap_pa = params.contact_max_pressure_pa;
-      if (row2.x > 0.0) {
-        row_cap_pa = min(row2.x, params.contact_max_pressure_pa);
-      }
-      let contact_pressure_pa = min(
-        max(elastic_pressure_pa + damping_pressure_pa + inertial_pressure_pa, 0.0),
-        row_cap_pa
-      );
-      selected_pressure = max(selected_pressure, contact_pressure_pa);
+      exact_domain_count = exact_domain_count + 1u;
     }
   }
-  return selected_pressure;
+
+  var selected_row = 4294967295u;
+  if (element_identity.z > 0.5 && exact_domain_count == 1u) {
+    selected_row = exact_domain_row;
+  } else if (generic_count > 0u) {
+    // A missing pair, no exact pair, or an ambiguous exact pair may use only
+    // an explicit generic material/phase fallback. Never silently select one
+    // of several body-specific rows.
+    selected_row = generic_row;
+  }
+  if (selected_row == 4294967295u) {
+    return 0.0;
+  }
+  return contact_pressure_for_policy_row(selected_row, area_m2, kinematics);
 }
 
 @compute @workgroup_size(64)
@@ -7674,8 +8020,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let centroid = row1.xyz;
   let area = row1.w;
   let status = row3.w;
-  let gas_pressure_pa = pressure_for_centroid(centroid);
-  let contact_pressure_pa = contact_pressure_for_element(row0.y, row0.z, area, contact_kinematics_rows[element_index]);
+  // Gas/plasma carriers already receive this pressure through their EOS
+  // stress. Feeding it back as traction on their own extracted surface would
+  // double-count the same pressure, with a catastrophic area/mass ratio for
+  // newly produced gas particles.
+  let gas_pressure_pa = select(
+    pressure_for_centroid(centroid),
+    0.0,
+    row0.z == 3.0 || row0.z == 4.0
+  );
+  let contact_kinematics = contact_kinematics_rows[element_index * 2u];
+  let contact_identity = contact_kinematics_rows[element_index * 2u + 1u];
+  let contact_pressure_pa = contact_pressure_for_element(
+    row0.y,
+    row0.z,
+    area,
+    contact_kinematics,
+    contact_identity
+  );
   let pressure_pa = gas_pressure_pa + contact_pressure_pa;
   var normal_area = vec3<f32>(row2.w, row3.x, row3.y);
   if (dot(normal_area, normal_area) <= 1.0e-24) {
@@ -7838,6 +8200,7 @@ struct InterfaceSourceKeyParams {
 @group(0) @binding(13) var<uniform> schroeder_contact_source_span_params: SchroederContactSourceSpanParams;
 @group(0) @binding(14) var<storage, read> interface_source_key_rows: array<f32>;
 @group(0) @binding(15) var<uniform> interface_source_key_params: InterfaceSourceKeyParams;
+@group(0) @binding(16) var<storage, read> particle_identity: array<u32>;
 
 const SCHROEDER_CONTACT_LAW_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_CONTACT_LAW_QUEUE_STATUS_OFFSET: u32 = 3u;
@@ -8130,7 +8493,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (element_index >= params.element_count) {
     return;
   }
-  contact_kinematics_rows[element_index] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  contact_kinematics_rows[element_index * 2u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  contact_kinematics_rows[element_index * 2u + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
   if (params.derivation_enabled == 0u || params.particle_count == 0u || params.contact_policy_row_count == 0u) {
     return;
   }
@@ -8371,11 +8735,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (source_mass_kg > 0.0 && target_mass_kg > 0.0) {
     representative_mass_kg = (source_mass_kg * target_mass_kg) / max(source_mass_kg + target_mass_kg, 1.0e-12);
   }
-  contact_kinematics_rows[element_index] = vec4<f32>(
+  let source_domain_id = particle_identity[source_index];
+  let target_domain_id = particle_identity[target_index];
+  let domain_pair_ready = source_domain_id > 0u && target_domain_id > 0u;
+  contact_kinematics_rows[element_index * 2u] = vec4<f32>(
     gap_m,
     relative_normal_velocity_m_per_s,
     representative_mass_kg,
     1.0
+  );
+  contact_kinematics_rows[element_index * 2u + 1u] = vec4<f32>(
+    f32(source_domain_id),
+    f32(target_domain_id),
+    select(0.0, 1.0, domain_pair_ready),
+    0.0
   );
 }
 `;
@@ -9184,7 +9557,7 @@ struct ResidentSummaryParams {
   base_end_index: u32,
   drop_start_index: u32,
   drop_end_index: u32,
-  pad_u1: u32,
+  h2o_material_id: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_sph_state: array<vec4<f32>>;
@@ -9264,6 +9637,9 @@ var<workgroup> wg_drop_cohort_max_y: array<f32, 32>;
 var<workgroup> wg_drop_cohort_max_z: array<f32, 32>;
 var<workgroup> wg_drop_cohort_max_speed: array<f32, 32>;
 var<workgroup> wg_drop_cohort_status: array<f32, 32>;
+var<workgroup> wg_h2o_gas_mass: array<f32, 32>;
+var<workgroup> wg_h2o_gas_temperature_mass_sum: array<f32, 32>;
+var<workgroup> wg_h2o_gas_phase_weight: array<f32, 32>;
 
 @compute @workgroup_size(32)
 fn main(
@@ -9321,6 +9697,9 @@ fn main(
   var drop_cohort_max = vec3<f32>(-3.4028234663852886e38);
   var drop_cohort_max_speed2 = 0.0;
   var drop_cohort_status = 0.0;
+  var h2o_gas_mass = 0.0;
+  var h2o_gas_temperature_mass_sum = 0.0;
+  var h2o_gas_phase_weight = 0.0;
 
   if (index < params.particle_count) {
     let state_base = index * 2u;
@@ -9388,6 +9767,15 @@ fn main(
     );
 
     let temperature_k = thermo_row0.z;
+    let particle_h2o_gas_mass = particle_mass * phase_fractions.z;
+    if (u32(round(thermo_row0.x)) == params.h2o_material_id && particle_h2o_gas_mass > 0.0) {
+      h2o_gas_mass = h2o_gas_mass + particle_h2o_gas_mass;
+      h2o_gas_phase_weight = h2o_gas_phase_weight + phase_fractions.z;
+      if (temperature_k > 0.0) {
+        h2o_gas_temperature_mass_sum = h2o_gas_temperature_mass_sum
+          + particle_h2o_gas_mass * temperature_k;
+      }
+    }
     if (temperature_k > 0.0) {
       temperature_mass_sum = temperature_mass_sum + particle_mass * temperature_k;
       min_temperature_k = min(min_temperature_k, temperature_k);
@@ -9469,6 +9857,9 @@ fn main(
   wg_drop_cohort_max_z[lane] = drop_cohort_max.z;
   wg_drop_cohort_max_speed[lane] = sqrt(drop_cohort_max_speed2);
   wg_drop_cohort_status[lane] = drop_cohort_status;
+  wg_h2o_gas_mass[lane] = h2o_gas_mass;
+  wg_h2o_gas_temperature_mass_sum[lane] = h2o_gas_temperature_mass_sum;
+  wg_h2o_gas_phase_weight[lane] = h2o_gas_phase_weight;
   workgroupBarrier();
 
   var stride = 16u;
@@ -9543,6 +9934,10 @@ fn main(
       wg_drop_cohort_max_z[lane] = max(wg_drop_cohort_max_z[lane], wg_drop_cohort_max_z[other]);
       wg_drop_cohort_max_speed[lane] = max(wg_drop_cohort_max_speed[lane], wg_drop_cohort_max_speed[other]);
       wg_drop_cohort_status[lane] = max(wg_drop_cohort_status[lane], wg_drop_cohort_status[other]);
+      wg_h2o_gas_mass[lane] = wg_h2o_gas_mass[lane] + wg_h2o_gas_mass[other];
+      wg_h2o_gas_temperature_mass_sum[lane] = wg_h2o_gas_temperature_mass_sum[lane]
+        + wg_h2o_gas_temperature_mass_sum[other];
+      wg_h2o_gas_phase_weight[lane] = wg_h2o_gas_phase_weight[lane] + wg_h2o_gas_phase_weight[other];
     }
     workgroupBarrier();
     if (stride == 1u) {
@@ -9552,7 +9947,7 @@ fn main(
   }
 
   if (lane == 0u) {
-    let partial_base = workgroup_id.x * 21u;
+    let partial_base = workgroup_id.x * 22u;
     let momentum_delta = vec3<f32>(
       wg_next_momentum_x[0u] - wg_source_momentum_x[0u],
       wg_next_momentum_y[0u] - wg_source_momentum_y[0u],
@@ -9684,6 +10079,12 @@ fn main(
       wg_drop_cohort_max_speed[0u],
       0.0
     );
+    partial_summaries[partial_base + 21u] = vec4<f32>(
+      wg_h2o_gas_mass[0u],
+      wg_h2o_gas_temperature_mass_sum[0u],
+      wg_h2o_gas_phase_weight[0u],
+      select(0.0, 1.0, params.h2o_material_id > 0u)
+    );
   }
 }
 `;
@@ -9697,7 +10098,7 @@ struct ResidentSummaryParams {
   base_end_index: u32,
   drop_start_index: u32,
   drop_end_index: u32,
-  pad_u1: u32,
+  h2o_material_id: u32,
 };
 
 @group(0) @binding(0) var<storage, read> partial_summaries: array<vec4<f32>>;
@@ -9751,9 +10152,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var drop_cohort_min = vec3<f32>(3.4028234663852886e38);
   var drop_cohort_max = vec3<f32>(-3.4028234663852886e38);
   var drop_cohort_max_speed = 0.0;
+  var h2o_gas_mass = 0.0;
+  var h2o_gas_temperature_mass_sum = 0.0;
+  var h2o_gas_phase_weight = 0.0;
+  var h2o_gas_summary_status = 0.0;
 
   for (var partial_index = 0u; partial_index < params.partial_count; partial_index = partial_index + 1u) {
-    let base = partial_index * 21u;
+    let base = partial_index * 22u;
     let row0 = partial_summaries[base];
     let row1 = partial_summaries[base + 1u];
     let row2 = partial_summaries[base + 2u];
@@ -9775,6 +10180,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row18 = partial_summaries[base + 18u];
     let row19 = partial_summaries[base + 19u];
     let row20 = partial_summaries[base + 20u];
+    let row21 = partial_summaries[base + 21u];
     active_grid_nodes = active_grid_nodes + row0.z;
     source_mass = source_mass + row0.w;
     next_mass = next_mass + row1.x;
@@ -9816,6 +10222,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     drop_cohort_min = min(drop_cohort_min, vec3<f32>(row19.x, row19.y, row19.z));
     drop_cohort_max = max(drop_cohort_max, vec3<f32>(row19.w, row20.x, row20.y));
     drop_cohort_max_speed = max(drop_cohort_max_speed, row20.z);
+    h2o_gas_mass = h2o_gas_mass + row21.x;
+    h2o_gas_temperature_mass_sum = h2o_gas_temperature_mass_sum + row21.y;
+    h2o_gas_phase_weight = h2o_gas_phase_weight + row21.z;
+    h2o_gas_summary_status = max(h2o_gas_summary_status, row21.w);
   }
 
   if (params.particle_count == 0u) {
@@ -9829,6 +10239,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var temperature_mass_weighted_mean_k = 0.0;
   if (phase_mass_total > 0.0) {
     temperature_mass_weighted_mean_k = temperature_mass_sum / phase_mass_total;
+  }
+  var h2o_gas_temperature_mass_weighted_mean_k = 0.0;
+  if (h2o_gas_mass > 0.0) {
+    h2o_gas_temperature_mass_weighted_mean_k = h2o_gas_temperature_mass_sum / h2o_gas_mass;
   }
   var source_center_of_mass = vec3<f32>(0.0);
   if (source_position_mass_total > 0.0) {
@@ -9987,6 +10401,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     drop_cohort_max.z,
     drop_cohort_max_speed,
     0.0
+  );
+  resident_summary[21u] = vec4<f32>(
+    h2o_gas_mass,
+    h2o_gas_temperature_mass_weighted_mean_k,
+    h2o_gas_phase_weight,
+    h2o_gas_summary_status
   );
 }
 `;
@@ -11900,6 +12320,7 @@ struct SchroederPhaseVolumeTargetAggregateParams {
 @group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeTargetAggregateParams;
 @group(0) @binding(3) var<storage, read> sph_state: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> sph_thermo: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> particle_identity: array<u32>;
 
 const SCHROEDER_PVTA_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_PVTA_AGGREGATE_STRIDE: u32 = 32u;
@@ -11958,7 +12379,7 @@ fn ss_pvta_level_from_support(support_radius_m: f32) -> i32 {
 }
 
 fn ss_pvta_write_empty(aggregate_offset: u32, assignment_offset: u32, particle_index: u32, status: f32) {
-  aggregate_rows[aggregate_offset + 0u] = 0.0;
+  aggregate_rows[aggregate_offset + 0u] = f32(particle_identity[particle_index]);
   aggregate_rows[aggregate_offset + 1u] = level_assignments[assignment_offset + 0u];
   aggregate_rows[aggregate_offset + 2u] = level_assignments[assignment_offset + 15u];
   aggregate_rows[aggregate_offset + 3u] = status;
@@ -12023,7 +12444,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let target_cell = floor(position / target_grid_spacing);
   let level_delta = target_level - source_level;
 
-  aggregate_rows[aggregate_offset + 0u] = 0.0;
+  aggregate_rows[aggregate_offset + 0u] = f32(particle_identity[particle_index]);
   aggregate_rows[aggregate_offset + 1u] = target_level;
   aggregate_rows[aggregate_offset + 2u] = chart_id;
   aggregate_rows[aggregate_offset + 3u] = 1.0;
@@ -13912,6 +14333,7 @@ struct SchroederPhaseVolumeMigrationParams {
 @group(0) @binding(1) var<storage, read> aggregate_node_rows: array<f32>;
 @group(0) @binding(2) var<storage, read_write> migration_rows: array<f32>;
 @group(0) @binding(3) var<uniform> params: SchroederPhaseVolumeMigrationParams;
+@group(0) @binding(4) var<storage, read> particle_identity: array<u32>;
 
 const SCHROEDER_PVM_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_PVM_AGGREGATE_NODE_STRIDE: u32 = 32u;
@@ -13953,10 +14375,12 @@ fn ss_pvm_active_aggregate_node(node_offset: u32) -> bool {
 
 fn ss_pvm_same_cell(
   node_offset: u32,
+  particle_domain: f32,
   target_level: i32,
   chart_id: f32,
   target_cell: vec3<f32>
 ) -> bool {
+  let node_domain = aggregate_node_rows[node_offset + 0u];
   let node_level = aggregate_node_rows[node_offset + 1u];
   let node_chart = aggregate_node_rows[node_offset + 2u];
   let node_cell = vec3<f32>(
@@ -13964,7 +14388,8 @@ fn ss_pvm_same_cell(
     aggregate_node_rows[node_offset + 5u],
     aggregate_node_rows[node_offset + 6u]
   );
-  return abs(node_level - f32(target_level)) < 0.5
+  return abs(node_domain - particle_domain) < 0.5
+    && abs(node_level - f32(target_level)) < 0.5
     && abs(node_chart - chart_id) < 0.5
     && all(abs(node_cell - target_cell) < vec3<f32>(0.5));
 }
@@ -14063,6 +14488,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     level_assignments[assignment_offset + 14u]
   );
   let chart_id = level_assignments[assignment_offset + 15u];
+  let particle_domain = f32(particle_identity[particle_index]);
 
   if (!ss_pvm_positive(represented_volume) || !ss_pvm_positive(rest_volume)) {
     ss_pvm_write_row(
@@ -14121,7 +14547,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   for (var node_index = 0u; node_index < params.aggregate_node_count; node_index = node_index + 1u) {
     let node_offset = node_index * aggregate_node_stride;
     if (ss_pvm_active_aggregate_node(node_offset)
-      && ss_pvm_same_cell(node_offset, target_level_i32, chart_id, target_cell)
+      && ss_pvm_same_cell(node_offset, particle_domain, target_level_i32, chart_id, target_cell)
       && aggregate_node_index < 0.0) {
       aggregate_node_index = f32(node_index);
       aggregate_match_count = aggregate_node_rows[node_offset + 15u];
@@ -14967,6 +15393,8 @@ struct SchroederParticleStorageMaterializationParams {
 @group(0) @binding(6) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> materialization_rows: array<f32>;
 @group(0) @binding(8) var<uniform> params: SchroederParticleStorageMaterializationParams;
+@group(0) @binding(9) var<storage, read> source_particle_identity: array<u32>;
+@group(0) @binding(10) var<storage, read_write> out_particle_identity: array<u32>;
 
 const SCHROEDER_PSM_ASSIGNMENT_STRIDE: u32 = 32u;
 const SCHROEDER_PSM_MATERIALIZATION_STRIDE: u32 = 32u;
@@ -14980,6 +15408,72 @@ fn ss_psm_stride(value: u32, fallback: u32) -> u32 {
 
 fn ss_psm_index(value: f32) -> u32 {
   return u32(max(floor(value), 0.0));
+}
+
+// A merged particle can carry only one structural render-domain id. Never
+// collapse particles from different initial bodies into a child whose domain
+// would depend on which assignment row happened to lead the group.
+fn ss_psm_merge_identity_compatible(
+  assignment_offset: u32,
+  source_index: u32,
+  target_count: u32,
+  free_start_value: f32,
+  free_start: u32,
+  free_count: u32
+) -> bool {
+  let assignment_action = assignment_rows[assignment_offset + 8u];
+  let assignment_stride = ss_psm_stride(
+    params.assignment_stride,
+    SCHROEDER_PSM_ASSIGNMENT_STRIDE
+  );
+  var has_identity = false;
+  var expected_identity = 0u;
+  if (source_index < params.source_particle_count) {
+    expected_identity = source_particle_identity[source_index];
+    has_identity = true;
+  }
+
+  if (assignment_action == 2.0 && assignment_rows[assignment_offset + 20u] >= 0.0) {
+    let merge_cell = assignment_rows[assignment_offset + 20u];
+    for (var row = 0u; row < params.assignment_row_count; row = row + 1u) {
+      let other_offset = row * assignment_stride;
+      if (assignment_rows[other_offset + 8u] != 2.0
+          || assignment_rows[other_offset + 20u] != merge_cell
+          || assignment_rows[other_offset + 11u] < 0.0
+          || !(assignment_rows[other_offset + 12u] > 0.0)) {
+        continue;
+      }
+      let member_index = ss_psm_index(assignment_rows[other_offset + 0u]);
+      if (member_index >= params.source_particle_count) {
+        continue;
+      }
+      let member_identity = source_particle_identity[member_index];
+      if (has_identity && member_identity != expected_identity) {
+        return false;
+      }
+      expected_identity = member_identity;
+      has_identity = true;
+    }
+  }
+
+  // The alternate leader-plus-freed-range merge encoding has no per-member
+  // action-2 rows. A one-child write that frees a range is compatible only
+  // when every consumed source slot belongs to the leader's domain.
+  if (target_count == 1u && free_start_value >= 0.0 && free_count > 0u) {
+    for (var slot = 0u; slot < free_count; slot = slot + 1u) {
+      let member_index = free_start + slot;
+      if (member_index >= params.source_particle_count) {
+        continue;
+      }
+      let member_identity = source_particle_identity[member_index];
+      if (has_identity && member_identity != expected_identity) {
+        return false;
+      }
+      expected_identity = member_identity;
+      has_identity = true;
+    }
+  }
+  return true;
 }
 
 fn ss_psm_target_mass(assignment_offset: u32, source_mass: f32) -> f32 {
@@ -15236,6 +15730,7 @@ fn ss_psm_copy_particle(
   out_mls_mechanics[target_mechanics_base + 5u] = source_mls_mechanics[source_mechanics_base + 5u];
   out_mls_mechanics[target_mechanics_base + 6u] = source_mls_mechanics[source_mechanics_base + 6u];
   out_mls_mechanics[target_mechanics_base + 7u] = source_mls_mechanics[source_mechanics_base + 7u];
+  out_particle_identity[target_index] = source_particle_identity[source_index];
   return 1.0;
 }
 
@@ -15258,6 +15753,7 @@ fn ss_psm_free_particle(source_index: u32) -> f32 {
   out_mls_mechanics[mechanics_base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
   let row5 = out_mls_mechanics[mechanics_base + 5u];
   out_mls_mechanics[mechanics_base + 5u] = vec4<f32>(row5.x, 0.0, row5.z, row5.w);
+  out_particle_identity[source_index] = 0u;
   return 1.0;
 }
 
@@ -15307,6 +15803,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let free_count = ss_psm_index(assignment_rows[assignment_offset + 12u]);
   let target_start = ss_psm_index(target_start_value);
   let free_start = ss_psm_index(free_start_value);
+
+  if (!ss_psm_merge_identity_compatible(
+      assignment_offset,
+      source_index,
+      target_count,
+      free_start_value,
+      free_start,
+      free_count
+  )) {
+    ss_psm_write_empty(materialization_offset, assignment_offset, 64.0);
+    return;
+  }
 
   // Freed-range conservation sums: the slots this row will free are the
   // merged-away members; their SOURCE state is still intact here (frees
@@ -16257,6 +16765,8 @@ struct SchroederParticleStorageCompactionParams {
 @group(0) @binding(5) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> summary_row: array<f32>;
 @group(0) @binding(7) var<uniform> params: SchroederParticleStorageCompactionParams;
+@group(0) @binding(8) var<storage, read> in_particle_identity: array<u32>;
+@group(0) @binding(9) var<storage, read_write> out_particle_identity: array<u32>;
 
 const SCHROEDER_PSCOMP_WORKGROUP_SIZE: u32 = 64u;
 
@@ -16284,6 +16794,7 @@ fn ss_pscomp_copy_slot(source_slot: u32, target_slot: u32) {
     out_mls_mechanics[target_slot * mechanics_stride + part] =
       in_mls_mechanics[source_slot * mechanics_stride + part];
   }
+  out_particle_identity[target_slot] = in_particle_identity[source_slot];
 }
 
 // Order-preserving stream compaction over the particle live range: freed

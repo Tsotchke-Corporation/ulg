@@ -22,6 +22,7 @@ import {
   createResidentProductMassHandle,
   reactionStrictGateFromSummary,
   runSphReactionSummaryWebGpu,
+  ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
   SPH_GPU_REACTION_SUMMARY_FLOATS
@@ -733,6 +734,44 @@ test('resident product mass handle preserves positioned product-event records', 
   assert.deepEqual(handle.productEvents.records[0].positionM, [0.5, 1, 1]);
   assert.equal(handle.productEvents.records[0].supportVolumeM3, 4);
   assert.notEqual(handle.productEvents.records[0], reactionSummary.productEvents.records[0]);
+});
+
+test('resident product mass handle carries only classified strict reaction gates', () => {
+  const baseSummary = {
+    productEventBufferRetained: true,
+    productEventBuffer: { label: 'strict-gate-product-events' },
+    productEventBufferByteLength: 128,
+    productEventRowCount: 1,
+    productEvents: {
+      schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+      records: []
+    }
+  };
+  const passed = createResidentProductMassHandle({
+    ...baseSummary,
+    strictReactionGate: {
+      schema: ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
+      status: 'strict-reaction-gate-pass',
+      blockers: [],
+      warnings: ['reference-phase-applicability-not-fully-validated'],
+      strictForceCouplingAllowed: true
+    }
+  });
+  assert.equal(passed.strictReactionGateStatus, 'strict-reaction-gate-pass');
+  assert.equal(passed.strictForceCouplingAllowed, true);
+  assert.notEqual(passed.strictReactionGate, passed);
+
+  const notRun = createResidentProductMassHandle({
+    ...baseSummary,
+    strictReactionGate: {
+      schema: ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
+      status: 'strict-reaction-gate-not-run-resident-no-readback',
+      blockers: ['compact reaction ledger readback skipped'],
+      strictForceCouplingAllowed: false
+    }
+  });
+  assert.equal(notRun.strictReactionGate, null);
+  assert.equal(notRun.strictReactionGateStatus, null);
 });
 
 test('SPH reaction atom residual decoder aggregates atom and charge parity rows', () => {

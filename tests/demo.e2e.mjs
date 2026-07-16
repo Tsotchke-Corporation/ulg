@@ -3274,6 +3274,377 @@ test('SPH phase demo opens collapsed and starts from URL params', async ({ page 
   await expect(page.locator('#sph-status')).toContainText(/resident profile : submissions=[1-9]|worker-view-state|pending worker view-state/);
 });
 
+test('SPH phase dark-lab lighting is live, URL-backed, and does not reset physics', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto('/?drop=Na&base=h2o&dropt=1000&baset=300&dropn=1&basen=1&boxx=3&boxy=3&boxz=3&mech=sph&residentAuto=0&residentWorkers=0&surfaceDraw=auto&lighting=dark-lab');
+  await ensureSphPhaseOverlayVisible(page);
+  await expect(page.locator('#sph-lighting-mode select')).toHaveValue('dark-lab');
+  await expect(page.locator('#sph-lighting-toggle')).toBeVisible();
+  await expect(page.locator('#sph-lighting-toggle')).toHaveAttribute('aria-pressed', 'true');
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return Boolean(overlay?.__sphScene?.getLightingMode?.());
+  });
+
+  const dark = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const sceneApi = overlay.__sphScene;
+    window.__sphDarkLabSceneIdentity = sceneApi;
+    window.__sphDarkLabResetCallCount = 0;
+    const resetResidentState = sceneApi.resetResidentStateForParticleReset?.bind(sceneApi);
+    if (resetResidentState) {
+      sceneApi.resetResidentStateForParticleReset = (...args) => {
+        window.__sphDarkLabResetCallCount += 1;
+        return resetResidentState(...args);
+      };
+    }
+    const lights = { ambient: null, hemisphere: null, directional: [] };
+    sceneApi.scene.traverse((node) => {
+      if (node.isAmbientLight) lights.ambient = node.intensity;
+      if (node.isHemisphereLight) lights.hemisphere = node.intensity;
+      if (node.isDirectionalLight) lights.directional.push(node.intensity);
+    });
+    const wire = sceneApi.scene.children.find((node) => node.userData?.renderLayer === 'container-wire');
+    const grid = sceneApi.scene.children.find((node) => node.userData?.renderLayer === 'container-grid');
+    const gridMaterials = Array.isArray(grid?.material) ? grid.material : [grid?.material];
+    return {
+      telemetry: sceneApi.getLightingMode(),
+      overlayTelemetry: overlay.__sphSceneLighting,
+      lights,
+      environmentIntensity: sceneApi.scene.environmentIntensity,
+      wireOpacity: wire?.material?.opacity,
+      gridOpacities: gridMaterials.filter(Boolean).map((material) => material.opacity)
+    };
+  });
+  expect(dark.telemetry.mode).toBe('dark-lab');
+  expect(dark.telemetry.physicallyDerivedEmissionPreserved).toBe(true);
+  expect(dark.telemetry.nativeAmbientSuppression).toBe(1);
+  expect(dark.telemetry.nativeDirectSuppression).toBe(1);
+  expect(dark.telemetry.nativeEnvironmentSuppression).toBe(1);
+  expect(dark.overlayTelemetry.mode).toBe('dark-lab');
+  expect(dark.lights).toEqual({ ambient: 0.03, hemisphere: 0, directional: [0, 0] });
+  expect(dark.environmentIntensity).toBe(0);
+  expect(dark.wireOpacity).toBe(0.1);
+  expect(dark.gridOpacities.every((opacity) => opacity === 0.06)).toBe(true);
+
+  await page.locator('#sph-lighting-mode select').selectOption('normal');
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toContain('lighting=normal');
+  const normal = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const sceneApi = overlay.__sphScene;
+    const lights = { ambient: null, hemisphere: null, directional: [] };
+    sceneApi.scene.traverse((node) => {
+      if (node.isAmbientLight) lights.ambient = node.intensity;
+      if (node.isHemisphereLight) lights.hemisphere = node.intensity;
+      if (node.isDirectionalLight) lights.directional.push(node.intensity);
+    });
+    const wire = sceneApi.scene.children.find((node) => node.userData?.renderLayer === 'container-wire');
+    const grid = sceneApi.scene.children.find((node) => node.userData?.renderLayer === 'container-grid');
+    const gridMaterials = Array.isArray(grid?.material) ? grid.material : [grid?.material];
+    return {
+      sameScene: sceneApi === window.__sphDarkLabSceneIdentity,
+      resetCallCount: window.__sphDarkLabResetCallCount,
+      telemetry: sceneApi.getLightingMode(),
+      lights,
+      environmentIntensity: sceneApi.scene.environmentIntensity,
+      wireOpacity: wire?.material?.opacity,
+      gridOpacities: gridMaterials.filter(Boolean).map((material) => material.opacity)
+    };
+  });
+  expect(normal.sameScene).toBe(true);
+  expect(normal.resetCallCount).toBe(0);
+  expect(normal.telemetry.mode).toBe('normal');
+  expect(normal.telemetry.nativeAmbientSuppression).toBe(0);
+  expect(normal.telemetry.nativeDirectSuppression).toBe(0);
+  expect(normal.telemetry.nativeEnvironmentSuppression).toBe(0);
+  expect(normal.lights).toEqual({ ambient: 1.4, hemisphere: 0.9, directional: [1.1, 0.5] });
+  expect(normal.environmentIntensity).toBe(1);
+  expect(normal.wireOpacity).toBe(0.6);
+  expect(normal.gridOpacities.every((opacity) => opacity === 1)).toBe(true);
+
+  await expect(page.locator('#sph-lighting-toggle')).toHaveAttribute('aria-pressed', 'false');
+  await page.locator('#sph-lighting-toggle').click();
+  await expect(page.locator('#sph-lighting-mode select')).toHaveValue('dark-lab');
+  await expect(page.locator('#sph-lighting-toggle')).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(() => page.evaluate(() => ({
+    sameScene: document.querySelector('#sph-phase-overlay')?.__sphScene === window.__sphDarkLabSceneIdentity,
+    resetCallCount: window.__sphDarkLabResetCallCount,
+    mode: document.querySelector('#sph-phase-overlay')?.__sphScene?.getLightingMode?.()?.mode
+  }))).toEqual({ sameScene: true, resetCallCount: 0, mode: 'dark-lab' });
+});
+
+test('SPH local background image is session-only, replaceable, persistent, and leak-free', async ({ page }) => {
+  test.setTimeout(120_000);
+  const backgroundSurfaceDraw = process.env.ULG_BACKGROUND_VISUAL_SURFACE_DRAW
+    || 'three-render-row-spheres';
+  const backgroundVisualCapturePrefix = process.env.ULG_BACKGROUND_VISUAL_CAPTURE_PREFIX || '';
+  const nativeBackgroundMode = backgroundSurfaceDraw === 'native-webgpu-surface-consumer';
+  if (process.env.ULG_BACKGROUND_VISUAL_MOBILE === '1') {
+    await page.setViewportSize({ width: 390, height: 844 });
+  }
+  await page.addInitScript(() => {
+    const createObjectURL = URL.createObjectURL.bind(URL);
+    const revokeObjectURL = URL.revokeObjectURL.bind(URL);
+    window.__sphBackgroundObjectUrls = { created: [], revoked: [] };
+    URL.createObjectURL = (...args) => {
+      const url = createObjectURL(...args);
+      window.__sphBackgroundObjectUrls.created.push(url);
+      return url;
+    };
+    URL.revokeObjectURL = (url) => {
+      window.__sphBackgroundObjectUrls.revoked.push(url);
+      return revokeObjectURL(url);
+    };
+  });
+  await page.goto(`/?drop=Na&base=h2o&dropt=300&baset=300&dropn=1&basen=1&boxx=3&boxy=3&boxz=3&mech=${nativeBackgroundMode ? 'mlsmpm' : 'sph'}&residentAuto=${nativeBackgroundMode ? '1' : '0'}&residentWorkers=0&surfaceDraw=${encodeURIComponent(backgroundSurfaceDraw)}`);
+  await ensureSphPhaseOverlayVisible(page);
+  if (await page.locator('#sph-panel').evaluate((panel) => panel.classList.contains('collapsed'))) {
+    await page.locator('#sph-toggle').click();
+  }
+
+  const fileInput = page.locator('#sph-background-image-file');
+  const clearButton = page.locator('#sph-background-image-clear');
+  const status = page.locator('#sph-background-image-status');
+  await expect(fileInput).toHaveAttribute('accept', 'image/avif,image/jpeg,image/png,image/webp');
+  await expect(status).toHaveAttribute('role', 'status');
+  await expect(status).toContainText('stay on this device');
+  await expect(clearButton).toBeDisabled();
+
+  await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    window.__sphBackgroundSceneIdentity = overlay.__sphScene;
+    window.__sphBackgroundResetCallCount = 0;
+    const reset = overlay.__sphScene.resetResidentStateForParticleReset?.bind(overlay.__sphScene);
+    if (reset) {
+      overlay.__sphScene.resetResidentStateForParticleReset = (...args) => {
+        window.__sphBackgroundResetCallCount += 1;
+        return reset(...args);
+      };
+    }
+  });
+
+  // Make the pre-decode callback deterministic, then prove that a newer
+  // invalid selection cancels the pending valid candidate instead of allowing
+  // the older file to commit later.
+  await page.evaluate(() => {
+    const NativeImage = window.Image;
+    window.__restoreSphBackgroundImageConstructor = () => {
+      window.Image = NativeImage;
+      delete window.__restoreSphBackgroundImageConstructor;
+    };
+    function DelayedImage(...args) {
+      const image = new NativeImage(...args);
+      return new Proxy(image, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+        set(target, property, value) {
+          if (property === 'onload' || property === 'onerror') {
+            Reflect.set(target, property, (event) => {
+              window.setTimeout(() => value?.call(target, event), 750);
+            }, target);
+            return true;
+          }
+          return Reflect.set(target, property, value, target);
+        }
+      });
+    }
+    DelayedImage.prototype = NativeImage.prototype;
+    window.Image = DelayedImage;
+  });
+  await fileInput.setInputFiles(path.resolve('plan/background-4.jpg'));
+  await expect(status).toContainText('Checking background-4.jpg');
+  await expect(clearButton).toBeEnabled();
+  const cancelledPendingUrl = await page.evaluate(() => (
+    window.__sphBackgroundObjectUrls.created.at(-1)
+  ));
+  await fileInput.setInputFiles({
+    name: 'newer-invalid.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('not an image')
+  });
+  await expect(status).toContainText('Use a PNG, JPEG, WebP, or AVIF image');
+  await page.waitForTimeout(1_000);
+  const pendingRace = await page.evaluate((url) => {
+    window.__restoreSphBackgroundImageConstructor?.();
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return {
+      sceneUrl: overlay.__sphScene.getBackgroundImage()?.url || null,
+      localStatus: overlay.__sphLocalBackgroundImage,
+      revocations: window.__sphBackgroundObjectUrls.revoked.filter((entry) => entry === url).length
+    };
+  }, cancelledPendingUrl);
+  expect(pendingRace.sceneUrl).toBeNull();
+  expect(pendingRace.localStatus.localObjectUrlActive).toBe(false);
+  expect(pendingRace.localStatus.localObjectUrlPending).toBe(false);
+  expect(pendingRace.revocations).toBe(1);
+
+  await fileInput.setInputFiles(path.resolve('plan/background-4.jpg'));
+  await expect(status).toContainText('background-4.jpg');
+  await expect(status).toContainText('nothing was uploaded');
+  await expect(clearButton).toBeEnabled();
+  const first = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return {
+      sceneUrl: overlay.__sphScene.getBackgroundImage()?.url,
+      local: overlay.__sphLocalBackgroundImage,
+      sameScene: overlay.__sphScene === window.__sphBackgroundSceneIdentity,
+      resetCallCount: window.__sphBackgroundResetCallCount,
+      containerBackground: overlay.querySelector('#sph-scene').style.backgroundImage,
+      hash: window.location.hash
+    };
+  });
+  expect(first.sceneUrl).toMatch(/^blob:/);
+  expect(first.local.localObjectUrlActive).toBe(true);
+  expect(first.local.sessionOnly).toBe(true);
+  expect(first.sameScene).toBe(true);
+  expect(first.resetCallCount).toBe(0);
+  expect(first.containerBackground).toContain(first.sceneUrl);
+  expect(first.hash).not.toContain('blob:');
+  expect(first.hash).not.toContain('background-4.jpg');
+  expect(first.hash).not.toContain('__local-background-image__');
+  if (nativeBackgroundMode) {
+    await expect.poll(() => page.evaluate(() => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const bridge = overlay?.__sphScene?.scene?.userData?.sphResidentSurfaceDrawRenderBridge;
+      const activeUrl = overlay?.__sphScene?.getBackgroundImage?.()?.url || null;
+      return {
+        status: bridge?.backgroundImageGpuStatus || null,
+        backgroundUrlMatches: bridge?.backgroundImageTextureUrl === activeUrl,
+        environmentUrlMatches: bridge?.envMapUrl === activeUrl,
+        backgroundDrawn: bridge?.lastBackgroundImageDrawn === true,
+        backgroundDrawCountPositive: Number(bridge?.backgroundImageDrawCount || 0) > 0,
+        refractiveDrawCountPositive: Number(bridge?.lastRefractiveDrawCount || 0) > 0,
+        refractionUsesEnvironment:
+          Boolean(bridge?.envMapView)
+          && bridge?.refractionBindGroupEnvironmentView === bridge?.envMapView
+      };
+    }), { timeout: 60_000 }).toEqual({
+      status: 'native-opaque-background-image-rendered',
+      backgroundUrlMatches: true,
+      environmentUrlMatches: true,
+      backgroundDrawn: true,
+      backgroundDrawCountPositive: true,
+      refractiveDrawCountPositive: true,
+      refractionUsesEnvironment: true
+    });
+  }
+  if (backgroundVisualCapturePrefix) {
+    await page.screenshot({ path: `${backgroundVisualCapturePrefix}-controls.png` });
+    await page.locator('#sph-background-color').screenshot({
+      path: `${backgroundVisualCapturePrefix}-control-group.png`
+    });
+    await page.locator('#sph-toggle').click();
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${backgroundVisualCapturePrefix}-first.png` });
+    await page.locator('#sph-toggle').click();
+  }
+
+  await fileInput.setInputFiles(path.resolve('plan/background-3.jpg'));
+  await expect(status).toContainText('background-3.jpg');
+  const second = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return {
+      sceneUrl: overlay.__sphScene.getBackgroundImage()?.url,
+      urls: window.__sphBackgroundObjectUrls,
+      hash: window.location.hash
+    };
+  });
+  expect(second.sceneUrl).toMatch(/^blob:/);
+  expect(second.sceneUrl).not.toBe(first.sceneUrl);
+  expect(second.urls.revoked.filter((url) => url === first.sceneUrl)).toHaveLength(1);
+  expect(second.hash).not.toContain('blob:');
+  if (nativeBackgroundMode) {
+    await expect.poll(() => page.evaluate(() => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const bridge = overlay?.__sphScene?.scene?.userData?.sphResidentSurfaceDrawRenderBridge;
+      const activeUrl = overlay?.__sphScene?.getBackgroundImage?.()?.url || null;
+      return {
+        status: bridge?.backgroundImageGpuStatus || null,
+        backgroundUrlMatches: bridge?.backgroundImageTextureUrl === activeUrl,
+        environmentUrlMatches: bridge?.envMapUrl === activeUrl,
+        backgroundDrawn: bridge?.lastBackgroundImageDrawn === true,
+        deferredReleasePendingCount: Number(bridge?.nativeSurfaceDeferredResourceReleasePending || 0)
+      };
+    }), { timeout: 60_000 }).toEqual({
+      status: 'native-opaque-background-image-rendered',
+      backgroundUrlMatches: true,
+      environmentUrlMatches: true,
+      backgroundDrawn: true,
+      deferredReleasePendingCount: 0
+    });
+  }
+  if (backgroundVisualCapturePrefix) {
+    await page.locator('#sph-toggle').click();
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${backgroundVisualCapturePrefix}-replacement.png` });
+    await page.locator('#sph-toggle').click();
+  }
+
+  await fileInput.setInputFiles({
+    name: 'broken.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from('this is not a png')
+  });
+  await expect(status).toContainText('could not be decoded');
+  const failedCandidate = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const urls = window.__sphBackgroundObjectUrls;
+    const candidate = urls.created.at(-1);
+    return {
+      sceneUrl: overlay.__sphScene.getBackgroundImage()?.url,
+      candidate,
+      candidateRevocations: urls.revoked.filter((url) => url === candidate).length
+    };
+  });
+  expect(failedCandidate.sceneUrl).toBe(second.sceneUrl);
+  expect(failedCandidate.candidate).not.toBe(second.sceneUrl);
+  expect(failedCandidate.candidateRevocations).toBe(1);
+
+  const priorSceneUrl = second.sceneUrl;
+  await page.locator('#sph-box input').nth(0).fill('3.5');
+  await page.locator('#sph-box input').nth(0).press('Enter');
+  await expect.poll(() => page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphScene !== window.__sphBackgroundSceneIdentity
+  )), { timeout: 60_000 }).toBe(true);
+  await expect.poll(() => page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphScene?.getBackgroundImage?.()?.url || null
+  )), { timeout: 30_000 }).toBe(priorSceneUrl);
+
+  await clearButton.click();
+  await expect(clearButton).toBeDisabled();
+  await expect(status).toContainText('solid background color');
+  const cleared = await page.evaluate((activeUrl) => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return {
+      sceneBackground: overlay.__sphScene.getBackgroundImage(),
+      containerBackground: overlay.querySelector('#sph-scene').style.backgroundImage,
+      revocations: window.__sphBackgroundObjectUrls.revoked.filter((url) => url === activeUrl).length
+    };
+  }, second.sceneUrl);
+  expect(cleared.sceneBackground?.url).toBeNull();
+  expect(cleared.containerBackground).toBe('');
+  expect(cleared.revocations).toBe(1);
+  if (backgroundVisualCapturePrefix) {
+    await page.locator('#sph-toggle').click();
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${backgroundVisualCapturePrefix}-cleared.png` });
+    await page.locator('#sph-toggle').click();
+  }
+
+  await fileInput.setInputFiles(path.resolve('plan/background-4.jpg'));
+  await expect(status).toContainText('background-4.jpg');
+  const closeUrl = await page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay').__sphScene.getBackgroundImage()?.url
+  ));
+  await page.locator('#sph-close').click();
+  await expect(page.locator('#sph-phase-overlay')).toHaveCount(0);
+  expect(await page.evaluate((url) => (
+    window.__sphBackgroundObjectUrls.revoked.filter((entry) => entry === url).length
+  ), closeUrl)).toBe(1);
+});
+
 test('SPH phase scenario menu applies and serializes standard presets', async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto('/?scenario=water-cycle');
@@ -3299,6 +3670,206 @@ test('SPH phase scenario menu applies and serializes standard presets', async ({
   await page.locator('#sph-scenario-preset select').selectOption('sodium-water');
   await expect(page.locator('#sph-laws input').nth(5)).toBeChecked();
   await expect(page.locator('#sph-laws input').nth(7)).not.toBeChecked();
+});
+
+test('SPH preset changes reload the matching runtime tuning instead of retaining the previous preset', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/?scenario=sodium-water&residentAuto=0&residentWorkers=0');
+  await ensureSphPhaseOverlayVisible(page);
+  await expect.poll(() => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const mechanics = overlay?.__sphDriver?.demo?.gpuMechanics
+      || overlay?.__sphPhaseViewState?.gpuMechanics;
+    const policy = overlay?.__sphScene?.getPeerComputeRenderOwnershipPolicy?.()
+      || overlay?.__sphPeerComputeRenderOwnershipPolicy;
+    return mechanics && policy ? {
+      dt: mechanics.dt,
+      artificialViscosityAlpha: mechanics.mlsMpmArtificialViscosityAlpha,
+      residentStepsPerSchedule: policy.residentStepsPerScheduleOverride,
+      interfaceRefreshMode: policy.residentInterfaceRefreshMode,
+      interfaceRefreshModeExplicit: policy.residentInterfaceRefreshModeExplicit,
+      computeManagerMode: policy.residentComputeManagerMode,
+      computeManagerModeExplicit: policy.residentComputeManagerModeExplicit
+    } : null;
+  }), { timeout: 60_000 }).toEqual({
+    dt: 0.001,
+    artificialViscosityAlpha: 0,
+    residentStepsPerSchedule: 128,
+    interfaceRefreshMode: 'pipelined',
+    interfaceRefreshModeExplicit: true,
+    computeManagerMode: 'direct',
+    computeManagerModeExplicit: true
+  });
+
+  if (await page.locator('#sph-panel').evaluate((panel) => panel.classList.contains('collapsed'))) {
+    await page.locator('#sph-toggle').click();
+  }
+  const navigation = page.waitForNavigation({ waitUntil: 'domcontentloaded' });
+  await page.locator('#sph-scenario-preset select').selectOption('water-cycle');
+  await navigation;
+  await ensureSphPhaseOverlayVisible(page);
+  await expect(page.locator('#sph-scenario-preset select')).toHaveValue('water-cycle');
+  await expect.poll(() => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const mechanics = overlay?.__sphDriver?.demo?.gpuMechanics
+      || overlay?.__sphPhaseViewState?.gpuMechanics;
+    const policy = overlay?.__sphScene?.getPeerComputeRenderOwnershipPolicy?.()
+      || overlay?.__sphPeerComputeRenderOwnershipPolicy;
+    return mechanics && policy ? {
+      dt: mechanics.dt,
+      artificialViscosityAlpha: mechanics.mlsMpmArtificialViscosityAlpha,
+      residentStepsPerSchedule: policy.residentStepsPerScheduleOverride ?? null,
+      interfaceRefreshModeExplicit: policy.residentInterfaceRefreshModeExplicit,
+      computeManagerModeExplicit: policy.residentComputeManagerModeExplicit
+    } : null;
+  }), { timeout: 60_000 }).toEqual({
+    dt: 0.0005,
+    artificialViscosityAlpha: 0.04,
+    residentStepsPerSchedule: null,
+    interfaceRefreshModeExplicit: false,
+    computeManagerModeExplicit: false
+  });
+  const runtimeParams = await page.evaluate(() => {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    return ['sdt', 'cfl', 'cflSafety', 'avAlpha', 'residentStepsPerSchedule',
+      'residentInterfaceRefreshMode', 'residentComputeManagerMode']
+      .filter((key) => params.has(key));
+  });
+  expect(runtimeParams).toEqual([]);
+});
+
+test('SPH initial material body editor preserves arbitrary body state through card operations and URL reload', async ({ page }) => {
+  test.setTimeout(120_000);
+  // Keep the same preset/runtime/body semantics but use a tiny,
+  // pitch-compatible CPU fixture. The test deliberately starts playback to
+  // prove an invalid draft stops it; full preset counts would make every
+  // Playwright action wait behind a long plain-SPH physics frame.
+  await page.goto('/?scenario=sodium-water&residentAuto=0&mech=sph&basen=2&dropn=1');
+  await ensureSphPhaseOverlayVisible(page);
+  if (await page.locator('#sph-panel').evaluate((panel) => panel.classList.contains('collapsed'))) {
+    await page.locator('#sph-toggle').click();
+  }
+  await expect(page.locator('#sph-panel')).not.toHaveClass(/collapsed/);
+
+  const cards = page.locator('.sph-initial-body-card');
+  await expect(cards).toHaveCount(2);
+  await expect(cards.first().locator('[data-body-field="sizeM"]')).toHaveCount(3);
+  await expect(cards.first().locator('[data-body-field="centerM"]')).toHaveCount(3);
+  await expect(cards.first().locator('[data-body-field="particlesPerEdge"]')).toHaveCount(3);
+  await expect(cards.first().locator('[data-body-field="velocityMPerS"]')).toHaveCount(3);
+
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return Boolean(overlay?.__sphDriver || overlay?.__sphPhaseViewState);
+  });
+  await page.locator('#sph-play').click();
+  await expect(page.locator('#sph-play')).toHaveText('Pause');
+  const baseSizeX = cards.first().locator('[data-body-field="sizeM"][data-axis="0"]');
+  const originalBaseSizeX = await baseSizeX.inputValue();
+  await baseSizeX.fill('1e308');
+  await baseSizeX.dispatchEvent('change');
+  await expect(page.locator('#sph-initial-bodies-error')).toBeVisible();
+  await expect(page.locator('#sph-play')).toHaveText('Play');
+  await expect(page.locator('#sph-play')).toBeDisabled();
+  await expect(page.locator('#sph-step')).toBeDisabled();
+  const stoppedStep = await page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphDriver?.demo?.state?.step ?? null
+  ));
+  await page.waitForTimeout(150);
+  await expect.poll(() => page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphDriver?.demo?.state?.step ?? null
+  ))).toBe(stoppedStep);
+  await baseSizeX.fill(originalBaseSizeX);
+  await baseSizeX.dispatchEvent('change');
+  await expect(page.locator('#sph-initial-bodies-error')).not.toBeVisible();
+  await expect(page.locator('#sph-play')).toBeEnabled();
+  await expect(page.locator('#sph-step')).toBeEnabled();
+
+  await page.locator('#sph-add-body').click();
+  await expect(cards).toHaveCount(3);
+  await expect.poll(() => page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphInitialBodies?.bodies?.map((body) => body.id)
+  ))).toEqual(['base', 'drop', 'body-1']);
+
+  let addedCard = page.locator('.sph-initial-body-card[data-body-id="body-1"]');
+  await addedCard.locator('[data-body-field="material"]').selectOption('fe');
+  await expect.poll(() => page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphInitialBodies?.bodies?.find(
+      (body) => body.id === 'body-1'
+    )?.material
+  ))).toBe('fe');
+
+  addedCard = page.locator('.sph-initial-body-card[data-body-id="body-1"]');
+  await addedCard.evaluate((card) => {
+    const writeVector = (field, values) => {
+      values.forEach((value, axis) => {
+        card.querySelector(`[data-body-field="${field}"][data-axis="${axis}"]`).value = String(value);
+      });
+    };
+    writeVector('sizeM', [0.4, 0.6, 0.8]);
+    writeVector('centerM', [2.5, 2, 2.5]);
+    writeVector('particlesPerEdge', [2, 3, 4]);
+    writeVector('velocityMPerS', [0.25, -0.5, 0.75]);
+    card.querySelector('[data-body-field="temperatureK"]').value = '900';
+    card.querySelector('[data-body-field="velocityMPerS"][data-axis="2"]')
+      .dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect.poll(() => page.evaluate(() => {
+    const body = document.querySelector('#sph-phase-overlay')?.__sphInitialBodies?.bodies?.find(
+      (candidate) => candidate.id === 'body-1'
+    );
+    return body && {
+      material: body.material,
+      sizeM: body.sizeM,
+      centerM: body.centerM,
+      temperatureK: body.temperatureK,
+      particlesPerEdge: body.particlesPerEdge,
+      velocityMPerS: body.velocityMPerS
+    };
+  })).toEqual({
+    material: 'fe',
+    sizeM: [0.4, 0.6, 0.8],
+    centerM: [2.5, 2, 2.5],
+    temperatureK: 900,
+    particlesPerEdge: [2, 3, 4],
+    velocityMPerS: [0.25, -0.5, 0.75]
+  });
+
+  await page.locator('.sph-initial-body-card[data-body-id="body-1"] [data-body-action="duplicate"]').click();
+  await expect(cards).toHaveCount(4);
+  await page.locator('.sph-initial-body-card[data-body-id="body-1-copy-1"] [data-body-action="move-up"]').click();
+  await expect.poll(() => page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphInitialBodies?.bodies?.map(
+      (body) => [body.id, body.domainId]
+    )
+  ))).toEqual([['base', 1], ['drop', 2], ['body-1-copy-1', 4], ['body-1', 3]]);
+  await page.locator('.sph-initial-body-card[data-body-id="body-1"] [data-body-action="remove"]').click();
+  await expect(cards).toHaveCount(3);
+
+  const beforeReload = await page.evaluate(() => ({
+    url: window.location.href,
+    bodies: document.querySelector('#sph-phase-overlay').__sphInitialBodies
+  }));
+  expect(beforeReload.url).toContain('bodies=');
+  expect(beforeReload.url).toContain('sdt=0.001');
+  expect(beforeReload.url).toContain('residentStepsPerSchedule=128');
+  await page.goto(beforeReload.url);
+  await ensureSphPhaseOverlayVisible(page);
+  await expect(page.locator('.sph-initial-body-card')).toHaveCount(3);
+  await expect.poll(() => page.evaluate(() => (
+    document.querySelector('#sph-phase-overlay')?.__sphInitialBodies
+  ))).toEqual(beforeReload.bodies);
+  await expect.poll(() => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const mechanics = overlay?.__sphDriver?.demo?.gpuMechanics
+      || overlay?.__sphPhaseViewState?.gpuMechanics;
+    const policy = overlay?.__sphScene?.getPeerComputeRenderOwnershipPolicy?.()
+      || overlay?.__sphPeerComputeRenderOwnershipPolicy;
+    return mechanics && policy
+      ? [mechanics.dt, mechanics.mlsMpmArtificialViscosityAlpha,
+        policy.residentStepsPerScheduleOverride]
+      : null;
+  }), { timeout: 60_000 }).toEqual([0.001, 0, 128]);
 });
 
 test('SPH phase visual sequence captures dense H2O/H2O resident motion', async ({ page }, testInfo) => {
@@ -4210,7 +4781,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     );
   });
   await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
-  await expect(page.getByText('SPH PHASE — two materials interacting')).toBeVisible();
+  await expect(page.getByText('SPH PHASE — material bodies interacting')).toBeVisible();
   const materialLabels = await page.locator('#sph-elements select').first().locator('option').evaluateAll(
     (options) => options.map((option) => option.textContent)
   );
@@ -9292,9 +9863,7 @@ test('SPH phase mounted Schroeder materialized storage publishes adopted descrip
       const rowBudget = Math.max(sourceParticleCount, 4);
       const requiredParticleCapacity = rowBudget + 4;
       const targetStateFamilies = [
-        'sph-particle-state',
-        'mls-mpm-particle-mechanics',
-        'sph-particle-thermo'
+        ...schroederModule.SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES
       ];
       const phaseVolumeSplitMergeAdmission = {
         schema: schroederModule.ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
@@ -9347,6 +9916,7 @@ test('SPH phase mounted Schroeder materialized storage publishes adopted descrip
         targetStateFamilies,
         schroederParticleStorageMaterializationRowCount: rowBudget,
         requiredParticleCapacity,
+        particleIdentityMutationApproved: true,
         hotBufferKey: 'ulg:browser:ss-adopted-storage-materialization-admission',
         sourceHotBufferKey: 'ulg:browser:ss-adopted-storage-materialization-admission',
         committed: true
@@ -12369,7 +12939,10 @@ test('Schroeder admitted split materializes appended particles and grows the ado
     if (!navigator.gpu) return { status: 'webgpu-unavailable' };
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
-    const device = await adapter.requestDevice();
+    const deviceLimits = await window.__ulgImportWithRetry('/src/runtime/webgpuDeviceLimits.js');
+    const device = await adapter.requestDevice(
+      deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter)
+    );
     const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
     const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
     const stepModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
@@ -12467,12 +13040,11 @@ test('Schroeder admitted split materializes appended particles and grows the ado
       schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
       status: 'schroeder-particle-storage-materialization-admission-admitted',
       particleStorageMaterializationApproved: true,
+      particleIdentityMutationApproved: true,
       slotAssignmentDescriptorApproved: true,
       outputFamilies: ['schroeder-particle-storage-materialization'],
       targetStateFamilies: [
-        'sph-particle-state',
-        'mls-mpm-particle-mechanics',
-        'sph-particle-thermo'
+        ...hierarchy.SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES
       ],
       schroederParticleStorageMaterializationRowCount: rowCount,
       requiredParticleCapacity: outputParticleCapacity,
@@ -12591,7 +13163,10 @@ test('Schroeder admitted merge compacts freed slots and shrinks the adopted coun
     if (!navigator.gpu) return { status: 'webgpu-unavailable' };
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
-    const device = await adapter.requestDevice();
+    const deviceLimits = await window.__ulgImportWithRetry('/src/runtime/webgpuDeviceLimits.js');
+    const device = await adapter.requestDevice(
+      deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter)
+    );
     const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
     const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
     const compactionModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
@@ -12687,12 +13262,11 @@ test('Schroeder admitted merge compacts freed slots and shrinks the adopted coun
       schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
       status: 'schroeder-particle-storage-materialization-admission-admitted',
       particleStorageMaterializationApproved: true,
+      particleIdentityMutationApproved: true,
       slotAssignmentDescriptorApproved: true,
       outputFamilies: ['schroeder-particle-storage-materialization'],
       targetStateFamilies: [
-        'sph-particle-state',
-        'mls-mpm-particle-mechanics',
-        'sph-particle-thermo'
+        ...hierarchy.SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES
       ],
       schroederParticleStorageMaterializationRowCount: rowCount,
       requiredParticleCapacity: outputParticleCapacity,
@@ -12824,7 +13398,10 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     if (!navigator.gpu) return { status: 'webgpu-unavailable' };
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
-    const device = await adapter.requestDevice();
+    const deviceLimits = await window.__ulgImportWithRetry('/src/runtime/webgpuDeviceLimits.js');
+    const device = await adapter.requestDevice(
+      deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter)
+    );
     const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
     const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
     const compactionModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
@@ -12945,9 +13522,7 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     };
 
     const targetStateFamilies = [
-      'sph-particle-state',
-      'mls-mpm-particle-mechanics',
-      'sph-particle-thermo'
+      ...hierarchy.SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES
     ];
     const outputParticleCapacity = 8;
     const phaseVolumeSplitMergeAdmission = {
@@ -12992,6 +13567,7 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
       schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
       status: 'schroeder-particle-storage-materialization-admission-admitted',
       particleStorageMaterializationApproved: true,
+      particleIdentityMutationApproved: true,
       slotAssignmentDescriptorApproved: true,
       outputFamilies: ['schroeder-particle-storage-materialization'],
       targetStateFamilies,
@@ -13247,7 +13823,10 @@ test('Schroeder refine-required row splits mass-correctly through the real propo
     if (!navigator.gpu) return { status: 'webgpu-unavailable' };
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
-    const device = await adapter.requestDevice();
+    const deviceLimits = await window.__ulgImportWithRetry('/src/runtime/webgpuDeviceLimits.js');
+    const device = await adapter.requestDevice(
+      deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter)
+    );
     const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
     const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
     const compactionModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
@@ -13324,9 +13903,7 @@ test('Schroeder refine-required row splits mass-correctly through the real propo
     };
 
     const targetStateFamilies = [
-      'sph-particle-state',
-      'mls-mpm-particle-mechanics',
-      'sph-particle-thermo'
+      ...hierarchy.SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES
     ];
     const outputParticleCapacity = 6;
     const admissionBase = (name, extra) => ({
@@ -13392,6 +13969,7 @@ test('Schroeder refine-required row splits mass-correctly through the real propo
       particleStorageMaterializationAdmission: admissionBase('particle-storage-materialization', {
         schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
         particleStorageMaterializationApproved: true,
+        particleIdentityMutationApproved: true,
         slotAssignmentDescriptorApproved: true,
         outputFamilies: ['schroeder-particle-storage-materialization'],
         schroederParticleStorageMaterializationRowCount: sourceParticleCount,

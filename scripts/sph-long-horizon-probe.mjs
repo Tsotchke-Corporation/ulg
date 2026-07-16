@@ -23,7 +23,15 @@ const DEFAULT_BASE_PARTICLE_EDGE = 5;
 const CONDENSED_VOLUME_STRAIN_TOLERANCE = 5e-3;
 const CONDENSED_MIN_VOLUME_RATIO_J = 1 - CONDENSED_VOLUME_STRAIN_TOLERANCE;
 const CONDENSED_MAX_VOLUME_RATIO_J = 1 + CONDENSED_VOLUME_STRAIN_TOLERANCE;
-const DEFAULT_CHROMIUM_ARGS = ['--enable-unsafe-webgpu'];
+// These probes validate the native GPU path and its performance envelope.
+// Chromium's headless default may silently select SwiftShader, which is not a
+// valid substitute and can watchdog on otherwise bounded SS kernels. Match the
+// dedicated native WebGPU probes by selecting the Vulkan hardware backend.
+const DEFAULT_CHROMIUM_ARGS = [
+  '--enable-unsafe-webgpu',
+  '--use-angle=vulkan',
+  '--enable-features=Vulkan,UseSkiaRenderer'
+];
 const BROWSER_CONSOLE_ENTRY_LIMIT = 500;
 const BROWSER_CONSOLE_ISSUE_LIMIT = 200;
 const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
@@ -2462,6 +2470,66 @@ async function runBrowserProbe({
           || 'final-only'
       };
       if (overlay) overlay.__mlsMpmResidentExecutionPolicy = residentExecutionPolicy;
+      const schroederSimulationConfig =
+        overlay?.__sphSchroederSimulationConfig || null;
+      const schroederExecutionOptions =
+        overlay?.__mlsMpmSchroederExecutionOptions
+        || (schroederSimulationConfig?.enabled === true
+          ? {
+            schroederSimulation: true,
+            schroederSelectedLevel: schroederSimulationConfig.selectedLevel,
+            schroederBaseGridSpacingM:
+              schroederSimulationConfig.baseGridSpacingM,
+            schroederMinLevel: schroederSimulationConfig.minLevel,
+            schroederMaxLevel: schroederSimulationConfig.maxLevel,
+            schroederTileCellCount: schroederSimulationConfig.tileCellCount,
+            schroederEnablePortableSummary:
+              schroederSimulationConfig.enablePortableSummary,
+            schroederPortableSummaryPeerComputeUseCase:
+              schroederSimulationConfig.portableSummaryPeerComputeUseCase,
+            schroederEnableActiveNodeIndex:
+              schroederSimulationConfig.enableActiveNodeIndex,
+            schroederEnableActiveNodeSortedIndex:
+              schroederSimulationConfig.enableActiveNodeSortedIndex,
+            schroederActiveNodeSortedIndexPolicyMode:
+              schroederSimulationConfig.activeNodeSortedIndexPolicyMode,
+            schroederLawNeighborTraversalPolicyMode:
+              schroederSimulationConfig.lawNeighborTraversalPolicyMode,
+            schroederLawNeighborCandidateReadbackMode:
+              schroederSimulationConfig.lawNeighborCandidateReadbackMode,
+            schroederEnableCrossLevelCoupling:
+              schroederSimulationConfig.enableCrossLevelCoupling,
+            schroederEnablePhaseVolumeMigration:
+              schroederSimulationConfig.enablePhaseVolumeMigration,
+            schroederEnableLawQueue:
+              schroederSimulationConfig.enableLawQueue,
+            schroederEnableLawNeighborCandidates:
+              schroederSimulationConfig.enableLawNeighborCandidates,
+            schroederEnableTwoLevelMechanics:
+              schroederSimulationConfig.enableTwoLevelMechanics,
+            schroederTwoLevelMechanicsAuthority:
+              schroederSimulationConfig.twoLevelMechanicsAuthority,
+            schroederTwoLevelFineSubstepCount:
+              schroederSimulationConfig.twoLevelFineSubstepCount,
+            schroederEnableParticleStorageMaterialization:
+              schroederSimulationConfig.enableParticleStorageMaterialization,
+            schroederParticleStorageAdmissionRowBudget:
+              schroederSimulationConfig.particleStorageAdmissionRowBudget,
+            schroederParticleStorageRequiredCapacity:
+              schroederSimulationConfig.particleStorageRequiredCapacity,
+            schroederParticleStorageCapacityMargin:
+              schroederSimulationConfig.particleStorageCapacityMargin,
+            schroederParticleStorageFreeListSlotCapacity:
+              schroederSimulationConfig.particleStorageFreeListSlotCapacity,
+            schroederParticleStorageFreeListAvailableSlotCount:
+              schroederSimulationConfig.particleStorageFreeListAvailableSlotCount,
+            schroederParticleStorageFreeListMaxSlotsPerRow:
+              schroederSimulationConfig.particleStorageFreeListMaxSlotsPerRow
+          }
+          : { schroederSimulation: false });
+      if (overlay) {
+        overlay.__mlsMpmSchroederExecutionOptions = schroederExecutionOptions;
+      }
       const cohortRangesFromCounts = (counts = {}) => {
         const baseCount = Math.max(0, Math.round(Number(counts?.base) || 0));
         const dropCount = Math.max(0, Math.round(Number(counts?.drop) || 0));
@@ -3504,6 +3572,33 @@ async function runBrowserProbe({
         residentMechanicsStageWorkerRunnerFactoryReady: host.residentMechanicsStageWorkerRunnerFactoryReady ?? null,
         workerCapability: compactWorkerCapability(host)
       } : null;
+      const compactSchroederSpatialEpochTransaction = (transaction) => transaction ? {
+        schema: transaction.schema ?? null,
+        status: transaction.status ?? null,
+        state: transaction.state ?? null,
+        generationId: transaction.generationId ?? null,
+        deviceId: transaction.deviceId ?? null,
+        epochIdentity: transaction.epochIdentity
+          ? { ...transaction.epochIdentity }
+          : null,
+        requiredReaderIds: [...(transaction.requiredReaderIds || [])],
+        admittedReaders: Array.isArray(transaction.admittedReaders)
+          ? transaction.admittedReaders.map((reader) => ({ ...reader }))
+          : [],
+        proposalSeal: transaction.proposalSeal
+          ? { ...transaction.proposalSeal }
+          : null,
+        commitStatus: transaction.commitStatus ?? null,
+        nextStateBufferRetained: transaction.nextStateBufferRetained === true,
+        abortReason: transaction.abortReason ?? null,
+        releaseFailureReason: transaction.releaseFailureReason ?? null,
+        legacyLookupRecords: Array.isArray(transaction.legacyLookupRecords)
+          ? transaction.legacyLookupRecords.map((record) => ({ ...record }))
+          : [],
+        counters: transaction.counters
+          ? { ...transaction.counters }
+          : null
+      } : null;
       const compactSchroederTelemetry = ({
         steps = null,
         residentStep = null,
@@ -3928,6 +4023,35 @@ async function runBrowserProbe({
             nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
             normalHotLoopReadbackFree: steps.normalHotLoopReadbackFree === true,
             residentExecutionPolicy: steps.residentExecutionPolicy || overlay?.__mlsMpmResidentExecutionPolicy || null,
+            schroederSpatialEpochTransactionSummaries: Array.isArray(
+              steps.schroederSpatialEpochTransactionSummaries
+            )
+              ? steps.schroederSpatialEpochTransactionSummaries.map(
+                compactSchroederSpatialEpochTransaction
+              )
+              : [],
+            schroederSpatialEpochReleaseSettlementCount:
+              steps.schroederSpatialEpochReleaseSettlementCount ?? null,
+            schroederSpatialEpochReleaseSettlementComplete:
+              steps.schroederSpatialEpochReleaseSettlementComplete === true,
+            schroederHierarchyArtifactLedgerSummaries: Array.isArray(
+              steps.schroederHierarchyArtifactLedgerSummaries
+            ) ? steps.schroederHierarchyArtifactLedgerSummaries.map(
+              (summary) => ({ ...summary })
+            ) : [],
+            schroederHierarchyArtifactLedgerSettlementCount:
+              steps.schroederHierarchyArtifactLedgerSettlementCount ?? null,
+            schroederHierarchyArtifactLedgerSettlementComplete:
+              steps.schroederHierarchyArtifactLedgerSettlementComplete === true,
+            schroederSpatialEpochGenerationSummaries: Array.isArray(
+              steps.schroederSameLevelMechanicsSummaries
+            )
+              ? steps.schroederSameLevelMechanicsSummaries
+                .map((summary) => summary?.spatialEpochGeneration ? {
+                  ...summary.spatialEpochGeneration
+                } : null)
+                .filter(Boolean)
+              : [],
             fusedResidentSequence: steps.fusedResidentSequence ? {
               schema: steps.fusedResidentSequence.schema ?? null,
               status: steps.fusedResidentSequence.status ?? null,
@@ -3966,6 +4090,10 @@ async function runBrowserProbe({
               sourceTime: finiteOrNull(residentStep.particlePingPong.sourceTime),
               nextTime: finiteOrNull(residentStep.particlePingPong.nextTime)
             } : null,
+            schroederSpatialEpochTransaction:
+              compactSchroederSpatialEpochTransaction(
+                residentStep.schroederSpatialEpochTransaction
+              ),
             stageTiming: compactStageTiming(residentStep.stageTiming || steps?.finalStep?.stageTiming),
             compactGpuSummary: compactGpuSummaryResult(residentStep.compactGpuSummary || steps?.finalStep?.compactGpuSummary),
             diagnostics: compactDiagnostics(residentStep.diagnostics)
@@ -5301,6 +5429,7 @@ async function runBrowserProbe({
             ? { wallRate: requestedThermalWallRate }
             : undefined,
             ...residentExecutionPolicy,
+            ...schroederExecutionOptions,
             measureFusedSequenceQueueFence: Boolean(
               requestedMeasureGpuQueueFence
               || residentExecutionPolicy?.measureFusedSequenceQueueFence
@@ -7440,6 +7569,35 @@ async function runDirectResidentProbe({
         residentAuthorityFamilyOwners: steps.residentAuthorityFamilyOwners || null,
         residentAuthorityWarnings: [...(steps.residentAuthorityWarnings || [])],
         residentAuthorityBlockers: [...(steps.residentAuthorityBlockers || [])],
+        schroederSpatialEpochTransactionSummaries: Array.isArray(
+          steps.schroederSpatialEpochTransactionSummaries
+        )
+          ? steps.schroederSpatialEpochTransactionSummaries.map(
+            compactSchroederSpatialEpochTransaction
+          )
+          : [],
+        schroederSpatialEpochReleaseSettlementCount:
+          steps.schroederSpatialEpochReleaseSettlementCount ?? null,
+        schroederSpatialEpochReleaseSettlementComplete:
+          steps.schroederSpatialEpochReleaseSettlementComplete === true,
+        schroederHierarchyArtifactLedgerSummaries: Array.isArray(
+          steps.schroederHierarchyArtifactLedgerSummaries
+        ) ? steps.schroederHierarchyArtifactLedgerSummaries.map(
+          (summary) => ({ ...summary })
+        ) : [],
+        schroederHierarchyArtifactLedgerSettlementCount:
+          steps.schroederHierarchyArtifactLedgerSettlementCount ?? null,
+        schroederHierarchyArtifactLedgerSettlementComplete:
+          steps.schroederHierarchyArtifactLedgerSettlementComplete === true,
+        schroederSpatialEpochGenerationSummaries: Array.isArray(
+          steps.schroederSameLevelMechanicsSummaries
+        )
+          ? steps.schroederSameLevelMechanicsSummaries
+            .map((summary) => summary?.spatialEpochGeneration ? {
+              ...summary.spatialEpochGeneration
+            } : null)
+            .filter(Boolean)
+          : [],
         sidecarAwareResidentSequenceActive: steps.sidecarAwareResidentSequenceActive ?? null,
         sidecarAwareResidentSequenceMode: steps.sidecarAwareResidentSequenceMode ?? null,
         sidecarAwareResidentSequenceRunner: steps.sidecarAwareResidentSequenceRunner ?? null,
@@ -7496,6 +7654,33 @@ async function runDirectResidentProbe({
         } : null,
         fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(steps.fusedResidentSequencePreflight)
       } : null;
+      const compactSchroederSpatialEpochTransaction = (transaction) => transaction ? {
+        schema: transaction.schema ?? null,
+        status: transaction.status ?? null,
+        state: transaction.state ?? null,
+        generationId: transaction.generationId ?? null,
+        deviceId: transaction.deviceId ?? null,
+        epochIdentity: transaction.epochIdentity
+          ? { ...transaction.epochIdentity }
+          : null,
+        requiredReaderIds: [...(transaction.requiredReaderIds || [])],
+        admittedReaders: Array.isArray(transaction.admittedReaders)
+          ? transaction.admittedReaders.map((reader) => ({ ...reader }))
+          : [],
+        proposalSeal: transaction.proposalSeal
+          ? { ...transaction.proposalSeal }
+          : null,
+        commitStatus: transaction.commitStatus ?? null,
+        nextStateBufferRetained: transaction.nextStateBufferRetained === true,
+        abortReason: transaction.abortReason ?? null,
+        releaseFailureReason: transaction.releaseFailureReason ?? null,
+        legacyLookupRecords: Array.isArray(transaction.legacyLookupRecords)
+          ? transaction.legacyLookupRecords.map((record) => ({ ...record }))
+          : [],
+        counters: transaction.counters
+          ? { ...transaction.counters }
+          : null
+      } : null;
       const summarizeStep = (step) => step ? {
         schema: step.schema ?? null,
         backend: step.backend ?? null,
@@ -7519,6 +7704,10 @@ async function runDirectResidentProbe({
           sourceTime: finiteOrNull(step.particlePingPong.sourceTime),
           nextTime: finiteOrNull(step.particlePingPong.nextTime)
         } : null,
+        schroederSpatialEpochTransaction:
+          compactSchroederSpatialEpochTransaction(
+            step.schroederSpatialEpochTransaction
+          ),
         diagnostics: compactDiagnostics(step.diagnostics),
         cohortDiagnostics: step.diagnostics?.cohortDiagnostics
           || cohortDiagnosticsForState(

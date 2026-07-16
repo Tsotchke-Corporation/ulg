@@ -114,6 +114,8 @@ export function trackedMaterialPropertyPaths(properties = {}) {
     'atomsPerFormula',
     'conductionElectronDensityPerM3',
     'intrinsicColorSrgb',
+    'conductorOpticalConstants',
+    'gasElectronicAbsorptionCrossSection',
     'opticalInterbandOscillators',
     'idealGas'
   ]) {

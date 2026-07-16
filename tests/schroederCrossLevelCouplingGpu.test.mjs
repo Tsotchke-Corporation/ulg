@@ -19,6 +19,7 @@ import {
   decodeSchroederCrossLevelGridConservationSummaryRow,
   prolongGridRowsCpuOracle,
   restrictGridRowsCpuOracle,
+  runSchroederTwoLevelMechanicsStepWebGpu,
   summarizeGridConservationCpuOracle
 } from '../src/runtime/sph/schroederCrossLevelCouplingGpu.js';
 
@@ -337,4 +338,23 @@ test('cross-level grid coupling WGSL kernels declare the shared params and entry
   assert.match(schroederCrossLevelGridProlongationWgsl, /var<storage, read> coarse_grid/);
   assert.match(schroederCrossLevelGridProlongationWgsl, /var<storage, read_write> fine_grid/);
   assert.match(schroederCrossLevelGridConservationSummaryWgsl, /var<storage, read_write> summary_row/);
+});
+
+test('two-level continuation fails closed when arbitrary domains lack resident identity', async () => {
+  await assert.rejects(
+    runSchroederTwoLevelMechanicsStepWebGpu({
+      device: {
+        createBuffer() {},
+        queue: { writeBuffer() {} }
+      },
+      sphParticleState: { particleCount: 1, identityRequired: true },
+      mlsMpmParticleState: { particleCount: 1 },
+      levelAssignment: {},
+      gridSpecFactory() {},
+      p2gRunner() {},
+      gridUpdateRunner() {},
+      g2pRunner() {}
+    }),
+    /requires resident identity for arbitrary render domains/
+  );
 });

@@ -6,7 +6,8 @@ import {
   ULG_SCHROEDER_CROSS_LEVEL_GRID_PROLONGATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_GRID_PROLONGATION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_GRID_RESTRICTION_EXECUTION_SCHEMA,
-  ULG_SCHROEDER_CROSS_LEVEL_GRID_RESTRICTION_SCHEMA
+  ULG_SCHROEDER_CROSS_LEVEL_GRID_RESTRICTION_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   schroederCrossLevelGridConservationSummaryWgsl,
@@ -24,6 +25,10 @@ import {
   runMlsMpmResidentSummaryWebGpu
 } from './sphMlsMpmGpuSummary.js';
 import { DEFAULT_CFL_FACTOR } from './sphGridUpdateGpuKernel.js';
+import {
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
+  sphParticleStateRequiresExplicitIdentity
+} from './sphGpuBuffers.js';
 
 export {
   ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -886,6 +891,23 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   if (!levelAssignment) {
     throw new TypeError('runSchroederTwoLevelMechanicsStepWebGpu requires a Schroeder level assignment');
   }
+  const identityRequired = sphParticleUpload?.identityRequired === true
+    || sphParticleStateRequiresExplicitIdentity(sphParticleState);
+  const identityBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
+    ? sphParticleUpload.identityBuffer
+    : null;
+  if (identityRequired && !identityBuffer) {
+    throw new TypeError(
+      'Schroeder two-level mechanics requires resident identity for arbitrary render domains'
+    );
+  }
+  if (
+    identityBuffer
+    && sphParticleUpload?.identitySchema
+    && sphParticleUpload?.identitySchema !== ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+  ) {
+    throw new TypeError('Schroeder two-level mechanics received an incompatible identity schema');
+  }
   const resolvedFineLevel = Math.round(finiteNumber(fineLevel, 0));
   const coarseLevel = resolvedFineLevel + 1;
   const baseDx = Math.max(1e-9, finiteNumber(baseGridSpacingM, 0));
@@ -1090,6 +1112,15 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       status: 'webgpu-uploaded',
       stateBuffer: substepG2p.stateBuffer,
       thermoBuffer,
+      identityBuffer,
+      identityRequired,
+      identitySchema: sphParticleUpload?.identitySchema
+        || ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+      identityStrideBytes: sphParticleUpload?.identityStrideBytes
+        || (SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT),
+      identityBufferByteLength: sphParticleUpload?.identityBufferByteLength || 0,
+      identityRevision: sphParticleUpload?.identityRevision || null,
+      renderDomainKeys: { ...(sphParticleUpload?.renderDomainKeys || {}) },
       slot: 0
     };
     currentMlsUpload = {
@@ -1234,8 +1265,19 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         particleCount: sphParticleState.particleCount,
         stateBuffer: coarseG2p.stateBuffer,
         thermoBuffer,
+        identityBuffer,
+        identityRequired,
+        identitySchema: sphParticleUpload?.identitySchema
+          || ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+        identityStrideBytes: sphParticleUpload?.identityStrideBytes
+          || (SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT),
+        identityBufferByteLength: sphParticleUpload?.identityBufferByteLength || 0,
+        identityRevision: sphParticleUpload?.identityRevision || null,
+        renderDomainKeys: { ...(sphParticleUpload?.renderDomainKeys || {}) },
         ownsStateBuffer: true,
         ownsThermoBuffer: transferThermoOwnership,
+        ownsIdentityBuffer: false,
+        identityOwnership: identityBuffer ? 'borrowed-from-source-upload' : 'legacy-no-identity-buffer',
         slot: 0,
         step: nextStep,
         time: nextTime

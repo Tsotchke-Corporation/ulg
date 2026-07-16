@@ -16,6 +16,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
   addResidentBufferLease,
@@ -60,6 +61,7 @@ const ACTIVE_GRID_DISPATCH_METADATA_UINTS = 16;
 const ACTIVE_GRID_DISPATCH_WORKGROUP_SIZE = 64;
 const DEFAULT_ACTIVE_GRID_SAFETY_CELLS = 3;
 const DEFAULT_GRAVITY_M_PER_S2 = [0, -9.80665, 0];
+const H2O_MATERIAL_ID = stableOpticalMaterialId('h2o');
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -133,7 +135,13 @@ function normalizedCohortRange(range, particleCount) {
   return { start, end };
 }
 
-function createSummaryParamsArray({ particleCount, gridNodeCount, partialCount, cohortRanges = null }) {
+function createSummaryParamsArray({
+  particleCount,
+  gridNodeCount,
+  partialCount,
+  cohortRanges = null,
+  h2oMaterialId = H2O_MATERIAL_ID
+}) {
   const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
@@ -145,6 +153,7 @@ function createSummaryParamsArray({ particleCount, gridNodeCount, partialCount, 
   view.setUint32(16, base.end, true);
   view.setUint32(20, drop.start, true);
   view.setUint32(24, drop.end, true);
+  view.setUint32(28, Math.max(0, Math.round(finiteNumber(h2oMaterialId, H2O_MATERIAL_ID))), true);
   return buffer;
 }
 
@@ -364,6 +373,31 @@ export function decodeMlsMpmResidentSummaryValues(values, {
     gas: values[22],
     plasma: values[23]
   };
+  const h2oGasSummaryReady = values[87] > 0;
+  const residentPhaseGasSpeciesSummary = {
+    schema: 'peercompute.ulg.resident-phase-gas-species-summary.v0',
+    status: h2oGasSummaryReady
+      ? 'resident-phase-gas-species-summary-ready'
+      : 'resident-phase-gas-species-summary-unavailable',
+    source: 'compact-resident-summary-h2o-gas-reduction',
+    fullParticleReadbackPerformed: false,
+    speciesCount: h2oGasSummaryReady ? 1 : 0,
+    bySpecies: h2oGasSummaryReady
+      ? {
+        h2o: {
+          material: 'h2o',
+          massKg: Math.max(0, values[84]),
+          temperatureK: Math.max(0, values[85]),
+          phaseWeight: Math.max(0, values[86]),
+          status: 'resident-phase-gas-species-ready'
+        }
+      }
+      : {},
+    scientificValidation: false,
+    gasValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
   return {
     schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
     executionSchema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
@@ -397,6 +431,7 @@ export function decodeMlsMpmResidentSummaryValues(values, {
     minVolumeRatioJ: values[17],
     maxVolumeRatioJ: values[18],
     phaseMassKg,
+    residentPhaseGasSpeciesSummary,
     temperatureMassWeightedMeanK: values[24],
     minTemperatureK: values[25],
     maxTemperatureK: values[26],
@@ -647,7 +682,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
       cohortRanges
     }));
     const { pipeline: partialsPipeline, bindGroupLayout: partialsBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-resident-summary-partials.v2',
+      cacheKey: 'ulg-mls-mpm-resident-summary-partials.v3',
       label: 'ulg-mls-mpm-resident-summary-partials',
       code: mlsMpmResidentSummaryPartialsWgsl,
       entryPoint: 'main',
@@ -676,7 +711,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
       ]
     });
     const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-resident-summary-finalize.v2',
+      cacheKey: 'ulg-mls-mpm-resident-summary-finalize.v3',
       label: 'ulg-mls-mpm-resident-summary-finalize',
       code: mlsMpmResidentSummaryFinalizeWgsl,
       entryPoint: 'main',

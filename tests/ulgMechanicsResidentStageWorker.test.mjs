@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT
 } from '../ulg-gpu-abi/src/index.js';
 import {
@@ -1015,4 +1016,70 @@ test('ULG resident stage worker rematerializes adopted storage from a descriptor
     'blocked-worker-adopted-storage-rematerialization-row-count-mismatch'
   );
   assert.equal(blocked.value.workerResidentStage.workerAdoptedStorageRematerializationApplied, false);
+});
+
+test('ULG resident stage worker fails closed until arbitrary-domain rematerialization has four authoritative buffers', async () => {
+  const buffers = manualBuffers();
+  buffers.sphParticleState.identity = Uint32Array.from([7]);
+  buffers.sphParticleState.identityRequired = true;
+  buffers.sphParticleState.identitySchema = ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA;
+  buffers.sphParticleState.identityStrideBytes = Uint32Array.BYTES_PER_ELEMENT;
+  buffers.sphParticleState.cpuStateStale = true;
+  buffers.sphParticleState.cpuIdentityStale = true;
+  buffers.mlsMpmParticleState.cpuStateStale = true;
+  const device = createFakeGpuDevice();
+  const seed = {
+    schema: 'peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0',
+    status: 'schroeder-adopted-particle-storage-portable-materialization-seed-ready',
+    ready: true,
+    hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:identity-seed',
+    authoritativeParticleCount: 1,
+    outputParticleCapacity: 1,
+    identityRequired: true,
+    identityRevision: 'identity-revision:7',
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+    particleIdentityMutationApproved: true,
+    requiresAuthoritativeFourBufferRows: true,
+    renderDomainKeys: { 7: 'body-seven' }
+  };
+  const context = {
+    taskIdPrefix: 'ulg:test:adopted-storage-worker-identity',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      ...buffers,
+      deviceResult: { device },
+      useSchroederAdoptedParticleStorageWorkerRematerialization: true,
+      schroederAdoptedParticleStorageWorkerRematerializationSeed: seed,
+      gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+      boxDimsM: [5, 5, 5],
+      dt: buffers.mlsMpmParticleState.mechanicsDtS,
+      gravityMPerS2: [0, 0, 0],
+      cflFactor: 10
+    }
+  };
+  const p2gStage = stage('p2g', ['sph-particle-state'], ['mls-mpm-grid']);
+  const blocked = await runUlgMechanicsResidentStageWorkerPayload(payload(p2gStage, context, null, {
+    laneId: 'ulg:test:adopted-storage-worker-identity-blocked-lane',
+    stateKey: 'ulg:test:adopted-storage-worker-identity-blocked-state'
+  }));
+  assert.equal(
+    blocked.value.workerResidentStage.workerAdoptedStorageRematerializationStatus,
+    'blocked-worker-adopted-storage-rematerialization-authoritative-four-buffer-snapshot-required'
+  );
+  assert.equal(blocked.value.workerResidentStage.workerAdoptedStorageRematerializationApplied, false);
+
+  buffers.sphParticleState.cpuStateStale = false;
+  buffers.sphParticleState.cpuIdentityStale = false;
+  buffers.mlsMpmParticleState.cpuStateStale = false;
+  const accepted = await runUlgMechanicsResidentStageWorkerPayload(payload(p2gStage, context, null, {
+    laneId: 'ulg:test:adopted-storage-worker-identity-ready-lane',
+    stateKey: 'ulg:test:adopted-storage-worker-identity-ready-state'
+  }));
+  const rematerialization = accepted.value.workerResidentStage.workerAdoptedStorageRematerialization;
+  assert.equal(rematerialization.status, 'worker-rematerialized-adopted-storage');
+  assert.equal(rematerialization.identityRequired, true);
+  assert.equal(rematerialization.identityRevision, seed.identityRevision);
+  assert.equal(rematerialization.identityBufferByteLength, Uint32Array.BYTES_PER_ELEMENT);
 });

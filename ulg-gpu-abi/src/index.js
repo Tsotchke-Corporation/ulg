@@ -2,6 +2,8 @@ export * from './sphPhaseContracts.js';
 export * from './parallelPrimitives.js';
 export * from './schroederSpatialEpoch.js';
 export * from './schroederSpatialEpochWgsl.js';
+export * from './schroederSpatialExactNearWgsl.js';
+export * from './schroederMechanicsSpatialAuthorityWgsl.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';
@@ -19,6 +21,8 @@ export const ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA = 'peercompute.ulg.optical-
 export const ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA = 'peercompute.ulg.optical-gpu-lookup-parity.v0';
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer.v0';
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
+export const ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA =
+  'peercompute.ulg.sph-gpu-particle-identity-buffer.v0';
 export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-material-table.v0';
 export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0';
 export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0';
@@ -45,6 +49,8 @@ export const ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA = 'peercompute.ulg.s
 export const ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA = 'peercompute.ulg.sph-material-interface-candidate-field.v0';
 export const ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA = 'peercompute.ulg.sph-material-interface-candidate-field-execution.v0';
 export const ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA = 'peercompute.ulg.sph-interface-source-key.v0';
+export const ULG_SPH_INTERFACE_CONTACT_KINEMATICS_SCHEMA =
+  'peercompute.ulg.sph-interface-contact-kinematics.v1';
 export const ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA = 'peercompute.ulg.sph-gpu-render-marching-cube-cells.v0';
 export const ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-marching-cube-cells-execution.v0';
 export const ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA = 'peercompute.ulg.sph-gpu-render-surface-vertices.v0';
@@ -329,6 +335,14 @@ export const SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT = Object.freeze([
   'status:f32',
   'visualParticleRadiusM:f32'
 ]);
+// Stable structural identity is intentionally separate from the floating
+// state and thermodynamic rows.  Those rows have no semantically safe spare
+// lane, and a u32 domain id must not alias temperature, status, or phase data.
+// Domain 0 is unassigned (including spare/product slots); positive ids name
+// initial material-body cohorts and are consumed by resident rendering.
+export const SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT = Object.freeze([
+  'renderDomainId:u32'
+]);
 export const SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
   'segmentOffset:f32',
@@ -596,6 +610,16 @@ export const SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT = Object.freeze([
   'status:f32',
   'flags:f32'
 ]);
+export const SPH_INTERFACE_CONTACT_KINEMATICS_ROW_LAYOUT = Object.freeze([
+  'gapM:f32',
+  'normalVelocityMPerS:f32',
+  'representativeMassKg:f32',
+  'status:f32',
+  'sourceDomainId:f32',
+  'targetDomainId:f32',
+  'domainPairReady:f32',
+  'selectedPolicyRowToken:f32'
+]);
 export const SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT = Object.freeze([
   'surfaceIndex:f32',
   'materialId:f32',
@@ -834,7 +858,11 @@ export const MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT = Object.freeze([
   'dropCohortNextMaxYM:f32',
   'dropCohortNextMaxZM:f32',
   'dropCohortMaxSpeedMPerS:f32',
-  'cohortSummaryPad0:f32'
+  'cohortSummaryPad0:f32',
+  'h2oGasMassKg:f32',
+  'h2oGasTemperatureMassWeightedMeanK:f32',
+  'h2oGasPhaseWeight:f32',
+  'h2oGasSummaryStatus:f32'
 ]);
 export const SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT = Object.freeze([
   'levelId:f32',

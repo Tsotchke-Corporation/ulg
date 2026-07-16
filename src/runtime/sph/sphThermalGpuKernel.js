@@ -35,6 +35,11 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import {
+  tagWebGpuBufferDevice,
+  typedArrayContentFingerprint,
+  webGpuBufferDevice
+} from './sphGpuDeviceIdentity.js';
 
 export {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
@@ -1107,7 +1112,10 @@ function outputEnvelope({
   destroyOutputParticleBuffers = null,
   readbackMode = FULL_READBACK_MODE,
   outputBufferInitializationMode = null,
-  materialPropertyBankWarmInputShaderBinding = null
+  materialPropertyBankWarmInputShaderBinding = null,
+  neighborLookupMode = null,
+  legacyPrivateSpatialBuildCount = 0,
+  legacyExhaustiveTraversalCount = 0
 }) {
   const materialPropertyBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
     thermalMaterialTable,
@@ -1164,6 +1172,9 @@ function outputEnvelope({
     destroyOutputParticleBuffers,
     readbackMode,
     outputBufferInitializationMode,
+    neighborLookupMode,
+    legacyPrivateSpatialBuildCount,
+    legacyExhaustiveTraversalCount,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     wallHeatJ: { ...wallHeatJ },
@@ -1351,7 +1362,10 @@ export function runSphThermalStepCpu({
     ambientTemperatureK,
     wallRate,
     wallLayerM: layer,
-    boxDimsM: dims
+    boxDimsM: dims,
+    neighborLookupMode: 'cpu-exhaustive-particle-scan',
+    legacyPrivateSpatialBuildCount: 0,
+    legacyExhaustiveTraversalCount: 1
   });
 }
 
@@ -1363,7 +1377,7 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
-  return buffer;
+  return tagWebGpuBufferDevice(buffer, device);
 }
 
 function resolveMaterialBankWarmInputShaderBinding(device, {
@@ -1461,6 +1475,44 @@ function assertOptionalThermalResponseGraphUpload(upload) {
   }
 }
 
+function thermalResponseGraphContentFingerprint({
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null
+} = {}) {
+  if (!thermalClosureGraphBank || !thermalPhaseResponseTable) return null;
+  return [
+    typedArrayContentFingerprint(thermalPhaseResponseTable.records),
+    typedArrayContentFingerprint(thermalPhaseResponseTable.responses),
+    typedArrayContentFingerprint(thermalClosureGraphBank.nodeRows),
+    typedArrayContentFingerprint(thermalClosureGraphBank.sampleRows)
+  ].join('|');
+}
+
+export function thermalResponseGraphUploadMatchesDevice(upload, device, {
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null
+} = {}) {
+  if (
+    upload?.status !== 'webgpu-uploaded'
+    || upload.destroyed === true
+    || !device
+  ) return false;
+  const buffersMatch = [
+    upload.responseRecordBuffer,
+    upload.responseBuffer,
+    upload.graphNodeBuffer,
+    upload.graphSampleBuffer
+  ].every((buffer) => buffer && webGpuBufferDevice(buffer) === device);
+  const expectedContentFingerprint = thermalResponseGraphContentFingerprint({
+    thermalClosureGraphBank,
+    thermalPhaseResponseTable
+  });
+  return Boolean(buffersMatch && (
+    !expectedContentFingerprint
+    || upload.contentFingerprint === expectedContentFingerprint
+  ));
+}
+
 export function uploadSphThermalResponseGraphBuffers(device, {
   thermalMaterialTable,
   thermalClosureGraphSet = null,
@@ -1500,6 +1552,10 @@ export function uploadSphThermalResponseGraphBuffers(device, {
     schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
     sourceMaterialTableSchema: thermalMaterialTable.schema,
+    contentFingerprint: thermalResponseGraphContentFingerprint({
+      thermalClosureGraphBank: resolved.thermalClosureGraphBank,
+      thermalPhaseResponseTable: resolved.thermalPhaseResponseTable
+    }),
     thermalClosureGraphSetSchema: resolved.thermalClosureGraphSet.schema,
     thermalClosureGraphBankSchema: resolved.thermalClosureGraphBank.schema,
     thermalPhaseResponseTableSchema: resolved.thermalPhaseResponseTable.schema,
@@ -1532,11 +1588,12 @@ export function uploadSphThermalResponseGraphBuffers(device, {
 }
 
 export function destroySphThermalResponseGraphBuffers(buffers) {
-  if (!buffers) return;
+  if (!buffers || buffers.destroyed === true) return;
   if (buffers.ownsResponseRecordBuffer !== false) buffers.responseRecordBuffer?.destroy?.();
   if (buffers.ownsResponseBuffer !== false) buffers.responseBuffer?.destroy?.();
   if (buffers.ownsGraphNodeBuffer !== false) buffers.graphNodeBuffer?.destroy?.();
   if (buffers.ownsGraphSampleBuffer !== false) buffers.graphSampleBuffer?.destroy?.();
+  buffers.destroyed = true;
 }
 
 // Widest conduction pair support in the scene: max over particles of the
@@ -1688,7 +1745,14 @@ export function createSphThermalStepWebGpuEncoderStage({
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
   const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
-  const borrowedResponseGraphUpload = thermalResponseGraphUpload?.status === 'webgpu-uploaded'
+  const borrowedResponseGraphUpload = thermalResponseGraphUploadMatchesDevice(
+    thermalResponseGraphUpload,
+    device,
+    {
+      thermalClosureGraphBank: resolvedGraphBank,
+      thermalPhaseResponseTable: resolvedPhaseResponseTable
+    }
+  )
     ? { ...thermalResponseGraphUpload, borrowed: true }
     : null;
   const localResponseGraphUpload = borrowedResponseGraphUpload
@@ -1752,6 +1816,14 @@ export function createSphThermalStepWebGpuEncoderStage({
     maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
     ambientTemperatureK
   }));
+  const neighborBinsEnabled = Boolean(
+    neighborBins?.binsBuffer
+    && Number(neighborBins?.capacity) > 0
+    && Number(neighborBins?.nx) > 0
+    && Number(neighborBins?.ny) > 0
+    && Number(neighborBins?.nz) > 0
+    && Number(neighborBins?.cellSizeM) > 0
+  );
   const neighborBinsBound = Boolean(neighborBins?.binsBuffer);
   // Binding 10 must always be present in the layout; a tiny placeholder
   // satisfies it when the exhaustive fallback runs (bins_enabled=0).
@@ -1839,6 +1911,11 @@ export function createSphThermalStepWebGpuEncoderStage({
     wallRate,
     wallLayerM: layer,
     boxDimsM: dims,
+    neighborLookupMode: neighborBinsEnabled
+      ? 'borrowed-postintegration-neighbor-bins'
+      : 'exhaustive-particle-scan',
+    legacyPrivateSpatialBuildCount: 0,
+    legacyExhaustiveTraversalCount: neighborBinsEnabled ? 0 : 1,
     stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
     thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
     stateBufferByteLength: outStateByteLength,

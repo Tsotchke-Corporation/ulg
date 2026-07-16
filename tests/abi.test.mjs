@@ -20,6 +20,7 @@ import {
   MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
@@ -87,6 +88,7 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
@@ -326,8 +328,13 @@ test('optical GPU table ABI exposes stable storage-buffer row layouts', () => {
 test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
   assert.equal(ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, 'peercompute.ulg.sph-gpu-particle-buffer.v0');
   assert.equal(ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA, 'peercompute.ulg.sph-gpu-particle-buffer-set.v0');
+  assert.equal(
+    ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    'peercompute.ulg.sph-gpu-particle-identity-buffer.v0'
+  );
   assert.equal(SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length, 8);
   assert.equal(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length, 12);
+  assert.deepEqual(SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT, ['renderDomainId:u32']);
   assert.equal(SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length % 4, 0);
   assert.equal(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.slice(0, 4), [
@@ -888,6 +895,9 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(1\) var<storage, read> sph_thermo/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> render_rows/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(4\) var<storage, read> mls_mpm_mechanics/);
+  assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(6\) var<storage, read> particle_identity: array<u32>/);
+  assert.match(sphRenderRowsWgsl, /let explicit_render_domain_id = particle_identity\[particle_index\]/);
+  assert.match(sphRenderRowsWgsl, /render_domain_id = f32\(explicit_render_domain_id\)/);
   assert.match(sphRenderRowsWgsl, /@compute @workgroup_size\(64\)/);
 });
 
@@ -1225,7 +1235,27 @@ test('MLS-MPM GPU P2G grid projection ABI exposes f32x4-aligned grid rows', () =
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(6\) var<storage, read_write> grid_nodes: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /resident_product_event_count: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(5\) var<storage, read> product_events: array<vec4<f32>>/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(8\) var<storage, read> schroeder_active_nodes: array<f32>/);
+  assert.match(
+    mlsMpmP2gGridProjectionWgsl,
+    /@group\(0\) @binding\(7\) var<storage, read> schroeder_level_assignments: array<f32>/
+  );
+  assert.match(
+    mlsMpmP2gGridProjectionWgsl,
+    /@group\(0\) @binding\(8\) var<storage, read> schroeder_spatial_directory: array<u32>/
+  );
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn p2g_spatial_directory_admitted/);
+  assert.match(
+    mlsMpmP2gGridProjectionWgsl,
+    /const SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS: u32 = 1u;/
+  );
+  assert.match(
+    mlsMpmP2gGridProjectionWgsl,
+    /const SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY: u32 = 2u;/
+  );
+  assert.match(
+    mlsMpmP2gGridProjectionWgsl,
+    /schroeder_spatial_directory\[46u\]\s*== SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS\s*\|\| schroeder_spatial_directory\[46u\]\s*== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY/
+  );
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn quadratic_weights/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
@@ -1303,7 +1333,7 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
     ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
     'peercompute.ulg.mls-mpm-gpu-resident-summary-execution.v0'
   );
-  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length, 84);
+  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length, 88);
   assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(0, 4), [
     'particleCount:f32',
@@ -1318,6 +1348,12 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
     'nextCenterOfMassXM:f32',
     'nextCenterOfMassYM:f32',
     'nextCenterOfMassZM:f32'
+  ]);
+  assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(-4), [
+    'h2oGasMassKg:f32',
+    'h2oGasTemperatureMassWeightedMeanK:f32',
+    'h2oGasPhaseWeight:f32',
+    'h2oGasSummaryStatus:f32'
   ]);
   assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(44, 54), [
     'nextMinXM:f32',

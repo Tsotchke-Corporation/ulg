@@ -24,11 +24,13 @@ import {
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   buildMlsMpmGpuParticleBuffers,
   buildSphGpuParticleBuffers,
@@ -287,6 +289,7 @@ function defaultRemoteRetainedBufferRefs(stateKey) {
   return [
     `${key}:sph-state-buffer`,
     `${key}:sph-thermo-buffer`,
+    `${key}:sph-particle-identity-buffer`,
     `${key}:mls-mpm-mechanics-buffer`
   ];
 }
@@ -302,7 +305,10 @@ function normalizePackedSphParticleState(packed = null) {
   return {
     ...packed,
     state: numericBufferView(packed.state),
-    thermo: numericBufferView(packed.thermo)
+    thermo: numericBufferView(packed.thermo),
+    identity: packed.identity instanceof Uint32Array
+      ? packed.identity
+      : (Array.isArray(packed.identity) ? Uint32Array.from(packed.identity) : packed.identity)
   };
 }
 
@@ -1419,6 +1425,9 @@ export function refreshUlgSphMlsMpmHotBuffersFromRemoteSeed({
   const retainedBufferRefs = [
     `${resolvedHotBufferKey}:sph-state-buffer`,
     `${resolvedHotBufferKey}:sph-thermo-buffer`,
+    ...(sphUpload?.identityBuffer
+      ? [`${resolvedHotBufferKey}:sph-particle-identity-buffer`]
+      : []),
     `${resolvedHotBufferKey}:mls-mpm-mechanics-buffer`
   ];
   const hotBufferRecord = {
@@ -1464,6 +1473,7 @@ export function refreshUlgSphMlsMpmHotBuffersFromRemoteSeed({
     bytes: {
       sphStateBytes: bufferByteLength(sphPacked.state),
       sphThermoBytes: bufferByteLength(sphPacked.thermo),
+      sphIdentityBytes: bufferByteLength(sphPacked.identity),
       mlsMpmMechanicsBytes: bufferByteLength(mlsMpmPacked.mechanics)
     },
     gpuFence: {
@@ -1486,6 +1496,28 @@ function snapshotFloat32Array(value, expectedLength, label) {
   }
   if (!out) {
     throw new TypeError(`compact buffer snapshot requires ${label} Float32 data`);
+  }
+  if (out.length !== expectedLength) {
+    throw new TypeError(`compact buffer snapshot ${label} length ${out.length} does not match expected ${expectedLength}`);
+  }
+  return out;
+}
+
+function snapshotUint32Array(value, expectedLength, label, { required = false } = {}) {
+  let out = null;
+  if (value instanceof Uint32Array) {
+    out = new Uint32Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    out = new Uint32Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  } else if (value instanceof ArrayBuffer) {
+    out = new Uint32Array(value.slice(0));
+  } else if (Array.isArray(value)) {
+    out = Uint32Array.from(value);
+  } else if (!required) {
+    out = new Uint32Array(expectedLength);
+  }
+  if (!out) {
+    throw new TypeError(`compact buffer snapshot requires ${label} Uint32 data`);
   }
   if (out.length !== expectedLength) {
     throw new TypeError(`compact buffer snapshot ${label} length ${out.length} does not match expected ${expectedLength}`);
@@ -1529,6 +1561,19 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
     'mlsMpmMechanics'
   );
+  const identityRequired = snapshot.identityRequired === true;
+  if (
+    identityRequired
+    && snapshot.identitySchema !== ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+  ) {
+    throw new TypeError('compact buffer snapshot arbitrary domains require the particle identity schema');
+  }
+  const sphIdentity = snapshotUint32Array(
+    snapshot.sphIdentity || snapshot.sphIdentityRows || snapshot.identity,
+    particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS,
+    'sphIdentity',
+    { required: identityRequired }
+  );
   const resolvedCacheKey = normalizeString(cacheKey, snapshot.cacheKey || compactCandidate?.cacheKey || compactCandidateAuthority?.cacheKey || null);
   const resolvedStateKey = normalizeString(stateKey, snapshot.stateKey || compactCandidate?.stateKey || compactCandidateAuthority?.stateKey || null);
   const resolvedHotBufferKey = makeHotBufferKey({
@@ -1550,12 +1595,20 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     smoothingLengthM: finiteSeedNumber(snapshot.smoothingLengthM, 0),
     stateLayout: [...SPH_GPU_PARTICLE_STATE_ROW_LAYOUT],
     thermoLayout: [...SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT],
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     thermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
     stateStrideBytes: SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     thermoStrideBytes: SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
+    identityStrideBytes: SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
     state: sphState,
     thermo: sphThermo,
+    identity: sphIdentity,
+    identityRequired,
+    identityRevision: snapshot.identityRevision || null,
+    renderDomainKeys: { ...(snapshot.renderDomainKeys || {}) },
+    cpuIdentityStale: false,
     metadata: [],
     scientificValidation: false,
     sphValidation: false,
@@ -1583,6 +1636,7 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
   const retainedBufferRefs = [
     `${resolvedHotBufferKey}:sph-state-buffer`,
     `${resolvedHotBufferKey}:sph-thermo-buffer`,
+    `${resolvedHotBufferKey}:sph-particle-identity-buffer`,
     `${resolvedHotBufferKey}:mls-mpm-mechanics-buffer`
   ];
   const hotBufferRecord = {
@@ -1630,6 +1684,7 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     bytes: {
       sphStateBytes: bufferByteLength(sphPacked.state),
       sphThermoBytes: bufferByteLength(sphPacked.thermo),
+      sphIdentityBytes: bufferByteLength(sphPacked.identity),
       mlsMpmMechanicsBytes: bufferByteLength(mlsMpmPacked.mechanics)
     },
     gpuFence: {
@@ -1936,6 +1991,9 @@ export function publishUlgSphMlsMpmSameDeviceHotBufferSource({
   const retainedBufferRefs = [
     `${resolvedHotBufferKey}:sph-state-buffer`,
     `${resolvedHotBufferKey}:sph-thermo-buffer`,
+    ...(sphUpload?.identityBuffer
+      ? [`${resolvedHotBufferKey}:sph-particle-identity-buffer`]
+      : []),
     `${resolvedHotBufferKey}:mls-mpm-mechanics-buffer`
   ];
   const hotBufferRecord = {
@@ -3417,7 +3475,8 @@ export function publishUlgSchroederPhaseVolumeMigrationAdmission({
 const SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES = Object.freeze([
   'sph-particle-state',
   'mls-mpm-particle-mechanics',
-  'sph-particle-thermo'
+  'sph-particle-thermo',
+  'sph-particle-identity'
 ]);
 
 function firstFinitePositiveIntegerFromObject(source = {}, keys = [], fallback = 0) {
@@ -3795,7 +3854,8 @@ export function publishUlgSchroederParticleStorageMaterializationAdmission({
     sourceMode: 'state-manager-schroeder-particle-storage-materialization-admission',
     approvalFields: {
       particleStorageMaterializationApproved: true,
-      slotAssignmentDescriptorApproved: true
+      slotAssignmentDescriptorApproved: true,
+      particleIdentityMutationApproved: true
     },
     extraAdmissionFields: {
       requiredParticleCapacity: resolvedRequiredCapacity
@@ -3812,13 +3872,16 @@ function descriptorContainsRawGpuBufferHandle(value, depth = 0) {
     'stateBuffer',
     'thermoBuffer',
     'mechanicsBuffer',
+    'identityBuffer',
     'materializationBuffer',
     'particleStateBuffer',
     'particleThermoBuffer',
     'particleMechanicsBuffer',
+    'particleIdentityBuffer',
     'outputStateBuffer',
     'outputThermoBuffer',
-    'outputMechanicsBuffer'
+    'outputMechanicsBuffer',
+    'outputIdentityBuffer'
   ]);
   for (const [key, entry] of Object.entries(value)) {
     if (rawBufferKeys.has(key) && entry && typeof entry === 'object') return true;
@@ -3875,13 +3938,67 @@ function validateSchroederAdoptedParticleStorageDescriptor(descriptor = null) {
     'mls-mpm-particle-mechanics',
     'schroeder-particle-storage'
   ]);
+  const identityRequired = descriptor.identityRequired === true;
+  const identityBufferRef = normalizeString(descriptor.identityBufferRef, null);
+  const identitySchema = normalizeString(descriptor.identitySchema, null);
+  const identityStrideBytes = Math.max(0, Math.round(finiteSeedNumber(
+    descriptor.identityStrideBytes,
+    0
+  )));
+  const identityBufferByteLength = Math.max(0, Math.round(finiteSeedNumber(
+    descriptor.identityBufferByteLength,
+    0
+  )));
+  const outputParticleCapacity = Math.max(authoritativeParticleCount, Math.round(finiteSeedNumber(
+    descriptor.outputParticleCapacity,
+    authoritativeParticleCount
+  )));
+  const identityRefDescriptor = Array.isArray(descriptor.retainedRefs)
+    ? descriptor.retainedRefs.find((entry) => (
+      entry?.ref === identityBufferRef || entry?.role === 'particle-identity'
+    ))
+    : null;
+  if (identityRequired) {
+    if (descriptor.particleIdentityMutationApproved !== true) {
+      issues.push('schroeder-adopted-particle-storage-identity-mutation-not-admitted');
+    }
+    if (!identityBufferRef || !retainedBufferRefs.includes(identityBufferRef)) {
+      issues.push('schroeder-adopted-particle-storage-identity-buffer-ref-missing');
+    }
+    if (identitySchema !== ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA) {
+      issues.push('schroeder-adopted-particle-storage-identity-schema-invalid');
+    }
+    if (identityStrideBytes !== SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT) {
+      issues.push('schroeder-adopted-particle-storage-identity-stride-invalid');
+    }
+    if (identityBufferByteLength < outputParticleCapacity * identityStrideBytes) {
+      issues.push('schroeder-adopted-particle-storage-identity-capacity-incomplete');
+    }
+    if (!outputFamilies.includes('sph-particle-identity')) {
+      issues.push('schroeder-adopted-particle-storage-identity-family-missing');
+    }
+    if (
+      !identityRefDescriptor
+      || identityRefDescriptor.retained !== true
+      || identityRefDescriptor.family !== 'sph-particle-identity'
+    ) {
+      issues.push('schroeder-adopted-particle-storage-identity-retained-ref-invalid');
+    }
+  }
   return {
     accepted: issues.length === 0,
     issues,
     reason: issues[0] || null,
     retainedBufferRefs,
     outputFamilies,
-    authoritativeParticleCount
+    authoritativeParticleCount,
+    outputParticleCapacity,
+    identityRequired,
+    identityBufferRef,
+    identitySchema,
+    identityStrideBytes,
+    identityBufferByteLength,
+    particleIdentityMutationApproved: descriptor.particleIdentityMutationApproved === true
   };
 }
 
@@ -3938,6 +4055,23 @@ function validateSchroederAdoptedParticleStoragePortableMaterializationSeed({
     if (missingRefs.length > 0) {
       issues.push('schroeder-adopted-particle-storage-portable-seed-retained-refs-incomplete');
     }
+    if (descriptorValidation.identityRequired) {
+      if (seed.identityRequired !== true) {
+        issues.push('schroeder-adopted-particle-storage-portable-seed-identity-requirement-missing');
+      }
+      if (seed.identitySchema !== descriptorValidation.identitySchema) {
+        issues.push('schroeder-adopted-particle-storage-portable-seed-identity-schema-mismatch');
+      }
+      if (seed.identityStrideBytes !== descriptorValidation.identityStrideBytes) {
+        issues.push('schroeder-adopted-particle-storage-portable-seed-identity-stride-mismatch');
+      }
+      if (seed.particleIdentityMutationApproved !== true) {
+        issues.push('schroeder-adopted-particle-storage-portable-seed-identity-mutation-not-admitted');
+      }
+      if (seed.requiresAuthoritativeFourBufferRows !== true) {
+        issues.push('schroeder-adopted-particle-storage-portable-seed-four-buffer-authority-undeclared');
+      }
+    }
   }
   const accepted = issues.length === 0 && descriptorValidation.accepted === true;
   return {
@@ -3966,6 +4100,11 @@ function validateSchroederAdoptedParticleStoragePortableMaterializationSeed({
       || descriptorValidation.retainedBufferRefs
     ),
     outputFamilies: uniqueStringList(seed?.outputFamilies || descriptorValidation.outputFamilies),
+    identityRequired: descriptorValidation.identityRequired,
+    identitySchema: descriptorValidation.identitySchema,
+    identityStrideBytes: descriptorValidation.identityStrideBytes,
+    identityBufferByteLength: descriptorValidation.identityBufferByteLength,
+    requiresAuthoritativeFourBufferRows: descriptorValidation.identityRequired,
     descriptorOnlyPeerComputeHandoff: true,
     rawGpuBufferTransferAllowed: false,
     rawGpuBufferTransferDetected:
@@ -4003,8 +4142,18 @@ export function createSchroederAdoptedParticleStoragePortableMaterializationSeed
     adoptedStorageDescriptorSchema: descriptor?.schema || null,
     adoptedStorageDescriptorStatus: descriptor?.status || null,
     authoritativeParticleCount: validation.authoritativeParticleCount,
+    outputParticleCapacity: validation.outputParticleCapacity,
     retainedBufferRefs: [...validation.retainedBufferRefs],
     outputFamilies: [...validation.outputFamilies],
+    identityRequired: validation.identityRequired,
+    identityBufferRef: validation.identityBufferRef,
+    identitySchema: validation.identitySchema,
+    identityStrideBytes: validation.identityStrideBytes,
+    identityBufferByteLength: validation.identityBufferByteLength,
+    identityRevision: descriptor?.identityRevision || null,
+    renderDomainKeys: { ...(descriptor?.renderDomainKeys || {}) },
+    particleIdentityMutationApproved: validation.particleIdentityMutationApproved,
+    requiresAuthoritativeFourBufferRows: validation.identityRequired,
     materializationMode: 'peer-local-gpu-rematerialization-from-descriptor-seed',
     peerLocalMaterializationRequired: true,
     descriptorOnlyPeerComputeHandoff: true,
@@ -4159,6 +4308,21 @@ function createSchroederAdoptedParticleStorageLocalRetainedBufferResolver({
     fallbackParticleCount: resolvedSphUpload?.particleCount
   });
   addAdoptedStorageLocalBufferEntry(retainedBufferMap, {
+    ref: 'sph-particle-identity-buffer',
+    role: 'identity',
+    source: resolvedSphUpload?.identityBuffer
+      ? {
+          buffer: resolvedSphUpload.identityBuffer,
+          byteLength: resolvedSphUpload.identityBufferByteLength,
+          strideBytes: resolvedSphUpload.identityStrideBytes,
+          particleCount: resolvedSphUpload.particleCount,
+          status: resolvedSphUpload.status || 'webgpu-uploaded'
+        }
+      : null,
+    fallbackByteLength: resolvedSphUpload?.identityBufferByteLength,
+    fallbackParticleCount: resolvedSphUpload?.particleCount
+  });
+  addAdoptedStorageLocalBufferEntry(retainedBufferMap, {
     ref: 'mls-mpm-mechanics-buffer',
     role: 'mechanics',
     source: resolvedMlsUpload?.mechanicsBuffer
@@ -4203,6 +4367,11 @@ function createSchroederAdoptedParticleStorageLocalRetainedBufferResolver({
     missingRetainedBufferRefCount: missingRetainedBufferRefs.length,
     authoritativeParticleCount: validation.authoritativeParticleCount,
     outputFamilies: validation.outputFamilies,
+    identityRequired: validation.identityRequired,
+    identityBufferRef: validation.identityBufferRef,
+    identitySchema: validation.identitySchema,
+    identityStrideBytes: validation.identityStrideBytes,
+    identityBufferByteLength: validation.identityBufferByteLength,
     retainedBufferResolver: retainedBufferMap,
     scientificValidation: false,
     sphValidation: false,
@@ -4231,7 +4400,12 @@ function summarizeAdoptedStorageLocalRetainedBufferResolver(resolver = null) {
     missingRetainedBufferRefs: [...(resolver.missingRetainedBufferRefs || [])],
     missingRetainedBufferRefCount: resolver.missingRetainedBufferRefCount ?? 0,
     authoritativeParticleCount: resolver.authoritativeParticleCount ?? 0,
-    outputFamilies: [...(resolver.outputFamilies || [])]
+    outputFamilies: [...(resolver.outputFamilies || [])],
+    identityRequired: resolver.identityRequired === true,
+    identityBufferRef: resolver.identityBufferRef || null,
+    identitySchema: resolver.identitySchema || null,
+    identityStrideBytes: resolver.identityStrideBytes ?? 0,
+    identityBufferByteLength: resolver.identityBufferByteLength ?? 0
   };
 }
 
@@ -4296,6 +4470,13 @@ export function publishUlgSchroederAdoptedParticleStorageDescriptor({
     authoritativeParticleCount: validation.authoritativeParticleCount,
     retainedBufferRefs: validation.retainedBufferRefs,
     outputFamilies: validation.outputFamilies,
+    identityRequired: validation.identityRequired,
+    identityBufferRef: validation.identityBufferRef,
+    identitySchema: validation.identitySchema,
+    identityStrideBytes: validation.identityStrideBytes,
+    identityBufferByteLength: validation.identityBufferByteLength,
+    identityRevision: storageDescriptor?.identityRevision || null,
+    particleIdentityMutationApproved: validation.particleIdentityMutationApproved,
     sameDeviceReplayReady: storageDescriptor?.sameDeviceReplayReady === true,
     crossPeerReplayReady: storageDescriptor?.crossPeerReplayReady === true,
     crossPeerReplayStatus: storageDescriptor?.crossPeerReplayStatus || null,
@@ -4484,6 +4665,14 @@ export function planSchroederAdoptedParticleStorageContinuation({
     retainedBufferRefs: validation.retainedBufferRefs,
     retainedBufferRefCount: validation.retainedBufferRefs.length,
     outputFamilies: validation.outputFamilies,
+    identityRequired: validation.identityRequired,
+    identityBufferRef: validation.identityBufferRef,
+    identitySchema: validation.identitySchema,
+    identityStrideBytes: validation.identityStrideBytes,
+    identityBufferByteLength: validation.identityBufferByteLength,
+    identityRevision: source.descriptor?.identityRevision || null,
+    renderDomainKeys: { ...(source.descriptor?.renderDomainKeys || {}) },
+    particleIdentityMutationApproved: validation.particleIdentityMutationApproved,
     sameDeviceContinuationReady,
     sameDevicePrivateLaneRefs: crossPeerRequested ? [] : validation.retainedBufferRefs,
     sameDevicePrivateLaneContinuation: sameDeviceContinuationReady,
@@ -5985,6 +6174,7 @@ async function importPeerComputeModule(moduleUrl) {
 }
 
 async function importPeerComputeClasses({
+  peercomputeModule = null,
   peercomputeModuleUrl = null,
   nodeKernelModuleUrl = DEFAULT_PEERCOMPUTE_NODE_KERNEL_MODULE_URL,
   computeManagerModuleUrl = DEFAULT_PEERCOMPUTE_COMPUTE_MANAGER_MODULE_URL,
@@ -5992,9 +6182,11 @@ async function importPeerComputeClasses({
   gpuHubModuleUrl = DEFAULT_PEERCOMPUTE_GPU_HUB_MODULE_URL,
   remoteResultQuorumModuleUrl = DEFAULT_PEERCOMPUTE_REMOTE_RESULT_QUORUM_MODULE_URL
 } = {}) {
-  const bundled = peercomputeModuleUrl
-    ? await importPeerComputeModule(peercomputeModuleUrl)
-    : {};
+  const bundled = peercomputeModule && typeof peercomputeModule === 'object'
+    ? peercomputeModule
+    : (peercomputeModuleUrl
+        ? await importPeerComputeModule(peercomputeModuleUrl)
+        : {});
   const nodeKernelModule = bundled.NodeKernel
     ? bundled
     : await importPeerComputeModule(nodeKernelModuleUrl);
@@ -7341,6 +7533,7 @@ export function createUlgResidentSolverDescriptors({
         retainedBufferRefs: [
           'sph-state-buffer',
           'sph-thermo-buffer',
+          'sph-particle-identity-buffer',
           'mls-mpm-mechanics-buffer'
         ]
       },
@@ -7559,6 +7752,7 @@ function summarizeWorkerCapability({
 }
 
 export async function createPeerComputeResidentAuthorityHost({
+  peercomputeModule = null,
   peercomputeModuleUrl = null,
   nodeKernelModuleUrl = DEFAULT_PEERCOMPUTE_NODE_KERNEL_MODULE_URL,
   computeManagerModuleUrl = DEFAULT_PEERCOMPUTE_COMPUTE_MANAGER_MODULE_URL,
@@ -7566,6 +7760,7 @@ export async function createPeerComputeResidentAuthorityHost({
   gpuHubModuleUrl = DEFAULT_PEERCOMPUTE_GPU_HUB_MODULE_URL,
   remoteResultQuorumModuleUrl = DEFAULT_PEERCOMPUTE_REMOTE_RESULT_QUORUM_MODULE_URL,
   computeTaskModulePath = DEFAULT_ULG_RESIDENT_COMPUTE_TASK_MODULE_PATH,
+  mechanicsResidentStageWorkerModuleUrl = DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH,
   preferNodeKernelAuthority = true,
   fallbackToDirectManagers = true,
   nodeKernelConfig = {},
@@ -7591,6 +7786,7 @@ export async function createPeerComputeResidentAuthorityHost({
     createResidentStageWorkerBackend,
     createRemoteResultQuorumValidator
   } = await importPeerComputeClasses({
+    peercomputeModule,
     peercomputeModuleUrl,
     nodeKernelModuleUrl,
     computeManagerModuleUrl,
@@ -7604,6 +7800,10 @@ export async function createPeerComputeResidentAuthorityHost({
   if (typeof StateManager !== 'function') {
     throw new Error('PeerCompute module did not export StateManager');
   }
+  const resolvedMechanicsResidentStageWorkerModuleUrl = normalizeString(
+    mechanicsResidentStageWorkerModuleUrl,
+    DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH
+  );
   let nodeKernel = null;
   let computeManager = null;
   let stateManager = null;
@@ -7672,6 +7872,7 @@ export async function createPeerComputeResidentAuthorityHost({
       gpuHub,
       config: {
         source,
+        peercomputeModuleProvided: Boolean(peercomputeModule),
         peercomputeModuleUrl,
         nodeKernelModuleUrl,
         computeManagerModuleUrl,
@@ -7849,7 +8050,7 @@ export async function createPeerComputeResidentAuthorityHost({
       throw new Error('PeerCompute createResidentStageWorkerBackend is not available');
     }
     return createResidentStageWorkerBackend({
-      workerModuleUrl: options.workerModuleUrl || DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH,
+      workerModuleUrl: options.workerModuleUrl || resolvedMechanicsResidentStageWorkerModuleUrl,
       workerFactory: options.workerFactory,
       workerScriptType: options.workerScriptType || 'module',
       requestIdPrefix: options.requestIdPrefix || 'ulg-mechanics-resident-stage-worker',
@@ -7877,6 +8078,7 @@ export async function createPeerComputeResidentAuthorityHost({
     status: 'ready',
     hostId,
     source,
+    peercomputeModuleProvided: Boolean(peercomputeModule),
     peercomputeModuleUrl,
     nodeKernelModuleUrl,
     computeManagerModuleUrl,
@@ -7886,7 +8088,7 @@ export async function createPeerComputeResidentAuthorityHost({
     createResidentStageWorkerBackend,
     peercomputeResidentStageWorkerBridgeAvailable: typeof createResidentStageWorkerBackend === 'function',
     createUlgMechanicsResidentStageWorkerRunner,
-    ulgMechanicsResidentStageWorkerModulePath: DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH,
+    ulgMechanicsResidentStageWorkerModulePath: resolvedMechanicsResidentStageWorkerModuleUrl,
     workerCapability: summarizeWorkerCapability({ computeManager, nodeKernel, enableWorkers }),
     renderOwnershipPolicy: initialRenderOwnershipPolicy,
     nodeKernelMode,

@@ -339,6 +339,15 @@ export function materialPropertyBankWarmInput(record, {
 }
 
 export function buildMaterialPropertyBankGpuWarmInputTable(warmInputs) {
+  if (
+    warmInputs?.identityMode === 'initial-bodies'
+    || Array.isArray(warmInputs?.bodies)
+  ) {
+    return buildMaterialPropertyBankInitialBodyGpuWarmInputTable({
+      initialBodies: warmInputs.bodies,
+      materialPropertyBankWarmInputs: warmInputs
+    });
+  }
   const entries = roleEntriesFromWarmInputs(warmInputs);
   if (entries.length === 0) return emptyWarmInputTable();
   const rows = [];
@@ -398,6 +407,11 @@ export function buildMaterialPropertyBankGpuWarmInputTable(warmInputs) {
 }
 
 export function buildMaterialPropertyBankParticleSizePackingTable(initialParticleSpacing) {
+  if (Array.isArray(initialParticleSpacing?.bodies)) {
+    return buildMaterialPropertyBankInitialBodyParticleSizePackingTable({
+      initialParticleSpacing
+    });
+  }
   const warmInputs = initialParticleSpacing?.materialPropertyBankWarmInputs;
   const entries = roleEntriesFromWarmInputs(warmInputs);
   if (entries.length === 0) return emptyParticleSizePackingTable();
@@ -457,6 +471,294 @@ export function buildMaterialPropertyBankParticleSizePackingTable(initialParticl
     rows: Float32Array.from(rows),
     rowCount: rows.length / MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length,
     metadata,
+    strictSourceOfTruth: false,
+    scientificValidation: false,
+    materialValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function orderedInitialBodyEntries(initialBodies, initialParticleSpacing = null) {
+  const source = Array.isArray(initialBodies)
+    ? initialBodies
+    : (Array.isArray(initialBodies?.bodies)
+        ? initialBodies.bodies
+        : (Array.isArray(initialParticleSpacing?.bodies)
+            ? initialParticleSpacing.bodies
+            : []));
+  const ids = new Set();
+  const domainIds = new Set();
+  return source.map((body, bodyOrder) => {
+    const bodyId = String(body?.id ?? body?.bodyId ?? '').trim();
+    const domainId = Math.round(finiteNumber(body?.domainId, 0));
+    if (!bodyId) throw new TypeError(`initial body at index ${bodyOrder} has no stable id`);
+    if (!(domainId > 0)) throw new RangeError(`initial body '${bodyId}' has no positive domain id`);
+    if (ids.has(bodyId)) throw new Error(`initial body id '${bodyId}' is duplicated`);
+    if (domainIds.has(domainId)) throw new Error(`initial body domain id '${domainId}' is duplicated`);
+    ids.add(bodyId);
+    domainIds.add(domainId);
+    return {
+      ...body,
+      id: bodyId,
+      domainId,
+      bodyOrder,
+      role: body?.legacyRole || bodyId
+    };
+  });
+}
+
+function bodyPlansById(initialParticleSpacing) {
+  const byBodyId = initialParticleSpacing?.byBodyId;
+  if (byBodyId instanceof Map) return byBodyId;
+  if (byBodyId && typeof byBodyId === 'object') return new Map(Object.entries(byBodyId));
+  return new Map((initialParticleSpacing?.bodies || []).map((plan) => [
+    String(plan?.bodyId ?? plan?.id ?? '').trim(),
+    plan
+  ]));
+}
+
+function bodyScopedCollectionEntry(collection, body) {
+  const byBodyId = collection?.byBodyId;
+  if (byBodyId instanceof Map && byBodyId.has(body.id)) return byBodyId.get(body.id);
+  if (byBodyId && typeof byBodyId === 'object' && byBodyId[body.id]) return byBodyId[body.id];
+  if (Array.isArray(collection?.bodies)) {
+    const entry = collection.bodies.find((candidate) => (
+      String(candidate?.bodyId ?? candidate?.id ?? '').trim() === body.id
+    ));
+    if (entry) return entry.warmInput ?? entry;
+  }
+  const roles = collection?.roles;
+  if (roles && typeof roles === 'object') {
+    return roles[body.id]
+      ?? roles[`body:${body.id}`]
+      ?? (body.legacyRole ? roles[body.legacyRole] : null)
+      ?? null;
+  }
+  return null;
+}
+
+function bodyMaterialWarmInput({ body, plan, warmInputs }) {
+  const candidate = plan?.materialPropertyBankWarmInput
+    ?? bodyScopedCollectionEntry(warmInputs, body)
+    ?? null;
+  return candidate?.schema === MATERIAL_PROPERTY_BANK_WARM_INPUT_SCHEMA ? candidate : null;
+}
+
+function bodyCrystalWarmInput({ body, plan, crystalWarmInputs }) {
+  return plan?.materialPropertyCrystalStructureWarmInput
+    ?? bodyScopedCollectionEntry(crystalWarmInputs, body)
+    ?? null;
+}
+
+function representativeParticlesPerEdge(particlesPerEdge) {
+  if (!Array.isArray(particlesPerEdge) || particlesPerEdge.length !== 3) {
+    return finiteNumber(particlesPerEdge, 0);
+  }
+  const product = particlesPerEdge.reduce(
+    (value, component) => value * Math.max(0, finiteNumber(component, 0)),
+    1
+  );
+  return product > 0 ? Math.cbrt(product) : 0;
+}
+
+/**
+ * Pack material-bank warm inputs in authoritative initial-body order. The GPU
+ * row ABI remains unchanged; stable body identity is retained in metadata.
+ */
+export function buildMaterialPropertyBankInitialBodyGpuWarmInputTable({
+  initialBodies = null,
+  initialParticleSpacing = null,
+  materialPropertyBankWarmInputs = initialParticleSpacing?.materialPropertyBankWarmInputs ?? null
+} = {}) {
+  const bodies = orderedInitialBodyEntries(initialBodies, initialParticleSpacing);
+  const plans = bodyPlansById(initialParticleSpacing);
+  const entries = bodies.map((body) => ({
+    body,
+    warmInput: bodyMaterialWarmInput({
+      body,
+      plan: plans.get(body.id),
+      warmInputs: materialPropertyBankWarmInputs
+    })
+  })).filter((entry) => entry.warmInput);
+  if (entries.length === 0) return emptyWarmInputTable();
+  const rows = [];
+  const metadata = [];
+  for (const { body, warmInput } of entries) {
+    const pbr = warmInput.pbr || {};
+    const color = Array.isArray(pbr.baseColorSrgb) ? pbr.baseColorSrgb : [0, 0, 0];
+    rows.push(
+      finiteNumber(warmInput.atomicNumber),
+      finiteNumber(warmInput.atomicNumber),
+      finiteNumber(warmInput.temperatureK),
+      finiteNumber(warmInput.pressurePa),
+      finiteNumber(warmInput.targetNeighborCount),
+      finiteNumber(warmInput.phaseCount),
+      finiteNumber(color[0]),
+      finiteNumber(color[1]),
+      finiteNumber(color[2]),
+      finiteNumber(pbr.metalness),
+      finiteNumber(pbr.roughness),
+      pbr.ior == null ? 1 : finiteNumber(pbr.ior, 1),
+      warmInput.strictSourceOfTruth === true ? 1 : 0,
+      MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready,
+      0,
+      0
+    );
+    metadata.push({
+      role: body.role,
+      bodyId: body.id,
+      domainId: body.domainId,
+      bodyOrder: body.bodyOrder,
+      material: warmInput.material,
+      requestedMaterial: warmInput.requestedMaterial ?? body.material ?? null,
+      materialId: warmInput.atomicNumber,
+      atomicNumber: warmInput.atomicNumber,
+      temperatureK: warmInput.temperatureK,
+      pressurePa: warmInput.pressurePa,
+      targetNeighborCount: warmInput.targetNeighborCount,
+      spacingPolicy: warmInput.spacingPolicy ?? null,
+      bankFamily: warmInput.bankFamily ?? null,
+      bankSchemaVersion: warmInput.bankSchemaVersion ?? null,
+      generatorFingerprint: warmInput.provenance?.generatorFingerprint ?? null,
+      identityAuthority: 'initial-body-domain-id',
+      strictSourceOfTruth: false,
+      status: 'ready'
+    });
+  }
+  return {
+    schema: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
+    status: 'material-bank-gpu-warm-input-table-ready',
+    rowLayout: [...MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT],
+    rowStrideFloats: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length,
+    rowStrideBytes: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+    rows: Float32Array.from(rows),
+    rowCount: rows.length / MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length,
+    metadata,
+    identityMode: 'initial-bodies',
+    strictSourceOfTruth: false,
+    scientificValidation: false,
+    materialValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+/**
+ * Pack rectangular initial-body particle plans without changing the existing
+ * 16-float particle-size ABI. `domainId` occupies the legacy role-id lane;
+ * exact XYZ resolution and spacing remain available in metadata.
+ */
+export function buildMaterialPropertyBankInitialBodyParticleSizePackingTable({
+  initialBodies = null,
+  initialParticleSpacing = null,
+  materialPropertyBankWarmInputs = initialParticleSpacing?.materialPropertyBankWarmInputs ?? null,
+  materialPropertyCrystalStructureWarmInputs =
+    initialParticleSpacing?.materialPropertyCrystalStructureWarmInputs ?? null
+} = {}) {
+  const bodies = orderedInitialBodyEntries(initialBodies, initialParticleSpacing);
+  const plans = bodyPlansById(initialParticleSpacing);
+  const entries = bodies.map((body) => {
+    const plan = plans.get(body.id);
+    if (!plan) throw new Error(`initial body '${body.id}' has no particle plan`);
+    return {
+      body,
+      plan,
+      warmInput: bodyMaterialWarmInput({
+        body,
+        plan,
+        warmInputs: materialPropertyBankWarmInputs
+      }),
+      crystalWarmInput: bodyCrystalWarmInput({
+        body,
+        plan,
+        crystalWarmInputs: materialPropertyCrystalStructureWarmInputs
+      })
+    };
+  }).filter((entry) => entry.warmInput);
+  if (entries.length === 0) return emptyParticleSizePackingTable();
+  const rows = [];
+  const metadata = [];
+  for (const { body, plan, warmInput, crystalWarmInput } of entries) {
+    const crystalUnitCell = crystalWarmInput?.unitCell || {};
+    const particlesPerAxis = Array.isArray(plan.particlesPerEdge)
+      ? plan.particlesPerEdge.map((value) => Math.max(0, Math.round(finiteNumber(value, 0))))
+      : [finiteNumber(plan.particlesPerEdge, 0)];
+    const spacingByAxisM = Array.isArray(plan.spacingByAxisM)
+      ? plan.spacingByAxisM.map((value) => finiteNumber(value, 0))
+      : [];
+    const representativeSpacingM = finiteNumber(
+      plan.representativeCellPitchM ?? plan.spacingM,
+      0
+    );
+    const radiusM = finiteNumber(
+      plan.volumeEquivalentParticleRadiusM ?? plan.visualParticleRadiusM,
+      0
+    );
+    const targetNeighborCount = finiteNumber(
+      plan.targetNeighborCount,
+      finiteNumber(warmInput.targetNeighborCount, 0)
+    );
+    const smoothingLengthM = finiteNumber(
+      initialParticleSpacing?.smoothingLengthM,
+      finiteNumber(plan.targetSmoothingLengthM, 0)
+    );
+    rows.push(
+      body.domainId,
+      finiteNumber(warmInput.atomicNumber),
+      finiteNumber(warmInput.temperatureK, plan.temperatureK),
+      finiteNumber(warmInput.pressurePa, plan.pressurePa),
+      representativeParticlesPerEdge(particlesPerAxis),
+      representativeSpacingM,
+      radiusM,
+      finiteNumber(plan.restVolumeM3 ?? plan.visualRestVolumeM3),
+      finiteNumber(plan.densityKgPerM3),
+      targetNeighborCount,
+      smoothingLengthM,
+      warmInput.strictSourceOfTruth === true ? 1 : 0,
+      MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready,
+      finiteNumber(crystalUnitCell.packingFraction),
+      finiteNumber(crystalUnitCell.coordinationNumber),
+      finiteNumber(crystalUnitCell.atomsPerConventionalCell)
+    );
+    metadata.push({
+      role: body.role,
+      roleId: body.domainId,
+      bodyId: body.id,
+      domainId: body.domainId,
+      bodyOrder: body.bodyOrder,
+      material: warmInput.material,
+      requestedMaterial: warmInput.requestedMaterial ?? body.material ?? null,
+      materialId: warmInput.atomicNumber,
+      particlesPerEdge: particlesPerAxis,
+      representativeParticlesPerEdge: representativeParticlesPerEdge(particlesPerAxis),
+      particleCount: finiteNumber(plan.particleCount),
+      spacingM: representativeSpacingM,
+      spacingByAxisM,
+      volumeEquivalentParticleRadiusM: radiusM,
+      restVolumeM3: finiteNumber(plan.restVolumeM3 ?? plan.visualRestVolumeM3),
+      mechanicsRestVolumeM3: finiteNumber(plan.mechanicsRestVolumeM3, plan.continuumCellVolumeM3),
+      densityKgPerM3: finiteNumber(plan.densityKgPerM3),
+      targetNeighborCount,
+      smoothingLengthM,
+      crystalStructureKey: crystalWarmInput?.structureKey ?? null,
+      crystalStructureStatus: crystalWarmInput?.status ?? null,
+      crystalPackingFraction: finiteNumber(crystalUnitCell.packingFraction),
+      crystalCoordinationNumber: finiteNumber(crystalUnitCell.coordinationNumber),
+      crystalAtomsPerConventionalCell: finiteNumber(crystalUnitCell.atomsPerConventionalCell),
+      identityAuthority: 'initial-body-domain-id',
+      strictSourceOfTruth: false,
+      status: 'ready'
+    });
+  }
+  return {
+    schema: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_PACKING_TABLE_SCHEMA,
+    status: 'material-bank-particle-size-packing-ready',
+    rowLayout: [...MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT],
+    rowStrideFloats: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length,
+    rowStrideBytes: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+    rows: Float32Array.from(rows),
+    rowCount: rows.length / MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length,
+    metadata,
+    identityMode: 'initial-bodies',
     strictSourceOfTruth: false,
     scientificValidation: false,
     materialValidation: false,

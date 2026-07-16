@@ -24,6 +24,7 @@ import {
   sampleOpticalGpuTableCpu,
   stableOpticalMaterialId,
   stableOpticalStateId,
+  updateUploadedOpticalGpuTable,
   uploadOpticalGpuTable
 } from '../src/runtime/material/opticalGpuBuffers.js';
 
@@ -231,10 +232,14 @@ test('optical GPU table packs derived PBR records and spectral samples', () => {
   assert.equal(table.fullPhysicsValidation, false);
 });
 
-test('optical GPU table consumes non-authoritative material-bank display PBR warm inputs', () => {
+test('optical GPU table keeps material-bank PBR warm inputs as metadata only', () => {
   const warmInputTable = sodiumWarmInputTable();
   const table = buildOpticalGpuTable([
-    { material: 'Na', phase: 'solid' },
+    {
+      material: 'Na',
+      phase: 'solid',
+      properties: { conductionElectronDensityPerM3: 5.9e28, opticalInterbandOscillators: [] }
+    },
     { material: 'h2o', phase: 'liquid' }
   ], {
     materialPropertyBankGpuWarmInputTable: warmInputTable
@@ -256,7 +261,7 @@ test('optical GPU table consumes non-authoritative material-bank display PBR war
   assert.equal(table.materialPropertyBankPbrWarmInputConsumer.shaderBound, false);
   assert.equal(
     table.materialPropertyBankPbrWarmInputConsumer.consumedAs,
-    'non-authoritative-display-pbr-warm-input-over-closure-derived-optical-rows'
+    'non-authoritative-pbr-warm-input-metadata-only-alongside-closure-derived-optical-rows'
   );
   assert.equal(table.materialPropertyBankPbrWarmInputRowCount, 1);
   assert.equal(table.materialPropertyBankPbrWarmInputRows.length, warmInputTable.rows.length);
@@ -268,18 +273,15 @@ test('optical GPU table consumes non-authoritative material-bank display PBR war
   assert.ok(Math.abs(sodium.materialPropertyBankPbrWarmInput.baseColorSrgb[2] - 0.72) < 1e-6);
   assert.equal(sodium.materialPropertyBankPbrWarmInput.strictSourceOfTruth, false);
   assert.equal(sodium.materialPropertyBankPbrWarmInputStatus, 'material-bank-pbr-warm-input-attached');
-  assert.equal(sodium.displayPbrSource, 'material-bank-pbr-warm-input');
-  assert.deepEqual(
-    sodium.displayPbr.baseColorSrgb.map((value) => Number(value.toFixed(2))),
-    [0.86, 0.82, 0.72]
-  );
-  assert.ok(sodium.closurePbr.baseColorSrgb.some((value, index) => Math.abs(value - sodium.displayPbr.baseColorSrgb[index]) > 0.01));
-  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearR') - srgbToLinear(0.86)) < 1e-6);
-  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearG') - srgbToLinear(0.82)) < 1e-6);
-  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearB') - srgbToLinear(0.72)) < 1e-6);
+  assert.equal(sodium.displayPbrSource, 'closure-derived-optical-pbr');
+  assert.deepEqual(sodium.displayPbr.baseColorSrgb, sodium.closurePbr.baseColorSrgb);
+  assert.ok(sodium.displayPbr.baseColorSrgb.some((value, index) => Math.abs(value - [0.86, 0.82, 0.72][index]) > 0.01));
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearR') - srgbToLinear(sodium.closurePbr.baseColorSrgb[0])) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearG') - srgbToLinear(sodium.closurePbr.baseColorSrgb[1])) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearB') - srgbToLinear(sodium.closurePbr.baseColorSrgb[2])) < 1e-6);
   assert.equal(opticalRecordField(table, sodium, 'metalness'), 1);
-  assert.ok(Math.abs(opticalRecordField(table, sodium, 'roughness') - 0.31) < 1e-6);
-  assert.ok(Math.abs(opticalRecordField(table, sodium, 'ior') - 1.1) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'roughness') - 0.32) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'ior') - 1) < 1e-6);
   assert.equal(water.materialPropertyBankPbrWarmInput, null);
   assert.equal(water.materialPropertyBankPbrWarmInputStatus, 'no-material-bank-pbr-warm-input');
   assert.equal(water.displayPbrSource, 'closure-derived-optical-pbr');
@@ -432,6 +434,94 @@ test('optical GPU table upload binds a full spectral row when descriptors have n
   );
 });
 
+test('optical GPU table updates compatible resident buffers in place', () => {
+  const bindingId = 4321;
+  const initial = buildOpticalGpuTable([{
+    material: 'h2o',
+    phase: 'gas',
+    opticalStateId: bindingId,
+    opticalState: { temperatureK: 450, h2oPartialPressurePa: 100, pressurePa: 101325 }
+  }]);
+  const updated = buildOpticalGpuTable([{
+    material: 'h2o',
+    phase: 'gas',
+    opticalStateId: bindingId,
+    opticalState: { temperatureK: 300, h2oPartialPressurePa: 1e6, pressurePa: 1e6 }
+  }]);
+  const writes = [];
+  const device = {
+    createBuffer(descriptor) {
+      return { ...descriptor };
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ buffer, offset, data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice() });
+      }
+    }
+  };
+  const buffers = uploadOpticalGpuTable(device, initial);
+  const recordsBuffer = buffers.recordsBuffer;
+  const spectralSamplesBuffer = buffers.spectralSamplesBuffer;
+  writes.length = 0;
+
+  const result = updateUploadedOpticalGpuTable(device, buffers, updated);
+
+  assert.equal(result.updated, true);
+  assert.equal(result.status, 'optical-gpu-buffers-updated-in-place');
+  assert.equal(buffers.recordsBuffer, recordsBuffer);
+  assert.equal(buffers.spectralSamplesBuffer, spectralSamplesBuffer);
+  assert.deepEqual(writes.map((write) => write.buffer.label), [
+    'ulg-optical-material-records',
+    'ulg-optical-spectral-samples'
+  ]);
+  assert.equal(updated.recordMetadata[0].opticalStateId, bindingId);
+  assert.notDeepEqual(Array.from(initial.records), Array.from(updated.records));
+});
+
+test('optical GPU table rejects conflicting values for one shader binding tuple', () => {
+  assert.throws(() => buildOpticalGpuTable([
+    {
+      material: 'h2o',
+      phase: 'gas',
+      opticalStateId: 42,
+      opticalState: { temperatureK: 450, h2oPartialPressurePa: 100 }
+    },
+    {
+      material: 'h2o',
+      phase: 'gas',
+      opticalStateId: 42,
+      opticalState: { temperatureK: 300, h2oPartialPressurePa: 1e6 }
+    }
+  ]), /conflicting optical states share GPU binding/);
+});
+
+test('optical GPU table does not rewrite resident buffers with a different shape', () => {
+  const initial = buildOpticalGpuTable([{ material: 'h2o', phase: 'liquid' }]);
+  const differentShape = buildOpticalGpuTable([
+    { material: 'h2o', phase: 'liquid' },
+    { material: 'Au', phase: 'solid' }
+  ]);
+  const writes = [];
+  const device = {
+    createBuffer(descriptor) {
+      return { ...descriptor };
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ buffer, offset, byteLength: data.byteLength });
+      }
+    }
+  };
+  const buffers = uploadOpticalGpuTable(device, initial);
+  writes.length = 0;
+
+  const result = updateUploadedOpticalGpuTable(device, buffers, differentShape);
+
+  assert.equal(result.updated, false);
+  assert.equal(result.status, 'optical-gpu-buffer-update-shape-mismatch');
+  assert.equal(writes.length, 0);
+});
+
 test('optical GPU lookup queries sample packed records by material and phase ids', () => {
   const table = buildOpticalGpuTable([
     { material: 'h2o', phase: 'liquid' },
@@ -530,6 +620,33 @@ test('optical GPU table packs air as transparent Rayleigh PBR instead of blocked
   assert.ok(row.opacity < 0.001);
   assert.ok(row.scatteringCoefficientPerM > 0);
   assert.ok(row.baseColorLinear.every((value) => value > 0.6));
+});
+
+test('optical GPU table admits measured fluorine gas absorption instead of an unknown model id', async () => {
+  const { deriveMaterialProperties } = await import('../src/runtime/material/materialDerivation.js');
+  const { anchorDerivedMaterialProperties } = await import('../src/runtime/material/referenceBankAnchoring.js');
+  const properties = anchorDerivedMaterialProperties(
+    deriveMaterialProperties('F'),
+    'F'
+  ).properties;
+  const table = buildOpticalGpuTable([{
+    material: 'F',
+    phase: 'gas',
+    properties
+  }]);
+  const metadata = table.recordMetadata[0];
+  const lookup = buildOpticalGpuLookupQueries(table, [{ material: 'F', phase: 'gas' }]);
+  const [row] = decodeOpticalGpuLookupOutputRows(
+    sampleOpticalGpuTableCpu(table, lookup),
+    lookup
+  );
+
+  assert.equal(metadata.renderModel, 'molecular-gas-reference-cross-section-pbr');
+  assert.equal(metadata.renderModelId, 9);
+  assert.equal(row.renderModelId, 9);
+  assert.equal(row.status, 1);
+  assert.ok(row.opticalDepth > 4e-3);
+  assert.ok(row.opacity > 4e-3);
 });
 
 test('optical GPU lookup output rows decode draw-state fields with query metadata', () => {

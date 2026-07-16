@@ -28,12 +28,14 @@ import {
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
   compareSphThermalStepParity,
+  createSphThermalStepWebGpuEncoderStage,
   destroySphThermalResponseGraphBuffers,
   resolveThermalPhaseResponseFromTable,
   resolveThermalStateFromGraphPhaseResponseCpu,
   resolveThermalStateFromTable,
   SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4,
   thermalEmissivityFromTable,
+  thermalResponseGraphUploadMatchesDevice,
   runSphThermalStepCpu,
   runSphThermalStepWebGpu,
   runSphThermalStepWithOptionalWebGpu,
@@ -426,12 +428,66 @@ test('SPH thermal response graph upload persists phase-response and graph buffer
   ]);
 
   destroySphThermalResponseGraphBuffers(upload);
+  destroySphThermalResponseGraphBuffers(upload);
+  assert.equal(upload.destroyed, true);
   assert.deepEqual(destroyed, [
     'ulg-sph-thermal-phase-response-records',
     'ulg-sph-thermal-phase-responses',
     'ulg-sph-thermal-graph-nodes',
     'ulg-sph-thermal-graph-samples'
   ]);
+});
+
+test('SPH thermal response graph uploads are reusable only on their owning device', () => {
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const createDevice = () => ({
+    createBuffer({ label }) {
+      return { label, destroy() {} };
+    },
+    queue: { writeBuffer() {} }
+  });
+  const deviceA = createDevice();
+  const deviceB = createDevice();
+  const upload = uploadSphThermalResponseGraphBuffers(deviceA, {
+    thermalMaterialTable: table,
+    thermalClosureGraphSet: graphSet,
+    thermalClosureGraphBank: graphSet.graphBank,
+    thermalPhaseResponseTable: responseTable
+  });
+
+  assert.equal(thermalResponseGraphUploadMatchesDevice(upload, deviceA), true);
+  assert.equal(thermalResponseGraphUploadMatchesDevice(upload, deviceB), false);
+  assert.equal(thermalResponseGraphUploadMatchesDevice({
+    ...upload,
+    responseRecordBuffer: { label: 'untagged-response-records' }
+  }, deviceA), false);
+  const differentTable = buildSphThermalMaterialTable({ h2o: materialProperties.h2o });
+  const differentGraphSet = buildSphThermalClosureGraphBuffers(differentTable);
+  const differentResponseTable = buildSphThermalPhaseResponseTable(
+    differentTable,
+    differentGraphSet
+  );
+  assert.equal(thermalResponseGraphUploadMatchesDevice(upload, deviceA, {
+    thermalClosureGraphBank: differentGraphSet.graphBank,
+    thermalPhaseResponseTable: differentResponseTable
+  }), false);
+  const equivalentTable = buildSphThermalMaterialTable(materialProperties);
+  const equivalentGraphSet = buildSphThermalClosureGraphBuffers(equivalentTable);
+  const equivalentResponseTable = buildSphThermalPhaseResponseTable(
+    equivalentTable,
+    equivalentGraphSet
+  );
+  assert.equal(thermalResponseGraphUploadMatchesDevice(upload, deviceA, {
+    thermalClosureGraphBank: equivalentGraphSet.graphBank,
+    thermalPhaseResponseTable: equivalentResponseTable
+  }), true);
+
+  destroySphThermalResponseGraphBuffers(upload);
+  destroySphThermalResponseGraphBuffers(upload);
+  assert.equal(upload.destroyed, true);
+  assert.equal(thermalResponseGraphUploadMatchesDevice(upload, deviceA), false);
 });
 
 test('SPH thermal CPU table step conserves pair conduction energy and refreshes thermo rows', () => {
@@ -669,6 +725,9 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(result.materialPropertyBankWarmInputConsumer.bufferSource, 'sph-particle-upload');
   assert.equal(result.materialPropertyBankWarmInputRowCount, 1);
   assert.equal(result.materialPropertyBankWarmInputMatchedMaterialCount, 1);
+  assert.equal(result.neighborLookupMode, 'exhaustive-particle-scan');
+  assert.equal(result.legacyPrivateSpatialBuildCount, 0);
+  assert.equal(result.legacyExhaustiveTraversalCount, 1);
   assert.ok(device.bindGroups.at(-1).entries.some((entry) => (
     entry.binding === 9 && entry.resource.buffer.label === 'material-bank-warm-inputs'
   )));
@@ -687,6 +746,61 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-state').length, 1);
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-thermo').length, 1);
   assert.equal(device.fenceRequestedCount, 2);
+});
+
+test('SPH thermal WebGPU reports borrowed post-integration bins without exhaustive fallback', () => {
+  const packed = packedTwoWaterParticles();
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const device = fakeThermalDeviceWithFence();
+  const neighborBinsBuffer = { label: 'borrowed-postintegration-bins' };
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseRecordBuffer: { label: 'response-records' },
+    responseBuffer: { label: 'responses' },
+    graphNodeBuffer: { label: 'graph-nodes' },
+    graphSampleBuffer: { label: 'graph-samples' },
+    responseBufferByteLength: responseTable.responses.byteLength,
+    graphSampleBufferByteLength: graphSet.graphBank.sampleRows.byteLength
+  };
+
+  const stage = createSphThermalStepWebGpuEncoderStage({
+    device,
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    thermalClosureGraphSet: graphSet,
+    thermalClosureGraphBank: graphSet.graphBank,
+    thermalPhaseResponseTable: responseTable,
+    thermalResponseGraphUpload,
+    sphParticleUpload: {
+      stateBuffer: { label: 'source-state' },
+      thermoBuffer: { label: 'source-thermo' }
+    },
+    neighborBins: {
+      binsBuffer: neighborBinsBuffer,
+      capacity: 16,
+      nx: 4,
+      ny: 4,
+      nz: 4,
+      cellSizeM: 0.2
+    },
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(
+    stage.result.neighborLookupMode,
+    'borrowed-postintegration-neighbor-bins'
+  );
+  assert.equal(stage.result.legacyPrivateSpatialBuildCount, 0);
+  assert.equal(stage.result.legacyExhaustiveTraversalCount, 0);
+  assert.equal(
+    device.bindGroups.at(-1).entries.find((entry) => entry.binding === 10)
+      .resource.buffer,
+    neighborBinsBuffer
+  );
+  stage.cleanupSubmittedWork();
 });
 
 test('SPH thermal WebGPU binds full-row empty material-bank warm input sentinel', async () => {

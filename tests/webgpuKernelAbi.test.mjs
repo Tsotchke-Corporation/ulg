@@ -2,6 +2,19 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
+import {
+  mlsMpmG2pReconstructCanonicalSpatialWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl,
+  mlsMpmParticleSeparationApplyCanonicalSpatialWgsl,
+  mlsMpmParticleSeparationApplyCanonicalSpatialUnobservedWgsl,
+  mlsMpmParticleSeparationBinFillCanonicalSpatialWgsl,
+  mlsMpmParticleSeparationBinFillCanonicalSpatialUnobservedWgsl,
+  mlsMpmParticleSeparationComputeCanonicalSpatialWgsl,
+  mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl
+} from '../ulg-gpu-abi/src/index.js';
+
 function readRepoText(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
 }
@@ -98,15 +111,23 @@ function wgslScalarParamStructByteLengths(wgslSource, structName) {
   return byteLengths;
 }
 
+function wgslStorageBindingIndices(wgslSource) {
+  return [...wgslSource.matchAll(
+    /@group\(0\)\s+@binding\((\d+)\)\s+var<storage(?:,\s*[^>]+)?>/g
+  )].map((match) => Number.parseInt(match[1], 10));
+}
+
 const CONTRACTS = [
   {
     file: 'src/runtime/sph/sphGridGpuKernel.js',
     label: 'ulg-mls-mpm-p2g-params',
     factory: 'createProjectionParamsArray',
     wgslStruct: 'P2gProjectionParams',
-    // 64 -> 80: grid_density_pressure_enabled + pads (spatial-density EOS
-    // term sampled from the previous substep's finalized grid).
-    bytes: 80
+    // 64 -> 80: grid-density pressure fields. 80 -> 96: canonical SS
+    // generation/storage/position/topology identity and admission. 96 -> 144:
+    // the remaining device/lane/lease/source/tick/chart/level/support identity
+    // fields required to reject a stale or cross-lane directory in WGSL.
+    bytes: 144
   },
   {
     file: 'src/runtime/sph/sphGridUpdateGpuKernel.js',
@@ -270,5 +291,176 @@ test('MLS-MPM P2G shader scatters particles in parallel instead of scanning part
     p2gSource,
     /for\s*\(\s*var\s+particle_index\s*=\s*0u;\s*particle_index\s*<\s*params\.particle_count/,
     'MLS-MPM P2G must not scan every particle inside each grid-node invocation'
+  );
+});
+
+test('canonical Schroeder mechanics P2G and G2P use one directory authority without assignment lookup', () => {
+  const canonicalMechanicsShaders = [
+    ['P2G', mlsMpmP2gGridProjectionCanonicalSpatialWgsl],
+    ['G2P', mlsMpmG2pReconstructCanonicalSpatialWgsl]
+  ];
+
+  for (const [label, wgslSource] of canonicalMechanicsShaders) {
+    assert.doesNotMatch(
+      wgslSource,
+      /var<storage[^>]*>\s+schroeder_level_assignments\b/,
+      `${label} must not declare the pre-canonical assignment buffer`
+    );
+    assert.doesNotMatch(
+      wgslSource,
+      /\bschroeder_level_assignments\s*\[/,
+      `${label} must not perform a pre-canonical assignment lookup`
+    );
+    assert.match(
+      wgslSource,
+      /@group\(0\)\s+@binding\(7\)\s+var<storage,\s*read_write>\s+schroeder_spatial_authority_evidence:\s*array<atomic<u32>>;/,
+      `${label} must bind shared mechanics authority evidence at binding 7`
+    );
+    assert.match(
+      wgslSource,
+      /@group\(0\)\s+@binding\(8\)\s+var<storage,\s*read>\s+schroeder_spatial_directory:\s*array<u32>;/,
+      `${label} must bind the canonical spatial directory at binding 8`
+    );
+    assert.match(
+      wgslSource,
+      /schroeder_spatial_directory\s*\[/,
+      `${label} must resolve spatial membership from the canonical directory`
+    );
+  }
+});
+
+test('canonical particle separation is fail-closed on shared mechanics authority evidence', () => {
+  const canonicalSeparationShaders = [
+    ['bin fill', 4, mlsMpmParticleSeparationBinFillCanonicalSpatialWgsl],
+    ['compute', 5, mlsMpmParticleSeparationComputeCanonicalSpatialWgsl],
+    ['apply', 4, mlsMpmParticleSeparationApplyCanonicalSpatialWgsl]
+  ];
+
+  for (const [label, binding, wgslSource] of canonicalSeparationShaders) {
+    assert.match(
+      wgslSource,
+      new RegExp(
+        `@group\\(0\\)\\s+@binding\\(${binding}\\)\\s+var<storage,\\s*read>`
+          + '\\s+mechanics_spatial_authority_evidence:\\s*array<u32>;'
+      ),
+      `${label} must bind the shared mechanics authority evidence`
+    );
+    for (const rejectedWord of [14, 15, 16, 17]) {
+      assert.match(
+        wgslSource,
+        new RegExp(`mechanics_spatial_authority_evidence\\[${rejectedWord}u\\]\\s*!=\\s*0u`),
+        `${label} must reject evidence word ${rejectedWord}`
+      );
+    }
+    if (label === 'bin fill') {
+      assert.match(
+        wgslSource,
+        /if\s*\(separation_mechanics_spatial_authority_rejected\(\)\)[\s\S]*in_state\[state_base\]\s*=\s*authority_restore_state\[state_base\][\s\S]*in_mechanics\[mechanics_base \+ row\]\s*=\s*authority_restore_mechanics\[mechanics_base \+ row\][\s\S]*return;/,
+        'bin fill must globally restore immutable particle rows before stopping'
+      );
+    } else {
+      assert.match(
+        wgslSource,
+        /if\s*\(separation_mechanics_spatial_authority_rejected\(\)\)\s*\{\s*return;/,
+        `${label} must stop before mutating particles when authority was rejected`
+      );
+    }
+  }
+});
+
+test('canonical G2P globally restores immutable inputs after any reverse-map rejection', () => {
+  assert.match(
+    mlsMpmG2pReconstructCanonicalSpatialWgsl,
+    /fn\s+g2p_spatial_authority_rejected\(\)[\s\S]*atomicLoad\(&schroeder_spatial_authority_evidence\[16u\]\)[\s\S]*atomicLoad\(&schroeder_spatial_authority_evidence\[17u\]\)/
+  );
+  assert.match(
+    mlsMpmG2pReconstructCanonicalSpatialWgsl,
+    /@compute\s+@workgroup_size\(64\)\s+fn\s+finalize_canonical_spatial_authority[\s\S]*g2p_spatial_authority_rejected\(\)[\s\S]*g2p_copy_input_particle\(particle_index \* 2u, particle_index \* 8u\)/
+  );
+  assert.match(
+    mlsMpmParticleSeparationBinFillCanonicalSpatialWgsl,
+    /authority_restore_state[\s\S]*authority_restore_mechanics[\s\S]*separation_mechanics_spatial_authority_rejected\(\)[\s\S]*in_state\[state_base\]\s*=\s*authority_restore_state\[state_base\]/
+  );
+});
+
+test('unobserved canonical mechanics retains one mandatory rejection summary without success atomics', () => {
+  for (const [label, prefix, wgslSource] of [
+    ['P2G', 'p2g', mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl],
+    ['G2P', 'g2p', mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl]
+  ]) {
+    assert.match(
+      wgslSource,
+      new RegExp(`fn ${prefix}_spatial_evidence_add\\(word: u32, value: u32\\) \\{\\s*\\}`),
+      `${label} must compile optional success evidence out of the production hot path`
+    );
+    assert.match(
+      wgslSource,
+      new RegExp(
+        `fn ${prefix}_spatial_reject\\(word: u32\\)[\\s\\S]*atomicStore\\(`
+          + '&schroeder_spatial_authority_evidence\\[14u\\], 1u\\)'
+      ),
+      `${label} must preserve a mandatory rejection summary`
+    );
+  }
+
+  for (const [label, wgslSource] of [
+    ['bin fill', mlsMpmParticleSeparationBinFillCanonicalSpatialUnobservedWgsl],
+    ['compute', mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl],
+    ['apply', mlsMpmParticleSeparationApplyCanonicalSpatialUnobservedWgsl]
+  ]) {
+    assert.match(
+      wgslSource,
+      /fn separation_mechanics_spatial_authority_rejected\(\) -> bool \{\s*return mechanics_spatial_authority_evidence\[14u\] != 0u;\s*\}/,
+      `${label} must consume the production rejection summary`
+    );
+  }
+});
+
+test('canonical Schroeder mechanics shaders stay within eight storage bindings', () => {
+  const shaders = [
+    ['P2G', mlsMpmP2gGridProjectionCanonicalSpatialWgsl],
+    ['P2G unobserved', mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl],
+    ['G2P', mlsMpmG2pReconstructCanonicalSpatialWgsl],
+    ['G2P unobserved', mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl],
+    ['separation bin fill', mlsMpmParticleSeparationBinFillCanonicalSpatialWgsl],
+    ['separation bin fill unobserved', mlsMpmParticleSeparationBinFillCanonicalSpatialUnobservedWgsl],
+    ['separation compute', mlsMpmParticleSeparationComputeCanonicalSpatialWgsl],
+    ['separation compute unobserved', mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl],
+    ['separation apply', mlsMpmParticleSeparationApplyCanonicalSpatialWgsl],
+    ['separation apply unobserved', mlsMpmParticleSeparationApplyCanonicalSpatialUnobservedWgsl]
+  ];
+
+  for (const [label, wgslSource] of shaders) {
+    const bindings = wgslStorageBindingIndices(wgslSource);
+    assert.equal(
+      new Set(bindings).size,
+      bindings.length,
+      `${label} must not redeclare a storage binding`
+    );
+    assert.ok(
+      bindings.length <= 8,
+      `${label} uses ${bindings.length} storage bindings; portable WebGPU allows eight`
+    );
+  }
+
+  const fusedStepSource = readRepoText('src/runtime/sph/sphMlsMpmGpuStep.js');
+  const activeGridTransform = extractFunctionBody(
+    fusedStepSource,
+    'createActiveGridP2gProjectionWgsl'
+  );
+  assert.doesNotMatch(
+    activeGridTransform,
+    /@group\(|@binding\(/,
+    'the active-grid transform must preserve the canonical P2G storage-binding set'
+  );
+  assert.match(
+    fusedStepSource,
+    /createActiveGridP2gProjectionWgsl\(mlsMpmP2gGridProjectionCanonicalSpatialWgsl\)/,
+    'the observed active-grid variant must derive from the guarded canonical shader'
+  );
+  assert.match(
+    fusedStepSource,
+    /createActiveGridP2gProjectionWgsl\(\s*mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl\s*\)/,
+    'the production active-grid variant must derive from the guarded canonical shader'
   );
 });

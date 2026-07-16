@@ -54,6 +54,144 @@ export function nativeSurfaceBridgeFailureReason(renderBridge) {
   return null;
 }
 
+export function resolveNativeSurfaceConsumerDeviceTransition({
+  previous = null,
+  device = null,
+  presentationReconfigured = false,
+  deviceKnownLost = false
+} = {}) {
+  const knownLost = Boolean(device && deviceKnownLost);
+  const sameDevice = Boolean(previous?.device && device && previous.device === device);
+  const resetValidation = !sameDevice || presentationReconfigured === true;
+  return {
+    status: knownLost
+      ? 'native-surface-consumer-known-lost-device-quarantined'
+      : !sameDevice
+      ? (previous?.device
+        ? 'native-surface-consumer-replacement-device'
+        : 'native-surface-consumer-initial-device')
+      : (resetValidation
+        ? 'native-surface-consumer-same-device-reconfigured'
+        : 'native-surface-consumer-same-device'),
+    sameDevice,
+    deviceKnownLost: knownLost,
+    deviceLost: knownLost || (sameDevice ? Boolean(previous.deviceLost) : false),
+    deviceLostReason: knownLost
+      ? (sameDevice
+        ? (previous.deviceLostReason || 'native WebGPU device is already known lost')
+        : 'native WebGPU device is already known lost')
+      : (sameDevice ? (previous.deviceLostReason || null) : null),
+    deviceLostInfo: sameDevice ? (previous.deviceLostInfo || null) : null,
+    pixelValidationStatus: resetValidation
+      ? 'not-run'
+      : (previous.pixelValidationStatus || 'not-run'),
+    readbackSmokeValidationStatus: resetValidation
+      ? 'not-run'
+      : (previous.readbackSmokeValidationStatus || 'not-run'),
+    readbackSmokeValidationReason: resetValidation
+      ? null
+      : (previous.readbackSmokeValidationReason || null),
+    readbackSmokeValidationSample: !resetValidation
+      && Array.isArray(previous.readbackSmokeValidationSample)
+      ? [...previous.readbackSmokeValidationSample]
+      : null,
+    offscreenValidationStatus: resetValidation
+      ? 'not-run'
+      : (previous.offscreenValidationStatus || 'not-run'),
+    offscreenValidationReason: resetValidation
+      ? null
+      : (previous.offscreenValidationReason || null),
+    offscreenValidationSample: !resetValidation
+      && Array.isArray(previous.offscreenValidationSample)
+      ? [...previous.offscreenValidationSample]
+      : null,
+    offscreenValidationNonzeroPixelCount: resetValidation
+      ? null
+      : (previous.offscreenValidationNonzeroPixelCount ?? null),
+    offscreenValidationPixelCount: resetValidation
+      ? null
+      : (previous.offscreenValidationPixelCount ?? null),
+    offscreenValidationWidth: resetValidation
+      ? null
+      : (previous.offscreenValidationWidth ?? null),
+    offscreenValidationHeight: resetValidation
+      ? null
+      : (previous.offscreenValidationHeight ?? null)
+  };
+}
+
+export function markNativeSurfaceDeviceLostForCurrentOwners({
+  device = null,
+  consumers = [],
+  renderBridge = null,
+  reason = 'native WebGPU device was lost',
+  info = null,
+  updatedAtMs = null
+} = {}) {
+  const currentConsumers = [...new Set(Array.isArray(consumers) ? consumers.filter(Boolean) : [])];
+  let consumerUpdateCount = 0;
+  const deviceLostInfo = info && typeof info === 'object' ? { ...info } : null;
+  for (const consumer of currentConsumers) {
+    if (!device || consumer?.device !== device) continue;
+    consumer.deviceLost = true;
+    consumer.deviceLostReason = reason;
+    consumer.deviceLostInfo = deviceLostInfo;
+    if (Number.isFinite(Number(updatedAtMs))) consumer.updatedAtMs = Number(updatedAtMs);
+    consumerUpdateCount += 1;
+  }
+  const renderBridgeUpdated = Boolean(device && renderBridge?.device === device);
+  if (renderBridgeUpdated) {
+    renderBridge.deviceLost = true;
+    renderBridge.deviceLostReason = reason;
+    renderBridge.deviceLostInfo = deviceLostInfo;
+  }
+  return {
+    status: consumerUpdateCount > 0 || renderBridgeUpdated
+      ? 'native-surface-current-device-owners-quarantined'
+      : 'native-surface-stale-device-loss-ignored',
+    reason,
+    consumerUpdateCount,
+    renderBridgeUpdated
+  };
+}
+
+export function resolveNativeSurfaceBridgeDeviceAdmission({
+  renderBridge = null,
+  device = null,
+  deviceKnownLost = false
+} = {}) {
+  if (device && deviceKnownLost) {
+    const failureReason = 'native WebGPU device is already known lost';
+    return {
+      status: 'native-surface-known-lost-device-quarantined',
+      admitted: false,
+      replacementDevice: false,
+      failureReason,
+      reason: failureReason
+    };
+  }
+  const failureReason = nativeSurfaceBridgeFailureReason(renderBridge);
+  if (!failureReason) {
+    return {
+      status: 'native-surface-bridge-healthy',
+      admitted: true,
+      replacementDevice: false,
+      failureReason: null
+    };
+  }
+  const failedDevice = renderBridge?.device || renderBridge?.nativeConsumer?.device || null;
+  const replacementDevice = Boolean(device && (!failedDevice || device !== failedDevice));
+  return {
+    status: replacementDevice
+      ? 'native-surface-failed-bridge-replacement-device-admitted'
+      : 'native-surface-failed-bridge-device-quarantined',
+    admitted: replacementDevice,
+    replacementDevice,
+    failureReason,
+    reason: replacementDevice ? null : failureReason
+  };
+}
+
 export function prepareNativeSurfaceBridgeForForcedDisposal(renderBridge) {
   if (!renderBridge || renderBridge.rendererBridge !== NATIVE_WEBGPU_SURFACE_CONSUMER_MODE) {
     return [];

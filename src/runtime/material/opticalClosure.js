@@ -17,6 +17,13 @@ import { createMaterialClosureArtifact } from '../../../ulg-gpu-abi/src/index.js
 import { _uhf } from '../electronicStructure/molecularHartreeFock.js';
 import { solveAtom } from '../electronicStructure/radialKohnSham.js';
 import { electronConfiguration, zForSymbol } from '../electronicStructure/periodicTable.js';
+import {
+  CONDUCTOR_OPTICAL_CONSTANTS_BANK,
+  absorptionCoefficientFromExtinctionPerM,
+  conductorOpticalConstantsRecord,
+  interpolateConductorOpticalConstants,
+  normalIncidenceReflectanceFromComplexIndex
+} from './conductorOpticalConstants.js';
 
 const C = 2.99792458e8;
 const BOHR_M = 5.29177210903e-11;
@@ -158,6 +165,8 @@ function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, 
     stableNumber(properties?.gasElectronicExcitationEv),
     stableNumber(properties?.gasElectronicBandFwhmEv),
     stableNumber(properties?.gasElectronicOscillatorStrength),
+    stableObjectKey(properties?.gasElectronicAbsorptionCrossSection),
+    stableObjectKey(properties?.conductorOpticalConstants),
     oscillatorCacheKey(properties?.opticalInterbandOscillators),
     Array.isArray(properties?.intrinsicColorSrgb) ? properties.intrinsicColorSrgb.map(stableNumber).join(',') : 'no-intrinsic'
   ].join('::');
@@ -338,6 +347,94 @@ function dielectricSpectralSample(nm, epsilon, pathLengthM) {
     n: nRe,
     k: kIm
   };
+}
+
+function referenceConductorComplexIndexAtNm(record, wavelengthNm) {
+  return interpolateConductorOpticalConstants(record, 1239.841984 / wavelengthNm);
+}
+
+function referenceConductorReflectanceAtNm(record, wavelengthNm) {
+  const index = referenceConductorComplexIndexAtNm(record, wavelengthNm);
+  return normalIncidenceReflectanceFromComplexIndex(index) ?? 0;
+}
+
+export function referenceConductorColorSrgb(material) {
+  const record = conductorOpticalConstantsRecord(material);
+  if (!record) return null;
+  return spectralResponseToSrgb((nm) => referenceConductorReflectanceAtNm(record, nm));
+}
+
+function referenceConductorRecordForProperties(material, properties) {
+  const marker = properties?.conductorOpticalConstants;
+  if (!marker || marker.bankVersion !== CONDUCTOR_OPTICAL_CONSTANTS_BANK.bankVersion) return null;
+  return conductorOpticalConstantsRecord(marker.symbol || material);
+}
+
+function referenceConductorOpticalRenderParams(record, {
+  phase = 'solid',
+  pathLengthM = 0.3,
+  marker = null
+} = {}) {
+  const reflectanceAt = (nm) => referenceConductorReflectanceAtNm(record, nm);
+  const absorptionAt = (nm) => {
+    const index = referenceConductorComplexIndexAtNm(record, nm);
+    return absorptionCoefficientFromExtinctionPerM(nm, index?.k) ?? 0;
+  };
+  const absorptionCoefficientPerM = visibleLuminousMean(absorptionAt);
+  const reflectance = visibleLuminousMean(reflectanceAt);
+  const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
+  const opacity = opticalDepthToOpacity(opticalDepth);
+  const transmission = Math.exp(-Math.min(80, opticalDepth));
+  const baseColor = spectralResponseToSrgb(reflectanceAt);
+  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => {
+    const index = referenceConductorComplexIndexAtNm(record, nm);
+    const absorptionCoefficient = absorptionCoefficientFromExtinctionPerM(nm, index?.k) ?? 0;
+    return {
+      wavelengthNm: nm,
+      reflectance: reflectanceAt(nm),
+      transmittance: Math.exp(-Math.min(80, absorptionCoefficient * Math.max(0, pathLengthM))),
+      absorptionCoefficientPerM: absorptionCoefficient,
+      scatteringCoefficientPerM: 0,
+      n: index?.n ?? null,
+      k: index?.k ?? null
+    };
+  });
+  const phaseApplication = phase === 'solid'
+    ? 'within-reference-phase'
+    : 'nearest-reference-condensed-phase-extrapolation';
+  return withPbrMetadata({
+    metalness: opacity > 0.5 ? 1 : opacity,
+    roughness: 0.32,
+    transmission,
+    ior: null,
+    opacity,
+    attenuationColor: null,
+    attenuationDistanceM: absorptionCoefficientPerM > 0 ? 1 / absorptionCoefficientPerM : Infinity,
+    condensationScatter: 0,
+    internalScatter: 0,
+    opticalDepth,
+    absorptionCoefficientPerM,
+    reflectance,
+    provenance: {
+      status: 'reference-fallback',
+      source: 'johnson-christy-1972-complex-index',
+      method: 'measured complex refractive index interpolation -> normal-incidence Fresnel reflectance + skin-depth absorption -> CIE 1931 equal-energy sRGB',
+      inputs: {
+        symbol: record.symbol,
+        phase,
+        phaseApplication,
+        pathLengthM,
+        bankVersion: CONDUCTOR_OPTICAL_CONSTANTS_BANK.bankVersion,
+        doi: CONDUCTOR_OPTICAL_CONSTANTS_BANK.doi,
+        marker
+      },
+      validation: false
+    }
+  }, {
+    baseColorSrgb: [baseColor.r, baseColor.g, baseColor.b],
+    renderModel: 'conductor-reference-complex-index',
+    spectralSamples
+  });
 }
 
 function absorptionSpectralSample(nm, { absorptionCoefficientPerM, pathLengthM, reflectance = 0, scatteringCoefficientPerM = 0, n = null, k = null }) {
@@ -749,6 +846,10 @@ export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3,
       return { r, g, b };
     }
   }
+  if (phase !== 'gas' && phase !== 'plasma') {
+    const referenceRecord = referenceConductorRecordForProperties(material, properties);
+    if (referenceRecord) return referenceConductorColorSrgb(referenceRecord.symbol);
+  }
   // Metals: derive the colour from the conduction-electron density (Drude). The caller passes the
   // density (from the material closure); a metal without one falls through to the grey default.
   if (conductionElectronDensityPerM3 > 0) {
@@ -894,6 +995,32 @@ function gasElectronicBandAbsorptionPerM(nm, { excitationEv, numberDensityPerM3,
 
 const GAUSSIAN_FWHM_TO_SIGMA = 1 / (2 * Math.sqrt(2 * Math.LN2));
 
+function interpolateGasAbsorptionCrossSectionM2(nm, spectrum) {
+  const wavelengths = spectrum?.wavelengthNm;
+  const crossSections = spectrum?.crossSectionM2;
+  if (
+    !Array.isArray(wavelengths)
+    || !Array.isArray(crossSections)
+    || wavelengths.length === 0
+    || wavelengths.length !== crossSections.length
+  ) return null;
+  const wavelength = Number(nm);
+  if (!Number.isFinite(wavelength)) return null;
+  if (wavelength <= wavelengths[0]) return Math.max(0, Number(crossSections[0]) || 0);
+  const last = wavelengths.length - 1;
+  if (wavelength >= wavelengths[last]) return Math.max(0, Number(crossSections[last]) || 0);
+  for (let index = 1; index < wavelengths.length; index += 1) {
+    if (wavelength > wavelengths[index]) continue;
+    const lowerWavelength = Number(wavelengths[index - 1]);
+    const upperWavelength = Number(wavelengths[index]);
+    const t = (wavelength - lowerWavelength) / (upperWavelength - lowerWavelength);
+    const lower = Number(crossSections[index - 1]) || 0;
+    const upper = Number(crossSections[index]) || 0;
+    return Math.max(0, lower + (upper - lower) * t);
+  }
+  return Math.max(0, Number(crossSections[last]) || 0);
+}
+
 function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
   const excitationEv = properties?.gasElectronicExcitationEv;
   if (!(excitationEv > 0)) return null;
@@ -905,12 +1032,16 @@ function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
     ? properties.gasElectronicBandFwhmEv * GAUSSIAN_FWHM_TO_SIGMA
     : null;
   const oscillatorStrength = properties?.gasElectronicOscillatorStrength ?? null;
-  const absorptionAt = (nm) => gasElectronicBandAbsorptionPerM(nm, {
-    excitationEv,
-    numberDensityPerM3,
-    bandSigmaEv,
-    oscillatorStrength
-  });
+  const measuredSpectrum = properties?.gasElectronicAbsorptionCrossSection || null;
+  const measuredSpectrumReady = interpolateGasAbsorptionCrossSectionM2(450, measuredSpectrum) != null;
+  const absorptionAt = measuredSpectrumReady
+    ? (nm) => numberDensityPerM3 * interpolateGasAbsorptionCrossSectionM2(nm, measuredSpectrum)
+    : (nm) => gasElectronicBandAbsorptionPerM(nm, {
+        excitationEv,
+        numberDensityPerM3,
+        bandSigmaEv,
+        oscillatorStrength
+      });
   const absorptionCoefficientPerM = visibleLuminousMean(absorptionAt);
   const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
   const opacity = opticalDepthToOpacity(opticalDepth);
@@ -939,15 +1070,29 @@ function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
     opticalDepth,
     absorptionCoefficientPerM,
     provenance: {
-      status: 'derived',
-      source: 'delta-scf-electronic-band-gas-absorption',
-      method: 'electronic band centre (banked spectroscopic or ΔSCF) -> Gaussian Franck-Condon continuum (banked FWHM or E0/6) -> Thomas-Reiche-Kuhn cross-section (banked f or 1e-3 weak-continuum estimate) -> Beer-Lambert',
-      inputs: { gasElectronicExcitationEv: excitationEv, bandSigmaEv, oscillatorStrength, pathLengthM, numberDensityPerM3 },
+      status: measuredSpectrumReady ? 'reference-fallback' : 'derived',
+      source: measuredSpectrumReady
+        ? 'measured-molecular-gas-absorption-cross-section'
+        : 'delta-scf-electronic-band-gas-absorption',
+      method: measuredSpectrumReady
+        ? 'measured wavelength-resolved molecular absorption cross section -> number-density extinction -> Beer-Lambert transmission and CIE color'
+        : 'electronic band centre (banked spectroscopic or ΔSCF) -> Gaussian Franck-Condon continuum (banked FWHM or E0/6) -> Thomas-Reiche-Kuhn cross-section (banked f or 1e-3 weak-continuum estimate) -> Beer-Lambert',
+      inputs: {
+        gasElectronicExcitationEv: excitationEv,
+        bandSigmaEv,
+        oscillatorStrength,
+        pathLengthM,
+        numberDensityPerM3,
+        absorptionCrossSectionDoi: measuredSpectrumReady ? measuredSpectrum.doi : null,
+        absorptionCrossSectionTemperatureK: measuredSpectrumReady ? measuredSpectrum.temperatureK : null
+      },
       validation: false
     }
   }, {
     baseColorSrgb: [responseColor.r, responseColor.g, responseColor.b],
-    renderModel: 'molecular-gas-electronic-band-absorption-pbr',
+    renderModel: measuredSpectrumReady
+      ? 'molecular-gas-reference-cross-section-pbr'
+      : 'molecular-gas-electronic-band-absorption-pbr',
     spectralSamples
   });
 }
@@ -964,6 +1109,16 @@ function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
  * closureBacked: true; opticalValidation stays false.
  */
 function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3, properties = null, conductionElectronDensityPerM3 = null, opticalState = null } = {}) {
+  if (phase !== 'gas' && phase !== 'plasma') {
+    const referenceRecord = referenceConductorRecordForProperties(material, properties);
+    if (referenceRecord) {
+      return referenceConductorOpticalRenderParams(referenceRecord, {
+        phase,
+        pathLengthM,
+        marker: properties.conductorOpticalConstants
+      });
+    }
+  }
   const conductionDensity = conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3 ?? null;
   if (conductionDensity > 0) {
     return metalOpticalRenderParams(conductionDensity, {

@@ -5,6 +5,9 @@ import {
   SPH_PHASE_RENDER_MODE,
   SPH_PHASE_RENDER_ORDER,
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
+  SPH_SCENE_LIGHTING_MODE_DEFAULT,
+  SPH_SCENE_LIGHTING_MODE_DARK_LAB,
+  SPH_SCENE_LIGHTING_PROFILES,
   SPH_NATIVE_WEBGPU_BACKGROUND_WGSL,
   SPH_SCENE_MAX_DEVICE_PIXEL_RATIO,
   SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
@@ -36,6 +39,7 @@ import {
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
   SPH_SURFACE_RADIUS_SCALE_DEFAULT,
   SPH_H2O_LIQUID_CONTINUITY_RADIUS_SCALE_MAX,
+  SPH_GAS_CONTINUITY_RADIUS_SCALE_MAX,
   SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
   createContinuousSurfaceBatches,
   createNativeWebGpuCanvasRenderer,
@@ -63,6 +67,9 @@ import {
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphSceneBackgroundColorHex,
+  normalizeSphSceneLightingMode,
+  resolveSphSceneLightingProfile,
+  emissiveAuthorityValueForSurface,
   nativeSurfaceBackgroundCoverScale,
   normalizeSphRendererBackend,
   resolveThreeWebGpuPresentationPolicy,
@@ -83,7 +90,11 @@ import {
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
   submitSceneGasCellEosProducerStageForPressureInterface,
   residentSurfaceBatchIdentitySignature,
+  residentSurfaceBatchOpticalSignature,
+  opticalGpuTableBindingLayoutSignature,
+  residentRenderGasPressureSummary,
   residentRenderFieldReadbackModeForSurfaceOverlay,
+  selectPressureInterfaceGridForceAdmissionForExecutionMode,
   resolveResidentSurfaceDrawOverlayPolicy,
   renderAlphaFromOpticalResponse,
   renderDepthWriteFromOpticalResponse,
@@ -104,6 +115,8 @@ import {
   SPH_SURFACE_INACTIVE_GRACE_FRAMES,
   surfaceRadiusScaleForRenderBatch,
   resolveRenderFieldParticleRadiusPolicy,
+  renderFieldBatchNeedsAliasSafeResolution,
+  applyResidentWaterVaporOpticalStateToSurfaceBatches,
   surfaceRadiusMetersFromRenderFieldRadius,
   surfaceObjectRenderOrder,
   stableSurfaceRenderOrder,
@@ -296,7 +309,14 @@ function createFakeSchroederProxyRenderDevice() {
       return result;
     },
     createBuffer(desc) {
-      const result = { type: 'buffer', ...desc };
+      const result = {
+        type: 'buffer',
+        ...desc,
+        destroyCount: 0,
+        destroy() {
+          this.destroyCount += 1;
+        }
+      };
       calls.buffers.push(result);
       return result;
     },
@@ -317,6 +337,60 @@ test('SPH scene background color defaults to dark navy and normalizes URL hex va
   assert.equal(normalizeSphSceneBackgroundColorHex('87CEEB'), '#87ceeb');
   assert.equal(normalizeSphSceneBackgroundColorHex('#8ce'), '#88ccee');
   assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');
+});
+
+test('SPH scene dark-lab lighting suppresses incident light while preserving emission', () => {
+  assert.equal(SPH_SCENE_LIGHTING_MODE_DEFAULT, 'normal');
+  assert.equal(SPH_SCENE_LIGHTING_MODE_DARK_LAB, 'dark-lab');
+  assert.equal(normalizeSphSceneLightingMode(null), 'normal');
+  assert.equal(normalizeSphSceneLightingMode('dark'), 'dark-lab');
+  assert.equal(normalizeSphSceneLightingMode('dark_lab'), 'dark-lab');
+  assert.equal(normalizeSphSceneLightingMode('normal', 'dark-lab'), 'normal');
+  assert.equal(normalizeSphSceneLightingMode('unknown'), 'normal');
+
+  assert.deepEqual(resolveSphSceneLightingProfile('normal'), SPH_SCENE_LIGHTING_PROFILES.normal);
+  assert.deepEqual(resolveSphSceneLightingProfile('dark-lab'), SPH_SCENE_LIGHTING_PROFILES['dark-lab']);
+  assert.deepEqual(SPH_SCENE_LIGHTING_PROFILES.normal, {
+    mode: 'normal',
+    ambientIntensity: 1.4,
+    hemisphereIntensity: 0.9,
+    keyIntensity: 1.1,
+    fillIntensity: 0.5,
+    environmentIntensity: 1,
+    nativeAmbientSuppression: 0,
+    nativeDirectSuppression: 0,
+    nativeEnvironmentSuppression: 0,
+    containerWireOpacity: 0.6,
+    containerGridOpacity: 1,
+    nativeContainerWireOpacity: 0.42
+  });
+  assert.deepEqual(SPH_SCENE_LIGHTING_PROFILES['dark-lab'], {
+    mode: 'dark-lab',
+    ambientIntensity: 0.03,
+    hemisphereIntensity: 0,
+    keyIntensity: 0,
+    fillIntensity: 0,
+    environmentIntensity: 0,
+    nativeAmbientSuppression: 1,
+    nativeDirectSuppression: 1,
+    nativeEnvironmentSuppression: 1,
+    containerWireOpacity: 0.1,
+    containerGridOpacity: 0.06,
+    nativeContainerWireOpacity: 0.08
+  });
+
+  // The compact camera ABI remains 320 bytes; its retired padding slots now
+  // carry zero-valued suppressions in the normal profile.
+  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 320);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /ambient_light_suppression: f32/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /direct_light_suppression: f32/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /environment_light_suppression: f32/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /return mix\(1\.4, 0\.03, suppression\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /1\.0 - clamp\(camera_data\.direct_light_suppression/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /1\.0 - clamp\(camera_data\.environment_light_suppression/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn resident_ambient_irradiance\(\) -> f32 \{\s*return 1\.4;/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /var lit = diffuse \+ specular \+ env_specular[\s\S]*\+ emissive;/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /emissive\s*\*\s*(?:ambient|direct|environment)/);
 });
 
 test('native WebGPU background image uses opaque cover rendering', () => {
@@ -496,6 +570,7 @@ test('SPH scene reads Schroeder phase-volume diagnostics from compact resident m
 
 test('SPH scene phase-volume overlay feedback keeps GPU buffer local and publishes summary only', () => {
   const levelUpdateBuffer = { label: 'retained-phase-volume-overlay-buffer' };
+  const transferReleases = [];
   const overlay = {
     schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
     status: 'schroeder-phase-volume-level-update-assignment-overlay-ready',
@@ -520,7 +595,10 @@ test('SPH scene phase-volume overlay feedback keeps GPU buffer local and publish
       status: 'resident-steps-executed',
       residentExecutionGeneration: 4,
       currentResidentExecutionGeneration: 4,
-      schroederPhaseVolumeNextTickAssignmentOverlay: overlay
+      schroederPhaseVolumeNextTickAssignmentOverlay: overlay,
+      releaseSchroederHierarchyArtifactTransfers(options) {
+        transferReleases.push(options);
+      }
     },
     source: 'unit-test'
   });
@@ -554,6 +632,15 @@ test('SPH scene phase-volume overlay feedback keeps GPU buffer local and publish
   assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackRowCount, 2);
   assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackIndexRequired, true);
   assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackRawGpuBufferTransferAllowed, false);
+  assert.equal(feedback.releaseSchroederPhaseVolumeOverlayTransfer(), true);
+  assert.equal(feedback.releaseSchroederPhaseVolumeOverlayTransfer(), false);
+  assert.equal(transferReleases.length, 1);
+  assert.deepEqual(transferReleases[0], {
+    transferClass: 'next-tick',
+    families: 'phase-volume-level-update',
+    reason: 'phase-volume-overlay-cache-owner-released',
+    submitted: true
+  });
 });
 
 test('worker resident particle-state source cache keys avoid full hashes for versioned CPU-visible state', () => {
@@ -1448,6 +1535,47 @@ test('SPH phase renderer preserves same-material render domains as separate surf
   );
 });
 
+test('SPH phase renderer preserves arbitrary same-material body ids as stable native surfaces', () => {
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      0.5, 0.5, 0.5,
+      0.7, 0.5, 0.5,
+      3.5, 0.5, 3.5,
+      3.7, 0.5, 3.5
+    ]),
+    colorsRgb: new Float32Array([
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1
+    ]),
+    materials: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 7, renderDomainKey: 'left-water' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 7, renderDomainKey: 'left-water' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 19, renderDomainKey: 'right-water' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 19, renderDomainKey: 'right-water' }
+    ]
+  });
+
+  assert.deepEqual(
+    batches.map((batch) => [batch.surfaceKey, batch.renderDomainId, batch.renderDomainKey, batch.count]).sort(),
+    [
+      ['h2o|h2o|liquid|domain:left-water', 7, 'left-water', 2],
+      ['h2o|h2o|liquid|domain:right-water', 19, 'right-water', 2]
+    ]
+  );
+  const nativeDescriptor = renderDescriptorForSurfaceRecord({
+    material: 'h2o',
+    phase: 'liquid',
+    renderKey: 'h2o',
+    renderDomainId: 19,
+    renderDomainKey: 'right-water'
+  });
+  assert.equal(nativeDescriptor.surfaceKey, 'h2o|h2o|liquid|domain:right-water');
+  assert.equal(nativeDescriptor.renderDomainId, 19);
+});
+
 test('SPH phase renderer derives same-material render domains from domain counts', () => {
   const batches = createContinuousSurfaceBatches({
     boxEdgeM: 5,
@@ -1891,7 +2019,6 @@ test('H2O liquid render fields derive a bounded J-aware continuity radius from S
 
   for (const ineligibleBatch of [
     { ...batch, material: 'naoh' },
-    { ...batch, phase: 'gas' },
     { ...batch, source: 'reaction-product-event-buffer' },
     { ...batch, representativeParticleRadiusM: null }
   ]) {
@@ -1917,6 +2044,172 @@ test('H2O liquid render fields derive a bounded J-aware continuity radius from S
   });
   assert.equal(explicit.mode, 'surface-wide-constant-strength');
   assert.equal(explicit.resolvedScale, 0);
+});
+
+test('gas render fields use alias-safe resolution and a bounded smoothing-support continuity radius', () => {
+  const batch = {
+    material: 'F',
+    phase: 'gas',
+    source: 'resident-known-phase-surface',
+    count: 125,
+    representativeParticleRadiusM: 0.1,
+    smoothingLengthM: 0.248
+  };
+  const policy = resolveRenderFieldParticleRadiusPolicy({
+    batch,
+    requestedScale: 1,
+    isolation: 24,
+    subtract: 10,
+    resolution: 64,
+    fieldPadding: 0.22,
+    refEdgeM: 4
+  });
+  const supportMultiplier = Math.sqrt(34 / 10);
+  const samplingCellSizeM = 4 / (0.56 * 64);
+  const expectedScale = (0.248 / supportMultiplier + samplingCellSizeM * 0.5) / 0.1;
+
+  assert.equal(SPH_GAS_CONTINUITY_RADIUS_SCALE_MAX, 2);
+  assert.equal(renderFieldBatchNeedsAliasSafeResolution(batch), true);
+  assert.equal(renderFieldBatchNeedsAliasSafeResolution({ ...batch, phase: 'liquid' }), false);
+  assert.equal(policy.status, 'gas-vapor-continuity-floor-applied');
+  assert.equal(policy.mode, 'retained-particle-radius-with-gas-vapor-continuity-floor');
+  assert.equal(policy.eligible, true);
+  assert.equal(policy.floorApplied, true);
+  assert.ok(Math.abs(policy.resolvedScale - expectedScale) < 1e-12);
+  assert.ok(policy.resolvedScale > 1.8 && policy.resolvedScale < 2);
+  assert.ok(policy.resolvedScale <= SPH_GAS_CONTINUITY_RADIUS_SCALE_MAX);
+});
+
+test('resident H2O gas summary refreshes steam optical identity without changing fluorine', () => {
+  const baselineSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'closure-derived-gas-pressure-diagnostic',
+    source: 'cpu-particle-state',
+    gasVolumeM3: 124,
+    condensedVolumeM3: 1,
+    boxVolumeM3: 125,
+    boxDimsM: [5, 5, 5],
+    bySpecies: {
+      air: {
+        material: 'air',
+        massKg: 150,
+        moles: 5175,
+        temperatureK: 293.15,
+        partialPressurePa: 101325
+      }
+    }
+  };
+  const materialProperties = {
+    h2o: {
+      molarMassKgPerMol: 0.01801528,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 997, temperatureK: 293.15 },
+        { name: 'gas', densityKgPerM3: 0.6, temperatureK: 373.15 }
+      ]
+    }
+  };
+  const steam = {
+    surfaceKey: 'steam|h2o|gas',
+    renderKey: 'steam',
+    material: 'h2o',
+    phase: 'gas',
+    descriptor: {
+      surfaceKey: 'steam|h2o|gas',
+      renderKey: 'steam',
+      material: 'h2o',
+      phase: 'gas',
+      opticalState: null,
+      opticalStateKey: 'default'
+    }
+  };
+  const fluorine = {
+    surfaceKey: 'F|F|gas',
+    renderKey: 'F',
+    material: 'F',
+    phase: 'gas',
+    descriptor: { renderKey: 'F', material: 'F', phase: 'gas' }
+  };
+  const residentStep = {
+    diagnostics: {
+      residentPhaseGasSpeciesSummary: {
+        bySpecies: {
+          h2o: {
+            material: 'h2o',
+            massKg: 100,
+            temperatureK: 373.15,
+            phaseWeight: 12.5,
+            status: 'resident-phase-gas-species-ready'
+          }
+        }
+      }
+    }
+  };
+  const pressure = residentRenderGasPressureSummary({
+    baselineSummary,
+    residentStep,
+    fieldBatches: [steam, fluorine],
+    materialProperties
+  });
+  const updated = applyResidentWaterVaporOpticalStateToSurfaceBatches(
+    [steam, fluorine],
+    pressure
+  );
+
+  assert.equal(pressure.source, 'gpu-resident-compact-thermal-phase-single-species');
+  assert.equal(pressure.residentThermalGasMassKg, 100);
+  assert.equal(updated[0].descriptor.opticalState.microphysicsStatus, 'supersaturated-condensed-droplets');
+  assert.notEqual(updated[0].descriptor.opticalStateKey, 'default');
+  assert.equal(updated[0].surfaceKey, steam.surfaceKey);
+  assert.equal(
+    residentSurfaceBatchIdentitySignature(updated),
+    residentSurfaceBatchIdentitySignature([steam, fluorine])
+  );
+  assert.notEqual(
+    residentSurfaceBatchOpticalSignature(updated),
+    residentSurfaceBatchOpticalSignature([steam, fluorine])
+  );
+  assert.equal(
+    updated[0].descriptor.opticalStateId,
+    renderDescriptorForSurfaceRecord(steam, 0).opticalStateId
+  );
+  assert.equal(updated[1], fluorine);
+});
+
+test('SPH phase renderer keeps optical binding layout stable while live values change', () => {
+  const clear = applyResidentWaterVaporOpticalStateToSurfaceBatches([{
+    surfaceKey: 'steam|h2o|gas',
+    renderKey: 'steam',
+    material: 'h2o',
+    phase: 'gas',
+    descriptor: renderDescriptorForSurfaceRecord({
+      surfaceKey: 'steam|h2o|gas',
+      renderKey: 'steam',
+      material: 'h2o',
+      phase: 'gas'
+    }, 0)
+  }], {
+    totalPressurePa: 101325,
+    bySpecies: {
+      h2o: { temperatureK: 450, partialPressurePa: 100 }
+    }
+  });
+  const dense = applyResidentWaterVaporOpticalStateToSurfaceBatches(clear, {
+    totalPressurePa: 1e6,
+    bySpecies: {
+      h2o: { temperatureK: 300, partialPressurePa: 1e6 }
+    }
+  });
+  const clearTable = createOpticalGpuTableForSurfaceBatches(clear);
+  const denseTable = createOpticalGpuTableForSurfaceBatches(dense);
+
+  assert.equal(clear[0].surfaceKey, dense[0].surfaceKey);
+  assert.equal(clear[0].descriptor.opticalStateId, dense[0].descriptor.opticalStateId);
+  assert.notEqual(clear[0].descriptor.opticalStateKey, dense[0].descriptor.opticalStateKey);
+  assert.equal(
+    opticalGpuTableBindingLayoutSignature(clearTable),
+    opticalGpuTableBindingLayoutSignature(denseTable)
+  );
+  assert.notDeepEqual(Array.from(clearTable.records), Array.from(denseTable.records));
 });
 
 test('SPH phase renderer derives a packed optical GPU table from surface batches', () => {
@@ -2044,7 +2337,7 @@ test('SPH phase renderer derives optical GPU lookup rows for active surface batc
   assert.equal(lookup.cpuReference.outputs[lookup.lookup.outputStrideFloats + 11], 1);
 });
 
-test('SPH phase renderer feeds material-bank display PBR into surface optical rows', () => {
+test('SPH phase renderer keeps surface optical rows closure-owned when bank metadata is attached', () => {
   const goldSrgb = [0.974261208026, 0.437181207287, 0.095032056649];
   const warmInputTable = {
     schema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
@@ -2122,16 +2415,17 @@ test('SPH phase renderer feeds material-bank display PBR into surface optical ro
 
   assert.equal(table.recordCount, 1);
   assert.equal(table.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
-  assert.equal(goldRecord.displayPbrSource, 'material-bank-pbr-warm-input');
+  assert.equal(goldRecord.displayPbrSource, 'closure-derived-optical-pbr');
   assert.ok(goldRecord.closurePbr.baseColorSrgb.some((value, index) => Math.abs(value - goldSrgb[index]) > 0.1));
-  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearR') - srgbToLinear(goldSrgb[0])) < 1e-6);
-  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearG') - srgbToLinear(goldSrgb[1])) < 1e-6);
-  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearB') - srgbToLinear(goldSrgb[2])) < 1e-6);
+  assert.deepEqual(goldRecord.displayPbr.baseColorSrgb, goldRecord.closurePbr.baseColorSrgb);
+  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearR') - srgbToLinear(goldRecord.closurePbr.baseColorSrgb[0])) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearG') - srgbToLinear(goldRecord.closurePbr.baseColorSrgb[1])) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearB') - srgbToLinear(goldRecord.closurePbr.baseColorSrgb[2])) < 1e-6);
   assert.equal(opticalRecordField(table, goldRecord, 'metalness'), 1);
   assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'roughness') - 0.32) < 1e-6);
 });
 
-test('SPH renderer keeps every surface alpha-one and depth-writing', () => {
+test('SPH renderer keeps condensed transmission alpha-one while vapor remains non-depth-writing', () => {
   const waterOptics = {
     material: 'h2o',
     phase: 'liquid',
@@ -2149,8 +2443,8 @@ test('SPH renderer keeps every surface alpha-one and depth-writing', () => {
 
   assert.equal(renderAlphaFromOpticalResponse(waterOptics, waterOptics), 1);
   assert.equal(renderDepthWriteFromOpticalResponse(waterOptics, waterOptics), true);
-  assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), 1);
-  assert.equal(renderDepthWriteFromOpticalResponse(vaporOptics, vaporOptics), true);
+  assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), 0.0028);
+  assert.equal(renderDepthWriteFromOpticalResponse(vaporOptics, vaporOptics), false);
 });
 
 test('SPH renderer gates vapor geometry from derived optical depth and scattering', () => {
@@ -2164,8 +2458,13 @@ test('SPH renderer gates vapor geometry from derived optical depth and scatterin
   };
   const barelyRetainedVapor = {
     ...clearVapor,
-    opacity: 0.006,
-    opticalDepth: 0.006
+    opacity: 0.003,
+    opticalDepth: 0.003
+  };
+  const weakAbsorbingVapor = {
+    ...clearVapor,
+    opacity: 0.0053,
+    opticalDepth: 0.0053
   };
   const condensedSteam = {
     ...clearVapor,
@@ -2189,8 +2488,8 @@ test('SPH renderer gates vapor geometry from derived optical depth and scatterin
     wasVisible: true
   });
   const shownByDepth = resolveOpticalSurfaceVisibility({
-    optics: { ...clearVapor, opacity: 0.02, opticalDepth: 0.02 },
-    descriptorOrRow: clearVapor
+    optics: weakAbsorbingVapor,
+    descriptorOrRow: weakAbsorbingVapor
   });
   const shownByDroplets = resolveOpticalSurfaceVisibility({
     optics: condensedSteam,
@@ -2201,6 +2500,8 @@ test('SPH renderer gates vapor geometry from derived optical depth and scatterin
   assert.equal(hidden.visible, false);
   assert.equal(hidden.reason, 'derived-pure-vapor-optically-thin');
   assert.equal(hidden.retainPreviousSurface, false);
+  assert.equal(hidden.showOpticalDepth, 0.004);
+  assert.equal(hidden.hideOpticalDepth, 0.002);
   assert.equal(retained.visible, true);
   assert.equal(retained.reason, 'derived-vapor-optical-depth-visible');
   assert.equal(shownByDepth.visible, true);
@@ -2350,7 +2651,7 @@ test('SPH renderer gives all depth-writing surfaces stable intra-layer order', (
 
 test('SPH resident overlay draw order follows render policy metadata', () => {
   const order = residentSurfaceDrawOrder([
-    { surfaceIndex: 0, renderOrder: 300, transparencyClassId: 3, depthWriteFlag: 0 },
+    { surfaceIndex: 0, renderOrder: 300, transparencyClassId: 1, depthWriteFlag: 0 },
     { surfaceIndex: 1, renderOrder: 100, transparencyClassId: 0, depthWriteFlag: 1 },
     {
       surfaceIndex: 2,
@@ -2364,7 +2665,7 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   assert.deepEqual(order.map((row) => row.surfaceIndex), [1, 2, 0]);
   assert.deepEqual(order.map((row) => row.indirectOffsetBytes), [16, 32, 0]);
   assert.deepEqual(order.map((row) => row.renderOrder), [100, 200, 300]);
-  assert.deepEqual(order.map((row) => row.depthWriteFlag), [1, 1, 1]);
+  assert.deepEqual(order.map((row) => row.depthWriteFlag), [1, 0, 0]);
   const extensionOrder = residentSurfaceDrawOrder([
     {
       surfaceIndex: 5,
@@ -2380,8 +2681,9 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   assert.deepEqual(extensionOrder.map((row) => row.indirectOffsetBytes), [0]);
   assert.equal(residentSurfaceDrawPipelineKey(order[0]), 'opaque-depth-write');
   assert.equal(residentSurfaceDrawPipelineKey(order[1]), 'refractive-depth-write');
-  assert.equal(residentSurfaceDrawPipelineKey(order[2]), 'opaque-depth-write');
+  assert.equal(residentSurfaceDrawPipelineKey(order[2]), 'vapor-alpha-blend');
   assert.equal(residentSurfaceDrawPipelineKey({ transparencyClassId: 2 }), 'refractive-depth-write');
+  assert.equal(residentSurfaceDrawPipelineKey({ transparencyClassId: 1 }), 'vapor-alpha-blend');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT, 'depth24plus');
   assert.equal(SPH_RESIDENT_SURFACE_REFRACTION_BACKFACE_DEPTH_FORMAT, 'depth32float');
 });
@@ -2677,6 +2979,8 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn find_optical_material/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn spectral_wavelength_rgb/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn spectral_tint_from_samples/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /spectral_tint_weight = 0\.35 \* \(1\.0 - clamp\(row1\.w, 0\.0, 1\.0\)\)/);
+  assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /row1\.xyz \* spectral_tint, 0\.35\)/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /base_color_linear/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /transmissive_surface/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /clip\.z = clip\.z \* 0\.5 \+ clip\.w \* 0\.5/);
@@ -2691,7 +2995,8 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn refracted_path_to_back_plane/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn refraction_beer_lambert_transmission_rgb/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /path_m_rgb/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /return vec4<f32>\(display_lit, 1\.0\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /var vapor_alpha = clamp\(1\.0 - exp\(-optical_depth\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /return vec4<f32>\(display_lit \* output_alpha, output_alpha\)/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /scattering_coefficient_per_m/);
 });
 
@@ -4057,6 +4362,7 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
 test('SPH scene builds Schroeder native proxy executor from same-device retained refs', () => {
   const { drawSource, nativeBackend } = createSchroederNativeProxyFixture();
   const { device, calls } = createFakeSchroederProxyRenderDevice();
+  let retainedReleaseCount = 0;
   const activeBuffer = { label: 'active-node-gpu-buffer' };
   const aggregateBuffer = { label: 'aggregate-node-gpu-buffer' };
   const retainedBufferResolver = new Map([
@@ -4087,6 +4393,9 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
     format: 'rgba8unorm',
     depthFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
     retainedBufferResolver,
+    releaseRetainedBuffers() {
+      retainedReleaseCount += 1;
+    },
     source: 'unit-test'
   });
 
@@ -4175,6 +4484,58 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
     passCalls.filter((call) => call.type === 'draw').map((call) => [call.vertexCount, call.instanceCount]),
     [[6, 12], [6, 3]]
   );
+  assert.equal(executor.destroy(), true);
+  assert.equal(executor.destroy(), false);
+  assert.equal(retainedReleaseCount, 1);
+  assert.equal(executor.cameraBuffer.destroyCount, 1);
+  assert.deepEqual(
+    executor.drawCommands.map((command) => command.batchParamsBuffer.destroyCount),
+    [1, 1]
+  );
+});
+
+test('SPH scene transfers owned Schroeder proxy camera lifetime across executor replacement', () => {
+  const { drawSource, nativeBackend } = createSchroederNativeProxyFixture();
+  const { device } = createFakeSchroederProxyRenderDevice();
+  const activeBuffer = { label: 'replacement-active-node-gpu-buffer' };
+  const aggregateBuffer = { label: 'replacement-aggregate-node-gpu-buffer' };
+  const retainedBufferResolver = new Map([
+    ['active-node-list:test', {
+      buffer: activeBuffer,
+      rowCount: 12,
+      strideFloats: SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS,
+      byteLength: 12 * SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    }],
+    ['aggregate-node:test', {
+      buffer: aggregateBuffer,
+      rowCount: 3,
+      strideFloats: SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS,
+      byteLength: 3 * SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    }]
+  ]);
+  const first = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource,
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm',
+    retainedBufferResolver
+  });
+  const second = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource,
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm',
+    retainedBufferResolver,
+    cameraBuffer: first.cameraBuffer,
+    adoptCameraBuffer: first.cameraBufferOwned
+  });
+
+  assert.equal(first.cameraBufferOwned, true);
+  assert.equal(second.cameraBufferOwned, true);
+  assert.equal(first.destroy({ preserveCameraBuffer: second.cameraBuffer }), true);
+  assert.equal(first.cameraBuffer.destroyCount, 0);
+  assert.equal(second.destroy(), true);
+  assert.equal(first.cameraBuffer.destroyCount, 1);
 });
 
 test('SPH scene builds local retained resolver for Schroeder same-device render buffers', () => {
@@ -4891,7 +5252,7 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(pending.status, 'native-webgpu-surface-validation-pending');
 });
 
-test('SPH renderer admits only closure-backed condensed refraction and never alpha transparency', () => {
+test('SPH renderer keeps closure-backed condensed refraction separate from vapor alpha coverage', () => {
   const closureRefraction = {
     ior: 1.333,
     status: 1,
@@ -4956,11 +5317,11 @@ test('SPH renderer admits only closure-backed condensed refraction and never alp
   assert.equal(renderLayerFromOpticalResponse(condensedWater, condensedWater), 'refractive-surface');
   assert.equal(renderOrderFromOpticalResponse(condensedWater, condensedWater), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
 
-  assert.equal(renderDepthWriteFromOpticalResponse(vapor, vapor), true);
-  assert.equal(renderAlphaFromOpticalResponse(vapor, vapor), 1);
+  assert.equal(renderDepthWriteFromOpticalResponse(vapor, vapor), false);
+  assert.equal(renderAlphaFromOpticalResponse(vapor, vapor), 0.04);
   assert.equal(hasAdmittedClosureRefraction(vapor, vapor), false);
-  assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'opaque-surface');
-  assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.opaqueSurface);
+  assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'vapor-surface');
+  assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.vaporSurface);
 
   assert.equal(renderDepthWriteFromOpticalResponse(transparentSolid, transparentSolid), true);
   assert.equal(hasAdmittedClosureRefraction(transparentSolid, transparentSolid), false);
@@ -5066,6 +5427,26 @@ test('SPH resident pressure interface state owns retained force rows outside ren
   assert.equal(state.pressureInterfaceForceRowsLeaseStatus, 'active');
   assert.equal(state.pressureInterfaceForceRowsLeaseActiveCount, 1);
   assert.equal(state.gpuAuthoritativeState, true);
+});
+
+test('direct pressure admission selection never falls back to prior batch authority', () => {
+  const priorAdmission = { status: 'prior-pressure-admission' };
+  const directAdmission = { status: 'current-direct-pressure-admission' };
+  assert.equal(selectPressureInterfaceGridForceAdmissionForExecutionMode({
+    residentComputeManagerMode: 'direct',
+    directAdmission,
+    priorAdmission
+  }), directAdmission);
+  assert.equal(selectPressureInterfaceGridForceAdmissionForExecutionMode({
+    residentComputeManagerMode: 'direct',
+    directAdmission: null,
+    priorAdmission
+  }), null);
+  assert.equal(selectPressureInterfaceGridForceAdmissionForExecutionMode({
+    residentComputeManagerMode: 'compute-manager',
+    directAdmission: null,
+    priorAdmission
+  }), priorAdmission);
 });
 
 test('SPH scene builds SS source-key replay diagnostics from production through pressure consumption', () => {
@@ -5444,6 +5825,7 @@ test('SPH scene asks resident authority host to admit gas-cell fields before imp
 
 test('SPH scene promotes retained Schroeder gas-cell rows for pressure-interface scheduling', () => {
   const gasPressureCellsBuffer = { label: 'retained-ss-gas-pressure-cells-buffer' };
+  const transferReleases = [];
   const schroederGasCellImport = {
     schema: ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
     status: 'schroeder-far-aggregate-gas-cell-import-submitted',
@@ -5483,7 +5865,10 @@ test('SPH scene promotes retained Schroeder gas-cell rows for pressure-interface
       stateKey: 'ulg:test:ss-resident-state'
     },
     finalStep: {
-      schroederFarAggregateGasCellImport: schroederGasCellImport
+      schroederFarAggregateGasCellImport: schroederGasCellImport,
+      releaseSchroederHierarchyArtifactTransfers(options) {
+        transferReleases.push(options);
+      }
     }
   };
 
@@ -5522,6 +5907,15 @@ test('SPH scene promotes retained Schroeder gas-cell rows for pressure-interface
   assert.equal(state.pressureInterfaceGasCellFieldImportReady, true);
   assert.equal(state.pressureInterfaceGasCellFieldImport.gasPressureCellsBuffer, gasPressureCellsBuffer);
   assert.deepEqual(state.pressureInterfaceGasCellFieldRetainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(publication.releaseSchroederGasCellTransfer(), true);
+  assert.equal(publication.releaseSchroederGasCellTransfer(), false);
+  assert.equal(transferReleases.length, 1);
+  assert.deepEqual(transferReleases[0], {
+    transferClass: 'next-tick',
+    families: 'far-aggregate-gas-cell-import',
+    reason: 'persistent-pressure-gas-cell-owner-released',
+    submitted: true
+  });
 });
 
 test('SPH scene publishes gas-cell import from gas-cell EOS producer result source', () => {
@@ -5994,6 +6388,33 @@ test('emissive temperature by material is the luminance-weighted incandescent me
   const out = emissiveTemperatureByMaterialFromSphRenderRows(rows);
   assert.ok(Math.abs(out.fe - 3000) < 1e-6);
   assert.equal(out.h2o, undefined);
+});
+
+test('surface emissive lookup never leaks a hot material aggregate into a cold exact body', () => {
+  const hotKey = 'render-domain:12|material:fe|phase:solid';
+  const values = {
+    fe: 'material-wide-hot-value',
+    [hotKey]: 'exact-hot-value'
+  };
+
+  assert.equal(emissiveAuthorityValueForSurface(values, {
+    material: 'fe',
+    phase: 'solid',
+    renderKey: 'fe',
+    renderDomainId: 12
+  }), 'exact-hot-value');
+  assert.equal(emissiveAuthorityValueForSurface(values, {
+    material: 'fe',
+    phase: 'solid',
+    renderKey: 'fe',
+    renderDomainId: 11
+  }), null);
+  assert.equal(emissiveAuthorityValueForSurface(values, {
+    material: 'fe',
+    phase: 'solid',
+    renderKey: 'fe',
+    renderDomainId: 0
+  }), 'material-wide-hot-value');
 });
 
 test('GGX latlong prefilter: identity base, constant invariance, monotone lobe spread', async () => {

@@ -56,6 +56,58 @@ function manualBuffers({
   };
 }
 
+function phaseCarrierBuffers(options = {}) {
+  const base = manualBuffers(options);
+  const phaseLaneCount = 4;
+  const stateStride = base.sphParticleState.state.length;
+  const thermoStride = base.sphParticleState.thermo.length;
+  const mechanicsStride = base.mlsMpmParticleState.mechanics.length;
+  const state = new Float32Array(stateStride * phaseLaneCount);
+  const thermo = new Float32Array(thermoStride * phaseLaneCount);
+  const mechanics = new Float32Array(mechanicsStride * phaseLaneCount);
+  for (let phaseLane = 0; phaseLane < phaseLaneCount; phaseLane += 1) {
+    state.set(base.sphParticleState.state, phaseLane * stateStride);
+    thermo.set(base.sphParticleState.thermo, phaseLane * thermoStride);
+    mechanics.set(base.mlsMpmParticleState.mechanics, phaseLane * mechanicsStride);
+    if (phaseLane > 0) {
+      state[phaseLane * stateStride + 3] = 0;
+      state[phaseLane * stateStride + 4] = 0;
+      state[phaseLane * stateStride + 5] = 0;
+      state[phaseLane * stateStride + 6] = 0;
+      mechanics[phaseLane * mechanicsStride + 19] = 0;
+    }
+  }
+  const phaseCarrierPlan = {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: 1,
+    primaryCapacity: 1,
+    phaseLaneCount,
+    phaseLaneStride: 1,
+    companionStart: 1,
+    companionCapacity: 3,
+    particleCapacity: 4,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+    localOnlyArray: [1, 2, 3],
+    localOnlyBuffer: { label: 'must-not-cross-worker-metadata-boundary' }
+  };
+  return {
+    sphParticleState: {
+      ...base.sphParticleState,
+      particleCount: 4,
+      state,
+      thermo,
+      phaseCarrierPlan
+    },
+    mlsMpmParticleState: {
+      ...base.mlsMpmParticleState,
+      particleCount: 4,
+      mechanics,
+      phaseCarrierPlan: { ...phaseCarrierPlan }
+    }
+  };
+}
+
 function stage(id, reads = [], writes = []) {
   return {
     id,
@@ -820,7 +872,7 @@ test('ULG resident stage worker can run reaction product stage with retained par
 
 test('ULG resident stage worker exports compact snapshots from export-owned G2P source copies', async () => {
   const device = createFakeGpuDevice();
-  const buffers = manualBuffers({
+  const buffers = phaseCarrierBuffers({
     position: [1.5, 1.75, 2.25],
     velocity: [0.25, -0.5, 0.75],
     massKg: 4,
@@ -875,7 +927,7 @@ test('ULG resident stage worker exports compact snapshots from export-owned G2P 
           stateBufferByteLength: g2pStateRows.byteLength,
           mechanicsBufferByteLength: g2pMechanicsRows.byteLength,
           stateStrideFloats: 8,
-          mechanicsStrideFloats: g2pMechanicsRows.length,
+          mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length,
           retainedOutputParticleBuffers: true,
           readbackMode: 'no-full-readback',
           fullReadbackPerformed: false,
@@ -920,7 +972,8 @@ test('ULG resident stage worker exports compact snapshots from export-owned G2P 
     particleCount: buffers.sphParticleState.particleCount,
     step: 1,
     time: 0.1,
-    smoothingLengthM: buffers.sphParticleState.smoothingLengthM
+    smoothingLengthM: buffers.sphParticleState.smoothingLengthM,
+    phaseCarrierPlan: buffers.sphParticleState.phaseCarrierPlan
   });
 
   assert.equal(exported.status, 'worker-retained-compact-snapshot-exported');
@@ -930,10 +983,51 @@ test('ULG resident stage worker exports compact snapshots from export-owned G2P 
   assert.deepEqual([...exported.compactBufferSnapshot.sphState], [...g2pStateRows]);
   assert.deepEqual([...exported.compactBufferSnapshot.mlsMpmMechanics], [...g2pMechanicsRows]);
   assert.deepEqual([...exported.compactBufferSnapshot.sphThermo], [...buffers.sphParticleState.thermo]);
+  assert.deepEqual(exported.compactBufferSnapshot.phaseCarrierPlan, {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: 1,
+    primaryCapacity: 1,
+    phaseLaneCount: 4,
+    phaseLaneStride: 1,
+    companionStart: 1,
+    companionCapacity: 3,
+    particleCapacity: 4,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex'
+  });
+  assert.notStrictEqual(
+    exported.compactBufferSnapshot.phaseCarrierPlan,
+    buffers.sphParticleState.phaseCarrierPlan
+  );
+  assert.equal(
+    Object.hasOwn(exported.compactBufferSnapshot.phaseCarrierPlan, 'localOnlyBuffer'),
+    false
+  );
+  assert.equal(
+    Object.hasOwn(exported.compactBufferSnapshot.phaseCarrierPlan, 'localOnlyArray'),
+    false
+  );
+
+  const rejected = await exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot({
+    device,
+    laneId,
+    stateKey,
+    particleCount: buffers.sphParticleState.particleCount,
+    phaseCarrierPlan: {
+      ...buffers.sphParticleState.phaseCarrierPlan,
+      particleCapacity: 1
+    }
+  });
+  assert.equal(rejected.status, 'worker-retained-compact-snapshot-export-blocked');
+  assert.equal(
+    rejected.reason,
+    'worker-retained-compact-snapshot-phase-carrier-plan-particle-count-mismatch'
+  );
+  assert.match(rejected.errorMessage, /phaseCarrierPlan does not match particleCount 4/);
 });
 
 test('ULG resident stage worker rematerializes adopted storage from a descriptor seed and reuses it across schedules', async () => {
-  const buffers = manualBuffers();
+  const buffers = phaseCarrierBuffers();
   const device = createFakeGpuDevice();
   const seed = {
     schema: 'peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0',
@@ -941,6 +1035,7 @@ test('ULG resident stage worker rematerializes adopted storage from a descriptor
     ready: true,
     hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:test-seed',
     authoritativeParticleCount: buffers.sphParticleState.particleCount,
+    phaseCarrierPlan: buffers.sphParticleState.phaseCarrierPlan,
     materializationMode: 'peer-local-gpu-rematerialization-from-descriptor-seed'
   };
   const context = {
@@ -978,6 +1073,21 @@ test('ULG resident stage worker rematerializes adopted storage from a descriptor
   assert.equal(firstRemat.reusedRetainedBuffers, false);
   assert.equal(firstRemat.hotBufferKey, seed.hotBufferKey);
   assert.equal(firstRemat.rawGpuBufferPeerComputeTransfer, false);
+  assert.deepEqual(firstRemat.phaseCarrierPlan, {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: 1,
+    primaryCapacity: 1,
+    phaseLaneCount: 4,
+    phaseLaneStride: 1,
+    companionStart: 1,
+    companionCapacity: 3,
+    particleCapacity: 4,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex'
+  });
+  assert.equal(firstRemat.phaseCarrierPlanPropagatedToUploads, true);
+  assert.equal(Object.hasOwn(firstRemat.phaseCarrierPlan, 'localOnlyBuffer'), false);
+  assert.equal(Object.hasOwn(firstRemat.phaseCarrierPlan, 'localOnlyArray'), false);
   assert.equal(firstRemat.stateBufferByteLength, buffers.sphParticleState.state.byteLength);
   assert.equal(
     first.value.workerResidentStage.workerRetainedContinuationInputStatus,
@@ -1016,6 +1126,39 @@ test('ULG resident stage worker rematerializes adopted storage from a descriptor
     'blocked-worker-adopted-storage-rematerialization-row-count-mismatch'
   );
   assert.equal(blocked.value.workerResidentStage.workerAdoptedStorageRematerializationApplied, false);
+
+  const conflictingPlanContext = {
+    ...context,
+    common: {
+      ...context.common,
+      schroederAdoptedParticleStorageWorkerRematerializationSeed: {
+        ...seed,
+        hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:test-seed-conflicting-phase-plan',
+        phaseCarrierPlan: {
+          ...buffers.sphParticleState.phaseCarrierPlan,
+          stableLaneAddress: 'differentPhaseLaneAddress'
+        }
+      }
+    }
+  };
+  const conflictingPlan = await runUlgMechanicsResidentStageWorkerPayload(
+    payload(p2gStage, conflictingPlanContext, null, {
+      laneId: 'ulg:test:adopted-storage-worker-lane-conflicting-phase-plan',
+      stateKey: 'ulg:test:adopted-storage-worker-state-conflicting-phase-plan'
+    })
+  );
+  assert.equal(
+    conflictingPlan.value.workerResidentStage.workerAdoptedStorageRematerializationStatus,
+    'blocked-worker-adopted-storage-rematerialization-phase-carrier-plan-mismatch'
+  );
+  assert.equal(
+    conflictingPlan.value.workerResidentStage.workerAdoptedStorageRematerializationApplied,
+    false
+  );
+  assert.match(
+    conflictingPlan.value.workerResidentStage.workerAdoptedStorageRematerialization.errorMessage,
+    /phaseCarrierPlan metadata conflicts across inputs/
+  );
 });
 
 test('ULG resident stage worker fails closed until arbitrary-domain rematerialization has four authoritative buffers', async () => {

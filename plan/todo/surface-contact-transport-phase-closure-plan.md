@@ -263,6 +263,91 @@ supply distinct velocities and explicit equal-and-opposite interface exchange.
 - **Scenario:** water-cycle and iron/ice multi-frame visual gates pass without
   changing a UI blob scale to hide a contact mismatch.
 
+## Integrated SS Phase-Flow Closure Checkpoint - 2026-07-16
+
+The first material-general mechanics/phase-flow closure is implemented on top
+of the Slice 6 compact SS node topology. A GPU-derived sparse field view is
+keyed exactly by `(denseNodeId, mechanicalFamilyId, materialId,
+continuityDomainId)`. Candidate generation, sort, unique, P2G, grid update,
+contact, and G2P stay GPU resident and require no field-count readback. Unlike
+fields retain tangential slip; their closing normal motion is resolved by an
+equal-and-opposite impulse. This removes the universal mixed-cell velocity
+average that previously locked liquid H2O to overlapping ice and iron.
+
+Two fail-closed integration defects were found and fixed during the native
+audit. The exclusive-prefix mapping initially used the current prefix instead
+of the following prefix/final unique count, so duplicate candidates could
+invalidate the entire field view. In addition, zero-mass phase-reserve rows do
+not own a field descriptor and must pass through G2P rather than invalidate
+all live carriers. Native tests now cover duplicate stencils, inactive reserve
+rows, corrupt evidence, and material/phase field separation.
+
+Continuous phase transfer uses schema
+`peercompute.ulg.sph-phase-carrier-plan.v2`. Every original lineage owns four
+stable, phase-pure lanes in solid/liquid/gas/plasma order. A source may split
+between adjacent thermodynamic phases, and all source contributions are
+conservatively reassembled into the target lanes. The transfer preserves mass,
+linear momentum, position first moment, internal energy, and total energy;
+relative kinetic energy lost while merging same-phase contributions is
+thermalized. Compatible constitutive state follows the largest contributor,
+while incompatible phase/model transitions reset `F`, `C`, and `J` to the
+target reference state. Invalidity is contained to one lineage unless the
+global layout itself is invalid. The browser host, resident worker, portable
+snapshot/rematerialization route, compact cohort summary, and reaction-product
+placement all understand this four-lane topology.
+
+Render-field phase partitioning now scales isovolume monotonically with phase
+fraction rather than inflating radius by inverse weight. A small new phase can
+therefore no longer create a coincident near-full-volume shell that hides the
+remaining phase.
+
+Native manufactured verification passes `19/19`, including simultaneous
+solid/liquid/gas ownership, total-energy conservation, constitutive-state
+selection, lineage-local failure containment, duplicate-field stencils, and
+inactive carrier rows. Portable host/worker verification passes `30/30`. The
+repository suite passes `1,404/1,410` with zero failures and six intentional
+opt-in skips, and the production build passes with only the existing chunk-size
+warning.
+
+The desktop iron/ice visual run at
+`/tmp/ulg-visual-sanity-matrix/phase-four-lane-iron-ice-20260716` passes all 11
+retained-GPU checkpoints through `2.56 s`, with 13 captured frames and no
+browser, WebGPU, blank-frame, geometry, or surface-lifecycle issue. Final H2O
+is approximately `294.69 kg` solid, `567.11 kg` liquid, and `55.20 kg` gas;
+liquid reaches `1.83 m/s`. Every checkpoint is phase-pure and reports zero
+invalid mechanics rows or phase-fraction problems. Iron changes from
+`1507.68 kg` liquid to `1246.58 kg` solid plus `261.10 kg` liquid. Total mass
+relative span is about `1.91e-6`, and observed condensed-state `J` remains
+within approximately `0.97655..1.02686`.
+
+The matching mobile run at
+`/tmp/ulg-visual-sanity-matrix/phase-four-lane-iron-ice-mobile-20260716`
+uses a `390 x 844` viewport at device scale factor `3`. It also passes all 11
+checkpoints through `2.56 s`, captures 13 frames, and reports no browser,
+WebGPU, geometry, or surface issue. Direct inspection of initial, impact,
+spreading, and final frames confirms the same opaque refractive melt surface
+and retained phase geometry in the portrait layout.
+
+The 1,024-live-particle smoke benchmark at
+`/tmp/ulg-phase-four-lane-performance.json` passes at about `101.80` complete
+engine steps/s, `101.68` wall steps/s, `217.39` resident-stage steps/s, and
+zero estimated readback bytes per step. Complete-engine throughput matches the
+Slice 6 baseline, while resident-stage throughput is lower because four fixed
+lanes currently dispatch and allocate at four times the original lineage
+capacity. Sparse phase-lane allocation/compaction remains a measured
+optimization opportunity; it is not hidden as completed work.
+
+This checkpoint closes the observed detach-and-flow blocker, but not the whole
+thermophysical plan. Geometry/contact/thermal-boundary unification, derived
+phase-resolved viscosity and conductivity, interfacial conductance, and the
+broader resolution/convergence gates remain open. Artificial viscosity and
+the demo-tuned conduction law remain active. Tiny gas fractions can still hit
+the coarse thermal clamp near `1e6 K` transiently before the quench returns to
+a stable range, so gas microphysics and thermal-limit closure remain explicit
+debt. Water-cycle, sodium/water, and cesium/fluorine gates must still be rerun
+after those transport changes; this checkpoint is not a claim of complete
+transport closure.
+
 ## Dependencies And Related Plans
 
 - `plan/todo/SS/shared-spatial-authority-refactor-plan.md`

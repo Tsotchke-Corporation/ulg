@@ -152,6 +152,11 @@ import {
   summarizeSchroederHierarchyArtifactLedger
 } from '../src/runtime/sph/schroederHierarchyArtifactLedger.js';
 
+const RUN_NATIVE_PHASE_LINEAGE_SUMMARY =
+  process.env.ULG_RUN_NATIVE_PHASE_LINEAGE_SUMMARY === '1';
+const NATIVE_PHASE_LINEAGE_SUMMARY_BASE_URL =
+  process.env.ULG_PHASE_LINEAGE_SUMMARY_BASE_URL || 'https://127.0.0.1:5174/';
+
 function manualBuffers({
   position = [1.25, 1.25, 1.25],
   velocity = [2, 0, 0],
@@ -1906,7 +1911,7 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
   assert.equal(device.bindGroups[1].entries.length, 3);
   assert.equal(device.copies.length, 1);
   assert.equal(device.copies[0].size, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
-  assert.equal(device.writes[0].byteLength, 32);
+  assert.equal(device.writes[0].byteLength, 48);
   assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, 5 * MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
   assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-readback').unmapped, true);
   assert.equal(summary.compactSummaryBufferAuthority, 'diagnostics-only');
@@ -1915,6 +1920,247 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
   assert.equal(summary.residentBufferLeaseActiveLeaseCount, 0);
   assert.equal(summary.residentBufferLeaseSummary.destroyedResourceCount, 3);
   assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
+});
+
+test('MLS-MPM resident summary packs v2 cohort ranges in lineage space', async () => {
+  const lineageCapacity = 2;
+  const phaseLaneCount = 4;
+  const particleCount = lineageCapacity * phaseLaneCount;
+  const summaryValues = new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
+  const device = fakeSummaryDevice(summaryValues);
+  const tracker = fakeBufferTracker();
+  const phaseCarrierPlan = {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity,
+    primaryCapacity: lineageCapacity,
+    phaseLaneCount,
+    phaseLaneStride: lineageCapacity,
+    companionStart: lineageCapacity,
+    companionCapacity: lineageCapacity * (phaseLaneCount - 1),
+    particleCapacity: particleCount
+  };
+
+  await runMlsMpmResidentSummaryWebGpu({
+    device,
+    cohortRanges: {
+      base: { startIndex: -100, endIndex: 1 },
+      drop: { startIndex: 1, endIndex: 100 }
+    },
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      phaseCarrierPlan,
+      state: new Float32Array(particleCount * 8),
+      thermo: new Float32Array(particleCount * 12)
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      mechanics: new Float32Array(
+        particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+      )
+    },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      phaseCarrierPlan,
+      stateBuffer: tracker.buffer('v2-source-state'),
+      thermoBuffer: tracker.buffer('v2-source-thermo')
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('v2-source-mechanics')
+    },
+    gridUpdate: {
+      gridNodeCount: 0,
+      gpuResult: { updatedGridBuffer: tracker.buffer('v2-updated-grid') }
+    },
+    g2pReconstruction: {
+      stateBuffer: tracker.buffer('v2-next-state'),
+      mechanicsBuffer: tracker.buffer('v2-next-mechanics')
+    }
+  });
+
+  const paramsWrite = device.writes.find(
+    (write) => write.label === 'ulg-mls-mpm-resident-summary-params'
+  );
+  assert.ok(paramsWrite);
+  assert.equal(paramsWrite.byteLength, 48);
+  const params = new DataView(paramsWrite.data);
+  assert.equal(params.getUint32(0, true), particleCount);
+  assert.equal(params.getUint32(12, true), 0);
+  assert.equal(params.getUint32(16, true), 1);
+  assert.equal(params.getUint32(20, true), 1);
+  assert.equal(params.getUint32(24, true), lineageCapacity);
+  assert.equal(params.getUint32(32, true), lineageCapacity);
+  assert.equal(params.getUint32(36, true), phaseLaneCount);
+  assert.equal(params.getUint32(40, true), 0);
+  assert.equal(params.getUint32(44, true), 0);
+
+  const partialsShader = device.shaderModules.find((module) => (
+    module.code.includes('phase_lineage_capacity')
+    && module.code.includes('partial_summaries')
+  ))?.code || '';
+  assert.match(partialsShader, /params\.phase_lineage_capacity \* params\.phase_lane_count == params\.particle_count/);
+  assert.match(partialsShader, /index % max\(params\.phase_lineage_capacity, 1u\)/);
+  assert.match(partialsShader, /cohort_index >= params\.base_start_index/);
+});
+
+test('native four-lane resident summary keeps a non-primary phase lane in its lineage cohort', {
+  skip: RUN_NATIVE_PHASE_LINEAGE_SUMMARY
+    ? false
+    : 'set ULG_RUN_NATIVE_PHASE_LINEAGE_SUMMARY=1 for native WebGPU readback',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: process.env.ULG_PHASE_LINEAGE_SUMMARY_CHROME || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+
+  let native;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_PHASE_LINEAGE_SUMMARY_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    native = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+      if (!adapter) return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+      const nonce = Date.now();
+      const summaryModule = await import(
+        `/src/runtime/sph/sphMlsMpmGpuSummary.js?nativePhaseLineageSummary=${nonce}`
+      );
+      const abi = await import(`/ulg-gpu-abi/src/index.js?nativePhaseLineageSummary=${nonce}`);
+      const particleCount = 8;
+      const lineageCapacity = 2;
+      const phaseLaneCount = 4;
+      const livePhysicalIndex = 3 * lineageCapacity;
+      const state = new Float32Array(particleCount * 8);
+      const thermo = new Float32Array(particleCount * 12);
+      const mechanics = new Float32Array(particleCount * 32);
+      for (let index = 0; index < particleCount; index += 1) {
+        mechanics[index * 32 + 18] = 1;
+        mechanics[index * 32 + 19] = 1;
+      }
+      state.set([2, 3, 4, 7, 1, -2, 0.5, 100], livePhysicalIndex * 8);
+      thermo.set([1, 4, 500, 1, 0, 0, 0, 1, 0.1, 1, 1, 0], livePhysicalIndex * 12);
+      const phaseCarrierPlan = {
+        schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+        status: 'phase-lane-capacity-ready',
+        lineageCapacity,
+        primaryCapacity: lineageCapacity,
+        phaseLaneCount,
+        phaseLaneStride: lineageCapacity,
+        companionStart: lineageCapacity,
+        companionCapacity: lineageCapacity * (phaseLaneCount - 1),
+        particleCapacity: particleCount
+      };
+      const upload = (label, values) => {
+        const buffer = device.createBuffer({
+          label,
+          size: Math.max(16, values.byteLength),
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+        if (values.byteLength > 0) device.queue.writeBuffer(buffer, 0, values);
+        return buffer;
+      };
+      const stateBuffer = upload('phase-lineage-state', state);
+      const thermoBuffer = upload('phase-lineage-thermo', thermo);
+      const mechanicsBuffer = upload('phase-lineage-mechanics', mechanics);
+      const updatedGridBuffer = upload('phase-lineage-grid', new Float32Array(8));
+      let summary;
+      try {
+        summary = await summaryModule.runMlsMpmResidentSummaryWebGpu({
+          device,
+          cohortRanges: {
+            base: { startIndex: 0, endIndex: 1 },
+            drop: { startIndex: 1, endIndex: 2 }
+          },
+          sphParticleState: {
+            schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+            particleCount,
+            phaseCarrierPlan,
+            state,
+            thermo
+          },
+          mlsMpmParticleState: {
+            schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+            particleCount,
+            mechanics
+          },
+          sphParticleUpload: {
+            status: 'webgpu-uploaded',
+            phaseCarrierPlan,
+            stateBuffer,
+            thermoBuffer
+          },
+          mlsMpmParticleUpload: {
+            status: 'webgpu-uploaded',
+            mechanicsBuffer
+          },
+          gridUpdate: {
+            gridNodeCount: 1,
+            gpuResult: { updatedGridBuffer }
+          },
+          g2pReconstruction: {
+            stateBuffer,
+            mechanicsBuffer
+          }
+        });
+        await device.queue.onSubmittedWorkDone();
+        const validationError = await device.popErrorScope();
+        return {
+          status: 'complete',
+          validationError: validationError?.message || null,
+          uncapturedErrors,
+          base: summary.cohortDiagnostics.base,
+          drop: summary.cohortDiagnostics.drop,
+          sourceMassKg: summary.sourceMassKg,
+          nextMassKg: summary.nextMassKg,
+          livePhysicalIndex
+        };
+      } finally {
+        stateBuffer.destroy();
+        thermoBuffer.destroy();
+        mechanicsBuffer.destroy();
+        updatedGridBuffer.destroy();
+        device.destroy();
+      }
+    });
+  } finally {
+    await browser.close();
+  }
+
+  assert.equal(native.status, 'complete', native.reason || 'native WebGPU did not run');
+  assert.equal(native.validationError, null);
+  assert.deepEqual(native.uncapturedErrors, []);
+  assert.equal(native.livePhysicalIndex, 6);
+  assert.equal(native.sourceMassKg, 7);
+  assert.equal(native.nextMassKg, 7);
+  assert.equal(native.base.status, 'cohort-summary-ready');
+  assert.equal(native.base.startIndex, 0);
+  assert.equal(native.base.endIndex, 1);
+  assert.equal(native.base.count, 1);
+  assert.equal(native.base.massKg, 7);
+  native.base.centerOfMassM.forEach((value, axis) => {
+    nearlyEqual(value, [2, 3, 4][axis]);
+  });
+  assert.equal(native.drop.status, 'cohort-summary-empty');
+  assert.equal(native.drop.massKg, 0);
 });
 
 test('MLS-MPM resident summary can skip the active-grid scan for particle-visual diagnostics', async () => {
@@ -1998,6 +2244,86 @@ test('MLS-MPM resident summary can skip the active-grid scan for particle-visual
   assert.equal(summary.cohortDiagnostics.drop.count, 12);
   assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1]);
   assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
+});
+
+test('MLS-MPM resident summary does not scan or regenerate the superseded dense grid in mechanics-field mode', async () => {
+  const particleCount = 4;
+  const gridNodeCount = 512;
+  const summaryValues = new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
+  summaryValues[0] = particleCount;
+  summaryValues[1] = 0;
+  summaryValues[2] = 99;
+  summaryValues[19] = 1;
+  const device = fakeSummaryDevice(summaryValues);
+  const tracker = fakeBufferTracker();
+  const summary = await runMlsMpmResidentSummaryWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      state: new Float32Array(particleCount * 8)
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      mechanics: new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length)
+    },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo')
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics')
+    },
+    gridUpdate: {
+      gridNodeCount,
+      gridDims: [8, 8, 8],
+      gridShift: 4,
+      gridSpacingM: 0.25,
+      mechanicsFieldViewEnabled: true,
+      gridStateAuthority: 'schroeder-spatial-mechanics-field-view-v1',
+      gpuResult: { updatedGridBuffer: tracker.buffer('unused-updated-grid') }
+    },
+    g2pReconstruction: {
+      stateBuffer: tracker.buffer('next-state'),
+      mechanicsBuffer: tracker.buffer('next-mechanics')
+    },
+    activeGridDispatchPlan: {
+      requested: true,
+      dt: 0.001,
+      stepCount: 2,
+      gravityMPerS2: [0, -9.80665, 0],
+      safetyCells: 1
+    }
+  });
+
+  assert.equal(summary.status, 'compact-summary-ready');
+  assert.equal(summary.mechanicsFieldViewEnabled, true);
+  assert.equal(summary.gridNodeSummaryAuthority, 'schroeder-spatial-mechanics-field-view-v1');
+  assert.equal(summary.gridNodeScanCount, 0);
+  assert.equal(summary.gridNodeScanSkipped, true);
+  assert.equal(summary.activeGridNodeCount, null);
+  assert.equal(summary.activeGridNodeCountAvailable, false);
+  assert.equal(
+    summary.activeGridNodeSummaryStatus,
+    'superseded-by-schroeder-spatial-mechanics-field-view'
+  );
+  assert.equal(summary.activeGridDispatchPlan.status, 'active-grid-summary-dispatch-plan-superseded');
+  assert.equal(
+    summary.activeGridDispatchPlan.reason,
+    'schroeder-spatial-mechanics-field-view-owns-indirect-dispatch'
+  );
+  assert.equal(summary.activeGridDispatchPlan.source, 'schroeder-spatial-mechanics-field-view-v1');
+  assert.equal(summary.activeGridDispatchPlanBuffersRetained, false);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1]);
+  assert.equal(device.bindGroups.length, 2);
+  assert.equal(
+    device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-active-grid-summary-dispatch-args'),
+    false
+  );
   assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
 });
 

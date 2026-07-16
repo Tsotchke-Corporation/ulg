@@ -25,6 +25,8 @@ export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPOR
   'peercompute.ulg.mechanics-resident-stage-worker-retained-compact-snapshot-export.v0';
 export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
   'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
+const ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA = 'peercompute.ulg.sph-phase-carrier-plan.v1';
+const ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA = 'peercompute.ulg.sph-phase-carrier-plan.v2';
 
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const GPU_BUFFER_USAGE = {
@@ -54,6 +56,125 @@ let workerDeviceResultPromise = null;
 function normalizeString(value, fallback = null) {
   const text = String(value ?? '').trim();
   return text || fallback;
+}
+
+function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'phase carrier plan') {
+  if (plan == null) return null;
+  const count = Number(particleCount);
+  const countAccepted = Number.isSafeInteger(count) && count > 0;
+  if (plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA) {
+    const lineageCapacity = Number(plan?.lineageCapacity);
+    const primaryCapacity = Number(plan?.primaryCapacity);
+    const phaseLaneCount = Number(plan?.phaseLaneCount);
+    const phaseLaneStride = Number(plan?.phaseLaneStride);
+    const companionStart = Number(plan?.companionStart);
+    const companionCapacity = Number(plan?.companionCapacity);
+    const particleCapacity = Number(plan?.particleCapacity);
+    const stableLaneAddressPresent = plan.stableLaneAddress !== undefined;
+    const accepted = countAccepted
+      && plan?.status === 'phase-lane-capacity-ready'
+      && Number.isSafeInteger(plan.lineageCapacity)
+      && Number.isSafeInteger(plan.primaryCapacity)
+      && Number.isSafeInteger(plan.phaseLaneCount)
+      && Number.isSafeInteger(plan.phaseLaneStride)
+      && Number.isSafeInteger(plan.companionStart)
+      && Number.isSafeInteger(plan.companionCapacity)
+      && Number.isSafeInteger(plan.particleCapacity)
+      && lineageCapacity > 0
+      && primaryCapacity === lineageCapacity
+      && phaseLaneCount === 4
+      && phaseLaneStride === lineageCapacity
+      && companionStart === lineageCapacity
+      && companionCapacity === 3 * lineageCapacity
+      && particleCapacity === 4 * lineageCapacity
+      && particleCapacity === count
+      && (!stableLaneAddressPresent || typeof plan.stableLaneAddress === 'string');
+    if (accepted) {
+      return {
+        schema: ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA,
+        status: 'phase-lane-capacity-ready',
+        lineageCapacity,
+        primaryCapacity,
+        phaseLaneCount,
+        phaseLaneStride,
+        companionStart,
+        companionCapacity,
+        particleCapacity,
+        ...(stableLaneAddressPresent
+          ? { stableLaneAddress: plan.stableLaneAddress }
+          : {})
+      };
+    }
+  }
+  const primaryCapacity = Number(plan?.primaryCapacity);
+  const companionStart = Number(plan?.companionStart);
+  const companionCapacity = Number(plan?.companionCapacity);
+  const particleCapacity = Number(plan?.particleCapacity);
+  const accepted = countAccepted
+    && plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA
+    && plan?.status === 'phase-companion-capacity-ready'
+    && Number.isSafeInteger(primaryCapacity)
+    && primaryCapacity > 0
+    && Number.isSafeInteger(companionStart)
+    && companionStart === primaryCapacity
+    && Number.isSafeInteger(companionCapacity)
+    && companionCapacity === primaryCapacity
+    && Number.isSafeInteger(particleCapacity)
+    && particleCapacity === count
+    && companionStart + companionCapacity === count;
+  if (!accepted) {
+    throw new RangeError(
+      `${label} does not match particleCount ${Number.isSafeInteger(count) ? count : 'invalid'}`
+    );
+  }
+  // Keep this descriptor-only across the worker boundary. Unknown properties
+  // are intentionally not cloned, so local buffers cannot hitchhike on it.
+  return {
+    schema: ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA,
+    status: 'phase-companion-capacity-ready',
+    primaryCapacity,
+    companionStart,
+    companionCapacity,
+    particleCapacity
+  };
+}
+
+function phaseCarrierPlansEqual(left, right) {
+  if (left == null || right == null) return left == null && right == null;
+  if (left.schema !== right.schema || left.status !== right.status) return false;
+  if (left.schema === ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA) {
+    return left.lineageCapacity === right.lineageCapacity
+      && left.primaryCapacity === right.primaryCapacity
+      && left.phaseLaneCount === right.phaseLaneCount
+      && left.phaseLaneStride === right.phaseLaneStride
+      && left.companionStart === right.companionStart
+      && left.companionCapacity === right.companionCapacity
+      && left.particleCapacity === right.particleCapacity
+      && left.stableLaneAddress === right.stableLaneAddress;
+  }
+  return left.primaryCapacity === right.primaryCapacity
+    && left.companionStart === right.companionStart
+    && left.companionCapacity === right.companionCapacity
+    && left.particleCapacity === right.particleCapacity;
+}
+
+function resolveWorkerPhaseCarrierPlan({ data = null, seed = null, particleCount = 0 } = {}) {
+  const candidates = [
+    ['worker rematerialization seed phaseCarrierPlan', seed?.phaseCarrierPlan],
+    ['SPH packed state phaseCarrierPlan', data?.sphParticleState?.phaseCarrierPlan],
+    ['MLS-MPM packed state phaseCarrierPlan', data?.mlsMpmParticleState?.phaseCarrierPlan],
+    ['SPH upload phaseCarrierPlan', data?.sphParticleUpload?.phaseCarrierPlan],
+    ['MLS-MPM upload phaseCarrierPlan', data?.mlsMpmParticleUpload?.phaseCarrierPlan]
+  ].filter(([, plan]) => plan != null);
+  let resolved = null;
+  for (const [label, plan] of candidates) {
+    const candidate = clonePhaseCarrierPlanForParticleCount(plan, particleCount, label);
+    if (resolved && !phaseCarrierPlansEqual(resolved, candidate)) {
+      throw new RangeError('worker adopted-storage phaseCarrierPlan metadata conflicts across inputs');
+    }
+    resolved = candidate;
+  }
+  return resolved;
 }
 
 function uniqueStringList(values = []) {
@@ -142,6 +263,7 @@ function getLaneRecord(payload = {}) {
       retainedThermoBufferSeededFromCpu: false,
       retainedThermoBufferCopySrc: false,
       retainedThermoSnapshotRows: null,
+      phaseCarrierPlan: null,
       compactSnapshotExportSources: null,
       nextBufferOrdinal: 1
     };
@@ -888,7 +1010,8 @@ export async function exportUlgMechanicsResidentStageWorkerRetainedCompactSnapsh
   step = null,
   time = null,
   dimension = 3,
-  smoothingLengthM = 0
+  smoothingLengthM = 0,
+  phaseCarrierPlan = undefined
 } = {}) {
   const retained = resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
     laneId,
@@ -953,6 +1076,28 @@ export async function exportUlgMechanicsResidentStageWorkerRetainedCompactSnapsh
   const expectedMechanicsFloats = resolvedParticleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
   const key = laneKeyForParts({ laneId, stateKey });
   const record = retainedLanes.get(key);
+  let resolvedPhaseCarrierPlan = null;
+  try {
+    const sourcePhaseCarrierPlan = phaseCarrierPlan !== undefined
+      ? phaseCarrierPlan
+      : (record?.phaseCarrierPlan
+          || record?.adoptedStorageRematerialization?.phaseCarrierPlan
+          || null);
+    resolvedPhaseCarrierPlan = clonePhaseCarrierPlanForParticleCount(
+      sourcePhaseCarrierPlan,
+      resolvedParticleCount,
+      'worker retained compact snapshot phaseCarrierPlan'
+    );
+  } catch (error) {
+    return blockedRetainedCompactSnapshotExport({
+      reason: 'worker-retained-compact-snapshot-phase-carrier-plan-particle-count-mismatch',
+      laneId,
+      stateKey,
+      sourceStageId,
+      retained,
+      error
+    });
+  }
   try {
     const sphState = await readWorkerGpuBufferFloat32({
       device,
@@ -1003,6 +1148,7 @@ export async function exportUlgMechanicsResidentStageWorkerRetainedCompactSnapsh
       time: resolvedTime,
       dimension: Number.isFinite(Number(dimension)) ? Number(dimension) : 3,
       smoothingLengthM: Number.isFinite(Number(smoothingLengthM)) ? Number(smoothingLengthM) : 0,
+      phaseCarrierPlan: resolvedPhaseCarrierPlan,
       sphState,
       sphThermo,
       mlsMpmMechanics
@@ -1024,6 +1170,7 @@ export async function exportUlgMechanicsResidentStageWorkerRetainedCompactSnapsh
       sphStateByteLength: sphState.byteLength,
       sphThermoByteLength: sphThermo.byteLength,
       mlsMpmMechanicsByteLength: mlsMpmMechanics.byteLength,
+      phaseCarrierPlan: resolvedPhaseCarrierPlan ? { ...resolvedPhaseCarrierPlan } : null,
       thermoSource,
       retainedThermoBufferCopySrc: record?.retainedThermoBufferCopySrc === true,
       retainedThermoBufferSeededFromCpu: record?.retainedThermoBufferSeededFromCpu === true
@@ -1374,11 +1521,49 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
   let reused = false;
   const identityRequired = seed.identityRequired === true;
   const identityRevision = normalizeString(seed.identityRevision, null);
+  const packedParticleCount = Math.max(0, Math.floor(Number(data?.sphParticleState?.particleCount) || 0));
+  const authoritativeParticleCount = Math.max(0, Math.floor(Number(seed.authoritativeParticleCount) || 0));
+  const outputParticleCapacity = Math.max(
+    authoritativeParticleCount,
+    Math.floor(Number(seed.outputParticleCapacity) || authoritativeParticleCount)
+  );
+  // The packed rows are the seed's row payload; a count mismatch means the
+  // shipped rows do not represent the adopted storage - fail honest rather
+  // than rematerialize a stale particle set as authoritative.
+  if (authoritativeParticleCount > 0 && packedParticleCount !== authoritativeParticleCount) {
+    return {
+      status: 'blocked-worker-adopted-storage-rematerialization-row-count-mismatch',
+      requested: true,
+      applied: false,
+      hotBufferKey,
+      packedParticleCount,
+      authoritativeParticleCount
+    };
+  }
+  let phaseCarrierPlan = null;
+  try {
+    phaseCarrierPlan = resolveWorkerPhaseCarrierPlan({
+      data,
+      seed,
+      particleCount: packedParticleCount
+    });
+  } catch (error) {
+    return {
+      status: 'blocked-worker-adopted-storage-rematerialization-phase-carrier-plan-mismatch',
+      requested: true,
+      applied: false,
+      hotBufferKey,
+      packedParticleCount,
+      errorName: error instanceof Error ? error.name : null,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    };
+  }
   if (
     retained
     && retained.hotBufferKey === hotBufferKey
     && retained.identityRequired === identityRequired
     && (!identityRequired || retained.identityRevision === identityRevision)
+    && phaseCarrierPlansEqual(retained.phaseCarrierPlan, phaseCarrierPlan)
   ) {
     reused = true;
   } else {
@@ -1391,25 +1576,6 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
         requested: true,
         applied: false,
         hotBufferKey
-      };
-    }
-    const packedParticleCount = Math.max(0, Math.floor(Number(data?.sphParticleState?.particleCount) || 0));
-    const authoritativeParticleCount = Math.max(0, Math.floor(Number(seed.authoritativeParticleCount) || 0));
-    const outputParticleCapacity = Math.max(
-      authoritativeParticleCount,
-      Math.floor(Number(seed.outputParticleCapacity) || authoritativeParticleCount)
-    );
-    // The packed rows are the seed's row payload; a count mismatch means the
-    // shipped rows do not represent the adopted storage - fail honest rather
-    // than rematerialize a stale particle set as authoritative.
-    if (authoritativeParticleCount > 0 && packedParticleCount !== authoritativeParticleCount) {
-      return {
-        status: 'blocked-worker-adopted-storage-rematerialization-row-count-mismatch',
-        requested: true,
-        applied: false,
-        hotBufferKey,
-        packedParticleCount,
-        authoritativeParticleCount
       };
     }
     const identity = data?.sphParticleState?.identity;
@@ -1459,6 +1625,7 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
       identityRevision,
       identitySchema: identityRequired ? seed.identitySchema : null,
       identityStrideBytes: identityRequired ? seed.identityStrideBytes : 0,
+      phaseCarrierPlan: phaseCarrierPlan ? { ...phaseCarrierPlan } : null,
       stateBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-state', state),
       thermoBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-thermo', thermo),
       mechanicsBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-mechanics', mechanics),
@@ -1489,6 +1656,9 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     }
     record.adoptedStorageRematerialization = retained;
   }
+  record.phaseCarrierPlan = retained.phaseCarrierPlan
+    ? { ...retained.phaseCarrierPlan }
+    : null;
   data.sphParticleUpload = {
     schema: 'peercompute.ulg.worker-rematerialized-adopted-storage-sph-particle-upload.v0',
     status: 'webgpu-uploaded',
@@ -1503,6 +1673,7 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     identitySchema: retained.identitySchema,
     identityStrideBytes: retained.identityStrideBytes,
     identityBufferByteLength: retained.identityBufferByteLength,
+    phaseCarrierPlan: retained.phaseCarrierPlan ? { ...retained.phaseCarrierPlan } : null,
     renderDomainKeys: { ...(seed.renderDomainKeys || {}) }
   };
   data.mlsMpmParticleUpload = {
@@ -1511,6 +1682,7 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     workerRetained: true,
     sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization',
     particleCount: retained.particleCount,
+    phaseCarrierPlan: retained.phaseCarrierPlan ? { ...retained.phaseCarrierPlan } : null,
     mechanicsBuffer: retained.mechanicsBuffer
   };
   return {
@@ -1528,6 +1700,12 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     identityRequired: retained.identityRequired,
     identityRevision: retained.identityRevision,
     identityBufferByteLength: retained.identityBufferByteLength,
+    phaseCarrierPlan: retained.phaseCarrierPlan ? { ...retained.phaseCarrierPlan } : null,
+    phaseCarrierPlanPropagatedToUploads: Boolean(
+      retained.phaseCarrierPlan
+      && phaseCarrierPlansEqual(data.sphParticleUpload.phaseCarrierPlan, retained.phaseCarrierPlan)
+      && phaseCarrierPlansEqual(data.mlsMpmParticleUpload.phaseCarrierPlan, retained.phaseCarrierPlan)
+    ),
     rawGpuBufferPeerComputeTransfer: false
   };
 }

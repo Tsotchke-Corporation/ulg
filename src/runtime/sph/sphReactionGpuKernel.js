@@ -28,6 +28,7 @@ import {
 import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -2016,7 +2017,7 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
-  return buffer;
+  return tagWebGpuBufferDevice(buffer, device);
 }
 
 function resolveSchroederReactionLawQueue(schroederLawQueue = null, { particleCount = 0 } = {}) {

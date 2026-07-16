@@ -199,7 +199,7 @@ const CONTRACTS = [
     label: 'ulg-mls-mpm-resident-summary-params',
     factory: 'createSummaryParamsArray',
     wgslStruct: 'ResidentSummaryParams',
-    bytes: 32
+    bytes: 48
   },
   {
     file: 'src/runtime/sph/sphRenderGpuKernel.js',

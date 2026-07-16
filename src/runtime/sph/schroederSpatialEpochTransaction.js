@@ -266,6 +266,9 @@ function generationMatchesSnapshot(authority, generation) {
     || (source?.sourceBuffer ?? source?.activeNodeBuffer) !== snapshot.sourceBuffer
     || (execution?.sourceBuffer ?? execution?.activeNodeBuffer) !== snapshot.sourceBuffer
     || execution?.directoryBuffer !== snapshot.directoryBuffer
+    || (generation?.mechanicsFieldView ?? null) !== snapshot.mechanicsFieldView
+    || (generation?.mechanicsFieldViewRuntime ?? null)
+      !== snapshot.mechanicsFieldViewRuntime
     || !webGpuBufferMatchesDevice(snapshot.sourceBuffer, authority.device)
     || !webGpuBufferMatchesDevice(snapshot.directoryBuffer, authority.device)
     || (snapshot.mechanicsView && (
@@ -275,6 +278,27 @@ function generationMatchesSnapshot(authority, generation) {
         !== snapshot.mechanicsViewBuffer
       || generation.mechanicsView?.submitPerformed !== true
       || !webGpuBufferMatchesDevice(snapshot.mechanicsViewBuffer, authority.device)
+    ))
+    || (snapshot.mechanicsFieldView && (
+      generation?.mechanicsFieldView !== snapshot.mechanicsFieldView
+      || generation?.mechanicsFieldViewRuntime
+        !== snapshot.mechanicsFieldViewRuntime
+      || generation.mechanicsFieldView?.fieldViewBuffer
+        !== snapshot.mechanicsFieldViewBuffer
+      || generation.mechanicsFieldView?.identityBuffer
+        !== snapshot.mechanicsFieldIdentityBuffer
+      || generation.mechanicsFieldView?.parentMechanicsView
+        !== snapshot.mechanicsView
+      || generation.mechanicsFieldView?.submitPerformed !== true
+      || generation.mechanicsFieldView?.released === true
+      || !webGpuBufferMatchesDevice(
+        snapshot.mechanicsFieldViewBuffer,
+        authority.device
+      )
+      || !webGpuBufferMatchesDevice(
+        snapshot.mechanicsFieldIdentityBuffer,
+        authority.device
+      )
     ))
     || execution?.generationId !== snapshot.generationId
     || execution?.buildOrdinal !== snapshot.buildOrdinal
@@ -627,6 +651,20 @@ export function createSchroederSpatialEpochTransaction({
     sphParticleUpload,
     mlsMpmParticleUpload
   });
+  const mechanicsFieldView = generation.mechanicsFieldView ?? null;
+  if (mechanicsFieldView && (
+    mechanicsFieldView.submitPerformed !== true
+    || mechanicsFieldView.released === true
+    || mechanicsFieldView.sourceBuffer !== spatialSourceBuffer
+    || mechanicsFieldView.identityBuffer !== sourceBuffers.identityBuffer
+    || mechanicsFieldView.parentMechanicsView !== (generation.mechanicsView ?? null)
+    || !webGpuBufferMatchesDevice(mechanicsFieldView.fieldViewBuffer, device)
+  )) {
+    throw transactionError(
+      'Spatial epoch mechanics field view does not match the frozen source family',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_IDENTITY'
+    );
+  }
   if (!Array.isArray(requiredReaderIds) || !Array.isArray(enabledConsumerReaderIds)) {
     throw transactionError(
       'requiredReaderIds and enabledConsumerReaderIds must be arrays',
@@ -707,6 +745,10 @@ export function createSchroederSpatialEpochTransaction({
       mechanicsView: generation.mechanicsView ?? null,
       mechanicsViewRuntime: generation.mechanicsViewRuntime ?? null,
       mechanicsViewBuffer: generation.mechanicsView?.mechanicsViewBuffer ?? null,
+      mechanicsFieldView,
+      mechanicsFieldViewRuntime: generation.mechanicsFieldViewRuntime ?? null,
+      mechanicsFieldViewBuffer: mechanicsFieldView?.fieldViewBuffer ?? null,
+      mechanicsFieldIdentityBuffer: mechanicsFieldView?.identityBuffer ?? null,
       generationId,
       buildOrdinal,
       sortUniqueOrdinal,

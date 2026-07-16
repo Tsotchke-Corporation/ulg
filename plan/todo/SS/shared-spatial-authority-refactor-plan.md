@@ -1090,6 +1090,82 @@ liquid water to overlapping ice/iron and eventually destabilizes. Sparse
 transfer are therefore a blocking mechanics closure before two-level
 coupling, not a reason to restore the deleted pseudo-active topology.
 
+### Slice 7 phase-overlay/mechanics-field checkpoint - 2026-07-16
+
+The blocking phase-overlay portion of Slice 7 is now implemented; this is not
+yet a claim that Slice 7's two-level coupling and aggregate traversal are
+complete. The Slice 6 compact dense-node set now derives a second sparse view
+whose identity is exactly `(denseNodeId, mechanicalFamilyId, materialId,
+continuityDomainId)`. Candidate generation, radix ordering, unique evidence,
+P2G, field grid update, explicit unlike-field contact, and G2P remain inside
+the caller-owned GPU encoder. The contact operator only removes closing normal
+velocity with equal-and-opposite momentum transfer, leaving tangential slip
+unconstrained. Field-mode compact summaries explicitly identify the legacy
+active-grid sidecar as superseded instead of rebuilding or scanning it.
+
+The native audit fixed two authority bugs before acceptance. Duplicate
+candidate runs need the following exclusive-prefix value (or final unique
+count) to map to their compact field; the prior current-prefix mapping could
+turn valid field evidence from flags `3` to `15` and collapse the field count
+to zero. Phase-reserve rows are intentionally zero mass and descriptor-free,
+so field G2P now copies them through rather than treating them as global
+evidence corruption. Native fixtures cover both cases and corrupt-view
+fail-close behavior.
+
+Phase topology now uses four fixed, phase-pure lanes per original lineage
+under `peercompute.ulg.sph-phase-carrier-plan.v2`. Stable address is
+`phaseLane * phaseLaneStride + lineageIndex`, in solid/liquid/gas/plasma order.
+Adjacent thermodynamic phase fractions are redistributed conservatively,
+including simultaneous solid/liquid/gas occupancy. Mass, momentum, first
+moment, internal energy, and total energy are conserved; merge-relative
+kinetic energy becomes internal energy. Material/model-compatible `F`, `C`,
+and `J` follow the actual largest contributor, while incompatible phase
+transitions use the target reference configuration. A malformed lineage is
+contained locally; only a malformed global layout copies every row through.
+The browser host, resident worker, portable snapshot/rematerialization path,
+compact cohort summary, and reaction-product allocator carry the v2 plan.
+Physical lane indices are mapped back to lineage indices for cohort evidence,
+and reaction products cannot consume reserved phase lanes.
+
+Phase-resolved render fields use monotone isovolume scaling by phase fraction
+instead of inverse-weight radius inflation. This preserves the opaque,
+refraction-led water/ice surface while making partial melt and vapor geometry
+appear continuously rather than as coincident full-volume shells.
+
+Manufactured native verification passes `19/19`; host/worker portable
+verification passes `30/30`; the full repository suite passes `1,404/1,410`
+with zero failures and six opt-in skips; and the production build passes with
+only the existing chunk-size warning. The 1,024-live-particle benchmark at
+`/tmp/ulg-phase-four-lane-performance.json` passes at about `101.80` complete
+engine steps/s, `101.68` wall steps/s, `217.39` resident-stage steps/s, and
+zero estimated readback bytes per step. Complete-engine throughput matches
+Slice 6, although resident-stage throughput is lower because the fixed four-
+lane topology dispatches inactive reserve capacity.
+
+The 13-frame desktop iron/ice artifact at
+`/tmp/ulg-visual-sanity-matrix/phase-four-lane-iron-ice-20260716` is clean
+through `2.56 s`. All 11 authoritative checkpoints are phase-pure with zero
+invalid mechanics rows. The final retained state contains about `567.11 kg`
+flowing liquid H2O and `55.20 kg` H2O gas; liquid reaches `1.83 m/s`. Iron
+solidifies from `1507.68 kg` liquid to `1246.58 kg` solid plus `261.10 kg`
+liquid, total mass relative span is `1.91e-6`, and observed condensed-state
+`J` remains approximately `0.97655..1.02686`. Direct frame inspection shows
+impact, progressive dark-water spreading, retained vapor geometry, and
+solidifying iron without flicker, disappearance, or transparency regression.
+The matching `390 x 844`, DPR-3 mobile artifact under
+`/tmp/ulg-visual-sanity-matrix/phase-four-lane-iron-ice-mobile-20260716` also
+passes all 11 checkpoints with 13 frames and zero browser, WebGPU, geometry,
+or surface issue; direct inspection confirms the same phase evolution.
+
+The remaining Slice 7 work is still the planned two-level reproduction,
+conservative coupling/reflux/subcycling, compact hierarchy reduction, and
+aggregate traversal. Fixed four-lane capacity should later become sparse when
+measurement justifies it. Geometry/contact/thermal-boundary unification,
+derived viscosity/conductivity/interfacial conductance, and coarse gas thermal
+microphysics remain separate transport debts; transient tiny gas fractions can
+still reach the thermal clamp near `1e6 K`. Do not call this checkpoint full
+Slice 7 or full thermophysical closure.
+
 ## Visual-Physics Restoration Checkpoint Before Slice 3
 
 The first production-consumer migration remains the next SS architecture

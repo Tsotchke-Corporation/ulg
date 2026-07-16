@@ -1366,9 +1366,120 @@ test('SPH render field physical-radius mode follows each retained particle radiu
   const tenthWeightOffGridCount = activeCellCount(0.04, halfCellPositionM, 0.1);
   assert.ok(smallCount > 0);
   assert.ok(offGridSmallCount > 0);
-  assert.ok(halfWeightOffGridCount > 0);
-  assert.ok(tenthWeightOffGridCount > 0);
+  assert.ok(halfWeightOffGridCount < offGridSmallCount);
+  assert.ok(tenthWeightOffGridCount <= halfWeightOffGridCount);
   assert.ok(largeCount > smallCount * 8);
+});
+
+test('SPH render field partitions one carrier into monotone solid and liquid isovolumes', () => {
+  const materialId = stableOpticalMaterialId('h2o');
+  const resolution = 32;
+  const isolation = 80;
+  const subtract = 24;
+  const fieldPadding = 0.22;
+  const refEdgeM = 1;
+  const particleRadiusM = 0.04;
+  const normalizedPosition = 0.5 + 0.5 / resolution;
+  const positionM = (normalizedPosition - fieldPadding) / (1 - 2 * fieldPadding);
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'h2o|h2o|solid',
+      material: 'h2o',
+      phase: 'solid',
+      resolution,
+      isolation,
+      subtract,
+      radiusNorm: 0.3,
+      particleRadiusScale: 1
+    },
+    {
+      surfaceKey: 'h2o|h2o|liquid',
+      material: 'h2o',
+      phase: 'liquid',
+      resolution,
+      isolation,
+      subtract,
+      radiusNorm: 0.3,
+      particleRadiusScale: 1
+    }
+  ]);
+  const fractions = [0, 0.01, 0.1, 0.25, 0.49, 0.5, 0.51, 0.75, 0.9, 0.99, 1];
+  const byFraction = fractions.map((liquidFraction) => {
+    const solidFraction = 1 - liquidFraction;
+    const rows = new Float32Array(SPH_GPU_RENDER_ROW_FLOATS);
+    rows.set([
+      positionM, positionM, positionM, 1,
+      materialId,
+      liquidFraction >= 0.5 ? GPU_PHASE_IDS.liquid : GPU_PHASE_IDS.solid,
+      273.15,
+      1,
+      1000,
+      0,
+      1,
+      0,
+      (4 * Math.PI * particleRadiusM ** 3) / 3,
+      particleRadiusM,
+      1,
+      0,
+      solidFraction,
+      0, 0, 0
+    ]);
+    const field = buildSphRenderFieldCpu({
+      renderRows: rows,
+      surfaceTable,
+      fieldPadding,
+      refEdgeM
+    });
+    const densityFor = (phaseId) => {
+      const surface = surfaceTable.metadata.find((entry) => entry.phaseId === phaseId);
+      const values = new Float32Array(surface.fieldCellCount);
+      for (let index = 0; index < surface.fieldCellCount; index += 1) {
+        values[index] = field.fieldRows[
+          (surface.fieldOffset + index) * SPH_GPU_RENDER_FIELD_CELL_FLOATS
+        ];
+      }
+      return values;
+    };
+    return {
+      liquidFraction,
+      solid: densityFor(GPU_PHASE_IDS.solid),
+      liquid: densityFor(GPU_PHASE_IDS.liquid)
+    };
+  });
+
+  for (let sample = 1; sample < byFraction.length; sample += 1) {
+    const previous = byFraction[sample - 1];
+    const current = byFraction[sample];
+    for (let cell = 0; cell < current.solid.length; cell += 1) {
+      assert.ok(current.solid[cell] <= previous.solid[cell] + 1e-5);
+      assert.ok(current.liquid[cell] + 1e-5 >= previous.liquid[cell]);
+    }
+  }
+
+  const selectedCell = (16 * resolution + 16) * resolution + 16;
+  const radiusFloorNorm = Math.sqrt(0.75 / (resolution * resolution) + 0.000001);
+  const radiusNorm = Math.max(
+    particleRadiusM * (1 - 2 * fieldPadding) / refEdgeM,
+    radiusFloorNorm
+  );
+  const fullStrength = (isolation + subtract) * radiusNorm * radiusNorm;
+  const distance = 16 / resolution - normalizedPosition;
+  const distanceSquared = 3 * distance * distance;
+  for (const sample of byFraction) {
+    const fraction = sample.liquidFraction;
+    const q = Math.cbrt(fraction * fraction);
+    const strength = fullStrength * q
+      + (isolation + subtract) * 0.000001 * (1 - q);
+    const expected = Math.max(
+      0,
+      strength / (0.000001 + distanceSquared) - subtract
+    );
+    assert.ok(Math.abs(sample.liquid[selectedCell] - expected) < 2e-4);
+  }
+  assert.ok(byFraction.at(-1).liquid[selectedCell] > 0);
+  assert.ok(byFraction[5].liquid[selectedCell] < byFraction.at(-1).liquid[selectedCell]);
+  assert.equal(byFraction[0].liquid[selectedCell], 0);
+  assert.equal(byFraction.at(-1).solid[selectedCell], 0);
 });
 
 test('SPH render field sparse proxy is strength-independent and matches the WGSL lattice bound', () => {

@@ -14025,6 +14025,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
                 device,
                 levelAssignment: resolvedLevelAssignment,
                 particleCount: plan.particleCount,
+                particleIdentityBuffer: sphParticleUpload?.identityBuffer || null,
+                particleIdentityStrideWords: SPH_GPU_PARTICLE_IDENTITY_UINTS,
                 laneId: 'direct-schroeder-scene',
                 sourceFamily: 'schroeder-level-assignment-particles',
                 selectedLevel: plan.selectedLevel,

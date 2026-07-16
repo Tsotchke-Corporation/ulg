@@ -136,7 +136,26 @@ test('demo initial state: hot molten-iron block on a cold ice block', () => {
   // Total includes the reserved zero-mass spare slots that GPU product-event
   // placement claims when reactions emit gas products (task #6 item 3).
   assert.ok(demo.counts.spareProductSlots >= 8);
-  assert.equal(demo.counts.total, demo.counts.drop + demo.counts.base + demo.counts.spareProductSlots);
+  const lineageCapacity = demo.counts.drop
+    + demo.counts.base
+    + demo.counts.spareProductSlots;
+  assert.equal(demo.counts.phaseCompanionSlots, lineageCapacity * 3);
+  assert.equal(demo.state.phaseCarrierPlan.schema, 'peercompute.ulg.sph-phase-carrier-plan.v2');
+  assert.equal(demo.state.phaseCarrierPlan.status, 'phase-lane-capacity-ready');
+  assert.equal(demo.state.phaseCarrierPlan.lineageCapacity, lineageCapacity);
+  assert.equal(demo.state.phaseCarrierPlan.primaryCapacity, lineageCapacity);
+  assert.equal(demo.state.phaseCarrierPlan.phaseLaneCount, 4);
+  assert.equal(demo.state.phaseCarrierPlan.phaseLaneStride, lineageCapacity);
+  assert.equal(demo.state.phaseCarrierPlan.companionStart, lineageCapacity);
+  assert.equal(demo.state.phaseCarrierPlan.companionCapacity, lineageCapacity * 3);
+  assert.equal(demo.state.phaseCarrierPlan.particleCapacity, lineageCapacity * 4);
+  assert.equal(
+    demo.counts.total,
+    demo.counts.drop
+      + demo.counts.base
+      + demo.counts.spareProductSlots
+      + demo.counts.phaseCompanionSlots
+  );
   assert.equal(demo.dropMaterial, 'fe');
   assert.equal(demo.baseMaterial, 'h2o');
   const fe = demo.state.particles.filter((p) => p.material === 'fe');
@@ -1072,7 +1091,9 @@ test('SPH phase view state exposes resolved initial particle spacing', () => {
   assert.equal(viewState.initialParticleSpacing.drop.particlesPerEdge, demo.initialParticleSpacing.drop.particlesPerEdge);
   assert.equal(viewState.initialParticleSpacing.base.particlesPerEdge, demo.initialParticleSpacing.base.particlesPerEdge);
   assert.equal(viewState.particleRadiiM.length, demo.counts.total);
-  assert.ok(viewState.particleRadiiM.every((value) => value > 0));
+  assert.ok(viewState.particleRadiiM.every((value, index) => (
+    viewState.materials[index]?.phaseCompanionSlot === true ? value === 0 : value > 0
+  )));
   const spareIndex = demo.state.particles.findIndex((particle) => particle.spareProductSlot === true);
   assert.ok(spareIndex >= 0);
   assert.equal(viewState.materials[spareIndex].particleMassKg, 0);

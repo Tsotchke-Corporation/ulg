@@ -929,7 +929,7 @@ function materialParticleCountsText(counts = {}) {
 function materialParticleCountsFromMaterials(materials = []) {
   const counts = {};
   for (const descriptor of materials || []) {
-    if (descriptor?.spareProductSlot === true) continue;
+    if (descriptor?.spareProductSlot === true || descriptor?.phaseCompanionSlot === true) continue;
     const material = descriptor?.material || descriptor?.renderKey || 'unknown';
     counts[material] = (counts[material] || 0) + 1;
   }

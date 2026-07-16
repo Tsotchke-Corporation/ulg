@@ -906,6 +906,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let row0 = thermo_row0(particle_index);
   let row1 = thermo_row1(particle_index);
   let row2 = thermo_row2(particle_index);
+  if (!(pos_mass.w > 0.0)) {
+    out_sph_state[particle_index * 2u] = pos_mass;
+    out_sph_state[particle_index * 2u + 1u] = vel_u;
+    out_sph_thermo[particle_index * 3u] = row0;
+    out_sph_thermo[particle_index * 3u + 1u] = row1;
+    out_sph_thermo[particle_index * 3u + 2u] = row2;
+    return;
+  }
   let position = vec3<f32>(pos_mass.x, pos_mass.y, pos_mass.z);
   let mass = max(pos_mass.w, 1.0e-30);
   let temperature = row0.z;
@@ -949,6 +957,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	            let other = thermal_bins[total_cells + cell * params.bin_capacity + entry];
 	            if (other == particle_index) { continue; }
 	            let other_pos_mass = state_pos_mass(other);
+	            if (!(other_pos_mass.w > 0.0)) { continue; }
 	            let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	            let distance = length(delta);
 	            let other_row0 = thermo_row0(other);
@@ -1009,6 +1018,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       continue;
     }
 	    let other_pos_mass = state_pos_mass(other);
+	    if (!(other_pos_mass.w > 0.0)) { continue; }
 	    let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	    let distance = length(delta);
 	    let other_row0 = thermo_row0(other);
@@ -2479,6 +2489,8 @@ struct ProductEventPlacementParams {
 @group(0) @binding(6) var<storage, read> source_state: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> source_thermo: array<vec4<f32>>;
 
+const PHASE_COMPANION_RESERVED_STATUS: f32 = 254.0;
+
 fn placement_summary_base(product_term_index: u32) -> u32 {
   return product_term_index * 8u;
 }
@@ -3130,7 +3142,13 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // pipeline skips mass <= 0, so claiming one only ever adds matter.
     var slot = params.particle_count;
     for (var candidate = cursor; candidate < params.particle_count; candidate = candidate + 1u) {
-      if (next_state[candidate * params.state_stride_vec4].w <= 0.0) {
+      let candidate_thermo_base = candidate * params.thermo_stride_vec4;
+      let candidate_reserved_for_phase =
+        abs(next_thermo[candidate_thermo_base + 2u].z - PHASE_COMPANION_RESERVED_STATUS) < 0.5;
+      if (
+        next_state[candidate * params.state_stride_vec4].w <= 0.0
+        && !candidate_reserved_for_phase
+      ) {
         slot = candidate;
         break;
       }
@@ -5508,6 +5526,23 @@ fn smooth_palette_weight(ratio: f32) -> f32 {
   return 1.0 - t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
+fn phase_partitioned_metaball_strength(
+  full_strength: f32,
+  phase_weight: f32,
+  isolation: f32,
+  subtract: f32
+) -> f32 {
+  let fraction = clamp(phase_weight, 0.0, 1.0);
+  let volume_scale_squared = pow(fraction * fraction, 0.3333333333333333);
+  let zero_radius_strength = max(isolation + subtract, 0.0) * 0.000001;
+  return full_strength * volume_scale_squared
+    + zero_radius_strength * (1.0 - volume_scale_squared);
+}
+
+fn metaball_support_norm(strength: f32, subtract: f32) -> f32 {
+  return sqrt(max(strength / max(subtract, 1.0e-12) - 0.000001, 0.0));
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let cell_index = global_id.x;
@@ -5562,8 +5597,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     sqrt(0.75 * inv_resolution * inv_resolution + 0.000001),
     particle_radius_scale > 0.0
   );
-  let particle_support_multiplier = sqrt(max((s1.y + subtract) / subtract, 0.0));
-
   var density = 0.0;
   var palette = vec3<f32>(0.0, 0.0, 0.0);
   // Density-weighted particle temperature for per-fragment emission; product
@@ -5591,7 +5624,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let row4 = render_row4(particle_index);
     let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, row4.x);
-    if (phase_weight <= 0.003) {
+    if (phase_weight <= 0.0) {
       continue;
     }
     let particle = vec3<f32>(
@@ -5601,31 +5634,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
     let delta = cell - particle;
     let dist2 = dot(delta, delta);
-    // The contribution is multiplied by phase_weight below. Compensate the
-    // conservative point-sampling floor by 1/sqrt(weight), otherwise a
-    // fractional transition carrier can fall below isolation at every cell.
-    let phase_aware_particle_radius_floor_norm = particle_radius_floor_norm
-      / sqrt(max(phase_weight, 1.0e-8));
     let particle_radius_norm = select(
       0.0,
-      max(row3.y * particle_radius_norm_scale, phase_aware_particle_radius_floor_norm),
+      max(row3.y * particle_radius_norm_scale, particle_radius_floor_norm),
       particle_radius_scale > 0.0 && row3.y > 0.0
     );
-    let particle_strength = select(
+    let full_particle_strength = select(
       strength,
       (s1.y + subtract) * particle_radius_norm * particle_radius_norm,
       particle_radius_norm > 0.0
     );
-    let particle_support_norm = select(
-      support_norm,
-      particle_radius_norm * particle_support_multiplier,
-      particle_radius_norm > 0.0
+    let particle_strength = phase_partitioned_metaball_strength(
+      full_particle_strength,
+      phase_weight,
+      s1.y,
+      subtract
     );
-    let value = (particle_strength * phase_weight) / (0.000001 + dist2) - subtract;
+    let particle_support_norm = metaball_support_norm(particle_strength, subtract);
+    let value = particle_strength / (0.000001 + dist2) - subtract;
     if (value > 0.0) {
       density = density + value;
       let ratio = sqrt(dist2) / max(particle_support_norm, 1.0e-6);
-      palette = palette + color * smooth_palette_weight(ratio) * phase_weight;
+      palette = palette + color * smooth_palette_weight(ratio);
       temperature_weighted = temperature_weighted + row1.z * value;
       temperature_weight = temperature_weight + value;
       let particle_velocity = row4.yzw;
@@ -5662,7 +5692,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           continue;
         }
         let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, render_row4(particle_index).x);
-        if (phase_weight <= 0.003) {
+        if (phase_weight <= 0.0) {
           continue;
         }
         let particle = vec3<f32>(
@@ -5672,28 +5702,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
         let delta = cell - particle;
         let dist2 = dot(delta, delta) + smear_sq;
-        let phase_aware_particle_radius_floor_norm = particle_radius_floor_norm
-          / sqrt(max(phase_weight, 1.0e-8));
         let particle_radius_norm = select(
           0.0,
-          max(row3.y * particle_radius_norm_scale, phase_aware_particle_radius_floor_norm),
+          max(row3.y * particle_radius_norm_scale, particle_radius_floor_norm),
           particle_radius_scale > 0.0 && row3.y > 0.0
         );
-        let particle_strength = select(
+        let full_particle_strength = select(
           strength,
           (s1.y + subtract) * particle_radius_norm * particle_radius_norm,
           particle_radius_norm > 0.0
         );
-        let particle_support_norm = select(
-          support_norm,
-          particle_radius_norm * particle_support_multiplier,
-          particle_radius_norm > 0.0
+        let particle_strength = phase_partitioned_metaball_strength(
+          full_particle_strength,
+          phase_weight,
+          s1.y,
+          subtract
         );
-        let value = (particle_strength * phase_weight) / (0.000001 + dist2) - subtract;
+        let particle_support_norm = metaball_support_norm(particle_strength, subtract);
+        let value = particle_strength / (0.000001 + dist2) - subtract;
         if (value > 0.0) {
           corrected_density = corrected_density + value;
           let ratio = sqrt(dist2) / max(particle_support_norm, 1.0e-6);
-          corrected_palette = corrected_palette + color * smooth_palette_weight(ratio) * phase_weight;
+          corrected_palette = corrected_palette + color * smooth_palette_weight(ratio);
           corrected_temperature_weighted = corrected_temperature_weighted + row1.z * value;
           corrected_temperature_weight = corrected_temperature_weight + value;
         }
@@ -9583,6 +9613,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let thermo0 = sph_thermo[particle_index * 3u];
   let state0 = sph_state[particle_index * 2u];
+  if (!(state0.w > 0.0)) {
+    return;
+  }
   let phase_mechanics = find_phase_mechanics(thermo0.x, thermo0.y);
   if (phase_mechanics.status != 1.0) {
     return;
@@ -9650,6 +9683,10 @@ struct ResidentSummaryParams {
   drop_start_index: u32,
   drop_end_index: u32,
   h2o_material_id: u32,
+  phase_lineage_capacity: u32,
+  phase_lane_count: u32,
+  pad0: u32,
+  pad1: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_sph_state: array<vec4<f32>>;
@@ -9825,8 +9862,18 @@ fn main(
     let displacement = next_pos_mass.xyz - source_pos_mass.xyz;
     max_displacement2 = max(max_displacement2, dot(displacement, displacement));
     let particle_speed2 = dot(next_vel_u.xyz, next_vel_u.xyz);
-    let in_base_cohort = index >= params.base_start_index && index < params.base_end_index;
-    let in_drop_cohort = index >= params.drop_start_index && index < params.drop_end_index;
+    let phase_lineage_v2 = params.phase_lineage_capacity > 0u
+      && params.phase_lane_count == 4u
+      && params.phase_lineage_capacity * params.phase_lane_count == params.particle_count;
+    let cohort_index = select(
+      index,
+      index % max(params.phase_lineage_capacity, 1u),
+      phase_lineage_v2
+    );
+    let in_base_cohort = cohort_index >= params.base_start_index
+      && cohort_index < params.base_end_index;
+    let in_drop_cohort = cohort_index >= params.drop_start_index
+      && cohort_index < params.drop_end_index;
     if (in_base_cohort && next_pos_mass.w > 0.0) {
       base_cohort_mass = base_cohort_mass + next_pos_mass.w;
       base_cohort_position_mass = base_cohort_position_mass + next_pos_mass.w * next_pos_mass.xyz;
@@ -10191,6 +10238,10 @@ struct ResidentSummaryParams {
   drop_start_index: u32,
   drop_end_index: u32,
   h2o_material_id: u32,
+  phase_lineage_capacity: u32,
+  phase_lane_count: u32,
+  pad0: u32,
+  pad1: u32,
 };
 
 @group(0) @binding(0) var<storage, read> partial_summaries: array<vec4<f32>>;
@@ -10671,6 +10722,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let rest_volume_m3 = max(mls_mpm_mechanics[mechanics_offset + 19u], 0.0);
   let mechanics_volume_m3 = rest_volume_m3 * max(volume_ratio_j, 0.000001);
   let phase_volume_reference_mass_kg = max(mls_mpm_mechanics[mechanics_offset + 31u], 0.0);
+  if (!(mass_kg > 0.0)) {
+    let inactive_level = params.min_level;
+    let inactive_dx = max(params.base_grid_spacing_m * exp2(f32(inactive_level)), 0.000001);
+    level_assignments[assignment_offset + 0u] = f32(inactive_level);
+    level_assignments[assignment_offset + 1u] = inactive_dx;
+    level_assignments[assignment_offset + 2u] = 0.0;
+    level_assignments[assignment_offset + 3u] = 0.0;
+    level_assignments[assignment_offset + 4u] = 0.0;
+    level_assignments[assignment_offset + 5u] = 0.0;
+    level_assignments[assignment_offset + 6u] = 0.0;
+    level_assignments[assignment_offset + 7u] = rest_density_kg_per_m3;
+    level_assignments[assignment_offset + 8u] = phase_id;
+    level_assignments[assignment_offset + 9u] = material_id;
+    // The base SS epoch currently requires every fixed-capacity source row
+    // to carry a structurally ready status. Mechanics consumers separately
+    // exclude zero-mass rows from their compact/field views.
+    level_assignments[assignment_offset + 10u] = 1.0;
+    level_assignments[assignment_offset + 11u] = max(params.hysteresis_band, 0.0);
+    level_assignments[assignment_offset + 12u] = px;
+    level_assignments[assignment_offset + 13u] = py;
+    level_assignments[assignment_offset + 14u] = pz;
+    level_assignments[assignment_offset + 15u] = params.chart_id;
+    return;
+  }
   var density_represented_volume_m3 = 0.0;
   if (ss_positive(phase_volume_reference_mass_kg) && ss_positive(rest_density_kg_per_m3)) {
     density_represented_volume_m3 = phase_volume_reference_mass_kg / rest_density_kg_per_m3;

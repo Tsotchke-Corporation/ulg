@@ -49,6 +49,7 @@ export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
   ready: 1,
   energyClampedLow: 2,
   energyClampedHigh: 3,
+  phaseCompanionReserved: 254,
   missingMaterialProperties: 255
 });
 
@@ -454,7 +455,9 @@ export function buildSphGpuParticleBuffers(state, {
       finiteNumber(particle.v?.[2]),
       finiteNumber(particle.specificInternalEnergyJPerKg)
     ], stateOffset);
-    const status = statusForEquilibrium(eq, properties);
+    const status = particle.phaseCompanionSlot === true
+      ? SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved
+      : statusForEquilibrium(eq, properties);
     thermoValues.set([
       properties ? stableOpticalMaterialId(material) : 0,
       gpuPhaseId(phase),
@@ -493,6 +496,23 @@ export function buildSphGpuParticleBuffers(state, {
       phase,
       phaseId: gpuPhaseId(phase),
       status,
+      spareProductSlot: particle.spareProductSlot === true,
+      phaseCompanionSlot: particle.phaseCompanionSlot === true,
+      phaseCarrierPrimaryIndex: Number.isSafeInteger(particle.phaseCarrierPrimaryIndex)
+        ? particle.phaseCarrierPrimaryIndex
+        : null,
+      phaseCarrierCompanionIndex: Number.isSafeInteger(particle.phaseCarrierCompanionIndex)
+        ? particle.phaseCarrierCompanionIndex
+        : null,
+      phaseCarrierLineageIndex: Number.isSafeInteger(particle.phaseCarrierLineageIndex)
+        ? particle.phaseCarrierLineageIndex
+        : null,
+      phaseCarrierLane: Number.isSafeInteger(particle.phaseCarrierLane)
+        ? particle.phaseCarrierLane
+        : null,
+      phaseCarrierTargetPhaseId: Number.isSafeInteger(particle.phaseCarrierTargetPhaseId)
+        ? particle.phaseCarrierTargetPhaseId
+        : null,
       initialBodyId: particle.initialBodyId ?? null,
       initialBodyDomainId: normalizedRenderDomainId(particle.initialBodyDomainId, { particleIndex: index }),
       renderDomainId: renderDomain.renderDomainId,
@@ -558,6 +578,7 @@ export function buildSphGpuParticleBuffers(state, {
     identityRevision: particleIdentityRevision(identityValues, renderDomainKeys),
     cpuIdentityStale: false,
     metadata,
+    phaseCarrierPlan: state.phaseCarrierPlan ? { ...state.phaseCarrierPlan } : null,
     materialPropertyBankWarmInputTable,
     materialPropertyBankParticleSizeTable,
     scientificValidation: false,
@@ -644,6 +665,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
       { copySource: true }
     ),
     renderDomainKeys: { ...(packed.renderDomainKeys || {}) },
+    phaseCarrierPlan: packed.phaseCarrierPlan ? { ...packed.phaseCarrierPlan } : null,
     materialPropertyBankWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer,
     materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,
@@ -696,7 +718,9 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     const restDensity = restDensityFor(properties, eq.stablePhase, particle);
     const volume0 = finiteNumber(particle.mpmVolume0, restDensity > 0 ? finiteNumber(particle.massKg) / restDensity : 0);
     const J = finiteNumber(particle.mpmJ, 1);
-    const status = statusForEquilibrium(eq, properties);
+    const status = particle.phaseCompanionSlot === true
+      ? SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved
+      : statusForEquilibrium(eq, properties);
     const phaseVolumeReferenceMassKg = finiteNumber(
       particle.phaseVolumeReferenceMassKg,
       finiteNumber(particle.massKg, 0)
@@ -715,7 +739,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       constitutive.lameLambdaPa,
       constitutive.soundSpeedMPerS,
       constitutive.eosModelId,
-      constitutive.constitutiveStatus,
+      particle.phaseCompanionSlot === true ? status : constitutive.constitutiveStatus,
       Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
       constitutive.dynamicViscosityPaS,
       constitutive.surfaceTensionNPerM,
@@ -727,6 +751,8 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       phase: eq.stablePhase,
       solid: constitutive.solid,
       status,
+      spareProductSlot: particle.spareProductSlot === true,
+      phaseCompanionSlot: particle.phaseCompanionSlot === true,
       effectiveBulkModulusPa: constitutive.effectiveBulkModulusPa,
       shearModulusPa: constitutive.shearModulusPa,
       lameLambdaPa: constitutive.lameLambdaPa,
@@ -786,6 +812,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       : [0, -9.80665, 0],
     mechanics,
     metadata,
+    phaseCarrierPlan: state.phaseCarrierPlan ? { ...state.phaseCarrierPlan } : null,
     materialPropertyBankWarmInputTable,
     materialPropertyBankParticleSizeTable,
     algorithmMaterialMlsMpmMechanicsRows,
@@ -832,6 +859,7 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
       packed.mechanics,
       { copySource: true }
     ),
+    phaseCarrierPlan: packed.phaseCarrierPlan ? { ...packed.phaseCarrierPlan } : null,
     materialPropertyBankWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer,
     materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,

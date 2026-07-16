@@ -80,6 +80,8 @@ export const ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_MECHANICS_STAGE_SEED_NODE_SCHEMA 
 export const ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_MECHANICS_STAGE_COMPACT_SEED_SCHEMA = 'peercompute.ulg.remote-task-graph-sph-mls-mpm-mechanics-stage-compact-seed.v0';
 export const ULG_REMOTE_TASK_GRAPH_COMPACT_LOCAL_REFRESH_CONTRACT_SCHEMA = 'peercompute.ulg.remote-task-graph-compact-local-refresh-contract.v0';
 export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA = 'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
+const ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA = 'peercompute.ulg.sph-phase-carrier-plan.v1';
+const ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA = 'peercompute.ulg.sph-phase-carrier-plan.v2';
 export const ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.remote-task-graph-same-device-retained-buffer-import.v0';
 export const ULG_SPH_MLS_MPM_SAME_DEVICE_HOT_BUFFER_SOURCE_PUBLICATION_SCHEMA = 'peercompute.ulg.sph-mls-mpm-same-device-hot-buffer-source-publication.v0';
 export const ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA = 'peercompute.ulg.worker-retained-access-contract.v0';
@@ -325,6 +327,87 @@ function finiteSeedNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'phase carrier plan') {
+  if (plan == null) return null;
+  const count = Number(particleCount);
+  const countAccepted = Number.isSafeInteger(count) && count > 0;
+  if (plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA) {
+    const lineageCapacity = Number(plan?.lineageCapacity);
+    const primaryCapacity = Number(plan?.primaryCapacity);
+    const phaseLaneCount = Number(plan?.phaseLaneCount);
+    const phaseLaneStride = Number(plan?.phaseLaneStride);
+    const companionStart = Number(plan?.companionStart);
+    const companionCapacity = Number(plan?.companionCapacity);
+    const particleCapacity = Number(plan?.particleCapacity);
+    const stableLaneAddressPresent = plan.stableLaneAddress !== undefined;
+    const accepted = countAccepted
+      && plan?.status === 'phase-lane-capacity-ready'
+      && Number.isSafeInteger(plan.lineageCapacity)
+      && Number.isSafeInteger(plan.primaryCapacity)
+      && Number.isSafeInteger(plan.phaseLaneCount)
+      && Number.isSafeInteger(plan.phaseLaneStride)
+      && Number.isSafeInteger(plan.companionStart)
+      && Number.isSafeInteger(plan.companionCapacity)
+      && Number.isSafeInteger(plan.particleCapacity)
+      && lineageCapacity > 0
+      && primaryCapacity === lineageCapacity
+      && phaseLaneCount === 4
+      && phaseLaneStride === lineageCapacity
+      && companionStart === lineageCapacity
+      && companionCapacity === 3 * lineageCapacity
+      && particleCapacity === 4 * lineageCapacity
+      && particleCapacity === count
+      && (!stableLaneAddressPresent || typeof plan.stableLaneAddress === 'string');
+    if (accepted) {
+      return {
+        schema: ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA,
+        status: 'phase-lane-capacity-ready',
+        lineageCapacity,
+        primaryCapacity,
+        phaseLaneCount,
+        phaseLaneStride,
+        companionStart,
+        companionCapacity,
+        particleCapacity,
+        ...(stableLaneAddressPresent
+          ? { stableLaneAddress: plan.stableLaneAddress }
+          : {})
+      };
+    }
+  }
+  const primaryCapacity = Number(plan?.primaryCapacity);
+  const companionStart = Number(plan?.companionStart);
+  const companionCapacity = Number(plan?.companionCapacity);
+  const particleCapacity = Number(plan?.particleCapacity);
+  const accepted = countAccepted
+    && plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA
+    && plan?.status === 'phase-companion-capacity-ready'
+    && Number.isSafeInteger(primaryCapacity)
+    && primaryCapacity > 0
+    && Number.isSafeInteger(companionStart)
+    && companionStart === primaryCapacity
+    && Number.isSafeInteger(companionCapacity)
+    && companionCapacity === primaryCapacity
+    && Number.isSafeInteger(particleCapacity)
+    && particleCapacity === count
+    && companionStart + companionCapacity === count;
+  if (!accepted) {
+    throw new RangeError(
+      `${label} does not match particleCount ${Number.isSafeInteger(count) ? count : 'invalid'}`
+    );
+  }
+  // Legacy v1 snapshots carry only fixed-pair topology metadata. Never
+  // forward arbitrary properties (especially local GPUBuffer handles).
+  return {
+    schema: ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA,
+    status: 'phase-companion-capacity-ready',
+    primaryCapacity,
+    companionStart,
+    companionCapacity,
+    particleCapacity
+  };
+}
+
 function finiteSeedVector3(value, fallback) {
   const source = Array.isArray(value) ? value : fallback;
   return [0, 1, 2].map((index) => finiteSeedNumber(source?.[index], fallback[index]));
@@ -489,6 +572,11 @@ function normalizeMechanicsCompactBufferSnapshot({
     };
   }
   try {
+    const phaseCarrierPlan = clonePhaseCarrierPlanForParticleCount(
+      snapshot.phaseCarrierPlan,
+      resolvedParticleCount,
+      'compact buffer snapshot phaseCarrierPlan'
+    );
     const sphState = snapshotFloat32Array(
       snapshot.sphState || snapshot.sphStateRows || snapshot.state,
       resolvedParticleCount * SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -517,6 +605,7 @@ function normalizeMechanicsCompactBufferSnapshot({
         time: finiteSeedNumber(snapshot.time, time),
         dimension: finiteSeedNumber(snapshot.dimension, 3),
         smoothingLengthM: finiteSeedNumber(snapshot.smoothingLengthM, 0),
+        phaseCarrierPlan,
         sphState,
         sphThermo,
         mlsMpmMechanics
@@ -607,6 +696,7 @@ function buildCompactMechanicsStageSeedCandidate({
     sameDeviceSourceHotBufferKey,
     compactBufferSnapshotStatus: compactSnapshotValidation.status,
     compactBufferSnapshotByteLength,
+    phaseCarrierPlan: compactSnapshotValidation.compactBufferSnapshot?.phaseCarrierPlan || null,
     gpuFenceSatisfied
   });
   const hasSameDeviceLocalSource = Boolean(
@@ -1546,6 +1636,11 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     throw new TypeError('refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot requires a compact buffer snapshot');
   }
   const particleCount = Math.max(0, Math.trunc(finiteSeedNumber(snapshot.particleCount, 0)));
+  const phaseCarrierPlan = clonePhaseCarrierPlanForParticleCount(
+    snapshot.phaseCarrierPlan,
+    particleCount,
+    'compact buffer snapshot phaseCarrierPlan'
+  );
   const sphState = snapshotFloat32Array(
     snapshot.sphState || snapshot.sphStateRows || snapshot.state,
     particleCount * SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -1608,6 +1703,7 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     identityRequired,
     identityRevision: snapshot.identityRevision || null,
     renderDomainKeys: { ...(snapshot.renderDomainKeys || {}) },
+    phaseCarrierPlan,
     cpuIdentityStale: false,
     metadata: [],
     scientificValidation: false,
@@ -1625,6 +1721,7 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
     mechanicsStrideBytes: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     mechanics: mlsMpmMechanics,
+    phaseCarrierPlan: phaseCarrierPlan ? { ...phaseCarrierPlan } : null,
     metadata: [],
     scientificValidation: false,
     sphValidation: false,

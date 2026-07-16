@@ -1500,6 +1500,22 @@ function copyInitialParticleMetadataIntoState(state, sourceParticles) {
     particle.material = source.material;
     particle.role = source.role;
     particle.spareProductSlot = source.spareProductSlot === true;
+    particle.phaseCompanionSlot = source.phaseCompanionSlot === true;
+    particle.phaseCarrierPrimaryIndex = Number.isSafeInteger(source.phaseCarrierPrimaryIndex)
+      ? source.phaseCarrierPrimaryIndex
+      : null;
+    particle.phaseCarrierCompanionIndex = Number.isSafeInteger(source.phaseCarrierCompanionIndex)
+      ? source.phaseCarrierCompanionIndex
+      : null;
+    particle.phaseCarrierLineageIndex = Number.isSafeInteger(source.phaseCarrierLineageIndex)
+      ? source.phaseCarrierLineageIndex
+      : null;
+    particle.phaseCarrierLane = Number.isSafeInteger(source.phaseCarrierLane)
+      ? source.phaseCarrierLane
+      : null;
+    particle.phaseCarrierTargetPhaseId = Number.isSafeInteger(source.phaseCarrierTargetPhaseId)
+      ? source.phaseCarrierTargetPhaseId
+      : null;
     particle.initialBodyId = source.initialBodyId ?? null;
     particle.initialBodyDomainId = Number(source.initialBodyDomainId) || 0;
     particle.renderDomainId = Number(source.renderDomainId) || 0;
@@ -1532,6 +1548,67 @@ function copyInitialParticleMetadataIntoState(state, sourceParticles) {
     particle.currentCellVolumeM3 = source.currentCellVolumeM3;
     particle.currentParticleRadiusM = source.currentParticleRadiusM;
     particle.particleSizeState = source.particleSizeState ? { ...source.particleSizeState } : null;
+  });
+}
+
+function appendPhaseCarrierLanes(particles) {
+  const lineageCapacity = particles.length;
+  const phaseLaneCount = 4;
+  const phaseLaneStride = lineageCapacity;
+  const companionStart = lineageCapacity;
+  const reservedLanes = [];
+  for (let phaseLane = 1; phaseLane < phaseLaneCount; phaseLane += 1) {
+    for (let lineageIndex = 0; lineageIndex < lineageCapacity; lineageIndex += 1) {
+      const primary = particles[lineageIndex];
+      reservedLanes.push({
+        ...primary,
+        role: 'phase-companion-slot',
+        phaseCarrierParentRole: primary.role ?? null,
+        phaseCompanionSlot: true,
+        phaseCarrierPrimaryIndex: lineageIndex,
+        phaseCarrierCompanionIndex: companionStart + lineageIndex,
+        phaseCarrierLineageIndex: lineageIndex,
+        phaseCarrierLane: phaseLane,
+        phaseCarrierTargetPhaseId: phaseLane + 1,
+        // Reaction placement owns the ordinary product-spare pool. Phase
+        // lanes are an independent fixed-capacity topology reserve.
+        spareProductSlot: false,
+        x: [...primary.x],
+        v: [0, 0, 0],
+        massKg: 0,
+        phaseVolumeReferenceMassKg: 0,
+        phaseVolumeReferenceVolumeM3: 0,
+        phaseVolumeReferenceMassRatio: 0,
+        visualRestVolumeM3: 0,
+        visualParticleRadiusM: 0,
+        visualRestParticleRadiusM: 0,
+        particleRadiusM: 0,
+        restParticleRadiusM: 0,
+        currentCellVolumeM3: 0,
+        currentParticleRadiusM: 0,
+        mpmVolume0: 0
+      });
+    }
+  }
+  for (let lineageIndex = 0; lineageIndex < lineageCapacity; lineageIndex += 1) {
+    particles[lineageIndex].phaseCarrierPrimaryIndex = lineageIndex;
+    particles[lineageIndex].phaseCarrierCompanionIndex = companionStart + lineageIndex;
+    particles[lineageIndex].phaseCarrierLineageIndex = lineageIndex;
+    particles[lineageIndex].phaseCarrierLane = 0;
+    particles[lineageIndex].phaseCarrierTargetPhaseId = 1;
+  }
+  particles.push(...reservedLanes);
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity,
+    primaryCapacity: lineageCapacity,
+    phaseLaneCount,
+    phaseLaneStride,
+    companionStart,
+    companionCapacity: lineageCapacity * (phaseLaneCount - 1),
+    particleCapacity: particles.length,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex'
   });
 }
 
@@ -1663,7 +1740,11 @@ function buildSphInitialBodiesDemoState({
       spareProductSlot: true
     });
   }
+  const phaseCarrierPlan = gpuResidentMechanics
+    ? appendPhaseCarrierLanes(all)
+    : null;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
+  state.phaseCarrierPlan = phaseCarrierPlan;
   copyInitialParticleMetadataIntoState(state, all);
 
   const totalBlockVolumeM3 = bodyPlans.reduce((sum, plan) => sum + plan.blockVolumeM3, 0);
@@ -1792,6 +1873,9 @@ function buildSphInitialBodiesDemoState({
       byBodyId: countsByBodyId,
       live: liveParticles.length,
       spareProductSlots: spareProductSlotCount,
+      ...(phaseCarrierPlan
+        ? { phaseCompanionSlots: phaseCarrierPlan.companionCapacity }
+        : {}),
       total: all.length,
       ...(legacyBase ? { base: countsByBodyId[legacyBase.id] } : {}),
       ...(legacyDrop ? { drop: countsByBodyId[legacyDrop.id] } : {})
@@ -2064,13 +2148,33 @@ export function buildSphPhaseDemoState({
       spareProductSlot: true
     });
   }
+  const phaseCarrierPlan = gpuResidentMechanics
+    ? appendPhaseCarrierLanes(all)
+    : null;
   const smoothingLengthM = initialParticleSpacing.smoothingLengthM;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
+  state.phaseCarrierPlan = phaseCarrierPlan;
   // Carry per-particle temperature + material alongside the SPH state for rendering.
   state.particles.forEach((p, index) => {
     p.material = all[index].material;
     p.role = all[index].role;
     p.spareProductSlot = all[index].spareProductSlot === true;
+    p.phaseCompanionSlot = all[index].phaseCompanionSlot === true;
+    p.phaseCarrierPrimaryIndex = Number.isSafeInteger(all[index].phaseCarrierPrimaryIndex)
+      ? all[index].phaseCarrierPrimaryIndex
+      : null;
+    p.phaseCarrierCompanionIndex = Number.isSafeInteger(all[index].phaseCarrierCompanionIndex)
+      ? all[index].phaseCarrierCompanionIndex
+      : null;
+    p.phaseCarrierLineageIndex = Number.isSafeInteger(all[index].phaseCarrierLineageIndex)
+      ? all[index].phaseCarrierLineageIndex
+      : null;
+    p.phaseCarrierLane = Number.isSafeInteger(all[index].phaseCarrierLane)
+      ? all[index].phaseCarrierLane
+      : null;
+    p.phaseCarrierTargetPhaseId = Number.isSafeInteger(all[index].phaseCarrierTargetPhaseId)
+      ? all[index].phaseCarrierTargetPhaseId
+      : null;
     p.temperatureK = all[index].temperatureK;
     p.pressurePa = all[index].pressurePa;
     p.restDensityKgPerM3 = all[index].restDensityKgPerM3;
@@ -2118,6 +2222,9 @@ export function buildSphPhaseDemoState({
       drop: dropParticles.length,
       base: baseParticles.length,
       spareProductSlots: spareProductSlotCount,
+      ...(phaseCarrierPlan
+        ? { phaseCompanionSlots: phaseCarrierPlan.companionCapacity }
+        : {}),
       total: all.length
     },
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))

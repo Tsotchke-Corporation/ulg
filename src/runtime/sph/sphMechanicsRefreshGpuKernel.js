@@ -185,11 +185,11 @@ function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
 }
 
 function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
-  return device.createBuffer({
+  return tagWebGpuBufferDevice(device.createBuffer({
     label,
     size: Math.max(4, byteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
-  });
+  }), device);
 }
 
 export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable) {
@@ -401,6 +401,7 @@ export function refreshMlsMpmMechanicsCpu({
     const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
     const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
     const mechanicsOffset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    if (!(finiteNumber(state[stateOffset + 3], 0) > 0)) continue;
     const materialId = thermo[thermoOffset];
     const phaseId = thermo[thermoOffset + 1];
     const phaseMechanics = findMechanicsMaterialPhaseRecord(mechanicsMaterialTable, materialId, phaseId);

@@ -62,6 +62,7 @@ const ACTIVE_GRID_DISPATCH_WORKGROUP_SIZE = 64;
 const DEFAULT_ACTIVE_GRID_SAFETY_CELLS = 3;
 const DEFAULT_GRAVITY_M_PER_S2 = [0, -9.80665, 0];
 const H2O_MATERIAL_ID = stableOpticalMaterialId('h2o');
+const SPH_PHASE_CARRIER_PLAN_V2_SCHEMA = 'peercompute.ulg.sph-phase-carrier-plan.v2';
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -106,6 +107,13 @@ function gridNodeScanCountForSummaryScope(summaryScope, gridNodeCount) {
     : gridNodeCount;
 }
 
+function mechanicsFieldViewEnabledForSummary({ gridUpdate, g2pReconstruction }) {
+  return gridUpdate?.mechanicsFieldViewEnabled === true
+    || gridUpdate?.schroederSpatialDirectory?.mechanicsFieldViewEnabled === true
+    || g2pReconstruction?.mechanicsFieldViewEnabled === true
+    || g2pReconstruction?.schroederSpatialDirectory?.mechanicsFieldViewEnabled === true;
+}
+
 function assertPackedInputs({ sphParticleState, mlsMpmParticleState }) {
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('MLS-MPM resident summary requires a packed SPH GPU particle buffer');
@@ -135,25 +143,51 @@ function normalizedCohortRange(range, particleCount) {
   return { start, end };
 }
 
+function normalizedPhaseLineageSummaryPlan(plan, particleCount) {
+  const lineageCapacity = Number(plan?.lineageCapacity);
+  const phaseLaneCount = Number(plan?.phaseLaneCount);
+  const phaseLaneStride = Number(plan?.phaseLaneStride);
+  const particleCapacity = Number(plan?.particleCapacity);
+  const accepted = plan?.schema === SPH_PHASE_CARRIER_PLAN_V2_SCHEMA
+    && plan?.status === 'phase-lane-capacity-ready'
+    && Number.isSafeInteger(lineageCapacity)
+    && lineageCapacity > 0
+    && Number.isSafeInteger(phaseLaneCount)
+    && phaseLaneCount === 4
+    && Number.isSafeInteger(phaseLaneStride)
+    && phaseLaneStride === lineageCapacity
+    && Number.isSafeInteger(particleCapacity)
+    && particleCapacity === particleCount
+    && lineageCapacity * phaseLaneCount === particleCount;
+  return accepted
+    ? { lineageCapacity, phaseLaneCount }
+    : { lineageCapacity: 0, phaseLaneCount: 0 };
+}
+
 function createSummaryParamsArray({
   particleCount,
   gridNodeCount,
   partialCount,
   cohortRanges = null,
+  phaseCarrierPlan = null,
   h2oMaterialId = H2O_MATERIAL_ID
 }) {
-  const buffer = new ArrayBuffer(32);
+  const phaseLineage = normalizedPhaseLineageSummaryPlan(phaseCarrierPlan, particleCount);
+  const cohortCapacity = phaseLineage.lineageCapacity || particleCount;
+  const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, gridNodeCount, true);
   view.setUint32(8, partialCount, true);
-  const base = normalizedCohortRange(cohortRanges?.base, particleCount);
-  const drop = normalizedCohortRange(cohortRanges?.drop, particleCount);
+  const base = normalizedCohortRange(cohortRanges?.base, cohortCapacity);
+  const drop = normalizedCohortRange(cohortRanges?.drop, cohortCapacity);
   view.setUint32(12, base.start, true);
   view.setUint32(16, base.end, true);
   view.setUint32(20, drop.start, true);
   view.setUint32(24, drop.end, true);
   view.setUint32(28, Math.max(0, Math.round(finiteNumber(h2oMaterialId, H2O_MATERIAL_ID))), true);
+  view.setUint32(32, phaseLineage.lineageCapacity, true);
+  view.setUint32(36, phaseLineage.phaseLaneCount, true);
   return buffer;
 }
 
@@ -465,6 +499,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
   g2pReconstruction,
   thermalStep = null,
   reactionStep = null,
+  mechanicsRefreshStep = null,
+  phaseCarrierTransferStep = null,
   cohortRanges = null,
   summaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   activeGridDispatchPlan = false,
@@ -479,12 +515,37 @@ export async function runMlsMpmResidentSummaryWebGpu({
   const particleCount = sphParticleState.particleCount;
   const gridNodeCount = gridUpdate?.gridNodeCount ?? g2pReconstruction?.gridNodeCount ?? 0;
   const resolvedSummaryScope = normalizeMlsMpmResidentSummaryScope(summaryScope);
-  const gridNodeScanCount = gridNodeScanCountForSummaryScope(resolvedSummaryScope, gridNodeCount);
-  const activeGridNodeCountAvailable = resolvedSummaryScope !== MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL;
+  const mechanicsFieldViewEnabled = mechanicsFieldViewEnabledForSummary({
+    gridUpdate,
+    g2pReconstruction
+  });
+  const gridNodeScanCount = mechanicsFieldViewEnabled
+    ? 0
+    : gridNodeScanCountForSummaryScope(resolvedSummaryScope, gridNodeCount);
+  const activeGridNodeCountAvailable = !mechanicsFieldViewEnabled
+    && resolvedSummaryScope !== MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL;
+  const activeGridNodeSummaryStatus = mechanicsFieldViewEnabled
+    ? 'superseded-by-schroeder-spatial-mechanics-field-view'
+    : (activeGridNodeCountAvailable
+      ? 'active-grid-node-summary-ready'
+      : 'active-grid-node-summary-not-requested');
   const partialCount = Math.max(1, Math.ceil(Math.max(particleCount, gridNodeScanCount) / SUMMARY_WORKGROUP_SIZE));
   const setupStartMs = nowMs();
-  const nextStateBuffer = outputBufferFromG2p(g2pReconstruction, 'stateBuffer');
-  const nextMechanicsBuffer = outputBufferFromG2p(g2pReconstruction, 'mechanicsBuffer');
+  const retainedPhaseStateBuffer = outputBufferFromStage(phaseCarrierTransferStep, 'stateBuffer');
+  const retainedPhaseThermoBuffer = outputBufferFromStage(phaseCarrierTransferStep, 'thermoBuffer');
+  const retainedPhaseMechanicsBuffer = outputBufferFromStage(phaseCarrierTransferStep, 'mechanicsBuffer');
+  const retainedReactionStateBuffer = outputBufferFromStage(reactionStep, 'stateBuffer');
+  const retainedReactionMechanicsBuffer = outputBufferFromStage(reactionStep, 'mechanicsBuffer');
+  const retainedThermalStateBuffer = outputBufferFromStage(thermalStep, 'stateBuffer');
+  const retainedRefreshMechanicsBuffer = outputBufferFromStage(mechanicsRefreshStep, 'mechanicsBuffer');
+  const nextStateBuffer = retainedPhaseStateBuffer
+    || retainedReactionStateBuffer
+    || retainedThermalStateBuffer
+    || outputBufferFromG2p(g2pReconstruction, 'stateBuffer');
+  const nextMechanicsBuffer = retainedPhaseMechanicsBuffer
+    || retainedRefreshMechanicsBuffer
+    || retainedReactionMechanicsBuffer
+    || outputBufferFromG2p(g2pReconstruction, 'mechanicsBuffer');
   const retainedReactionThermoBuffer = outputBufferFromStage(reactionStep, 'thermoBuffer');
   const retainedThermalThermoBuffer = outputBufferFromStage(thermalStep, 'thermoBuffer');
   const updatedGridBuffer = updatedGridBufferFromGridUpdate(gridUpdate);
@@ -496,12 +557,18 @@ export async function runMlsMpmResidentSummaryWebGpu({
   const borrowedSourceMechanicsBuffer = optionalSourceMechanicsBuffer(mlsMpmParticleUpload);
   const sourceStateBuffer = borrowedSourceStateBuffer
     || writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-sph-state', sphParticleState.state);
-  let nextThermoBuffer = retainedReactionThermoBuffer || retainedThermalThermoBuffer || borrowedSourceThermoBuffer || null;
-  let nextThermoBufferMode = retainedReactionThermoBuffer
+  let nextThermoBuffer = retainedPhaseThermoBuffer
+    || retainedReactionThermoBuffer
+    || retainedThermalThermoBuffer
+    || borrowedSourceThermoBuffer
+    || null;
+  let nextThermoBufferMode = retainedPhaseThermoBuffer
+    ? 'retained-phase-carrier-transfer-output'
+    : (retainedReactionThermoBuffer
     ? 'retained-reaction-output'
     : (retainedThermalThermoBuffer
       ? 'retained-thermal-output'
-      : (borrowedSourceThermoBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload'));
+      : (borrowedSourceThermoBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload')));
   if (!nextThermoBuffer) {
     nextThermoBuffer = writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-sph-thermo', sourceThermoArray(sphParticleState));
     nextThermoBufferMode = 'temporary-source-upload';
@@ -529,23 +596,31 @@ export async function runMlsMpmResidentSummaryWebGpu({
     : null;
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-resident-summary-params',
-    size: 32,
+    size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const activeGridPlanRequest = activeGridDispatchPlanRequest(activeGridDispatchPlan);
-  const activeGridPlanGrid = activeGridPlanRequest.requested
+  const legacyActiveGridPlanRequested = activeGridPlanRequest.requested
+    && !mechanicsFieldViewEnabled;
+  const activeGridPlanGrid = legacyActiveGridPlanRequested
     ? resolveActiveGridDispatchPlanGrid({ gridUpdate, g2pReconstruction, gridNodeCount })
     : null;
   const activeGridPlanArgsByteLength = ACTIVE_GRID_DISPATCH_ARGS_UINTS * Uint32Array.BYTES_PER_ELEMENT;
   const activeGridPlanMetadataByteLength = ACTIVE_GRID_DISPATCH_METADATA_UINTS * Uint32Array.BYTES_PER_ELEMENT;
   let activeGridPlanState = activeGridPlanRequest.requested
-    ? {
+    ? (mechanicsFieldViewEnabled
+      ? {
+        status: 'active-grid-summary-dispatch-plan-superseded',
+        reason: 'schroeder-spatial-mechanics-field-view-owns-indirect-dispatch',
+        source: 'schroeder-spatial-mechanics-field-view-v1'
+      }
+      : {
       status: 'active-grid-summary-dispatch-plan-unavailable',
       reason: activeGridPlanGrid ? null : 'grid-dims-shift-or-spacing-unavailable',
       source: 'compact-summary-gpu-sidecar'
-    }
+      })
     : null;
-  if (activeGridPlanRequest.requested && activeGridPlanGrid) {
+  if (legacyActiveGridPlanRequested && activeGridPlanGrid) {
     const gravity = finiteVector3(activeGridPlanRequest.gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
     const safetyCells = Math.max(1, Math.round(finiteNumber(activeGridPlanRequest.safetyCells, DEFAULT_ACTIVE_GRID_SAFETY_CELLS)));
     const stepCount = Math.max(1, Math.round(finiteNumber(activeGridPlanRequest.stepCount, 1)));
@@ -679,10 +754,15 @@ export async function runMlsMpmResidentSummaryWebGpu({
       particleCount,
       gridNodeCount: gridNodeScanCount,
       partialCount,
-      cohortRanges
+      cohortRanges,
+      phaseCarrierPlan: sphParticleUpload?.phaseCarrierPlan
+        || sphParticleState?.phaseCarrierPlan
+        || phaseCarrierTransferStep?.result?.phaseCarrierPlan
+        || phaseCarrierTransferStep?.phaseCarrierPlan
+        || null
     }));
     const { pipeline: partialsPipeline, bindGroupLayout: partialsBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-resident-summary-partials.v3',
+      cacheKey: 'ulg-mls-mpm-resident-summary-partials.v4',
       label: 'ulg-mls-mpm-resident-summary-partials',
       code: mlsMpmResidentSummaryPartialsWgsl,
       entryPoint: 'main',
@@ -711,7 +791,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
       ]
     });
     const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-resident-summary-finalize.v3',
+      cacheKey: 'ulg-mls-mpm-resident-summary-finalize.v4',
       label: 'ulg-mls-mpm-resident-summary-finalize',
       code: mlsMpmResidentSummaryFinalizeWgsl,
       entryPoint: 'main',
@@ -809,10 +889,16 @@ export async function runMlsMpmResidentSummaryWebGpu({
         compactGpuSummaryAvailable: false,
         compactGpuSummaryStatus: 'not-read-no-compact-summary-readback',
         summaryScope: resolvedSummaryScope,
+        mechanicsFieldViewEnabled,
+        gridNodeSummaryAuthority: mechanicsFieldViewEnabled
+          ? 'schroeder-spatial-mechanics-field-view-v1'
+          : 'legacy-dense-grid-v1',
         gridNodeScanCount,
         gridNodeScanSkipped: gridNodeScanCount < gridNodeCount,
         activeGridNodeCountAvailable: false,
-        activeGridNodeSummaryStatus: 'active-grid-node-summary-not-read',
+        activeGridNodeSummaryStatus: mechanicsFieldViewEnabled
+          ? activeGridNodeSummaryStatus
+          : 'active-grid-node-summary-not-read',
         compactReadbackFloatCount: 0,
         compactReadbackByteLength: 0,
         queueCompletionStatus: 'submitted-no-compact-summary-readback',
@@ -880,9 +966,11 @@ export async function runMlsMpmResidentSummaryWebGpu({
       gridNodeScanCount,
       gridNodeScanSkipped: gridNodeScanCount < gridNodeCount,
       activeGridNodeCountAvailable,
-      activeGridNodeSummaryStatus: activeGridNodeCountAvailable
-        ? 'active-grid-node-summary-ready'
-        : 'active-grid-node-summary-not-requested',
+      activeGridNodeSummaryStatus,
+      mechanicsFieldViewEnabled,
+      gridNodeSummaryAuthority: mechanicsFieldViewEnabled
+        ? 'schroeder-spatial-mechanics-field-view-v1'
+        : 'legacy-dense-grid-v1',
       compactReadbackFloatCount: MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS,
       compactReadbackByteLength: summaryByteLength,
       queueCompletionStatus: 'readback-map-completed',

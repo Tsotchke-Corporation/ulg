@@ -340,6 +340,12 @@ fn mark_mechanics_nodes(@builtin(global_invocation_id) global_id: vec3<u32>) {
     record_invalid_source();
     return;
   }
+  if (
+    params.source_row_layout_id == SOURCE_LAYOUT_LEVEL_ASSIGNMENT
+    && !(source_rows[source_index * params.source_stride_floats + 6u] > 0.0)
+  ) {
+    return;
+  }
   let values = source_row_values(source_index);
   let level = i32(round(values.x));
   if (level != params.selected_level) {

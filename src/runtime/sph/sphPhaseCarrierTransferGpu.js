@@ -1,0 +1,971 @@
+import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+} from '../../../ulg-gpu-abi/src/index.js';
+import {
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  deferSubmittedWorkCleanup
+} from '../webgpuComputeLayout.js';
+import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  SPH_GPU_PARTICLE_STATE_FLOATS,
+  SPH_GPU_PARTICLE_THERMO_FLOATS
+} from './sphGpuBuffers.js';
+import { ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA } from './sphMechanicsMaterialTable.js';
+import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+
+export const ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA =
+  'peercompute.ulg.sph-phase-carrier-transfer.v2';
+export const ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA =
+  'peercompute.ulg.sph-phase-carrier-plan.v2';
+
+const FULL_READBACK_MODE = 'full-parity-readback';
+const NO_FULL_READBACK_MODE = 'no-full-readback';
+
+const GPU_BUFFER_USAGE = {
+  MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
+  COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
+  COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
+  UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
+};
+
+const GPU_MAP_MODE = {
+  READ: globalThis.GPUMapMode?.READ ?? 1
+};
+
+const PHASE_TRANSFER_EVIDENCE_MAGIC = 0x50544631;
+const PHASE_TRANSFER_EVIDENCE_VERSION = 1;
+const PHASE_COMPANION_RESERVED_STATUS = 254;
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+export function validateSphPhaseCarrierPlan(plan, particleCount) {
+  const rawParticleCount = Number(particleCount);
+  const particleCountValid = Number.isSafeInteger(rawParticleCount)
+    && rawParticleCount > 0;
+  const count = particleCountValid ? rawParticleCount : 0;
+  const lineageCapacity = Number(plan?.lineageCapacity);
+  const primaryCapacity = Number(plan?.primaryCapacity);
+  const phaseLaneCount = Number(plan?.phaseLaneCount);
+  const phaseLaneStride = Number(plan?.phaseLaneStride);
+  const companionStart = Number(plan?.companionStart);
+  const companionCapacity = Number(plan?.companionCapacity);
+  const particleCapacity = Number(plan?.particleCapacity);
+  const accepted = plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA
+    && particleCountValid
+    && plan?.status === 'phase-lane-capacity-ready'
+    && Number.isSafeInteger(lineageCapacity)
+    && lineageCapacity > 0
+    && Number.isSafeInteger(primaryCapacity)
+    && primaryCapacity === lineageCapacity
+    && Number.isSafeInteger(phaseLaneCount)
+    && phaseLaneCount === 4
+    && Number.isSafeInteger(phaseLaneStride)
+    && phaseLaneStride === lineageCapacity
+    && Number.isSafeInteger(companionStart)
+    && companionStart === lineageCapacity
+    && Number.isSafeInteger(companionCapacity)
+    && companionCapacity === lineageCapacity * (phaseLaneCount - 1)
+    && Number.isSafeInteger(particleCapacity)
+    && particleCapacity === count
+    && lineageCapacity * phaseLaneCount === count;
+  if (!accepted) {
+    return {
+      accepted: false,
+      status: 'phase-carrier-plan-rejected',
+      lineageCapacity: 0,
+      primaryCapacity: 0,
+      phaseLaneCount: 0,
+      phaseLaneStride: 0,
+      companionStart: 0,
+      companionCapacity: 0,
+      particleCapacity: count
+    };
+  }
+  return {
+    accepted: true,
+    status: 'phase-carrier-plan-admitted',
+    lineageCapacity,
+    primaryCapacity,
+    phaseLaneCount,
+    phaseLaneStride,
+    companionStart,
+    companionCapacity,
+    particleCapacity
+  };
+}
+
+function assertInputs({
+  sphParticleState,
+  mlsMpmParticleState,
+  thermalMaterialTable,
+  mechanicsMaterialTable,
+  phaseCarrierPlan
+}) {
+  if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
+    throw new TypeError('Phase-carrier transfer requires a packed SPH particle state');
+  }
+  if (mlsMpmParticleState?.schema !== ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA) {
+    throw new TypeError('Phase-carrier transfer requires a packed MLS-MPM particle state');
+  }
+  if (sphParticleState.particleCount !== mlsMpmParticleState.particleCount) {
+    throw new RangeError('Phase-carrier transfer requires matching particle counts');
+  }
+  if (!(thermalMaterialTable?.segments instanceof Float32Array)) {
+    throw new TypeError('Phase-carrier transfer requires a packed thermal segment table');
+  }
+  if (mechanicsMaterialTable?.schema !== ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA) {
+    throw new TypeError('Phase-carrier transfer requires a mechanics material table');
+  }
+  const admitted = validateSphPhaseCarrierPlan(
+    phaseCarrierPlan || sphParticleState.phaseCarrierPlan,
+    sphParticleState.particleCount
+  );
+  if (!admitted.accepted) {
+    throw new RangeError('Phase-carrier transfer rejected an invalid fixed phase-lane plan');
+  }
+  return admitted;
+}
+
+function createStorageBuffer(device, label, byteLength, extraUsage = 0) {
+  return tagWebGpuBufferDevice(device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
+  }), device);
+}
+
+function uploadStorageBuffer(device, label, values, extraUsage = 0) {
+  const buffer = createStorageBuffer(
+    device,
+    label,
+    values.byteLength,
+    GPU_BUFFER_USAGE.COPY_DST | extraUsage
+  );
+  if (values.byteLength > 0) device.queue.writeBuffer(buffer, 0, values);
+  return buffer;
+}
+
+function createClosureRows(thermalMaterialTable, mechanicsMaterialTable) {
+  const thermalSegments = thermalMaterialTable.segments;
+  const mechanicsRecords = mechanicsMaterialTable.records;
+  const values = new Float32Array(thermalSegments.length + mechanicsRecords.length);
+  values.set(thermalSegments, 0);
+  values.set(mechanicsRecords, thermalSegments.length);
+  return {
+    values,
+    thermalSegmentCount: Math.floor(thermalSegments.length / 12),
+    mechanicsRecordCount: Math.floor(mechanicsRecords.length / 12),
+    thermalOffsetVec4: 0,
+    mechanicsOffsetVec4: Math.floor(thermalSegments.length / 4)
+  };
+}
+
+function createParamsArray({ particleCount, plan, closure }) {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, particleCount, true);
+  view.setUint32(4, plan.lineageCapacity, true);
+  view.setUint32(8, plan.phaseLaneCount, true);
+  view.setUint32(12, plan.phaseLaneStride, true);
+  view.setUint32(16, closure.thermalSegmentCount, true);
+  view.setUint32(20, closure.mechanicsRecordCount, true);
+  view.setUint32(24, closure.thermalOffsetVec4, true);
+  view.setUint32(28, closure.mechanicsOffsetVec4, true);
+  view.setUint32(32, PHASE_COMPANION_RESERVED_STATUS, true);
+  view.setFloat32(36, 1e-7, true);
+  view.setFloat32(40, 2e-4, true);
+  view.setFloat32(44, 1e-20, true);
+  return buffer;
+}
+
+function initialEvidence(primaryCapacity) {
+  return new Uint32Array([
+    PHASE_TRANSFER_EVIDENCE_MAGIC,
+    PHASE_TRANSFER_EVIDENCE_VERSION,
+    0, // error bits
+    0, // valid lineages
+    0, // multi-phase lineages
+    0, // transferred lineages
+    0, // rejected lineages
+    0xffffffff, // first rejected lineage
+    0, 0, 0, 0, 0, 0, 0, 0
+  ]);
+}
+
+export const sphPhaseCarrierTransferWgsl = /* wgsl */ `
+struct PhaseTransferParams {
+  particle_count: u32,
+  lineage_capacity: u32,
+  phase_lane_count: u32,
+  phase_lane_stride: u32,
+  thermal_segment_count: u32,
+  mechanics_record_count: u32,
+  thermal_offset_vec4: u32,
+  mechanics_offset_vec4: u32,
+  reserved_status: u32,
+  fraction_epsilon: f32,
+  relative_tolerance: f32,
+  mass_epsilon: f32,
+  pad0: vec4<u32>,
+};
+
+struct LineagePhases {
+  phase_mask: u32,
+  count: u32,
+  valid: u32,
+  error_bits: u32,
+  material_id: f32,
+};
+
+struct PhaseAggregate {
+  mass: f32,
+  first_moment: vec3<f32>,
+  momentum: vec3<f32>,
+  internal_energy: f32,
+  source_kinetic_energy: f32,
+  temperature_mass: f32,
+  smoothing_length: f32,
+  entity_count: f32,
+  radius_cubed: f32,
+  template_index: u32,
+  template_component_mass: f32,
+};
+
+@group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> source_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> closure_rows: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> out_state: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> out_thermo: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> out_mechanics: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> evidence: array<atomic<u32>>;
+@group(0) @binding(8) var<uniform> params: PhaseTransferParams;
+
+const EVIDENCE_MAGIC: u32 = 0x50544631u;
+const EVIDENCE_VERSION: u32 = 1u;
+const ERROR_LAYOUT: u32 = 1u;
+const ERROR_NONFINITE: u32 = 2u;
+const ERROR_MATERIAL: u32 = 4u;
+const ERROR_FRACTION: u32 = 8u;
+const ERROR_PHASE_COUNT: u32 = 16u;
+const ERROR_PLATEAU: u32 = 32u;
+const ERROR_ENERGY: u32 = 64u;
+const ERROR_MECHANICS: u32 = 128u;
+const INVALID_INDEX: u32 = 0xffffffffu;
+
+fn finite_f32(value: f32) -> bool {
+  return value == value && abs(value) <= 3.402823e38;
+}
+
+fn nearly_equal(a: f32, b: f32) -> bool {
+  return abs(a - b) <= params.relative_tolerance * max(1.0, max(abs(a), abs(b)));
+}
+
+fn state0(index: u32) -> vec4<f32> { return source_state[index * 2u]; }
+fn state1(index: u32) -> vec4<f32> { return source_state[index * 2u + 1u]; }
+fn thermo0(index: u32) -> vec4<f32> { return source_thermo[index * 3u]; }
+fn thermo1(index: u32) -> vec4<f32> { return source_thermo[index * 3u + 1u]; }
+fn thermo2(index: u32) -> vec4<f32> { return source_thermo[index * 3u + 2u]; }
+
+fn phase_lane_index(lineage_index: u32, phase_id: u32) -> u32 {
+  return (phase_id - 1u) * params.phase_lane_stride + lineage_index;
+}
+
+fn plateau_endpoint(
+  material_id: f32,
+  phase0: u32,
+  phase1: u32,
+  source_u: f32,
+  target_phase: u32
+) -> vec2<f32> {
+  for (var segment = 0u; segment < params.thermal_segment_count; segment = segment + 1u) {
+    let base = params.thermal_offset_vec4 + segment * 3u;
+    let row0 = closure_rows[base];
+    let row1 = closure_rows[base + 1u];
+    if (
+      row0.x == material_id
+      && abs(row0.y - 2.0) < 0.5
+      && u32(round(row0.z)) == phase0
+      && u32(round(row0.w)) == phase1
+      && source_u >= row1.x - params.relative_tolerance * max(1.0, abs(row1.x))
+      && source_u <= row1.y + params.relative_tolerance * max(1.0, abs(row1.y))
+    ) {
+      if (target_phase == phase0) { return vec2<f32>(row1.x, 1.0); }
+      if (target_phase == phase1) { return vec2<f32>(row1.y, 1.0); }
+    }
+  }
+  return vec2<f32>(0.0, 0.0);
+}
+
+fn mechanics_record_index(material_id: f32, phase_id: u32) -> u32 {
+  for (var record = 0u; record < params.mechanics_record_count; record = record + 1u) {
+    let row0 = closure_rows[params.mechanics_offset_vec4 + record * 3u];
+    if (row0.x == material_id && u32(round(row0.y)) == phase_id) {
+      return record;
+    }
+  }
+  return INVALID_INDEX;
+}
+
+fn lineage_phases(lineage_index: u32) -> LineagePhases {
+  var phase_set = LineagePhases(0u, 0u, 1u, 0u, 0.0);
+  for (var source_phase = 1u; source_phase <= 4u; source_phase = source_phase + 1u) {
+    let source_index = phase_lane_index(lineage_index, source_phase);
+    let s0 = state0(source_index);
+    let s1 = state1(source_index);
+    if (!(s0.w > params.mass_epsilon)) { continue; }
+    let t0 = thermo0(source_index);
+    let fractions = thermo1(source_index);
+    if (
+      !finite_f32(s0.x) || !finite_f32(s0.y) || !finite_f32(s0.z)
+      || !finite_f32(s0.w) || !finite_f32(s1.x) || !finite_f32(s1.y)
+      || !finite_f32(s1.z) || !finite_f32(s1.w) || !finite_f32(t0.x)
+      || t0.x < 1.0 || t0.x > 16777215.0
+    ) {
+      phase_set.valid = 0u;
+      phase_set.error_bits = phase_set.error_bits | ERROR_NONFINITE;
+      return phase_set;
+    }
+    if (phase_set.material_id == 0.0) {
+      phase_set.material_id = t0.x;
+    } else if (phase_set.material_id != t0.x) {
+      phase_set.valid = 0u;
+      phase_set.error_bits = phase_set.error_bits | ERROR_MATERIAL;
+      return phase_set;
+    }
+    var fraction_sum = 0.0;
+    var positive_count = 0u;
+    var local_phase0 = 0u;
+    var local_phase1 = 0u;
+    for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+      let fraction = fractions[lane];
+      if (!finite_f32(fraction) || fraction < -params.fraction_epsilon || fraction > 1.0 + params.fraction_epsilon) {
+        phase_set.valid = 0u;
+        phase_set.error_bits = phase_set.error_bits | ERROR_FRACTION;
+        return phase_set;
+      }
+      fraction_sum = fraction_sum + max(fraction, 0.0);
+      if (fraction > params.fraction_epsilon) {
+        let phase_id = lane + 1u;
+        let phase_bit = 1u << (phase_id - 1u);
+        if ((phase_set.phase_mask & phase_bit) == 0u) {
+          phase_set.phase_mask = phase_set.phase_mask | phase_bit;
+          phase_set.count = phase_set.count + 1u;
+        }
+        if (positive_count == 0u) { local_phase0 = phase_id; }
+        if (positive_count == 1u) { local_phase1 = phase_id; }
+        positive_count = positive_count + 1u;
+      }
+    }
+    if (!nearly_equal(fraction_sum, 1.0) || positive_count == 0u || positive_count > 2u) {
+      phase_set.valid = 0u;
+      phase_set.error_bits = phase_set.error_bits | ERROR_FRACTION | ERROR_PHASE_COUNT;
+      return phase_set;
+    }
+    if (positive_count == 2u) {
+      if (local_phase1 < local_phase0) {
+        let swap = local_phase0;
+        local_phase0 = local_phase1;
+        local_phase1 = swap;
+      }
+      let e0 = plateau_endpoint(t0.x, local_phase0, local_phase1, s1.w, local_phase0);
+      let e1 = plateau_endpoint(t0.x, local_phase0, local_phase1, s1.w, local_phase1);
+      if (e0.y == 0.0 || e1.y == 0.0) {
+        phase_set.valid = 0u;
+        phase_set.error_bits = phase_set.error_bits | ERROR_PLATEAU;
+        return phase_set;
+      }
+      let reconstructed = fractions[local_phase0 - 1u] * e0.x
+        + fractions[local_phase1 - 1u] * e1.x;
+      if (!nearly_equal(reconstructed, s1.w)) {
+        phase_set.valid = 0u;
+        phase_set.error_bits = phase_set.error_bits | ERROR_ENERGY;
+        return phase_set;
+      }
+    }
+  }
+  return phase_set;
+}
+
+fn source_component_energy(source_index: u32, target_phase: u32) -> vec2<f32> {
+  let s1 = state1(source_index);
+  let t0 = thermo0(source_index);
+  let fractions = thermo1(source_index);
+  var positive_count = 0u;
+  var local_phase0 = 0u;
+  var local_phase1 = 0u;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    if (fractions[lane] > params.fraction_epsilon) {
+      let phase_id = lane + 1u;
+      if (positive_count == 0u) { local_phase0 = phase_id; }
+      if (positive_count == 1u) { local_phase1 = phase_id; }
+      positive_count = positive_count + 1u;
+    }
+  }
+  if (positive_count == 1u && local_phase0 == target_phase) {
+    return vec2<f32>(s1.w, 1.0);
+  }
+  if (positive_count == 2u) {
+    if (local_phase1 < local_phase0) {
+      let swap = local_phase0;
+      local_phase0 = local_phase1;
+      local_phase1 = swap;
+    }
+    return plateau_endpoint(t0.x, local_phase0, local_phase1, s1.w, target_phase);
+  }
+  return vec2<f32>(0.0, 0.0);
+}
+
+fn phase_aggregate(
+  lineage_index: u32,
+  target_phase: u32
+) -> PhaseAggregate {
+  var aggregate = PhaseAggregate(
+    0.0,
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    phase_lane_index(lineage_index, target_phase),
+    -1.0
+  );
+  for (var source_phase = 1u; source_phase <= 4u; source_phase = source_phase + 1u) {
+    let source_index = phase_lane_index(lineage_index, source_phase);
+    let s0 = state0(source_index);
+    if (!(s0.w > params.mass_epsilon)) { continue; }
+    let s1 = state1(source_index);
+    let t0 = thermo0(source_index);
+    let fractions = thermo1(source_index);
+    let t2 = thermo2(source_index);
+    let fraction = max(fractions[target_phase - 1u], 0.0);
+    if (!(fraction > params.fraction_epsilon)) { continue; }
+    let component_mass = s0.w * fraction;
+    let component_energy = source_component_energy(source_index, target_phase).x;
+    aggregate.mass = aggregate.mass + component_mass;
+    aggregate.first_moment = aggregate.first_moment + s0.xyz * component_mass;
+    aggregate.momentum = aggregate.momentum + s1.xyz * component_mass;
+    aggregate.internal_energy = aggregate.internal_energy + component_energy * component_mass;
+    aggregate.source_kinetic_energy = aggregate.source_kinetic_energy
+      + 0.5 * component_mass * dot(s1.xyz, s1.xyz);
+    aggregate.temperature_mass = aggregate.temperature_mass + t0.z * component_mass;
+    aggregate.smoothing_length = max(aggregate.smoothing_length, max(t2.x, 0.0));
+    aggregate.entity_count = aggregate.entity_count + max(t2.y, 0.0) * fraction;
+    aggregate.radius_cubed = aggregate.radius_cubed + pow(max(t2.w, 0.0), 3.0) * fraction;
+    if (component_mass > aggregate.template_component_mass) {
+      aggregate.template_component_mass = component_mass;
+      aggregate.template_index = source_index;
+    }
+  }
+  return aggregate;
+}
+
+fn copy_lineage(lineage_index: u32) {
+  for (var phase_id = 1u; phase_id <= 4u; phase_id = phase_id + 1u) {
+    let index = phase_lane_index(lineage_index, phase_id);
+    out_state[index * 2u] = source_state[index * 2u];
+    out_state[index * 2u + 1u] = source_state[index * 2u + 1u];
+    out_thermo[index * 3u] = source_thermo[index * 3u];
+    out_thermo[index * 3u + 1u] = source_thermo[index * 3u + 1u];
+    out_thermo[index * 3u + 2u] = source_thermo[index * 3u + 2u];
+    for (var row = 0u; row < 8u; row = row + 1u) {
+      out_mechanics[index * 8u + row] = source_mechanics[index * 8u + row];
+    }
+  }
+}
+
+fn one_hot(phase_id: u32) -> vec4<f32> {
+  return vec4<f32>(
+    select(0.0, 1.0, phase_id == 1u),
+    select(0.0, 1.0, phase_id == 2u),
+    select(0.0, 1.0, phase_id == 3u),
+    select(0.0, 1.0, phase_id == 4u)
+  );
+}
+
+fn mechanics_model_matches_target(
+  source_index: u32,
+  target_solid: f32,
+  target_eos_model: f32
+) -> bool {
+  let source_base = source_index * 8u;
+  let source_row5 = source_mechanics[source_base + 5u];
+  let source_row6 = source_mechanics[source_base + 6u];
+  return abs(source_row5.x - target_solid) < 0.5
+    && abs(source_row6.z - target_eos_model) < 0.5
+    && source_row5.y == 1.0
+    && source_row6.w == 1.0;
+}
+
+fn write_phase_slot(
+  target_index: u32,
+  target_phase: u32,
+  phases: LineagePhases,
+  aggregate: PhaseAggregate
+) {
+  let mechanics_record = mechanics_record_index(phases.material_id, target_phase);
+  let record_base = params.mechanics_offset_vec4 + mechanics_record * 3u;
+  let record0 = closure_rows[record_base];
+  let record1 = closure_rows[record_base + 1u];
+  let record2 = closure_rows[record_base + 2u];
+  // Preserve deformation from the largest actual contributor to this phase,
+  // not merely from whichever fixed slot now owns it. The phase pair changes
+  // roles at solid/liquid/gas boundaries, so slot-local mechanics can belong
+  // to the previous constitutive model (for example gas J=1000 moving into a
+  // liquid slot). A model mismatch starts the target phase at its own
+  // reference configuration instead of importing an incompatible F/J state.
+  let template_index = aggregate.template_index;
+  let template_source_mass = state0(template_index).w;
+  let template_source_fraction = thermo1(template_index)[target_phase - 1u];
+  let preserve_deformation = template_source_mass > params.mass_epsilon
+    && template_source_fraction > params.fraction_epsilon
+    && mechanics_model_matches_target(template_index, record2.x, record1.w);
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    out_mechanics[target_index * 8u + row] = source_mechanics[template_index * 8u + row];
+  }
+
+  let inv_mass = 1.0 / aggregate.mass;
+  let position = aggregate.first_moment * inv_mass;
+  let velocity = aggregate.momentum * inv_mass;
+  let merged_kinetic_energy = 0.5 * aggregate.mass * dot(velocity, velocity);
+  let thermalized_kinetic_energy = max(
+    aggregate.source_kinetic_energy - merged_kinetic_energy,
+    0.0
+  );
+  let specific_energy = (aggregate.internal_energy + thermalized_kinetic_energy) * inv_mass;
+  let temperature = aggregate.temperature_mass * inv_mass;
+  let rest_volume = aggregate.mass / max(record0.z, params.mass_epsilon);
+  out_state[target_index * 2u] = vec4<f32>(position, aggregate.mass);
+  out_state[target_index * 2u + 1u] = vec4<f32>(velocity, specific_energy);
+  out_thermo[target_index * 3u] = vec4<f32>(
+    phases.material_id,
+    f32(target_phase),
+    temperature,
+    record0.z
+  );
+  out_thermo[target_index * 3u + 1u] = one_hot(target_phase);
+  out_thermo[target_index * 3u + 2u] = vec4<f32>(
+    aggregate.smoothing_length,
+    aggregate.entity_count,
+    1.0,
+    pow(max(aggregate.radius_cubed, 0.0), 1.0 / 3.0)
+  );
+  if (!preserve_deformation) {
+    out_mechanics[target_index * 8u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    out_mechanics[target_index * 8u + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    out_mechanics[target_index * 8u + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    out_mechanics[target_index * 8u + 3u] = vec4<f32>(0.0);
+    out_mechanics[target_index * 8u + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+  } else {
+    let old4 = out_mechanics[target_index * 8u + 4u];
+    out_mechanics[target_index * 8u + 4u] = vec4<f32>(old4.xyz, rest_volume);
+  }
+  out_mechanics[target_index * 8u + 5u] = vec4<f32>(record2.x, record2.y, record0.w, record1.x);
+  out_mechanics[target_index * 8u + 6u] = vec4<f32>(record1.y, record1.z, record1.w, record2.y);
+  let old7 = out_mechanics[target_index * 8u + 7u];
+  out_mechanics[target_index * 8u + 7u] = vec4<f32>(
+    old7.x,
+    record2.z,
+    record2.w,
+    aggregate.mass
+  );
+}
+
+fn clear_phase_slot(target_index: u32, target_phase: u32, material_id: f32) {
+  let source_s0 = state0(target_index);
+  let source_s1 = state1(target_index);
+  let source_t0 = thermo0(target_index);
+  let source_t2 = thermo2(target_index);
+  out_state[target_index * 2u] = vec4<f32>(source_s0.xyz, 0.0);
+  out_state[target_index * 2u + 1u] = source_s1;
+  out_thermo[target_index * 3u] = vec4<f32>(
+    material_id,
+    f32(target_phase),
+    source_t0.z,
+    source_t0.w
+  );
+  out_thermo[target_index * 3u + 1u] = vec4<f32>(0.0);
+  out_thermo[target_index * 3u + 2u] = vec4<f32>(
+    source_t2.x,
+    0.0,
+    f32(params.reserved_status),
+    0.0
+  );
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    out_mechanics[target_index * 8u + row] = source_mechanics[target_index * 8u + row];
+  }
+  out_mechanics[target_index * 8u + 4u].w = 0.0;
+  out_mechanics[target_index * 8u + 5u].y = f32(params.reserved_status);
+  out_mechanics[target_index * 8u + 6u].w = f32(params.reserved_status);
+  out_mechanics[target_index * 8u + 7u].w = 0.0;
+}
+
+fn lineage_mechanics_valid(phases: LineagePhases) -> bool {
+  for (var phase_id = 1u; phase_id <= 4u; phase_id = phase_id + 1u) {
+    let phase_bit = 1u << (phase_id - 1u);
+    if ((phases.phase_mask & phase_bit) != 0u
+        && mechanics_record_index(phases.material_id, phase_id) == INVALID_INDEX) {
+      return false;
+    }
+  }
+  return true;
+}
+
+@compute @workgroup_size(64)
+fn preflight(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let lineage_index = global_id.x;
+  if (lineage_index >= params.lineage_capacity) { return; }
+  if (
+    params.phase_lane_count != 4u
+    || params.phase_lane_stride != params.lineage_capacity
+    || params.particle_count != params.lineage_capacity * params.phase_lane_count
+    || arrayLength(&source_state) < params.particle_count * 2u
+    || arrayLength(&source_thermo) < params.particle_count * 3u
+    || arrayLength(&source_mechanics) < params.particle_count * 8u
+    || arrayLength(&out_state) < params.particle_count * 2u
+    || arrayLength(&out_thermo) < params.particle_count * 3u
+    || arrayLength(&out_mechanics) < params.particle_count * 8u
+    || arrayLength(&evidence) < 16u
+    || atomicLoad(&evidence[0u]) != EVIDENCE_MAGIC
+    || atomicLoad(&evidence[1u]) != EVIDENCE_VERSION
+  ) {
+    atomicOr(&evidence[2u], ERROR_LAYOUT);
+    return;
+  }
+  let phases = lineage_phases(lineage_index);
+  if (phases.valid == 0u) {
+    atomicOr(&evidence[2u], phases.error_bits);
+    atomicAdd(&evidence[6u], 1u);
+    atomicMin(&evidence[7u], lineage_index);
+    return;
+  }
+  if (phases.count > 0u && !lineage_mechanics_valid(phases)) {
+    atomicOr(&evidence[2u], ERROR_MECHANICS);
+    atomicAdd(&evidence[6u], 1u);
+    atomicMin(&evidence[7u], lineage_index);
+    return;
+  }
+  if (phases.count > 1u) {
+    atomicAdd(&evidence[4u], 1u);
+  }
+  atomicAdd(&evidence[3u], 1u);
+}
+
+@compute @workgroup_size(64)
+fn apply_transfer(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let lineage_index = global_id.x;
+  if (lineage_index >= params.lineage_capacity) { return; }
+  if ((atomicLoad(&evidence[2u]) & ERROR_LAYOUT) != 0u) {
+    copy_lineage(lineage_index);
+    return;
+  }
+  let phases = lineage_phases(lineage_index);
+  if (phases.valid == 0u || (phases.count > 0u && !lineage_mechanics_valid(phases))) {
+    copy_lineage(lineage_index);
+    return;
+  }
+  if (phases.count == 0u) {
+    copy_lineage(lineage_index);
+    return;
+  }
+  for (var target_phase = 1u; target_phase <= 4u; target_phase = target_phase + 1u) {
+    let target_index = phase_lane_index(lineage_index, target_phase);
+    let phase_bit = 1u << (target_phase - 1u);
+    if ((phases.phase_mask & phase_bit) != 0u) {
+      let aggregate = phase_aggregate(lineage_index, target_phase);
+      if (aggregate.mass > params.mass_epsilon) {
+        write_phase_slot(target_index, target_phase, phases, aggregate);
+      } else {
+        clear_phase_slot(target_index, target_phase, phases.material_id);
+      }
+    } else {
+      clear_phase_slot(target_index, target_phase, phases.material_id);
+    }
+  }
+  atomicAdd(&evidence[5u], 1u);
+}
+`;
+
+async function readBuffer(device, sourceBuffer, byteLength, label) {
+  const readback = device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(sourceBuffer, 0, readback, 0, byteLength);
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPU_MAP_MODE.READ);
+  const copy = readback.getMappedRange().slice(0);
+  readback.unmap();
+  readback.destroy?.();
+  return copy;
+}
+
+export function createSphPhaseCarrierTransferWebGpuEncoderStage({
+  device,
+  sphParticleState,
+  mlsMpmParticleState,
+  thermalMaterialTable,
+  mechanicsMaterialTable,
+  phaseCarrierPlan = sphParticleState?.phaseCarrierPlan,
+  sourceStateBuffer,
+  sourceThermoBuffer,
+  sourceMechanicsBuffer,
+  retainOutputParticleBuffers = false,
+  readbackMode = NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('Phase-carrier transfer requires a WebGPU-like device');
+  }
+  const plan = assertInputs({
+    sphParticleState,
+    mlsMpmParticleState,
+    thermalMaterialTable,
+    mechanicsMaterialTable,
+    phaseCarrierPlan
+  });
+  for (const [name, buffer] of Object.entries({
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer
+  })) {
+    if (!buffer || webGpuBufferDevice(buffer) !== device) {
+      throw new TypeError(`Phase-carrier transfer ${name} must belong to the runtime device`);
+    }
+  }
+
+  const closure = createClosureRows(thermalMaterialTable, mechanicsMaterialTable);
+  const closureBuffer = uploadStorageBuffer(
+    device,
+    'ulg-sph-phase-carrier-transfer-closure-rows',
+    closure.values
+  );
+  const evidenceValues = initialEvidence(plan.lineageCapacity);
+  const evidenceBuffer = uploadStorageBuffer(
+    device,
+    'ulg-sph-phase-carrier-transfer-evidence',
+    evidenceValues,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const stateByteLength = sphParticleState.particleCount
+    * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const thermoByteLength = sphParticleState.particleCount
+    * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const mechanicsByteLength = mlsMpmParticleState.particleCount
+    * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const outStateBuffer = createStorageBuffer(
+    device,
+    'ulg-sph-phase-carrier-transfer-state',
+    stateByteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const outThermoBuffer = createStorageBuffer(
+    device,
+    'ulg-sph-phase-carrier-transfer-thermo',
+    thermoByteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const outMechanicsBuffer = createStorageBuffer(
+    device,
+    'ulg-sph-phase-carrier-transfer-mechanics',
+    mechanicsByteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-sph-phase-carrier-transfer-params',
+    size: 64,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
+    particleCount: sphParticleState.particleCount,
+    plan,
+    closure
+  }));
+
+  const bindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'uniform')
+  ];
+  const preflightPipeline = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-phase-carrier-transfer.v2.preflight',
+    label: 'ulg-sph-phase-carrier-transfer-preflight',
+    code: sphPhaseCarrierTransferWgsl,
+    entryPoint: 'preflight',
+    bindings
+  });
+  const applyPipeline = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-phase-carrier-transfer.v2.apply',
+    label: 'ulg-sph-phase-carrier-transfer-apply',
+    code: sphPhaseCarrierTransferWgsl,
+    entryPoint: 'apply_transfer',
+    bindings
+  });
+  const bindGroupEntries = [
+      { binding: 0, resource: { buffer: sourceStateBuffer } },
+      { binding: 1, resource: { buffer: sourceThermoBuffer } },
+      { binding: 2, resource: { buffer: sourceMechanicsBuffer } },
+      { binding: 3, resource: { buffer: closureBuffer } },
+      { binding: 4, resource: { buffer: outStateBuffer } },
+      { binding: 5, resource: { buffer: outThermoBuffer } },
+      { binding: 6, resource: { buffer: outMechanicsBuffer } },
+      { binding: 7, resource: { buffer: evidenceBuffer } },
+      { binding: 8, resource: { buffer: paramsBuffer } }
+  ];
+  const preflightBindGroup = device.createBindGroup({
+    layout: preflightPipeline.bindGroupLayout,
+    entries: bindGroupEntries
+  });
+  const applyBindGroup = device.createBindGroup({
+    layout: applyPipeline.bindGroupLayout,
+    entries: bindGroupEntries
+  });
+  const workgroups = Math.max(1, Math.ceil(plan.lineageCapacity / 64));
+  let cleaned = false;
+  let outputsDestroyed = false;
+  const destroyOutputs = () => {
+    if (outputsDestroyed) return;
+    outputsDestroyed = true;
+    outStateBuffer.destroy?.();
+    outThermoBuffer.destroy?.();
+    outMechanicsBuffer.destroy?.();
+  };
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    closureBuffer.destroy?.();
+    evidenceBuffer.destroy?.();
+    paramsBuffer.destroy?.();
+    if (!retainOutputParticleBuffers) destroyOutputs();
+  };
+  const result = {
+    schema: ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA,
+    status: 'phase-carrier-transfer-submitted',
+    backend: 'webgpu',
+    particleCount: sphParticleState.particleCount,
+    phaseCarrierPlan: { ...phaseCarrierPlan },
+    lineageCapacity: plan.lineageCapacity,
+    primaryCapacity: plan.primaryCapacity,
+    phaseLaneCount: plan.phaseLaneCount,
+    phaseLaneStride: plan.phaseLaneStride,
+    companionStart: plan.companionStart,
+    lineageCount: plan.lineageCapacity,
+    state: new Float32Array(),
+    thermo: new Float32Array(),
+    mechanics: new Float32Array(),
+    evidence: null,
+    stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
+    thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
+    mechanicsBuffer: retainOutputParticleBuffers ? outMechanicsBuffer : null,
+    stateBufferByteLength: stateByteLength,
+    thermoBufferByteLength: thermoByteLength,
+    mechanicsBufferByteLength: mechanicsByteLength,
+    retainedOutputParticleBuffers: retainOutputParticleBuffers,
+    readbackMode,
+    normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    fullParticleReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
+    failClosedPolicy: 'global-layout-copy-through-lineage-local-invalid-copy-through',
+    conservationPolicy: 'mass-momentum-first-moment-total-energy-with-relative-kinetic-thermalization',
+    destroyOutputParticleBuffers: retainOutputParticleBuffers
+      ? () => deferSubmittedWorkCleanup(device, destroyOutputs)
+      : null,
+    scientificValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+  return {
+    schema: 'peercompute.ulg.sph-phase-carrier-transfer-encoder-stage.v2',
+    status: 'phase-carrier-transfer-encoder-stage-ready',
+    result,
+    stateBuffer: outStateBuffer,
+    thermoBuffer: outThermoBuffer,
+    mechanicsBuffer: outMechanicsBuffer,
+    evidenceBuffer,
+    stateBufferByteLength: stateByteLength,
+    thermoBufferByteLength: thermoByteLength,
+    mechanicsBufferByteLength: mechanicsByteLength,
+    evidenceBufferByteLength: evidenceValues.byteLength,
+    encode(encoder) {
+      const preflight = encoder.beginComputePass({ label: 'ulg-sph-phase-carrier-transfer-preflight' });
+      preflight.setPipeline(preflightPipeline.pipeline);
+      preflight.setBindGroup(0, preflightBindGroup);
+      preflight.dispatchWorkgroups(workgroups);
+      preflight.end();
+      const apply = encoder.beginComputePass({ label: 'ulg-sph-phase-carrier-transfer-apply' });
+      apply.setPipeline(applyPipeline.pipeline);
+      apply.setBindGroup(0, applyBindGroup);
+      apply.dispatchWorkgroups(workgroups);
+      apply.end();
+    },
+    cleanupSubmittedWork: cleanup
+  };
+}
+
+export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
+  const stage = createSphPhaseCarrierTransferWebGpuEncoderStage(args);
+  const { device, retainOutputParticleBuffers = false } = args;
+  const noFullReadback = args.readbackMode === NO_FULL_READBACK_MODE;
+  const encoder = device.createCommandEncoder();
+  stage.encode(encoder);
+  device.queue.submit([encoder.finish()]);
+  if (!noFullReadback) {
+    const [stateBytes, thermoBytes, mechanicsBytes, evidenceBytes] = await Promise.all([
+      readBuffer(device, stage.stateBuffer, stage.stateBufferByteLength, 'ulg-phase-transfer-state-readback'),
+      readBuffer(device, stage.thermoBuffer, stage.thermoBufferByteLength, 'ulg-phase-transfer-thermo-readback'),
+      readBuffer(device, stage.mechanicsBuffer, stage.mechanicsBufferByteLength, 'ulg-phase-transfer-mechanics-readback'),
+      readBuffer(device, stage.evidenceBuffer, stage.evidenceBufferByteLength, 'ulg-phase-transfer-evidence-readback')
+    ]);
+    stage.result.state = new Float32Array(stateBytes);
+    stage.result.thermo = new Float32Array(thermoBytes);
+    stage.result.mechanics = new Float32Array(mechanicsBytes);
+    stage.result.evidence = new Uint32Array(evidenceBytes);
+    stage.result.invalidLineageCount = stage.result.evidence[6];
+    stage.result.firstInvalidLineage = stage.result.evidence[7] === 0xffffffff
+      ? null
+      : stage.result.evidence[7];
+    stage.result.status = (stage.result.evidence[2] & 1) !== 0
+      ? 'phase-carrier-transfer-failed-closed'
+      : (stage.result.evidence[6] > 0
+        ? 'phase-carrier-transfer-complete-with-rejected-lineages'
+        : 'phase-carrier-transfer-complete');
+  }
+  if (noFullReadback) {
+    deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+  } else {
+    stage.cleanupSubmittedWork();
+  }
+  if (!retainOutputParticleBuffers) {
+    stage.result.stateBuffer = null;
+    stage.result.thermoBuffer = null;
+    stage.result.mechanicsBuffer = null;
+  }
+  return stage.result;
+}
+
+export function retainedPhaseCarrierTransferOutputBuffers(stageOrResult) {
+  const source = stageOrResult?.result || stageOrResult;
+  return {
+    stateBuffer: source?.stateBuffer || stageOrResult?.stateBuffer || null,
+    thermoBuffer: source?.thermoBuffer || stageOrResult?.thermoBuffer || null,
+    mechanicsBuffer: source?.mechanicsBuffer || stageOrResult?.mechanicsBuffer || null,
+    stateBufferByteLength: source?.stateBufferByteLength || stageOrResult?.stateBufferByteLength || 0,
+    thermoBufferByteLength: source?.thermoBufferByteLength || stageOrResult?.thermoBufferByteLength || 0,
+    mechanicsBufferByteLength: source?.mechanicsBufferByteLength || stageOrResult?.mechanicsBufferByteLength || 0
+  };
+}

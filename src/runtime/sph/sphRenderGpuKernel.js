@@ -1713,6 +1713,36 @@ function renderPhaseWeightForSurface(surfacePhaseId, rowPhaseId, gasFraction, so
   return rowPhaseId === surfacePhaseId ? 1 : 0;
 }
 
+// Partition one carrier's full-fraction implicit isovolume between phase
+// surfaces. For D(r) = A / (epsilon + r^2) - B, the zero-isosurface radius is
+// proportional to sqrt(A - B*epsilon), so A(f) below gives R(f)=R(1)cbrt(f)
+// and therefore V(f)=V(1)f. The epsilon anchor makes the radius converge to
+// zero without inflating a sparse-sampling floor or introducing a material
+// special case.
+function phasePartitionedMetaballStrength({
+  fullStrength,
+  phaseWeight,
+  isolation,
+  subtract
+}) {
+  const fraction = clamp(finiteNumber(phaseWeight, 0), 0, 1);
+  const volumeScaleSquared = Math.cbrt(fraction * fraction);
+  const zeroRadiusStrength = Math.max(
+    0,
+    finiteNumber(isolation, 0) + finiteNumber(subtract, 0)
+  ) * 0.000001;
+  return finiteNumber(fullStrength, 0) * volumeScaleSquared
+    + zeroRadiusStrength * (1 - volumeScaleSquared);
+}
+
+function metaballSupportNorm(strength, subtract) {
+  return Math.sqrt(Math.max(
+    finiteNumber(strength, 0) / Math.max(finiteNumber(subtract, 0), 1e-12)
+      - 0.000001,
+    0
+  ));
+}
+
 function accumulateMetaballSample({
   cell,
   position,
@@ -1776,10 +1806,6 @@ export function buildSphRenderFieldCpu({
     const fieldSpan = 1 - 2 * fieldPadding;
     const fieldRefEdgeM = Math.max(refEdgeM, 1e-12);
     const particleRadiusNormScale = (particleRadiusScale * fieldSpan) / fieldRefEdgeM;
-    const particleSupportMultiplier = Math.sqrt(Math.max(
-      (surface.isolation + surface.subtract) / Math.max(surface.subtract, 1e-12),
-      0
-    ));
     for (let cellIndex = 0; cellIndex < surface.fieldCellCount; cellIndex += 1) {
       const xy = resolution * resolution;
       const z = Math.floor(cellIndex / xy);
@@ -1816,28 +1842,29 @@ export function buildSphRenderFieldCpu({
             renderRows[renderOffset + 9],
             renderRows[renderOffset + 16]
           );
-          if (phaseWeight <= 0.003) continue;
+          if (phaseWeight <= 0) continue;
           const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
           const particleRadiusM = finiteNumber(renderRows[renderOffset + 13], 0);
-          // Phase weighting reduces metaball strength after radius selection.
-          // Scale the conservative lattice floor by 1/sqrt(weight) so every
-          // admitted transition contribution still reaches isolation at the
-          // worst half-cell sample instead of disappearing mid-transition.
-          const phaseAwareParticleRadiusFloorNorm = particleRadiusFloorNorm
-            / Math.sqrt(Math.max(phaseWeight, 1e-8));
           const particleRadiusNorm = particleRadiusScale > 0 && particleRadiusM > 0
-            ? Math.max(particleRadiusM * particleRadiusNormScale, phaseAwareParticleRadiusFloorNorm)
+            ? Math.max(particleRadiusM * particleRadiusNormScale, particleRadiusFloorNorm)
             : 0;
-          const particleStrength = particleRadiusNorm > 0
+          const fullParticleStrength = particleRadiusNorm > 0
             ? (surface.isolation + surface.subtract) * particleRadiusNorm ** 2
             : surface.strength;
-          const particleSupportNorm = particleRadiusNorm > 0
-            ? particleRadiusNorm * particleSupportMultiplier
-            : supportNorm;
+          const particleStrength = phasePartitionedMetaballStrength({
+            fullStrength: fullParticleStrength,
+            phaseWeight,
+            isolation: surface.isolation,
+            subtract: surface.subtract
+          });
+          const particleSupportNorm = metaballSupportNorm(
+            particleStrength,
+            surface.subtract
+          );
           const accumulated = accumulateMetaballSample({
             cell,
             position: particle,
-            strength: particleStrength * phaseWeight,
+            strength: particleStrength,
             subtract: surface.subtract,
             supportNorm: particleSupportNorm,
             color: surface.colorLinear,

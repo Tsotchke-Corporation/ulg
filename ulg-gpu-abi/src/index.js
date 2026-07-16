@@ -8,6 +8,8 @@ export * from './schroederSpatialExactNearTraversalWgsl.js';
 export * from './schroederMechanicsSpatialAuthorityWgsl.js';
 export * from './schroederSpatialMechanicsView.js';
 export * from './schroederSpatialMechanicsViewWgsl.js';
+export * from './schroederSpatialMechanicsFieldView.js';
+export * from './schroederSpatialMechanicsFieldViewWgsl.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';

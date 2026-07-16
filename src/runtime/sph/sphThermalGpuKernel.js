@@ -1299,7 +1299,9 @@ export function runSphThermalStepCpu({
   for (let i = 0; i < particleCount; i += 1) {
     const oi = i * SPH_GPU_PARTICLE_STATE_FLOATS;
     const ti = i * SPH_GPU_PARTICLE_THERMO_FLOATS;
-    const mass = Math.max(finiteNumber(sphParticleState.state[oi + 3], 0), 1e-30);
+    const sourceMass = finiteNumber(sphParticleState.state[oi + 3], 0);
+    if (!(sourceMass > 0)) continue;
+    const mass = Math.max(sourceMass, 1e-30);
     const temperature = finiteNumber(sphParticleState.thermo[ti + 2], 0);
     const materialId = sphParticleState.thermo[ti];
     const temperatureSlope = thermalTemperatureSlopeFromTable(
@@ -1316,12 +1318,14 @@ export function runSphThermalStepCpu({
     for (let j = 0; j < particleCount; j += 1) {
       if (i === j) continue;
       const oj = j * SPH_GPU_PARTICLE_STATE_FLOATS;
+      const sourceOtherMass = finiteNumber(sphParticleState.state[oj + 3], 0);
+      if (!(sourceOtherMass > 0)) continue;
       const dx = sphParticleState.state[oi] - sphParticleState.state[oj];
       const dy = sphParticleState.state[oi + 1] - sphParticleState.state[oj + 1];
       const dz = sphParticleState.state[oi + 2] - sphParticleState.state[oj + 2];
       const r = Math.hypot(dx, dy, dz);
       const tj = j * SPH_GPU_PARTICLE_THERMO_FLOATS;
-      const otherMass = Math.max(finiteNumber(sphParticleState.state[oj + 3], 0), 1e-30);
+      const otherMass = Math.max(sourceOtherMass, 1e-30);
       const otherRadiusM = particleNominalRadiusM(otherMass, finiteNumber(sphParticleState.thermo[tj + 3], 0));
       // Mirrors the WGSL kernel: contact-pair support max(2h, r_i + r_j) and
       // the radiation range RADIATION_PAIR_RANGE_RADII * (r_i + r_j).
@@ -1421,6 +1425,7 @@ export function runSphThermalStepCpu({
   for (let i = 0; i < particleCount; i += 1) {
     const stateOffset = i * SPH_GPU_PARTICLE_STATE_FLOATS;
     const thermoOffset = i * SPH_GPU_PARTICLE_THERMO_FLOATS;
+    if (!(finiteNumber(sphParticleState.state[stateOffset + 3], 0) > 0)) continue;
     state[stateOffset + 7] = sphParticleState.state[stateOffset + 7] + du[i];
     const materialId = sphParticleState.thermo[thermoOffset];
     const resolved = resolveThermalStateFromTable(thermalMaterialTable, materialId, state[stateOffset + 7]);
@@ -1519,11 +1524,11 @@ function resolveMaterialBankWarmInputShaderBinding(device, {
 }
 
 function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
-  return device.createBuffer({
+  return tagWebGpuBufferDevice(device.createBuffer({
     label,
     size: Math.max(4, byteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
-  });
+  }), device);
 }
 
 function resolveThermalResponseGraphArtifacts({

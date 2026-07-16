@@ -5856,6 +5856,22 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   });
   const compactSnapshotStep = graph.stateSeedPayload.step + 1;
   const compactSnapshotTime = graph.stateSeedPayload.time + (graph.stateSeedPayload.state.gpuMechanics?.dt ?? 5e-4);
+  const phaseLineageCapacity = graph.stateSeedPayload.state.particles.length / 4;
+  assert.equal(Number.isSafeInteger(phaseLineageCapacity), true);
+  const phaseCarrierPlan = {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: phaseLineageCapacity,
+    primaryCapacity: phaseLineageCapacity,
+    phaseLaneCount: 4,
+    phaseLaneStride: phaseLineageCapacity,
+    companionStart: phaseLineageCapacity,
+    companionCapacity: 3 * phaseLineageCapacity,
+    particleCapacity: graph.stateSeedPayload.state.particles.length,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+    localOnlyArray: [1, 2, 3],
+    localOnlyBuffer: { label: 'must-not-cross-portable-snapshot-boundary' }
+  };
   const compactBufferSnapshot = {
     schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
     cacheKey: graph.cacheKey,
@@ -5863,6 +5879,7 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
     particleCount: graph.stateSeedPayload.state.particles.length,
     step: compactSnapshotStep,
     time: compactSnapshotTime,
+    phaseCarrierPlan,
     sphState: snapshotSphPacked.state,
     sphThermo: snapshotSphPacked.thermo,
     mlsMpmMechanics: snapshotMlsMpmPacked.mechanics
@@ -5910,6 +5927,30 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   assert.equal(compactSnapshotCandidate.portableSnapshotAvailable, true);
   assert.equal(compactSnapshotCandidate.crossPeerReplayReady, true);
   assert.equal(compactSnapshotCandidate.crossPeerReplayBlocker, null);
+  assert.deepEqual(compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan, {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: phaseLineageCapacity,
+    primaryCapacity: phaseLineageCapacity,
+    phaseLaneCount: 4,
+    phaseLaneStride: phaseLineageCapacity,
+    companionStart: phaseLineageCapacity,
+    companionCapacity: 3 * phaseLineageCapacity,
+    particleCapacity: graph.stateSeedPayload.state.particles.length,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex'
+  });
+  assert.notStrictEqual(
+    compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan,
+    phaseCarrierPlan
+  );
+  assert.equal(
+    Object.hasOwn(compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan, 'localOnlyBuffer'),
+    false
+  );
+  assert.equal(
+    Object.hasOwn(compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan, 'localOnlyArray'),
+    false
+  );
   assert.equal(compactSnapshotCandidate.localRefreshRequired, true);
   assert.equal(
     compactSnapshotCandidate.localRefreshContract.status,
@@ -5963,6 +6004,68 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   const compactSnapshotHotBuffer = host.stateManager.getHotBuffer(compactSnapshotResult.hotBufferKey);
   assert.equal(compactSnapshotHotBuffer.schema, ULG_REMOTE_TASK_GRAPH_HOT_BUFFER_REFRESH_RESULT_SCHEMA);
   assert.equal(compactSnapshotHotBuffer.sourceMode, 'compact-buffer-snapshot');
+  assert.deepEqual(
+    compactSnapshotHotBuffer.sphPacked.phaseCarrierPlan,
+    compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan
+  );
+  assert.deepEqual(
+    compactSnapshotHotBuffer.mlsMpmPacked.phaseCarrierPlan,
+    compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan
+  );
+  assert.deepEqual(
+    compactSnapshotHotBuffer.sphUpload.phaseCarrierPlan,
+    compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan
+  );
+  assert.deepEqual(
+    compactSnapshotHotBuffer.mlsMpmUpload.phaseCarrierPlan,
+    compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan
+  );
+  assert.notStrictEqual(
+    compactSnapshotHotBuffer.sphUpload.phaseCarrierPlan,
+    compactSnapshotHotBuffer.mlsMpmUpload.phaseCarrierPlan
+  );
+  const invalidPhasePlanSeed = runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode({
+    stateSeedPayload: graph.stateSeedPayload,
+    mechanicsG2pResult: {
+      particleCount: graph.stateSeedPayload.state.particles.length,
+      compactBufferSnapshot: {
+        ...compactBufferSnapshot,
+        phaseCarrierPlan: {
+          ...phaseCarrierPlan,
+          particleCapacity: graph.stateSeedPayload.state.particles.length - 1
+        }
+      }
+    }
+  });
+  assert.equal(
+    invalidPhasePlanSeed.compactMechanicsStageSeed.compactBufferSnapshotValidationStatus,
+    'invalid-compact-buffer-snapshot'
+  );
+  assert.match(
+    invalidPhasePlanSeed.compactMechanicsStageSeed.compactBufferSnapshotValidationReason,
+    /phaseCarrierPlan does not match particleCount/
+  );
+  const createdBufferCountBeforeRejectedRefresh = compactSnapshotDevice.createdBuffers.length;
+  await assert.rejects(
+    compactSnapshotExecutor({
+      cacheKey: graph.cacheKey,
+      stateManager: host.stateManager,
+      compactCandidateAuthority: {
+        compactCandidate: {
+          ...compactSnapshotCandidate,
+          compactBufferSnapshot: {
+            ...compactSnapshotCandidate.compactBufferSnapshot,
+            phaseCarrierPlan: {
+              ...compactSnapshotCandidate.compactBufferSnapshot.phaseCarrierPlan,
+              stableLaneAddress: ['invalid-array-address']
+            }
+          }
+        }
+      }
+    }),
+    /phaseCarrierPlan does not match particleCount/
+  );
+  assert.equal(compactSnapshotDevice.createdBuffers.length, createdBufferCountBeforeRejectedRefresh);
   const liveSourcePublication = host.publishSameDeviceHotBufferSource({
     cacheKey: graph.cacheKey,
     stateKey: graph.stateSeedPayload.stateKey,

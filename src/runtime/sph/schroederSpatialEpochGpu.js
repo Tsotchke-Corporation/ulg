@@ -40,6 +40,9 @@ import {
   webGpuDeviceMismatchInfo
 } from './sphGpuDeviceIdentity.js';
 import { createSchroederSpatialMechanicsViewGpu } from './schroederSpatialMechanicsViewGpu.js';
+import {
+  createSchroederSpatialMechanicsFieldViewGpu
+} from './schroederSpatialMechanicsFieldViewGpu.js';
 
 export {
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
@@ -1555,6 +1558,7 @@ function directSpatialEpochRuntime(device, sourceCount) {
   entry = {
     runtime,
     mechanicsViewRuntimes: new Map(),
+    mechanicsFieldViewRuntimes: new Map(),
     capacity,
     generation: 0,
     buildCount: 0,
@@ -1562,6 +1566,57 @@ function directSpatialEpochRuntime(device, sourceCount) {
   };
   runtimes.set(capacity, entry);
   return { entry, cacheHit: false };
+}
+
+function directMechanicsFieldViewRuntime(device, entry, mechanicsGrid, identityStrideWords) {
+  if (!mechanicsGrid) return null;
+  const dims = Array.from(mechanicsGrid.gridDims || []);
+  const key = [
+    mechanicsGrid.gridNodeCount,
+    dims[0],
+    dims[1],
+    dims[2],
+    mechanicsGrid.gridShift,
+    Math.fround(mechanicsGrid.gridSpacingM),
+    identityStrideWords
+  ].join(':');
+  let runtime = entry.mechanicsFieldViewRuntimes.get(key);
+  if (runtime) {
+    entry.mechanicsFieldViewRuntimes.delete(key);
+    entry.mechanicsFieldViewRuntimes.set(key, runtime);
+  }
+  if (!runtime) {
+    if (
+      entry.mechanicsFieldViewRuntimes.size
+        >= DIRECT_MECHANICS_VIEW_RUNTIME_CACHE_LIMIT
+    ) {
+      const retired = [...entry.mechanicsFieldViewRuntimes.entries()].find(
+        ([, candidate]) => candidate.activeExecutionCount?.() === 0
+      );
+      if (!retired) {
+        const error = new Error(
+          'mechanics field view runtime cache is under live-generation backpressure'
+        );
+        error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_CACHE_BACKPRESSURE';
+        throw error;
+      }
+      const [retiredKey, retiredRuntime] = retired;
+      entry.mechanicsFieldViewRuntimes.delete(retiredKey);
+      retiredRuntime.destroy();
+    }
+    runtime = createSchroederSpatialMechanicsFieldViewGpu(device, {
+      maxSourceCount: entry.capacity,
+      gridNodeCount: mechanicsGrid.gridNodeCount,
+      gridDims: dims,
+      gridShift: mechanicsGrid.gridShift,
+      gridSpacingM: mechanicsGrid.gridSpacingM,
+      identityStrideWords,
+      arenaCount: DIRECT_SPATIAL_EPOCH_ARENA_COUNT,
+      label: `ulg-schroeder-direct-mechanics-field-view-${entry.capacity}-${dims.join('x')}`
+    });
+    entry.mechanicsFieldViewRuntimes.set(key, runtime);
+  }
+  return runtime;
 }
 
 function directMechanicsViewRuntime(device, entry, mechanicsGrid) {
@@ -1624,6 +1679,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   levelAssignment = null,
   activeNodeList,
   particleCount = null,
+  particleIdentityBuffer = null,
+  particleIdentityStrideWords = 1,
   laneId = 'direct-schroeder-scene',
   sourceFamily = null,
   allowPhaseVolumeOverlay = false,
@@ -1715,6 +1772,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   let execution = null;
   let mechanicsViewExecution = null;
   let mechanicsViewRuntime = null;
+  let mechanicsFieldViewExecution = null;
+  let mechanicsFieldViewRuntime = null;
   let submissionPerformed = false;
   let generationId = 0;
   let postSubmitCleanupGeneration = null;
@@ -1776,11 +1835,36 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         selectedLevel,
         spatialExecution: execution
       });
+      if (particleIdentityBuffer) {
+        if (!webGpuBufferMatchesDevice(particleIdentityBuffer, device)) {
+          throw new TypeError(
+            'mechanics field identity buffer must belong to the generation device'
+          );
+        }
+        mechanicsFieldViewRuntime = directMechanicsFieldViewRuntime(
+          device,
+          entry,
+          mechanicsGrid,
+          positiveInteger(particleIdentityStrideWords, 'particleIdentityStrideWords', 16)
+        );
+        mechanicsFieldViewExecution = mechanicsFieldViewRuntime.encode(encoder, {
+          sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
+          identityBuffer: particleIdentityBuffer,
+          sourceCount: source.sourceCount,
+          sourceRowLayoutId: source.sourceRowLayoutId,
+          identityStrideWords: particleIdentityStrideWords,
+          selectedLevel,
+          parentMechanicsView: mechanicsViewExecution
+        });
+      }
     }
     device.queue.submit([encoder.finish()]);
     submissionPerformed = true;
     if (!markSubmittedOrConfirm(mechanicsViewRuntime, mechanicsViewExecution)) {
       throw new Error('compact mechanics view runtime did not authenticate the submitted execution');
+    }
+    if (!markSubmittedOrConfirm(mechanicsFieldViewRuntime, mechanicsFieldViewExecution)) {
+      throw new Error('mechanics field view runtime did not authenticate the submitted execution');
     }
     if (!markSubmittedOrConfirm(entry.runtime, execution)) {
       throw new Error('spatial epoch runtime did not authenticate the submitted execution');
@@ -1798,6 +1882,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       runtime: entry.runtime,
       mechanicsView: mechanicsViewExecution,
       mechanicsViewRuntime,
+      mechanicsFieldView: mechanicsFieldViewExecution,
+      mechanicsFieldViewRuntime,
       runtimeCapacity: entry.capacity,
       arenaCapacity: entry.runtime.arenaCount,
       runtimeCacheHit: cacheHit,
@@ -1825,9 +1911,13 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         mechanicsViewRuntime,
         mechanicsViewExecution
       );
+      const mechanicsFieldSubmitted = markSubmittedOrConfirm(
+        mechanicsFieldViewRuntime,
+        mechanicsFieldViewExecution
+      );
       cache.entry.generation = Math.max(cache.entry.generation, generationId);
       cache.entry.buildCount += 1;
-      if (spatialSubmitted && mechanicsSubmitted) {
+      if (spatialSubmitted && mechanicsSubmitted && mechanicsFieldSubmitted) {
         postSubmitCleanupGeneration = {
           schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
           status: 'schroeder-spatial-epoch-post-submit-cleanup-retained',
@@ -1839,6 +1929,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           runtime: cache.entry.runtime,
           mechanicsView: mechanicsViewExecution,
           mechanicsViewRuntime,
+          mechanicsFieldView: mechanicsFieldViewExecution,
+          mechanicsFieldViewRuntime,
           releaseScheduled: false,
           releaseStatus: 'spatial-epoch-post-submit-cleanup-awaiting-fence'
         };
@@ -1872,11 +1964,24 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         // Preserve the original build/admission error.
       }
     }
+    if (mechanicsFieldViewExecution && !submissionPerformed && mechanicsFieldViewRuntime) {
+      try {
+        mechanicsFieldViewRuntime.releaseExecution(
+          mechanicsFieldViewExecution,
+          { discardedEncoder: true }
+        );
+      } catch {
+        // Preserve the original build/admission error.
+      }
+    }
     return {
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: (
         error?.code === 'ERR_SCHROEDER_SPATIAL_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_VIEW_ARENA_EXHAUSTED'
+        || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_ARENA_EXHAUSTED'
+        || error?.code === 'ERR_SCHROEDER_MECHANICS_VIEW_CACHE_BACKPRESSURE'
+        || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_CACHE_BACKPRESSURE'
       )
         ? 'schroeder-spatial-epoch-generation-backpressure'
         : 'schroeder-spatial-epoch-generation-rejected',
@@ -2432,6 +2537,8 @@ export async function runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
         spatialReleased: liveGeneration?.execution?.released === true,
         mechanicsReleased: liveGeneration?.mechanicsView == null
           || liveGeneration.mechanicsView.released === true,
+        mechanicsFieldReleased: liveGeneration?.mechanicsFieldView == null
+          || liveGeneration.mechanicsFieldView.released === true,
         operations: liveGeneration?.releaseOperationResults ?? []
       }));
       const error = new Error(
@@ -2471,14 +2578,21 @@ export function releaseSchroederSpatialEpochGenerationAfterQueue(
   const ownerRuntime = generation.runtime || null;
   const mechanicsViewExecution = generation.mechanicsView || null;
   const mechanicsViewRuntime = generation.mechanicsViewRuntime || null;
+  const mechanicsFieldViewExecution = generation.mechanicsFieldView || null;
+  const mechanicsFieldViewRuntime = generation.mechanicsFieldViewRuntime || null;
   const spatialAlreadyReleased = generation.execution.released === true;
   const mechanicsAlreadyReleased = mechanicsViewExecution?.released === true;
+  const mechanicsFieldAlreadyReleased = mechanicsFieldViewExecution?.released === true;
   let ownerRuntimeOwnsExecution = spatialAlreadyReleased;
   let ownerRuntimeSubmissionProven = spatialAlreadyReleased;
   let mechanicsRuntimeOwnsExecution = mechanicsViewExecution == null
     || mechanicsAlreadyReleased;
   let mechanicsRuntimeSubmissionProven = mechanicsViewExecution == null
     || mechanicsAlreadyReleased;
+  let mechanicsFieldRuntimeOwnsExecution = mechanicsFieldViewExecution == null
+    || mechanicsFieldAlreadyReleased;
+  let mechanicsFieldRuntimeSubmissionProven = mechanicsFieldViewExecution == null
+    || mechanicsFieldAlreadyReleased;
   try {
     if (!spatialAlreadyReleased) {
       ownerRuntimeOwnsExecution = ownerRuntime?.ownsExecution?.(
@@ -2496,11 +2610,21 @@ export function releaseSchroederSpatialEpochGenerationAfterQueue(
         mechanicsViewExecution
       ) === true;
     }
+    if (mechanicsFieldViewExecution && !mechanicsFieldAlreadyReleased) {
+      mechanicsFieldRuntimeOwnsExecution = mechanicsFieldViewRuntime?.ownsExecution?.(
+        mechanicsFieldViewExecution
+      ) === true;
+      mechanicsFieldRuntimeSubmissionProven = mechanicsFieldViewRuntime?.isExecutionSubmitted?.(
+        mechanicsFieldViewExecution
+      ) === true;
+    }
   } catch {
     ownerRuntimeOwnsExecution = false;
     ownerRuntimeSubmissionProven = false;
     mechanicsRuntimeOwnsExecution = false;
     mechanicsRuntimeSubmissionProven = false;
+    mechanicsFieldRuntimeOwnsExecution = false;
+    mechanicsFieldRuntimeSubmissionProven = false;
   }
   if (
     (!spatialAlreadyReleased && (
@@ -2517,7 +2641,14 @@ export function releaseSchroederSpatialEpochGenerationAfterQueue(
       || mechanicsViewRuntime?.deviceId !== releaseDeviceId
       || typeof mechanicsViewRuntime?.releaseExecutionAfter !== 'function'
       || !mechanicsRuntimeOwnsExecution
-      || !mechanicsRuntimeSubmissionProven
+    || !mechanicsRuntimeSubmissionProven
+    ))
+    || (mechanicsFieldViewExecution && !mechanicsFieldAlreadyReleased && (
+      mechanicsFieldViewRuntime !== mechanicsFieldViewExecution.ownerRuntime
+      || mechanicsFieldViewRuntime?.deviceId !== releaseDeviceId
+      || typeof mechanicsFieldViewRuntime?.releaseExecutionAfter !== 'function'
+      || !mechanicsFieldRuntimeOwnsExecution
+      || !mechanicsFieldRuntimeSubmissionProven
     ))
   ) {
     generation.releaseStatus = 'spatial-epoch-generation-retained-owner-mismatch';
@@ -2546,12 +2677,27 @@ export function releaseSchroederSpatialEpochGenerationAfterQueue(
         mechanicsViewRuntime.releaseExecutionAfter(mechanicsViewExecution, fence)
       );
     }
+    if (mechanicsFieldViewExecution && !mechanicsFieldAlreadyReleased) {
+      releaseOperations.push(
+        mechanicsFieldViewRuntime.releaseExecutionAfter(
+          mechanicsFieldViewExecution,
+          fence
+        )
+      );
+    }
     ownerReleasePromise = Promise.allSettled(releaseOperations).then(
       (results) => {
+        const releaseOwners = [
+          ...(!spatialAlreadyReleased ? ['spatial-directory'] : []),
+          ...(mechanicsViewExecution && !mechanicsAlreadyReleased
+            ? ['compact-mechanics-view']
+            : []),
+          ...(mechanicsFieldViewExecution && !mechanicsFieldAlreadyReleased
+            ? ['mechanics-field-view']
+            : [])
+        ];
         generation.releaseOperationResults = results.map((result, index) => ({
-          owner: index === 0 && !spatialAlreadyReleased
-            ? 'spatial-directory'
-            : 'compact-mechanics-view',
+          owner: releaseOwners[index] || 'unknown-generation-artifact',
           status: result.status,
           confirmed: result.status === 'fulfilled' && result.value === true,
           reason: result.status === 'rejected'
@@ -2561,7 +2707,8 @@ export function releaseSchroederSpatialEpochGenerationAfterQueue(
             : null
         }));
         const bothExecutionsReleased = generation.execution?.released === true
-          && (!mechanicsViewExecution || mechanicsViewExecution.released === true);
+          && (!mechanicsViewExecution || mechanicsViewExecution.released === true)
+          && (!mechanicsFieldViewExecution || mechanicsFieldViewExecution.released === true);
         if (bothExecutionsReleased) return true;
         const rejected = results.find((result) => result.status === 'rejected');
         if (rejected) throw rejected.reason;
@@ -2604,6 +2751,7 @@ export function releaseSchroederSpatialEpochGenerationAfterQueue(
         || (
           generation.execution?.released === true
           && (!mechanicsViewExecution || mechanicsViewExecution.released === true)
+          && (!mechanicsFieldViewExecution || mechanicsFieldViewExecution.released === true)
         )
       ) {
         generation.releaseStatus =
@@ -2619,6 +2767,7 @@ export function releaseSchroederSpatialEpochGenerationAfterQueue(
       if (
         generation.execution?.released === true
         && (!mechanicsViewExecution || mechanicsViewExecution.released === true)
+        && (!mechanicsFieldViewExecution || mechanicsFieldViewExecution.released === true)
       ) {
         generation.releaseStatus =
           'spatial-epoch-generation-released-after-final-consumer';

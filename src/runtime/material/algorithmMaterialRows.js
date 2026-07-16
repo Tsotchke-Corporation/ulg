@@ -503,7 +503,12 @@ export function buildAlgorithmInitialBodyMlsMpmMechanicsRows({
   for (let index = 0; index < particleCount; index += 1) {
     const particle = particles[index] || {};
     const meta = metadata[index] || {};
-    if (particle.spareProductSlot === true || meta.spareProductSlot === true) continue;
+    if (
+      particle.spareProductSlot === true
+      || meta.spareProductSlot === true
+      || particle.phaseCompanionSlot === true
+      || meta.phaseCompanionSlot === true
+    ) continue;
     const rawBodyId = particle.initialBodyId ?? meta.initialBodyId ?? null;
     const bodyId = rawBodyId == null ? null : String(rawBodyId);
     const initializationRow = bodyId == null ? null : (initRowsByBodyId.get(bodyId) || null);
@@ -601,7 +606,12 @@ export function buildAlgorithmMlsMpmMechanicsRows({
     // Spare product-placement rows are zero-mass reserves: they carry no
     // material-class statistics and must not mint a (role|material|phase)
     // class of their own.
-    if (particle.spareProductSlot === true || meta.spareProductSlot === true) continue;
+    if (
+      particle.spareProductSlot === true
+      || meta.spareProductSlot === true
+      || particle.phaseCompanionSlot === true
+      || meta.phaseCompanionSlot === true
+    ) continue;
     const role = particle.role || meta.role || (particle.material === 'h2o' ? 'base' : 'drop');
     const material = meta.material || particle.material || 'unknown';
     const phase = meta.phase || particle.phase || 'unknown';

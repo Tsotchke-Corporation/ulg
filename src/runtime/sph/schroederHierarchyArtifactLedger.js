@@ -6,6 +6,11 @@ import {
   releaseResidentBufferLease,
   summarizeResidentBufferLeaseLedger
 } from '../residentBufferLease.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY
+} from './schroederSpatialEpochTransaction.js';
+
+export { SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY };
 
 export const ULG_SCHROEDER_HIERARCHY_ARTIFACT_LEDGER_SCHEMA =
   'peercompute.ulg.schroeder-hierarchy-artifact-ledger.v0';
@@ -15,6 +20,40 @@ export const ULG_SCHROEDER_HIERARCHY_ARTIFACT_LEDGER_SUMMARY_SCHEMA =
 const TRANSFER_CLASSES = new Set(['render', 'next-tick', 'continuation']);
 const RETIREMENT_AUTHORITIES = new Set(['ledger-consumer', 'external-owner']);
 const runtimeByLedger = new WeakMap();
+
+const GENERATION_BOUND_ARTIFACT_FAMILIES = new Set(
+  Object.values(SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY)
+);
+
+function exactNearConsumerArtifactSpecs(specificProposalFields) {
+  return [
+    {
+      role: 'proposal',
+      fields: [...specificProposalFields, 'proposalBuffer'],
+      destroyMethod: 'destroyProposalBuffer'
+    },
+    {
+      role: 'candidate-offsets',
+      fields: ['candidateOffsetBuffer', 'pairOffsetBuffer'],
+      destroyMethod: 'destroyCandidateBuffers'
+    },
+    {
+      role: 'candidate-members',
+      fields: ['candidateMemberBuffer', 'pairMemberBuffer'],
+      destroyMethod: 'destroyCandidateBuffers'
+    },
+    {
+      role: 'consumer-receipt',
+      fields: ['consumerReceiptBuffer', 'authenticationReceiptBuffer', 'receiptBuffer'],
+      destroyMethod: 'destroyConsumerReceiptBuffer'
+    },
+    {
+      role: 'diagnostic-counter',
+      fields: ['diagnosticCounterBuffer'],
+      destroyMethod: 'destroyDiagnosticCounterBuffer'
+    }
+  ];
+}
 
 const PARTICLE_BUFFER_SPECS = [
   { role: 'particle-state', fields: ['particleStateBuffer'], destroyMethod: 'destroyParticleBuffers' },
@@ -185,7 +224,39 @@ const FAMILY_BUFFER_SPECS = Object.freeze({
   ],
   'phase-volume-diagnostic-summary': [
     { role: 'summary', fields: ['summaryBuffer'], destroyMethod: 'destroySummaryBuffer' }
-  ]
+  ],
+  [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.PRESSURE_CONTACT_INTERFACE]:
+    exactNearConsumerArtifactSpecs([
+      'pressureContactInterfaceProposalBuffer',
+      'forceProposalBuffer',
+      'forceRowsBuffer'
+    ]),
+  [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_DISCOVERY]:
+    exactNearConsumerArtifactSpecs([
+      'reactionDiscoveryProposalBuffer',
+      'reactionProposalBuffer'
+    ]),
+  [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.SEPARATION]:
+    exactNearConsumerArtifactSpecs([
+      'separationProposalBuffer',
+      'mechanicsDeltaBuffer'
+    ]),
+  [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.THERMAL_CONDUCTION]:
+    exactNearConsumerArtifactSpecs([
+      'thermalConductionProposalBuffer',
+      'thermalDeltaBuffer'
+    ]),
+  [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.THERMAL_RADIATION]:
+    exactNearConsumerArtifactSpecs([
+      'thermalRadiationProposalBuffer',
+      'radiationDeltaBuffer'
+    ]),
+  [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.LOCAL_MATERIAL_INTERFACE]:
+    exactNearConsumerArtifactSpecs([
+      'localMaterialInterfaceProposalBuffer',
+      'materialInterfaceDeltaBuffer',
+      'stateDeltaBuffer'
+    ])
 });
 
 function cleanString(value, fallback = null) {
@@ -196,6 +267,37 @@ function cleanString(value, fallback = null) {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function exactSpatialEpochGenerationId(value, label) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 0
+    || value > 0xffff_ffff
+  ) {
+    throw new TypeError(`${label} requires an exact u32 spatial epoch generation id`);
+  }
+  return value;
+}
+
+function resolveArtifactSpatialEpochGenerationId(ledger, family, value) {
+  if (!GENERATION_BOUND_ARTIFACT_FAMILIES.has(family)) return null;
+  if (ledger.spatialEpochGenerationId === null) {
+    throw new Error(
+      `Generation-bound Schroeder hierarchy artifact family ${family} requires a bound spatial epoch ledger`
+    );
+  }
+  const generationId = exactSpatialEpochGenerationId(
+    value,
+    `Generation-bound Schroeder hierarchy artifact family ${family}`
+  );
+  if (generationId !== ledger.spatialEpochGenerationId) {
+    throw new Error(
+      `Generation-bound Schroeder hierarchy artifact family ${family} identifies spatial epoch ${generationId}; expected ${ledger.spatialEpochGenerationId}`
+    );
+  }
+  return generationId;
 }
 
 function uniqueStrings(values) {
@@ -236,6 +338,9 @@ function refreshLedger(ledger) {
   );
   ledger.ownedResourceCount = resources.filter((resource) => resource.owned).length;
   ledger.borrowedResourceCount = resources.filter((resource) => !resource.owned).length;
+  ledger.generationBoundResourceCount = resources.filter(
+    (resource) => resource.spatialEpochGenerationId !== null
+  ).length;
   ledger.transferredResourceCount = resources.filter((resource) => Boolean(resource.transfer)).length;
   ledger.pendingTransferCount = resources.filter(
     (resource) => resource.transfer?.status === 'active'
@@ -555,6 +660,7 @@ export function createSchroederHierarchyArtifactLedger({
     aliasCount: 0,
     ownedResourceCount: 0,
     borrowedResourceCount: 0,
+    generationBoundResourceCount: 0,
     transferredResourceCount: 0,
     pendingTransferCount: 0,
     retirementAttemptedResourceCount: 0,
@@ -626,7 +732,8 @@ export function registerSchroederHierarchyArtifact(ledger, {
   producerStage = null,
   byteLength = 0,
   rowCount = 0,
-  expectedConsumers = []
+  expectedConsumers = [],
+  spatialEpochGenerationId = null
 } = {}) {
   const runtime = assertLedger(ledger);
   if (ledger.sealed) {
@@ -638,6 +745,12 @@ export function registerSchroederHierarchyArtifact(ledger, {
   const allKeys = uniqueStrings([key, ...aliases]);
   const normalizedFamily = cleanString(family, 'unknown');
   const normalizedRole = cleanString(role, 'buffer');
+  const resolvedSpatialEpochGenerationId =
+    resolveArtifactSpatialEpochGenerationId(
+      ledger,
+      normalizedFamily,
+      spatialEpochGenerationId
+    );
   const existingByBuffer = runtime.byBuffer.get(buffer) || null;
   for (const alias of allKeys) {
     const existingByKey = runtime.byKey.get(alias);
@@ -656,6 +769,18 @@ export function registerSchroederHierarchyArtifact(ledger, {
       && !equivalentDestroyAuthority(authority, existingByBuffer.destroyAuthority)
     ) {
       throw new Error(`Schroeder hierarchy artifact destroy-authority conflict: ${key}`);
+    }
+    if (
+      resolvedSpatialEpochGenerationId !== null
+      && existingByBuffer.spatialEpochGenerationId !== null
+      && existingByBuffer.spatialEpochGenerationId !== resolvedSpatialEpochGenerationId
+    ) {
+      throw new Error(
+        `Schroeder hierarchy artifact spatial epoch generation conflict: ${key}`
+      );
+    }
+    if (resolvedSpatialEpochGenerationId !== null) {
+      existingByBuffer.spatialEpochGenerationId = resolvedSpatialEpochGenerationId;
     }
     for (const alias of allKeys) {
       runtime.byKey.set(alias, existingByBuffer);
@@ -682,6 +807,8 @@ export function registerSchroederHierarchyArtifact(ledger, {
     ).sort();
     ledger.resources[existingByBuffer.canonicalKey].memberships =
       existingByBuffer.memberships.map((membership) => ({ ...membership }));
+    ledger.resources[existingByBuffer.canonicalKey].spatialEpochGenerationId =
+      existingByBuffer.spatialEpochGenerationId;
     refreshLedger(ledger);
     return existingByBuffer;
   }
@@ -700,6 +827,7 @@ export function registerSchroederHierarchyArtifact(ledger, {
     byteLength: Math.max(0, Math.round(finiteNumber(byteLength, 0))),
     rowCount: Math.max(0, Math.round(finiteNumber(rowCount, 0))),
     bufferLabel: cleanString(buffer.label),
+    spatialEpochGenerationId: resolvedSpatialEpochGenerationId,
     destroy: resolvedDestroy,
     destroyAuthority: cleanString(
       destroyAuthority,
@@ -744,7 +872,8 @@ export function registerSchroederHierarchyArtifact(ledger, {
     producerStage: resource.producerStage,
     byteLength: resource.byteLength,
     rowCount: resource.rowCount,
-    bufferLabel: resource.bufferLabel
+    bufferLabel: resource.bufferLabel,
+    spatialEpochGenerationId: resource.spatialEpochGenerationId
   };
   refreshLedger(ledger);
   return resource;
@@ -755,7 +884,8 @@ export function registerSchroederHierarchyArtifactFamily(ledger, {
   artifact,
   owned = true,
   producerStage = null,
-  expectedConsumers = []
+  expectedConsumers = [],
+  spatialEpochGenerationId = artifact?.spatialEpochGenerationId ?? null
 } = {}) {
   const runtime = assertLedger(ledger);
   const normalizedFamily = cleanString(family);
@@ -792,7 +922,8 @@ export function registerSchroederHierarchyArtifactFamily(ledger, {
       destroyAuthority: `${normalizedFamily}:${authority.destroyAuthority}`,
       producerStage: producerStage || normalizedFamily,
       byteLength: byteLengthFor(buffer, artifact, populatedFields),
-      expectedConsumers
+      expectedConsumers,
+      spatialEpochGenerationId
     });
     if (resource && !registered.includes(resource)) registered.push(resource);
   }
@@ -1023,6 +1154,7 @@ export function schroederHierarchyArtifactBufferLifecycle(ledger, buffer) {
     families: uniqueStrings(resource.memberships.map((membership) => membership.family)).sort(),
     roles: uniqueStrings(resource.memberships.map((membership) => membership.role)).sort(),
     memberships: resource.memberships.map((membership) => ({ ...membership })),
+    spatialEpochGenerationId: resource.spatialEpochGenerationId,
     owned: resource.owned,
     transfer: resource.transfer ? { ...resource.transfer } : null,
     externallyOwned: resource.externallyOwned,
@@ -1048,6 +1180,7 @@ export function summarizeSchroederHierarchyArtifactLedger(ledger) {
     aliasCount: ledger.aliasCount,
     ownedResourceCount: ledger.ownedResourceCount,
     borrowedResourceCount: ledger.borrowedResourceCount,
+    generationBoundResourceCount: ledger.generationBoundResourceCount,
     transferredResourceCount: ledger.transferredResourceCount,
     pendingTransferCount: ledger.pendingTransferCount,
     retirementAttemptedResourceCount: ledger.retirementAttemptedResourceCount,
@@ -1065,6 +1198,7 @@ export function summarizeSchroederHierarchyArtifactLedger(ledger) {
       families: uniqueStrings(resource.memberships.map((membership) => membership.family)).sort(),
       roles: uniqueStrings(resource.memberships.map((membership) => membership.role)).sort(),
       memberships: resource.memberships.map((membership) => ({ ...membership })),
+      spatialEpochGenerationId: resource.spatialEpochGenerationId,
       owned: resource.owned,
       producerStage: resource.producerStage,
       byteLength: resource.byteLength,

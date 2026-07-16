@@ -21,7 +21,16 @@ const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
   url: sphPhaseScenarioPresetUrl(entry.id, {
     renderer: 'native-webgpu',
     renderOwnership: 'main-thread-renderer',
-    surfaceDraw: 'native-webgpu-surface-consumer'
+    surfaceDraw: 'native-webgpu-surface-consumer',
+    ss: '1',
+    schroederLevel: '0',
+    schroederPortableSummary: '1',
+    schroederActiveNodeIndex: '1',
+    schroederTwoLevel: '0',
+    schroederCrossLevelCoupling: '0',
+    schroederPhaseVolumeMigration: '0',
+    schroederLawQueue: '0',
+    schroederLawNeighborCandidates: '0'
   }),
   visualRendererMode: 'native-webgpu-surface-consumer',
   ...entry.validation,
@@ -332,6 +341,15 @@ function deterministicRandomPairScenarios() {
     params.set('renderer', 'native-webgpu');
     params.set('renderOwnership', 'main-thread-renderer');
     params.set('surfaceDraw', 'native-webgpu-surface-consumer');
+    params.set('ss', '1');
+    params.set('schroederLevel', '0');
+    params.set('schroederPortableSummary', '1');
+    params.set('schroederActiveNodeIndex', '1');
+    params.set('schroederTwoLevel', '0');
+    params.set('schroederCrossLevelCoupling', '0');
+    params.set('schroederPhaseVolumeMigration', '0');
+    params.set('schroederLawQueue', '0');
+    params.set('schroederLawNeighborCandidates', '0');
     scenarios.push({
       label: `random-elements-${drop.key.toLowerCase()}-${base.key.toLowerCase()}`,
       randomPair: { drop: drop.key, base: base.key, seed: rawSeed },

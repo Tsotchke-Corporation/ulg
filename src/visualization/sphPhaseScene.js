@@ -289,15 +289,32 @@ export async function settleSchroederSpatialEpochBatchEvidence({
     throw error;
   }
   for (const settlement of settlements) {
-    if (
-      typeof settlement?.releasePromise?.then !== 'function'
-      || typeof settlement?.currentTransactionSummary !== 'function'
-      || typeof settlement?.currentGenerationSummary !== 'function'
-      || typeof settlement?.artifactRetirementPromise?.then !== 'function'
-      || typeof settlement?.currentArtifactLedgerSummary !== 'function'
-    ) {
+    const missingHooks = [
+      typeof settlement?.releasePromise?.then === 'function'
+        ? null
+        : 'releasePromise',
+      typeof settlement?.currentTransactionSummary === 'function'
+        ? null
+        : 'currentTransactionSummary',
+      typeof settlement?.currentGenerationSummary === 'function'
+        ? null
+        : 'currentGenerationSummary',
+      typeof settlement?.artifactRetirementPromise?.then === 'function'
+        ? null
+        : 'artifactRetirementPromise',
+      typeof settlement?.currentArtifactLedgerSummary === 'function'
+        ? null
+        : 'currentArtifactLedgerSummary'
+    ].filter(Boolean);
+    if (missingHooks.length > 0) {
+      const transactionSummary = typeof settlement?.currentTransactionSummary === 'function'
+        ? settlement.currentTransactionSummary()
+        : null;
+      const generationSummary = typeof settlement?.currentGenerationSummary === 'function'
+        ? settlement.currentGenerationSummary()
+        : null;
       const error = new Error(
-        `Schroeder spatial epoch batch step ${settlement?.index ?? 'unknown'} lacks an owner settlement hook`
+        `Schroeder spatial epoch batch step ${settlement?.index ?? 'unknown'} lacks owner settlement hooks: ${missingHooks.join(', ')}; transaction=${transactionSummary?.state ?? 'none'} generation=${generationSummary?.status ?? 'none'} selected=${generationSummary?.selected === true}`
       );
       error.code = 'ERR_SCHROEDER_SPATIAL_EPOCH_BATCH_RELEASE_HOOKS';
       throw error;
@@ -24406,10 +24423,13 @@ fn fs_main() -> @location(0) vec4<f32> {
     schroederActiveNodeSortedIndexPolicyMode = undefined,
     schroederLawNeighborTraversalPolicyMode = undefined,
     schroederLawNeighborCandidateReadbackMode = null,
-    schroederEnableCrossLevelCoupling = true,
-    schroederEnablePhaseVolumeMigration = true,
-    schroederEnableLawQueue = true,
-    schroederEnableLawNeighborCandidates = true,
+    // Slice 5's production authority is the single-level exact-near epoch.
+    // Later hierarchy/overlay and legacy queue families remain explicit
+    // opt-ins until their own immutable-epoch contracts are complete.
+    schroederEnableCrossLevelCoupling = false,
+    schroederEnablePhaseVolumeMigration = false,
+    schroederEnableLawQueue = false,
+    schroederEnableLawNeighborCandidates = false,
     schroederStateDeltaMergeAdmission = null,
     schroederPhaseVolumeMigrationAdmission = null,
     schroederEnableParticleStorageMaterialization = false,

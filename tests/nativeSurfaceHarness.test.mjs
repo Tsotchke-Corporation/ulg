@@ -1195,9 +1195,13 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   assert.match(matrixSource, /renderer: 'native-webgpu'/);
   assert.match(matrixSource, /renderOwnership: 'main-thread-renderer'/);
   assert.match(matrixSource, /surfaceDraw: 'native-webgpu-surface-consumer'/);
+  assert.match(matrixSource, /ss: '1'/);
+  assert.match(matrixSource, /schroederPhaseVolumeMigration: '0'/);
   assert.match(matrixSource, /params\.set\('renderer', 'native-webgpu'\)/);
   assert.match(matrixSource, /params\.set\('renderOwnership', 'main-thread-renderer'\)/);
   assert.match(matrixSource, /params\.set\('surfaceDraw', 'native-webgpu-surface-consumer'\)/);
+  assert.match(matrixSource, /params\.set\('ss', '1'\)/);
+  assert.match(matrixSource, /params\.set\('schroederPhaseVolumeMigration', '0'\)/);
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_WIDTH[\s\S]*?'1280'/);
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_HEIGHT[\s\S]*?'800'/);
   assert.match(
@@ -1219,6 +1223,30 @@ test('standard material matrix pins production native WebGPU visual evidence', (
     matrixSource,
     /'initial-state-captured'[\s\S]*?simulation time zero/,
     'initial-state claims should remain inconclusive without a time-zero GPU checkpoint'
+  );
+});
+
+test('single-level SS is the production default while future hierarchy families stay opt-in', () => {
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  for (const option of [
+    'initialSchroederCrossLevelCouplingEnabled',
+    'initialSchroederPhaseVolumeMigrationEnabled',
+    'initialSchroederLawQueueEnabled',
+    'initialSchroederLawNeighborCandidatesEnabled'
+  ]) {
+    assert.match(
+      mountSource,
+      new RegExp(`const ${option} = booleanUrlParam\\([\\s\\S]*?\\n    false\\n  \\);`),
+      `${option} must remain opt-in until its immutable-epoch slice is complete`
+    );
+  }
+  assert.match(mountSource, /initialSchroederPhaseVolumeMigrationEnabled\) q\.set\('schroederPhaseVolumeMigration', '1'\)/);
+  assert.match(
+    sceneSource,
+    /schroederEnableCrossLevelCoupling = false,[\s\S]*?schroederEnablePhaseVolumeMigration = false,[\s\S]*?schroederEnableLawQueue = false,[\s\S]*?schroederEnableLawNeighborCandidates = false/,
+    'programmatic scene callers must inherit the supported single-level Slice 5 boundary'
   );
 });
 

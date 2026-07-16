@@ -170,8 +170,10 @@ import {
   runSchroederSpatialEpochGenerationWithBackpressureWebGpu
 } from './schroederSpatialEpochGpu.js';
 import {
+  SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY,
   SCHROEDER_SPATIAL_EPOCH_READER,
   SCHROEDER_SPATIAL_EPOCH_READER_PHASE,
+  SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID,
   abortSchroederSpatialEpochTransaction,
   admitSchroederSpatialEpochTransactionReader,
   commitSchroederSpatialEpochTransaction,
@@ -14045,6 +14047,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       residentStepRunner === runMlsMpmResidentStepWithOptionalWebGpu
       || residentStepRunner?.schroederSpatialEpochTransactionAware === true
   });
+  const residentRunnerExactNearConsumerAware = Boolean(
+    residentStepRunner === runMlsMpmResidentStepWithOptionalWebGpu
+    || residentStepRunner?.schroederSpatialExactNearConsumerAware === true
+  );
   const spatialEpochTransactionEligible = Object.values(
     spatialEpochTransactionEligibility
   ).every(Boolean);
@@ -14124,12 +14130,49 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     // same-call level-assignment -> active-node -> generation chain. An
     // injected generation does not prove which particle buffer family
     // produced its active-node rows.
+    const enabledConsumerReaderIds = residentRunnerExactNearConsumerAware ? [
+      SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE,
+      ...(residentStepOptions?.reactionTable?.reactionCount > 0
+          && residentStepOptions?.thermalMaterialTable
+        ? [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]
+        : []),
+      SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION,
+      ...(residentStepOptions?.thermalMaterialTable
+        ? [
+            SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
+            SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION
+          ]
+        : []),
+      SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE
+    ] : [];
+    const supportProfileByReaderId = {
+      [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
+        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.PRESSURE_CONTACT_INTERFACE,
+      [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
+        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.REACTION_DISCOVERY,
+      [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
+        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.SEPARATION,
+      [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
+        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_CONDUCTION,
+      [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]:
+        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_RADIATION,
+      [SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE]:
+        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.LOCAL_MATERIAL_INTERFACE
+    };
+    const consumerSupportProfileIds = Object.fromEntries(
+      enabledConsumerReaderIds.map((readerId) => [
+        readerId,
+        supportProfileByReaderId[readerId]
+      ])
+    );
     spatialEpochTransaction = createSchroederSpatialEpochTransaction({
       device,
       generation: resolvedSpatialEpochGeneration,
       sphParticleUpload,
       mlsMpmParticleUpload,
-      twoLevelAuthoritative
+      twoLevelAuthoritative,
+      enabledConsumerReaderIds,
+      consumerSupportProfileIds
     });
   }
   reportHierarchyStage(
@@ -15308,8 +15351,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && resolvedSpatialEpochGeneration.execution.queryGeometryEvidence
       === resolvedSpatialEpochGeneration.execution.exactNearQueryProfile
   );
+  const pressureInterfaceOwnerScopeSupersededByExactNearProposal = Boolean(
+    spatialEpochTransaction
+    && residentRunnerExactNearConsumerAware
+  );
   const pressureInterfaceOwnerScopeEligibilityBlockers = [
     !enablePressureInterfaceOwnerScope && 'owner-scope-disabled',
+    pressureInterfaceOwnerScopeSupersededByExactNearProposal
+      && 'pressure-contact-interface-migrated-to-resident-exact-near-proposal',
     twoLevelAuthoritative && 'two-level-authoritative',
     resolvedSpatialEpochGeneration?.selected !== true
       && 'canonical-generation-not-selected',
@@ -15569,16 +15618,45 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     // requested one; a silent downgrade becomes a replay treadmill.
     residentStep.schroederRequestedReadbackMode = readbackMode;
   }
+  const exactNearConsumerArtifactFamilyByReader = {
+    [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
+      SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.PRESSURE_CONTACT_INTERFACE,
+    [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
+      SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_DISCOVERY,
+    [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
+      SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.SEPARATION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
+      SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.THERMAL_CONDUCTION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]:
+      SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.THERMAL_RADIATION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE]:
+      SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.LOCAL_MATERIAL_INTERFACE
+  };
+  for (const [readerId, artifact] of Object.entries(
+    residentStep?.schroederSpatialExactNearConsumerArtifacts ?? {}
+  )) {
+    const family = exactNearConsumerArtifactFamilyByReader[readerId];
+    if (!family || !artifact) continue;
+    // Proposal arenas own these generation-bound buffers. The hierarchy
+    // ledger records their memberships and receipts, but must never destroy
+    // a cache-owned buffer during ordinary per-tick retirement.
+    registerHierarchyArtifacts(family, artifact, artifact, {
+      producerStage: `${readerId}-proposal`,
+      expectedConsumers: [readerId]
+    });
+  }
   if (spatialEpochTransaction) {
     const preCommitTransactionSummary =
       summarizeSchroederSpatialEpochTransaction(spatialEpochTransaction);
     sealSchroederSpatialEpochTransactionProposals(
       spatialEpochTransaction,
       {
-        migratedProposalCount: 0,
         legacyConsumerCount:
-          preCommitTransactionSummary.legacyLookupRecords.length,
-        status: 'unmigrated-post-integration-laws-quarantined'
+          preCommitTransactionSummary.legacyLookupRecords.filter((record) => (
+            (record.privateBuildCount ?? 0) > 0
+            || (record.exhaustiveTraversalCount ?? 0) > 0
+          )).length,
+        status: 'authenticated-exact-near-consumer-proposals-sealed'
       }
     );
     commitSchroederSpatialEpochTransaction(spatialEpochTransaction, {

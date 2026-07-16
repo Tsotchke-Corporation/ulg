@@ -7,7 +7,7 @@ export const SCHROEDER_SPATIAL_EPOCH_MAGIC = 0x53534531;
 export const SCHROEDER_SPATIAL_EPOCH_VERSION = 1;
 export const SCHROEDER_SPATIAL_EPOCH_KEY_WORDS = 5;
 export const SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS = 48;
-export const SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS = 4;
+export const SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS = 6;
 
 export const SCHROEDER_SPATIAL_SORT_BOUNDED_ATLAS_U32 = 1;
 export const SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5 = 2;
@@ -111,7 +111,9 @@ export const SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI = Object.freeze({
       'chartId:u32',
       'minLevel:i32-bits',
       'maxLevel:i32-bits',
-      'baseGridSpacingM:f32-bits'
+      'baseGridSpacingM:f32-bits',
+      'occupiedLevelMaskLow:u32',
+      'occupiedLevelMaskHigh:u32'
     ]),
     rowAdmission:
       'all-active-rows-match-single-chart-inclusive-level-range-and-exact-f32-pow2-spacing',

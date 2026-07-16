@@ -98,8 +98,11 @@ import {
 } from './sphMlsMpmGpuSummary.js';
 import {
   createSphThermalStepWebGpuEncoderStage,
+  destroySphThermalResponseGraphBuffers,
   runSphThermalStepWithOptionalWebGpu,
-  runSphThermalStepWebGpu
+  runSphThermalStepWebGpu,
+  thermalResponseGraphUploadMatchesDevice,
+  uploadSphThermalResponseGraphBuffers
 } from './sphThermalGpuKernel.js';
 import {
   runSphReactionStepWebGpu,
@@ -145,12 +148,22 @@ import {
 } from '../residentBufferLease.js';
 import { schroederHierarchyArtifactBufferLifecycle } from './schroederHierarchyArtifactLedger.js';
 import {
+  runSchroederSpatialMechanicalProposalWebGpu
+} from './schroederSpatialMechanicalProposalsGpu.js';
+import {
+  runSchroederSpatialReactionDiscoveryProposalWebGpu
+} from './schroederSpatialReactionDiscoveryProposalGpu.js';
+import {
+  runSchroederSpatialThermalProposalWebGpu
+} from './schroederSpatialThermalProposalsGpu.js';
+import {
   SCHROEDER_SPATIAL_EPOCH_READER,
   SCHROEDER_SPATIAL_EPOCH_READER_PHASE,
   admitSchroederSpatialEpochTransactionReader,
   quarantineSchroederSpatialEpochTransactionLawInputs,
   recordSchroederSpatialEpochTransactionLegacyLookup,
-  sealSchroederSpatialEpochTransactionReaders
+  sealSchroederSpatialEpochTransactionReaders,
+  summarizeSchroederSpatialEpochTransaction
 } from './schroederSpatialEpochTransaction.js';
 
 export {
@@ -1538,14 +1551,30 @@ function createResidentDispatchTopology({
     enabled: canonicalSpatialAuthority === true,
     rejectionPolicy: 'global-copy-through-to-immutable-input-family'
   };
+  const spatialMechanicalProposalApply = {
+    stageId: 'spatialMechanicalProposalApply',
+    topology: 'particle-parallel-staged-contact-separation-apply',
+    entryPoint: 'apply',
+    dispatchAxis: 'particle',
+    dispatchWorkgroupsPerSubstep: canonicalSpatialAuthority ? particleWorkgroups : 0,
+    invocationLimitPerSubstep: canonicalSpatialAuthority ? boundedParticleCount : 0,
+    workgroupSize,
+    particleCount: boundedParticleCount,
+    particleLoopInShader: false,
+    enabled: canonicalSpatialAuthority === true,
+    proposalSource: 'same-epoch-pre-integration-ss-spatial-epoch.v1',
+    privateLookupBuildCount: 0,
+    fixedCandidateBuildCount: 0,
+    exhaustiveTraversalCount: 0
+  };
   const dispatchesPerSubstep = (useActiveGrid ? 5 : 4)
-    + (canonicalSpatialAuthority ? 1 : 0);
+    + (canonicalSpatialAuthority ? 2 : 0);
   const workgroupsPerSubstep = particleWorkgroups
     + (useActiveGrid ? gridWorkgroups : 0)
     + gridWorkgroups
     + gridWorkgroups
     + particleWorkgroups
-    + (canonicalSpatialAuthority ? particleWorkgroups : 0);
+    + (canonicalSpatialAuthority ? particleWorkgroups * 2 : 0);
   return {
     schema: ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA,
     status: 'resident-dispatch-topology-ready',
@@ -1566,7 +1595,7 @@ function createResidentDispatchTopology({
     p2gBackendEffective: p2gBackendPolicy.effectiveBackend,
     p2gBackendFallbackReason: p2gBackendPolicy.fallbackReason,
     particleParallelStages: canonicalSpatialAuthority
-      ? ['p2g', 'g2p', 'g2pAuthorityFinalize']
+      ? ['p2g', 'g2p', 'spatialMechanicalProposalApply', 'g2pAuthorityFinalize']
       : ['p2g', 'g2p'],
     gridParallelStages: useActiveGrid
       ? ['p2gAccumulatorClear', 'p2gFinalize', 'gridUpdate']
@@ -1577,6 +1606,7 @@ function createResidentDispatchTopology({
     p2gFinalize,
     gridUpdate,
     g2p,
+    spatialMechanicalProposalApply,
     g2pAuthorityFinalize,
     dispatchesPerSubstep,
     totalDispatches: boundedSubstepCount * dispatchesPerSubstep,
@@ -2977,6 +3007,72 @@ function fusedCanonicalSpatialAuthorityError(status, reason) {
   return error;
 }
 
+function assertCanonicalSpatialMechanicalProposalGeneration({
+  device,
+  generation,
+  selectedLevel
+} = {}) {
+  if (
+    typeof selectedLevel !== 'number'
+    || !Number.isInteger(selectedLevel)
+    || selectedLevel < -0x8000_0000
+    || selectedLevel > 0x7fff_ffff
+  ) {
+    throw fusedCanonicalSpatialAuthorityError(
+      'canonical-spatial-selected-level-rejected',
+      'an exact i32 selected Schroeder level is required'
+    );
+  }
+  const execution = generation?.execution || null;
+  const directoryBuffer = execution?.directoryBuffer || null;
+  const evidenceBuffer = execution?.evidenceBuffer || null;
+  const directoryMismatch = directoryBuffer
+    ? webGpuDeviceMismatchInfo({ buffer: directoryBuffer, device })
+    : { mismatch: false };
+  const evidenceMismatch = evidenceBuffer
+    ? webGpuDeviceMismatchInfo({ buffer: evidenceBuffer, device })
+    : { mismatch: false };
+  const evidenceBufferTooSmall = Number.isFinite(Number(evidenceBuffer?.size))
+    && Number(evidenceBuffer.size) < SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES;
+  const overlayRejected = generation?.source?.phaseVolumeAssignmentOverlayEnabled === true;
+  const schemaRejected = generation?.schema !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
+    || execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA;
+  const queryProfileRejected = execution?.sourceAdapterId
+      !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+    || execution?.exactNearQueryProfile?.ready !== true
+    || execution?.queryGeometryEvidence !== execution.exactNearQueryProfile;
+  const released = execution?.released === true;
+  const status = directoryMismatch.mismatch || evidenceMismatch.mismatch
+    ? 'canonical-spatial-directory-rejected-device'
+    : (evidenceBufferTooSmall
+        ? 'canonical-spatial-directory-rejected-evidence-capacity'
+        : (overlayRejected
+            ? 'canonical-spatial-directory-rejected-overlay-authority'
+            : (schemaRejected
+                ? 'canonical-spatial-directory-rejected-schema'
+                : (queryProfileRejected
+                    ? 'canonical-spatial-directory-rejected-query-geometry'
+                    : (released
+                        ? 'canonical-spatial-directory-rejected-released-generation'
+                        : null)))));
+  if (
+    status
+    || generation?.selected !== true
+    || generation?.ready !== true
+    || execution?.submitPerformed !== true
+    || !directoryBuffer
+    || !evidenceBuffer
+  ) {
+    const resolvedStatus = status
+      || 'canonical-spatial-directory-requested-but-unavailable';
+    throw fusedCanonicalSpatialAuthorityError(
+      resolvedStatus,
+      `spatial authority was rejected before proposal submission: ${resolvedStatus}`
+    );
+  }
+  return true;
+}
+
 function createFusedSchroederLevelAssignmentBinding({
   device,
   schroederLevelAssignment = null,
@@ -3828,6 +3924,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   schroederSelectedLevel = null,
   schroederActiveNodeList = null,
   schroederSpatialEpochGeneration = null,
+  schroederSpatialMechanicalProposal = null,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false
 }) {
@@ -3913,21 +4010,21 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     size: Math.max(4, p2gAccumulatorByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   });
-  const updatedGridBuffer = device.createBuffer({
+  const updatedGridBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-mls-mpm-fused-grid-update-out',
     size: Math.max(4, updatedGridByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  });
-  const outStateBuffer = device.createBuffer({
+  }), device);
+  const outStateBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-mls-mpm-fused-g2p-state-out',
     size: Math.max(4, stateByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  });
-  const outMechanicsBuffer = device.createBuffer({
+  }), device);
+  const outMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-mls-mpm-fused-g2p-mechanics-out',
     size: Math.max(4, mechanicsByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  });
+  }), device);
   const p2gParamsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-p2g-params',
@@ -4264,25 +4361,48 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
       );
     }
-    const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
-      stateBuffer: outStateBuffer,
-      mechanicsBuffer: outMechanicsBuffer,
-      authorityRestoreStateBuffer: sphParticleUpload.stateBuffer,
-      authorityRestoreMechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer,
-      particleCount,
-      boxDimsM: dims,
-      relaxation: mlsMpmParticleState?.particleSeparationRelaxation
-        ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
-      normalVelocityDamping: mlsMpmParticleState?.particleSeparationVelocityDamping
-        ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
-      maxPairRestDistanceM: maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount),
-      gridSpacingM: gridSpec.gridSpacingM,
-      spatialAuthorityEvidenceBuffer: canonicalSpatialAuthority
-        ? schroederLevelFilter.assignmentBuffer
-        : null,
-      spatialAuthorityEvidenceObserved: canonicalSpatialAuthority
-        && observeCanonicalSpatialAuthority === true
-    });
+    let separation;
+    if (canonicalSpatialAuthority) {
+      if (
+        schroederSpatialMechanicalProposal?.ready !== true
+        || schroederSpatialMechanicalProposal.generation !== schroederSpatialEpochGeneration
+        || typeof schroederSpatialMechanicalProposal.encodeApply !== 'function'
+      ) {
+        throw new Error(
+          'Canonical spatial mechanics requires one authenticated pre-integration contact/separation proposal'
+        );
+      }
+      schroederSpatialMechanicalProposal.encodeApply(encoder, {
+        stateBuffer: outStateBuffer,
+        mechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer
+      });
+      separation = {
+        enabled: true,
+        transientBuffers: [],
+        scratch: null,
+        canonicalSpatialAuthorityGate: true,
+        canonicalAuthorityRestoreFolded: false,
+        canonicalSpatialAuthorityEvidenceObserved:
+          observeCanonicalSpatialAuthority === true,
+        canonicalProposalSource: 'pre-integration-ss-spatial-epoch.v1',
+        privateBinBuildCount: 0,
+        fixedCandidateBuildCount: 0,
+        exhaustiveParticleScanCount: 0
+      };
+    } else {
+      separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
+        stateBuffer: outStateBuffer,
+        mechanicsBuffer: outMechanicsBuffer,
+        particleCount,
+        boxDimsM: dims,
+        relaxation: mlsMpmParticleState?.particleSeparationRelaxation
+          ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+        normalVelocityDamping: mlsMpmParticleState?.particleSeparationVelocityDamping
+          ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
+        maxPairRestDistanceM: maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount),
+        gridSpacingM: gridSpec.gridSpacingM
+      });
+    }
     separationTransientBuffers = separation.transientBuffers;
     if (separation.canonicalAuthorityRestoreFolded === true) {
       recordCanonicalAuthorityRestoreFold(dispatchTopology);
@@ -17573,6 +17693,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederActiveNodeList = null,
   schroederSpatialEpochGeneration = null,
   schroederSpatialEpochTransaction = null,
+  spatialMechanicalProposalRunner = runSchroederSpatialMechanicalProposalWebGpu,
+  spatialReactionDiscoveryProposalRunner =
+    runSchroederSpatialReactionDiscoveryProposalWebGpu,
+  spatialThermalProposalRunner = runSchroederSpatialThermalProposalWebGpu,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
   schroederLawQueue = null,
@@ -17689,6 +17813,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   } : null);
   const stageTimingStartMs = nowMs();
   const stageMs = {};
+  let residentQueueFenceStatus = null;
+  let residentQueueFenceMethod = null;
   const markStageProgress = (status, extra = {}) => {
     if (typeof onResidentStageProgress !== 'function') return;
     try {
@@ -17732,6 +17858,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   };
   let lostInfo = null;
   let resolvedDeviceResult = deviceResult;
+  let spatialMechanicalProposal = null;
+  let spatialReactionDiscoveryProposal = null;
+  let spatialThermalProposal = null;
+  let spatialProposalThermalResponseGraphUpload = null;
+  let ownedSpatialProposalThermalResponseGraphUpload = null;
   try {
     await timedStage('deviceAcquire', async () => {
       if (preferWebGpu && !device && !deviceResult) {
@@ -17747,7 +17878,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     const sharedDeviceResult = resolvedDevice
       ? { status: 'webgpu-device-ready', reason: device ? 'provided device' : (resolvedDeviceResult?.reason || 'resident step shared device'), device: resolvedDevice }
       : resolvedDeviceResult;
-    const admitSpatialEpochReader = (readerId, phase) => {
+    const admitSpatialEpochReader = (readerId, phase, consumerReceipt = null) => {
       if (!schroederSpatialEpochTransaction) return false;
       return admitSchroederSpatialEpochTransactionReader(
         schroederSpatialEpochTransaction,
@@ -17756,9 +17887,28 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           phase,
           generation: schroederSpatialEpochGeneration,
           sphParticleUpload,
-          mlsMpmParticleUpload
+          mlsMpmParticleUpload,
+          consumerReceipt
         }
       );
+    };
+    const enabledSpatialEpochConsumerReaders = new Set(
+      schroederSpatialEpochTransaction
+        ? summarizeSchroederSpatialEpochTransaction(
+            schroederSpatialEpochTransaction
+          ).enabledConsumerReaderIds
+        : []
+    );
+    const admitEnabledSpatialEpochConsumer = (
+      readerId,
+      phase,
+      consumerReceipt
+    ) => {
+      if (
+        !schroederSpatialEpochTransaction
+        || !enabledSpatialEpochConsumerReaders.has(readerId)
+      ) return false;
+      return admitSpatialEpochReader(readerId, phase, consumerReceipt);
     };
     const uniformGaugePressureStressAdmission = resolveUniformGaugePressureStressAdmission({
       pressureInterfaceForceSolver,
@@ -17769,6 +17919,188 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       ? finiteNumber(uniformGaugePressureStressAdmission.pressurePa, 0)
       : 0;
     const externalGaugePressureEnabled = uniformGaugePressureStressAdmission.approved === true;
+
+    const canonicalSpatialProposalMode = Boolean(
+      schroederSpatialEpochGeneration?.selected === true
+      && (
+        canonicalSpatialRequired === true
+        || enabledSpatialEpochConsumerReaders.size > 0
+      )
+    );
+    stageMs.spatialMechanicalProposal = 0;
+    stageMs.spatialReactionDiscoveryProposal = 0;
+    stageMs.spatialThermalProposal = 0;
+    if (canonicalSpatialProposalMode) {
+      assertCanonicalSpatialMechanicalProposalGeneration({
+        device: resolvedDevice,
+        generation: schroederSpatialEpochGeneration,
+        selectedLevel: schroederSelectedLevel
+      });
+      if (typeof spatialMechanicalProposalRunner !== 'function') {
+        throw new TypeError(
+          'Canonical spatial mechanics requires a spatialMechanicalProposalRunner'
+        );
+      }
+      spatialMechanicalProposal = await timedStage(
+        'spatialMechanicalProposal',
+        () => spatialMechanicalProposalRunner({
+          device: resolvedDevice,
+          generation: schroederSpatialEpochGeneration,
+          sphParticleState,
+          mlsMpmParticleState,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          boxDimsM: dims,
+          gridSpacingM
+        })
+      );
+      if (spatialMechanicalProposal?.ready !== true) {
+        throw new Error(
+          'Canonical spatial mechanical proposal did not publish a complete authenticated stage'
+        );
+      }
+
+      if (
+        reactionTable?.reactionCount > 0
+        && thermalMaterialTable
+      ) {
+        if (typeof spatialReactionDiscoveryProposalRunner !== 'function') {
+          throw new TypeError(
+            'Canonical reaction discovery requires a spatialReactionDiscoveryProposalRunner'
+          );
+        }
+        spatialReactionDiscoveryProposal = await timedStage(
+          'spatialReactionDiscoveryProposal',
+          () => spatialReactionDiscoveryProposalRunner({
+            device: resolvedDevice,
+            generation: schroederSpatialEpochGeneration,
+            sphParticleState,
+            sphParticleUpload,
+            reactionTable
+          })
+        );
+        if (spatialReactionDiscoveryProposal?.ready !== true) {
+          throw new Error(
+            'Canonical reaction discovery did not publish a complete authenticated stage'
+          );
+        }
+      }
+
+      if (thermalMaterialTable) {
+        if (typeof spatialThermalProposalRunner !== 'function') {
+          throw new TypeError(
+            'Canonical thermal laws require a spatialThermalProposalRunner'
+          );
+        }
+        const requestedThermalResponseGraphUpload =
+          thermalStepOptions.thermalResponseGraphUpload
+          || reactionStepOptions.thermalResponseGraphUpload
+          || null;
+        spatialProposalThermalResponseGraphUpload =
+          thermalResponseGraphUploadMatchesDevice(
+            requestedThermalResponseGraphUpload,
+            resolvedDevice,
+            {
+              thermalClosureGraphBank:
+                thermalStepOptions.thermalClosureGraphBank
+                || reactionStepOptions.thermalClosureGraphBank
+                || null,
+              thermalPhaseResponseTable:
+                thermalStepOptions.thermalPhaseResponseTable
+                || reactionStepOptions.thermalPhaseResponseTable
+                || null
+            }
+          )
+            ? requestedThermalResponseGraphUpload
+            : uploadSphThermalResponseGraphBuffers(resolvedDevice, {
+                thermalMaterialTable,
+                thermalClosureGraphSet:
+                  thermalStepOptions.thermalClosureGraphSet
+                  || reactionStepOptions.thermalClosureGraphSet
+                  || null,
+                thermalClosureGraphBank:
+                  thermalStepOptions.thermalClosureGraphBank
+                  || reactionStepOptions.thermalClosureGraphBank
+                  || null,
+                thermalPhaseResponseTable:
+                  thermalStepOptions.thermalPhaseResponseTable
+                  || reactionStepOptions.thermalPhaseResponseTable
+                  || null
+              });
+        if (
+          spatialProposalThermalResponseGraphUpload
+          !== requestedThermalResponseGraphUpload
+        ) {
+          ownedSpatialProposalThermalResponseGraphUpload =
+            spatialProposalThermalResponseGraphUpload;
+        }
+        spatialThermalProposal = await timedStage(
+          'spatialThermalProposal',
+          () => spatialThermalProposalRunner({
+            device: resolvedDevice,
+            generation: schroederSpatialEpochGeneration,
+            sphParticleState,
+            sphParticleUpload,
+            thermalResponseGraphUpload:
+              spatialProposalThermalResponseGraphUpload,
+            dtS: dtSeconds,
+            smoothingLengthM:
+              thermalStepOptions.smoothingLengthM
+              ?? sphParticleState.smoothingLengthM,
+            conductionRate: thermalStepOptions.conductionRate
+          })
+        );
+        if (spatialThermalProposal?.ready !== true) {
+          throw new Error(
+            'Canonical thermal proposal did not publish a complete authenticated stage'
+          );
+        }
+      }
+
+      // Authentication order is part of the transaction contract. Proposal
+      // computation may be fused internally, but every enabled consumer must
+      // present its own runtime-issued receipt before P2G observes x_n.
+      admitEnabledSpatialEpochConsumer(
+        SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRESSURE_CONTACT_PROPOSAL,
+        spatialMechanicalProposal.consumerReceipt?.(
+          SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE
+        )
+      );
+      admitEnabledSpatialEpochConsumer(
+        SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.REACTION_DISCOVERY_PROPOSAL,
+        spatialReactionDiscoveryProposal?.receipt ?? null
+      );
+      admitEnabledSpatialEpochConsumer(
+        SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.SEPARATION_PROPOSAL,
+        spatialMechanicalProposal.consumerReceipt?.(
+          SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION
+        )
+      );
+      admitEnabledSpatialEpochConsumer(
+        SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.THERMAL_CONDUCTION_PROPOSAL,
+        spatialThermalProposal?.consumerReceipt?.(
+          SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION
+        ) ?? null
+      );
+      admitEnabledSpatialEpochConsumer(
+        SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.THERMAL_RADIATION_PROPOSAL,
+        spatialThermalProposal?.consumerReceipt?.(
+          SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION
+        ) ?? null
+      );
+      admitEnabledSpatialEpochConsumer(
+        SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.LOCAL_MATERIAL_INTERFACE_PROPOSAL,
+        spatialMechanicalProposal.consumerReceipt?.(
+          SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE
+        )
+      );
+    }
 
     let fusedMechanics = null;
     stageMs.fusedMechanics = 0;
@@ -17820,6 +18152,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         schroederSelectedLevel,
         schroederActiveNodeList,
         schroederSpatialEpochGeneration,
+        schroederSpatialMechanicalProposal: spatialMechanicalProposal,
         canonicalSpatialRequired,
         observeCanonicalSpatialAuthority
       }));
@@ -17833,14 +18166,6 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         canonicalSpatialAuthority:
           fusedMechanics?.p2gGridProjection?.schroederSpatialDirectoryEnabled === true
       });
-      if (measureFusedSequenceQueueFence || measureGpuQueueFence) {
-        await timedStage('fusedMechanicsQueueFence', async () => {
-          if (typeof resolvedDevice?.queue?.onSubmittedWorkDone !== 'function') {
-            throw new Error('Fused resident mechanics queue-fence measurement requires queue.onSubmittedWorkDone');
-          }
-          await resolvedDevice.queue.onSubmittedWorkDone();
-        });
-      }
       stageMs.p2gGridProjection = 0;
       stageMs.gridUpdate = 0;
       stageMs.g2pReconstruction = 0;
@@ -17933,6 +18258,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     schroederLevelAssignment,
     schroederSelectedLevel,
     schroederSpatialEpochGeneration,
+    schroederSpatialMechanicalProposal: spatialMechanicalProposal,
     canonicalSpatialRequired,
     observeCanonicalSpatialAuthority,
     preferWebGpu: preferWebGpu && gridUpdate.backend === 'webgpu' && !lostInfo,
@@ -17948,6 +18274,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       if (typeof onDeviceLost === 'function') onDeviceLost(info);
     }
   }));
+  spatialMechanicalProposal?.releaseAfterSubmittedWork?.();
   if (schroederSpatialEpochTransaction) {
     sealSchroederSpatialEpochTransactionReaders(
       schroederSpatialEpochTransaction
@@ -18001,11 +18328,30 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         dtS: dtSeconds,
         retainOutputParticleBuffers: true,
         readbackMode: requestedReadbackMode,
-        ...thermalStepOptions
+        ...thermalStepOptions,
+        thermalResponseGraphUpload:
+          spatialProposalThermalResponseGraphUpload
+          || thermalStepOptions.thermalResponseGraphUpload
+          || null,
+        schroederSpatialEpochGeneration:
+          spatialThermalProposal
+            ? schroederSpatialEpochGeneration
+            : null,
+        schroederSpatialThermalProposal: spatialThermalProposal
       }));
     }
   }
-  if (schroederSpatialEpochTransaction && thermalStep) {
+  if (spatialThermalProposal && !thermalStep) {
+    throw new Error(
+      'Canonical thermal proposal was submitted but the thermal apply stage did not execute'
+    );
+  }
+  spatialThermalProposal?.releaseAfterCanonicalApplySubmittedWork?.();
+  if (
+    schroederSpatialEpochTransaction
+    && thermalStep
+    && !spatialThermalProposal
+  ) {
     recordSchroederSpatialEpochTransactionLegacyLookup(
       schroederSpatialEpochTransaction,
       {
@@ -18094,6 +18440,16 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         schroederLawNeighborCandidates: effectiveReactionLawNeighborCandidates,
         ...noFullReactionSummaryDefaults,
         ...reactionStepOptions,
+        thermalResponseGraphUpload:
+          spatialProposalThermalResponseGraphUpload
+          || reactionStepOptions.thermalResponseGraphUpload
+          || null,
+        schroederSpatialEpochGeneration:
+          spatialReactionDiscoveryProposal
+            ? schroederSpatialEpochGeneration
+            : null,
+        schroederSpatialReactionDiscoveryProposal:
+          spatialReactionDiscoveryProposal,
         // Nested reaction options are spread above, so enforce quarantine
         // again afterward. This prevents an x_n candidate view from being
         // reintroduced while reaction reads post-G2P state.
@@ -18107,7 +18463,17 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       }));
     }
   }
-  if (schroederSpatialEpochTransaction && reactionStep) {
+  if (spatialReactionDiscoveryProposal && !reactionStep) {
+    throw new Error(
+      'Canonical reaction discovery proposal was submitted but the reaction apply stage did not execute'
+    );
+  }
+  spatialReactionDiscoveryProposal?.destroy?.();
+  if (
+    schroederSpatialEpochTransaction
+    && reactionStep
+    && !spatialReactionDiscoveryProposal
+  ) {
     const privateBinsEnabled = reactionStep.reactionParticleBins?.enabled === true;
     recordSchroederSpatialEpochTransactionLegacyLookup(
       schroederSpatialEpochTransaction,
@@ -18123,6 +18489,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
             : 0
       }
     );
+  }
+  if (ownedSpatialProposalThermalResponseGraphUpload) {
+    const upload = ownedSpatialProposalThermalResponseGraphUpload;
+    ownedSpatialProposalThermalResponseGraphUpload = null;
+    deferSubmittedWorkCleanup(resolvedDevice, () => {
+      destroySphThermalResponseGraphBuffers(upload);
+    });
   }
 
   let mechanicsRefreshStep = null;
@@ -18279,12 +18652,30 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       };
     }
   }
+  if (measureGpuQueueFence || measureFusedSequenceQueueFence) {
+    await timedStage('residentQueueFence', async () => {
+      if (typeof resolvedDevice?.queue?.onSubmittedWorkDone !== 'function') {
+        throw new Error(
+          'Resident step queue-fence measurement requires queue.onSubmittedWorkDone'
+        );
+      }
+      await resolvedDevice.queue.onSubmittedWorkDone();
+    });
+    residentQueueFenceStatus = 'complete';
+    residentQueueFenceMethod = 'queue.onSubmittedWorkDone';
+  }
   const stageTiming = {
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
     stageMs: { ...stageMs },
     queueFenceMs: {
       compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
+    },
+    queueFenceStatus: {
+      fusedMechanicsSequence: residentQueueFenceStatus
+    },
+    queueFenceMethod: {
+      fusedMechanicsSequence: residentQueueFenceMethod
     },
     compactSummaryTiming: compactGpuSummary?.timing ?? null,
     fusedResidentMechanics: Boolean(fusedMechanics),
@@ -18367,6 +18758,93 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       sidecarFusionPlan,
       stageTiming
     }));
+  const exactNearGenerationId =
+    schroederSpatialEpochGeneration?.execution?.generationId ?? null;
+  const mechanicalReceiptBuffer =
+    spatialMechanicalProposal?.evidence?.buffer ?? null;
+  const orderedAuthenticatedConsumerIds = schroederSpatialEpochTransaction
+    ? summarizeSchroederSpatialEpochTransaction(
+        schroederSpatialEpochTransaction
+      ).consumerReceipts.map(({ consumerId }) => consumerId)
+    : [
+        ...Object.keys(spatialMechanicalProposal?.consumerReceipts ?? {}),
+        ...(spatialReactionDiscoveryProposal?.receipt?.consumerId
+          ? [spatialReactionDiscoveryProposal.receipt.consumerId]
+          : []),
+        ...Object.keys(spatialThermalProposal?.consumerReceipts ?? {})
+      ];
+  step.schroederSpatialExactNearProposalSummary = Object.freeze({
+    status: canonicalSpatialProposalMode
+      ? 'canonical-exact-near-consumer-proposals-submitted'
+      : 'canonical-exact-near-consumer-proposals-not-requested',
+    generationId: exactNearGenerationId,
+    mechanicalTraversalCount:
+      spatialMechanicalProposal?.traversalCount ?? 0,
+    reactionTraversalCount:
+      spatialReactionDiscoveryProposal?.traversalCount ?? 0,
+    thermalTraversalCount:
+      spatialThermalProposal?.traversalCount ?? 0,
+    authenticatedConsumerIds: Object.freeze(orderedAuthenticatedConsumerIds),
+    directoryBuildCount: canonicalSpatialProposalMode ? 1 : 0,
+    privateLookupBuildCount: 0,
+    fixedCandidateBuildCount: 0,
+    exhaustiveTraversalCount: 0,
+    fullParticleReadbackPerformed: false
+  });
+  step.schroederSpatialExactNearConsumerArtifacts = Object.freeze({
+    [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
+      spatialMechanicalProposal
+        ? Object.freeze({
+            spatialEpochGenerationId: exactNearGenerationId,
+            pressureContactInterfaceProposalBuffer:
+              spatialMechanicalProposal.proposalBuffer,
+            consumerReceiptBuffer: mechanicalReceiptBuffer,
+            owned: false,
+            owner: 'schroeder-spatial-mechanical-device-arena-cache'
+          })
+        : null,
+    [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
+      spatialReactionDiscoveryProposal
+        ? Object.freeze({
+            spatialEpochGenerationId: exactNearGenerationId,
+            reactionDiscoveryProposalBuffer:
+              spatialReactionDiscoveryProposal.proposalBuffer,
+            consumerReceiptBuffer:
+              spatialReactionDiscoveryProposal.evidenceBuffer,
+            owned: false,
+            owner: 'schroeder-spatial-reaction-device-arena-cache'
+          })
+        : null,
+    [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
+      spatialMechanicalProposal
+        ? Object.freeze({
+            spatialEpochGenerationId: exactNearGenerationId,
+            separationProposalBuffer: spatialMechanicalProposal.proposalBuffer,
+            consumerReceiptBuffer: mechanicalReceiptBuffer,
+            owned: false,
+            owner: 'schroeder-spatial-mechanical-device-arena-cache'
+          })
+        : null,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
+      spatialThermalProposal?.artifactDescriptors?.[
+        SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION
+      ] ?? null,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]:
+      spatialThermalProposal?.artifactDescriptors?.[
+        SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION
+      ] ?? null,
+    [SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE]:
+      spatialMechanicalProposal
+        ? Object.freeze({
+            spatialEpochGenerationId: exactNearGenerationId,
+            localMaterialInterfaceProposalBuffer:
+              spatialMechanicalProposal.proposalBuffer,
+            consumerReceiptBuffer: mechanicalReceiptBuffer,
+            owned: false,
+            owner: 'schroeder-spatial-mechanical-device-arena-cache'
+          })
+        : null
+  });
   if (gpuResidentLaneLease) {
     const queueEvidence = queueEvidenceFromResidentStep(step);
     const gpuResidentLaneExecution = completeResidentGpuLaneLease(gpuResidentLaneManager, gpuResidentLaneLease.leaseId, {
@@ -18385,6 +18863,21 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   }
   return step;
   } catch (error) {
+    spatialMechanicalProposal?.releaseAfterSubmittedWork?.();
+    spatialThermalProposal?.releaseAfterCanonicalApplySubmittedWork?.();
+    spatialReactionDiscoveryProposal?.destroy?.();
+    if (ownedSpatialProposalThermalResponseGraphUpload) {
+      const upload = ownedSpatialProposalThermalResponseGraphUpload;
+      ownedSpatialProposalThermalResponseGraphUpload = null;
+      const cleanupDevice = device || resolvedDeviceResult?.device || null;
+      if (cleanupDevice?.queue) {
+        deferSubmittedWorkCleanup(cleanupDevice, () => {
+          destroySphThermalResponseGraphBuffers(upload);
+        });
+      } else {
+        destroySphThermalResponseGraphBuffers(upload);
+      }
+    }
     if (gpuResidentLaneLease) {
       rejectResidentGpuLaneLease(gpuResidentLaneManager, gpuResidentLaneLease.leaseId, 'resident-step-error');
     }

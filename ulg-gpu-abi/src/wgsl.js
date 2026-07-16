@@ -1371,6 +1371,10 @@ fn sample_temperature_from_graph(graph_index: u32, specific_internal_energy: f32
   return left.y + t * (right.y - left.y);
 }
 
+fn reaction_value_finite(value: f32) -> bool {
+  return value == value && abs(value) <= 3.402823e38;
+}
+
 fn phase_mask_satisfied(mask_f: f32, phase_id_f: f32) -> bool {
   let mask = u32(mask_f + 0.5);
   if (mask == 0u) {
@@ -2130,7 +2134,21 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let proposal = proposals[particle_index];
-  if (proposal.x < 0.0 || proposal.y < 0.0) {
+  if (
+    !all(vec4<bool>(
+      reaction_value_finite(proposal.x),
+      reaction_value_finite(proposal.y),
+      reaction_value_finite(proposal.z),
+      reaction_value_finite(proposal.w)
+    ))
+    || proposal.x < 0.0
+    || proposal.x != floor(proposal.x)
+    || proposal.x >= f32(params.particle_count)
+    || proposal.y < 0.0
+    || proposal.y != floor(proposal.y)
+    || proposal.y >= f32(params.reaction_count)
+    || proposal.w < 0.0
+  ) {
     copy_particle(particle_index);
     return;
   }
@@ -2140,14 +2158,31 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
   let partner_proposal = proposals[partner_index];
-  if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
+  if (
+    !all(vec4<bool>(
+      reaction_value_finite(partner_proposal.x),
+      reaction_value_finite(partner_proposal.y),
+      reaction_value_finite(partner_proposal.z),
+      reaction_value_finite(partner_proposal.w)
+    ))
+    || partner_proposal.x < 0.0
+    || partner_proposal.x != floor(partner_proposal.x)
+    || u32(partner_proposal.x) != particle_index
+    || partner_proposal.y != proposal.y
+    || partner_proposal.w < 0.0
+  ) {
     copy_particle(particle_index);
     return;
   }
 
   let reaction_index = u32(proposal.y + 0.5);
+  if (reaction_index >= params.reaction_count) {
+    copy_particle(particle_index);
+    return;
+  }
   let rx0 = reaction_row0(reaction_index);
   let rx1 = reaction_row1(reaction_index);
+  let rx2 = reaction_row2(reaction_index);
   let header0 = reaction_header_row0(reaction_index);
   let header1 = reaction_header_row1(reaction_index);
   let pos_mass = state_pos_mass(particle_index);
@@ -2156,6 +2191,63 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let partner_vel_u = state_vel_u(partner_index);
   let self_thermo = thermo_row0(particle_index);
   let partner_thermo = thermo_row0(partner_index);
+  // Discovery is intentionally allowed to run against immutable x_n before
+  // thermal and mechanics commit. Revalidate every chemistry-sensitive field
+  // against the current post-thermal state before any material/topology
+  // mutation. A stale contact candidate can therefore only become a no-op.
+  let self_is_a = self_thermo.x == rx0.x
+    && partner_thermo.x == rx0.y
+    && phase_mask_satisfied(rx1.z, self_thermo.y)
+    && phase_mask_satisfied(rx1.w, partner_thermo.y);
+  let self_is_b = self_thermo.x == rx0.y
+    && partner_thermo.x == rx0.x
+    && phase_mask_satisfied(rx1.w, self_thermo.y)
+    && phase_mask_satisfied(rx1.z, partner_thermo.y);
+  let pair_delta = pos_mass.xyz - partner_pos_mass.xyz;
+  let current_distance2 = dot(pair_delta, pair_delta);
+  let contact_radius2 = rx1.y * rx1.y;
+  let expected_self_role = select(2.0, 1.0, self_is_a);
+  let expected_partner_role = select(1.0, 2.0, self_is_a);
+  if (
+    !all(vec4<bool>(
+      reaction_value_finite(pos_mass.x),
+      reaction_value_finite(pos_mass.y),
+      reaction_value_finite(pos_mass.z),
+      reaction_value_finite(pos_mass.w)
+    ))
+    || !all(vec4<bool>(
+      reaction_value_finite(partner_pos_mass.x),
+      reaction_value_finite(partner_pos_mass.y),
+      reaction_value_finite(partner_pos_mass.z),
+      reaction_value_finite(partner_pos_mass.w)
+    ))
+    || pos_mass.w <= 0.0
+    || partner_pos_mass.w <= 0.0
+    || !reaction_value_finite(rx0.x)
+    || !reaction_value_finite(rx0.y)
+    || !reaction_value_finite(rx0.w)
+    || !reaction_value_finite(rx1.y)
+    || !reaction_value_finite(rx1.z)
+    || !reaction_value_finite(rx1.w)
+    || !reaction_value_finite(self_thermo.x)
+    || !reaction_value_finite(self_thermo.y)
+    || !reaction_value_finite(self_thermo.z)
+    || !reaction_value_finite(partner_thermo.x)
+    || !reaction_value_finite(partner_thermo.y)
+    || !reaction_value_finite(partner_thermo.z)
+    || !reaction_value_finite(current_distance2)
+    || !reaction_value_finite(contact_radius2)
+    || rx2.x != 1.0
+    || rx1.y <= 0.0
+    || self_is_a == self_is_b
+    || proposal.z != expected_self_role
+    || partner_proposal.z != expected_partner_role
+    || max(self_thermo.z, partner_thermo.z) < rx0.w
+    || current_distance2 > contact_radius2
+  ) {
+    copy_particle(particle_index);
+    return;
+  }
   let product_term_count = u32(max(header1.x, 0.0));
   let self_term = reactant_term_for_material(reaction_index, self_thermo.x);
   let partner_term = reactant_term_for_material(reaction_index, partner_thermo.x);

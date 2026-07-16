@@ -49,6 +49,9 @@ import {
   createResidentProductMassHandle,
   runSphReactionSummaryWebGpu
 } from './sphReactionGpuSummary.js';
+import {
+  resolveSchroederSpatialReactionDiscoveryProposalForConsumer
+} from './schroederSpatialReactionDiscoveryProposalGpu.js';
 
 export {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
@@ -1662,8 +1665,32 @@ function outputEnvelope({
   reactionParticleBinOverflowCount = null,
   queueCompletionStatus = null,
   queueCompletionMethod = null,
-  scratchBufferCleanupStatus = null
+  scratchBufferCleanupStatus = null,
+  canonicalReactionDiscovery = null
 }) {
+  const canonicalReactionReceipt = canonicalReactionDiscovery?.admitted === true
+    ? canonicalReactionDiscovery.receipt
+    : null;
+  const canonicalReactionProvenance = canonicalReactionReceipt
+    ? Object.freeze({
+        schema: 'peercompute.ulg.sph-reaction-canonical-spatial-discovery-provenance.v1',
+        status: 'canonical-spatial-reaction-discovery-consumed',
+        consumerId: canonicalReactionReceipt.consumerId,
+        supportProfileId: canonicalReactionReceipt.supportProfileId,
+        generationId: canonicalReactionDiscovery.generationId,
+        epochIdentity: canonicalReactionDiscovery.epochIdentity,
+        receipt: canonicalReactionReceipt,
+        traversalCount: canonicalReactionReceipt.traversalCount,
+        proposalBufferOwnership: 'borrowed-canonical-spatial-artifact',
+        reactionRecordBufferOwnership: 'borrowed-canonical-spatial-artifact',
+        proposalPipelineDispatchCount: 0,
+        privateParticleBinDispatchCount: 0,
+        privateLookupBuildCount: 0,
+        fixedCandidateBuildCount: 0,
+        exhaustiveTraversalCount: 0,
+        fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE
+      })
+    : null;
   return {
     schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
     backend,
@@ -1751,6 +1778,35 @@ function outputEnvelope({
     readbackMode,
     sourceParticlePackMode,
     reactionProposalNeighborMode,
+    canonicalSpatialReactionDiscovery: canonicalReactionDiscovery?.admitted === true,
+    canonicalSpatialReactionDiscoveryStatus: canonicalReactionDiscovery?.status ?? null,
+    canonicalSpatialReactionDiscoveryGenerationId:
+      canonicalReactionDiscovery?.generationId ?? null,
+    canonicalSpatialReactionDiscoverySupportProfileId:
+      canonicalReactionReceipt?.supportProfileId ?? null,
+    canonicalSpatialReactionDiscoveryConsumerId:
+      canonicalReactionReceipt?.consumerId ?? null,
+    canonicalSpatialReactionDiscoveryEpochIdentity:
+      canonicalReactionDiscovery?.epochIdentity ?? null,
+    canonicalSpatialReactionDiscoveryReceipt: canonicalReactionReceipt,
+    canonicalSpatialReactionDiscoveryProvenance: canonicalReactionProvenance,
+    canonicalSpatialReactionDiscoveryProposalBufferOwnership:
+      canonicalReactionProvenance?.proposalBufferOwnership ?? null,
+    canonicalSpatialReactionDiscoveryReactionRecordBufferOwnership:
+      canonicalReactionProvenance?.reactionRecordBufferOwnership ?? null,
+    canonicalSpatialReactionDiscoveryProposalPipelineDispatchCount:
+      canonicalReactionProvenance?.proposalPipelineDispatchCount ?? null,
+    canonicalSpatialReactionDiscoveryPrivateParticleBinDispatchCount:
+      canonicalReactionProvenance?.privateParticleBinDispatchCount ?? null,
+    legacyPrivateSpatialBuildCount: canonicalReactionDiscovery?.admitted === true
+      ? 0
+      : (reactionParticleBins?.enabled === true ? 1 : 0),
+    legacyFixedCandidateBuildCount: canonicalReactionDiscovery?.admitted === true
+      ? 0
+      : (schroederReactionLawNeighborCandidates?.available === true ? 1 : 0),
+    legacyExhaustiveTraversalCount: canonicalReactionDiscovery?.admitted === true
+      ? 0
+      : (reactionParticleBins?.enabled === true ? 0 : 1),
     schroederLawQueueSchema: schroederReactionLawQueue?.sourceSchema ?? null,
     schroederLawQueueSourceStatus: schroederReactionLawQueue?.sourceStatus ?? null,
     schroederLawQueueStatus: schroederReactionLawQueue?.status ?? null,
@@ -2327,6 +2383,37 @@ function createReactionParticleBinBuffers({
   };
 }
 
+function canonicalReactionParticleBinBypass(proposal) {
+  return {
+    schema: 'peercompute.ulg.sph-reaction-particle-bin-grid.v0',
+    status: 'reaction-particle-bin-grid-bypassed-canonical-spatial-discovery',
+    reason: 'immutable ss-spatial-epoch.v1 discovery proposals replace private reaction bins',
+    enabled: false,
+    neighborMode: 'canonical-spatial-reaction-discovery-proposals',
+    particleBinGrid: {
+      status: 'reaction-particle-bin-grid-bypassed-canonical-spatial-discovery',
+      enabled: false,
+      neighborMode: 'canonical-spatial-reaction-discovery-proposals',
+      particleCount: proposal?.particleCount ?? 0,
+      binCapacity: 0,
+      cellCount: 0
+    },
+    countsBuffer: null,
+    indicesBuffer: null,
+    metadataBuffer: null,
+    metadataReadbackBuffer: null,
+    paramsBuffer: null,
+    cellCount: 0,
+    binCapacity: 0,
+    averageOccupancy: 0,
+    estimatedOverflowRisk: false,
+    indexBufferByteLength: 0,
+    overflowMetadataStatus: 'not-applicable-canonical-spatial-discovery',
+    overflowMetadataReadbackRequested: false,
+    cleanupBuffers: []
+  };
+}
+
 function packReactionParticleRecords(sphParticleState, mlsMpmParticleState) {
   const packed = new Float32Array(sphParticleState.particleCount * SPH_REACTION_PACKED_PARTICLE_FLOATS);
   for (let index = 0; index < sphParticleState.particleCount; index += 1) {
@@ -2436,7 +2523,9 @@ export async function runSphReactionStepWebGpu({
   reactionProductPlacementReadbackCadence = 'single-step-final',
   reactionProductPlacementSourceSummaryCount = 1,
   schroederLawQueue = null,
-  schroederLawNeighborCandidates = null
+  schroederLawNeighborCandidates = null,
+  schroederSpatialEpochGeneration = null,
+  schroederSpatialReactionDiscoveryProposal = null
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
@@ -2445,6 +2534,36 @@ export async function runSphReactionStepWebGpu({
     throw new TypeError('runSphReactionStepWebGpu requires a WebGPU-like device');
   }
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  if (
+    Boolean(schroederSpatialEpochGeneration)
+    !== Boolean(schroederSpatialReactionDiscoveryProposal)
+  ) {
+    throw new Error(
+      'canonical reaction mode requires both the spatial epoch generation and its reaction discovery proposal'
+    );
+  }
+  const canonicalReactionDiscovery = schroederSpatialReactionDiscoveryProposal
+    ? resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
+        schroederSpatialReactionDiscoveryProposal,
+        {
+          device,
+          generation: schroederSpatialEpochGeneration,
+          particleCount: sphParticleState.particleCount,
+          reactionCount: reactionTable.reactionCount
+        }
+      )
+    : null;
+  if (
+    schroederSpatialReactionDiscoveryProposal
+    && canonicalReactionDiscovery?.admitted !== true
+  ) {
+    throw new Error(
+      canonicalReactionDiscovery?.reason
+      || 'reaction stage rejected canonical spatial discovery proposals'
+    );
+  }
+  const canonicalReactionDiscoveryEnabled =
+    canonicalReactionDiscovery?.admitted === true;
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const borrowedMechanicsBuffer = sourceMechanicsBuffer || mlsMpmParticleUpload?.mechanicsBuffer || null;
@@ -2480,54 +2599,74 @@ export async function runSphReactionStepWebGpu({
       thermalPhaseResponseTable: resolvedPhaseResponseTable
     });
   const responseGraphUpload = borrowedResponseGraphUpload || localResponseGraphUpload;
-  const reactionRecordBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-reaction-records-and-product-phases',
-    reactionTable.combinedRecords || new Float32Array([...reactionTable.records, ...reactionTable.productPhaseRecords])
-  );
+  const localReactionRecordBuffer = canonicalReactionDiscoveryEnabled
+    ? null
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-reaction-records-and-product-phases',
+        reactionTable.combinedRecords
+          || new Float32Array([
+            ...reactionTable.records,
+            ...reactionTable.productPhaseRecords
+          ])
+      );
+  const reactionRecordBuffer = canonicalReactionDiscovery?.reactionRecordBuffer
+    || localReactionRecordBuffer;
   const phaseResponseRecordBuffer = responseGraphUpload.responseRecordBuffer;
   const phaseResponseBuffer = responseGraphUpload.responseBuffer;
   const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
   const graphSampleBuffer = responseGraphUpload.graphSampleBuffer;
-  const reactionParticleBins = createReactionParticleBinBuffers({
-    device,
-    sphParticleState,
-    reactionTable,
-    boxDimsM,
-    binCapacity: reactionParticleBinCapacity,
-    readbackMetadata: reactionParticleBinMetadataReadback
-  });
-  const schroederReactionLawQueue = resolveSchroederReactionLawQueue(schroederLawQueue, {
+  const reactionParticleBins = canonicalReactionDiscoveryEnabled
+    ? canonicalReactionParticleBinBypass(schroederSpatialReactionDiscoveryProposal)
+    : createReactionParticleBinBuffers({
+        device,
+        sphParticleState,
+        reactionTable,
+        boxDimsM,
+        binCapacity: reactionParticleBinCapacity,
+        readbackMetadata: reactionParticleBinMetadataReadback
+      });
+  const schroederReactionLawQueue = resolveSchroederReactionLawQueue(
+    canonicalReactionDiscoveryEnabled ? null : schroederLawQueue,
+    {
     particleCount: sphParticleState.particleCount
-  });
+    }
+  );
   const schroederReactionLawNeighborCandidates = resolveSchroederReactionLawNeighborCandidates(
-    schroederLawNeighborCandidates
+    canonicalReactionDiscoveryEnabled ? null : schroederLawNeighborCandidates
   );
   const borrowedSchroederLawQueueBuffer = schroederReactionLawQueue.enabled
     ? schroederReactionLawQueue.lawQueueBuffer
     : null;
-  const localSchroederLawQueueBuffer = borrowedSchroederLawQueueBuffer
+  const localSchroederLawQueueBuffer = canonicalReactionDiscoveryEnabled
+    || borrowedSchroederLawQueueBuffer
     ? null
     : writeStorageBuffer(
       device,
       'ulg-sph-reaction-schroeder-law-queue-disabled',
       new Float32Array(SCHROEDER_REACTION_LAW_QUEUE_FLOATS)
     );
-  const schroederReactionLawQueueBuffer = borrowedSchroederLawQueueBuffer || localSchroederLawQueueBuffer;
-  const schroederReactionLawQueueParamsBuffer = device.createBuffer({
-    label: 'ulg-sph-reaction-schroeder-law-queue-params',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(
-    schroederReactionLawQueueParamsBuffer,
-    0,
-    createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue)
-  );
+  const schroederReactionLawQueueBuffer = borrowedSchroederLawQueueBuffer
+    || localSchroederLawQueueBuffer;
+  const schroederReactionLawQueueParamsBuffer = canonicalReactionDiscoveryEnabled
+    ? null
+    : device.createBuffer({
+        label: 'ulg-sph-reaction-schroeder-law-queue-params',
+        size: 16,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      });
+  if (schroederReactionLawQueueParamsBuffer) {
+    device.queue.writeBuffer(
+      schroederReactionLawQueueParamsBuffer,
+      0,
+      createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue)
+    );
+  }
   const borrowedSchroederLawNeighborCandidateBuffer = schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
     ? schroederReactionLawNeighborCandidates.neighborCandidateBuffer
     : null;
-  const localSchroederLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
+  const localSchroederLawNeighborCandidateBuffer = canonicalReactionDiscoveryEnabled
+    || borrowedSchroederLawNeighborCandidateBuffer
     ? null
     : writeStorageBuffer(
       device,
@@ -2539,7 +2678,8 @@ export async function runSphReactionStepWebGpu({
   const borrowedSchroederLawNeighborSourceSpanBuffer = schroederReactionLawNeighborCandidates.sourceCandidateSpanBufferConsumed
     ? schroederReactionLawNeighborCandidates.sourceCandidateSpanBuffer
     : null;
-  const localSchroederLawNeighborSourceSpanBuffer = borrowedSchroederLawNeighborSourceSpanBuffer
+  const localSchroederLawNeighborSourceSpanBuffer = canonicalReactionDiscoveryEnabled
+    || borrowedSchroederLawNeighborSourceSpanBuffer
     ? null
     : writeStorageBuffer(
       device,
@@ -2548,22 +2688,33 @@ export async function runSphReactionStepWebGpu({
     );
   const schroederReactionLawNeighborSourceSpanBuffer = borrowedSchroederLawNeighborSourceSpanBuffer
     || localSchroederLawNeighborSourceSpanBuffer;
-  const schroederReactionLawNeighborCandidateParamsBuffer = device.createBuffer({
-    label: 'ulg-sph-reaction-schroeder-law-neighbor-candidates-params',
-    size: 32,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(
-    schroederReactionLawNeighborCandidateParamsBuffer,
-    0,
-    createSchroederReactionLawNeighborCandidateParamsArray(schroederReactionLawNeighborCandidates)
-  );
-  const proposalBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-reaction-proposals',
-    new Float32Array(sphParticleState.particleCount * 4),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  const schroederReactionLawNeighborCandidateParamsBuffer =
+    canonicalReactionDiscoveryEnabled
+      ? null
+      : device.createBuffer({
+          label: 'ulg-sph-reaction-schroeder-law-neighbor-candidates-params',
+          size: 32,
+          usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        });
+  if (schroederReactionLawNeighborCandidateParamsBuffer) {
+    device.queue.writeBuffer(
+      schroederReactionLawNeighborCandidateParamsBuffer,
+      0,
+      createSchroederReactionLawNeighborCandidateParamsArray(
+        schroederReactionLawNeighborCandidates
+      )
+    );
+  }
+  const localProposalBuffer = canonicalReactionDiscoveryEnabled
+    ? null
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-reaction-proposals',
+        new Float32Array(sphParticleState.particleCount * 4),
+        GPU_BUFFER_USAGE.COPY_SRC
+      );
+  const proposalBuffer = canonicalReactionDiscovery?.proposalBuffer
+    || localProposalBuffer;
   const outPackedParticleRecordBuffer = writeStorageBuffer(
     device,
     'ulg-sph-reaction-packed-output-particles',
@@ -2667,13 +2818,15 @@ export async function runSphReactionStepWebGpu({
       bindings: reactionParticleBinBindings
     })
     : null;
-  const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-reaction-step',
-    label: 'ulg-sph-reaction-propose',
-    code: sphReactionStepWgsl,
-    entryPoint: 'propose',
-    bindings: reactionBindings
-  });
+  const proposePipelineInfo = canonicalReactionDiscoveryEnabled
+    ? null
+    : createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-step',
+        label: 'ulg-sph-reaction-propose',
+        code: sphReactionStepWgsl,
+        entryPoint: 'propose',
+        bindings: reactionBindings
+      });
   const { pipeline: resolvePipeline, bindGroupLayout: resolveBindGroupLayout } = createCachedExplicitComputePipeline(device, {
     cacheKey: 'ulg-sph-reaction-step',
     label: 'ulg-sph-reaction-resolve',
@@ -2754,7 +2907,9 @@ export async function runSphReactionStepWebGpu({
       ]
     })
     : null;
-  const proposeBindGroup = device.createBindGroup(proposeBindEntries(proposeBindGroupLayout));
+  const proposeBindGroup = proposePipelineInfo
+    ? device.createBindGroup(proposeBindEntries(proposePipelineInfo.bindGroupLayout))
+    : null;
   const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
   const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
   const encoder = device.createCommandEncoder();
@@ -2769,9 +2924,11 @@ export async function runSphReactionStepWebGpu({
     pass.setBindGroup(0, reactionParticleBinBindGroup);
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
   }
-  pass.setPipeline(proposePipeline);
-  pass.setBindGroup(0, proposeBindGroup);
-  pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  if (proposePipelineInfo && proposeBindGroup) {
+    pass.setPipeline(proposePipelineInfo.pipeline);
+    pass.setBindGroup(0, proposeBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  }
   pass.setPipeline(resolvePipeline);
   pass.setBindGroup(0, resolveBindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
@@ -2878,8 +3035,8 @@ export async function runSphReactionStepWebGpu({
   const scratchBuffers = [
     packedParticleRecordBuffer,
     outPackedParticleRecordBuffer,
-    reactionRecordBuffer,
-    proposalBuffer,
+    localReactionRecordBuffer,
+    localProposalBuffer,
     paramsBuffer,
     localSchroederLawQueueBuffer,
     schroederReactionLawQueueParamsBuffer,
@@ -2966,24 +3123,31 @@ export async function runSphReactionStepWebGpu({
     scratchBufferCleanupStatus,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
-    reactionProposalNeighborMode: [
-      schroederReactionLawQueue.enabled ? 'schroeder-law-queue-gated' : null,
-      schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
-        ? 'schroeder-law-neighbor-candidates-authoritative'
-        : (schroederReactionLawNeighborCandidates.available ? 'schroeder-law-neighbor-candidates-observed' : null),
-      schroederReactionLawNeighborCandidates.sourceCandidateSpanBufferConsumed
-        ? 'source-span-indexed'
-        : null,
-      schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
-        ? null
-        : (reactionParticleBins.enabled ? 'fixed-capacity-particle-bin-grid' : 'all-particle-scan-fallback')
-    ].filter(Boolean).join('-'),
+    reactionProposalNeighborMode: canonicalReactionDiscoveryEnabled
+      ? 'canonical-spatial-reaction-discovery-proposals'
+      : [
+          schroederReactionLawQueue.enabled ? 'schroeder-law-queue-gated' : null,
+          schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
+            ? 'schroeder-law-neighbor-candidates-authoritative'
+            : (schroederReactionLawNeighborCandidates.available
+                ? 'schroeder-law-neighbor-candidates-observed'
+                : null),
+          schroederReactionLawNeighborCandidates.sourceCandidateSpanBufferConsumed
+            ? 'source-span-indexed'
+            : null,
+          schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
+            ? null
+            : (reactionParticleBins.enabled
+                ? 'fixed-capacity-particle-bin-grid'
+                : 'all-particle-scan-fallback')
+        ].filter(Boolean).join('-'),
     reactionParticleBinGrid: reactionParticleBins.particleBinGrid,
     reactionParticleBins,
     schroederReactionLawQueue,
     schroederReactionLawNeighborCandidates,
     reactionParticleBinOverflowStatus,
-    reactionParticleBinOverflowCount
+    reactionParticleBinOverflowCount,
+    canonicalReactionDiscovery
   });
 }
 

@@ -14,6 +14,9 @@ import {
   mlsMpmParticleSeparationComputeCanonicalSpatialWgsl,
   mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl
 } from '../ulg-gpu-abi/src/index.js';
+import {
+  sphThermalStepWgsl as canonicalSphThermalStepWgsl
+} from '../src/runtime/sph/sphThermalGpuKernel.js';
 
 function readRepoText(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
@@ -155,11 +158,13 @@ const CONTRACTS = [
     label: 'ulg-sph-thermal-params',
     factory: 'createParamsArray',
     wgslStruct: 'ThermalParams',
+    wgslSource: canonicalSphThermalStepWgsl,
     // 80 -> 96: shared neighbor-bin fields (bins_enabled, capacity, dims,
     // cell size) for binned pair conduction.
     // 96 -> 112: max_pair_support_m (+16B pad) so the neighbor scan covers
-    // rest-volume contact radii of coarse low-density particles.
-    bytes: 112
+    // rest-volume contact radii of coarse low-density particles. 112 -> 144:
+    // canonical SS proposal/generation identity and admission fields.
+    bytes: 144
   },
   {
     file: 'src/runtime/sph/sphReactionGpuKernel.js',
@@ -256,7 +261,10 @@ test('SPH WebGPU params structs match JS packing and uniform buffer sizes', () =
     sourceCache.set(contract.file, source);
     const arrayBytes = paramsArrayByteLength(source, contract.arrayFactory ?? contract.factory);
     const uniformBytes = uniformBufferByteLength(source, contract.label);
-    const wgslBytes = wgslScalarParamStructByteLengths(wgslSource, contract.wgslStruct);
+    const wgslBytes = wgslScalarParamStructByteLengths(
+      contract.wgslSource ?? wgslSource,
+      contract.wgslStruct
+    );
 
     assert.equal(arrayBytes, contract.bytes, `${contract.factory} ArrayBuffer byte length drifted`);
     assert.equal(uniformBytes, contract.bytes, `${contract.label} uniform buffer byte length drifted`);

@@ -262,7 +262,8 @@ new epoch.
 
 ### Slice 5 - Remaining exact-near consumers
 
-Migrate one consumer per commit after epoch ordering is explicit:
+Migrate the remaining consumers as one integrated slice and one final commit
+after epoch ordering is explicit:
 
 1. remaining pressure/interface and contact routes;
 2. reaction candidate discovery, without changing product/topology semantics;
@@ -933,6 +934,81 @@ compact unique mechanics-node view. Slice 7 retains phase-overlay/two-level
 parent-child construction and aggregate traversal. Slice 8 retains other
 source families and duplicate-builder/fallback cleanup. Skin reuse remains
 prohibited until a GPU displacement certificate exists.
+
+### Slice 5 - Integrated exact-near consumer checkpoint, 2026-07-16
+
+Slice 5 is implemented as one transaction boundary rather than five partial
+sub-slices. Every enabled exact-near reader now receives an authenticated view
+or traversal of the same immutable `ss-spatial-epoch.v1` generation before
+P2G/G2P changes position or topology. Mechanical contact/pressure/interface,
+reaction discovery, separation, conduction, wider-support radiation, and the
+remaining local material/interface path all publish proposal artifacts before
+the single resident commit. Reaction and thermal application consume those
+canonical proposals without rebuilding a private directory or forwarding a
+stale post-G2P lookup.
+
+The scheduler owns a declared reader set, support-profile identity, finalized
+per-consumer receipts, proposal sealing, commit, release, and hierarchy-ledger
+retirement. Incomplete canonical inputs, cross-device or stale identities,
+wrong support profiles, counter overflow, and corrupt headers fail closed.
+The migrated path reports zero private spatial builds, fixed-candidate builds,
+and exhaustive production scans. The queue-completion fence now covers the
+whole submitted resident sequence instead of preceding reaction/thermal
+sidecars. A plain production `?ss=1` entry point defaults to this supported
+single-level Slice 5 boundary; cross-level coupling, phase-volume migration,
+legacy law queues/candidates, and two-level mechanics remain explicit opt-ins
+for their later slices. Explicit overlay use is still rejected rather than
+silently suppressing or reinterpreting its authority.
+
+Exact-near query evidence grew from four to six words so the generation
+authenticates its occupied-level mask. Traversal skips unoccupied levels and
+uses nested level/x/y-bounded lower/upper searches rather than restarting every
+prefix search across the full directory. Candidate and accepted-pair evidence
+is accumulated per particle before one bounded atomic flush, eliminating the
+original per-pair global contention. Conduction and radiation share one fused
+physical traversal while retaining distinct support receipts and evidence;
+uniform active temperature is an exact zero-delta fast path, not a material
+special case.
+
+Stable explicit-Vulkan performance evidence is in
+`/tmp/ulg-slice5-performance-ss-final-stable-10k.json`. At 9,826 realized
+particles with mechanics, pressure, thermal, reaction, and viscosity enabled,
+the complete-engine rate is `89.2857 steps/s` and the suite gate passes. This
+is stable against the preceding ranged-search run (`89.0001 steps/s`) and is a
+large recovery from the initial contended Slice 5 result (`31.7 steps/s`). The
+separate instrumented campaign
+`/tmp/ulg-slice5-performance-ss-final-fenced.json` passes at 1,024 and 9,826
+particles with `queueFenceStatus=complete` for both; its lower rate is not used
+as the throughput claim because the requested fence deliberately serializes
+measurement.
+
+Repository verification after the ABI-guard correction reports `1377/1380`
+tests passed, zero failures, and the three existing opt-in long-horizon skips.
+The production Vite build passes with only the existing large-chunk warning.
+Focused scheduler, consumer, shader, settlement, and native-surface suites are
+green. The WebGPU uniform guard now validates the generated 144-byte canonical
+thermal WGSL directly instead of comparing it with the 112-byte legacy source
+template.
+
+Desktop and 390 x 844 DPR-3 touch/mobile matrices each ran all four standard
+presets plus deterministic Ba/Pb, Bk/Lr, and Fr/Fe pairings with native WebGPU,
+`ss=1`, and retained initial/early/middle/final captures. Across 14 runs and 144
+PNG frames, every requested renderer matched; there were zero browser-console,
+WebGPU, blank-frame, geometry-disappearance, or visual-surface lifecycle
+issues. Direct inspection shows opaque refractive water flowing across time,
+persistent iron/ice contact without flicker, sodium/water and product surfaces,
+visible moving fluorine with a distinct CsF product region, and all random
+pair surfaces retained. Artifacts are under
+`/tmp/ulg-slice5-visual/slice5-final-desktop-fixed` and
+`/tmp/ulg-slice5-visual/slice5-final-mobile`.
+
+The matrices intentionally continue to report the same pre-Slice-5 physics
+debts already recorded above: water-cycle steam does not rise/condense, iron
+does not cool enough in the quench interval, sodium/water reaches the existing
+speed and minimum-`J` bounds, and cesium/fluorine product rows still outpace the
+retained reaction-event diagnostic. These are not hidden as passes and were
+not changed with per-material workarounds; they remain separate physics and
+diagnostic closure work after the shared spatial-authority migration.
 
 ## Visual-Physics Restoration Checkpoint Before Slice 3
 

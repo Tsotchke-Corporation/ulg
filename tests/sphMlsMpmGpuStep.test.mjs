@@ -126,10 +126,16 @@ import {
   webGpuDeviceId
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  SCHROEDER_SPATIAL_EPOCH_READER,
+  SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID,
   createSchroederSpatialEpochTransaction,
   summarizeSchroederSpatialEpochTransaction
 } from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
+import {
+  runSchroederSpatialEpochGenerationWebGpu
+} from '../src/runtime/sph/schroederSpatialEpochGpu.js';
 import { buildSphThermalMaterialTable } from '../src/runtime/sph/sphThermalGpuKernel.js';
+import { buildSphReactionTable } from '../src/runtime/sph/sphReactionGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
   RESIDENT_STATE_FAMILIES,
@@ -3429,6 +3435,25 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
     mechanicsBuffer: sourceMechanicsBuffer,
     slot: 0
   };
+  const canonicalMechanicalProposalRunner = async ({ generation }) => ({
+    ready: true,
+    generation,
+    traversalCount: 1,
+    consumerReceipts: Object.freeze({}),
+    evidence: Object.freeze({
+      buffer: tracker.buffer('canonical-mechanical-proposal-evidence')
+    }),
+    proposalBuffer: tracker.buffer('canonical-mechanical-proposals'),
+    encodeApply(encoder) {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline({ compute: { entryPoint: 'apply' } });
+      pass.dispatchWorkgroups(1);
+      pass.end();
+    },
+    releaseAfterSubmittedWork() {
+      return true;
+    }
+  });
   const schroederSpatialEpochTransaction =
     createSchroederSpatialEpochTransaction({
       device,
@@ -3454,6 +3479,7 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
     schroederSelectedLevel: 2,
     schroederSpatialEpochGeneration,
     schroederSpatialEpochTransaction,
+    spatialMechanicalProposalRunner: canonicalMechanicalProposalRunner,
     canonicalSpatialRequired: true,
     preferWebGpu: true,
     device,
@@ -3535,21 +3561,18 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
   assert.equal(step.stageTiming.dispatchTopology.canonicalSpatialAuthority, true);
   assert.deepEqual(
     step.stageTiming.dispatchTopology.particleParallelStages,
-    ['p2g', 'g2p']
+    ['p2g', 'g2p', 'spatialMechanicalProposalApply', 'g2pAuthorityFinalize']
   );
-  assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 4);
-  assert.equal(step.stageTiming.dispatchTopology.g2pAuthorityFinalize.enabled, false);
+  assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 6);
+  assert.equal(step.stageTiming.dispatchTopology.spatialMechanicalProposalApply.enabled, true);
+  assert.equal(step.stageTiming.dispatchTopology.g2pAuthorityFinalize.enabled, true);
   assert.equal(
-    step.stageTiming.dispatchTopology.g2pAuthorityFinalize.foldedIntoStage,
-    'particleSeparationBinFill'
+    step.stageTiming.dispatchTopology.g2pAuthorityFinalize.entryPoint,
+    'finalize_canonical_spatial_authority'
   );
   assert.equal(
     step.stageTiming.dispatchTopology.g2pAuthorityFinalize.rejectionPolicy,
-    'global-copy-through-in-ordered-separation-bin-fill'
-  );
-  assert.equal(
-    step.stageTiming.dispatchTopology.canonicalAuthorityRestoreStage,
-    'particleSeparationBinFill'
+    'global-copy-through-to-immutable-input-family'
   );
   assert.equal(step.p2gGridProjection.fusedResidentMechanics, true);
   assert.equal(step.p2gGridProjection.schroederLevelFilterEnabled, true);
@@ -3647,17 +3670,16 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
   const canonicalG2pFinalizeDispatch = device.dispatches.find((dispatch) => (
     dispatch.pipeline?.compute?.entryPoint === 'finalize_canonical_spatial_authority'
   ));
-  assert.equal(canonicalG2pFinalizeDispatch, undefined);
-  const canonicalSeparationBinFillDispatch = device.dispatches.find((dispatch) => (
+  assert.ok(canonicalG2pFinalizeDispatch);
+  const legacyCanonicalSeparationBinFillDispatch = device.dispatches.find((dispatch) => (
     /authority_restore_state[\s\S]*authority_restore_mechanics/.test(
       dispatch.pipeline?.compute?.module?.code || ''
     )
   ));
-  assert.ok(canonicalSeparationBinFillDispatch);
-  assert.match(
-    canonicalSeparationBinFillDispatch.pipeline.compute.module.code,
-    /authority_restore_state[\s\S]*authority_restore_mechanics[\s\S]*separation_mechanics_spatial_authority_rejected/
-  );
+  assert.equal(legacyCanonicalSeparationBinFillDispatch, undefined);
+  assert.ok(device.dispatches.some((dispatch) => (
+    dispatch.pipeline?.compute?.entryPoint === 'apply'
+  )));
   assert.equal(
     device.bindGroups.some((group) => group.entries.some((entry) => (
       entry.resource?.buffer === schroederAssignmentBuffer
@@ -3677,11 +3699,230 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
     device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-fused-empty-schroeder-spatial-directory'),
     false
   );
-  assert.equal(device.dispatches.length, 7);
+  assert.equal(device.dispatches.length, 6);
   assert.notEqual(schroederSpatialEvidenceBuffer.destroyed, true);
 });
 
-test('MLS-MPM canonical fused cleanup retires separation scratch after evidence readback failure', async () => {
+test('MLS-MPM resident step authenticates every enabled Slice 5 consumer before P2G and removes legacy spatial work', async () => {
+  const buffers = manualBuffers({
+    particleCount: 2,
+    position: [0.5, 0.5, 0.5],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 0.25,
+    mechanicsDtS: 1 / 120
+  });
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 | 8 }),
+    device
+  );
+  const particleCount = buffers.sphParticleState.particleCount;
+  const sphParticleUpload = {
+    status: 'webgpu-uploaded',
+    particleCount,
+    storageGeneration: 11,
+    stateBuffer: taggedBuffer(
+      'slice5-source-state',
+      buffers.sphParticleState.state.byteLength
+    ),
+    thermoBuffer: taggedBuffer(
+      'slice5-source-thermo',
+      buffers.sphParticleState.thermo.byteLength
+    ),
+    identityBuffer: taggedBuffer('slice5-source-identity', particleCount * 16),
+    slot: 0
+  };
+  const mlsMpmParticleUpload = {
+    status: 'webgpu-uploaded',
+    particleCount,
+    storageGeneration: 11,
+    mechanicsBuffer: taggedBuffer(
+      'slice5-source-mechanics',
+      buffers.mlsMpmParticleState.mechanics.byteLength
+    ),
+    slot: 0
+  };
+  const activeNodeBuffer = taggedBuffer(
+    'slice5-active-node-source',
+    particleCount * 16 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    spatialDirectorySourceSchema:
+      'peercompute.ulg.schroeder-spatial-directory-active-node-source.v1',
+    spatialDirectorySourceStatus: 'schroeder-spatial-directory-source-ready',
+    spatialDirectorySourceReady: true,
+    spatialEpochSourceSchema:
+      'peercompute.ulg.schroeder-spatial-active-node-source.v1',
+    spatialEpochSourceStatus: 'schroeder-spatial-active-node-source-ready',
+    spatialEpochSourceReady: true,
+    spatialEpochLevelSpacingMode: 'base-grid-spacing-times-pow2-level',
+    spatialEpochPositionAuthority: 'same-epoch-pre-integration-particle-state',
+    spatialEpochMinLevel: 0,
+    spatialEpochMaxLevel: 0,
+    spatialEpochBaseGridSpacingM: 0.25,
+    spatialEpochChartId: 0,
+    activeCandidateCount: particleCount,
+    activeNodeStrideFloats: 16,
+    activeNodeBuffer,
+    spatialEpochStorageGeneration: 11,
+    spatialEpochPhysicsTick: 7,
+    spatialEpochPhysicsSubstep: 0,
+    spatialEpochPositionEpoch: 13,
+    spatialEpochTopologyEpoch: 17,
+    spatialEpochChartEpoch: 19,
+    spatialEpochLevelEpoch: 23,
+    spatialEpochSupportEpoch: 29,
+    phaseVolumeAssignmentOverlayEnabled: false
+  };
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    activeNodeList,
+    particleCount
+  });
+  const enabledConsumerReaderIds = [
+    SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE,
+    SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+    SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION,
+    SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
+    SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION,
+    SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE
+  ];
+  const consumerSupportProfileIds = {
+    [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.PRESSURE_CONTACT_INTERFACE,
+    [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.REACTION_DISCOVERY,
+    [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.SEPARATION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_CONDUCTION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_RADIATION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.LOCAL_MATERIAL_INTERFACE
+  };
+  const transaction = createSchroederSpatialEpochTransaction({
+    device,
+    generation,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    enabledConsumerReaderIds,
+    consumerSupportProfileIds
+  });
+  const materialProperties = {
+    a: {
+      molarMassKgPerMol: 0.01,
+      phases: [{
+        name: 'solid',
+        temperatureRange: [0, 2000],
+        cpJPerKgK: 1000,
+        densityKgPerM3: 1000,
+        bulkModulusPa: 1e6,
+        shearModulusPa: 2e5
+      }],
+      transitions: []
+    },
+    b: {
+      molarMassKgPerMol: 0.02,
+      phases: [{
+        name: 'liquid',
+        temperatureRange: [0, 2000],
+        cpJPerKgK: 1200,
+        densityKgPerM3: 800,
+        bulkModulusPa: 8e5,
+        shearModulusPa: 0
+      }],
+      transitions: []
+    },
+    ab: {
+      molarMassKgPerMol: 0.03,
+      phases: [{
+        name: 'liquid',
+        temperatureRange: [0, 3000],
+        cpJPerKgK: 1500,
+        densityKgPerM3: 500,
+        bulkModulusPa: 5e5,
+        shearModulusPa: 0
+      }],
+      transitions: []
+    }
+  };
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const reactionTable = buildSphReactionTable([{
+    a: 'a',
+    b: 'b',
+    product: 'ab',
+    activationTemperatureK: 0,
+    phaseRequirements: { b: ['liquid'] },
+    specificEnthalpyJPerKg: -1000
+  }], {
+    materialProperties,
+    contactRadiusM: 0.25
+  });
+
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: generation,
+    schroederSpatialEpochTransaction: transaction,
+    canonicalSpatialRequired: true,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [2, 2, 2],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    fuseNoFullResidentMechanics: true,
+    thermalMaterialTable,
+    reactionTable,
+    measureFusedSequenceQueueFence: true,
+    summaryRunner: null
+  });
+
+  const summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.state, 'readers-complete');
+  assert.deepEqual(
+    summary.admittedReaders.map(({ readerId }) => readerId),
+    [...enabledConsumerReaderIds, 'mechanics-p2g', 'mechanics-g2p']
+  );
+  assert.equal(summary.consumerReceipts.length, 6);
+  assert.equal(summary.counters.authenticatedConsumerTraversalCount, 6);
+  assert.equal(summary.counters.legacyPrivateLookupBuildCount, 0);
+  assert.equal(summary.counters.legacyExhaustiveTraversalCount, 0);
+  assert.equal(step.schroederSpatialExactNearProposalSummary.directoryBuildCount, 1);
+  assert.deepEqual(
+    step.schroederSpatialExactNearProposalSummary.authenticatedConsumerIds,
+    enabledConsumerReaderIds
+  );
+  assert.equal(step.thermalStep.canonicalSpatialThermalProposal, true);
+  assert.equal(step.thermalStep.legacyExhaustiveTraversalCount, 0);
+  assert.equal(step.reactionStep.canonicalSpatialReactionDiscovery, true);
+  assert.equal(step.reactionStep.legacyPrivateSpatialBuildCount, 0);
+  assert.equal(step.reactionStep.legacyExhaustiveTraversalCount, 0);
+  assert.equal(
+    step.stageTiming.queueFenceStatus.fusedMechanicsSequence,
+    'complete'
+  );
+  assert.equal(
+    step.stageTiming.queueFenceMethod.fusedMechanicsSequence,
+    'queue.onSubmittedWorkDone'
+  );
+  assert.equal(
+    device.createdBuffers.some(({ label }) => (
+      String(label).startsWith('ulg-sph-reaction-particle-bin-')
+      || String(label).startsWith('ulg-mls-mpm-separation-')
+      || label === 'ulg-sph-thermal-bin-placeholder'
+    )),
+    false
+  );
+});
+
+test('MLS-MPM canonical fused cleanup releases proposals without legacy separation scratch after evidence readback failure', async () => {
   const buffers = manualBuffers({ smoothingLengthM: 0.5 });
   const stateStrideFloats = buffers.sphParticleState.state.length;
   const duplicateRows = (source) => {
@@ -3745,6 +3986,27 @@ test('MLS-MPM canonical fused cleanup retires separation scratch after evidence 
       layout: { byteLength: 256 }
     }
   };
+  let proposalReleaseCount = 0;
+  const canonicalMechanicalProposalRunner = async ({ generation: sourceGeneration }) => ({
+    ready: true,
+    generation: sourceGeneration,
+    traversalCount: 1,
+    consumerReceipts: Object.freeze({}),
+    evidence: Object.freeze({
+      buffer: tracker.buffer('canonical-mechanical-proposal-evidence')
+    }),
+    proposalBuffer: tracker.buffer('canonical-mechanical-proposals'),
+    encodeApply(encoder) {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline({ compute: { entryPoint: 'apply' } });
+      pass.dispatchWorkgroups(1);
+      pass.end();
+    },
+    releaseAfterSubmittedWork() {
+      proposalReleaseCount += 1;
+      return proposalReleaseCount === 1;
+    }
+  });
 
   await assert.rejects(
     () => runMlsMpmResidentStepWithOptionalWebGpu({
@@ -3762,6 +4024,7 @@ test('MLS-MPM canonical fused cleanup retires separation scratch after evidence 
       },
       schroederSelectedLevel: 2,
       schroederSpatialEpochGeneration: generation,
+      spatialMechanicalProposalRunner: canonicalMechanicalProposalRunner,
       canonicalSpatialRequired: true,
       observeCanonicalSpatialAuthority: true,
       preferWebGpu: true,
@@ -3782,8 +4045,8 @@ test('MLS-MPM canonical fused cleanup retires separation scratch after evidence 
       'ulg-mls-mpm-separation-bins'
     ].includes(buffer.label)
   ));
-  assert.equal(separationScratch.length, 3);
-  assert.ok(separationScratch.every((buffer) => buffer.destroyed === true));
+  assert.equal(separationScratch.length, 0);
+  assert.equal(proposalReleaseCount, 1);
   assert.notEqual(directoryBuffer.destroyed, true);
   assert.notEqual(evidenceBuffer.destroyed, true);
 });

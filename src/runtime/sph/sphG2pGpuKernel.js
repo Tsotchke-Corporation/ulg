@@ -28,6 +28,9 @@ import {
   SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_BYTES,
   SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
 } from '../../../ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js';
+import {
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1
+} from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
@@ -37,7 +40,10 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
-import { webGpuDeviceMismatchInfo } from './sphGpuDeviceIdentity.js';
+import {
+  tagWebGpuBufferDevice,
+  webGpuDeviceMismatchInfo
+} from './sphGpuDeviceIdentity.js';
 
 export {
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
@@ -905,6 +911,48 @@ function schroederSpatialAuthorityMetadata(binding = null) {
   return metadata;
 }
 
+function canonicalMechanicalProposalAdmitted({
+  proposal,
+  generation,
+  spatialAuthority,
+  device
+} = {}) {
+  const separationReceipt = proposal?.consumerReceipt?.('separation') ?? null;
+  return Boolean(
+    proposal
+    && Object.isFrozen(proposal)
+    && proposal.schema === 'peercompute.ulg.schroeder-spatial-mechanical-proposal.v1'
+    && proposal.status === 'schroeder-spatial-mechanical-proposal-submitted'
+    && proposal.ready === true
+    && proposal.releaseScheduled !== true
+    && proposal.released !== true
+    && proposal.generation === generation
+    && proposal.generationId === spatialAuthority?.generationId
+    && proposal.supportEpoch === spatialAuthority?.supportEpoch
+    && proposal.traversalCount === 1
+    && proposal.privateBuildCount === 0
+    && proposal.fixedCandidateBuildCount === 0
+    && proposal.exhaustiveTraversalCount === 0
+    && proposal.fullParticleReadbackPerformed === false
+    && typeof proposal.encodeApply === 'function'
+    && proposal.proposalBuffer
+    && webGpuDeviceMismatchInfo({ buffer: proposal.proposalBuffer, device }).mismatch === false
+    && proposal.evidence?.buffer
+    && webGpuDeviceMismatchInfo({ buffer: proposal.evidence.buffer, device }).mismatch === false
+    && separationReceipt
+    && Object.isFrozen(separationReceipt)
+    && separationReceipt.status === 'schroeder-spatial-epoch-consumer-receipt-finalized'
+    && separationReceipt.gpuAuthenticated === true
+    && separationReceipt.consumerId === 'separation'
+    && separationReceipt.supportProfileId === SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1
+    && separationReceipt.generationId === spatialAuthority?.generationId
+    && separationReceipt.traversalCount === 1
+    && separationReceipt.privateLookupBuildCount === 0
+    && separationReceipt.fixedCandidateBuildCount === 0
+    && separationReceipt.exhaustiveTraversalCount === 0
+  );
+}
+
 function createParamsArray({
   particleCount,
   gridUpdate,
@@ -1327,6 +1375,7 @@ export async function runMlsMpmG2pWebGpu({
   schroederActiveNodeList = null,
   schroederSelectedLevel = null,
   schroederSpatialEpochGeneration = null,
+  schroederSpatialMechanicalProposal = null,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
   retainOutputParticleBuffers = false,
@@ -1394,8 +1443,8 @@ export async function runMlsMpmG2pWebGpu({
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-thermo-in', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-mechanics-in', mlsMpmParticleState.mechanics);
   const gridBuffer = borrowedGridBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-grid-in', gridUpdate.updatedGridNodes);
-  const outStateBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
-  const outMechanicsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const outStateBuffer = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC }), device);
+  const outMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC }), device);
   const paramsBuffer = !canonicalSpatialAuthority
     ? device.createBuffer({
         label: 'ulg-mls-mpm-g2p-params',
@@ -1556,26 +1605,52 @@ export async function runMlsMpmG2pWebGpu({
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
     pass.end();
-    const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
-      stateBuffer: outStateBuffer,
-      mechanicsBuffer: outMechanicsBuffer,
-      authorityRestoreStateBuffer: stateBuffer,
-      authorityRestoreMechanicsBuffer: mechanicsBuffer,
-      particleCount: sphParticleState.particleCount,
-      boxDimsM: dims,
-      relaxation: particleSeparationRelaxation,
-      normalVelocityDamping: particleSeparationVelocityDamping,
-      maxPairRestDistanceM: maxSeparationRestDistanceM(
-        mlsMpmParticleState.mechanics,
-        sphParticleState.particleCount
-      ),
-      gridSpacingM: gridUpdate.gridSpacingM,
-      spatialAuthorityEvidenceBuffer: canonicalSpatialAuthority
-        ? schroederSpatialAuthority.evidenceBuffer
-        : null,
-      spatialAuthorityEvidenceObserved: canonicalSpatialAuthority
-        && observeCanonicalSpatialAuthority === true
-    });
+    let separation;
+    if (canonicalSpatialAuthority) {
+      if (
+        !canonicalMechanicalProposalAdmitted({
+          proposal: schroederSpatialMechanicalProposal,
+          generation: schroederSpatialEpochGeneration,
+          spatialAuthority: schroederSpatialAuthority,
+          device
+        })
+      ) {
+        throw new Error(
+          'Canonical G2P requires one authenticated pre-integration contact/separation proposal'
+        );
+      }
+      schroederSpatialMechanicalProposal.encodeApply(encoder, {
+        stateBuffer: outStateBuffer,
+        mechanicsBuffer
+      });
+      separation = {
+        enabled: true,
+        transientBuffers: [],
+        scratch: null,
+        canonicalSpatialAuthorityGate: true,
+        canonicalAuthorityRestoreFolded: false,
+        canonicalSpatialAuthorityEvidenceObserved:
+          observeCanonicalSpatialAuthority === true,
+        canonicalProposalSource: 'pre-integration-ss-spatial-epoch.v1',
+        privateBinBuildCount: 0,
+        fixedCandidateBuildCount: 0,
+        exhaustiveParticleScanCount: 0
+      };
+    } else {
+      separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
+        stateBuffer: outStateBuffer,
+        mechanicsBuffer: outMechanicsBuffer,
+        particleCount: sphParticleState.particleCount,
+        boxDimsM: dims,
+        relaxation: particleSeparationRelaxation,
+        normalVelocityDamping: particleSeparationVelocityDamping,
+        maxPairRestDistanceM: maxSeparationRestDistanceM(
+          mlsMpmParticleState.mechanics,
+          sphParticleState.particleCount
+        ),
+        gridSpacingM: gridUpdate.gridSpacingM
+      });
+    }
     separationTransientBuffers = separation.transientBuffers;
     if (canonicalFinalize && separation.canonicalAuthorityRestoreFolded !== true) {
       const finalizePass = encoder.beginComputePass();
@@ -1813,6 +1888,7 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
   schroederSpatialEpochGeneration = null,
+  schroederSpatialMechanicalProposal = null,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
   preferWebGpu = false,
@@ -1911,6 +1987,7 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       schroederLevelAssignment,
       schroederSelectedLevel,
       schroederSpatialEpochGeneration,
+      schroederSpatialMechanicalProposal,
       canonicalSpatialRequired,
       observeCanonicalSpatialAuthority,
       retainOutputParticleBuffers,

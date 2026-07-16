@@ -213,8 +213,13 @@ test('spatial epoch ABI fixes exact keys, identity header, and compact directory
   assert.equal(layout.particleToCellOffsetWords, 105);
   assert.equal(layout.queryEvidenceCapacityOffsetWords, 113);
   assert.equal(layout.queryEvidenceWordCapacity, SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS);
-  assert.equal(layout.wordLength, 117);
-  assert.equal(layout.byteLength, 468);
+  assert.equal(SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS, 6);
+  assert.equal(layout.wordLength, 119);
+  assert.equal(layout.byteLength, 476);
+  assert.deepEqual(
+    SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI.queryGeometryEvidence.layout.slice(4),
+    ['occupiedLevelMaskLow:u32', 'occupiedLevelMaskHigh:u32']
+  );
   assert.equal(SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS, 1);
   assert.equal(SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY, 2);
   assert.match(SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI.consumerDispatchLinearization, /workgroup\.y/);
@@ -387,6 +392,14 @@ test('spatial WGSL admits the established active-row status and derives duplicat
   assert.match(
     schroederSpatialEpochAssembleWgsl,
     /directory\[query_evidence_offset_words \+ 3u\]/
+  );
+  assert.match(
+    schroederSpatialEpochAssembleWgsl,
+    /directory\[query_evidence_offset_words \+ 4u\] = occupied_level_mask_low/
+  );
+  assert.match(
+    schroederSpatialEpochAssembleWgsl,
+    /atomicOr\(&epoch_evidence\[5\]/
   );
   assert.match(
     schroederSpatialEpochAssembleWgsl,

@@ -76,7 +76,7 @@ fn p2g_canonical_query_geometry_admitted() -> bool {
   if (
     schroeder_spatial_directory[46u]
       != SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
-    || !p2g_spatial_range_within(query_offset_words, 4u, physical_upper_bound_words)
+    || !p2g_spatial_range_within(query_offset_words, 6u, physical_upper_bound_words)
   ) {
     return false;
   }
@@ -163,7 +163,7 @@ fn p2g_particle_enabled(particle_index: u32) -> bool {
     return false;
   }
   let query_offset_words = particle_to_cell_offset_words + source_count;
-  if (!p2g_spatial_range_within(query_offset_words, 4u, bound_words)) {
+  if (!p2g_spatial_range_within(query_offset_words, 6u, bound_words)) {
     p2g_spatial_reject(15u);
     return false;
   }
@@ -397,7 +397,7 @@ fn g2p_canonical_query_geometry_admitted() -> bool {
   if (
     schroeder_spatial_directory[46u]
       != G2P_SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
-    || !g2p_spatial_range_within(query_offset_words, 4u, physical_upper_bound_words)
+    || !g2p_spatial_range_within(query_offset_words, 6u, physical_upper_bound_words)
   ) {
     return false;
   }
@@ -530,7 +530,7 @@ fn g2p_particle_enabled(particle_index: u32) -> bool {
     return false;
   }
   let query_offset_words = particle_to_cell_offset_words + source_count;
-  if (!g2p_spatial_range_within(query_offset_words, 4u, bound_words)) {
+  if (!g2p_spatial_range_within(query_offset_words, 6u, bound_words)) {
     g2p_spatial_reject(17u);
     return false;
   }

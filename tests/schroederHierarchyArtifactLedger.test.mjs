@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY,
   ULG_SCHROEDER_HIERARCHY_ARTIFACT_LEDGER_SCHEMA,
   bindSchroederHierarchyArtifactLedgerSpatialEpoch,
   createSchroederHierarchyArtifactLedger,
@@ -55,6 +56,84 @@ test('hierarchy ledger binds one exact spatial generation identity', () => {
   assert.throws(
     () => bindSchroederHierarchyArtifactLedgerSpatialEpoch(ledger, '41'),
     /exact u32/
+  );
+});
+
+test('exact-near consumer artifact families require and retain one spatial generation identity', () => {
+  const family =
+    SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_DISCOVERY;
+  const unbound = createSchroederHierarchyArtifactLedger({ ledgerId: 'unbound-consumer' });
+  assert.throws(() => registerSchroederHierarchyArtifactFamily(unbound, {
+    family,
+    artifact: {
+      spatialEpochGenerationId: 41,
+      reactionProposalBuffer: fakeBuffer('unbound-proposal')
+    }
+  }), /requires a bound spatial epoch ledger/);
+
+  const ledger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'generation-bound-consumer'
+  });
+  bindSchroederHierarchyArtifactLedgerSpatialEpoch(ledger, 41);
+  assert.throws(() => registerSchroederHierarchyArtifactFamily(ledger, {
+    family,
+    artifact: {
+      reactionProposalBuffer: fakeBuffer('missing-generation-proposal')
+    }
+  }), /exact u32 spatial epoch generation id/);
+  assert.throws(() => registerSchroederHierarchyArtifactFamily(ledger, {
+    family,
+    artifact: {
+      spatialEpochGenerationId: 42,
+      reactionProposalBuffer: fakeBuffer('stale-generation-proposal')
+    }
+  }), /expected 41/);
+
+  const proposalBuffer = fakeBuffer('reaction-generation-41-proposal');
+  const receiptBuffer = fakeBuffer('reaction-generation-41-receipt');
+  const registered = registerSchroederHierarchyArtifactFamily(ledger, {
+    family,
+    artifact: {
+      spatialEpochGenerationId: 41,
+      reactionProposalBuffer: proposalBuffer,
+      consumerReceiptBuffer: receiptBuffer
+    },
+    expectedConsumers: ['reaction-discovery']
+  });
+  assert.equal(registered.length, 2);
+  const summary = summarizeSchroederHierarchyArtifactLedger(ledger);
+  assert.equal(summary.spatialEpochGenerationId, 41);
+  assert.equal(summary.generationBoundResourceCount, 2);
+  assert.equal(summary.resources[`${family}:proposal`].spatialEpochGenerationId, 41);
+  assert.equal(
+    summary.resources[`${family}:consumer-receipt`].spatialEpochGenerationId,
+    41
+  );
+});
+
+test('generation-bound consumer aliases cannot cross spatial epochs', () => {
+  const ledger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'generation-bound-alias-conflict'
+  });
+  bindSchroederHierarchyArtifactLedgerSpatialEpoch(ledger, 17);
+  const proposalBuffer = fakeBuffer('shared-consumer-proposal');
+  registerSchroederHierarchyArtifactFamily(ledger, {
+    family: SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.SEPARATION,
+    artifact: {
+      spatialEpochGenerationId: 17,
+      separationProposalBuffer: proposalBuffer
+    }
+  });
+  assert.throws(() => registerSchroederHierarchyArtifact(ledger, {
+    resourceKey: 'stale-thermal-alias',
+    family: SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.THERMAL_CONDUCTION,
+    role: 'proposal',
+    buffer: proposalBuffer,
+    spatialEpochGenerationId: 18
+  }), /expected 17/);
+  assert.equal(
+    summarizeSchroederHierarchyArtifactLedger(ledger).generationBoundResourceCount,
+    1
   );
 });
 

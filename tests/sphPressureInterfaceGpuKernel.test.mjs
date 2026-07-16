@@ -22,6 +22,9 @@ import {
   sphPressureInterfaceSpatialExactNearContactKinematicsWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialExactNearWgsl.js';
 import {
+  schroederSpatialExactNearTraversalV1Wgsl
+} from '../ulg-gpu-abi/src/schroederSpatialExactNearTraversalWgsl.js';
+import {
   sphPressureInterfaceContactKinematicsWgsl,
   sphPressureInterfaceForceRowsWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
@@ -762,20 +765,20 @@ test('pressure/interface canonical exact-near view has no candidate budget or pr
   )].map((match) => Number(match[1]));
   assert.deepEqual(bindings, [0, 1, 2, 3, 4, 5, 6, 7]);
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
+    schroederSpatialExactNearTraversalV1Wgsl,
     /let expected_max_level = bitcast<i32>\(expected_max_level_order \^ 0x80000000u\)/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
+    schroederSpatialExactNearTraversalV1Wgsl,
     /\(evidence_max_level_bits \^ 0x80000000u\) == expected_max_level_order/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /fn\s+ss_lower_bound_cell_key[\s\S]*iteration\s*<\s*32u\s*&&\s*lower\s*<\s*upper/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /fn\s+ss_exact_near_lower_bound_cell_key[\s\S]*iteration\s*<\s*32u\s*&&\s*lower\s*<\s*upper/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /fn\s+ss_upper_bound_cell_key[\s\S]*iteration\s*<\s*32u\s*&&\s*lower\s*<\s*upper/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /fn\s+ss_exact_near_upper_bound_cell_key[\s\S]*iteration\s*<\s*32u\s*&&\s*lower\s*<\s*upper/
   );
   assert.match(
     sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
@@ -816,7 +819,7 @@ test('pressure/interface canonical exact-near view has no candidate budget or pr
     /\bwhile\s*\(/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
+    schroederSpatialExactNearTraversalV1Wgsl,
     /expected_cell_offsets_offset_words\s*\+\s*cell_index\s*\+\s*1u/
   );
   assert.match(
@@ -824,44 +827,44 @@ test('pressure/interface canonical exact-near view has no candidate budget or pr
     /directory_query_radius_m\s*=\s*search_radius_m\s*\*\s*1\.4142135623730951/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
+    schroederSpatialExactNearTraversalV1Wgsl,
     /arrayLength\(&spatial_directory\)/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /SPATIAL_STATUS_INVALID_SOURCE[\s\S]*SPATIAL_STATUS_CAPACITY_OVERFLOW/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /SS_EXACT_NEAR_STATUS_INVALID_SOURCE[\s\S]*SS_EXACT_NEAR_STATUS_CAPACITY_OVERFLOW/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /SPATIAL_HEADER_COMPLETION_ORDINAL[\s\S]*==\s*build_ordinal/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /SS_EXACT_NEAR_HEADER_COMPLETION_ORDINAL[\s\S]*==\s*build_ordinal/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /SPATIAL_HEADER_SOURCE_ADAPTER[\s\S]*SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /SS_EXACT_NEAR_HEADER_SOURCE_ADAPTER[\s\S]*SS_EXACT_NEAR_SOURCE_ADAPTER_QUERY_V1/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /query_evidence_offset[\s\S]*SPATIAL_QUERY_EVIDENCE_WORDS[\s\S]*physical_upper/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /query_evidence_offset[\s\S]*SS_EXACT_NEAR_QUERY_EVIDENCE_WORDS[\s\S]*physical_upper/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /evidence_min_level_bits\s*==\s*bitcast<u32>\(params\.min_level\)/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /evidence_min_level_bits\s*==\s*bitcast<u32>\(expected\.min_level\)/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /evidence_base_spacing_bits\s*==\s*bitcast<u32>\(params\.base_grid_spacing_m\)/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /evidence_base_spacing_bits\s*==\s*bitcast<u32>\(expected\.base_grid_spacing_m\)/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
+    schroederSpatialExactNearTraversalV1Wgsl,
     /expected_cell_offsets_offset_words\]\s*==\s*0u[\s\S]*expected_cell_offsets_offset_words\s*\+\s*cell_count[\s\S]*==\s*source_count/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /member_begin\s*>\s*member_end\s*\|\|\s*member_end\s*>\s*params\.particle_count[\s\S]*return\s+ss_invalid_directory_pair\(\)/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /member_begin\s*>\s*member_end\s*\|\|\s*member_end\s*>\s*expected\.source_count[\s\S]*return\s+ss_exact_near_invalid_range\(\)/
   );
   assert.match(
-    sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
-    /particle_index\s*>=\s*params\.particle_count[\s\S]*return\s+ss_invalid_directory_pair\(\)/
+    schroederSpatialExactNearTraversalV1Wgsl,
+    /source_index\s*>=\s*expected\.source_count[\s\S]*return\s+SchroederSpatialExactNearSourceLookupV1\(0u, 0u\)/
   );
   assert.match(
     sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,

@@ -1,3 +1,10 @@
+import {
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1
+} from './schroederSpatialExactNear.js';
+import {
+  schroederSpatialExactNearTraversalV1Wgsl
+} from './schroederSpatialExactNearTraversalWgsl.js';
+
 // Pressure/contact is the first staged exact-near consumer of
 // ss-spatial-epoch.v1. It is intentionally separate from legacy particle bins
 // and fixed candidate rows: the canonical view needs one directory binding and
@@ -47,65 +54,8 @@ struct SpatialExactNearContactParams {
 @group(0) @binding(6) var<storage, read> spatial_directory: array<u32>;
 @group(0) @binding(7) var<storage, read> particle_identity: array<u32>;
 
-const SPATIAL_MAGIC: u32 = 0x53534531u;
-const SPATIAL_ABI_VERSION: u32 = 1u;
-const SPATIAL_STATUS_READY: u32 = 1u;
-const SPATIAL_STATUS_ADMITTED: u32 = 2u;
-const SPATIAL_STATUS_FAIL_CLOSED: u32 = 4u;
-const SPATIAL_STATUS_INVALID_SOURCE: u32 = 8u;
-const SPATIAL_STATUS_CAPACITY_OVERFLOW: u32 = 16u;
-const SPATIAL_PRIMITIVE_STATUS_READY: u32 = 1u;
-const SPATIAL_PRIMITIVE_STATUS_FAIL_CLOSED: u32 = 4u;
-const SPATIAL_EXACT_KEY_WORDS: u32 = 5u;
-const SPATIAL_HEADER_WORDS: u32 = 48u;
-const SPATIAL_SORT_LEXICOGRAPHIC_U32X5: u32 = 2u;
-const SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY: u32 = 2u;
-const SPATIAL_QUERY_EVIDENCE_WORDS: u32 = 4u;
-const SPATIAL_HEADER_MAGIC: u32 = 0u;
-const SPATIAL_HEADER_VERSION: u32 = 1u;
-const SPATIAL_HEADER_STATUS: u32 = 2u;
-const SPATIAL_HEADER_GENERATION: u32 = 3u;
-const SPATIAL_HEADER_DEVICE_ORDINAL: u32 = 4u;
-const SPATIAL_HEADER_LANE_ORDINAL: u32 = 5u;
-const SPATIAL_HEADER_LEASE_TOKEN: u32 = 6u;
-const SPATIAL_HEADER_SOURCE_FAMILY: u32 = 7u;
-const SPATIAL_HEADER_STORAGE_GENERATION: u32 = 8u;
-const SPATIAL_HEADER_PHYSICS_TICK: u32 = 9u;
-const SPATIAL_HEADER_PHYSICS_SUBSTEP: u32 = 10u;
-const SPATIAL_HEADER_POSITION_EPOCH: u32 = 11u;
-const SPATIAL_HEADER_TOPOLOGY_EPOCH: u32 = 12u;
-const SPATIAL_HEADER_CHART_EPOCH: u32 = 13u;
-const SPATIAL_HEADER_LEVEL_EPOCH: u32 = 14u;
-const SPATIAL_HEADER_SUPPORT_EPOCH: u32 = 15u;
-const SPATIAL_HEADER_SOURCE_COUNT: u32 = 16u;
-const SPATIAL_HEADER_SOURCE_CAPACITY: u32 = 17u;
-const SPATIAL_HEADER_CELL_COUNT: u32 = 18u;
-const SPATIAL_HEADER_CELL_CAPACITY: u32 = 19u;
-const SPATIAL_HEADER_LOGICAL_REQUIRED_WORDS: u32 = 20u;
-const SPATIAL_HEADER_LOGICAL_ADMITTED_WORDS: u32 = 21u;
-const SPATIAL_HEADER_DIRECTORY_CAPACITY: u32 = 22u;
-const SPATIAL_HEADER_INVALID_SOURCE_COUNT: u32 = 23u;
-const SPATIAL_HEADER_OVERFLOW_COUNT: u32 = 24u;
-const SPATIAL_HEADER_EXACT_KEY_WORDS: u32 = 25u;
-const SPATIAL_HEADER_SORT_KEY_WORDS: u32 = 26u;
-const SPATIAL_HEADER_SORT_MODE: u32 = 27u;
-const SPATIAL_HEADER_WORD_COUNT: u32 = 28u;
-const SPATIAL_HEADER_CELL_KEYS_OFFSET: u32 = 29u;
-const SPATIAL_HEADER_CELL_OFFSETS_OFFSET: u32 = 30u;
-const SPATIAL_HEADER_CELL_MEMBERS_OFFSET: u32 = 31u;
-const SPATIAL_HEADER_PARTICLE_TO_CELL_OFFSET: u32 = 32u;
-const SPATIAL_HEADER_BUILD_ORDINAL: u32 = 33u;
-const SPATIAL_HEADER_SORT_UNIQUE_ORDINAL: u32 = 34u;
-const SPATIAL_HEADER_COMPLETION_ORDINAL: u32 = 35u;
-const SPATIAL_HEADER_UNIQUE_GENERATION: u32 = 36u;
-const SPATIAL_HEADER_UNIQUE_INPUT_COUNT: u32 = 37u;
-const SPATIAL_HEADER_UNIQUE_COUNT: u32 = 38u;
-const SPATIAL_HEADER_UNIQUE_ADMITTED: u32 = 39u;
-const SPATIAL_HEADER_UNIQUE_OVERFLOW: u32 = 40u;
-const SPATIAL_HEADER_UNIQUE_STATUS: u32 = 41u;
-const SPATIAL_HEADER_CLEARED_WORDS: u32 = 45u;
-const SPATIAL_HEADER_SOURCE_ADAPTER: u32 = 46u;
-const SPATIAL_HEADER_PHYSICAL_UPPER_WORDS: u32 = 47u;
+${schroederSpatialExactNearTraversalV1Wgsl}
+
 struct SpatialContactCandidate {
   valid: u32,
   particle_index: u32,
@@ -234,209 +184,50 @@ fn ss_normal_from_element(row2: vec4<f32>, row3: vec4<f32>) -> vec3<f32> {
   return normalize(normal);
 }
 
-fn ss_range_within(start: u32, count: u32, limit: u32) -> bool {
-  return start <= limit && count <= limit - start;
+fn ss_exact_near_expectation() -> SchroederSpatialExactNearExpectationV1 {
+  return SchroederSpatialExactNearExpectationV1(
+    params.particle_count,
+    params.derivation_enabled,
+    ${SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1}u,
+    params.chart_id,
+    params.level_count,
+    params.expected_generation_id,
+    params.expected_device_ordinal,
+    params.expected_lane_ordinal,
+    params.expected_lease_token,
+    params.expected_source_family_id,
+    params.expected_storage_generation,
+    params.expected_physics_tick,
+    params.expected_physics_substep,
+    params.expected_position_epoch,
+    params.expected_topology_epoch,
+    params.expected_chart_epoch,
+    params.expected_level_epoch,
+    params.expected_support_epoch,
+    params.min_level,
+    params.base_grid_spacing_m,
+    params.expected_cell_keys_offset_words,
+    params.expected_cell_offsets_offset_words,
+    params.expected_cell_members_offset_words,
+    params.expected_particle_to_cell_offset_words,
+    params.expected_directory_capacity_words,
+    params.expected_source_capacity,
+    params.expected_cell_capacity
+  );
 }
 
 fn ss_directory_ready() -> bool {
-  let bound_words = arrayLength(&spatial_directory);
-  if (bound_words < SPATIAL_HEADER_WORDS) {
-    return false;
-  }
-  let status = spatial_directory[SPATIAL_HEADER_STATUS];
-  let required_status = SPATIAL_STATUS_READY | SPATIAL_STATUS_ADMITTED;
-  let rejected_status = SPATIAL_STATUS_FAIL_CLOSED
-    | SPATIAL_STATUS_INVALID_SOURCE
-    | SPATIAL_STATUS_CAPACITY_OVERFLOW;
-  let source_count = spatial_directory[SPATIAL_HEADER_SOURCE_COUNT];
-  let source_capacity = spatial_directory[SPATIAL_HEADER_SOURCE_CAPACITY];
-  let cell_count = spatial_directory[SPATIAL_HEADER_CELL_COUNT];
-  let cell_capacity = spatial_directory[SPATIAL_HEADER_CELL_CAPACITY];
-  let directory_capacity = spatial_directory[SPATIAL_HEADER_DIRECTORY_CAPACITY];
-  let logical_required = spatial_directory[SPATIAL_HEADER_LOGICAL_REQUIRED_WORDS];
-  let logical_admitted = spatial_directory[SPATIAL_HEADER_LOGICAL_ADMITTED_WORDS];
-  let physical_upper = spatial_directory[SPATIAL_HEADER_PHYSICAL_UPPER_WORDS];
-  let cell_key_words = cell_count * SPATIAL_EXACT_KEY_WORDS;
-  let unique_status = spatial_directory[SPATIAL_HEADER_UNIQUE_STATUS];
-  let build_ordinal = spatial_directory[SPATIAL_HEADER_BUILD_ORDINAL];
-  if (
-    source_count == 0u
-    || source_count > source_capacity
-    || directory_capacity > bound_words
-    || physical_upper > directory_capacity
-    || params.level_count == 0u
-    || params.level_count > 64u
-    || params.chart_id > 0x00ffffffu
-    || !ss_finite(params.base_grid_spacing_m)
-    || params.base_grid_spacing_m <= 0.0
-  ) {
-    return false;
-  }
-  let min_level_order = bitcast<u32>(params.min_level) ^ 0x80000000u;
-  let max_level_delta = params.level_count - 1u;
-  if (max_level_delta > 0xffffffffu - min_level_order) {
-    return false;
-  }
-  let expected_max_level_order = min_level_order + max_level_delta;
-  let expected_max_level = bitcast<i32>(expected_max_level_order ^ 0x80000000u);
-  let min_spacing = params.base_grid_spacing_m * exp2(f32(params.min_level));
-  let max_spacing = params.base_grid_spacing_m * exp2(f32(expected_max_level));
-  if (
-    !ss_finite(min_spacing)
-    || min_spacing < 0.000001
-    || !ss_finite(max_spacing)
-    || max_spacing <= 0.0
-  ) {
-    return false;
-  }
-  if (source_count > 0xffffffffu - params.expected_particle_to_cell_offset_words) {
-    return false;
-  }
-  let query_evidence_offset = params.expected_particle_to_cell_offset_words
-    + source_count;
-  if (!ss_range_within(
-    query_evidence_offset,
-    SPATIAL_QUERY_EVIDENCE_WORDS,
-    physical_upper
-  )) {
-    return false;
-  }
-  let evidence_chart_id = spatial_directory[query_evidence_offset + 0u];
-  let evidence_min_level_bits = spatial_directory[query_evidence_offset + 1u];
-  let evidence_max_level_bits = spatial_directory[query_evidence_offset + 2u];
-  let evidence_base_spacing_bits = spatial_directory[query_evidence_offset + 3u];
-  return params.derivation_enabled != 0u
-    && params.element_count <= arrayLength(&interface_elements) / 4u
+  return params.element_count <= arrayLength(&interface_elements) / 4u
     && params.element_count <= arrayLength(&contact_kinematics_rows) / 2u
     && params.particle_count <= arrayLength(&particle_state_rows) / 2u
     && params.particle_count <= arrayLength(&particle_thermo_rows) / 3u
     && params.particle_count <= arrayLength(&particle_identity)
     && params.contact_policy_row_count <= arrayLength(&contact_policy_rows) / 4u
-    && spatial_directory[SPATIAL_HEADER_MAGIC] == SPATIAL_MAGIC
-    && spatial_directory[SPATIAL_HEADER_VERSION] == SPATIAL_ABI_VERSION
-    && (status & required_status) == required_status
-    && (status & rejected_status) == 0u
-    && spatial_directory[SPATIAL_HEADER_GENERATION] == params.expected_generation_id
-    && spatial_directory[SPATIAL_HEADER_DEVICE_ORDINAL] == params.expected_device_ordinal
-    && spatial_directory[SPATIAL_HEADER_LANE_ORDINAL] == params.expected_lane_ordinal
-    && spatial_directory[SPATIAL_HEADER_LEASE_TOKEN] == params.expected_lease_token
-    && spatial_directory[SPATIAL_HEADER_SOURCE_FAMILY] == params.expected_source_family_id
-    && spatial_directory[SPATIAL_HEADER_STORAGE_GENERATION] == params.expected_storage_generation
-    && spatial_directory[SPATIAL_HEADER_PHYSICS_TICK] == params.expected_physics_tick
-    && spatial_directory[SPATIAL_HEADER_PHYSICS_SUBSTEP] == params.expected_physics_substep
-    && spatial_directory[SPATIAL_HEADER_POSITION_EPOCH] == params.expected_position_epoch
-    && spatial_directory[SPATIAL_HEADER_TOPOLOGY_EPOCH] == params.expected_topology_epoch
-    && spatial_directory[SPATIAL_HEADER_CHART_EPOCH] == params.expected_chart_epoch
-    && spatial_directory[SPATIAL_HEADER_LEVEL_EPOCH] == params.expected_level_epoch
-    && spatial_directory[SPATIAL_HEADER_SUPPORT_EPOCH] == params.expected_support_epoch
-    && source_count == params.particle_count
-    && source_capacity == params.expected_source_capacity
-    && cell_count > 0u
-    && cell_count <= source_count
-    && cell_count <= cell_capacity
-    && cell_capacity == params.expected_cell_capacity
-    && directory_capacity == params.expected_directory_capacity_words
-    && logical_required == logical_admitted
-    && logical_admitted >= SPATIAL_HEADER_WORDS
-    && logical_admitted <= physical_upper
-    && spatial_directory[SPATIAL_HEADER_INVALID_SOURCE_COUNT] == 0u
-    && spatial_directory[SPATIAL_HEADER_OVERFLOW_COUNT] == 0u
-    && spatial_directory[SPATIAL_HEADER_EXACT_KEY_WORDS] == SPATIAL_EXACT_KEY_WORDS
-    && spatial_directory[SPATIAL_HEADER_SORT_KEY_WORDS] == SPATIAL_EXACT_KEY_WORDS
-    && spatial_directory[SPATIAL_HEADER_SORT_MODE]
-      == SPATIAL_SORT_LEXICOGRAPHIC_U32X5
-    && spatial_directory[SPATIAL_HEADER_WORD_COUNT] == SPATIAL_HEADER_WORDS
-    && spatial_directory[SPATIAL_HEADER_CELL_KEYS_OFFSET]
-      == params.expected_cell_keys_offset_words
-    && spatial_directory[SPATIAL_HEADER_CELL_OFFSETS_OFFSET]
-      == params.expected_cell_offsets_offset_words
-    && spatial_directory[SPATIAL_HEADER_CELL_MEMBERS_OFFSET]
-      == params.expected_cell_members_offset_words
-    && spatial_directory[SPATIAL_HEADER_PARTICLE_TO_CELL_OFFSET]
-      == params.expected_particle_to_cell_offset_words
-    && build_ordinal != 0u
-    && spatial_directory[SPATIAL_HEADER_SORT_UNIQUE_ORDINAL] == build_ordinal
-    && spatial_directory[SPATIAL_HEADER_COMPLETION_ORDINAL] == build_ordinal
-    && spatial_directory[SPATIAL_HEADER_UNIQUE_GENERATION]
-      == params.expected_generation_id
-    && spatial_directory[SPATIAL_HEADER_UNIQUE_INPUT_COUNT] == source_count
-    && spatial_directory[SPATIAL_HEADER_UNIQUE_COUNT] == cell_count
-    && spatial_directory[SPATIAL_HEADER_UNIQUE_ADMITTED] != 0u
-    && spatial_directory[SPATIAL_HEADER_UNIQUE_OVERFLOW] == 0u
-    && (unique_status & SPATIAL_PRIMITIVE_STATUS_READY) != 0u
-    && (unique_status & SPATIAL_PRIMITIVE_STATUS_FAIL_CLOSED) == 0u
-    && spatial_directory[SPATIAL_HEADER_CLEARED_WORDS] >= SPATIAL_HEADER_WORDS
-    && spatial_directory[SPATIAL_HEADER_SOURCE_ADAPTER]
-      == SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
-    && evidence_chart_id == params.chart_id
-    && evidence_min_level_bits == bitcast<u32>(params.min_level)
-    && (evidence_max_level_bits ^ 0x80000000u) == expected_max_level_order
-    && evidence_base_spacing_bits == bitcast<u32>(params.base_grid_spacing_m)
-    && ss_range_within(
-      params.expected_cell_keys_offset_words,
-      cell_key_words,
-      physical_upper
-    )
-    && ss_range_within(
-      params.expected_cell_offsets_offset_words,
-      cell_count + 1u,
-      physical_upper
-    )
-    && ss_range_within(
-      params.expected_cell_members_offset_words,
-      source_count,
-      physical_upper
-    )
-    && ss_range_within(
-      params.expected_particle_to_cell_offset_words,
-      source_count,
-      physical_upper
-    )
-    && spatial_directory[params.expected_cell_offsets_offset_words] == 0u
-    && spatial_directory[
-      params.expected_cell_offsets_offset_words + cell_count
-    ] == source_count;
+    && ss_exact_near_directory_admitted(ss_exact_near_expectation());
 }
 
 fn ss_signed_order_key(value: i32) -> u32 {
-  return bitcast<u32>(value) ^ 0x80000000u;
-}
-
-fn ss_compare_word(left: u32, right: u32) -> i32 {
-  if (left < right) {
-    return -1;
-  }
-  if (left > right) {
-    return 1;
-  }
-  return 0;
-}
-
-fn ss_compare_cell_key(
-  cell_index: u32,
-  chart: u32,
-  level_order: u32,
-  cell_order: vec3<u32>
-) -> i32 {
-  let key_offset = params.expected_cell_keys_offset_words
-    + cell_index * SPATIAL_EXACT_KEY_WORDS;
-  var comparison = ss_compare_word(spatial_directory[key_offset], chart);
-  if (comparison != 0) {
-    return comparison;
-  }
-  comparison = ss_compare_word(spatial_directory[key_offset + 1u], level_order);
-  if (comparison != 0) {
-    return comparison;
-  }
-  comparison = ss_compare_word(spatial_directory[key_offset + 2u], cell_order.x);
-  if (comparison != 0) {
-    return comparison;
-  }
-  comparison = ss_compare_word(spatial_directory[key_offset + 3u], cell_order.y);
-  if (comparison != 0) {
-    return comparison;
-  }
-  return ss_compare_word(spatial_directory[key_offset + 4u], cell_order.z);
+  return ss_exact_near_signed_order_key(value);
 }
 
 fn ss_lower_bound_cell_key(
@@ -444,26 +235,12 @@ fn ss_lower_bound_cell_key(
   level_order: u32,
   cell_order: vec3<u32>
 ) -> u32 {
-  let cell_count = spatial_directory[SPATIAL_HEADER_CELL_COUNT];
-  var lower = 0u;
-  var upper = cell_count;
-  for (
-    var iteration = 0u;
-    iteration < 32u && lower < upper;
-    iteration = iteration + 1u
-  ) {
-    let middle = lower + (upper - lower) / 2u;
-    let comparison = ss_compare_cell_key(middle, chart, level_order, cell_order);
-    if (comparison < 0) {
-      lower = middle + 1u;
-    } else {
-      upper = middle;
-    }
-  }
-  if (lower < upper) {
-    return cell_count;
-  }
-  return lower;
+  return ss_exact_near_lower_bound_cell_key(
+    ss_exact_near_expectation(),
+    chart,
+    level_order,
+    cell_order
+  );
 }
 
 fn ss_upper_bound_cell_key(
@@ -471,50 +248,62 @@ fn ss_upper_bound_cell_key(
   level_order: u32,
   cell_order: vec3<u32>
 ) -> u32 {
-  let cell_count = spatial_directory[SPATIAL_HEADER_CELL_COUNT];
-  var lower = 0u;
-  var upper = cell_count;
-  for (
-    var iteration = 0u;
-    iteration < 32u && lower < upper;
-    iteration = iteration + 1u
-  ) {
-    let middle = lower + (upper - lower) / 2u;
-    let comparison = ss_compare_cell_key(middle, chart, level_order, cell_order);
-    if (comparison <= 0) {
-      lower = middle + 1u;
-    } else {
-      upper = middle;
-    }
-  }
-  if (lower < upper) {
-    return cell_count;
-  }
-  return lower;
+  return ss_exact_near_upper_bound_cell_key(
+    ss_exact_near_expectation(),
+    chart,
+    level_order,
+    cell_order
+  );
+}
+
+fn ss_lower_bound_cell_key_range(
+  chart: u32,
+  level_order: u32,
+  cell_order: vec3<u32>,
+  range_begin: u32,
+  range_end: u32
+) -> u32 {
+  return ss_exact_near_lower_bound_cell_key_range(
+    ss_exact_near_expectation(),
+    chart,
+    level_order,
+    cell_order,
+    range_begin,
+    range_end
+  );
+}
+
+fn ss_upper_bound_cell_key_range(
+  chart: u32,
+  level_order: u32,
+  cell_order: vec3<u32>,
+  range_begin: u32,
+  range_end: u32
+) -> u32 {
+  return ss_exact_near_upper_bound_cell_key_range(
+    ss_exact_near_expectation(),
+    chart,
+    level_order,
+    cell_order,
+    range_begin,
+    range_end
+  );
 }
 
 fn ss_cell_key_word(cell_index: u32, word_index: u32) -> u32 {
-  return spatial_directory[
-    params.expected_cell_keys_offset_words
-      + cell_index * SPATIAL_EXACT_KEY_WORDS
-      + word_index
-  ];
+  return ss_exact_near_cell_key_word(
+    ss_exact_near_expectation(),
+    cell_index,
+    word_index
+  );
 }
 
 fn ss_saturating_sub_radius(value: i32, radius: i32) -> i32 {
-  let minimum = -2147483647 - 1;
-  if (radius > 0 && value < minimum + radius) {
-    return minimum;
-  }
-  return value - radius;
+  return ss_exact_near_saturating_sub_radius(value, radius);
 }
 
 fn ss_saturating_add_radius(value: i32, radius: i32) -> i32 {
-  let maximum = 2147483647;
-  if (radius > 0 && value > maximum - radius) {
-    return maximum;
-  }
-  return value + radius;
+  return ss_exact_near_saturating_add_radius(value, radius);
 }
 
 fn ss_empty_candidate() -> SpatialContactCandidate {
@@ -819,6 +608,9 @@ fn ss_pair_for_policy(
     level_ordinal < params.level_count;
     level_ordinal = level_ordinal + 1u
   ) {
+    if (!ss_exact_near_level_occupied(ss_exact_near_expectation(), level_ordinal)) {
+      continue;
+    }
     let level = params.min_level + i32(level_ordinal);
     let spacing_m = params.base_grid_spacing_m * exp2(f32(level));
     if (!ss_finite(spacing_m) || !(spacing_m > 0.0)) {
@@ -867,13 +659,12 @@ fn ss_pair_for_policy(
     if (level_begin >= level_end) {
       continue;
     }
-    var x_cursor = max(
+    var x_cursor = ss_lower_bound_cell_key_range(
+      params.chart_id,
+      level_order,
+      vec3<u32>(minimum_order.x, 0u, 0u),
       level_begin,
-      ss_lower_bound_cell_key(
-        params.chart_id,
-        level_order,
-        vec3<u32>(minimum_order.x, 0u, 0u)
-      )
+      level_end
     );
     for (
       var x_iteration = 0u;
@@ -885,13 +676,12 @@ fn ss_pair_for_policy(
         x_cursor = level_end;
         continue;
       }
-      let x_end = min(
-        level_end,
-        ss_upper_bound_cell_key(
-          params.chart_id,
-          level_order,
-          vec3<u32>(x_order, 0xffffffffu, 0xffffffffu)
-        )
+      let x_end = ss_upper_bound_cell_key_range(
+        params.chart_id,
+        level_order,
+        vec3<u32>(x_order, 0xffffffffu, 0xffffffffu),
+        x_cursor,
+        level_end
       );
       // The directory header is authenticated on-device, but a sparse-prefix
       // consumer must still own its termination proof. Fail closed if a torn
@@ -899,13 +689,12 @@ fn ss_pair_for_policy(
       if (x_end <= x_cursor) {
         return ss_invalid_directory_pair();
       }
-      var y_cursor = max(
+      var y_cursor = ss_lower_bound_cell_key_range(
+        params.chart_id,
+        level_order,
+        vec3<u32>(x_order, minimum_order.y, 0u),
         x_cursor,
-        ss_lower_bound_cell_key(
-          params.chart_id,
-          level_order,
-          vec3<u32>(x_order, minimum_order.y, 0u)
-        )
+        x_end
       );
       for (
         var y_iteration = 0u;
@@ -917,58 +706,55 @@ fn ss_pair_for_policy(
           y_cursor = x_end;
           continue;
         }
-        let y_end = min(
-          x_end,
-          ss_upper_bound_cell_key(
-            params.chart_id,
-            level_order,
-            vec3<u32>(x_order, y_order, 0xffffffffu)
-          )
+        let y_end = ss_upper_bound_cell_key_range(
+          params.chart_id,
+          level_order,
+          vec3<u32>(x_order, y_order, 0xffffffffu),
+          y_cursor,
+          x_end
         );
         if (y_end <= y_cursor) {
           return ss_invalid_directory_pair();
         }
-        let z_begin = max(
+        let z_begin = ss_lower_bound_cell_key_range(
+          params.chart_id,
+          level_order,
+          vec3<u32>(x_order, y_order, minimum_order.z),
           y_cursor,
-          ss_lower_bound_cell_key(
-            params.chart_id,
-            level_order,
-            vec3<u32>(x_order, y_order, minimum_order.z)
-          )
+          y_end
         );
-        let z_end = min(
-          y_end,
-          ss_upper_bound_cell_key(
-            params.chart_id,
-            level_order,
-            vec3<u32>(x_order, y_order, maximum_order.z)
-          )
+        let z_end = ss_upper_bound_cell_key_range(
+          params.chart_id,
+          level_order,
+          vec3<u32>(x_order, y_order, maximum_order.z),
+          z_begin,
+          y_end
         );
         for (
           var cell_index = z_begin;
           cell_index < z_end;
           cell_index = cell_index + 1u
         ) {
-          let member_begin = spatial_directory[
-            params.expected_cell_offsets_offset_words + cell_index
-          ];
-          let member_end = spatial_directory[
-            params.expected_cell_offsets_offset_words + cell_index + 1u
-          ];
-          if (member_begin > member_end || member_end > params.particle_count) {
+          let member_range = ss_exact_near_cell_member_range(
+            ss_exact_near_expectation(),
+            cell_index
+          );
+          if (member_range.admitted == 0u) {
             return ss_invalid_directory_pair();
           }
           for (
-            var member_offset = member_begin;
-            member_offset < member_end;
+            var member_offset = member_range.begin;
+            member_offset < member_range.end;
             member_offset = member_offset + 1u
           ) {
-            let particle_index = spatial_directory[
-              params.expected_cell_members_offset_words + member_offset
-            ];
-            if (particle_index >= params.particle_count) {
+            let source_lookup = ss_exact_near_source_at_member(
+              ss_exact_near_expectation(),
+              member_offset
+            );
+            if (source_lookup.admitted == 0u) {
               return ss_invalid_directory_pair();
             }
+            let particle_index = source_lookup.source_index;
             let candidate = ss_candidate_for_particle(
               particle_index,
               centroid,

@@ -2934,28 +2934,28 @@ export async function mountSphPhaseDemoOverlay({
       ['schroederCrossLevelCoupling'],
       ['enableCrossLevelCoupling', 'crossLevelCoupling', 'schroederEnableCrossLevelCoupling']
     ),
-    true
+    false
   );
   const initialSchroederPhaseVolumeMigrationEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederPhaseVolumeMigration', 'ssPhaseVolumeMigration'],
       ['enablePhaseVolumeMigration', 'phaseVolumeMigration', 'schroederEnablePhaseVolumeMigration']
     ),
-    true
+    false
   );
   const initialSchroederLawQueueEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederLawQueue'],
       ['enableLawQueue', 'lawQueue', 'schroederEnableLawQueue']
     ),
-    true
+    false
   );
   const initialSchroederLawNeighborCandidatesEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederLawNeighborCandidates', 'schroederLawNeighbors'],
       ['enableLawNeighborCandidates', 'lawNeighborCandidates', 'schroederEnableLawNeighborCandidates']
     ),
-    true
+    false
   );
   const initialSchroederTwoLevelMechanicsEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
@@ -3585,9 +3585,10 @@ export async function mountSphPhaseDemoOverlay({
       if (initialSchroederActiveNodeSortedIndexPolicyMode) {
         q.set('schroederActiveNodeSortedIndexPolicy', initialSchroederActiveNodeSortedIndexPolicyMode);
       }
-      if (!initialSchroederCrossLevelCouplingEnabled) q.set('schroederCrossLevelCoupling', '0');
-      if (!initialSchroederLawQueueEnabled) q.set('schroederLawQueue', '0');
-      if (!initialSchroederLawNeighborCandidatesEnabled) q.set('schroederLawNeighborCandidates', '0');
+      if (initialSchroederCrossLevelCouplingEnabled) q.set('schroederCrossLevelCoupling', '1');
+      if (initialSchroederPhaseVolumeMigrationEnabled) q.set('schroederPhaseVolumeMigration', '1');
+      if (initialSchroederLawQueueEnabled) q.set('schroederLawQueue', '1');
+      if (initialSchroederLawNeighborCandidatesEnabled) q.set('schroederLawNeighborCandidates', '1');
       if (initialSchroederParticleStorageMaterializationEnabled) {
         q.set('schroederParticleStorageMaterialization', '1');
       }

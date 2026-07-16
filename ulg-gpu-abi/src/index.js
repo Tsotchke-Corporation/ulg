@@ -2,7 +2,9 @@ export * from './sphPhaseContracts.js';
 export * from './parallelPrimitives.js';
 export * from './schroederSpatialEpoch.js';
 export * from './schroederSpatialEpochWgsl.js';
+export * from './schroederSpatialExactNear.js';
 export * from './schroederSpatialExactNearWgsl.js';
+export * from './schroederSpatialExactNearTraversalWgsl.js';
 export * from './schroederMechanicsSpatialAuthorityWgsl.js';
 
 export const ULG_IR_VERSION = '0.5';

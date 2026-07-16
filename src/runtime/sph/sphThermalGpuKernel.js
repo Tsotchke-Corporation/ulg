@@ -5,6 +5,8 @@ import {
   SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1,
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
   ULG_CLOSURE_LAW_GRAPH_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
@@ -17,7 +19,7 @@ import {
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
   createClosureLawGraphBuffers
 } from '../../../ulg-gpu-abi/src/index.js';
-import { sphThermalStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { sphThermalStepWgsl as sphThermalStepLegacyWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
@@ -32,14 +34,80 @@ import {
 } from '../material/thermoState.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
+  SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES,
+  SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL,
+  SCHROEDER_SPATIAL_THERMAL_CONSUMER,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION,
+  ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_BUFFER_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_SCHEMA
+} from './schroederSpatialThermalProposalsGpu.js';
+import {
+  isFinalizedSchroederSpatialExactNearConsumerReceipt,
+  resolveSchroederSpatialExactNearConsumerGeneration
+} from './schroederSpatialEpochGpu.js';
+import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import {
   tagWebGpuBufferDevice,
   typedArrayContentFingerprint,
-  webGpuBufferDevice
+  webGpuBufferDevice,
+  webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+
+function replaceThermalWgslSection(source, before, after, label) {
+  if (!source.includes(before)) {
+    throw new Error(`Unable to install canonical thermal proposal WGSL ${label}`);
+  }
+  return source.replace(before, after);
+}
+
+function createCanonicalThermalProposalApplyWgsl(legacyWgsl) {
+  let code = replaceThermalWgslSection(
+    legacyWgsl,
+    `  ambient_temperature_k: f32,\n  _pad_b: f32,\n  _pad_c: f32,\n};`,
+    `  ambient_temperature_k: f32,\n  canonical_proposal_enabled: u32,\n  canonical_generation_id: u32,\n  canonical_support_epoch: u32,\n  canonical_position_epoch: u32,\n  canonical_topology_epoch: u32,\n  canonical_storage_generation: u32,\n  canonical_physics_tick: u32,\n  canonical_physics_substep: u32,\n  _pad_c: u32,\n  _pad_d: u32,\n};`,
+    'uniform identity extension'
+  );
+  code = replaceThermalWgslSection(
+    code,
+    `@group(0) @binding(10) var<storage, read> thermal_bins: array<u32>;\n\nconst PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;`,
+    `@group(0) @binding(10) var<storage, read> thermal_bins: array<u32>;\n\nconst THERMAL_PROPOSAL_MAGIC: u32 = 0x54504831u;\nconst THERMAL_PROPOSAL_VERSION: u32 = 1u;\nconst THERMAL_PROPOSAL_HEADER_WORDS: u32 = 16u;\nconst THERMAL_PROPOSAL_ROW_WORDS: u32 = 4u;\nconst THERMAL_CONDUCTION_SUPPORT_PROFILE_ID: u32 = 0x00010004u;\nconst THERMAL_RADIATION_SUPPORT_PROFILE_ID: u32 = 0x00010005u;\n\nfn canonical_thermal_proposal_header_valid() -> bool {\n  let required_words = THERMAL_PROPOSAL_HEADER_WORDS\n    + params.particle_count * THERMAL_PROPOSAL_ROW_WORDS;\n  return arrayLength(&thermal_bins) >= required_words\n    && thermal_bins[0u] == THERMAL_PROPOSAL_MAGIC\n    && thermal_bins[1u] == THERMAL_PROPOSAL_VERSION\n    && thermal_bins[2u] == params.canonical_generation_id\n    && thermal_bins[3u] == params.canonical_support_epoch\n    && thermal_bins[4u] == params.particle_count\n    && thermal_bins[5u] == THERMAL_PROPOSAL_ROW_WORDS\n    && thermal_bins[6u] == 0u\n    && thermal_bins[7u] == 0u\n    && thermal_bins[8u] == THERMAL_CONDUCTION_SUPPORT_PROFILE_ID\n    && thermal_bins[9u] == THERMAL_RADIATION_SUPPORT_PROFILE_ID\n    && thermal_bins[10u] == params.canonical_position_epoch\n    && thermal_bins[11u] == params.canonical_topology_epoch\n    && thermal_bins[12u] == params.canonical_storage_generation\n    && thermal_bins[13u] == params.canonical_physics_tick\n    && thermal_bins[14u] == params.canonical_physics_substep\n    && thermal_bins[15u] == 0u;\n}\n\nconst PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;`,
+    'proposal header validator'
+  );
+  code = replaceThermalWgslSection(
+    code,
+    `    && thermal_bins[15u] == 0u;\n}\n\nconst PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;`,
+    `    && thermal_bins[15u] == 0u;\n}\n\nfn canonical_thermal_proposal_finite(value: f32) -> bool {\n  return value == value && abs(value) <= 3.402823466e+38;\n}\n\nconst PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;`,
+    'finite-row guard'
+  );
+  code = replaceThermalWgslSection(
+    code,
+    `\t  if (params.bins_enabled == 1u && params.bin_capacity > 0u && bins_cover_support) {`,
+    `\t  if (params.canonical_proposal_enabled == 1u) {\n\t    if (canonical_thermal_proposal_header_valid()) {\n\t      let proposal_base = THERMAL_PROPOSAL_HEADER_WORDS\n\t        + particle_index * THERMAL_PROPOSAL_ROW_WORDS;\n\t      let proposed_conduction_du = bitcast<f32>(thermal_bins[proposal_base]);\n\t      let proposed_radiation_du = bitcast<f32>(thermal_bins[proposal_base + 1u]);\n\t      let proposed_min_temperature = bitcast<f32>(thermal_bins[proposal_base + 2u]);\n\t      let proposed_max_temperature = bitcast<f32>(thermal_bins[proposal_base + 3u]);\n\t      if (\n\t        isFinite(proposed_conduction_du)\n\t        && isFinite(proposed_radiation_du)\n\t        && isFinite(proposed_min_temperature)\n\t        && isFinite(proposed_max_temperature)\n\t        && proposed_min_temperature <= temperature\n\t        && proposed_max_temperature >= temperature\n\t        && proposed_min_temperature <= proposed_max_temperature\n\t      ) {\n\t        conduction_du = proposed_conduction_du + proposed_radiation_du;\n\t        neighbor_min_temperature = proposed_min_temperature;\n\t        neighbor_max_temperature = proposed_max_temperature;\n\t      }\n\t    }\n\t  } else if (params.bins_enabled == 1u && params.bin_capacity > 0u && bins_cover_support) {`,
+    'canonical proposal branch'
+  );
+  code = code.replaceAll('isFinite(', 'canonical_thermal_proposal_finite(');
+  const expectedMagic = `0x${SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC
+    .toString(16).padStart(8, '0')}u`;
+  if (
+    !code.includes(`THERMAL_PROPOSAL_MAGIC: u32 = ${expectedMagic}`)
+    || !code.includes(
+      `THERMAL_PROPOSAL_VERSION: u32 = ${SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION}u`
+    )
+  ) {
+    throw new Error('Canonical thermal proposal WGSL ABI constants are stale');
+  }
+  return code;
+}
+
+export const sphThermalStepWgsl = createCanonicalThermalProposalApplyWgsl(
+  sphThermalStepLegacyWgsl
+);
 
 export {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
@@ -49,8 +117,7 @@ export {
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
-  ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
-  sphThermalStepWgsl
+  ULG_SPH_GPU_THERMAL_STEP_SCHEMA
 };
 
 export const SPH_THERMAL_MATERIAL_RECORD_FLOATS = SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length;
@@ -1115,7 +1182,9 @@ function outputEnvelope({
   materialPropertyBankWarmInputShaderBinding = null,
   neighborLookupMode = null,
   legacyPrivateSpatialBuildCount = 0,
-  legacyExhaustiveTraversalCount = 0
+  legacyFixedCandidateBuildCount = 0,
+  legacyExhaustiveTraversalCount = 0,
+  canonicalThermalProposal = null
 }) {
   const materialPropertyBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
     thermalMaterialTable,
@@ -1174,7 +1243,21 @@ function outputEnvelope({
     outputBufferInitializationMode,
     neighborLookupMode,
     legacyPrivateSpatialBuildCount,
+    legacyFixedCandidateBuildCount,
     legacyExhaustiveTraversalCount,
+    canonicalSpatialThermalProposal: canonicalThermalProposal != null,
+    canonicalSpatialThermalProposalStatus:
+      canonicalThermalProposal?.proposal?.status ?? null,
+    canonicalSpatialThermalGenerationId:
+      canonicalThermalProposal?.execution?.generationId ?? null,
+    canonicalSpatialThermalSupportEpoch:
+      canonicalThermalProposal?.execution?.supportEpoch ?? null,
+    canonicalSpatialThermalPositionEpoch:
+      canonicalThermalProposal?.execution?.positionEpoch ?? null,
+    canonicalSpatialThermalTopologyEpoch:
+      canonicalThermalProposal?.execution?.topologyEpoch ?? null,
+    canonicalSpatialThermalConsumerReceipts:
+      canonicalThermalProposal?.consumerReceipts ?? null,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     wallHeatJ: { ...wallHeatJ },
@@ -1634,6 +1717,186 @@ export function resolveThermalMaxPairSupportM(sphParticleState, phaseResponseTab
   return maxRadiusM > 0 ? SPH_THERMAL_RADIATION_PAIR_RANGE_RADII * 2 * maxRadiusM : 0;
 }
 
+const THERMAL_PARAMS_BYTES = 144;
+const CANONICAL_THERMAL_EPOCH_FIELDS = Object.freeze([
+  'storageGeneration',
+  'physicsTick',
+  'physicsSubstep',
+  'positionEpoch',
+  'topologyEpoch',
+  'chartEpoch',
+  'levelEpoch',
+  'supportEpoch'
+]);
+
+function exactThermalU32(value, label, { positive = false } = {}) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < (positive ? 1 : 0)
+    || value > 0xffff_ffff
+  ) {
+    throw new RangeError(`${label} must be an exact ${positive ? 'positive ' : ''}u32`);
+  }
+  return value;
+}
+
+function rejectCanonicalThermalProposal(reason) {
+  const error = new Error(reason);
+  error.code = 'ERR_SCHROEDER_SPATIAL_THERMAL_APPLY_REJECTED';
+  throw error;
+}
+
+function resolveCanonicalThermalProposal({
+  device,
+  sphParticleState,
+  schroederSpatialEpochGeneration,
+  schroederSpatialThermalProposal
+}) {
+  const generationProvided = schroederSpatialEpochGeneration != null;
+  const proposalProvided = schroederSpatialThermalProposal != null;
+  if (!generationProvided && !proposalProvided) return null;
+  if (!generationProvided || !proposalProvided) {
+    rejectCanonicalThermalProposal(
+      'Canonical thermal apply requires both the retained spatial generation and its proposal'
+    );
+  }
+  const generation = schroederSpatialEpochGeneration;
+  const proposal = schroederSpatialThermalProposal;
+  const execution = generation?.execution;
+  const particleCount = exactThermalU32(
+    sphParticleState?.particleCount,
+    'sphParticleState.particleCount',
+    { positive: true }
+  );
+  if (
+    proposal?.schema !== ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_SCHEMA
+    || proposal.status !== 'schroeder-spatial-thermal-proposals-submitted'
+    || proposal.ready !== true
+    || proposal.released === true
+    || proposal.generation !== generation
+  ) {
+    rejectCanonicalThermalProposal(
+      'Thermal proposal is not the live proposal issued for the retained generation'
+    );
+  }
+  if (
+    proposal.proposalBufferSchema !== ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_BUFFER_SCHEMA
+    || proposal.proposalHeaderWords !== SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS
+    || proposal.proposalRowWords !== SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+    || proposal.canonicalApplyMode?.replacesLegacyNeighborBinding !== 10
+    || proposal.canonicalApplyMode?.paramsSentinelOffsetBytes
+      !== SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES
+    || proposal.canonicalApplyMode?.paramsSentinelValue
+      !== SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL
+    || proposal.thermalConductionProposalBuffer !== proposal.proposalBuffer
+    || proposal.thermalRadiationProposalBuffer !== proposal.proposalBuffer
+    || proposal.traversalCount !== 1
+    || proposal.traversalCountPerConsumer !== 1
+    || proposal.sharedTraversalConsumerCount !== 2
+    || proposal.privateBuildCount !== 0
+    || proposal.fixedCandidateBuildCount !== 0
+    || proposal.exhaustiveTraversalCount !== 0
+    || proposal.fullParticleReadbackPerformed !== false
+  ) {
+    rejectCanonicalThermalProposal('Thermal proposal does not carry the canonical apply ABI');
+  }
+  if (
+    proposal.particleCount !== particleCount
+    || generation?.source?.sourceCount !== particleCount
+    || execution?.sourceCount !== particleCount
+    || proposal.generationId !== execution?.generationId
+    || proposal.supportEpoch !== execution?.supportEpoch
+  ) {
+    rejectCanonicalThermalProposal(
+      'Thermal proposal particle count or generation identity does not match the thermal step'
+    );
+  }
+  const activeProposalByteLength = (
+    SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS
+    + particleCount * SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+  ) * Uint32Array.BYTES_PER_ELEMENT;
+  const proposalBuffer = proposal.proposalBuffer;
+  if (
+    !proposalBuffer
+    || webGpuBufferDevice(proposalBuffer) !== device
+    || !Number.isFinite(Number(proposalBuffer.size))
+    || Number(proposalBuffer.size) < activeProposalByteLength
+    || Number(proposal.activeProposalByteLength) !== activeProposalByteLength
+  ) {
+    rejectCanonicalThermalProposal(
+      'Canonical thermal proposal buffer is not a complete same-device particle row set'
+    );
+  }
+  const consumerContracts = [
+    [
+      SCHROEDER_SPATIAL_THERMAL_CONSUMER.CONDUCTION,
+      SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1
+    ],
+    [
+      SCHROEDER_SPATIAL_THERMAL_CONSUMER.RADIATION,
+      SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1
+    ]
+  ];
+  const consumerReceipts = {};
+  const consumerAuthentications = {};
+  for (const [consumerId, supportProfileId] of consumerContracts) {
+    const authentication = resolveSchroederSpatialExactNearConsumerGeneration(
+      generation,
+      {
+        device,
+        runtime: generation.runtime,
+        consumerId,
+        supportProfileId,
+        sourceBuffer: generation.source?.activeNodeBuffer,
+        expected: {
+          generationId: proposal.generationId,
+          sourceCount: particleCount,
+          supportEpoch: proposal.supportEpoch,
+          positionEpoch: execution.positionEpoch,
+          topologyEpoch: execution.topologyEpoch
+        }
+      }
+    );
+    const receipt = proposal.consumerReceipt?.(consumerId)
+      ?? proposal.consumerReceipts?.[consumerId]
+      ?? null;
+    if (
+      authentication?.authenticated !== true
+      || authentication.ready !== true
+      || !isFinalizedSchroederSpatialExactNearConsumerReceipt(receipt)
+      || receipt.consumerId !== consumerId
+      || receipt.supportProfileId !== supportProfileId
+      || receipt.deviceId !== webGpuDeviceId(device)
+      || receipt.generationId !== execution.generationId
+      || receipt.migratedProposalCount !== particleCount
+    ) {
+      rejectCanonicalThermalProposal(
+        `Canonical thermal consumer ${consumerId} is not authenticated for this generation`
+      );
+    }
+    for (const field of CANONICAL_THERMAL_EPOCH_FIELDS) {
+      if (!Object.is(receipt.epochIdentity?.[field], execution[field])) {
+        rejectCanonicalThermalProposal(
+          `Canonical thermal consumer ${consumerId} has stale ${field} identity`
+        );
+      }
+    }
+    consumerReceipts[consumerId] = receipt;
+    consumerAuthentications[consumerId] = authentication;
+  }
+  return Object.freeze({
+    proposal,
+    proposalBuffer,
+    generation,
+    execution,
+    particleCount,
+    activeProposalByteLength,
+    consumerReceipts: Object.freeze(consumerReceipts),
+    consumerAuthentications: Object.freeze(consumerAuthentications)
+  });
+}
+
 function createParamsArray({
   particleCount,
   materialCount,
@@ -1648,9 +1911,10 @@ function createParamsArray({
   materialBankWarmInputRowCount = 0,
   neighborBins = null,
   maxPairSupportM = 0,
-  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT
+  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
+  canonicalThermalProposal = null
 }) {
-  const buffer = new ArrayBuffer(112);
+  const buffer = new ArrayBuffer(THERMAL_PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, materialCount, true);
@@ -1670,7 +1934,7 @@ function createParamsArray({
   view.setFloat32(60, wallTemp(wallTemperaturesK, 'yMax'), true);
   view.setFloat32(64, wallTemp(wallTemperaturesK, 'zMin'), true);
   view.setFloat32(68, wallTemp(wallTemperaturesK, 'zMax'), true);
-  const binsEnabled = Boolean(
+  const binsEnabled = canonicalThermalProposal == null && Boolean(
     neighborBins?.binsBuffer
     && Number(neighborBins?.capacity) > 0
     && Number(neighborBins?.nx) > 0
@@ -1686,6 +1950,27 @@ function createParamsArray({
   view.setFloat32(92, binsEnabled ? Number(neighborBins.cellSizeM) : 0, true);
   view.setFloat32(96, Math.max(0, finiteNumber(maxPairSupportM, 0)), true);
   view.setFloat32(100, Math.max(0, finiteNumber(ambientTemperatureK, SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT)), true);
+  if (canonicalThermalProposal) {
+    const execution = canonicalThermalProposal.execution;
+    view.setUint32(
+      SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES,
+      SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL,
+      true
+    );
+    view.setUint32(108, exactThermalU32(execution.generationId, 'generationId', {
+      positive: true
+    }), true);
+    view.setUint32(112, exactThermalU32(execution.supportEpoch, 'supportEpoch'), true);
+    view.setUint32(116, exactThermalU32(execution.positionEpoch, 'positionEpoch'), true);
+    view.setUint32(120, exactThermalU32(execution.topologyEpoch, 'topologyEpoch'), true);
+    view.setUint32(124, exactThermalU32(
+      execution.storageGeneration,
+      'storageGeneration',
+      { positive: true }
+    ), true);
+    view.setUint32(128, exactThermalU32(execution.physicsTick, 'physicsTick'), true);
+    view.setUint32(132, exactThermalU32(execution.physicsSubstep, 'physicsSubstep'), true);
+  }
   return buffer;
 }
 
@@ -1725,6 +2010,8 @@ export function createSphThermalStepWebGpuEncoderStage({
   wallLayerM = sphParticleState?.smoothingLengthM,
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE,
+  schroederSpatialEpochGeneration = null,
+  schroederSpatialThermalProposal = null,
   // Shared per-substep neighbor bins (from the separation bin-fill pass):
   // { countsBuffer, entriesBuffer, capacity, nx, ny, nz, cellSizeM }.
   // Absent bins fall back to the exhaustive pair scan.
@@ -1735,13 +2022,41 @@ export function createSphThermalStepWebGpuEncoderStage({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphThermalStepWebGpu requires a WebGPU-like device');
   }
+  const canonicalThermalProposal = resolveCanonicalThermalProposal({
+    device,
+    sphParticleState,
+    schroederSpatialEpochGeneration,
+    schroederSpatialThermalProposal
+  });
   const dims = finiteVector3(boxDimsM, [5, 5, 5]);
   const layer = finiteNumber(wallLayerM, sphParticleState.smoothingLengthM);
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
+  if (
+    canonicalThermalProposal
+    && (
+      (borrowedStateBuffer && webGpuBufferDevice(borrowedStateBuffer) !== device)
+      || (borrowedThermoBuffer && webGpuBufferDevice(borrowedThermoBuffer) !== device)
+    )
+  ) {
+    rejectCanonicalThermalProposal(
+      'Canonical thermal apply source state and thermo buffers must belong to the generation device'
+    );
+  }
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-thermal-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-thermal-source-thermo', sphParticleState.thermo);
+  if (
+    canonicalThermalProposal
+    && (
+      webGpuBufferDevice(stateBuffer) !== device
+      || webGpuBufferDevice(thermoBuffer) !== device
+    )
+  ) {
+    rejectCanonicalThermalProposal(
+      'Canonical thermal apply source state and thermo buffers must belong to the generation device'
+    );
+  }
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
   const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
@@ -1797,7 +2112,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   );
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-thermal-params',
-    size: 112,
+    size: THERMAL_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
@@ -1814,9 +2129,10 @@ export function createSphThermalStepWebGpuEncoderStage({
     materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount,
     neighborBins,
     maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
-    ambientTemperatureK
+    ambientTemperatureK,
+    canonicalThermalProposal
   }));
-  const neighborBinsEnabled = Boolean(
+  const neighborBinsEnabled = canonicalThermalProposal == null && Boolean(
     neighborBins?.binsBuffer
     && Number(neighborBins?.capacity) > 0
     && Number(neighborBins?.nx) > 0
@@ -1824,10 +2140,13 @@ export function createSphThermalStepWebGpuEncoderStage({
     && Number(neighborBins?.nz) > 0
     && Number(neighborBins?.cellSizeM) > 0
   );
-  const neighborBinsBound = Boolean(neighborBins?.binsBuffer);
+  const spatialInputBuffer = canonicalThermalProposal?.proposalBuffer
+    || neighborBins?.binsBuffer
+    || null;
+  const spatialInputBound = Boolean(spatialInputBuffer);
   // Binding 10 must always be present in the layout; a tiny placeholder
   // satisfies it when the exhaustive fallback runs (bins_enabled=0).
-  const binPlaceholderBuffer = neighborBinsBound
+  const binPlaceholderBuffer = spatialInputBound
     ? null
     : device.createBuffer({
       label: 'ulg-sph-thermal-bin-placeholder',
@@ -1836,7 +2155,7 @@ export function createSphThermalStepWebGpuEncoderStage({
     });
 
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-thermal-step.v3',
+    cacheKey: 'ulg-sph-thermal-step.v4',
     label: 'ulg-sph-thermal-step',
     code: sphThermalStepWgsl,
     entryPoint: 'main',
@@ -1867,7 +2186,7 @@ export function createSphThermalStepWebGpuEncoderStage({
       { binding: 7, resource: { buffer: outThermoBuffer } },
       { binding: 8, resource: { buffer: paramsBuffer } },
       { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } },
-      { binding: 10, resource: { buffer: neighborBinsBound ? neighborBins.binsBuffer : binPlaceholderBuffer } }
+      { binding: 10, resource: { buffer: spatialInputBound ? spatialInputBuffer : binPlaceholderBuffer } }
     ]
   });
   const state = new Float32Array();
@@ -1911,11 +2230,16 @@ export function createSphThermalStepWebGpuEncoderStage({
     wallRate,
     wallLayerM: layer,
     boxDimsM: dims,
-    neighborLookupMode: neighborBinsEnabled
-      ? 'borrowed-postintegration-neighbor-bins'
-      : 'exhaustive-particle-scan',
+    neighborLookupMode: canonicalThermalProposal
+      ? 'canonical-schroeder-spatial-thermal-proposals'
+      : (neighborBinsEnabled
+        ? 'borrowed-postintegration-neighbor-bins'
+        : 'exhaustive-particle-scan'),
     legacyPrivateSpatialBuildCount: 0,
-    legacyExhaustiveTraversalCount: neighborBinsEnabled ? 0 : 1,
+    legacyExhaustiveTraversalCount: canonicalThermalProposal
+      ? 0
+      : (neighborBinsEnabled ? 0 : 1),
+    canonicalThermalProposal,
     stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
     thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
     stateBufferByteLength: outStateByteLength,

@@ -20,6 +20,14 @@ import {
   SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES,
   SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_WORDS
 } from '../../../ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js';
+import {
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+  ULG_SCHROEDER_SPATIAL_CONSUMER_AUTHENTICATION_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA,
+  createSchroederSpatialExactNearExpectationV1Data,
+  resolveSchroederSpatialSupportProfileContract
+} from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import { createWebGpuStableRadixScanUnique } from '../webgpuRadixScanUnique.js';
 import {
   tagWebGpuBufferDevice,
@@ -50,6 +58,8 @@ const PARAMS_BUFFER_BYTES = 256;
 const MAX_EXACT_F32_INTEGER = 0x00ff_ffff;
 const DIRECT_SPATIAL_EPOCH_ARENA_COUNT = 3;
 const directSpatialEpochRuntimeCache = new WeakMap();
+const exactNearConsumerAuthentications = new WeakMap();
+const finalizedExactNearConsumerReceipts = new WeakSet();
 const GPU_BUFFER_USAGE = {
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
@@ -1517,6 +1527,463 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       runtimeCacheHit: Boolean(cache?.cacheHit)
     };
   }
+}
+
+function rejectedExactNearConsumerAuthentication({
+  consumerId = null,
+  supportProfileId = null,
+  status,
+  reason,
+  field = null,
+  expected = undefined,
+  actual = undefined
+}) {
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_CONSUMER_AUTHENTICATION_SCHEMA,
+    status,
+    reason,
+    ready: false,
+    admitted: false,
+    authenticated: false,
+    gpuAuthenticated: false,
+    generationBound: false,
+    consumerId,
+    supportProfileId,
+    ...(field == null ? {} : { field }),
+    ...(expected === undefined ? {} : { expected }),
+    ...(actual === undefined ? {} : { actual })
+  });
+}
+
+function exactNearEpochIdentity(execution) {
+  return Object.freeze({
+    storageGeneration: execution.storageGeneration,
+    physicsTick: execution.physicsTick,
+    physicsSubstep: execution.physicsSubstep,
+    positionEpoch: execution.positionEpoch,
+    topologyEpoch: execution.topologyEpoch,
+    chartEpoch: execution.chartEpoch,
+    levelEpoch: execution.levelEpoch,
+    supportEpoch: execution.supportEpoch
+  });
+}
+
+function exactNearIdentityMatches(left, right) {
+  if (!left || !right) return false;
+  return [
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ].every((field) => Object.is(left[field], right[field]));
+}
+
+/**
+ * Resolve one law consumer onto the exact retained generation that owns its
+ * directory and source buffer. This authenticates host-side binding identity;
+ * the reusable WGSL module still validates the completed v1 directory header
+ * on-device before the first traversal.
+ */
+export function resolveSchroederSpatialExactNearConsumerGeneration(
+  generation,
+  {
+    device = null,
+    runtime = null,
+    consumerId = null,
+    supportProfileId = null,
+    sourceBuffer = null,
+    expected: expectedIdentity = {}
+  } = {}
+) {
+  const reject = (status, reason, details = {}) => (
+    rejectedExactNearConsumerAuthentication({
+      consumerId,
+      supportProfileId,
+      status,
+      reason,
+      ...details
+    })
+  );
+  if (typeof consumerId !== 'string' || consumerId.trim().length === 0) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-consumer',
+      'consumerId must be a non-empty string'
+    );
+  }
+  const profile = resolveSchroederSpatialSupportProfileContract(supportProfileId);
+  if (!profile) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-support-profile',
+      'supportProfileId is not a registered exact-near v1 support contract'
+    );
+  }
+  if (
+    generation?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
+    || generation.ready !== true
+    || generation.selected !== true
+    || generation.status !== 'schroeder-spatial-epoch-generation-submitted'
+  ) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-generation',
+      'generation is not a submitted retained Schroeder spatial generation'
+    );
+  }
+  const execution = generation.execution;
+  const ownerRuntime = runtime ?? generation.runtime ?? null;
+  const source = generation.source;
+  if (
+    execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || execution.magic !== SCHROEDER_SPATIAL_EPOCH_MAGIC
+    || execution.abiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+    || execution.status !== 'schroeder-spatial-epoch-gpu-build-submitted'
+    || execution.submitPerformed !== true
+    || execution.released === true
+    || generation.releaseScheduled === true
+  ) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-execution',
+      'generation execution is not live, submitted, and retained for consumers'
+    );
+  }
+  const consumerDeviceId = device ? webGpuDeviceId(device) : null;
+  if (!device || consumerDeviceId == null || execution.deviceId !== consumerDeviceId) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-device',
+      'consumer device does not own the retained generation',
+      { field: 'deviceId', expected: execution.deviceId, actual: consumerDeviceId }
+    );
+  }
+  if (
+    ownerRuntime !== generation.runtime
+    || ownerRuntime !== execution.ownerRuntime
+    || ownerRuntime?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || ownerRuntime.status !== 'schroeder-spatial-epoch-gpu-runtime-ready'
+    || ownerRuntime.deviceId !== consumerDeviceId
+  ) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-runtime',
+      'consumer runtime is not the exact live generation owner'
+    );
+  }
+  let runtimeOwnsExecution = false;
+  let runtimeSubmittedExecution = false;
+  try {
+    runtimeOwnsExecution = ownerRuntime.ownsExecution(execution) === true;
+    runtimeSubmittedExecution = ownerRuntime.isExecutionSubmitted(execution) === true;
+  } catch {
+    runtimeOwnsExecution = false;
+    runtimeSubmittedExecution = false;
+  }
+  if (!runtimeOwnsExecution || !runtimeSubmittedExecution) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-runtime-ownership',
+      'runtime cannot prove ownership and submission of the exact execution'
+    );
+  }
+  const retainedSourceBuffer = source?.activeNodeBuffer ?? null;
+  const expectedSourceBuffer = sourceBuffer ?? retainedSourceBuffer;
+  if (
+    source?.ready !== true
+    || source.status !== 'schroeder-spatial-directory-source-ready'
+    || !retainedSourceBuffer
+    || expectedSourceBuffer !== retainedSourceBuffer
+    || execution.activeNodeBuffer !== retainedSourceBuffer
+    || source.exactNearQueryProfile?.activeNodeBuffer !== retainedSourceBuffer
+    || !webGpuBufferMatchesDevice(retainedSourceBuffer, device)
+    || !execution.directoryBuffer
+    || !webGpuBufferMatchesDevice(execution.directoryBuffer, device)
+  ) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-source-buffer',
+      'source/directory buffers do not form one same-device retained family'
+    );
+  }
+  if (
+    execution.sourceAdapterId !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+    || execution.exactNearQueryProfile?.ready !== true
+    || source.exactNearQueryProfile?.ready !== true
+    || execution.queryGeometryMode !== SCHROEDER_SPATIAL_QUERY_GEOMETRY_SINGLE_CHART_POW2
+  ) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-query-profile',
+      'generation does not carry an admitted exact-near query geometry profile'
+    );
+  }
+  const sourceIdentityChecks = [
+    ['sourceCount', source.sourceCount, execution.sourceCount],
+    ['storageGeneration', source.storageGeneration, execution.storageGeneration],
+    ['physicsTick', source.physicsTick, execution.physicsTick],
+    ['physicsSubstep', source.physicsSubstep, execution.physicsSubstep],
+    ['positionEpoch', source.positionEpoch, execution.positionEpoch],
+    ['topologyEpoch', source.topologyEpoch, execution.topologyEpoch],
+    ['chartEpoch', source.chartEpoch, execution.chartEpoch],
+    ['levelEpoch', source.levelEpoch, execution.levelEpoch],
+    ['supportEpoch', source.supportEpoch, execution.supportEpoch],
+    ['chartId', source.exactNearQueryProfile.chartId, execution.queryChartId],
+    ['minLevel', source.exactNearQueryProfile.minLevel, execution.queryMinLevel],
+    ['maxLevel', source.exactNearQueryProfile.maxLevel, execution.queryMaxLevel],
+    [
+      'baseGridSpacingM',
+      Math.fround(source.exactNearQueryProfile.baseGridSpacingM),
+      execution.queryBaseGridSpacingM
+    ]
+  ];
+  for (const [field, expected, actual] of sourceIdentityChecks) {
+    if (!Object.is(expected, actual)) {
+      return reject(
+        'schroeder-spatial-consumer-authentication-rejected-source-identity',
+        `source identity field ${field} does not match the directory generation`,
+        { field, expected, actual }
+      );
+    }
+  }
+  const optionalIdentityChecks = [
+    ['deviceId', execution.deviceId],
+    ['laneId', execution.laneId],
+    ['generationId', execution.generationId],
+    ['deviceOrdinal', execution.deviceOrdinal],
+    ['laneOrdinal', execution.laneOrdinal],
+    ['leaseToken', execution.leaseToken],
+    ['sourceFamily', execution.sourceFamily],
+    ['sourceFamilyId', execution.sourceFamilyId],
+    ['sourceAdapterId', execution.sourceAdapterId],
+    ['sourceCount', execution.sourceCount],
+    ['storageGeneration', execution.storageGeneration],
+    ['physicsTick', execution.physicsTick],
+    ['physicsSubstep', execution.physicsSubstep],
+    ['positionEpoch', execution.positionEpoch],
+    ['topologyEpoch', execution.topologyEpoch],
+    ['chartEpoch', execution.chartEpoch],
+    ['levelEpoch', execution.levelEpoch],
+    ['supportEpoch', execution.supportEpoch]
+  ];
+  for (const [field, actual] of optionalIdentityChecks) {
+    if (
+      Object.hasOwn(expectedIdentity, field)
+      && !Object.is(expectedIdentity[field], actual)
+    ) {
+      return reject(
+        'schroeder-spatial-consumer-authentication-rejected-expected-identity',
+        `consumer expectation ${field} does not match the retained generation`,
+        { field, expected: expectedIdentity[field], actual }
+      );
+    }
+  }
+  let expectationData;
+  try {
+    expectationData = createSchroederSpatialExactNearExpectationV1Data({
+      sourceCount: execution.sourceCount,
+      derivationEnabled: true,
+      supportProfileId,
+      chartId: execution.queryChartId,
+      levelCount: execution.queryLevelCount,
+      generationId: execution.generationId,
+      deviceOrdinal: execution.deviceOrdinal,
+      laneOrdinal: execution.laneOrdinal,
+      leaseToken: execution.leaseToken,
+      sourceFamilyId: execution.sourceFamilyId,
+      storageGeneration: execution.storageGeneration,
+      physicsTick: execution.physicsTick,
+      physicsSubstep: execution.physicsSubstep,
+      positionEpoch: execution.positionEpoch,
+      topologyEpoch: execution.topologyEpoch,
+      chartEpoch: execution.chartEpoch,
+      levelEpoch: execution.levelEpoch,
+      supportEpoch: execution.supportEpoch,
+      minLevel: execution.queryMinLevel,
+      baseGridSpacingM: execution.queryBaseGridSpacingM,
+      cellKeysOffsetWords: execution.layout.cellKeysOffsetWords,
+      cellOffsetsOffsetWords: execution.layout.cellOffsetsOffsetWords,
+      cellMembersOffsetWords: execution.layout.cellMembersOffsetWords,
+      particleToCellOffsetWords: execution.layout.particleToCellOffsetWords,
+      directoryCapacityWords: execution.layout.wordLength,
+      sourceCapacity: execution.sourceCapacity,
+      cellCapacity: execution.cellCapacity
+    });
+  } catch (error) {
+    return reject(
+      'schroeder-spatial-consumer-authentication-rejected-expectation',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+  const epochIdentity = exactNearEpochIdentity(execution);
+  const receipt = Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA,
+    status: 'schroeder-spatial-epoch-consumer-binding-authenticated',
+    authenticated: true,
+    gpuAuthenticated: false,
+    submitPerformed: true,
+    generationBound: true,
+    consumerId,
+    phase: profile.phase,
+    supportProfileId,
+    artifactFamily: profile.artifactFamily,
+    deviceId: consumerDeviceId,
+    generationId: execution.generationId,
+    epochIdentity,
+    traversalCount: 0,
+    candidateVisitCount: 0,
+    consumerMaskHitCount: 0,
+    migratedProposalCount: 0,
+    candidateBytesRequired: 0,
+    candidateBytesAdmitted: 0,
+    candidateBytesCapacity: 0,
+    candidateOverflowBytes: 0,
+    privateLookupBuildCount: 0,
+    fixedCandidateBuildCount: 0,
+    exhaustiveTraversalCount: 0,
+    overflowed: false,
+    partialPublication: false,
+    fallbackObserved: false,
+    fullReadbackPerformed: false
+  });
+  const authentication = {
+    schema: ULG_SCHROEDER_SPATIAL_CONSUMER_AUTHENTICATION_SCHEMA,
+    status: 'schroeder-spatial-consumer-bindings-authenticated',
+    reason: null,
+    ready: true,
+    admitted: true,
+    authenticated: true,
+    gpuAuthenticated: false,
+    generationBound: true,
+    consumerId,
+    supportProfileId,
+    supportProfile: profile,
+    deviceId: consumerDeviceId,
+    generationId: execution.generationId,
+    epochIdentity,
+    sourceFamily: execution.sourceFamily,
+    sourceFamilyId: execution.sourceFamilyId,
+    sourceAdapterId: execution.sourceAdapterId,
+    sourceCount: execution.sourceCount,
+    sourceBuffer: retainedSourceBuffer,
+    directoryBuffer: execution.directoryBuffer,
+    expectationData,
+    expectationUniformBytes: SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+    gpuDirectoryAdmissionRequired: true,
+    gpuDirectoryAdmissionMode: 'consumer-wgsl-v1-fail-closed',
+    receipt,
+    generation,
+    execution,
+    runtime: ownerRuntime
+  };
+  exactNearConsumerAuthentications.set(authentication, {
+    generation,
+    execution,
+    runtime: ownerRuntime,
+    device,
+    profile,
+    receipt,
+    finalizedReceipt: null
+  });
+  return Object.freeze(authentication);
+}
+
+function exactNonNegativeCounter(value, label) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 0
+    || value > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new RangeError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+/** Finalize one runtime-issued binding receipt with law-owned GPU evidence. */
+export function finalizeSchroederSpatialExactNearConsumerReceipt(
+  authentication,
+  gpuEvidence
+) {
+  const record = exactNearConsumerAuthentications.get(authentication);
+  if (!record || authentication?.receipt !== record.receipt) {
+    throw new TypeError('authentication was not issued by the live spatial epoch runtime');
+  }
+  if (record.finalizedReceipt) return record.finalizedReceipt;
+  if (
+    gpuEvidence?.schema !== ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA
+    || gpuEvidence.status !== 'schroeder-spatial-exact-near-gpu-authenticated'
+    || gpuEvidence.gpuAuthenticated !== true
+    || gpuEvidence.consumerId !== authentication.consumerId
+    || gpuEvidence.supportProfileId !== authentication.supportProfileId
+    || gpuEvidence.generationId !== authentication.generationId
+    || !exactNearIdentityMatches(gpuEvidence.epochIdentity, authentication.epochIdentity)
+  ) {
+    throw new TypeError('GPU evidence does not authenticate this exact consumer generation');
+  }
+  if (
+    record.generation.releaseScheduled === true
+    || record.execution.released === true
+    || record.runtime.ownsExecution(record.execution) !== true
+    || record.runtime.isExecutionSubmitted(record.execution) !== true
+  ) {
+    throw new Error('consumer receipt cannot finalize after generation retirement begins');
+  }
+  const traversalCount = exactNonNegativeCounter(
+    gpuEvidence.traversalCount,
+    'traversalCount'
+  );
+  if (traversalCount !== 1) {
+    throw new RangeError('an enabled exact-near consumer must authenticate exactly one traversal');
+  }
+  const counters = Object.fromEntries([
+    'candidateVisitCount',
+    'consumerMaskHitCount',
+    'migratedProposalCount',
+    'candidateBytesRequired',
+    'candidateBytesAdmitted',
+    'candidateBytesCapacity',
+    'candidateOverflowBytes',
+    'privateLookupBuildCount',
+    'fixedCandidateBuildCount',
+    'exhaustiveTraversalCount'
+  ].map((field) => [
+    field,
+    exactNonNegativeCounter(gpuEvidence[field] ?? 0, field)
+  ]));
+  if (
+    counters.candidateBytesRequired > counters.candidateBytesCapacity
+    || counters.candidateBytesAdmitted !== counters.candidateBytesRequired
+    || counters.candidateOverflowBytes !== 0
+    || counters.privateLookupBuildCount !== 0
+    || counters.fixedCandidateBuildCount !== 0
+    || counters.exhaustiveTraversalCount !== 0
+    || gpuEvidence.overflowed === true
+    || gpuEvidence.partialPublication === true
+    || gpuEvidence.fallbackObserved === true
+    || gpuEvidence.fullReadbackPerformed === true
+  ) {
+    throw new Error('GPU evidence violates exact-near fail-closed residency invariants');
+  }
+  const finalizedReceipt = Object.freeze({
+    ...record.receipt,
+    status: 'schroeder-spatial-epoch-consumer-receipt-finalized',
+    gpuAuthenticated: true,
+    traversalCount,
+    ...counters
+  });
+  record.finalizedReceipt = finalizedReceipt;
+  finalizedExactNearConsumerReceipts.add(finalizedReceipt);
+  return finalizedReceipt;
+}
+
+/** True only for the exact immutable object issued by the private finalizer. */
+export function isFinalizedSchroederSpatialExactNearConsumerReceipt(receipt) {
+  return Boolean(
+    receipt
+    && finalizedExactNearConsumerReceipts.has(receipt)
+    && receipt.schema === ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA
+    && receipt.status === 'schroeder-spatial-epoch-consumer-receipt-finalized'
+    && receipt.authenticated === true
+    && receipt.gpuAuthenticated === true
+    && receipt.generationBound === true
+    && receipt.traversalCount === 1
+  );
 }
 
 /**

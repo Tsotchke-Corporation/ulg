@@ -343,7 +343,7 @@ const SOURCE_ADAPTER_ACTIVE_NODE_ROWS: u32 = 1u;
 const SOURCE_ADAPTER_EXACT_NEAR_QUERY: u32 = 2u;
 const QUERY_GEOMETRY_GENERIC: u32 = 0u;
 const QUERY_GEOMETRY_SINGLE_CHART_POW2: u32 = 1u;
-const QUERY_EVIDENCE_WORDS: u32 = 4u;
+const QUERY_EVIDENCE_WORDS: u32 = 6u;
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
@@ -383,6 +383,12 @@ fn saturating_add_u32(left: u32, right: u32) -> u32 {
     return 0xffffffffu;
   }
   return left + right;
+}
+
+fn low_bits_mask(bit_count: u32) -> u32 {
+  if (bit_count == 0u) { return 0u; }
+  if (bit_count >= 32u) { return 0xffffffffu; }
+  return (1u << bit_count) - 1u;
 }
 
 @compute @workgroup_size(64)
@@ -426,6 +432,25 @@ fn assemble_directory(
     let target_key = params.cell_keys_offset_words + group_index * EXACT_KEY_WORDS;
     for (var word = 0u; word < EXACT_KEY_WORDS; word = word + 1u) {
       directory[target_key + word] = exact_keys[source_key + word];
+    }
+    if (params.query_geometry_mode == QUERY_GEOMETRY_SINGLE_CHART_POW2) {
+      let level_order = exact_keys[source_key + 1u];
+      let query_min_order = signed_order_key(params.query_min_level);
+      let query_max_order = signed_order_key(params.query_max_level);
+      let query_level_count = query_max_order - query_min_order + 1u;
+      let level_ordinal = level_order - query_min_order;
+      if (
+        level_order < query_min_order
+        || level_order > query_max_order
+        || level_ordinal >= query_level_count
+        || level_ordinal >= 64u
+      ) {
+        atomicAdd(&epoch_evidence[3], 1u);
+      } else if (level_ordinal < 32u) {
+        atomicOr(&epoch_evidence[4], 1u << level_ordinal);
+      } else {
+        atomicOr(&epoch_evidence[5], 1u << (level_ordinal - 32u));
+      }
     }
   }
 }
@@ -478,13 +503,31 @@ fn finalize_directory() {
     && assembly_overflow == 0u
     && primitive_unique_count <= params.cell_capacity
     && directory_capacity_ready;
+  let has_query_evidence =
+    params.query_geometry_mode == QUERY_GEOMETRY_SINGLE_CHART_POW2;
+  let query_level_count = select(
+    0u,
+    signed_order_key(params.query_max_level)
+      - signed_order_key(params.query_min_level) + 1u,
+    has_query_evidence
+  );
+  let occupied_level_mask_low = atomicLoad(&epoch_evidence[4]);
+  let occupied_level_mask_high = atomicLoad(&epoch_evidence[5]);
+  let allowed_level_mask_low = low_bits_mask(min(query_level_count, 32u));
+  let allowed_level_mask_high = low_bits_mask(
+    select(0u, query_level_count - 32u, query_level_count > 32u)
+  );
+  let occupied_level_mask_ready = !has_query_evidence || (
+    (occupied_level_mask_low | occupied_level_mask_high) != 0u
+    && (occupied_level_mask_low & ~allowed_level_mask_low) == 0u
+    && (occupied_level_mask_high & ~allowed_level_mask_high) == 0u
+  );
   let admitted = primitive_ready
     && invalid_source_count == 0u
     && overflow_free
     && emitted_count == params.source_count
-    && exact_near_query_profile_ready();
-  let has_query_evidence =
-    params.query_geometry_mode == QUERY_GEOMETRY_SINGLE_CHART_POW2;
+    && exact_near_query_profile_ready()
+    && occupied_level_mask_ready;
   let live_required_words = params.header_words
     + primitive_unique_count * EXACT_KEY_WORDS
     + primitive_unique_count + 1u
@@ -559,7 +602,13 @@ fn finalize_directory() {
     directory[query_evidence_offset_words + 2u] = bitcast<u32>(params.query_max_level);
     directory[query_evidence_offset_words + 3u] =
       bitcast<u32>(params.query_base_grid_spacing_m);
+    directory[query_evidence_offset_words + 4u] = occupied_level_mask_low;
+    directory[query_evidence_offset_words + 5u] = occupied_level_mask_high;
   }
+  // Words 4-5 are temporally borrowed while the directory is assembled, then
+  // returned to the mechanics evidence ABI before any consumer dispatch.
+  atomicStore(&epoch_evidence[4], 0u);
+  atomicStore(&epoch_evidence[5], 0u);
 
   directory[0] = MAGIC;
   directory[1] = ABI_VERSION;

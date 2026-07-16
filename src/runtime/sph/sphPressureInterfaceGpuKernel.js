@@ -6,6 +6,8 @@ import {
   SCHROEDER_SPATIAL_EPOCH_VERSION,
   SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT,
@@ -1299,6 +1301,77 @@ export function resolveSchroederPressureInterfaceSpatialEpochSource(
       'No canonical active-node source was provided to the pressure/interface stage'
     );
   }
+  if (
+    source.schema === ULG_SCHROEDER_SPATIAL_DIRECTORY_SOURCE_SCHEMA
+    && source.status === 'schroeder-spatial-directory-source-ready'
+    && source.ready === true
+    && source.exactNearQueryProfile?.ready === true
+  ) {
+    const sourceBuffer = source.sourceBuffer ?? source.activeNodeBuffer ?? null;
+    const queryProfile = source.exactNearQueryProfile;
+    const sourceCount = spatialU32(source.sourceCount, Number.NaN);
+    const expectedParticleCount = spatialU32(particleCount, Number.NaN);
+    const sourceRowStrideFloats = spatialU32(
+      source.sourceRowStrideFloats ?? source.activeNodeStrideFloats,
+      Number.NaN
+    );
+    const sourceRowLayoutId = spatialU32(
+      source.sourceRowLayoutId,
+      Number.NaN
+    );
+    const sourceRowLayoutSupported =
+      sourceRowLayoutId === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0
+      || sourceRowLayoutId
+        === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0;
+    const mismatch = webGpuDeviceMismatchInfo({ buffer: sourceBuffer, device });
+    if (
+      !sourceBuffer
+      || mismatch.mismatch
+      || sourceCount <= 0
+      || sourceCount !== expectedParticleCount
+      || sourceRowStrideFloats !== SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS
+      || !sourceRowLayoutSupported
+    ) {
+      return unavailableSchroederSpatialSource(
+        source,
+        device,
+        'schroeder-spatial-exact-near-source-rejected-buffer-family',
+        'Canonical directory source does not expose one same-device 16-float source family',
+        mismatch
+      );
+    }
+    return {
+      schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+      sourceSchema: source.sourceSchema ?? null,
+      sourceStatus: source.sourceStatus ?? null,
+      adapterSchema: queryProfile.schema,
+      adapterStatus: queryProfile.status,
+      status: 'schroeder-spatial-exact-near-source-ready',
+      reason: null,
+      ready: true,
+      sourceBuffer,
+      sourceRowLayoutId,
+      sourceRowStrideFloats,
+      sourceCount,
+      chartId: queryProfile.chartId,
+      minLevel: queryProfile.minLevel,
+      maxLevel: queryProfile.maxLevel,
+      levelCount: queryProfile.levelCount,
+      baseGridSpacingM: queryProfile.baseGridSpacingM,
+      levelSpacingMode: queryProfile.levelSpacingMode,
+      positionAuthority: queryProfile.positionAuthority,
+      physicsTick: source.physicsTick,
+      physicsSubstep: source.physicsSubstep,
+      positionEpoch: source.positionEpoch,
+      topologyEpoch: source.topologyEpoch,
+      chartEpoch: source.chartEpoch,
+      levelEpoch: source.levelEpoch,
+      supportEpoch: source.supportEpoch,
+      storageGeneration: source.storageGeneration,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
   if (source.phaseVolumeAssignmentOverlayEnabled === true) {
     return unavailableSchroederSpatialSource(
       source,
@@ -1445,7 +1518,10 @@ export function resolveSchroederPressureInterfaceSpatialEpochSource(
     status: 'schroeder-spatial-exact-near-source-ready',
     reason: null,
     ready: true,
+    sourceBuffer: activeNodeBuffer,
     activeNodeBuffer,
+    sourceRowLayoutId: SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
+    sourceRowStrideFloats: strideFloats,
     sourceCount,
     activeNodeStrideFloats: strideFloats,
     chartId,
@@ -1750,29 +1826,52 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
   }
   const generationSource = generation.source || null;
   const expectedParticleCount = spatialU32(particleCount, Number.NaN);
-  if (execution.activeNodeBuffer !== spatialSource.activeNodeBuffer) {
+  const spatialSourceBuffer = spatialSource.sourceBuffer
+    ?? spatialSource.activeNodeBuffer
+    ?? null;
+  const executionSourceBuffer = execution.sourceBuffer
+    ?? execution.activeNodeBuffer
+    ?? null;
+  const generationSourceBuffer = generationSource?.sourceBuffer
+    ?? generationSource?.activeNodeBuffer
+    ?? null;
+  const sourceRowLayoutId = spatialU32(
+    spatialSource.sourceRowLayoutId,
+    Number.NaN
+  );
+  const expectedSourceFamily = sourceRowLayoutId
+    === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    ? 'schroeder-level-assignment-particles'
+    : sourceRowLayoutId === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0
+      ? 'schroeder-active-node-particles'
+      : null;
+  if (executionSourceBuffer !== spatialSourceBuffer) {
     return rejectedBorrowedSchroederPressureSpatialGeneration(
       generation,
       device,
       'schroeder-spatial-exact-near-shared-generation-rejected-execution-source',
-      'Borrowed directory execution was encoded from a different active-node buffer'
+      'Borrowed directory execution was encoded from a different source buffer'
     );
   }
   if (
     generationSource?.schema !== ULG_SCHROEDER_SPATIAL_DIRECTORY_SOURCE_SCHEMA
     || generationSource.status !== 'schroeder-spatial-directory-source-ready'
     || generationSource.ready !== true
-    || generationSource.activeNodeBuffer !== spatialSource.activeNodeBuffer
+    || generationSourceBuffer !== spatialSourceBuffer
     || generationSource.sourceCount !== spatialSource.sourceCount
     || generationSource.sourceCount !== expectedParticleCount
-    || generationSource.activeNodeStrideFloats !== SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS
+    || (generationSource.sourceRowStrideFloats
+      ?? generationSource.activeNodeStrideFloats) !== SCHROEDER_SPATIAL_ACTIVE_NODE_FLOATS
+    || generationSource.sourceRowLayoutId !== sourceRowLayoutId
+    || execution.sourceRowLayoutId !== sourceRowLayoutId
+    || expectedSourceFamily == null
     || generationSource.phaseVolumeAssignmentOverlayEnabled === true
   ) {
     return rejectedBorrowedSchroederPressureSpatialGeneration(
       generation,
       device,
       'schroeder-spatial-exact-near-shared-generation-rejected-source',
-      'Borrowed directory source is not the exact active-node source admitted by pressure/contact'
+      'Borrowed directory source is not the exact canonical 16-float source layout admitted by pressure/contact'
     );
   }
   const queryProfile = generationSource.exactNearQueryProfile || null;
@@ -1781,7 +1880,8 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
       !== 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1'
     || queryProfile.status !== 'schroeder-spatial-exact-near-query-profile-ready'
     || queryProfile.ready !== true
-    || queryProfile.activeNodeBuffer !== spatialSource.activeNodeBuffer
+    || (queryProfile.sourceBuffer ?? queryProfile.activeNodeBuffer)
+      !== spatialSourceBuffer
     || queryProfile.sourceCount !== spatialSource.sourceCount
     || queryProfile.chartId !== spatialSource.chartId
     || queryProfile.minLevel !== spatialSource.minLevel
@@ -1873,7 +1973,7 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
     && Number.isInteger(laneOrdinal)
     && leaseToken > 0
     && sourceFamilyId > 0
-    && execution.sourceFamily === 'schroeder-active-node-particles'
+    && execution.sourceFamily === expectedSourceFamily
     && buildOrdinal > 0
     && sortUniqueOrdinal === buildOrdinal
     && Number.isInteger(arenaIndex)
@@ -4105,10 +4205,13 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     { device }
   );
   const schroederPressureInterfaceSpatialSource =
-    resolveSchroederPressureInterfaceSpatialEpochSource(schroederActiveNodeList, {
+    resolveSchroederPressureInterfaceSpatialEpochSource(
+      schroederSpatialEpochGeneration?.source ?? schroederActiveNodeList,
+      {
       device,
       particleCount: particleSource.particleCount
-    });
+      }
+    );
   const schroederPressureInterfaceSpatialProvenance =
     resolveSchroederPressureInterfaceSpatialEpochProvenance({
       spatialSource: schroederPressureInterfaceSpatialSource,

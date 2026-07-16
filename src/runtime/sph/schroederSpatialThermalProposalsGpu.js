@@ -1194,7 +1194,8 @@ function authenticateThermalConsumers(device, generation) {
           runtime: generation?.runtime,
           consumerId,
           supportProfileId,
-          sourceBuffer: generation?.source?.activeNodeBuffer
+          sourceBuffer: generation?.source?.sourceBuffer
+            ?? generation?.source?.activeNodeBuffer
         }
       );
       if (authentication?.ready !== true || authentication.authenticated !== true) {

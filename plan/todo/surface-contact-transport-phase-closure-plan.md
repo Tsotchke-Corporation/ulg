@@ -25,6 +25,9 @@ spatial views rather than adding another private neighbor search.
 - After iron and ice appear to contact, heating, melting, and visible steam
   arrive too late.
 - The water/ice surface does not visibly evolve as its phase fractions change.
+- Retained-GPU evidence can report hundreds of kilograms of liquid H2O while
+  the melt remains effectively stationary, followed by an abrupt gas/volume
+  instability instead of progressive melt flow.
 
 ## Source Diagnosis
 
@@ -95,6 +98,33 @@ geometry/optical composition and backend parity, not a hand-authored water
 color. Pure vapor should remain nearly invisible; a visible white cloud must
 come from locally predicted condensate/droplet scattering.
 
+### One shared MPM node velocity locks melted water to ice and iron
+
+The current P2G path deposits every material and mechanical phase into one
+`(mass, momentum)` accumulator per grid node. Grid update produces one velocity
+from that combined momentum, and every particle samples the same velocity in
+G2P. Fully liquid H2O therefore cannot slip past solid ice or iron when their
+quadratic supports overlap. This is algorithmic mixed-cell locking, independent
+of the liquid viscosity coefficient.
+
+The iron/ice native Vulkan probe demonstrates the failure. At `2.56 s`, the
+retained state contains about `232.08 kg` liquid H2O and at least twelve
+fully-liquid H2O carriers, but liquid-contributing H2O reaches only about
+`0.00749 m/s`. Setting both artificial-viscosity alpha and liquid velocity
+diffusion to zero still leaves H2O at about `0.00670 m/s`. A manufactured pair
+with co-located equal-mass solid/liquid carriers at opposite tangential
+velocities collapses both velocities to zero after one shared-field
+P2G/update/G2P cycle; separate fields preserve both velocities. The clean
+Slice 5 commit and the in-progress Slice 6 worktree produce identical quench
+evidence through the later `3.584 s` instability, ruling out a Slice 6
+regression.
+
+This is the live phase-change manifestation of the separate solid/fluid state
+families and mixed-cell interface operator already required by
+`plan/todo/sol-critic.md`. The compact SS mechanics topology should supply the
+sparse node set; a derived `(node, material/body/mechanical-field)` view should
+supply distinct velocities and explicit equal-and-opposite interface exchange.
+
 ## Non-Negotiable Rules
 
 - Do not make `1.9`, `80`, `82`, `24`, `1500`, or any replacement tuning
@@ -114,6 +144,9 @@ come from locally predicted condensate/droplet scattering.
   latency, and verify its onset time from the energy and mass ledger.
 - Do not add a private contact, thermal, or render neighbor grid. Reuse the
   SS generation and request law-specific exact-near/support views.
+- Do not blend rigid/solid mass into a liquid node velocity or fix the result
+  with a material-specific force. Derive sparse mechanics fields from the
+  SS-owned compact node topology and resolve their interface explicitly.
 
 ## Ordered Work
 
@@ -132,7 +165,21 @@ come from locally predicted condensate/droplet scattering.
 - Calibrate against requested body AABBs and zero signed physical gap. Do not
   calibrate against the current shared-grid stopping distance.
 
-### 2. Produce phase-resolved transport closures
+### 2. Materialize SS-owned sparse mechanics fields
+
+- Extend the compact mechanics topology with deterministic field entries keyed
+  by grid node plus material/body/mechanical phase identity; compact rows must
+  remain structurally distinct from particle rows.
+- Deposit and gather liquid, deformable, gas, and coherent-solid state through
+  their admitted field families instead of one universally averaged velocity.
+- At mixed cells, consume SS exact-near interface candidates and apply explicit
+  non-penetration, slip/friction, pressure, viscosity, adhesion, thermal, and
+  reaction exchange with equal-and-opposite momentum/body-wrench accounting.
+- When melting is admitted, detach the conserved melted mass, momentum, and
+  energy from the solid lane and materialize it in the fluid lane. A dominant
+  phase-id flip alone is not topology or kinematic authority.
+
+### 3. Produce phase-resolved transport closures
 
 - Add `dynamicViscosityPaS(T,P,phase,composition)` and
   `thermalConductivityWPerMK(T,P,phase,composition)` artifacts for active
@@ -146,7 +193,7 @@ come from locally predicted condensate/droplet scattering.
 - Pack validated transport rows into the material bank and GPU mechanics/
   thermal tables with cache invalidation by solver and ABI fingerprint.
 
-### 3. Replace demo pair rates with conservative transport
+### 4. Replace demo pair rates with conservative transport
 
 - Use harmonic-mean bulk conductivity and a resolution-consistent SPH/MLS-MPM
   discretization for interior conduction.
@@ -161,7 +208,7 @@ come from locally predicted condensate/droplet scattering.
   refinement mechanism so a kilogram-scale macro-particle does not delay all
   local flash boiling until its dominant phase changes.
 
-### 4. Make phase geometry and optics continuous
+### 5. Make phase geometry and optics continuous
 
 - Sweep solid/liquid/gas fractions without inverse-weight radius inflation
   producing coincident full-volume shells.
@@ -176,7 +223,7 @@ come from locally predicted condensate/droplet scattering.
   connect nucleation/condensation mass transfer to latent energy rather than
   using optics-only equilibrium as a substitute for microphysics.
 
-### 5. Validate the iron-on-ice scenario
+### 6. Validate the iron-on-ice scenario
 
 - Correlate first visible contact, first mechanical contact, first nonzero
   thermal flux, first melt fraction, first vapor fraction, and first visible
@@ -193,6 +240,10 @@ come from locally predicted condensate/droplet scattering.
   within half a render voxel. In a planar Fe/ice drop, visible, mechanical,
   and thermal first contact agree within one mechanics substep and one render
   voxel.
+- **Mechanics fields:** a co-located two-field tangential-slip fixture preserves
+  the two unconstrained tangential velocities, while a same-field control
+  performs the expected mass-weighted average. Mixed-cell contact conserves
+  linear/angular momentum and does not blend rigid mass into liquid velocity.
 - **Viscosity:** Couette and Poiseuille manufactured cases recover the active
   closure viscosity over multiple resolutions. Report physical and numerical
   dissipation separately.

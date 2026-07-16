@@ -50,7 +50,7 @@ struct SpatialEpochParams {
   query_pad_2: u32,
 };
 
-@group(0) @binding(0) var<storage, read> active_node_rows: array<f32>;
+@group(0) @binding(0) var<storage, read> source_rows: array<f32>;
 @group(0) @binding(1) var<storage, read_write> exact_keys: array<u32>;
 @group(0) @binding(2) var<storage, read_write> sort_keys: array<u32>;
 @group(0) @binding(3) var<storage, read_write> epoch_evidence: array<atomic<u32>>;
@@ -62,6 +62,8 @@ const SORT_MODE_BOUNDED_ATLAS: u32 = 1u;
 const SORT_MODE_LEXICOGRAPHIC: u32 = 2u;
 const QUERY_GEOMETRY_GENERIC: u32 = 0u;
 const QUERY_GEOMETRY_SINGLE_CHART_POW2: u32 = 1u;
+const SOURCE_LAYOUT_LEVEL_ASSIGNMENT: u32 = 1u;
+const SOURCE_LAYOUT_ACTIVE_NODE: u32 = 2u;
 const MAX_EXACT_F32_INTEGER: f32 = 16777215.0;
 const MIN_SAFE_I32_F32: f32 = -2147483520.0;
 const MAX_SAFE_I32_F32: f32 = 2147483520.0;
@@ -133,16 +135,29 @@ fn emit_spatial_keys(
     return;
   }
   let row = source_index * ACTIVE_NODE_STRIDE;
-  let level_f = active_node_rows[row + 0u];
-  let native_spacing = active_node_rows[row + 8u];
-  let source_particle_f = active_node_rows[row + 10u];
-  let status_f = active_node_rows[row + 11u];
+  let source_layout = params.query_pad_0;
+  let level_f = source_rows[row + 0u];
+  var native_spacing = 0.0;
+  var source_particle_f = f32(source_index);
+  var status_f = 0.0;
+  if (source_layout == SOURCE_LAYOUT_LEVEL_ASSIGNMENT) {
+    native_spacing = source_rows[row + 1u];
+    status_f = source_rows[row + 10u];
+  } else if (source_layout == SOURCE_LAYOUT_ACTIVE_NODE) {
+    native_spacing = source_rows[row + 8u];
+    source_particle_f = source_rows[row + 10u];
+    status_f = source_rows[row + 11u];
+  } else {
+    write_invalid_keys(source_index);
+    atomicAdd(&epoch_evidence[0], 1u);
+    return;
+  }
   let position = vec3<f32>(
-    active_node_rows[row + 12u],
-    active_node_rows[row + 13u],
-    active_node_rows[row + 14u]
+    source_rows[row + 12u],
+    source_rows[row + 13u],
+    source_rows[row + 14u]
   );
-  let chart_f = active_node_rows[row + 15u];
+  let chart_f = source_rows[row + 15u];
 
   let fields_valid = integral_f32(level_f)
     && integral_f32(source_particle_f)

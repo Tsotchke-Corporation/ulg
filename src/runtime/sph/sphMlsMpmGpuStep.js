@@ -4,6 +4,19 @@ import {
   SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_CAPACITY_OVERFLOW,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_INVALID_SOURCE,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_VERSION,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
@@ -27,9 +40,11 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
-  ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
+  ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+  validateSchroederSpatialMechanicsViewDescriptor
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   mlsMpmG2pReconstructWgsl,
@@ -196,6 +211,14 @@ export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP = 'every-step';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY = 'final-only';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE = 'none';
 const P2G_ACCUMULATOR_COMPONENTS = 4;
+const COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS = Object.freeze([
+  Object.freeze({ id: 'header', entryPoint: 'preflight_compact_mechanics_view' }),
+  Object.freeze({ id: 'owner', entryPoint: 'preflight_compact_mechanics_owner_identity' }),
+  Object.freeze({ id: 'epoch', entryPoint: 'preflight_compact_mechanics_epoch_identity' }),
+  Object.freeze({ id: 'grid', entryPoint: 'preflight_compact_mechanics_grid_geometry' }),
+  Object.freeze({ id: 'topology', entryPoint: 'preflight_compact_mechanics_topology_counts' }),
+  Object.freeze({ id: 'dispatch', entryPoint: 'preflight_compact_mechanics_dispatch' })
+]);
 const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA = 'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
@@ -1453,12 +1476,26 @@ function createResidentDispatchTopology({
   const workgroupSize = 64;
   const gridNodeCount = Math.max(0, Math.floor(finiteNumber(gridSpec?.gridNodeCount, 0)));
   const useActiveGrid = activeGridDispatch?.useActiveGrid === true;
-  const activeGridNodeCount = useActiveGrid
-    ? Math.max(0, Math.floor(finiteNumber(activeGridDispatch?.activeNodeCount, 0)))
-    : gridNodeCount;
+  const activeGridNodeCountKnown = !useActiveGrid
+    || activeGridDispatch?.activeNodeCountKnown !== false;
+  const activeGridNodeCount = !useActiveGrid
+    ? gridNodeCount
+    : (activeGridNodeCountKnown
+        ? Math.max(0, Math.floor(finiteNumber(activeGridDispatch?.activeNodeCount, 0)))
+        : null);
+  const activeGridNodeCapacity = !useActiveGrid
+    ? gridNodeCount
+    : Math.max(0, Math.floor(finiteNumber(
+        activeGridDispatch?.activeNodeCapacity,
+        gridNodeCount
+      )));
+  const gridInvocationUpperBound = activeGridNodeCountKnown
+    ? activeGridNodeCount
+    : activeGridNodeCapacity;
+  const compactMechanicsView = activeGridDispatch?.compactMechanicsView === true;
   const boundedSubstepCount = Math.max(1, Math.floor(finiteNumber(substepCount, 1)));
   const particleWorkgroups = Math.max(1, Math.ceil(boundedParticleCount / workgroupSize));
-  const gridWorkgroups = Math.max(1, Math.ceil(activeGridNodeCount / workgroupSize));
+  const gridWorkgroups = Math.max(1, Math.ceil(gridInvocationUpperBound / workgroupSize));
   const activeGridAxis = useActiveGrid ? 'active-grid-node' : 'grid-node';
   const p2gBackendPolicy = resolveMlsMpmP2gBackendPolicy({
     requestedBackend: p2gBackend,
@@ -1490,10 +1527,14 @@ function createResidentDispatchTopology({
     entryPoint: 'finalize_grid',
     dispatchAxis: activeGridAxis,
     dispatchWorkgroupsPerSubstep: gridWorkgroups,
-    invocationLimitPerSubstep: activeGridNodeCount,
+    dispatchWorkgroupsPerSubstepExact: activeGridNodeCountKnown,
+    invocationLimitPerSubstep: activeGridNodeCountKnown ? activeGridNodeCount : null,
+    invocationLimitPerSubstepUpperBound: gridInvocationUpperBound,
     workgroupSize,
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
+    activeGridNodeCountKnown,
+    activeGridNodeCapacity,
     activeGridEnabled: useActiveGrid,
     particleLoopInShader: false
   };
@@ -1503,10 +1544,18 @@ function createResidentDispatchTopology({
     entryPoint: useActiveGrid ? 'clear_accumulators' : 'GPUCommandEncoder.clearBuffer',
     dispatchAxis: useActiveGrid ? activeGridAxis : 'full-grid-buffer',
     dispatchWorkgroupsPerSubstep: useActiveGrid ? gridWorkgroups : 0,
-    invocationLimitPerSubstep: useActiveGrid ? activeGridNodeCount : gridNodeCount,
+    dispatchWorkgroupsPerSubstepExact: !useActiveGrid || activeGridNodeCountKnown,
+    invocationLimitPerSubstep: useActiveGrid && !activeGridNodeCountKnown
+      ? null
+      : (useActiveGrid ? activeGridNodeCount : gridNodeCount),
+    invocationLimitPerSubstepUpperBound: useActiveGrid
+      ? gridInvocationUpperBound
+      : gridNodeCount,
     workgroupSize,
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
+    activeGridNodeCountKnown,
+    activeGridNodeCapacity,
     activeGridEnabled: useActiveGrid,
     particleLoopInShader: false,
     bufferClearMode: useActiveGrid ? 'active-grid-compute-clear' : 'full-accumulator-clearBuffer'
@@ -1517,10 +1566,14 @@ function createResidentDispatchTopology({
     entryPoint: 'main',
     dispatchAxis: activeGridAxis,
     dispatchWorkgroupsPerSubstep: gridWorkgroups,
-    invocationLimitPerSubstep: activeGridNodeCount,
+    dispatchWorkgroupsPerSubstepExact: activeGridNodeCountKnown,
+    invocationLimitPerSubstep: activeGridNodeCountKnown ? activeGridNodeCount : null,
+    invocationLimitPerSubstepUpperBound: gridInvocationUpperBound,
     workgroupSize,
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
+    activeGridNodeCountKnown,
+    activeGridNodeCapacity,
     activeGridEnabled: useActiveGrid,
     particleLoopInShader: false
   };
@@ -1567,13 +1620,57 @@ function createResidentDispatchTopology({
     fixedCandidateBuildCount: 0,
     exhaustiveTraversalCount: 0
   };
+  const compactMechanicsViewPreflight = {
+    stageId: 'compactMechanicsViewPreflight',
+    topology: 'ordered-authenticated-compact-view-preflight-stages',
+    entryPoint: 'preflight_compact_mechanics_view',
+    entryPoints: COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS.map(
+      ({ entryPoint }) => entryPoint
+    ),
+    dispatchAxis: 'authority-header-and-node-list',
+    dispatchWorkgroupsPerSubstep: compactMechanicsView
+      ? COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS.length
+      : 0,
+    invocationLimitPerSubstep: compactMechanicsView
+      ? COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS.length
+      : 0,
+    workgroupSize: 1,
+    enabled: compactMechanicsView,
+    rejectionPolicy: 'zero-indirect-dispatch-and-global-canonical-copy-through',
+    nodeLoopInShader: false
+  };
+  const compactMechanicsNodeValidation = {
+    stageId: 'compactMechanicsNodeValidation',
+    topology: 'compact-node-parallel-strict-order-validation',
+    entryPoint: 'validate_compact_mechanics_nodes',
+    dispatchAxis: 'compact-grid-node',
+    dispatchWorkgroupsPerSubstep: compactMechanicsView ? gridWorkgroups : 0,
+    dispatchWorkgroupsPerSubstepExact: !compactMechanicsView
+      || activeGridNodeCountKnown,
+    invocationLimitPerSubstep: compactMechanicsView && activeGridNodeCountKnown
+      ? activeGridNodeCount
+      : null,
+    invocationLimitPerSubstepUpperBound: compactMechanicsView
+      ? gridInvocationUpperBound
+      : 0,
+    workgroupSize,
+    enabled: compactMechanicsView,
+    nodeLoopInShader: false,
+    rejectionPolicy: 'atomic-reject-and-zero-later-indirect-dispatch'
+  };
   const dispatchesPerSubstep = (useActiveGrid ? 5 : 4)
+    + (compactMechanicsView
+        ? COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS.length + 1
+        : 0)
     + (canonicalSpatialAuthority ? 2 : 0);
   const workgroupsPerSubstep = particleWorkgroups
     + (useActiveGrid ? gridWorkgroups : 0)
     + gridWorkgroups
     + gridWorkgroups
     + particleWorkgroups
+    + (compactMechanicsView
+        ? COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS.length + gridWorkgroups
+        : 0)
     + (canonicalSpatialAuthority ? particleWorkgroups * 2 : 0);
   return {
     schema: ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA,
@@ -1586,7 +1683,10 @@ function createResidentDispatchTopology({
     particleCount: boundedParticleCount,
     fullGridNodeCount: gridNodeCount,
     activeGridNodeCount,
+    activeGridNodeCountKnown,
+    activeGridNodeCapacity,
     activeGridEnabled: useActiveGrid,
+    compactMechanicsView,
     canonicalSpatialAuthority: canonicalSpatialAuthority === true,
     activeGridDispatchStatus: activeGridDispatch?.status || null,
     p2gBackendPolicy,
@@ -1598,10 +1698,18 @@ function createResidentDispatchTopology({
       ? ['p2g', 'g2p', 'spatialMechanicalProposalApply', 'g2pAuthorityFinalize']
       : ['p2g', 'g2p'],
     gridParallelStages: useActiveGrid
-      ? ['p2gAccumulatorClear', 'p2gFinalize', 'gridUpdate']
+      ? [
+          ...(compactMechanicsView ? ['compactMechanicsViewPreflight'] : []),
+          ...(compactMechanicsView ? ['compactMechanicsNodeValidation'] : []),
+          'p2gAccumulatorClear',
+          'p2gFinalize',
+          'gridUpdate'
+        ]
       : ['p2gFinalize', 'gridUpdate'],
     cpuParticleLoopInHotPath: false,
     p2g,
+    compactMechanicsViewPreflight,
+    compactMechanicsNodeValidation,
     p2gAccumulatorClear,
     p2gFinalize,
     gridUpdate,
@@ -1611,7 +1719,11 @@ function createResidentDispatchTopology({
     dispatchesPerSubstep,
     totalDispatches: boundedSubstepCount * dispatchesPerSubstep,
     workgroupsPerSubstep,
-    totalWorkgroups: boundedSubstepCount * workgroupsPerSubstep
+    workgroupsPerSubstepExact: !useActiveGrid || activeGridNodeCountKnown,
+    workgroupsPerSubstepUpperBound: workgroupsPerSubstep,
+    totalWorkgroups: boundedSubstepCount * workgroupsPerSubstep,
+    totalWorkgroupsExact: !useActiveGrid || activeGridNodeCountKnown,
+    totalWorkgroupsUpperBound: boundedSubstepCount * workgroupsPerSubstep
   };
 }
 
@@ -2230,6 +2342,95 @@ function createActiveGridComputeDispatchArgsBuffer(
   };
 }
 
+function createCompactMechanicsViewIndirectDispatchArgs(
+  device,
+  schroederSpatialDirectory,
+  gridSpec
+) {
+  if (
+    schroederSpatialDirectory?.mechanicsViewEnabled !== true
+    || !schroederSpatialDirectory.mechanicsViewIndirectDispatchBuffer
+  ) return null;
+  const buffer = device.createBuffer({
+    label: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+    size: COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    usage: GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_DST
+  });
+  return {
+    schema: 'peercompute.ulg.mls-mpm-compact-mechanics-view-indirect-dispatch.v1',
+    status: 'gpu-authored-compact-mechanics-view-indirect-dispatch-ready',
+    source: 'ss-spatial-mechanics-view-v1',
+    buffer,
+    ownsBuffer: true,
+    bufferByteLength: COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    sourceBuffer: schroederSpatialDirectory.mechanicsViewIndirectDispatchBuffer,
+    sourceBufferByteLength: schroederSpatialDirectory.mechanicsViewByteLength,
+    sourceOffsetBytes: schroederSpatialDirectory.mechanicsViewIndirectDispatchOffsetBytes,
+    metadataBufferByteLength: 0,
+    offsetBytes: 0,
+    workgroupCountX: null,
+    workgroupCountY: null,
+    workgroupCountZ: null,
+    workgroupSize: 64,
+    activeGridNodeCount: null,
+    activeGridNodeCountKnown: false,
+    activeGridNodeCapacity: schroederSpatialDirectory.mechanicsViewNodeCapacity,
+    fullGridNodeCount: Math.max(0, Math.floor(finiteNumber(gridSpec?.gridNodeCount, 0))),
+    indirectDispatchUsed: false,
+    indirectDispatchUseCount: 0,
+    directDispatchFallbackCount: 0,
+    dispatchMode: 'pending',
+    dispatchPlanHintStatus: null,
+    dispatchPlanHintSource: null,
+    dispatchPlanHintBorrowed: false,
+    dispatchPlanHintCompatibilityReason: 'canonical-compact-mechanics-view',
+    dispatchPlanHintCompatibility: null
+  };
+}
+
+function copyCompactMechanicsViewIndirectDispatchArgs(encoder, indirectDispatchArgs) {
+  if (
+    !indirectDispatchArgs?.sourceBuffer
+    || !indirectDispatchArgs?.buffer
+    || typeof encoder?.copyBufferToBuffer !== 'function'
+  ) {
+    const error = new Error(
+      'Canonical compact mechanics requires GPU dispatch-argument staging'
+    );
+    error.code = 'ERR_COMPACT_MECHANICS_INDIRECT_COPY_REQUIRED';
+    throw error;
+  }
+  encoder.copyBufferToBuffer(
+    indirectDispatchArgs.sourceBuffer,
+    indirectDispatchArgs.sourceOffsetBytes,
+    indirectDispatchArgs.buffer,
+    0,
+    COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT
+  );
+  indirectDispatchArgs.gpuCopyCount = (indirectDispatchArgs.gpuCopyCount ?? 0) + 1;
+}
+
+function dispatchCompactMechanicsViewPass(pass, indirectDispatchArgs) {
+  if (
+    !indirectDispatchArgs?.buffer
+    || typeof pass?.dispatchWorkgroupsIndirect !== 'function'
+  ) {
+    const error = new Error(
+      'Canonical compact mechanics requires GPU-authored dispatchWorkgroupsIndirect'
+    );
+    error.code = 'ERR_COMPACT_MECHANICS_INDIRECT_DISPATCH_REQUIRED';
+    throw error;
+  }
+  pass.dispatchWorkgroupsIndirect(
+    indirectDispatchArgs.buffer,
+    indirectDispatchArgs.offsetBytes
+  );
+  indirectDispatchArgs.indirectDispatchUsed = true;
+  indirectDispatchArgs.indirectDispatchUseCount += 1;
+  indirectDispatchArgs.dispatchMode = 'dispatchWorkgroupsIndirect';
+  return 'dispatchWorkgroupsIndirect';
+}
+
 function dispatchActiveGridComputePass(pass, directWorkgroupCount, indirectDispatchArgs) {
   if (indirectDispatchArgs?.buffer && typeof pass.dispatchWorkgroupsIndirect === 'function') {
     pass.dispatchWorkgroupsIndirect(indirectDispatchArgs.buffer, indirectDispatchArgs.offsetBytes);
@@ -2256,6 +2457,8 @@ function activeGridIndirectDispatchDescriptor(indirectDispatchArgs) {
     source: indirectDispatchArgs.source,
     bufferByteLength: indirectDispatchArgs.bufferByteLength,
     metadataBufferByteLength: indirectDispatchArgs.metadataBufferByteLength ?? 0,
+    sourceBufferByteLength: indirectDispatchArgs.sourceBufferByteLength ?? 0,
+    sourceOffsetBytes: indirectDispatchArgs.sourceOffsetBytes ?? null,
     ownsBuffer: indirectDispatchArgs.ownsBuffer !== false,
     offsetBytes: indirectDispatchArgs.offsetBytes,
     workgroupCountX: indirectDispatchArgs.workgroupCountX,
@@ -2263,10 +2466,14 @@ function activeGridIndirectDispatchDescriptor(indirectDispatchArgs) {
     workgroupCountZ: indirectDispatchArgs.workgroupCountZ,
     workgroupSize: indirectDispatchArgs.workgroupSize,
     activeGridNodeCount: indirectDispatchArgs.activeGridNodeCount,
+    activeGridNodeCountKnown: indirectDispatchArgs.activeGridNodeCountKnown !== false,
+    activeGridNodeCapacity: indirectDispatchArgs.activeGridNodeCapacity
+      ?? indirectDispatchArgs.activeGridNodeCount,
     fullGridNodeCount: indirectDispatchArgs.fullGridNodeCount,
     indirectDispatchUsed: indirectDispatchArgs.indirectDispatchUsed,
     indirectDispatchUseCount: indirectDispatchArgs.indirectDispatchUseCount,
     directDispatchFallbackCount: indirectDispatchArgs.directDispatchFallbackCount,
+    gpuCopyCount: indirectDispatchArgs.gpuCopyCount ?? 0,
     dispatchMode: indirectDispatchArgs.dispatchMode,
     dispatchPlanHintStatus: indirectDispatchArgs.dispatchPlanHintStatus ?? null,
     dispatchPlanHintSource: indirectDispatchArgs.dispatchPlanHintSource ?? null,
@@ -2282,7 +2489,12 @@ function attachActiveGridIndirectDispatchTopology(dispatchTopology, indirectDisp
   if (!dispatchTopology || !indirectDispatchArgs) return dispatchTopology;
   const descriptor = activeGridIndirectDispatchDescriptor(indirectDispatchArgs);
   dispatchTopology.activeGridIndirectDispatch = descriptor;
-  for (const stageId of ['p2gAccumulatorClear', 'p2gFinalize', 'gridUpdate']) {
+  for (const stageId of [
+    'compactMechanicsNodeValidation',
+    'p2gAccumulatorClear',
+    'p2gFinalize',
+    'gridUpdate'
+  ]) {
     if (!dispatchTopology[stageId]) continue;
     dispatchTopology[stageId].dispatchSubmissionMode = descriptor.dispatchMode;
     dispatchTopology[stageId].indirectDispatchReady = true;
@@ -2850,11 +3062,397 @@ function createActiveGridUpdateWgsl() {
   );
 }
 
+function createCompactMechanicsP2gProjectionWgsl(sourceWgsl) {
+  const withPreflightGate = replaceRequiredWgsl(
+    sourceWgsl,
+    `fn p2g_particle_enabled(particle_index: u32) -> bool {
+  p2g_authenticate_spatial_header(particle_index);`,
+    `fn p2g_particle_enabled(particle_index: u32) -> bool {
+  if (p2g_spatial_authority_rejected()) {
+    return false;
+  }
+  p2g_authenticate_spatial_header(particle_index);
+  if (p2g_spatial_authority_rejected()) {
+    return false;
+  }`,
+    'compact mechanics P2G preflight gate'
+  );
+  const withCompactNodeMapping = replaceRequiredWgsl(
+    withPreflightGate,
+    `fn p2g_finalize_node_index(global_index: u32) -> u32 {
+  if (global_index >= params.grid_node_count) {
+    return params.grid_node_count;
+  }
+  return global_index;
+}`,
+    `fn p2g_finalize_node_index(global_index: u32) -> u32 {
+  let bound_words = arrayLength(&schroeder_spatial_authority_evidence);
+  if (bound_words <= 53u) {
+    return params.grid_node_count;
+  }
+  let node_count = atomicLoad(&schroeder_spatial_authority_evidence[46u]);
+  let node_offset_words = atomicLoad(&schroeder_spatial_authority_evidence[53u]);
+  if (
+    global_index >= node_count
+    || node_offset_words > bound_words
+    || node_count > bound_words - node_offset_words
+  ) {
+    return params.grid_node_count;
+  }
+  let node_index = atomicLoad(
+    &schroeder_spatial_authority_evidence[node_offset_words + global_index]
+  );
+  return select(node_index, params.grid_node_count, node_index >= params.grid_node_count);
+}`,
+    'compact mechanics P2G node index mapping'
+  );
+  const rejectedFlags = SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_CAPACITY_OVERFLOW;
+  return `${withCompactNodeMapping}
+
+fn compact_mechanics_view_word(index: u32) -> u32 {
+  return atomicLoad(&schroeder_spatial_authority_evidence[index]);
+}
+
+fn compact_mechanics_view_reject() {
+  let bound_words = arrayLength(&schroeder_spatial_authority_evidence);
+  if (bound_words > 14u) {
+    atomicStore(&schroeder_spatial_authority_evidence[4u], 0x4d534131u);
+    atomicStore(
+      &schroeder_spatial_authority_evidence[5u],
+      params.schroeder_spatial_generation_id
+    );
+    atomicStore(&schroeder_spatial_authority_evidence[14u], 1u);
+  }
+  if (bound_words > ${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 2}u) {
+    atomicStore(
+      &schroeder_spatial_authority_evidence[${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS}u],
+      0u
+    );
+    atomicStore(
+      &schroeder_spatial_authority_evidence[${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 1}u],
+      0u
+    );
+    atomicStore(
+      &schroeder_spatial_authority_evidence[${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 2}u],
+      0u
+    );
+  }
+}
+
+@compute @workgroup_size(1)
+fn preflight_compact_mechanics_view() {
+  let bound_words = arrayLength(&schroeder_spatial_authority_evidence);
+  let minimum_words = ${SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS}u;
+  if (bound_words < minimum_words) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  let flags = compact_mechanics_view_word(22u);
+  let rejected_flags = ${rejectedFlags}u;
+  if (
+    params.resident_product_event_count != 0u
+    || !p2g_spatial_directory_admitted()
+    || !p2g_canonical_query_geometry_admitted()
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  if (compact_mechanics_view_word(20u) != ${SCHROEDER_SPATIAL_MECHANICS_VIEW_MAGIC}u
+    || compact_mechanics_view_word(21u) != ${SCHROEDER_SPATIAL_MECHANICS_VIEW_VERSION}u) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  if (flags != ${SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_READY | SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_ADMITTED}u
+    || (flags & rejected_flags) != 0u) {
+    compact_mechanics_view_reject();
+  }
+}
+
+fn compact_mechanics_view_preflight_continue() -> bool {
+  if (p2g_spatial_authority_rejected()) {
+    return false;
+  }
+  if (arrayLength(&schroeder_spatial_authority_evidence)
+    < ${SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS}u) {
+    compact_mechanics_view_reject();
+    return false;
+  }
+  return true;
+}
+
+@compute @workgroup_size(1)
+fn preflight_compact_mechanics_owner_identity() {
+  if (!compact_mechanics_view_preflight_continue()) {
+    return;
+  }
+  if (
+    compact_mechanics_view_word(23u) != params.schroeder_spatial_generation_id
+    || compact_mechanics_view_word(24u) != params.schroeder_spatial_device_ordinal
+    || compact_mechanics_view_word(25u) != params.schroeder_spatial_lane_ordinal
+    || compact_mechanics_view_word(26u) != params.schroeder_spatial_lease_token
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  if (
+    compact_mechanics_view_word(27u) != params.schroeder_spatial_source_family_id
+    || compact_mechanics_view_word(28u) != params.schroeder_spatial_storage_generation
+    || compact_mechanics_view_word(29u) != params.schroeder_spatial_physics_tick
+    || compact_mechanics_view_word(30u) != params.schroeder_spatial_physics_substep
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+}
+
+@compute @workgroup_size(1)
+fn preflight_compact_mechanics_epoch_identity() {
+  if (!compact_mechanics_view_preflight_continue()) {
+    return;
+  }
+  if (
+    compact_mechanics_view_word(31u) != params.schroeder_spatial_position_epoch
+    || compact_mechanics_view_word(32u) != params.schroeder_spatial_topology_epoch
+    || compact_mechanics_view_word(33u) != params.schroeder_spatial_chart_epoch
+    || compact_mechanics_view_word(34u) != params.schroeder_spatial_level_epoch
+    || compact_mechanics_view_word(35u) != params.schroeder_spatial_support_epoch
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  if (
+    compact_mechanics_view_word(36u) != params.particle_count
+    || compact_mechanics_view_word(37u) != bitcast<u32>(params.schroeder_selected_level)
+    || compact_mechanics_view_word(52u) != params.schroeder_spatial_pad2
+    || schroeder_spatial_directory[33u] != params.schroeder_spatial_pad2
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+}
+
+@compute @workgroup_size(1)
+fn preflight_compact_mechanics_grid_geometry() {
+  if (!compact_mechanics_view_preflight_continue()) {
+    return;
+  }
+  if (params.grid_nx == 0u || params.grid_ny == 0u || params.grid_nz == 0u) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  let occupancy_word_count = params.grid_node_count / 32u
+    + select(0u, 1u, params.grid_node_count % 32u != 0u);
+  let node_count = compact_mechanics_view_word(46u);
+  if (
+    compact_mechanics_view_word(38u) != params.grid_node_count
+    || compact_mechanics_view_word(39u) != params.grid_nx
+    || compact_mechanics_view_word(40u) != params.grid_ny
+    || compact_mechanics_view_word(41u) != params.grid_nz
+    || compact_mechanics_view_word(42u) != params.shift
+    || compact_mechanics_view_word(43u) != bitcast<u32>(params.grid_spacing_m)
+    || compact_mechanics_view_word(44u) != occupancy_word_count
+    || compact_mechanics_view_word(45u) != params.grid_node_count
+    || node_count > params.grid_node_count
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+}
+
+@compute @workgroup_size(1)
+fn preflight_compact_mechanics_topology_counts() {
+  if (!compact_mechanics_view_preflight_continue()) {
+    return;
+  }
+  let bound_words = arrayLength(&schroeder_spatial_authority_evidence);
+  let node_count = compact_mechanics_view_word(46u);
+  let selected_source_count = compact_mechanics_view_word(50u);
+  let stencil_visit_count = compact_mechanics_view_word(51u);
+  if (
+    compact_mechanics_view_word(47u) != 0u
+    || compact_mechanics_view_word(48u) != 0u
+    || compact_mechanics_view_word(49u) != params.particle_count
+    || selected_source_count > params.particle_count
+    || selected_source_count > 0xffffffffu / 27u
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  if (
+    stencil_visit_count > selected_source_count * 27u
+    || node_count > stencil_visit_count
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  let node_offset_words = compact_mechanics_view_word(53u);
+  let required_words = compact_mechanics_view_word(54u);
+  let capacity_words = compact_mechanics_view_word(55u);
+  if (params.grid_node_count > 0xffffffffu - node_offset_words
+    || node_count > 0xffffffffu - node_offset_words) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  if (
+    node_offset_words != ${SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS}u
+    || required_words != node_offset_words + node_count
+    || capacity_words != node_offset_words + params.grid_node_count
+    || capacity_words > bound_words
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  let source_row_layout_id = compact_mechanics_view_word(56u);
+  if (
+    source_row_layout_id != params.schroeder_spatial_pad1
+    || (source_row_layout_id != ${SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0}u
+      && source_row_layout_id != ${SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0}u)
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+}
+
+@compute @workgroup_size(1)
+fn preflight_compact_mechanics_dispatch() {
+  if (!compact_mechanics_view_preflight_continue()) {
+    return;
+  }
+  let node_count = compact_mechanics_view_word(46u);
+  let occupancy_word_count = params.grid_node_count / 32u
+    + select(0u, 1u, params.grid_node_count % 32u != 0u);
+  let expected_dispatch_x = node_count / 64u
+    + select(0u, 1u, node_count % 64u != 0u);
+  let expected_dispatch_yz = select(0u, 1u, node_count > 0u);
+  if (
+    compact_mechanics_view_word(57u) != expected_dispatch_x
+    || compact_mechanics_view_word(58u)
+      != ${SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS}u + occupancy_word_count
+    || compact_mechanics_view_word(59u) != params.schroeder_spatial_generation_id
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  if (
+    compact_mechanics_view_word(${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS}u)
+      != expected_dispatch_x
+    || compact_mechanics_view_word(${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 1}u)
+      != expected_dispatch_yz
+    || compact_mechanics_view_word(${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 2}u)
+      != expected_dispatch_yz
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+}
+
+@compute @workgroup_size(64)
+fn validate_compact_mechanics_nodes(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (p2g_spatial_authority_rejected()) {
+    return;
+  }
+  let compact_index = global_id.x;
+  let bound_words = arrayLength(&schroeder_spatial_authority_evidence);
+  if (bound_words <= 53u) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  let node_count = compact_mechanics_view_word(46u);
+  let node_offset_words = compact_mechanics_view_word(53u);
+  if (compact_index >= node_count) {
+    return;
+  }
+  if (
+    node_offset_words > bound_words
+    || node_count > bound_words - node_offset_words
+  ) {
+    compact_mechanics_view_reject();
+    return;
+  }
+  let node_index = compact_mechanics_view_word(node_offset_words + compact_index);
+  var ordered = node_index < params.grid_node_count;
+  if (compact_index > 0u) {
+    let previous_node = compact_mechanics_view_word(
+      node_offset_words + compact_index - 1u
+    );
+    ordered = ordered && previous_node < node_index;
+  }
+  if (!ordered) {
+    compact_mechanics_view_reject();
+  }
+}
+
+@compute @workgroup_size(64)
+fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let node_index = p2g_finalize_node_index(global_id.x);
+  if (node_index >= params.grid_node_count) {
+    return;
+  }
+  let accumulator_base = node_index * 4u;
+  atomicStore(&grid_accumulators[accumulator_base], 0);
+  atomicStore(&grid_accumulators[accumulator_base + 1u], 0);
+  atomicStore(&grid_accumulators[accumulator_base + 2u], 0);
+  atomicStore(&grid_accumulators[accumulator_base + 3u], 0);
+}
+`;
+}
+
+function createCompactMechanicsGridUpdateWgsl() {
+  const withViewBinding = replaceRequiredWgsl(
+    mlsMpmGridUpdateWgsl,
+    '@group(0) @binding(3) var<storage, read> pressure_force_rows: array<vec4<f32>>;',
+    `@group(0) @binding(3) var<storage, read> pressure_force_rows: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> compact_mechanics_view: array<u32>;`,
+    'compact mechanics grid-update view binding'
+  );
+  return replaceRequiredWgsl(
+    withViewBinding,
+    `  let node_index = global_id.x;
+  if (node_index >= params.grid_node_count) {
+    return;
+  }
+
+  let row0 = p2g_grid_nodes[node_index * 2u];`,
+    `  let compact_index = global_id.x;
+  if (arrayLength(&compact_mechanics_view) <= 53u) {
+    return;
+  }
+  let node_count = compact_mechanics_view[46u];
+  let node_offset_words = compact_mechanics_view[53u];
+  if (
+    compact_index >= node_count
+    || node_offset_words > arrayLength(&compact_mechanics_view)
+    || node_count > arrayLength(&compact_mechanics_view) - node_offset_words
+  ) {
+    return;
+  }
+  let node_index = compact_mechanics_view[node_offset_words + compact_index];
+  if (node_index >= params.grid_node_count) {
+    return;
+  }
+
+  let row0 = p2g_grid_nodes[node_index * 2u];`,
+    'compact mechanics grid-update node index mapping'
+  );
+}
+
 const mlsMpmP2gGridProjectionActiveGridWgsl = createActiveGridP2gProjectionWgsl();
 const mlsMpmP2gGridProjectionCanonicalSpatialActiveGridWgsl =
   createActiveGridP2gProjectionWgsl(mlsMpmP2gGridProjectionCanonicalSpatialWgsl);
 const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveGridWgsl =
   createActiveGridP2gProjectionWgsl(
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl
+  );
+const mlsMpmP2gGridProjectionCanonicalSpatialCompactMechanicsWgsl =
+  createCompactMechanicsP2gProjectionWgsl(
+    mlsMpmP2gGridProjectionCanonicalSpatialWgsl
+  );
+const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedCompactMechanicsWgsl =
+  createCompactMechanicsP2gProjectionWgsl(
     mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl
   );
 // Spatial (grid-measured) density term for the liquid EOS. DISABLED: with
@@ -2864,6 +3462,7 @@ const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveGridWgsl =
 // by t=0.14). The plumbing stays for a stabilized estimator to re-enable.
 const MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED = false;
 const mlsMpmGridUpdateActiveGridWgsl = createActiveGridUpdateWgsl();
+const mlsMpmGridUpdateCompactMechanicsWgsl = createCompactMechanicsGridUpdateWgsl();
 
 function createFusedP2gParamsArray(
   gridSpec,
@@ -2959,6 +3558,18 @@ function createFusedP2gParamsArray(
     0
   ))), true);
   view.setUint32(132, schroederLevelFilter?.spatialEvidenceEnabled === true ? 1 : 0, true);
+  view.setUint32(136, schroederActiveNodeFilter?.mechanicsViewEnabled === true
+    ? Math.max(0, Math.round(finiteNumber(
+        schroederActiveNodeFilter.sourceRowLayoutId,
+        0
+      )))
+    : 0, true);
+  view.setUint32(140, schroederActiveNodeFilter?.mechanicsViewEnabled === true
+    ? Math.max(0, Math.round(finiteNumber(
+        schroederActiveNodeFilter.completionOrdinal,
+        0
+      )))
+    : 0, true);
   return buffer;
 }
 
@@ -3220,11 +3831,17 @@ function createFusedSchroederActiveNodeBinding({
   device,
   schroederSpatialEpochGeneration = null,
   canonicalSpatialRequired = false,
+  gridSpec = null,
+  selectedLevel = null,
+  particleStateBuffer = null,
   labelPrefix = 'ulg-mls-mpm-fused'
 } = {}) {
   const execution = schroederSpatialEpochGeneration?.execution || null;
   const directoryBuffer = execution?.directoryBuffer || null;
   const evidenceBuffer = execution?.evidenceBuffer || null;
+  const mechanicsView = schroederSpatialEpochGeneration?.mechanicsView || null;
+  const mechanicsViewRuntime = schroederSpatialEpochGeneration?.mechanicsViewRuntime || null;
+  const mechanicsViewPublished = mechanicsView != null || mechanicsViewRuntime != null;
   const directoryDeviceMismatch = directoryBuffer
     ? webGpuDeviceMismatchInfo({ buffer: directoryBuffer, device })
     : { mismatch: false, sourceDeviceId: null, consumerDeviceId: null };
@@ -3236,6 +3853,86 @@ function createFusedSchroederActiveNodeBinding({
     : evidenceDeviceMismatch;
   const evidenceBufferTooSmall = Number.isFinite(Number(evidenceBuffer?.size))
     && Number(evidenceBuffer.size) < SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES;
+  let mechanicsViewAdmission = null;
+  let mechanicsViewDeviceMismatch = { mismatch: false, sourceDeviceId: null, consumerDeviceId: null };
+  let mechanicsViewOwnerAdmitted = false;
+  let mechanicsViewShapeAdmitted = false;
+  if (mechanicsViewPublished) {
+    mechanicsViewDeviceMismatch = mechanicsView?.mechanicsViewBuffer
+      ? webGpuDeviceMismatchInfo({ buffer: mechanicsView.mechanicsViewBuffer, device })
+      : mechanicsViewDeviceMismatch;
+    mechanicsViewAdmission = validateSchroederSpatialMechanicsViewDescriptor(
+      mechanicsView,
+      {
+        generationId: execution?.generationId,
+        deviceOrdinal: execution?.deviceOrdinal,
+        laneOrdinal: execution?.laneOrdinal,
+        leaseToken: execution?.leaseToken,
+        sourceFamilyId: execution?.sourceFamilyId,
+        storageGeneration: execution?.storageGeneration,
+        physicsTick: execution?.physicsTick,
+        physicsSubstep: execution?.physicsSubstep,
+        positionEpoch: execution?.positionEpoch,
+        topologyEpoch: execution?.topologyEpoch,
+        chartEpoch: execution?.chartEpoch,
+        levelEpoch: execution?.levelEpoch,
+        supportEpoch: execution?.supportEpoch,
+        sourceCount: execution?.sourceCount,
+        sourceRowLayoutId: execution?.sourceRowLayoutId,
+        selectedLevel,
+        gridNodeCount: gridSpec?.gridNodeCount,
+        gridDims: gridSpec?.gridDims,
+        gridShift: gridSpec?.shift,
+        gridSpacingM: Math.fround(Number(gridSpec?.gridSpacingM))
+      }
+    );
+    try {
+      mechanicsViewOwnerAdmitted = mechanicsViewRuntime === mechanicsView?.ownerRuntime
+        && mechanicsViewRuntime?.ownsExecution?.(mechanicsView) === true
+        && mechanicsViewRuntime?.isExecutionSubmitted?.(mechanicsView) === true
+        && schroederSpatialEpochGeneration?.runtime === execution?.ownerRuntime
+        && schroederSpatialEpochGeneration?.runtime?.ownsExecution?.(execution) === true
+        && schroederSpatialEpochGeneration?.runtime?.isExecutionSubmitted?.(execution)
+          === true;
+    } catch {
+      mechanicsViewOwnerAdmitted = false;
+    }
+    const expectedByteLength = Number(mechanicsView?.layout?.byteLength);
+    const expectedCapacityWords = SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS
+      + Math.max(0, Math.floor(finiteNumber(gridSpec?.gridNodeCount, 0)));
+    mechanicsViewShapeAdmitted = mechanicsView?.schema
+        === ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA
+      && mechanicsView?.sourceBuffer === execution?.sourceBuffer
+      && schroederSpatialEpochGeneration?.source?.sourceStateBuffer
+        === particleStateBuffer
+      && mechanicsView?.directoryBuffer === directoryBuffer
+      && mechanicsView?.mechanicsViewBuffer === mechanicsView?.indirectDispatchBuffer
+      && mechanicsView?.indirectDispatchOffsetBytes
+        === SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS * Uint32Array.BYTES_PER_ELEMENT
+      && mechanicsView?.completionOrdinal === execution?.buildOrdinal
+      && mechanicsView?.layout?.nodeOffsetWords
+        === SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS
+      && mechanicsView?.layout?.headerOffsetWords
+        === SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_OFFSET_WORDS
+      && mechanicsView?.layout?.headerWords
+        === SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_WORDS
+      && mechanicsView?.layout?.dispatchOffsetWords
+        === SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS
+      && mechanicsView?.layout?.nodeCapacity === gridSpec?.gridNodeCount
+      && mechanicsView?.layout?.occupancyWordCount
+        === Math.ceil(Math.max(0, finiteNumber(gridSpec?.gridNodeCount, 0)) / 32)
+      && mechanicsView?.layout?.wordLength === expectedCapacityWords
+      && Number.isSafeInteger(expectedByteLength)
+      && expectedByteLength === expectedCapacityWords * Uint32Array.BYTES_PER_ELEMENT
+      && (!Number.isFinite(Number(mechanicsView?.mechanicsViewBuffer?.size))
+        || Number(mechanicsView.mechanicsViewBuffer.size) >= expectedByteLength);
+  }
+  const mechanicsViewRejected = mechanicsViewPublished && (
+    mechanicsViewAdmission?.admitted !== true
+    || mechanicsViewDeviceMismatch.mismatch
+    || !mechanicsViewOwnerAdmitted
+    || !mechanicsViewShapeAdmitted
+  );
   const schemaRejected = schroederSpatialEpochGeneration != null && (
     schroederSpatialEpochGeneration?.schema !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
     || execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
@@ -3260,10 +3957,19 @@ function createFusedSchroederActiveNodeBinding({
     && !evidenceBufferTooSmall
     && !schemaRejected
     && !queryProfileRejected
+    && !mechanicsViewRejected
     && !released;
   if (!enabled) {
     const rejectionStatus = deviceMismatch.mismatch
       ? 'canonical-spatial-directory-rejected-device'
+      : (mechanicsViewRejected
+        ? (mechanicsViewDeviceMismatch.mismatch
+            ? 'canonical-spatial-mechanics-view-rejected-device'
+            : (mechanicsViewAdmission?.admitted !== true
+              ? mechanicsViewAdmission?.status
+              : (!mechanicsViewOwnerAdmitted
+                ? 'canonical-spatial-mechanics-view-rejected-owner'
+                : 'canonical-spatial-mechanics-view-rejected-shape')))
       : (evidenceBufferTooSmall
         ? 'canonical-spatial-directory-rejected-evidence-capacity'
         : (overlayRejected
@@ -3275,8 +3981,8 @@ function createFusedSchroederActiveNodeBinding({
               : (released
                   ? 'canonical-spatial-directory-rejected-released-generation'
                   : (canonicalIntent
-                      ? 'canonical-spatial-directory-requested-but-unavailable'
-                      : 'canonical-spatial-directory-not-provided'))))));
+                  ? 'canonical-spatial-directory-requested-but-unavailable'
+                      : 'canonical-spatial-directory-not-provided')))))));
     if (canonicalIntent) {
       throw fusedCanonicalSpatialAuthorityError(
         rejectionStatus,
@@ -3306,6 +4012,12 @@ function createFusedSchroederActiveNodeBinding({
       supportEpoch: 0,
       activeNodeBuffer: buffer,
       evidenceBuffer: null,
+      mechanicsViewEnabled: false,
+      mechanicsViewBuffer: null,
+      mechanicsViewIndirectDispatchBuffer: null,
+      mechanicsViewIndirectDispatchOffsetBytes: 0,
+      sourceRowLayoutId: 0,
+      completionOrdinal: 0,
       ownsActiveNodeBuffer: true,
       retainedActiveNodeBuffer: false,
       activeNodeBufferByteLength: 48 * Uint32Array.BYTES_PER_ELEMENT,
@@ -3322,6 +4034,14 @@ function createFusedSchroederActiveNodeBinding({
       status: rejectionStatus
     };
   }
+  const mechanicsViewEnabled = mechanicsViewPublished
+    && mechanicsViewAdmission?.admitted === true
+    && mechanicsViewOwnerAdmitted
+    && mechanicsViewShapeAdmitted
+    && !mechanicsViewDeviceMismatch.mismatch;
+  const authorityEvidenceBuffer = mechanicsViewEnabled
+    ? mechanicsView.mechanicsViewBuffer
+    : evidenceBuffer;
   return {
     enabled: true,
     required: canonicalSpatialRequired === true,
@@ -3339,17 +4059,33 @@ function createFusedSchroederActiveNodeBinding({
     supportEpoch: execution.supportEpoch,
     generationId: execution.generationId,
     activeNodeBuffer: directoryBuffer,
-    evidenceBuffer,
+    evidenceBuffer: authorityEvidenceBuffer,
+    mechanicsViewEnabled,
+    mechanicsViewBuffer: mechanicsViewEnabled ? mechanicsView.mechanicsViewBuffer : null,
+    mechanicsViewIndirectDispatchBuffer: mechanicsViewEnabled
+      ? mechanicsView.indirectDispatchBuffer
+      : null,
+    mechanicsViewIndirectDispatchOffsetBytes: mechanicsViewEnabled
+      ? mechanicsView.indirectDispatchOffsetBytes
+      : 0,
+    mechanicsViewNodeCapacity: mechanicsViewEnabled ? mechanicsView.nodeCapacity : 0,
+    mechanicsViewByteLength: mechanicsViewEnabled ? mechanicsView.layout.byteLength : 0,
+    sourceRowLayoutId: mechanicsViewEnabled ? mechanicsView.sourceRowLayoutId : 0,
+    completionOrdinal: mechanicsViewEnabled ? mechanicsView.completionOrdinal : 0,
     ownsActiveNodeBuffer: false,
     retainedActiveNodeBuffer: true,
     activeNodeBufferByteLength: execution.layout?.byteLength
       ?? directoryBuffer.size
       ?? 0,
     activeNodeBufferSource: 'retained-schroeder-spatial-directory',
-    evidenceBufferByteLength: execution.evidenceBufferByteLength
-      ?? evidenceBuffer.size
-      ?? SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES,
-    evidenceBufferSource: 'generation-owned-schroeder-spatial-evidence-buffer',
+    evidenceBufferByteLength: mechanicsViewEnabled
+      ? mechanicsView.layout.byteLength
+      : (execution.evidenceBufferByteLength
+        ?? evidenceBuffer.size
+        ?? SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES),
+    evidenceBufferSource: mechanicsViewEnabled
+      ? 'generation-owned-schroeder-compact-mechanics-view-buffer'
+      : 'generation-owned-schroeder-spatial-evidence-buffer',
     sourceDeviceId: deviceMismatch.sourceDeviceId,
     consumerDeviceId: deviceMismatch.consumerDeviceId,
     hostBindingAdmitted: true,
@@ -3357,7 +4093,9 @@ function createFusedSchroederActiveNodeBinding({
     gpuAdmissionObserved: false,
     gpuAdmissionStatus: 'shader-validates-at-dispatch-no-host-readback',
     gpuFallbackObserved: null,
-    status: 'canonical-spatial-directory-bound-for-p2g-level-admission'
+    status: mechanicsViewEnabled
+      ? 'canonical-spatial-compact-mechanics-view-bound-for-grid-dispatch'
+      : 'canonical-spatial-directory-bound-for-p2g-level-admission'
   };
 }
 
@@ -3391,6 +4129,13 @@ function fusedSchroederActiveNodeFilterMetadata(filter = null) {
     directoryBufferSource: filter?.activeNodeBufferSource ?? null,
     evidenceBufferByteLength: filter?.evidenceBufferByteLength ?? 0,
     evidenceBufferSource: filter?.evidenceBufferSource ?? null,
+    mechanicsViewEnabled: filter?.mechanicsViewEnabled === true,
+    mechanicsViewNodeCapacity: filter?.mechanicsViewNodeCapacity ?? 0,
+    mechanicsViewByteLength: filter?.mechanicsViewByteLength ?? 0,
+    mechanicsViewIndirectDispatchOffsetBytes:
+      filter?.mechanicsViewIndirectDispatchOffsetBytes ?? 0,
+    mechanicsViewSourceRowLayoutId: filter?.sourceRowLayoutId ?? 0,
+    mechanicsViewCompletionOrdinal: filter?.completionOrdinal ?? 0,
     retainedActiveNodeBuffer: filter?.retainedActiveNodeBuffer === true,
     activeNodeBufferByteLength: filter?.activeNodeBufferByteLength ?? 0,
     activeNodeBufferSource: filter?.activeNodeBufferSource ?? null
@@ -3759,6 +4504,33 @@ function fullGridDispatchMetadata({ status, reason = null, gridSpec, requested =
   };
 }
 
+function compactMechanicsViewDispatchMetadata({ gridSpec }) {
+  return {
+    schema: ULG_MLS_MPM_FUSED_ACTIVE_GRID_DISPATCH_SCHEMA,
+    status: 'canonical-compact-mechanics-view-dispatch-ready',
+    reason: null,
+    requested: true,
+    mode: 'canonical-compact-mechanics-view',
+    compactMechanicsView: true,
+    useActiveGrid: true,
+    fullGridNodeCount: gridSpec.gridNodeCount,
+    activeNodeCount: null,
+    activeNodeCountKnown: false,
+    activeNodeCapacity: gridSpec.gridNodeCount,
+    activeGridRatio: null,
+    activeStart: null,
+    activeCount: null,
+    activeEnd: null,
+    gridDims: [...gridSpec.gridDims],
+    safetyCells: 0,
+    boundsSource: 'ss-spatial-mechanics-view-v1',
+    sourcePositionBoundsM: null,
+    predictedMotionM: null,
+    safetyMarginM: null,
+    predictedExpansionM: null
+  };
+}
+
 function resolveFusedActiveGridDispatch({
   requested,
   sphParticleState,
@@ -3951,25 +4723,36 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
       ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
-  const activeGridDispatch = resolveFusedActiveGridDispatch({
-    requested: fuseActiveGrid,
-    sphParticleState,
-    gridSpec,
-    dt: dtSeconds,
-    stepCount: 1,
-    gravityMPerS2: gravity,
-    safetyCells: activeGridSafetyCells
-  });
-  const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
-    ? activeGridDispatch.activeNodeCount
-    : gridSpec.gridNodeCount;
   const schroederActiveNodeFilter = createFusedSchroederActiveNodeBinding({
     device,
     schroederSpatialEpochGeneration,
     canonicalSpatialRequired,
+    gridSpec,
+    selectedLevel: schroederSelectedLevel,
+    particleStateBuffer: sphParticleUpload.stateBuffer,
     labelPrefix: 'ulg-mls-mpm-fused'
   });
   const canonicalSpatialAuthority = schroederActiveNodeFilter.enabled === true;
+  const compactMechanicsViewEnabled = canonicalSpatialAuthority
+    && schroederActiveNodeFilter.mechanicsViewEnabled === true;
+  const activeGridDispatch = compactMechanicsViewEnabled
+    ? compactMechanicsViewDispatchMetadata({ gridSpec })
+    : resolveFusedActiveGridDispatch({
+        requested: fuseActiveGrid,
+        sphParticleState,
+        gridSpec,
+        dt: dtSeconds,
+        stepCount: 1,
+        gravityMPerS2: gravity,
+        safetyCells: activeGridSafetyCells
+      });
+  const aabbActiveGridEnabled = activeGridDispatch.useActiveGrid
+    && !compactMechanicsViewEnabled;
+  const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
+    ? (activeGridDispatch.activeNodeCountKnown === false
+        ? activeGridDispatch.activeNodeCapacity
+        : activeGridDispatch.activeNodeCount)
+    : gridSpec.gridNodeCount;
   const schroederLevelFilter = createFusedSchroederLevelAssignmentBinding({
     device,
     schroederLevelAssignment,
@@ -3980,17 +4763,23 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     labelPrefix: 'ulg-mls-mpm-fused'
   });
   const activeGridDispatchPlanHint = sphParticleState?.residentActiveGridDispatchPlanHint ?? null;
-  const activeGridIndirectDispatchArgs = createActiveGridComputeDispatchArgsBuffer(
-    device,
-    activeGridDispatch,
-    Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-    activeGridDispatchPlanHint,
-    {
-      gridSpec,
-      stepCount: 1,
-      dt: dtSeconds
-    }
-  );
+  const activeGridIndirectDispatchArgs = compactMechanicsViewEnabled
+    ? createCompactMechanicsViewIndirectDispatchArgs(
+        device,
+        schroederActiveNodeFilter,
+        gridSpec
+      )
+    : createActiveGridComputeDispatchArgsBuffer(
+        device,
+        activeGridDispatch,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridDispatchPlanHint,
+        {
+          gridSpec,
+          stepCount: 1,
+          dt: dtSeconds
+        }
+      );
   const dispatchTopology = createResidentDispatchTopology({
     particleCount,
     gridSpec,
@@ -4028,7 +4817,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const p2gParamsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-p2g-params',
-    activeGridDispatch.useActiveGrid
+    aabbActiveGridEnabled
       ? createFusedActiveP2gParamsArray(
           gridSpec,
           particleCount,
@@ -4059,7 +4848,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const gridUpdateParamsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-grid-update-params',
-    activeGridDispatch.useActiveGrid
+    aabbActiveGridEnabled
       ? createFusedActiveGridUpdateParamsArray({
           gridSpec,
           dt: dtSeconds,
@@ -4131,21 +4920,25 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   let spatialAuthorityEvidence = null;
   let separationTransientBuffers = [];
   try {
-    const p2gCode = activeGridDispatch.useActiveGrid
-      ? (canonicalSpatialAuthority
+    const p2gCode = compactMechanicsViewEnabled
+      ? (observeCanonicalSpatialAuthority === true
+          ? mlsMpmP2gGridProjectionCanonicalSpatialCompactMechanicsWgsl
+          : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedCompactMechanicsWgsl)
+      : (activeGridDispatch.useActiveGrid
+        ? (canonicalSpatialAuthority
           ? (observeCanonicalSpatialAuthority === true
               ? mlsMpmP2gGridProjectionCanonicalSpatialActiveGridWgsl
               : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveGridWgsl)
           : mlsMpmP2gGridProjectionActiveGridWgsl)
-      : (canonicalSpatialAuthority
+        : (canonicalSpatialAuthority
           ? (observeCanonicalSpatialAuthority === true
               ? mlsMpmP2gGridProjectionCanonicalSpatialWgsl
               : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl)
-          : mlsMpmP2gGridProjectionWgsl);
+          : mlsMpmP2gGridProjectionWgsl));
     const p2gVariant = canonicalSpatialAuthority
       ? `canonical-spatial.${observeCanonicalSpatialAuthority === true
           ? 'observed'
-          : 'unobserved'}`
+          : 'unobserved'}${compactMechanicsViewEnabled ? '.compact-mechanics' : ''}`
       : 'precanonical-assignment';
     const p2gBindings = [
       computeBufferBinding(0, 'read-only-storage'),
@@ -4159,27 +4952,58 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       computeBufferBinding(8, 'read-only-storage')
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: activeGridDispatch.useActiveGrid
+      cacheKey: compactMechanicsViewEnabled
+        ? `ulg-mls-mpm-p2g-grid-projection.compact-mechanics.scatter.v10.${p2gVariant}`
+        : (activeGridDispatch.useActiveGrid
         ? `ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v9.${p2gVariant}`
-        : `ulg-mls-mpm-p2g-grid-projection.scatter.v9.${p2gVariant}`,
-      label: activeGridDispatch.useActiveGrid
+        : `ulg-mls-mpm-p2g-grid-projection.scatter.v9.${p2gVariant}`),
+      label: compactMechanicsViewEnabled
+        ? 'ulg-mls-mpm-p2g-grid-projection-compact-mechanics'
+        : (activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection-active-grid'
-        : 'ulg-mls-mpm-p2g-grid-projection',
+        : 'ulg-mls-mpm-p2g-grid-projection'),
       code: p2gCode,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: activeGridDispatch.useActiveGrid
+      cacheKey: compactMechanicsViewEnabled
+        ? `ulg-mls-mpm-p2g-grid-projection.compact-mechanics.finalize.v10.${p2gVariant}`
+        : (activeGridDispatch.useActiveGrid
         ? `ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v9.${p2gVariant}`
-        : `ulg-mls-mpm-p2g-grid-projection.finalize.v9.${p2gVariant}`,
-      label: activeGridDispatch.useActiveGrid
+        : `ulg-mls-mpm-p2g-grid-projection.finalize.v9.${p2gVariant}`),
+      label: compactMechanicsViewEnabled
+        ? 'ulg-mls-mpm-p2g-grid-finalize-compact-mechanics'
+        : (activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-finalize-active-grid'
-        : 'ulg-mls-mpm-p2g-grid-finalize',
+        : 'ulg-mls-mpm-p2g-grid-finalize'),
       code: p2gCode,
       entryPoint: 'finalize_grid',
       bindings: p2gBindings
     });
+    const compactMechanicsPreflightPipelineInfos = [];
+    if (compactMechanicsViewEnabled) {
+      for (const stage of COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS) {
+        compactMechanicsPreflightPipelineInfos.push(
+          createCachedExplicitComputePipeline(device, {
+            cacheKey: `ulg-mls-mpm-p2g-grid-projection.compact-mechanics.preflight-${stage.id}.v11.${p2gVariant}`,
+            label: `ulg-mls-mpm-compact-mechanics-view-preflight-${stage.id}`,
+            code: p2gCode,
+            entryPoint: stage.entryPoint,
+            bindings: p2gBindings
+          })
+        );
+      }
+    }
+    const compactMechanicsValidationPipelineInfo = compactMechanicsViewEnabled
+      ? createCachedExplicitComputePipeline(device, {
+        cacheKey: `ulg-mls-mpm-p2g-grid-projection.compact-mechanics.validate-nodes.v10.${p2gVariant}`,
+        label: 'ulg-mls-mpm-compact-mechanics-view-validate-nodes',
+        code: p2gCode,
+        entryPoint: 'validate_compact_mechanics_nodes',
+        bindings: p2gBindings
+      })
+      : null;
     const activeAccumulatorClearPipelineInfo = activeGridDispatch.useActiveGrid
       ? createCachedExplicitComputePipeline(device, {
         cacheKey: `ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v9.${p2gVariant}`,
@@ -4202,6 +5026,19 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       ];
     const p2gBindGroup = device.createBindGroup({ layout: p2gBindGroupLayout, entries: p2gEntries });
     const p2gFinalizeBindGroup = device.createBindGroup({ layout: p2gFinalizeBindGroupLayout, entries: p2gEntries });
+    const compactMechanicsPreflightBindGroups =
+      compactMechanicsPreflightPipelineInfos.map((pipelineInfo) => (
+        device.createBindGroup({
+          layout: pipelineInfo.bindGroupLayout,
+          entries: p2gEntries
+        })
+      ));
+    const compactMechanicsValidationBindGroup = compactMechanicsValidationPipelineInfo
+      ? device.createBindGroup({
+        layout: compactMechanicsValidationPipelineInfo.bindGroupLayout,
+        entries: p2gEntries
+      })
+      : null;
     const activeAccumulatorClearBindGroup = activeAccumulatorClearPipelineInfo
       ? device.createBindGroup({
         layout: activeAccumulatorClearPipelineInfo.bindGroupLayout,
@@ -4209,21 +5046,30 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       })
       : null;
     const { pipeline: gridUpdatePipeline, bindGroupLayout: gridUpdateBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: activeGridDispatch.useActiveGrid
+      cacheKey: compactMechanicsViewEnabled
+        ? 'ulg-mls-mpm-grid-update.compact-mechanics.v3'
+        : (activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-grid-update.active-grid.v2'
-        : 'ulg-mls-mpm-grid-update.v2',
-      label: activeGridDispatch.useActiveGrid
+        : 'ulg-mls-mpm-grid-update.v2'),
+      label: compactMechanicsViewEnabled
+        ? 'ulg-mls-mpm-grid-update-compact-mechanics'
+        : (activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-grid-update-active-grid'
-        : 'ulg-mls-mpm-grid-update',
-      code: activeGridDispatch.useActiveGrid
+        : 'ulg-mls-mpm-grid-update'),
+      code: compactMechanicsViewEnabled
+        ? mlsMpmGridUpdateCompactMechanicsWgsl
+        : (activeGridDispatch.useActiveGrid
         ? mlsMpmGridUpdateActiveGridWgsl
-        : mlsMpmGridUpdateWgsl,
+        : mlsMpmGridUpdateWgsl),
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'storage'),
         computeBufferBinding(2, 'uniform'),
-        computeBufferBinding(3, 'read-only-storage')
+        computeBufferBinding(3, 'read-only-storage'),
+        ...(compactMechanicsViewEnabled
+          ? [computeBufferBinding(4, 'read-only-storage')]
+          : [])
       ]
     });
     const gridUpdateBindGroup = device.createBindGroup({
@@ -4232,7 +5078,13 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         { binding: 0, resource: { buffer: gridBuffer } },
         { binding: 1, resource: { buffer: updatedGridBuffer } },
         { binding: 2, resource: { buffer: gridUpdateParamsBuffer } },
-        { binding: 3, resource: { buffer: pressureRowsBuffer } }
+        { binding: 3, resource: { buffer: pressureRowsBuffer } },
+        ...(compactMechanicsViewEnabled
+          ? [{
+              binding: 4,
+              resource: { buffer: schroederActiveNodeFilter.mechanicsViewBuffer }
+            }]
+          : [])
       ]
     });
     const g2pBindings = [
@@ -4308,15 +5160,54 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_BYTES
       );
     }
+    if (compactMechanicsViewEnabled) {
+      const preflightPass = encoder.beginComputePass();
+      for (let stageIndex = 0;
+        stageIndex < compactMechanicsPreflightPipelineInfos.length;
+        stageIndex += 1) {
+        preflightPass.setPipeline(
+          compactMechanicsPreflightPipelineInfos[stageIndex].pipeline
+        );
+        preflightPass.setBindGroup(
+          0,
+          compactMechanicsPreflightBindGroups[stageIndex]
+        );
+        preflightPass.dispatchWorkgroups(1);
+      }
+      preflightPass.end();
+      copyCompactMechanicsViewIndirectDispatchArgs(
+        encoder,
+        activeGridIndirectDispatchArgs
+      );
+      const validationPass = encoder.beginComputePass();
+      validationPass.setPipeline(compactMechanicsValidationPipelineInfo.pipeline);
+      validationPass.setBindGroup(0, compactMechanicsValidationBindGroup);
+      dispatchCompactMechanicsViewPass(
+        validationPass,
+        activeGridIndirectDispatchArgs
+      );
+      validationPass.end();
+      copyCompactMechanicsViewIndirectDispatchArgs(
+        encoder,
+        activeGridIndirectDispatchArgs
+      );
+    }
     if (activeGridDispatch.useActiveGrid) {
       const accumulatorClearPass = encoder.beginComputePass();
       accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
       accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
-      dispatchActiveGridComputePass(
-        accumulatorClearPass,
-        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-        activeGridIndirectDispatchArgs
-      );
+      if (compactMechanicsViewEnabled) {
+        dispatchCompactMechanicsViewPass(
+          accumulatorClearPass,
+          activeGridIndirectDispatchArgs
+        );
+      } else {
+        dispatchActiveGridComputePass(
+          accumulatorClearPass,
+          Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+          activeGridIndirectDispatchArgs
+        );
+      }
       accumulatorClearPass.end();
     } else {
       encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
@@ -4329,20 +5220,34 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     const p2gFinalizePass = encoder.beginComputePass();
     p2gFinalizePass.setPipeline(p2gFinalizePipeline);
     p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
-    dispatchActiveGridComputePass(
-      p2gFinalizePass,
-      Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-      activeGridIndirectDispatchArgs
-    );
+    if (compactMechanicsViewEnabled) {
+      dispatchCompactMechanicsViewPass(
+        p2gFinalizePass,
+        activeGridIndirectDispatchArgs
+      );
+    } else {
+      dispatchActiveGridComputePass(
+        p2gFinalizePass,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridIndirectDispatchArgs
+      );
+    }
     p2gFinalizePass.end();
     const gridUpdatePass = encoder.beginComputePass();
     gridUpdatePass.setPipeline(gridUpdatePipeline);
     gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
-    dispatchActiveGridComputePass(
-      gridUpdatePass,
-      Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
-      activeGridIndirectDispatchArgs
-    );
+    if (compactMechanicsViewEnabled) {
+      dispatchCompactMechanicsViewPass(
+        gridUpdatePass,
+        activeGridIndirectDispatchArgs
+      );
+    } else {
+      dispatchActiveGridComputePass(
+        gridUpdatePass,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridIndirectDispatchArgs
+      );
+    }
     gridUpdatePass.end();
     const g2pPass = encoder.beginComputePass();
     g2pPass.setPipeline(g2pPipeline);

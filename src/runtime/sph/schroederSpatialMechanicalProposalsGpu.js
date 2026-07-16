@@ -1106,7 +1106,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           runtime: generation.runtime,
           consumerId,
           supportProfileId,
-          sourceBuffer: authority.source.activeNodeBuffer
+          sourceBuffer: authority.source.sourceBuffer
+            ?? authority.source.activeNodeBuffer
         }
       );
       if (authentication?.ready !== true || authentication.authenticated !== true) {

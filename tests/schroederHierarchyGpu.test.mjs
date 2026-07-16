@@ -6936,25 +6936,28 @@ test('Schroeder same-level mechanics releases an owned spatial generation when t
       enableCrossLevelCoupling: false,
       spatialEpochGenerationRunner: async (options) => {
         spatialGenerationCalls.push(options);
-        const activeNodeList = options.activeNodeList;
+        const levelAssignment = options.levelAssignment;
         const epochIdentity = {
-          storageGeneration: activeNodeList.spatialEpochStorageGeneration,
-          physicsTick: activeNodeList.spatialEpochPhysicsTick,
-          physicsSubstep: activeNodeList.spatialEpochPhysicsSubstep,
-          positionEpoch: activeNodeList.spatialEpochPositionEpoch,
-          topologyEpoch: activeNodeList.spatialEpochTopologyEpoch,
-          chartEpoch: activeNodeList.spatialEpochChartEpoch,
-          levelEpoch: activeNodeList.spatialEpochLevelEpoch,
-          supportEpoch: activeNodeList.spatialEpochSupportEpoch
+          storageGeneration: levelAssignment.storageGeneration,
+          physicsTick: levelAssignment.physicsTick,
+          physicsSubstep: levelAssignment.physicsSubstep,
+          positionEpoch: levelAssignment.positionEpoch,
+          topologyEpoch: levelAssignment.topologyEpoch,
+          chartEpoch: levelAssignment.chartEpoch,
+          levelEpoch: levelAssignment.levelEpoch,
+          supportEpoch: levelAssignment.supportEpoch
         };
         Object.assign(generation.source, {
-          activeNodeBuffer: activeNodeList.activeNodeBuffer,
+          sourceBuffer: levelAssignment.assignmentBuffer,
+          sourceStateBuffer: levelAssignment.sourceStateBuffer,
           ...epochIdentity
         });
         Object.assign(generation.execution, {
-          activeNodeBuffer: activeNodeList.activeNodeBuffer,
+          sourceBuffer: levelAssignment.assignmentBuffer,
           ...epochIdentity
         });
+        assert.equal(options.selectedLevel, 0);
+        assert.deepEqual(options.mechanicsGrid.gridDims.length, 3);
         return generation;
       },
       residentStepRunner: transactionAwareFailingRunner
@@ -6963,7 +6966,7 @@ test('Schroeder same-level mechanics releases an owned spatial generation when t
   );
 
   assert.equal(spatialGenerationCalls.length, 1);
-  assert.ok(spatialGenerationCalls[0].activeNodeList.activeNodeBuffer);
+  assert.ok(spatialGenerationCalls[0].levelAssignment.assignmentBuffer);
   assert.ok(capturedTransaction);
   const transactionSummary =
     summarizeSchroederSpatialEpochTransaction(capturedTransaction);
@@ -7217,25 +7220,28 @@ test('Schroeder owner scope submits borrowed pressure before resident mechanics 
     enableCrossLevelCoupling: false,
     spatialEpochGenerationRunner: async (options) => {
       calls.push('generation');
-      const activeNodeList = options.activeNodeList;
+      const levelAssignment = options.levelAssignment;
       const epochIdentity = {
-        storageGeneration: activeNodeList.spatialEpochStorageGeneration,
-        physicsTick: activeNodeList.spatialEpochPhysicsTick,
-        physicsSubstep: activeNodeList.spatialEpochPhysicsSubstep,
-        positionEpoch: activeNodeList.spatialEpochPositionEpoch,
-        topologyEpoch: activeNodeList.spatialEpochTopologyEpoch,
-        chartEpoch: activeNodeList.spatialEpochChartEpoch,
-        levelEpoch: activeNodeList.spatialEpochLevelEpoch,
-        supportEpoch: activeNodeList.spatialEpochSupportEpoch
+        storageGeneration: levelAssignment.storageGeneration,
+        physicsTick: levelAssignment.physicsTick,
+        physicsSubstep: levelAssignment.physicsSubstep,
+        positionEpoch: levelAssignment.positionEpoch,
+        topologyEpoch: levelAssignment.topologyEpoch,
+        chartEpoch: levelAssignment.chartEpoch,
+        levelEpoch: levelAssignment.levelEpoch,
+        supportEpoch: levelAssignment.supportEpoch
       };
       Object.assign(generation.source, {
-        activeNodeBuffer: activeNodeList.activeNodeBuffer,
+        sourceBuffer: levelAssignment.assignmentBuffer,
+        sourceStateBuffer: levelAssignment.sourceStateBuffer,
         ...epochIdentity
       });
       Object.assign(generation.execution, {
-        activeNodeBuffer: activeNodeList.activeNodeBuffer,
+        sourceBuffer: levelAssignment.assignmentBuffer,
         ...epochIdentity
       });
+      assert.equal(options.selectedLevel, 0);
+      assert.equal(options.mechanicsGrid.gridNodeCount > 0, true);
       return generation;
     },
     pressureInterfaceStageRunner: async (options) => {

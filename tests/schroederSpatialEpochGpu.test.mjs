@@ -33,6 +33,20 @@ import {
   SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_WORDS
 } from '../ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_PARAMS_BYTES,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+  ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA,
+  createSchroederSpatialMechanicsViewPlan,
+  validateSchroederSpatialMechanicsViewDescriptor
+} from '../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
+import {
+  schroederSpatialMechanicsViewWgsl
+} from '../ulg-gpu-abi/src/schroederSpatialMechanicsViewWgsl.js';
+import {
   createSchroederSpatialEpochGpu,
   releaseSchroederSpatialEpochGenerationAfterQueue,
   resolveSchroederSpatialDirectoryActiveNodeSource,
@@ -187,6 +201,47 @@ function createDirectSpatialActiveNodeList(device, overrides = {}) {
   };
 }
 
+function createDirectSpatialLevelAssignment(device, overrides = {}) {
+  const particleCount = overrides.particleCount ?? 2;
+  const assignmentBuffer = overrides.assignmentBuffer ?? device.createBuffer({
+    label: 'direct-spatial-level-assignment-source',
+    size: particleCount * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const sourceStateBuffer = overrides.sourceStateBuffer ?? device.createBuffer({
+    label: 'direct-spatial-level-assignment-state-source',
+    size: particleCount * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  return {
+    schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount,
+    assignmentStrideFloats: 16,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignmentBuffer.size,
+    sourceStateBuffer,
+    sourceStateBufferBorrowed: true,
+    storageGeneration: 11,
+    physicsTick: 13,
+    physicsSubstep: 0,
+    positionEpoch: 17,
+    topologyEpoch: 19,
+    chartEpoch: 23,
+    levelEpoch: 29,
+    supportEpoch: 31,
+    minLevel: -1,
+    maxLevel: 1,
+    chartId: 0,
+    baseGridSpacingM: 0.25,
+    ...overrides,
+    assignmentBuffer,
+    sourceStateBuffer
+  };
+}
+
 test('spatial epoch ABI fixes exact keys, identity header, and compact directory offsets', () => {
   assert.equal(SCHROEDER_SPATIAL_EPOCH_HEADER_LAYOUT.length, 48);
   assert.equal(SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS, 48);
@@ -223,6 +278,233 @@ test('spatial epoch ABI fixes exact keys, identity header, and compact directory
   assert.equal(SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS, 1);
   assert.equal(SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY, 2);
   assert.match(SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI.consumerDispatchLinearization, /workgroup\.y/);
+});
+
+test('compact mechanics view ABI fixes authenticated header, indirect, and node regions', () => {
+  const plan = createSchroederSpatialMechanicsViewPlan({
+    sourceCount: 2,
+    sourceRowLayoutId: SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    selectedLevel: 0,
+    gridNodeCount: 512,
+    gridDims: [8, 8, 8],
+    gridShift: 2,
+    gridSpacingM: 0.25,
+    generationId: 7,
+    deviceOrdinal: 3,
+    laneOrdinal: 5,
+    leaseToken: 11,
+    sourceFamilyId: 13,
+    storageGeneration: 17,
+    physicsTick: 19,
+    physicsSubstep: 0,
+    positionEpoch: 23,
+    topologyEpoch: 29,
+    chartEpoch: 31,
+    levelEpoch: 37,
+    supportEpoch: 41,
+    completionOrdinal: 43
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_OFFSET_WORDS, 20);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_WORDS, 40);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS, 60);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_VIEW_NODE_OFFSET_WORDS, 64);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_VIEW_PARAMS_BYTES, 192);
+  assert.equal(plan.layout.nodeCapacity, 512);
+  assert.equal(plan.layout.occupancyWordCount, 16);
+  assert.equal(plan.layout.wordLength, 576);
+  assert.equal(plan.particleAligned, undefined);
+  assert.match(schroederSpatialMechanicsViewWgsl, /fn spatial_directory_admitted/);
+  assert.match(schroederSpatialMechanicsViewWgsl, /fn mark_mechanics_nodes/);
+  assert.match(schroederSpatialMechanicsViewWgsl, /fn scatter_mechanics_nodes/);
+  assert.match(schroederSpatialMechanicsViewWgsl, /strict|destination/);
+  assert.throws(
+    () => createSchroederSpatialMechanicsViewPlan({
+      ...plan,
+      gridNodeCount: 511,
+      gridDims: [8, 8, 8]
+    }),
+    /gridNodeCount/
+  );
+});
+
+test('direct level-assignment generation publishes and retires one compact mechanics view', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  });
+  assert.equal(generation.ready, true);
+  assert.equal(generation.selected, true);
+  assert.equal(device.submissions.length, 1);
+  assert.equal(generation.execution.sourceBuffer, levelAssignment.assignmentBuffer);
+  assert.equal(generation.source.sourceStateBuffer, levelAssignment.sourceStateBuffer);
+  assert.equal(generation.mechanicsView.sourceBuffer, generation.execution.sourceBuffer);
+  assert.equal(generation.mechanicsView.directoryBuffer, generation.execution.directoryBuffer);
+  assert.equal(generation.mechanicsView.sourceRowLayoutId,
+    SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0);
+  assert.equal(generation.mechanicsView.indirectDispatchBuffer,
+    generation.mechanicsView.mechanicsViewBuffer);
+  assert.equal(generation.mechanicsView.indirectDispatchOffsetBytes, 240);
+  assert.equal(generation.mechanicsView.bufferAllocationCountDuringEncode, 0);
+  assert.equal(generation.mechanicsView.gpuBufferCreationCountDuringEncode, 0);
+  assert.equal(validateSchroederSpatialMechanicsViewDescriptor(
+    generation.mechanicsView,
+    {
+      generationId: generation.execution.generationId,
+      completionOrdinal: generation.execution.buildOrdinal,
+      gridDims: [8, 8, 8]
+    }
+  ).admitted, true);
+  assert.equal(validateSchroederSpatialMechanicsViewDescriptor({
+    ...generation.mechanicsView
+  }).status, 'schroeder-spatial-mechanics-view-rejected-owner');
+
+  const submittedEvents = device.submissions[0][0].events;
+  const entryPoints = submittedEvents
+    .filter((event) => event.kind === 'pass')
+    .flatMap((event) => event.commands.map((command) => command.pipeline));
+  assert.ok(entryPoints.some((label) => /mechanics-view.*mark/.test(label)));
+  assert.ok(entryPoints.some((label) => /mechanics-view.*count/.test(label)));
+  assert.ok(entryPoints.some((label) => /mechanics-view.*scatter/.test(label)));
+  assert.ok(entryPoints.some((label) => /mechanics-view.*finalize/.test(label)));
+
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    generation,
+    device
+  ), true);
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.execution.released, true);
+  assert.equal(generation.mechanicsView.released, true);
+});
+
+test('compact mechanics generations retire under resident arena backpressure', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const options = {
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  };
+  const retained = Array.from({ length: 3 }, () => (
+    runSchroederSpatialEpochGenerationWebGpu(options)
+  ));
+  for (const generation of retained) {
+    assert.equal(generation.ready, true);
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+      true
+    );
+  }
+  const next = await runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
+    options
+  );
+  assert.equal(next.ready, true);
+  assert.equal(next.execution.generationId, 4);
+  assert.equal(next.backpressureWaitCount, 1);
+  assert.deepEqual(
+    await Promise.all(retained.map((generation) => generation.releasePromise)),
+    [true, true, true]
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(next, device),
+    true
+  );
+  assert.equal(await next.releasePromise, true);
+});
+
+test('post-submit admission failure schedules queue-fenced directory and view cleanup', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const options = {
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  };
+  const seed = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(seed.ready, true);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(seed, device), true);
+  assert.equal(await seed.releasePromise, true);
+
+  const originalMarkExecutionSubmitted = seed.runtime.markExecutionSubmitted;
+  let rejectOnce = true;
+  seed.runtime.markExecutionSubmitted = (execution) => {
+    if (rejectOnce) {
+      rejectOnce = false;
+      return false;
+    }
+    return originalMarkExecutionSubmitted(execution);
+  };
+  const rejected = runSchroederSpatialEpochGenerationWebGpu(options);
+  seed.runtime.markExecutionSubmitted = originalMarkExecutionSubmitted;
+  assert.equal(rejected.ready, false);
+  assert.equal(rejected.status, 'schroeder-spatial-epoch-generation-rejected');
+  assert.equal(rejected.releaseScheduled, true);
+  assert.ok(rejected.releasePromise);
+  assert.equal(await rejected.releasePromise, true);
+  assert.equal(rejected.releaseStatus,
+    'spatial-epoch-generation-release-scheduled-after-final-consumer');
+});
+
+test('partial directory/view release can retry only the still-live owner', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  });
+  assert.equal(generation.ready, true);
+  const originalReleaseExecutionAfter =
+    generation.mechanicsViewRuntime.releaseExecutionAfter;
+  generation.mechanicsViewRuntime.releaseExecutionAfter = async () => {
+    throw new Error('intentional mechanics-view release failure');
+  };
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    generation,
+    device
+  ), true);
+  assert.equal(await generation.releasePromise, false);
+  assert.equal(generation.execution.released, true);
+  assert.equal(generation.mechanicsView.released, false);
+  generation.mechanicsViewRuntime.releaseExecutionAfter =
+    originalReleaseExecutionAfter;
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    generation,
+    device
+  ), true);
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.mechanicsView.released, true);
 });
 
 test('signed structural order keys round trip and preserve i32 ordering', () => {

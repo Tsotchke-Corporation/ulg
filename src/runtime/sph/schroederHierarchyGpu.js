@@ -7467,6 +7467,8 @@ export async function runSchroederLevelAssignmentWebGpu({
       fullReadbackPerformed: !noFullReadback,
       fullParticleReadbackPerformed: false,
       normalHotLoopReadbackFree: noFullReadback,
+      sourceStateBuffer: stateBuffer,
+      sourceStateBufferBorrowed: Boolean(borrowedStateBuffer),
       retainedAssignmentBuffer: Boolean(retainAssignmentBuffer),
       assignmentBufferByteLength: plan.assignmentByteLength,
       assignments,
@@ -14003,11 +14005,15 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     );
   }
   registerPressureInterfaceOwnerScopeSetupArtifacts('active-node-list', resolvedActiveNodeList, activeNodeList, {
-    expectedConsumers: ['spatial-generation', 'resident-mechanics', 'render']
+    expectedConsumers: ['legacy-law-topology', 'render']
   });
   const twoLevelAuthoritative = enableTwoLevelMechanics
     && twoLevelMechanicsAuthority === 'authoritative';
   const ownsResolvedSpatialEpochGeneration = !spatialEpochGeneration;
+  const spatialMechanicsGridSpec = createMlsMpmGridSpec({
+    boxDimsM,
+    gridSpacingM: plan.nativeGridSpacingM
+  });
   const resolvedSpatialEpochGeneration = spatialEpochGeneration
     || (!enableSpatialEpochGeneration || twoLevelAuthoritative
         ? null
@@ -14017,10 +14023,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
             async () => {
               const generation = await spatialEpochGenerationRunner({
                 device,
-                activeNodeList: resolvedActiveNodeList,
+                levelAssignment: resolvedLevelAssignment,
                 particleCount: plan.particleCount,
                 laneId: 'direct-schroeder-scene',
-                sourceFamily: 'schroeder-active-node-particles'
+                sourceFamily: 'schroeder-level-assignment-particles',
+                selectedLevel: plan.selectedLevel,
+                mechanicsGrid: {
+                  gridNodeCount: spatialMechanicsGridSpec.gridNodeCount,
+                  gridDims: spatialMechanicsGridSpec.gridDims,
+                  gridShift: spatialMechanicsGridSpec.shift,
+                  gridSpacingM: spatialMechanicsGridSpec.gridSpacingM
+                }
               });
               if (
                 generation?.status
@@ -14041,7 +14054,6 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   const spatialEpochTransactionEligibility = Object.freeze({
     sameLevelAuthority: twoLevelAuthoritative !== true,
     internalLevelAssignment: ownsResolvedLevelAssignment,
-    internalActiveNodeList: ownsResolvedActiveNodeList,
     internalGeneration: ownsResolvedSpatialEpochGeneration,
     transactionAwareResidentRunner:
       residentStepRunner === runMlsMpmResidentStepWithOptionalWebGpu
@@ -14240,6 +14252,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       compactSummaryReadback: twoLevelAuthoritative
     });
   const resolvedActiveNodeIndex = !enableActiveNodeIndex
+    || resolvedSpatialEpochGeneration?.mechanicsView
     ? null
     : activeNodeIndex || await activeNodeIndexRunner({
       device,
@@ -14252,7 +14265,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   registerHierarchyArtifacts('active-node-index', resolvedActiveNodeIndex, activeNodeIndex);
   const activeNodeSortedIndexSelection = createSchroederActiveNodeSortedIndexSelection({
     activeNodeSortedIndex,
-    enableActiveNodeSortedIndex,
+    enableActiveNodeSortedIndex: enableActiveNodeSortedIndex
+      && !resolvedSpatialEpochGeneration?.mechanicsView,
     activeNodeSortedIndexPolicyMode,
     lawNeighborTraversalPolicyMode,
     lawNeighborTraversalDiagnosticCounters,

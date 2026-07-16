@@ -527,7 +527,7 @@ struct ReactionDiscoveryParams {
   state_stride_vec4s: u32,
 };
 
-@group(0) @binding(0) var<storage, read> active_node_rows: array<f32>;
+@group(0) @binding(0) var<storage, read> source_state_authority: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> source_state: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> reaction_records: array<vec4<f32>>;
@@ -559,35 +559,20 @@ fn reaction_discovery_increment_counter(counter_index: u32) {
 }
 
 fn reaction_discovery_source_row_admitted(source_index: u32) -> bool {
-  let offset = source_index * params.active_node_stride_floats;
-  if (offset > arrayLength(&active_node_rows)
-      || params.active_node_stride_floats > arrayLength(&active_node_rows) - offset) {
+  let offset = source_index * params.state_stride_vec4s;
+  if (offset >= arrayLength(&source_state_authority)) {
     return false;
   }
-  let row_source = active_node_rows[offset + 10u];
-  let status = active_node_rows[offset + 11u];
-  let position = vec3<f32>(
-    active_node_rows[offset + 12u],
-    active_node_rows[offset + 13u],
-    active_node_rows[offset + 14u]
-  );
-  return row_source == f32(source_index)
-    && status > 0.0
-    && status < 32.0
-    && all(vec3<bool>(
-      ss_exact_near_finite(position.x),
-      ss_exact_near_finite(position.y),
-      ss_exact_near_finite(position.z)
-    ));
+  let position_mass = source_state_authority[offset];
+  return all(vec3<bool>(
+      ss_exact_near_finite(position_mass.x),
+      ss_exact_near_finite(position_mass.y),
+      ss_exact_near_finite(position_mass.z)
+    )) && ss_exact_near_finite(position_mass.w);
 }
 
 fn reaction_discovery_position(source_index: u32) -> vec3<f32> {
-  let offset = source_index * params.active_node_stride_floats;
-  return vec3<f32>(
-    active_node_rows[offset + 12u],
-    active_node_rows[offset + 13u],
-    active_node_rows[offset + 14u]
-  );
+  return source_state_authority[source_index * params.state_stride_vec4s].xyz;
 }
 
 fn reaction_discovery_thermo0(source_index: u32) -> vec4<f32> {
@@ -1012,10 +997,10 @@ export function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     sourceThermoBuffer || sphParticleUpload?.thermoBuffer,
     'reaction discovery sourceThermoBuffer'
   );
-  const activeNodeBuffer = requireBuffer(
+  const canonicalSourceBuffer = requireBuffer(
     device,
-    generation?.source?.activeNodeBuffer,
-    'reaction discovery canonical activeNodeBuffer'
+    generation?.source?.sourceBuffer ?? generation?.source?.activeNodeBuffer,
+    'reaction discovery canonical sourceBuffer'
   );
   requireMinimumBufferBytes(
     stateBuffer,
@@ -1034,7 +1019,7 @@ export function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       runtime: generation.runtime,
       consumerId: SCHROEDER_SPATIAL_REACTION_DISCOVERY_CONSUMER_ID,
       supportProfileId: SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
-      sourceBuffer: activeNodeBuffer,
+      sourceBuffer: canonicalSourceBuffer,
       expected: {
         generationId: generation.execution?.generationId,
         sourceCount: particleCount,
@@ -1142,7 +1127,7 @@ export function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     label: 'ulg-schroeder-spatial-reaction-discovery-proposal-bindings',
     layout: proposalPipeline.bindGroupLayout,
     entries: [
-      { binding: 0, resource: { buffer: activeNodeBuffer } },
+      { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: thermoBuffer } },
       { binding: 2, resource: { buffer: stateBuffer } },
       { binding: 3, resource: { buffer: resolvedReactionRecordBuffer } },

@@ -263,11 +263,19 @@ function generationMatchesSnapshot(authority, generation) {
     || generation?.runtime !== snapshot.runtime
     || execution?.ownerRuntime !== snapshot.executionOwnerRuntime
     || execution?.deviceId !== snapshot.deviceId
-    || source?.activeNodeBuffer !== snapshot.activeNodeBuffer
-    || execution?.activeNodeBuffer !== snapshot.activeNodeBuffer
+    || (source?.sourceBuffer ?? source?.activeNodeBuffer) !== snapshot.sourceBuffer
+    || (execution?.sourceBuffer ?? execution?.activeNodeBuffer) !== snapshot.sourceBuffer
     || execution?.directoryBuffer !== snapshot.directoryBuffer
-    || !webGpuBufferMatchesDevice(snapshot.activeNodeBuffer, authority.device)
+    || !webGpuBufferMatchesDevice(snapshot.sourceBuffer, authority.device)
     || !webGpuBufferMatchesDevice(snapshot.directoryBuffer, authority.device)
+    || (snapshot.mechanicsView && (
+      generation?.mechanicsView !== snapshot.mechanicsView
+      || generation?.mechanicsViewRuntime !== snapshot.mechanicsViewRuntime
+      || generation.mechanicsView?.mechanicsViewBuffer
+        !== snapshot.mechanicsViewBuffer
+      || generation.mechanicsView?.submitPerformed !== true
+      || !webGpuBufferMatchesDevice(snapshot.mechanicsViewBuffer, authority.device)
+    ))
     || execution?.generationId !== snapshot.generationId
     || execution?.buildOrdinal !== snapshot.buildOrdinal
     || execution?.sortUniqueOrdinal !== snapshot.sortUniqueOrdinal
@@ -569,9 +577,11 @@ export function createSchroederSpatialEpochTransaction({
       'ERR_SCHROEDER_SPATIAL_EPOCH_DEVICE_MISMATCH'
     );
   }
+  const spatialSourceBuffer = source.sourceBuffer ?? source.activeNodeBuffer ?? null;
+  const executionSourceBuffer = execution.sourceBuffer ?? execution.activeNodeBuffer ?? null;
   if (
-    source.activeNodeBuffer !== execution.activeNodeBuffer
-    || !webGpuBufferMatchesDevice(source.activeNodeBuffer, device)
+    spatialSourceBuffer !== executionSourceBuffer
+    || !webGpuBufferMatchesDevice(spatialSourceBuffer, device)
     || !webGpuBufferMatchesDevice(execution.directoryBuffer, device)
   ) {
     throw transactionError(
@@ -692,8 +702,11 @@ export function createSchroederSpatialEpochTransaction({
       runtime: generation.runtime,
       executionOwnerRuntime: execution.ownerRuntime,
       deviceId,
-      activeNodeBuffer: source.activeNodeBuffer,
+      sourceBuffer: spatialSourceBuffer,
       directoryBuffer: execution.directoryBuffer,
+      mechanicsView: generation.mechanicsView ?? null,
+      mechanicsViewRuntime: generation.mechanicsViewRuntime ?? null,
+      mechanicsViewBuffer: generation.mechanicsView?.mechanicsViewBuffer ?? null,
       generationId,
       buildOrdinal,
       sortUniqueOrdinal,

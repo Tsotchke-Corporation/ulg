@@ -8,6 +8,8 @@ import {
   SCHROEDER_SPATIAL_EPOCH_VERSION,
   SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_ABI,
   SPH_INTERFACE_CONTACT_KINEMATICS_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
@@ -422,7 +424,12 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
   generationOverrides = {},
   sourceOverrides = {},
   executionOverrides = {},
-  queryProfileOverrides = {}
+  queryProfileOverrides = {},
+  sourceRowLayoutId = SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
+  sourceFamily = sourceRowLayoutId
+    === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    ? 'schroeder-level-assignment-particles'
+    : 'schroeder-active-node-particles'
 } = {}) {
   const sourceCount = activeNodeList.activeCandidateCount;
   const layout = createSchroederSpatialEpochLayout({
@@ -450,6 +457,7 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
     ready: true,
     mode: 1,
     sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    sourceBuffer: activeNodeList.activeNodeBuffer,
     activeNodeBuffer: activeNodeList.activeNodeBuffer,
     sourceCount,
     chartId: activeNodeList.spatialEpochChartId,
@@ -467,8 +475,11 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
     schema: 'peercompute.ulg.schroeder-spatial-directory-active-node-source.v1',
     status: 'schroeder-spatial-directory-source-ready',
     ready: true,
+    sourceBuffer: activeNodeList.activeNodeBuffer,
     activeNodeBuffer: activeNodeList.activeNodeBuffer,
     sourceCount,
+    sourceRowLayoutId,
+    sourceRowStrideFloats: 16,
     activeNodeStrideFloats: 16,
     phaseVolumeAssignmentOverlayEnabled: false,
     exactNearQueryProfile,
@@ -492,7 +503,8 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
     laneOrdinal: 19,
     leaseToken: 41,
     sourceFamilyId: 23,
-    sourceFamily: 'schroeder-active-node-particles',
+    sourceFamily,
+    sourceRowLayoutId,
     sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
     exactNearQueryProfile,
     queryGeometryEvidence: exactNearQueryProfile,
@@ -500,6 +512,7 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
     sortUniqueOrdinal: 41,
     layout,
     directoryBuffer,
+    sourceBuffer: activeNodeList.activeNodeBuffer,
     activeNodeBuffer: activeNodeList.activeNodeBuffer,
     arenaIndex: 1,
     arenaGeneration: 1,
@@ -1858,6 +1871,45 @@ test('pressure/interface borrows one caller-owned spatial generation without reb
   assert.equal(result.destroyOwnerScopeTemporaryBuffers(), false);
 });
 
+test('pressure/interface admits a caller-owned level-assignment spatial generation', async () => {
+  const device = fakePressureDevice();
+  const args = canonicalPressureRunFixture(device);
+  const shared = sharedSpatialGenerationFixture(
+    device,
+    args.schroederActiveNodeList,
+    {
+      sourceRowLayoutId:
+        SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    }
+  );
+  args.schroederSpatialEpochGeneration = shared.generation;
+  args.sharedSpatialFenceAuthority = 'generation-owner';
+
+  const result = await runSphPressureInterfaceForceRowsWebGpu(args);
+  const solver = result.pressureInterfaceForceSolver;
+
+  assert.equal(shared.source.sourceRowLayoutId,
+    SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0);
+  assert.equal(shared.execution.sourceRowLayoutId,
+    SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0);
+  assert.equal(
+    shared.execution.sourceFamily,
+    'schroeder-level-assignment-particles'
+  );
+  assert.equal(
+    solver.schroederSpatialExactNearHostAdmissionStatus,
+    'schroeder-spatial-exact-near-shared-generation-selected'
+  );
+  assert.equal(solver.schroederSpatialExactNearSelected, true);
+  assert.equal(solver.schroederSpatialExactNearDirectoryBuildCount, 0);
+  assert.equal(solver.schroederSpatialExactNearPrivateParticleBinBuildCount, 0);
+  assert.equal(
+    solver.interfaceContactKinematicsDerivationStatus,
+    'interface-contact-kinematics-spatial-exact-near-submitted'
+  );
+  assert.equal(shared.releaseCalls.length, 0);
+});
+
 test('pressure/interface full-readback shared generation summarizes authoritative GPU force rows', async () => {
   const device = fakePressureDevice();
   const authoritativeForceRows = new Float32Array([
@@ -2166,11 +2218,13 @@ test('pressure/interface borrowed generation admission rejects torn identity fam
       name: 'active-node identity',
       expected: 'schroeder-spatial-exact-near-shared-generation-rejected-source',
       mutate({ source, device }) {
-        source.activeNodeBuffer = device.createBuffer({
+        const tornBuffer = device.createBuffer({
           label: 'test-torn-active-node-source',
           size: 2 * 16 * Float32Array.BYTES_PER_ELEMENT,
           usage: 128
         });
+        source.sourceBuffer = tornBuffer;
+        source.activeNodeBuffer = tornBuffer;
       }
     },
     {
@@ -2183,8 +2237,11 @@ test('pressure/interface borrowed generation admission rejects torn identity fam
           size: 2 * 16 * Float32Array.BYTES_PER_ELEMENT,
           usage: 128
         }), device);
+        source.sourceBuffer = tornBuffer;
         source.activeNodeBuffer = tornBuffer;
+        exactNearQueryProfile.sourceBuffer = tornBuffer;
         exactNearQueryProfile.activeNodeBuffer = tornBuffer;
+        spatialSource.sourceBuffer = tornBuffer;
         spatialSource.activeNodeBuffer = tornBuffer;
       }
     },

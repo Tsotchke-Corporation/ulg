@@ -51,6 +51,18 @@ and conductivity with provenance, and validate phase/steam onset from the
 energy ledger. This work must consume SS-owned spatial views rather than add a
 new private lookup.
 
+Current diagnostic addendum, 2026-07-16 AKDT: the iron/ice quench is melting
+thermodynamically but not flowing correctly. At `2.56 s`, retained Vulkan
+evidence contains about `232.08 kg` liquid H2O while liquid-contributing H2O
+peaks near `0.00749 m/s`; removing artificial viscosity and liquid diffusion
+does not restore motion. The root is the single shared MLS-MPM velocity per
+grid node, which averages fully liquid carriers together with overlapping ice
+and iron. A clean Slice 5 worktree reproduces the in-progress Slice 6 result
+exactly, so this is not a compact-tree regression. Route the repair through the
+existing SOL-3 separate solid/fluid mixed-cell contract and derive sparse
+`(node, field)` mechanics entries from the SS compact node topology. Do not add
+a water force, viscosity fudge, or another private grid.
+
 Current routing note, 2026-07-15 AKDT: arbitrary initial material setup routes
 through `plan/todo/dynamic-initial-material-bodies-plan.md`. The fixed base/drop
 controls are now a compatibility adapter, not the simulation authority. Stable

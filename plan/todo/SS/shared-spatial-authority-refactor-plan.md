@@ -282,6 +282,10 @@ never `particleCount * fixedBudget`.
 - Use compact active-node indirect dispatch to eliminate avoidable full-grid
   clears/finalizes where measured and safe.
 - Guard against ever treating compact node rows as particle-aligned rows.
+- Preserve enough deterministic node identity for a later derived
+  `(node, material/body/mechanical-field)` view. Slice 6 compacts topology; it
+  does not claim that the current single velocity field solves mixed
+  solid/liquid cells.
 
 ### Slice 7 - Two-level coupling and aggregate traversal
 
@@ -1009,6 +1013,82 @@ speed and minimum-`J` bounds, and cesium/fluorine product rows still outpace the
 retained reaction-event diagnostic. These are not hidden as passes and were
 not changed with per-material workarounds; they remain separate physics and
 diagnostic closure work after the shared spatial-authority migration.
+
+### Slice 6 - Compact mechanics-view implementation checkpoint, 2026-07-16
+
+The canonical spatial generation now derives one authenticated
+`ss-spatial-mechanics-view.v1` in the same caller-owned encoder as the spatial
+directory. A GPU bitset, fixed exclusive scan, and scatter produce a strictly
+ascending unique list of dense MLS-MPM node indices touched by the exact
+clipped 3 x 3 x 3 particle stencil. The view has its own evidence/header,
+capacity, source-layout, generation, owner, grid-geometry, count, and indirect-
+dispatch contract. It remains structurally distinct from particle rows and
+borrows the exact level-assignment source/state and directory generation that
+created it. Three resident arenas are queue-fenced and backpressure is
+fail-closed; no per-encode GPU buffer allocation is permitted after warmup.
+
+Canonical fused mechanics consumes the view without a host count readback.
+Compact indirect dispatch drives node validation, accumulator clear, P2G
+finalization, and grid update; P2G and G2P remain particle-parallel. The fused
+path encodes 14 dispatches: six ordered one-workgroup authentication stages,
+one compact-node validation stage, four mechanics stages, one proposal-apply
+stage, and one authority finalizer. Two copies stage the view's indirect
+arguments because WebGPU does not permit one writable storage binding to alias
+the indirect-dispatch source in the same submission. Missing indirect dispatch
+support, a torn identity, corrupt node order/range, stale source state, or any
+capacity/layout mismatch zeros later indirect work and fails closed before a
+partial authoritative mechanics result can be published.
+
+The six small authentication entry points are intentional. The original
+single large preflight shader reproducibly destroyed the Dawn/Vulkan instance
+on this system while compiling its combined unsigned-product overflow
+expression. Splitting the same ordered checks into header, owner, epoch, grid,
+topology, and dispatch stages avoids the driver/compiler failure. Exact host
+admission authenticates the grid product; the GPU stages authenticate the same
+grid tuple, buffer bounds, offsets, counts, layouts, ownership, epochs, and
+dispatch arguments. A four-step live SS run now advances cleanly with no
+device loss or release failure; evidence is in
+`/tmp/ulg-slice6-backpressure-fixed-final-4steps.json`.
+
+Native manufactured evidence is green: the compact-view probe passes all
+`10/10` checks, including CPU/GPU node-set parity, permutation determinism,
+strict ordering, zero-selected dispatch, corrupt-directory fail-close, and
+zero encode-time allocation. The full spatial-epoch probe passes `36/36`.
+Repository verification passes `1,384/1,387` with zero failures and the same
+three opt-in skips, and the production build passes with only its existing
+large-chunk warning. The SS smoke benchmark at
+`/tmp/ulg-slice6-performance-smoke.json` passes its suite gate at about
+`101.33` complete-engine steps/s for the realized 1,024-particle target
+(`270.27` resident-stage steps/s). Its scene probe still reports the existing
+initial-preflight diagnostic blocker, so it is throughput evidence rather than
+a visual-physics acceptance claim.
+
+Desktop/mobile visual artifacts under `/tmp/ulg-slice6-live-visual` are runtime
+clean and prove canonical compact indirect dispatch plus clean generation
+release. They do not expose the live compact node count without a readback;
+telemetry therefore reports a conservative full-capacity workgroup upper bound
+and must not be cited as measured compaction. Direct inspection rejects the
+physics: iron/ice lacks separable meltwater and later explodes, water-cycle is
+cohesive/scalloped, sodium/water lacks a visible energetic reaction, and
+fluorine collapses into floor-bound chains.
+
+The final pressure/interface review also closed a host-admission mismatch:
+the consumer now authenticates source-row layout 1 as
+`schroeder-level-assignment-particles` and layout 2 as
+`schroeder-active-node-particles` instead of hard-coding the latter. An
+integrated layout-1 borrowed-generation pressure test proves the live Slice 6
+source remains selected without a private rebuild.
+
+This slice reduces full-grid node work, but it does not yet reduce every
+full-sized mechanics allocation, materialize sparse material/body fields, or
+remove legacy active-node rows retained by other source families. Do not claim
+memory-initialization savings until those buffers are compacted and measured.
+The iron/ice visual audit also proves the compact view is not a melt-flow fix:
+phase change proceeds numerically, then the one shared node velocity locks
+liquid water to overlapping ice/iron and eventually destabilizes. Sparse
+`(node, material/body/mechanical-field)` state and continuous phase-volume
+transfer are therefore a blocking mechanics closure before two-level
+coupling, not a reason to restore the deleted pseudo-active topology.
 
 ## Visual-Physics Restoration Checkpoint Before Slice 3
 

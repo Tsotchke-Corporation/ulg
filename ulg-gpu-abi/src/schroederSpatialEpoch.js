@@ -1,3 +1,8 @@
+import {
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+} from './schroederSpatialMechanicsView.js';
+
 export const ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch.v1';
 export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA =
@@ -411,6 +416,7 @@ export function createSchroederSpatialEpochLayout({
 export function createSchroederSpatialEpochBuildPlan({
   sourceCount,
   sourceCapacity,
+  sourceRowLayoutId = SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
   cellCapacity = sourceCapacity,
   sortMode = 'bounded-atlas-u32',
   atlas = null,
@@ -433,6 +439,17 @@ export function createSchroederSpatialEpochBuildPlan({
 } = {}) {
   const layout = createSchroederSpatialEpochLayout({ sourceCapacity, cellCapacity });
   const resolvedSourceCount = nonNegativeInteger(sourceCount, 'sourceCount', layout.sourceCapacity);
+  const resolvedSourceRowLayoutId = positiveInteger(
+    sourceRowLayoutId,
+    'sourceRowLayoutId',
+    SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0
+  );
+  if (
+    resolvedSourceRowLayoutId !== SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    && resolvedSourceRowLayoutId !== SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0
+  ) {
+    throw new RangeError('sourceRowLayoutId is not a supported spatial source-row layout');
+  }
   const queryGeometryEvidence = normalizeExactNearQueryProfile(
     exactNearQueryProfile,
     resolvedSourceCount
@@ -462,6 +479,8 @@ export function createSchroederSpatialEpochBuildPlan({
     schema: ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
     status: 'schroeder-spatial-epoch-build-plan-ready',
     sourceCount: resolvedSourceCount,
+    sourceRowLayoutId: resolvedSourceRowLayoutId,
+    sourceRowStrideFloats: 16,
     sourceCapacity: layout.sourceCapacity,
     cellCapacity: layout.cellCapacity,
     exactKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,

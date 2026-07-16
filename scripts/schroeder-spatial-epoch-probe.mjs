@@ -72,7 +72,7 @@ function decodeCase(result, name) {
     particleToCell: words.slice(reverseOffset, reverseOffset + header[HEADER.sourceCount]),
     queryEvidence: words.slice(
       reverseOffset + header[HEADER.sourceCount],
-      reverseOffset + header[HEADER.sourceCount] + 4
+      reverseOffset + header[HEADER.sourceCount] + 6
     )
   };
 }
@@ -120,7 +120,7 @@ function evaluateChecks(raw) {
       && bounded.header[HEADER.cellCapacity] === 8],
     ['bounded-evidence-words', bounded.header[HEADER.logicalRequiredWords] === 101
       && bounded.header[HEADER.logicalAdmittedWords] === 101
-      && bounded.header[HEADER.directoryCapacityWords] === 117
+      && bounded.header[HEADER.directoryCapacityWords] === 119
       && bounded.header[HEADER.physicalAddressUpperBoundWords] === 113
       && bounded.header[HEADER.clearedWords] === 67],
     ['bounded-sort-mode', bounded.header[HEADER.exactKeyWordCount] === 5
@@ -164,9 +164,12 @@ function evaluateChecks(raw) {
     ['query-profile-authenticated', queryAuthenticated.header[HEADER.status] === 3
       && queryAuthenticated.header[HEADER.sourceAdapter] === 2
       && queryAuthenticated.header[HEADER.cellCount] === 5
-      && queryAuthenticated.header[HEADER.logicalRequiredWords] === 99
-      && queryAuthenticated.header[HEADER.physicalAddressUpperBoundWords] === 117
-      && equalArray(queryAuthenticated.queryEvidence, [0, 0xffff_ffff, 0, 0x3f00_0000])],
+      && queryAuthenticated.header[HEADER.logicalRequiredWords] === 101
+      && queryAuthenticated.header[HEADER.physicalAddressUpperBoundWords] === 119
+      && equalArray(
+        queryAuthenticated.queryEvidence,
+        [0, 0xffff_ffff, 0, 0x3f00_0000, 3, 0]
+      )],
     ['boundary-4097-multilevel-csr', boundary4097.header[HEADER.status] === 3
       && boundary4097.header[HEADER.sourceCount] === 4097
       && boundary4097.header[HEADER.cellCount] === 4097

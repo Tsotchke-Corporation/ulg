@@ -1,6 +1,8 @@
 import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
   MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
@@ -11,9 +13,29 @@ import {
 import { mlsMpmGridUpdateWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
-import { MLS_MPM_GPU_GRID_NODE_FLOATS } from './sphGridGpuKernel.js';
+import {
+  MLS_MPM_GPU_GRID_NODE_FLOATS,
+  MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
+  MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+  validateLocallySubmittedMlsMpmMechanicsFieldP2g
+} from './sphGridGpuKernel.js';
+import {
+  claimSchroederFusedCoarseTerminalStageProducer,
+  claimSchroederFusedFineSubstepStageProducer,
+  markSchroederFusedCoarseTerminalStageSubmissionObserved,
+  markSchroederFusedCoarseTerminalStageSubmitted,
+  markSchroederFusedFineSubstepStageSubmissionObserved,
+  markSchroederFusedFineSubstepStageSubmitted,
+  quarantineSchroederFusedCoarseTerminalTransaction,
+  quarantineSchroederFusedFineSubstepTransaction,
+  releaseSchroederFusedCoarseTerminalStageProducer,
+  releaseSchroederFusedFineSubstepStageProducer,
+  validateSchroederFusedCoarseTerminalTransaction,
+  validateSchroederFusedFineSubstepTransaction
+} from './schroederFusedFineSubstepGpu.js';
 import {
   typedArrayContentFingerprint,
+  webGpuBufferMatchesDevice,
   webGpuBufferDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
@@ -43,6 +65,7 @@ const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  INDIRECT: globalThis.GPUBufferUsage?.INDIRECT ?? 256,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
@@ -62,6 +85,7 @@ const DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M = 0;
 const DEFAULT_WALL_BARRIER_CONTACT_SCALE = 1;
 const DEFAULT_WALL_BARRIER_MIN_GAP_M = 1e-6;
 const ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA = 'peercompute.ulg.algorithm-material-contact-rows.v0';
+const mechanicsFieldGridUpdateOrigins = new WeakMap();
 const PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES = new Set([
   'apply-to-mls-mpm-grid',
   'pressure-interface-grid-force-consumer-approved'
@@ -90,6 +114,260 @@ function clamp01(value) {
   if (number <= 0) return 0;
   if (number >= 1) return 1;
   return number;
+}
+
+function exactArrayMatches(value, expected) {
+  return Array.isArray(value)
+    && value.length === expected.length
+    && expected.every((entry, index) => Object.is(value[index], entry));
+}
+
+function mechanicsFieldGridUpdateMatchesOrigin(update, origin, {
+  sourceProjection = null,
+  fieldExecution = null,
+  transaction = null,
+  terminalTransaction = null,
+  macroAuthority = null,
+  microepochAuthority = null,
+  particleContinuation = null,
+  mutationSegment = null,
+  priorArtifact = null,
+  requireDeferred = null,
+  proposalMode = null
+} = {}) {
+  const receipt = update?.mechanicsFieldEnergyReceipt ?? null;
+  const fine = origin?.transactionMode === 'fine';
+  const terminal = origin?.transactionMode === 'coarse-terminal';
+  return Boolean(
+    origin
+    && update === origin.update
+    && update?.schema === ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA
+    && update?.backend === 'webgpu'
+    && update?.status === 'submitted-unverified'
+    && update?.sourceProjection === origin.sourceProjection
+    && (sourceProjection == null || sourceProjection === origin.sourceProjection)
+    && update?.mechanicsFieldViewExecution === origin.fieldExecution
+    && (fieldExecution == null || fieldExecution === origin.fieldExecution)
+    && update?.mechanicsFieldViewBuffer === origin.fieldBuffer
+    && update?.mechanicsFieldViewByteLength === origin.fieldByteLength
+    && update?.mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+    && update?.mechanicsFieldViewEnabled === true
+    && update?.gridStateAuthority
+      === 'schroeder-spatial-mechanics-field-view-v1'
+    && update?.denseGridAuthoritative === false
+    && update?.fieldStateUpdateSubmittedInPlace === true
+    && update?.fieldStateUpdatedInPlace === false
+    && update?.mechanicsFieldMutationInputOrdinal === origin.inputOrdinal
+    && update?.mechanicsFieldMutationOutputOrdinal === origin.outputOrdinal
+    && update?.mechanicsFieldMutationInputStateEncoding === origin.inputEncoding
+    && update?.mechanicsFieldMutationOutputStateEncoding === origin.outputEncoding
+    && receipt === origin.receipt
+    && receipt?.schema
+      === 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2'
+    && receipt?.status === origin.receiptStatus
+    && receipt?.deferSeal === origin.deferSeal
+    && receipt?.fieldMutationOrdinal === origin.outputOrdinal
+    && (requireDeferred == null
+      || receipt.deferSeal === (requireDeferred === true))
+    && Object.is(update?.dt, origin.dt)
+    && exactArrayMatches(update?.gravityMPerS2, origin.gravity)
+    && exactArrayMatches(update?.boxDimsM, origin.box)
+    && Object.is(update?.cflFactor, origin.cflFactor)
+    && Object.is(update?.gridSpacingM, origin.gridSpacingM)
+    && exactArrayMatches(update?.gridDims, origin.gridDims)
+    && update?.gridNodeCount === origin.gridNodeCount
+    && update?.gridShift === origin.gridShift
+    && update?.readbackMode === NO_FULL_READBACK_MODE
+    && update?.fullReadbackPerformed === false
+    && update?.normalHotLoopReadbackFree === true
+    && (origin.transaction == null || (
+      (fine
+        ? update?.fusedFineSubstepTransaction === origin.transaction
+          && update?.fineMicroepochAuthority === origin.microepochAuthority
+          && update?.fusedCoarseTerminalTransaction == null
+        : terminal
+          ? update?.fusedCoarseTerminalTransaction === origin.transaction
+            && update?.terminalMicroepochAuthority === origin.microepochAuthority
+            && update?.fusedFineSubstepTransaction == null
+          : false)
+        && update?.sourceParticleContinuation === origin.particleContinuation
+        && update?.proposalMode === origin.proposalMode
+        && origin.transaction?.macroAuthority === origin.macroAuthority
+        && origin.transaction?.microepochAuthority === origin.microepochAuthority
+        && origin.transaction?.particleContinuation === origin.particleContinuation
+        && origin.canonicalGeneration === origin.microepochAuthority?.generation
+        && origin.transaction?.gridUpdateMutation === origin.mutationSegment
+        && Object.is(
+          origin.dt,
+          fine ? origin.macroAuthority?.fineDt : origin.macroAuthority?.macroDt
+        )
+        && Object.is(
+          origin.sourceProjection?.dt,
+          fine ? origin.macroAuthority?.fineDt : origin.macroAuthority?.macroDt
+        )
+        && origin.fieldExecution === (fine
+          ? origin.transaction?.fineFieldView
+          : origin.transaction?.coarseFieldView)
+        && origin.selectedLevel === (fine
+          ? origin.macroAuthority?.fineLevel
+          : origin.macroAuthority?.coarseLevel)
+        && origin.sourceProjection?.schroederLevelFilter?.selectedLevel
+          === origin.selectedLevel
+        && origin.proposalMode === 'proposal-deferred-to-post-mechanics'
+        && (fine
+          ? validateSchroederFusedFineSubstepTransaction(
+              origin.device,
+              origin.transaction,
+              {
+                macroAuthority: origin.macroAuthority,
+                microepochAuthority: origin.microepochAuthority,
+                particleContinuation: origin.particleContinuation
+              }
+            )
+          : validateSchroederFusedCoarseTerminalTransaction(
+              origin.device,
+              origin.transaction,
+              {
+                macroAuthority: origin.macroAuthority,
+                microepochAuthority: origin.microepochAuthority,
+                particleContinuation: origin.particleContinuation
+              }
+            ))
+        && validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+          origin.device,
+          origin.sourceProjection,
+          {
+            ...(fine
+              ? { transaction: origin.transaction }
+              : { terminalTransaction: origin.transaction }),
+            macroAuthority: origin.macroAuthority,
+            microepochAuthority: origin.microepochAuthority,
+            particleContinuation: origin.particleContinuation,
+            fieldExecution: origin.fieldExecution,
+            mutationSegment: origin.transaction.p2gMutation,
+            priorArtifact: null,
+            requireDeferred: true,
+            proposalMode: origin.proposalMode
+          }
+        )
+      ))
+    && (fine
+      ? (transaction == null || transaction === origin.transaction)
+        && terminalTransaction == null
+      : terminal
+        ? (terminalTransaction == null
+            || terminalTransaction === origin.transaction)
+          && transaction == null
+        : transaction == null && terminalTransaction == null)
+    && (macroAuthority == null || macroAuthority === origin.macroAuthority)
+    && (microepochAuthority == null
+      || microepochAuthority === origin.microepochAuthority)
+    && (particleContinuation == null
+      || particleContinuation === origin.particleContinuation)
+    && (mutationSegment == null || mutationSegment === origin.mutationSegment)
+    && (priorArtifact == null || priorArtifact === origin.sourceProjection)
+    && (proposalMode == null || proposalMode === origin.proposalMode)
+  );
+}
+
+export function validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate(
+  device,
+  update,
+  options = {}
+) {
+  const origin = update && mechanicsFieldGridUpdateOrigins.get(update);
+  return Boolean(
+    origin?.transaction
+    && origin.deviceId === webGpuDeviceId(device)
+    && mechanicsFieldGridUpdateMatchesOrigin(update, origin, options)
+  );
+}
+
+export function validateSubmittedMlsMpmMechanicsFieldGridUpdate(
+  device,
+  update,
+  options = {}
+) {
+  const localOrigin = update && mechanicsFieldGridUpdateOrigins.get(update);
+  return Boolean(
+    localOrigin?.deviceId === webGpuDeviceId(device)
+    && mechanicsFieldGridUpdateMatchesOrigin(update, localOrigin, options)
+  );
+}
+
+function registerSubmittedMechanicsFieldGridUpdate(
+  device,
+  update,
+  sourceProjection,
+  fieldExecution,
+  {
+    transaction = null,
+    transactionMode = 'fine',
+    particleContinuation = null,
+    mutationSegment = null
+  } = {}
+) {
+  const receipt = update.mechanicsFieldEnergyReceipt;
+  const origin = Object.freeze({
+    device,
+    deviceId: webGpuDeviceId(device),
+    update,
+    sourceProjection,
+    fieldExecution,
+    transaction,
+    transactionMode,
+    macroAuthority: transaction?.macroAuthority ?? null,
+    microepochAuthority: transaction?.microepochAuthority ?? null,
+    particleContinuation,
+    mutationSegment,
+    canonicalGeneration: transaction?.microepochAuthority?.generation ?? null,
+    selectedLevel:
+      sourceProjection?.schroederLevelFilter?.selectedLevel ?? null,
+    proposalMode: transaction == null
+      ? null
+      : 'proposal-deferred-to-post-mechanics',
+    fieldBuffer: update.mechanicsFieldViewBuffer,
+    fieldByteLength: update.mechanicsFieldViewByteLength,
+    inputOrdinal: update.mechanicsFieldMutationInputOrdinal,
+    outputOrdinal: update.mechanicsFieldMutationOutputOrdinal,
+    inputEncoding: update.mechanicsFieldMutationInputStateEncoding,
+    outputEncoding: update.mechanicsFieldMutationOutputStateEncoding,
+    receipt,
+    receiptStatus: receipt.status,
+    deferSeal: receipt.deferSeal,
+    dt: update.dt,
+    gravity: Object.freeze([...update.gravityMPerS2]),
+    box: Object.freeze([...update.boxDimsM]),
+    cflFactor: update.cflFactor,
+    gridSpacingM: update.gridSpacingM,
+    gridDims: Object.freeze([...update.gridDims]),
+    gridNodeCount: update.gridNodeCount,
+    gridShift: update.gridShift
+  });
+  if (transaction != null && !mechanicsFieldGridUpdateMatchesOrigin(
+    update,
+    origin,
+    {
+      sourceProjection,
+      fieldExecution,
+      ...(transactionMode === 'coarse-terminal'
+        ? { terminalTransaction: transaction }
+        : { transaction }),
+      macroAuthority: transaction.macroAuthority,
+      microepochAuthority: transaction.microepochAuthority,
+      particleContinuation,
+      mutationSegment,
+      priorArtifact: sourceProjection,
+      requireDeferred: true,
+      proposalMode: 'proposal-deferred-to-post-mechanics'
+    }
+  )) {
+    throw new TypeError(
+      'submitted mechanics-field grid update does not match its exact fused producer inputs'
+    );
+  }
+  mechanicsFieldGridUpdateOrigins.set(update, origin);
+  return update;
 }
 
 export function mlsMpmWallBarrierContactResponse({
@@ -438,6 +716,26 @@ function outputEnvelope({
     queueCompletionMethod,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
+    mechanicsFieldMode:
+      p2gGridProjection.mechanicsFieldMode
+        ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
+    mechanicsFieldViewEnabled:
+      p2gGridProjection.mechanicsFieldViewEnabled === true,
+    mechanicsFieldViewExecution:
+      p2gGridProjection.mechanicsFieldViewExecution ?? null,
+    mechanicsFieldViewBuffer:
+      p2gGridProjection.mechanicsFieldViewBuffer
+        ?? p2gGridProjection.mechanicsFieldView
+        ?? null,
+    mechanicsFieldViewByteLength:
+      p2gGridProjection.mechanicsFieldViewByteLength ?? 0,
+    mechanicsFieldViewOwned: false,
+    gridStateAuthority:
+      p2gGridProjection.gridStateAuthority ?? 'dense-mls-mpm-grid-state',
+    denseGridAuthoritative:
+      p2gGridProjection.denseGridAuthoritative !== false,
+    fieldStateUpdatedInPlace: false,
+    fieldStateUpdateSubmittedInPlace: false,
     p2gProjectionValidation: false,
     stressProjectionValidation: false,
     gridUpdateValidation: false,
@@ -1025,7 +1323,9 @@ function createGridUpdateParamsArray({
   pressureInterfaceForceRowCount = 0,
   wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
-  wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M
+  wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
+  mechanicsFieldMutation = null,
+  mechanicsFieldReceiptModeFlags = null
 }) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
@@ -1035,7 +1335,21 @@ function createGridUpdateParamsArray({
   view.setUint32(8, gridDims[1] ?? 1, true);
   view.setUint32(12, gridDims[2] ?? 1, true);
   view.setUint32(16, p2gGridProjection.gridShift ?? 1, true);
-  view.setUint32(20, pressureInterfaceForceRowCount, true);
+  view.setUint32(
+    20,
+    mechanicsFieldReceiptModeFlags == null
+      ? pressureInterfaceForceRowCount
+      : (Number(mechanicsFieldReceiptModeFlags) >>> 0),
+    true
+  );
+  view.setUint32(24, Math.max(0, Math.round(finiteNumber(
+    mechanicsFieldMutation?.expectedOrdinal,
+    0
+  ))), true);
+  view.setUint32(28, Math.max(0, Math.round(finiteNumber(
+    mechanicsFieldMutation?.outputOrdinal,
+    0
+  ))), true);
   view.setFloat32(32, finiteNumber(p2gGridProjection.gridSpacingM, 0), true);
   view.setFloat32(36, dt, true);
   view.setFloat32(40, gravityMPerS2[0], true);
@@ -1064,6 +1378,665 @@ function pressureInterfaceAppliedImpulseFromRows(forceRows, forceRowCount, dtSec
   return impulse;
 }
 
+function fusedMechanicsFieldGridUpdateAdmission(
+  device,
+  {
+    p2gGridProjection,
+    transaction,
+    transactionMode,
+    fieldExecution,
+    dt
+  }
+) {
+  const fine = transactionMode === 'fine';
+  const terminal = transactionMode === 'coarse-terminal';
+  if (!transaction || (!fine && !terminal)) return false;
+  const macroAuthority = transaction.macroAuthority;
+  const microepochAuthority = transaction.microepochAuthority;
+  const particleContinuation = transaction.particleContinuation;
+  const expectedField = fine
+    ? transaction.fineFieldView
+    : transaction.coarseFieldView;
+  const expectedLevel = fine
+    ? macroAuthority?.fineLevel
+    : macroAuthority?.coarseLevel;
+  const expectedDt = fine
+    ? macroAuthority?.fineDt
+    : macroAuthority?.macroDt;
+  return Boolean(
+    expectedField === fieldExecution
+    && particleContinuation === p2gGridProjection?.sourceParticleContinuation
+    && microepochAuthority === (fine
+      ? p2gGridProjection?.fineMicroepochAuthority
+      : p2gGridProjection?.terminalMicroepochAuthority)
+    && transaction.proposalMode === 'proposal-deferred-to-post-mechanics'
+    && p2gGridProjection?.proposalMode
+      === 'proposal-deferred-to-post-mechanics'
+    && p2gGridProjection?.schroederLevelFilter?.selectedLevel === expectedLevel
+    && expectedField?.selectedLevel === expectedLevel
+    && Object.is(Number(dt), Number(expectedDt))
+    && Object.is(p2gGridProjection?.dt, expectedDt)
+    && (fine
+      ? validateSchroederFusedFineSubstepTransaction(
+          device,
+          transaction,
+          { stage: 'grid-update', artifact: p2gGridProjection }
+        )
+      : validateSchroederFusedCoarseTerminalTransaction(
+          device,
+          transaction,
+          { stage: 'grid-update', artifact: p2gGridProjection }
+        ))
+    && validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      device,
+      p2gGridProjection,
+      {
+        ...(fine
+          ? { transaction }
+          : { terminalTransaction: transaction }),
+        macroAuthority,
+        microepochAuthority,
+        particleContinuation,
+        fieldExecution,
+        mutationSegment: transaction.p2gMutation,
+        priorArtifact: null,
+        requireDeferred: true,
+        proposalMode: 'proposal-deferred-to-post-mechanics'
+      }
+    )
+  );
+}
+
+async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
+  device,
+  p2gGridProjection,
+  p2gGridBuffer,
+  pressureInterfaceForceRowsBuffer,
+  pressureInterfaceForceSolver,
+  dt,
+  gravityMPerS2,
+  boxDimsM,
+  cflFactor,
+  wallBarrierElasticStiffnessNPerM,
+  wallBarrierMaterialBulkModulusPa,
+  wallBarrierMaterialShearModulusPa,
+  algorithmMaterialContactRows,
+  wallBarrierContactScale,
+  wallBarrierMinGapM,
+  mechanicsFieldEnergyReceipt,
+  fusedFineSubstepTransaction,
+  fusedCoarseTerminalTransaction,
+  fusedProducerCapability,
+  retainUpdatedGridBuffer,
+  readbackMode
+}) {
+  if (readbackMode !== NO_FULL_READBACK_MODE) {
+    throw new Error('Mechanics-field grid update supports resident no-full-readback execution only');
+  }
+  if (retainUpdatedGridBuffer || p2gGridBuffer) {
+    throw new Error(
+      'Mechanics-field grid update mutates the borrowed field in place and cannot publish a dense updated-grid buffer'
+    );
+  }
+  const fieldExecution = p2gGridProjection.mechanicsFieldViewExecution;
+  const fieldBuffer = p2gGridProjection.mechanicsFieldViewBuffer
+    ?? p2gGridProjection.mechanicsFieldView
+    ?? null;
+  let liveFieldExecution = false;
+  const fieldRuntime = fieldExecution?.ownerRuntime ?? null;
+  const fusedFineSubstep = fusedFineSubstepTransaction != null;
+  const fusedCoarseTerminal = fusedCoarseTerminalTransaction != null;
+  const fusedTransaction = fusedFineSubstepTransaction
+    ?? fusedCoarseTerminalTransaction;
+  const fusedTransactionMode = fusedFineSubstep
+    ? 'fine'
+    : fusedCoarseTerminal
+      ? 'coarse-terminal'
+      : null;
+  if (
+    typeof fieldRuntime?.reserveStateMutation !== 'function'
+    || typeof fieldRuntime?.markStateMutationSubmitted !== 'function'
+    || typeof fieldRuntime?.discardStateMutation !== 'function'
+    || typeof fieldRuntime?.quarantineStateMutation !== 'function'
+  ) {
+    throw new TypeError(
+      'Mechanics-field grid update needs exact mutable-field operation provenance'
+    );
+  }
+  const p2gMutationOrdinal =
+    p2gGridProjection.mechanicsFieldMutationOutputOrdinal;
+  const fusedTransactionAdmitted = fusedTransaction == null
+    || fusedMechanicsFieldGridUpdateAdmission(device, {
+      p2gGridProjection,
+      transaction: fusedTransaction,
+      transactionMode: fusedTransactionMode,
+      fieldExecution,
+      dt
+    });
+  try {
+    liveFieldExecution = Boolean(
+      fieldExecution
+      && fieldExecution.fieldViewBuffer === fieldBuffer
+      && fieldExecution.indirectDispatchBuffer === fieldBuffer
+      && fieldExecution.indirectDispatchOffsetBytes === 60 * Uint32Array.BYTES_PER_ELEMENT
+      && Number(fieldBuffer?.size ?? 0)
+        >= Number(p2gGridProjection.mechanicsFieldViewByteLength ?? 0)
+      && fieldExecution.ownerRuntime?.ownsExecution?.(fieldExecution) === true
+      && fieldExecution.ownerRuntime?.isExecutionSubmitted?.(fieldExecution) === true
+      && p2gGridProjection.mechanicsFieldMutationOutputStateEncoding
+        === SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
+      && (
+        fusedTransaction != null
+          ? fusedTransactionAdmitted
+            && fieldRuntime?.isStatePublicationLockActive?.(
+              fieldExecution,
+              fusedFineSubstep
+                ? fusedFineSubstepTransaction.publicationLock
+                : fusedCoarseTerminalTransaction.coarsePublicationLock
+            ) === true
+          : fieldRuntime?.isCurrentStateArtifact?.(fieldExecution, {
+              mutationOrdinal: p2gMutationOrdinal,
+              stateEncoding:
+                SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
+            }) === true
+      )
+    );
+  } catch {
+    liveFieldExecution = false;
+  }
+  if (
+    p2gGridProjection.mechanicsFieldViewEnabled !== true
+    || p2gGridProjection.mechanicsFieldMode
+      !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+    || p2gGridProjection.gridStateAuthority
+      !== 'schroeder-spatial-mechanics-field-view-v1'
+    || p2gGridProjection.denseGridAuthoritative !== false
+    || !fieldBuffer
+    || !webGpuBufferMatchesDevice(fieldBuffer, device)
+    || !liveFieldExecution
+  ) {
+    throw new TypeError(
+      'Mechanics-field grid update requires the exact live generation-owned field published by P2G'
+    );
+  }
+  const approvedPressureRows = pressureInterfaceForceSolverAllowsGridApplication(
+    pressureInterfaceForceSolver
+  )
+    ? pressureForceRowCountFromSolver(
+        pressureInterfaceForceSolver,
+        pressureForceRowsFromSolver(pressureInterfaceForceSolver)
+      )
+    : 0;
+  if (pressureInterfaceForceRowsBuffer || approvedPressureRows > 0) {
+    throw new Error(
+      'Mechanics-field grid update cannot consume dense pressure-interface rows'
+    );
+  }
+  const dtSeconds = finiteNumber(dt, 0);
+  const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
+  const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
+  const cfl = finiteNumber(cflFactor, DEFAULT_CFL_FACTOR);
+  const elasticStiffness = resolveWallBarrierElasticStiffness({
+    wallBarrierElasticStiffnessNPerM,
+    wallBarrierMaterialBulkModulusPa,
+    wallBarrierMaterialShearModulusPa,
+    supportLengthM: finiteNumber(p2gGridProjection.gridSpacingM, 0),
+    algorithmMaterialContactRows
+  });
+  const wallBarrierContact = createWallBarrierContactSummary({
+    status: 'wall-barrier-contact-submitted-unverified-mechanics-field',
+    wallBarrierElasticStiffnessNPerM: elasticStiffness.elasticNormalStiffnessNPerM,
+    elasticStiffnessSource: elasticStiffness.source,
+    materialPolicy: elasticStiffness.materialPolicy,
+    bulkModulusPa: elasticStiffness.bulkModulusPa,
+    shearModulusPa: elasticStiffness.shearModulusPa,
+    supportLengthM: elasticStiffness.supportLengthM,
+    wallBarrierContactScale: clamp01(wallBarrierContactScale),
+    wallBarrierMinGapM: Math.max(
+      1e-12,
+      Math.abs(finiteNumber(wallBarrierMinGapM, DEFAULT_WALL_BARRIER_MIN_GAP_M))
+    )
+  });
+  const receiptModeFlags = mechanicsFieldEnergyReceipt?.deferSeal === true ? 1 : 0;
+  const ownedBuffers = new Set();
+  const trackOwnedBuffer = (buffer) => {
+    if (buffer?.destroy) ownedBuffers.add(buffer);
+    return buffer;
+  };
+  const cleanupOwnedBuffers = () => {
+    for (let attempt = 0; attempt < 2 && ownedBuffers.size > 0; attempt += 1) {
+      for (const buffer of [...ownedBuffers]) {
+        try {
+          buffer.destroy?.();
+          ownedBuffers.delete(buffer);
+        } catch {
+          // Continue across the complete ledger and retry each failed
+          // destructor once without replacing the producer's error.
+        }
+      }
+    }
+  };
+  const scheduleOwnedBufferCleanup = () => {
+    if (!submitted) {
+      cleanupOwnedBuffers();
+      return;
+    }
+    try {
+      const fence = device.queue?.onSubmittedWorkDone?.();
+      if (!fence?.then) {
+        cleanupOwnedBuffers();
+      } else {
+        Promise.resolve(fence)
+          .catch(() => null)
+          .finally(cleanupOwnedBuffers);
+      }
+    } catch {
+      cleanupOwnedBuffers();
+    }
+  };
+  let paramsBuffer = null;
+  let indirectBuffer = null;
+  let submitted = false;
+  let mutationCommitted = false;
+  let mutationToken = null;
+  try {
+    paramsBuffer = trackOwnedBuffer(device.createBuffer({
+      label: 'ulg-mls-mpm-mechanics-field-grid-update-params',
+      size: 80,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    }));
+    indirectBuffer = trackOwnedBuffer(device.createBuffer({
+      label: 'ulg-mls-mpm-mechanics-field-grid-update-indirect',
+      size: 3 * Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.INDIRECT
+    }));
+    mutationToken = fusedTransaction != null
+      ? fusedTransaction.gridUpdateMutation
+      : fieldRuntime.reserveStateMutation(fieldExecution, {
+          expectedOrdinal: p2gMutationOrdinal,
+          expectedEncoding:
+            SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+          outputEncoding:
+            SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
+          operation: 'grid-update-mass-velocity-gradient-submitted'
+        });
+    device.queue.writeBuffer(paramsBuffer, 0, createGridUpdateParamsArray({
+      p2gGridProjection,
+      dt: dtSeconds,
+      gravityMPerS2: gravity,
+      boxDimsM: dims,
+      cflFactor: cfl,
+      pressureInterfaceForceRowCount: 0,
+      wallBarrierElasticStiffnessNPerM: wallBarrierContact.wallBarrierElasticStiffnessNPerM,
+      wallBarrierContactScale: wallBarrierContact.wallBarrierContactScale,
+      wallBarrierMinGapM: wallBarrierContact.wallBarrierMinGapM,
+      mechanicsFieldMutation: mutationToken,
+      mechanicsFieldReceiptModeFlags: receiptModeFlags
+    }));
+    const { mlsMpmMechanicsFieldGridUpdateWgsl } = await import(
+      './sphMlsMpmGpuStep.js'
+    );
+    if (fusedTransaction != null && !fusedMechanicsFieldGridUpdateAdmission(
+      device,
+      {
+        p2gGridProjection,
+        transaction: fusedTransaction,
+        transactionMode: fusedTransactionMode,
+        fieldExecution,
+        dt
+      }
+    )) {
+      throw new Error(
+        'Fused grid update lost its exact pending transaction before submission'
+      );
+    }
+    const bindings = [
+      computeBufferBinding(0, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const beginHeat = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-begin-heat.v2',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field-begin-heat',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'begin_heat_receipt',
+      bindings
+    });
+    const clearHeat = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-clear-heat.v2',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field-clear-heat',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'clear_heat_rows',
+      bindings
+    });
+    const buildHeat = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-build-heat.v2',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field-build-heat',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'begin_heat_build',
+      bindings
+    });
+    const main = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field.v2',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const claim = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-claim.v3',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field-claim',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'claim_velocity_state',
+      bindings
+    });
+    const contact = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-contact.v2',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field-contact',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'contact_fields',
+      bindings
+    });
+    const summarizeHeat = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-summarize-heat.v2',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field-summarize-heat',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'summarize_heat_rows',
+      bindings
+    });
+    const seal = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-seal-velocity.v2',
+      label: 'ulg-mls-mpm-grid-update-mechanics-field-seal-velocity',
+      code: mlsMpmMechanicsFieldGridUpdateWgsl,
+      entryPoint: 'seal_velocity_state',
+      bindings
+    });
+    const entries = [
+      { binding: 0, resource: { buffer: fieldBuffer } },
+      { binding: 2, resource: { buffer: paramsBuffer } }
+    ];
+    const mainBindGroup = device.createBindGroup({
+      layout: main.bindGroupLayout,
+      entries
+    });
+    const beginHeatBindGroup = device.createBindGroup({
+      layout: beginHeat.bindGroupLayout,
+      entries
+    });
+    const clearHeatBindGroup = device.createBindGroup({
+      layout: clearHeat.bindGroupLayout,
+      entries
+    });
+    const buildHeatBindGroup = device.createBindGroup({
+      layout: buildHeat.bindGroupLayout,
+      entries
+    });
+    const claimBindGroup = device.createBindGroup({
+      layout: claim.bindGroupLayout,
+      entries
+    });
+    const contactBindGroup = device.createBindGroup({
+      layout: contact.bindGroupLayout,
+      entries
+    });
+    const summarizeHeatBindGroup = device.createBindGroup({
+      layout: summarizeHeat.bindGroupLayout,
+      entries
+    });
+    const sealBindGroup = device.createBindGroup({
+      layout: seal.bindGroupLayout,
+      entries
+    });
+    const encoder = device.createCommandEncoder();
+    if (typeof encoder.copyBufferToBuffer !== 'function') {
+      throw new Error('Mechanics-field grid update requires indirect-dispatch staging');
+    }
+    encoder.copyBufferToBuffer(
+      fieldExecution.indirectDispatchBuffer,
+      fieldExecution.indirectDispatchOffsetBytes,
+      indirectBuffer,
+      0,
+      3 * Uint32Array.BYTES_PER_ELEMENT
+    );
+    const beginHeatPass = encoder.beginComputePass();
+    beginHeatPass.setPipeline(beginHeat.pipeline);
+    beginHeatPass.setBindGroup(0, beginHeatBindGroup);
+    beginHeatPass.dispatchWorkgroups(1);
+    beginHeatPass.end();
+    const clearHeatPass = encoder.beginComputePass();
+    clearHeatPass.setPipeline(clearHeat.pipeline);
+    clearHeatPass.setBindGroup(0, clearHeatBindGroup);
+    clearHeatPass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    clearHeatPass.end();
+    const buildHeatPass = encoder.beginComputePass();
+    buildHeatPass.setPipeline(buildHeat.pipeline);
+    buildHeatPass.setBindGroup(0, buildHeatBindGroup);
+    buildHeatPass.dispatchWorkgroups(1);
+    buildHeatPass.end();
+    const claimPass = encoder.beginComputePass();
+    claimPass.setPipeline(claim.pipeline);
+    claimPass.setBindGroup(0, claimBindGroup);
+    claimPass.dispatchWorkgroups(1);
+    claimPass.end();
+    const mainPass = encoder.beginComputePass();
+    mainPass.setPipeline(main.pipeline);
+    mainPass.setBindGroup(0, mainBindGroup);
+    mainPass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    mainPass.end();
+    const contactPass = encoder.beginComputePass();
+    contactPass.setPipeline(contact.pipeline);
+    contactPass.setBindGroup(0, contactBindGroup);
+    contactPass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    contactPass.end();
+    const summarizeHeatPass = encoder.beginComputePass();
+    summarizeHeatPass.setPipeline(summarizeHeat.pipeline);
+    summarizeHeatPass.setBindGroup(0, summarizeHeatBindGroup);
+    summarizeHeatPass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    summarizeHeatPass.end();
+    const sealPass = encoder.beginComputePass();
+    sealPass.setPipeline(seal.pipeline);
+    sealPass.setBindGroup(0, sealBindGroup);
+    sealPass.dispatchWorkgroups(1);
+    sealPass.end();
+    device.queue.submit([encoder.finish()]);
+    submitted = true;
+    if (fusedTransaction != null) {
+      if (fusedFineSubstep) {
+        markSchroederFusedFineSubstepStageSubmissionObserved(
+          device,
+          fusedFineSubstepTransaction,
+          {
+            stage: 'grid-update',
+            producerCapability: fusedProducerCapability
+          }
+        );
+      } else {
+        markSchroederFusedCoarseTerminalStageSubmissionObserved(
+          device,
+          fusedCoarseTerminalTransaction,
+          {
+            stage: 'grid-update',
+            producerCapability: fusedProducerCapability
+          }
+        );
+      }
+    }
+    const update = outputEnvelope({
+      backend: 'webgpu',
+      p2gGridProjection,
+      updatedGridNodes: new Float32Array(),
+      dt: dtSeconds,
+      gravityMPerS2: gravity,
+      boxDimsM: dims,
+      cflFactor: cfl,
+      pressureInterfaceForceSolver,
+      wallBarrierContact,
+      pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
+        pressureInterfaceForceSolver,
+        forceRowCount: 0,
+        applicationApproved: false,
+        impulseProofStatus: 'not-applicable-mechanics-field-grid-update'
+      }),
+      readbackMode: NO_FULL_READBACK_MODE,
+      queueCompletionStatus: device.queue?.onSubmittedWorkDone
+        ? 'queue-submitted-cleanup-deferred'
+        : 'queue-submitted-no-explicit-completion',
+      queueCompletionMethod: device.queue?.onSubmittedWorkDone
+        ? 'deferred queue.onSubmittedWorkDone cleanup'
+        : null
+    });
+    update.mechanicsFieldMode = MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED;
+    update.status = 'submitted-unverified';
+    update.fieldStateUpdateSubmittedInPlace = true;
+    update.fieldStateUpdatedInPlace = false;
+    update.mechanicsFieldEnergyReceipt = Object.freeze({
+      schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2',
+      status: receiptModeFlags === 0
+        ? 'energy-ready-submitted-unverified'
+        : 'heat-building-deferred-to-reflux-owner',
+      deferSeal: receiptModeFlags !== 0,
+      fieldMutationOrdinal: mutationToken.outputOrdinal
+    });
+    Object.defineProperty(update, 'sourceProjection', {
+      value: p2gGridProjection,
+      enumerable: true
+    });
+    update.mechanicsFieldMutationInputOrdinal = mutationToken.expectedOrdinal;
+    update.mechanicsFieldMutationOutputOrdinal = mutationToken.outputOrdinal;
+    update.mechanicsFieldMutationInputStateEncoding = mutationToken.expectedEncoding;
+    update.mechanicsFieldMutationOutputStateEncoding = mutationToken.outputEncoding;
+    if (fusedTransaction != null) {
+      const transactionProperty = fusedFineSubstep
+        ? 'fusedFineSubstepTransaction'
+        : 'fusedCoarseTerminalTransaction';
+      const microepochProperty = fusedFineSubstep
+        ? 'fineMicroepochAuthority'
+        : 'terminalMicroepochAuthority';
+      Object.defineProperties(update, {
+        [transactionProperty]: {
+          value: fusedTransaction,
+          enumerable: false,
+          configurable: false,
+          writable: false
+        },
+        [microepochProperty]: {
+          value: fusedTransaction.microepochAuthority,
+          enumerable: false,
+          configurable: false,
+          writable: false
+        },
+        sourceParticleContinuation: {
+          value: fusedTransaction.particleContinuation,
+          enumerable: false,
+          configurable: false,
+          writable: false
+        },
+        proposalMode: {
+          value: 'proposal-deferred-to-post-mechanics',
+          enumerable: false,
+          configurable: false,
+          writable: false
+        }
+      });
+    }
+    registerSubmittedMechanicsFieldGridUpdate(
+      device,
+      update,
+      p2gGridProjection,
+      fieldExecution,
+      fusedTransaction != null
+        ? {
+            transaction: fusedTransaction,
+            transactionMode: fusedTransactionMode,
+            particleContinuation: fusedTransaction.particleContinuation,
+            mutationSegment: mutationToken,
+          }
+        : {}
+    );
+    if (fusedTransaction != null) {
+      try {
+        if (fusedFineSubstep) {
+          markSchroederFusedFineSubstepStageSubmitted(
+            device,
+            fusedFineSubstepTransaction,
+            {
+              stage: 'grid-update',
+              artifact: update,
+              priorArtifact: p2gGridProjection,
+              producerCapability: fusedProducerCapability
+            }
+          );
+        } else {
+          markSchroederFusedCoarseTerminalStageSubmitted(
+            device,
+            fusedCoarseTerminalTransaction,
+            {
+              stage: 'grid-update',
+              artifact: update,
+              priorArtifact: p2gGridProjection,
+              producerCapability: fusedProducerCapability
+            }
+          );
+        }
+      } catch (error) {
+        mechanicsFieldGridUpdateOrigins.delete(update);
+        throw error;
+      }
+      mutationCommitted = true;
+    }
+    if (fusedTransaction == null) {
+      fieldRuntime.markStateMutationSubmitted(mutationToken);
+      mutationCommitted = true;
+    }
+    return update;
+  } finally {
+    if (fusedTransaction != null && submitted && !mutationCommitted) {
+      try {
+        const error = new Error(
+          'Grid-update submission completed before fused artifact publication'
+        );
+        if (fusedFineSubstep) {
+          quarantineSchroederFusedFineSubstepTransaction(
+            device,
+            fusedFineSubstepTransaction,
+            error
+          );
+        } else {
+          quarantineSchroederFusedCoarseTerminalTransaction(
+            device,
+            fusedCoarseTerminalTransaction,
+            error
+          );
+        }
+      } catch {
+        // Preserve the producer error. This invocation submitted GPU work, so
+        // the exact transaction is already observed or quarantined and cannot
+        // be safely retried.
+      }
+    }
+    if (mutationToken && !mutationCommitted && fusedTransaction == null) {
+      try {
+        if (submitted) {
+          fieldRuntime.quarantineStateMutation(mutationToken, {
+            submissionObserved: true,
+            reason: new Error(
+              'Grid-update submission completed before mechanics-field artifact publication'
+            )
+          });
+        } else {
+          fieldRuntime.discardStateMutation(
+            mutationToken,
+            { discardedEncoder: true }
+          );
+        }
+      } catch {
+        // Preserve the producer error. Submitted field state stays pending or
+        // quarantined and cannot be mistaken for a publishable artifact.
+      }
+    }
+    scheduleOwnedBufferCleanup();
+  }
+}
+
 export async function runMlsMpmGridUpdateWebGpu({
   device,
   p2gGridProjection,
@@ -1071,6 +2044,8 @@ export async function runMlsMpmGridUpdateWebGpu({
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
   pressureInterfaceGridForceAdmission = null,
+  mechanicsFieldMode = p2gGridProjection?.mechanicsFieldMode
+    ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
   dt = p2gGridProjection?.dt ?? 0,
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -1081,13 +2056,142 @@ export async function runMlsMpmGridUpdateWebGpu({
   algorithmMaterialContactRows = null,
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
+  mechanicsFieldEnergyReceipt = null,
+  fusedFineSubstepTransaction = null,
+  fusedCoarseTerminalTransaction = null,
   retainUpdatedGridBuffer = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmGridUpdateWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  if (fusedFineSubstepTransaction != null
+      && fusedCoarseTerminalTransaction != null) {
+    throw new TypeError(
+      'grid update accepts either a fused fine transaction or fused coarse-terminal transaction, never both'
+    );
+  }
   assertP2gGridProjection(p2gGridProjection);
+  if (
+    mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_DISABLED
+    && mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+  ) {
+    throw new RangeError(
+      `mechanicsFieldMode must be '${MLS_MPM_MECHANICS_FIELD_MODE_DISABLED}' or '${MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED}'`
+    );
+  }
+  if (
+    p2gGridProjection.mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+    && mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+  ) {
+    throw new Error(
+      'A required mechanics-field P2G artifact cannot be consumed through the dense grid-update mode'
+    );
+  }
+  if (mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED) {
+    if (p2gGridProjection.mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED) {
+      throw new Error(
+        'Required mechanics-field grid update needs an explicitly required upstream P2G artifact'
+      );
+    }
+    const fusedFineSubstep = fusedFineSubstepTransaction != null;
+    const fusedCoarseTerminal = fusedCoarseTerminalTransaction != null;
+    const fusedTransaction = fusedFineSubstepTransaction
+      ?? fusedCoarseTerminalTransaction;
+    const fusedTransactionMode = fusedFineSubstep
+      ? 'fine'
+      : fusedCoarseTerminal
+        ? 'coarse-terminal'
+        : null;
+    if (
+      fusedTransaction != null
+      && mechanicsFieldEnergyReceipt?.deferSeal !== true
+    ) {
+      throw new TypeError(
+        'Fused mechanics-field grid update requires deferred heat sealing for reflux ownership'
+      );
+    }
+    if (fusedTransaction != null && !fusedMechanicsFieldGridUpdateAdmission(
+      device,
+      {
+        p2gGridProjection,
+        transaction: fusedTransaction,
+        transactionMode: fusedTransactionMode,
+        fieldExecution: fusedFineSubstep
+          ? fusedTransaction.fineFieldView
+          : fusedTransaction.coarseFieldView,
+        dt
+      }
+    )) {
+      throw new TypeError(
+        'Fused mechanics-field grid update requires the exact locally submitted P2G artifact'
+      );
+    }
+    const fusedProducerCapability = fusedTransaction == null
+      ? null
+      : fusedFineSubstep
+        ? claimSchroederFusedFineSubstepStageProducer(
+            device,
+            fusedTransaction,
+            { stage: 'grid-update', priorArtifact: p2gGridProjection }
+          )
+        : claimSchroederFusedCoarseTerminalStageProducer(
+            device,
+            fusedTransaction,
+            { stage: 'grid-update', priorArtifact: p2gGridProjection }
+          );
+    try {
+      return await runMlsMpmMechanicsFieldGridUpdateWebGpu({
+        device,
+        p2gGridProjection,
+        p2gGridBuffer,
+        pressureInterfaceForceRowsBuffer,
+        pressureInterfaceForceSolver,
+        dt,
+        gravityMPerS2,
+        boxDimsM,
+        cflFactor,
+        wallBarrierElasticStiffnessNPerM,
+        wallBarrierMaterialBulkModulusPa,
+        wallBarrierMaterialShearModulusPa,
+        algorithmMaterialContactRows,
+        wallBarrierContactScale,
+        wallBarrierMinGapM,
+        mechanicsFieldEnergyReceipt,
+        fusedFineSubstepTransaction,
+        fusedCoarseTerminalTransaction,
+        fusedProducerCapability,
+        retainUpdatedGridBuffer,
+        readbackMode
+      });
+    } finally {
+      if (fusedProducerCapability != null) {
+        try {
+          if (fusedFineSubstep) {
+            releaseSchroederFusedFineSubstepStageProducer(
+              device,
+              fusedTransaction,
+              fusedProducerCapability
+            );
+          } else {
+            releaseSchroederFusedCoarseTerminalStageProducer(
+              device,
+              fusedTransaction,
+              fusedProducerCapability
+            );
+          }
+        } catch {
+          // Observed/submitted work consumes or quarantines the capability;
+          // only an unsubmitted producer is returned for an exact retry.
+        }
+      }
+    }
+  }
+  if (p2gGridProjection.mechanicsFieldViewEnabled === true) {
+    throw new Error(
+      'A mechanics-field P2G artifact must be consumed with mechanicsFieldMode required'
+    );
+  }
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -1425,6 +2529,34 @@ function executionFromUpdate(update, {
     queueCompletionMethod: update?.queueCompletionMethod ?? null,
     fullReadbackPerformed: update?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: update?.normalHotLoopReadbackFree ?? false,
+    mechanicsFieldMode:
+      update?.mechanicsFieldMode ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
+    mechanicsFieldViewEnabled:
+      update?.mechanicsFieldViewEnabled === true,
+    mechanicsFieldViewExecution:
+      update?.mechanicsFieldViewExecution ?? null,
+    mechanicsFieldViewBuffer:
+      update?.mechanicsFieldViewBuffer ?? null,
+    mechanicsFieldViewByteLength:
+      update?.mechanicsFieldViewByteLength ?? 0,
+    mechanicsFieldViewOwned: false,
+    gridStateAuthority:
+      update?.gridStateAuthority ?? 'dense-mls-mpm-grid-state',
+    denseGridAuthoritative:
+      update?.denseGridAuthoritative !== false,
+    fieldStateUpdatedInPlace:
+      update?.fieldStateUpdatedInPlace === true,
+    fieldStateUpdateSubmittedInPlace:
+      update?.fieldStateUpdateSubmittedInPlace === true,
+    sourceProjection: update?.sourceProjection ?? null,
+    mechanicsFieldMutationInputOrdinal:
+      update?.mechanicsFieldMutationInputOrdinal ?? null,
+    mechanicsFieldMutationOutputOrdinal:
+      update?.mechanicsFieldMutationOutputOrdinal ?? null,
+    mechanicsFieldMutationInputStateEncoding:
+      update?.mechanicsFieldMutationInputStateEncoding ?? null,
+    mechanicsFieldMutationOutputStateEncoding:
+      update?.mechanicsFieldMutationOutputStateEncoding ?? null,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -1456,6 +2588,8 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
   pressureInterfaceGridForceAdmission = null,
+  mechanicsFieldMode = p2gGridProjection?.mechanicsFieldMode
+    ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
   dt = p2gGridProjection?.dt ?? 0,
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -1466,6 +2600,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   algorithmMaterialContactRows = null,
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
+  fusedFineSubstepTransaction = null,
+  fusedCoarseTerminalTransaction = null,
+  mechanicsFieldEnergyReceipt = null,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -1477,6 +2614,16 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const mechanicsFieldRequired =
+    mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED;
+  if (
+    mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_DISABLED
+    && !mechanicsFieldRequired
+  ) {
+    throw new RangeError(
+      `mechanicsFieldMode must be '${MLS_MPM_MECHANICS_FIELD_MODE_DISABLED}' or '${MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED}'`
+    );
+  }
   let cpuReference = null;
   const getCpuReference = () => {
     if (!cpuReference) {
@@ -1499,6 +2646,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
     return cpuReference;
   };
   if (!preferWebGpu) {
+    if (mechanicsFieldRequired) {
+      throw new Error('Required mechanics-field grid update cannot use the CPU reference path');
+    }
     const reference = getCpuReference();
     return executionFromUpdate(reference, {
       cpuReference: reference,
@@ -1525,6 +2675,11 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       });
     }
     if (!resolvedDeviceResult.device) {
+      if (mechanicsFieldRequired) {
+        throw new Error(
+          resolvedDeviceResult.reason || 'Required mechanics-field grid update has no WebGPU device'
+        );
+      }
       const reference = getCpuReference();
       return executionFromUpdate(reference, {
         cpuReference: reference,
@@ -1537,6 +2692,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
     }
     await Promise.resolve();
     if (lostInfo) {
+      if (mechanicsFieldRequired) {
+        throw new Error(`Required mechanics-field grid update lost its device: ${describeDeviceLost(lostInfo)}`);
+      }
       const reference = getCpuReference();
       return executionFromUpdate(reference, {
         cpuReference: reference,
@@ -1554,6 +2712,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       pressureInterfaceForceRowsBuffer,
       pressureInterfaceForceSolver,
       pressureInterfaceGridForceAdmission,
+      mechanicsFieldMode,
       dt,
       gravityMPerS2,
       boxDimsM,
@@ -1564,12 +2723,18 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       algorithmMaterialContactRows,
       wallBarrierContactScale,
       wallBarrierMinGapM,
+      fusedFineSubstepTransaction,
+      fusedCoarseTerminalTransaction,
+      mechanicsFieldEnergyReceipt,
       retainUpdatedGridBuffer,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     await Promise.resolve();
     if (lostInfo) {
       gpuResult.destroyUpdatedGridBuffer?.();
+      if (mechanicsFieldRequired) {
+        throw new Error(`Required mechanics-field grid update lost its device: ${describeDeviceLost(lostInfo)}`);
+      }
       const reference = getCpuReference();
       return executionFromUpdate(reference, {
         cpuReference: reference,
@@ -1621,6 +2786,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       webgpuParity
     });
   } catch (error) {
+    if (mechanicsFieldRequired) throw error;
     const reference = getCpuReference();
     return executionFromUpdate(reference, {
       cpuReference: reference,

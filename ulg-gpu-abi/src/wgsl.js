@@ -1,3 +1,8 @@
+export {
+  schroederSpatialAggregateStacklessTraversalWgsl,
+  schroederSpatialAggregateViewWgsl
+} from './schroederSpatialAggregateViewWgsl.js';
+
 export const commonWgsl = `
 struct TensorDescriptor {
   offset_words: u32,
@@ -7514,35 +7519,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // per-particle static hydrostatic prestress (row7.x) is intentionally
       // NOT added: a depth-frozen pressure field becomes unbalanced as soon
       // as particles circulate and pumps energy into the liquid.
-      // On a vaporization plateau the growing gas fraction exerts its
-      // ideal-gas partial pressure so steam inflates gradually and buoyancy
-      // emerges from falling grid density.
+      // On a vaporization plateau the growing gas fraction exerts a reduced-
+      // speed isothermal gas pressure. row6.y is the material sound speed
+      // after the host's acoustic-CFL reduction, so admitted gas must use it
+      // just like every other packed EOS. Bypassing it with P_atm/rho_rest
+      // silently restored the physical sound speed and made the explicit
+      // mechanics step unstable.
       //
-      // Gauge ideal-gas partial pressure. The gas rest density is BY
-      // CONSTRUCTION the ideal-gas density at one standard atmosphere
-      // (rho_rest = P_atm*M/(R*T_pack)), so P_abs = rho*R_s*T =
-      // P_atm*(rho/rho_rest)*(T/T_pack). The temperature ratio is
-      // approximated at 1: particles sit near the temperature their gas
-      // phase row was packed at, and carrying per-material R_s would need a
-      // new material-record binding (frontier). Unlike the previous constant
-      // P_atm term this pressure DECAYS as the gas expands - a gas particle
-      // no longer does P*dV work at constant P forever (the energy pump
-      // behind the +/-150 m/s churn) - and it is measured relative to
-      // params.ambient_pressure_pa, so a uniform atmosphere exerts no net
-      // force on immersed bodies (Archimedes) and a solid cannot rest on a
-      // gas cushion in a vacuum box.
+      // rho_reference scales the standard-atmosphere rest density to the
+      // configured ambient pressure. This preserves zero gauge pressure at
+      // rho_rest under one atmosphere while making the stiffness c^2 and
+      // therefore convergent toward the physical EOS as dt is refined.
       let gas_fraction = clamp(thermo1.z, 0.0, 1.0);
-      let gas_density_ratio = density / max(thermo0.w, 1.0e-9);
-      let gas_partial_pressure = 101325.0 * gas_density_ratio - params.ambient_pressure_pa;
+      let gas_reference_density = thermo0.w * params.ambient_pressure_pa / 101325.0;
+      let gas_partial_pressure = row6.y * row6.y * (density - gas_reference_density);
       let packed_material_pressure = packed_pressure(density, thermo0.w, row6.y, row6.z);
       let gas_eos = row6.z > 1.5 && row6.z < 2.5;
-      // gasLinearized and the ideal-gas term are two closures for the same
-      // compressibility, not independent pressures.  Adding them made a pure
-      // gas parcel roughly (gamma + 1) times too stiff and turned a compact
-      // gas volume into a false spring under condensed matter.  Admitted gas
-      // particles use the ambient-referenced ideal-gas closure; the packed
-      // linearized branch remains available for positionless product-event
-      // sidecars that do not carry the ambient-pressure inputs yet.
+      // Admitted gas uses the ambient-referenced branch; the packed bounded
+      // branch remains available for positionless product-event sidecars that
+      // do not carry the ambient-pressure inputs yet.
       let pressure = params.internal_pressure_scale * select(
         packed_material_pressure,
         gas_fraction * gas_partial_pressure,
@@ -16397,6 +16392,7 @@ const SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE: u32 = 64u;
 const SCHROEDER_GRID_COUPLING_FLAG_ACCUMULATE: u32 = 1u;
 const SCHROEDER_GRID_COUPLING_FLAG_Z_FASTEST: u32 = 2u;
 const SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS: u32 = 4u;
+const SCHROEDER_GRID_COUPLING_FLAG_PRE_VELOCITY_GRID: u32 = 8u;
 
 fn schroeder_grid_axis_coords(index: u32, dims: vec3<u32>, flags: u32) -> vec3<u32> {
   if ((flags & SCHROEDER_GRID_COUPLING_FLAG_Z_FASTEST) != 0u) {
@@ -16419,20 +16415,18 @@ fn schroeder_grid_axis_index(coords: vec3<u32>, dims: vec3<u32>, flags: u32) -> 
   return coords.x + dims.x * (coords.y + dims.y * coords.z);
 }
 
-fn schroeder_fine_child_axis(coarse_axis: u32, child: u32, shift: i32) -> i32 {
-  return 2 * (i32(coarse_axis) - shift) + shift + i32(child);
+fn schroeder_fine_support_axis(coarse_axis: u32, offset: i32, shift: i32) -> i32 {
+  return 2 * (i32(coarse_axis) - shift) + shift + offset;
 }
 
-fn schroeder_coarse_parent_axis(fine_axis: u32, shift: i32, coarse_n: u32) -> u32 {
-  let logical = i32(fine_axis) - shift;
-  var parent = logical;
-  if (logical >= 0) {
-    parent = logical / 2;
-  } else {
-    parent = -((-logical + 1) / 2);
-  }
-  let indexed = parent + shift;
-  return u32(clamp(indexed, 0, i32(coarse_n) - 1));
+fn schroeder_coarse_interpolation_axis(fine_axis: u32, shift: i32) -> vec2<f32> {
+  let coordinate = f32(i32(fine_axis) - shift) * 0.5 + f32(shift);
+  let lower = floor(coordinate);
+  return vec2<f32>(lower, coordinate - lower);
+}
+
+fn schroeder_linear_axis_weight(offset: i32) -> f32 {
+  return select(0.5, 1.0, offset == 0);
 }
 `;
 
@@ -16456,21 +16450,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   var mass_kg = 0.0;
   var momentum = vec3<f32>(0.0, 0.0, 0.0);
-  for (var dz = 0u; dz < 2u; dz = dz + 1u) {
-    let fz = schroeder_fine_child_axis(coarse_coords.z, dz, params.grid_shift);
+  for (var dz = -1i; dz <= 1i; dz = dz + 1i) {
+    let fz = schroeder_fine_support_axis(coarse_coords.z, dz, params.grid_shift);
     if (fz < 0 || fz >= i32(fine_dims.z)) {
       continue;
     }
-    for (var dy = 0u; dy < 2u; dy = dy + 1u) {
-      let fy = schroeder_fine_child_axis(coarse_coords.y, dy, params.grid_shift);
+    let wz = schroeder_linear_axis_weight(dz);
+    for (var dy = -1i; dy <= 1i; dy = dy + 1i) {
+      let fy = schroeder_fine_support_axis(coarse_coords.y, dy, params.grid_shift);
       if (fy < 0 || fy >= i32(fine_dims.y)) {
         continue;
       }
-      for (var dx = 0u; dx < 2u; dx = dx + 1u) {
-        let fx = schroeder_fine_child_axis(coarse_coords.x, dx, params.grid_shift);
+      let wy = schroeder_linear_axis_weight(dy);
+      for (var dx = -1i; dx <= 1i; dx = dx + 1i) {
+        let fx = schroeder_fine_support_axis(coarse_coords.x, dx, params.grid_shift);
         if (fx < 0 || fx >= i32(fine_dims.x)) {
           continue;
         }
+        let weight = schroeder_linear_axis_weight(dx) * wy * wz;
         let fine_index = schroeder_grid_axis_index(
           vec3<u32>(u32(fx), u32(fy), u32(fz)),
           fine_dims,
@@ -16478,8 +16475,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
         let fine_offset = fine_index * stride;
         let node_mass = max(fine_grid[fine_offset], 0.0);
-        mass_kg = mass_kg + node_mass;
-        momentum = momentum + vec3<f32>(
+        mass_kg = mass_kg + weight * node_mass;
+        momentum = momentum + weight * vec3<f32>(
           fine_grid[fine_offset + 1u],
           fine_grid[fine_offset + 2u],
           fine_grid[fine_offset + 3u]
@@ -16517,6 +16514,40 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederSameGridMomentumAccumulationWgsl = `
+struct SchroederSameGridMomentumAccumulationParams {
+  node_count: u32,
+  grid_stride: u32,
+  flags: u32,
+  pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> source_grid: array<f32>;
+@group(0) @binding(1) var<storage, read_write> target_grid: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederSameGridMomentumAccumulationParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let node_index = global_id.x;
+  if (node_index >= params.node_count) { return; }
+  let stride = max(params.grid_stride, 8u);
+  let offset = node_index * stride;
+  let source_mass = max(source_grid[offset], 0.0);
+  if (!(source_mass > 0.0)) { return; }
+  let target_mass = max(target_grid[offset], 0.0);
+  target_grid[offset] = target_mass + source_mass;
+  target_grid[offset + 1u] = target_grid[offset + 1u] + source_grid[offset + 1u];
+  target_grid[offset + 2u] = target_grid[offset + 2u] + source_grid[offset + 2u];
+  target_grid[offset + 3u] = target_grid[offset + 3u] + source_grid[offset + 3u];
+  if (!(target_mass > 0.0)) {
+    target_grid[offset + 4u] = source_grid[offset + 4u];
+    target_grid[offset + 5u] = source_grid[offset + 5u];
+    target_grid[offset + 6u] = source_grid[offset + 6u];
+  }
+  target_grid[offset + 7u] = 1.0;
+}
+`;
+
 export const schroederCrossLevelGridProlongationWgsl = `${schroederCrossLevelGridCouplingSharedWgsl}
 @group(0) @binding(0) var<storage, read> coarse_grid: array<f32>;
 @group(0) @binding(1) var<storage, read_write> fine_grid: array<f32>;
@@ -16533,38 +16564,71 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   let stride = max(params.grid_stride, 8u);
   let fine_coords = schroeder_grid_axis_coords(fine_index, fine_dims, params.flags);
-  let coarse_coords = vec3<u32>(
-    schroeder_coarse_parent_axis(fine_coords.x, params.grid_shift, coarse_dims.x),
-    schroeder_coarse_parent_axis(fine_coords.y, params.grid_shift, coarse_dims.y),
-    schroeder_coarse_parent_axis(fine_coords.z, params.grid_shift, coarse_dims.z)
-  );
-  let coarse_index = schroeder_grid_axis_index(coarse_coords, coarse_dims, params.flags);
-  let coarse_offset = coarse_index * stride;
-  let coarse_mass = coarse_grid[coarse_offset];
-  if (coarse_mass <= 0.0) {
-    return;
-  }
+  let coarse_x = schroeder_coarse_interpolation_axis(fine_coords.x, params.grid_shift);
+  let coarse_y = schroeder_coarse_interpolation_axis(fine_coords.y, params.grid_shift);
+  let coarse_z = schroeder_coarse_interpolation_axis(fine_coords.z, params.grid_shift);
   let velocity_grids = (params.flags & SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS) != 0u;
-  var coarse_velocity = vec3<f32>(
-    coarse_grid[coarse_offset + 1u],
-    coarse_grid[coarse_offset + 2u],
-    coarse_grid[coarse_offset + 3u]
-  );
-  if (!velocity_grids) {
-    coarse_velocity = coarse_velocity / coarse_mass;
+  var interpolated_velocity = vec3<f32>(0.0);
+  var weight_sum = 0.0;
+  var complete = true;
+  for (var oz = 0u; oz < 2u; oz = oz + 1u) {
+    let cz = i32(coarse_z.x) + i32(oz);
+    let wz = select(1.0 - coarse_z.y, coarse_z.y, oz == 1u);
+    if (!(wz > 0.0)) { continue; }
+    for (var oy = 0u; oy < 2u; oy = oy + 1u) {
+      let cy = i32(coarse_y.x) + i32(oy);
+      let wy = select(1.0 - coarse_y.y, coarse_y.y, oy == 1u);
+      if (!(wy > 0.0)) { continue; }
+      for (var ox = 0u; ox < 2u; ox = ox + 1u) {
+        let cx = i32(coarse_x.x) + i32(ox);
+        let wx = select(1.0 - coarse_x.y, coarse_x.y, ox == 1u);
+        let weight = wx * wy * wz;
+        if (!(weight > 0.0)) { continue; }
+        if (
+          cx < 0 || cy < 0 || cz < 0
+          || cx >= i32(coarse_dims.x)
+          || cy >= i32(coarse_dims.y)
+          || cz >= i32(coarse_dims.z)
+        ) {
+          complete = false;
+          continue;
+        }
+        let coarse_index = schroeder_grid_axis_index(
+          vec3<u32>(u32(cx), u32(cy), u32(cz)),
+          coarse_dims,
+          params.flags
+        );
+        let coarse_offset = coarse_index * stride;
+        let coarse_mass = coarse_grid[coarse_offset];
+        if (!(coarse_mass > 0.0)) {
+          complete = false;
+          continue;
+        }
+        var parent_velocity = vec3<f32>(
+          coarse_grid[coarse_offset + 1u],
+          coarse_grid[coarse_offset + 2u],
+          coarse_grid[coarse_offset + 3u]
+        );
+        if (!velocity_grids) { parent_velocity = parent_velocity / coarse_mass; }
+        interpolated_velocity = interpolated_velocity + weight * parent_velocity;
+        weight_sum = weight_sum + weight;
+      }
+    }
+  }
+  if (!complete || abs(weight_sum - 1.0) > 0.000001) {
+    return;
   }
   let fine_offset = fine_index * stride;
   let fine_mass = max(fine_grid[fine_offset], 0.0);
+  if (!(fine_mass > 0.0)) { return; }
   if (velocity_grids) {
-    if (fine_mass > 0.0) {
-      fine_grid[fine_offset + 1u] = coarse_velocity.x;
-      fine_grid[fine_offset + 2u] = coarse_velocity.y;
-      fine_grid[fine_offset + 3u] = coarse_velocity.z;
-    }
+    fine_grid[fine_offset + 1u] = interpolated_velocity.x;
+    fine_grid[fine_offset + 2u] = interpolated_velocity.y;
+    fine_grid[fine_offset + 3u] = interpolated_velocity.z;
   } else {
-    fine_grid[fine_offset + 1u] = fine_mass * coarse_velocity.x;
-    fine_grid[fine_offset + 2u] = fine_mass * coarse_velocity.y;
-    fine_grid[fine_offset + 3u] = fine_mass * coarse_velocity.z;
+    fine_grid[fine_offset + 1u] = fine_mass * interpolated_velocity.x;
+    fine_grid[fine_offset + 2u] = fine_mass * interpolated_velocity.y;
+    fine_grid[fine_offset + 3u] = fine_mass * interpolated_velocity.z;
   }
 }
 `;
@@ -16687,11 +16751,10 @@ export const schroederCrossLevelGridVelocityDeltaProlongationWgsl = `${schroeder
 @group(0) @binding(3) var<uniform> params: SchroederCrossLevelGridCouplingParams;
 
 // Delta-form prolongation (AMR velocity correction): each massive fine node
-// receives the change in its parent's velocity across the coarse grid update,
-// fine_v += post_v(parent) - pre_v(parent). The pre grid is momentum-layout
-// (P2G output after restriction), the post grid is velocity-layout (grid
-// update output), and the fine grid is velocity-layout. A force-free field
-// produces exactly zero delta, so this transfer adds no error of its own.
+// receives a trilinear interpolation of the coarse velocity change. The same
+// dyadic basis is used by restriction, so complete supports preserve POU and
+// reproduce affine coarse corrections. Wall response is part of the coarse
+// target; no boundary-band early return is allowed to break the basis.
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let fine_index = global_id.x;
@@ -16707,68 +16770,77 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (fine_mass <= 0.0) {
     return;
   }
-  // Boundary ownership: wall/barrier response bands are one grid spacing
-  // wide per level, so the coarse band covers fine nodes the fine level
-  // already treated with its own (narrower, correct) boundary response.
-  // Skip the coarse delta inside that band; the fine level owns it.
-  let box_dims = vec3<f32>(params.box_x_m, params.box_y_m, params.box_z_m);
-  if (box_dims.x > 0.0 && box_dims.y > 0.0 && box_dims.z > 0.0) {
-    let node_pos = vec3<f32>(
-      fine_grid[fine_offset + 4u],
-      fine_grid[fine_offset + 5u],
-      fine_grid[fine_offset + 6u]
-    );
-    let coarse_spacing = params.fine_grid_spacing_m * 2.0;
-    if (node_pos.x < coarse_spacing || node_pos.x > box_dims.x - coarse_spacing
-      || node_pos.y < coarse_spacing || node_pos.y > box_dims.y - coarse_spacing
-      || node_pos.z < coarse_spacing || node_pos.z > box_dims.z - coarse_spacing) {
-      return;
-    }
-  }
   let fine_coords = schroeder_grid_axis_coords(fine_index, fine_dims, params.flags);
-  let coarse_coords = vec3<u32>(
-    schroeder_coarse_parent_axis(fine_coords.x, params.grid_shift, coarse_dims.x),
-    schroeder_coarse_parent_axis(fine_coords.y, params.grid_shift, coarse_dims.y),
-    schroeder_coarse_parent_axis(fine_coords.z, params.grid_shift, coarse_dims.z)
-  );
-  let coarse_offset = schroeder_grid_axis_index(coarse_coords, coarse_dims, params.flags) * stride;
-  let pre_mass = coarse_pre_grid[coarse_offset];
-  let post_mass = coarse_post_grid[coarse_offset];
-  if (pre_mass <= 0.0 || post_mass <= 0.0) {
-    return;
-  }
-  // Mass significance: the coarse grid update conserves node mass, so pre
-  // and post rows must describe the same matter. A relative mass mismatch
-  // (min/max below 1/2) means the two buffers are inconsistent (layout
-  // drift, stale snapshot) and no valid velocity delta exists here.
-  if (min(pre_mass, post_mass) < 0.5 * max(pre_mass, post_mass)) {
-    return;
-  }
-  var pre_velocity = vec3<f32>(
-    coarse_pre_grid[coarse_offset + 1u],
-    coarse_pre_grid[coarse_offset + 2u],
-    coarse_pre_grid[coarse_offset + 3u]
-  ) / pre_mass;
-  // P2G momentum carries fused stress impulses (dt * stress * grad w), so
-  // momentum/mass at a near-empty parent (a few gas particles) can exceed
-  // any velocity the solver itself would ever emit: impulse / tiny mass.
-  // The grid update clamps every velocity it produces to its CFL bound
-  // before anything consumes it; apply the identical clamp to this raw
-  // momentum read so pre and post velocities live in the same representable
-  // space. Without it the delta transfers the clamp difference (hundreds of
-  // m/s) into fine nodes and blasts tiny-mass cohorts apart.
+  let coarse_x = schroeder_coarse_interpolation_axis(fine_coords.x, params.grid_shift);
+  let coarse_y = schroeder_coarse_interpolation_axis(fine_coords.y, params.grid_shift);
+  let coarse_z = schroeder_coarse_interpolation_axis(fine_coords.z, params.grid_shift);
   let vmax = params.max_coarse_velocity_m_per_s;
-  if (vmax > 0.0) {
-    let pre_speed2 = dot(pre_velocity, pre_velocity);
-    if (pre_speed2 > vmax * vmax) {
-      pre_velocity = pre_velocity * (vmax / sqrt(pre_speed2));
+  var pre_velocity = vec3<f32>(0.0);
+  var post_velocity = vec3<f32>(0.0);
+  var weight_sum = 0.0;
+  var complete = true;
+  for (var oz = 0u; oz < 2u; oz = oz + 1u) {
+    let cz = i32(coarse_z.x) + i32(oz);
+    let wz = select(1.0 - coarse_z.y, coarse_z.y, oz == 1u);
+    if (!(wz > 0.0)) { continue; }
+    for (var oy = 0u; oy < 2u; oy = oy + 1u) {
+      let cy = i32(coarse_y.x) + i32(oy);
+      let wy = select(1.0 - coarse_y.y, coarse_y.y, oy == 1u);
+      if (!(wy > 0.0)) { continue; }
+      for (var ox = 0u; ox < 2u; ox = ox + 1u) {
+        let cx = i32(coarse_x.x) + i32(ox);
+        let wx = select(1.0 - coarse_x.y, coarse_x.y, ox == 1u);
+        let weight = wx * wy * wz;
+        if (!(weight > 0.0)) { continue; }
+        if (
+          cx < 0 || cy < 0 || cz < 0
+          || cx >= i32(coarse_dims.x)
+          || cy >= i32(coarse_dims.y)
+          || cz >= i32(coarse_dims.z)
+        ) {
+          complete = false;
+          continue;
+        }
+        let coarse_offset = schroeder_grid_axis_index(
+          vec3<u32>(u32(cx), u32(cy), u32(cz)),
+          coarse_dims,
+          params.flags
+        ) * stride;
+        let pre_mass = coarse_pre_grid[coarse_offset];
+        let post_mass = coarse_post_grid[coarse_offset];
+        if (
+          !(pre_mass > 0.0) || !(post_mass > 0.0)
+          || min(pre_mass, post_mass) < 0.5 * max(pre_mass, post_mass)
+        ) {
+          complete = false;
+          continue;
+        }
+        var parent_pre_velocity = vec3<f32>(
+          coarse_pre_grid[coarse_offset + 1u],
+          coarse_pre_grid[coarse_offset + 2u],
+          coarse_pre_grid[coarse_offset + 3u]
+        );
+        if ((params.flags & SCHROEDER_GRID_COUPLING_FLAG_PRE_VELOCITY_GRID) == 0u) {
+          parent_pre_velocity = parent_pre_velocity / pre_mass;
+        }
+        if (vmax > 0.0) {
+          let pre_speed2 = dot(parent_pre_velocity, parent_pre_velocity);
+          if (pre_speed2 > vmax * vmax) {
+            parent_pre_velocity = parent_pre_velocity * (vmax / sqrt(pre_speed2));
+          }
+        }
+        let parent_post_velocity = vec3<f32>(
+          coarse_post_grid[coarse_offset + 1u],
+          coarse_post_grid[coarse_offset + 2u],
+          coarse_post_grid[coarse_offset + 3u]
+        );
+        pre_velocity = pre_velocity + weight * parent_pre_velocity;
+        post_velocity = post_velocity + weight * parent_post_velocity;
+        weight_sum = weight_sum + weight;
+      }
     }
   }
-  let post_velocity = vec3<f32>(
-    coarse_post_grid[coarse_offset + 1u],
-    coarse_post_grid[coarse_offset + 2u],
-    coarse_post_grid[coarse_offset + 3u]
-  );
+  if (!complete || abs(weight_sum - 1.0) > 0.000001) { return; }
   // delta_scale supports subcycled fine substeps: each substep applies its
   // time-interpolated share of the coarse correction (scale 1/substeps),
   // summing to the full delta across the coarse step. Zero means 1.
@@ -16799,6 +16871,57 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   fine_grid[fine_offset + 3u] = fine_grid[fine_offset + 3u] + delta.z;
 }
 `;
+
+function schroederCompactHierarchyDispatchVariant(source, {
+  invocationKind,
+  hierarchyBinding,
+  paramsBinding
+}) {
+  const paramsDeclaration = `@group(0) @binding(${hierarchyBinding}) var<uniform> params: SchroederCrossLevelGridCouplingParams;`;
+  const replacementDeclaration = `@group(0) @binding(${hierarchyBinding}) var<storage, read> hierarchy_view: array<u32>;
+@group(0) @binding(${paramsBinding}) var<uniform> params: SchroederCrossLevelGridCouplingParams;`;
+  const compactIndexColumn = invocationKind == 'fine' ? '34u' : '35u';
+  const nodeOffsetColumn = invocationKind == 'fine' ? '48u' : '49u';
+  const denseName = invocationKind == 'fine' ? 'fine_index' : 'coarse_index';
+  const invocationMapping = `let compact_${invocationKind}_index = global_id.x;
+  let hierarchy_admitted = arrayLength(&hierarchy_view) >= 68u
+    && hierarchy_view[0u] == 0x53485631u
+    && hierarchy_view[1u] == 1u
+    && (hierarchy_view[2u] & 3u) == 3u
+    && hierarchy_view[18u] == params.fine_nx * params.fine_ny * params.fine_nz
+    && hierarchy_view[19u] == params.coarse_nx * params.coarse_ny * params.coarse_nz
+    && hierarchy_view[28u] == bitcast<u32>(params.fine_grid_spacing_m)
+    && hierarchy_view[29u] == bitcast<u32>(params.fine_grid_spacing_m * 2.0);
+  if (!hierarchy_admitted || compact_${invocationKind}_index >= hierarchy_view[${compactIndexColumn}]) {
+    return;
+  }
+  let compact_node_offset = hierarchy_view[${nodeOffsetColumn}];
+  if (compact_node_offset + compact_${invocationKind}_index >= arrayLength(&hierarchy_view)) {
+    return;
+  }
+  let ${denseName} = hierarchy_view[compact_node_offset + compact_${invocationKind}_index];`;
+  return source
+    .replace(paramsDeclaration, replacementDeclaration)
+    .replace(`let ${denseName} = global_id.x;`, invocationMapping);
+}
+
+export const schroederCrossLevelGridRestrictionCompactWgsl =
+  schroederCompactHierarchyDispatchVariant(
+    schroederCrossLevelGridRestrictionWgsl,
+    { invocationKind: 'coarse', hierarchyBinding: 2, paramsBinding: 3 }
+  );
+
+export const schroederCrossLevelGridProlongationCompactWgsl =
+  schroederCompactHierarchyDispatchVariant(
+    schroederCrossLevelGridProlongationWgsl,
+    { invocationKind: 'fine', hierarchyBinding: 2, paramsBinding: 3 }
+  );
+
+export const schroederCrossLevelGridVelocityDeltaProlongationCompactWgsl =
+  schroederCompactHierarchyDispatchVariant(
+    schroederCrossLevelGridVelocityDeltaProlongationWgsl,
+    { invocationKind: 'fine', hierarchyBinding: 3, paramsBinding: 4 }
+  );
 
 export const schroederParticleStorageCountSummaryWgsl = `
 struct SchroederParticleStorageCountSummaryParams {

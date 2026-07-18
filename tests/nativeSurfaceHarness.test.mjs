@@ -137,6 +137,35 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /gpuBufferHandoffReady,/);
 });
 
+test('GPU stage timestamps discard only an unsubmitted encoder allocation suffix', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const spatialSource = readRepoFile(
+    'src/runtime/sph/schroederSpatialEpochGpu.js'
+  );
+
+  assert.match(probeSource, /const encoderSpanTokens = new WeakMap\(\)/);
+  assert.match(
+    probeSource,
+    /discardEncoderSpans\(encoder\)[\s\S]*?spanSuffixOffset[\s\S]*?spans\[spanSuffixOffset \+ index\] !== token/
+  );
+  assert.match(
+    probeSource,
+    /token\.endEncoder !== null && token\.endEncoder !== encoder/
+  );
+  assert.match(
+    probeSource,
+    /queryIndices\.length !== nextQueryIndex - rollbackStart[\s\S]*?queryIndex !== rollbackStart \+ index/
+  );
+  assert.match(
+    probeSource,
+    /pendingTokens\.delete\(token\)[\s\S]*?spans\.splice\(spanSuffixOffset, encoderTokens\.length\)[\s\S]*?nextQueryIndex = rollbackStart/
+  );
+  assert.match(
+    spatialSource,
+    /!submissionPerformed[\s\S]*?generationEncoder[\s\S]*?gpuTimestampRecorder\.discardEncoderSpans\(generationEncoder\)/
+  );
+});
+
 test('native WebGPU probe batches primary and secondary indirect args into one checkpoint readback', () => {
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
   const evidenceSource = readRepoFile('scripts/sph-native-indirect-evidence.mjs');
@@ -566,6 +595,21 @@ test('performance benchmark reports Schroeder native render proxy telemetry', ()
   );
   assert.match(
     benchmarkSource,
+    /ULG_BENCH_SCHROEDER_TWO_LEVEL/,
+    'benchmark should expose an explicit two-level mechanics flag'
+  );
+  assert.match(
+    probeSource,
+    /twoLevelAuthoritativeStepCount/,
+    'long-horizon telemetry should count every authoritative two-level step'
+  );
+  assert.match(
+    probeSource,
+    /twoLevelMechanicsCoverageComplete/,
+    'long-horizon telemetry should fail closed on partial two-level coverage'
+  );
+  assert.match(
+    benchmarkSource,
     /schroederPortableSummaryRequested/,
     'benchmark should record whether portable summaries are enabled for the SS run'
   );
@@ -621,7 +665,7 @@ test('performance benchmark reports Schroeder native render proxy telemetry', ()
   );
   assert.match(
     benchmarkSource,
-    /schroederPhaseVolumeMigration:[\s\S]*?schroederPhaseVolumeMigrationRequested \? '1' : '0'/,
+    /phaseVolumeMigrationRequested = false[\s\S]*?schroederPhaseVolumeMigration: phaseVolumeMigrationRequested \? '1' : '0'/,
     'the transactional SS benchmark must make its phase-overlay compatibility profile explicit'
   );
   assert.match(

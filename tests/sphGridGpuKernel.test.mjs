@@ -4,9 +4,14 @@ import { mlsMpmP2gGridProjectionWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
-  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
   MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL,
@@ -23,8 +28,52 @@ import {
   resolveMlsMpmP2gBackendPolicy,
   runMlsMpmP2gGridProjectionWebGpu,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
-  runMlsMpmP2gGridProjectionWithOptionalWebGpu
+  runMlsMpmP2gGridProjectionWithOptionalWebGpu,
+  validateLocallySubmittedMlsMpmMechanicsFieldP2g
 } from '../src/runtime/sph/sphGridGpuKernel.js';
+import {
+  abortSchroederTwoLevelMacroAuthorityAfter,
+  claimSchroederFusedCoarseTerminalOutput,
+  createSchroederCanonicalParticleContinuation,
+  createSchroederFineMicroepochAuthority,
+  createSchroederFusedCoarseTerminalTransaction,
+  createSchroederFusedFineSubstepTransaction,
+  createSchroederTwoLevelMacroAuthority,
+  discardSchroederFusedCoarseTerminalTransaction,
+  discardSchroederFusedFineSubstepTransaction,
+  markSchroederFusedCoarseTerminalStageSubmissionObserved,
+  markSchroederFusedCoarseTerminalStageSubmitted,
+  quarantineSchroederFusedCoarseTerminalTransaction,
+  retireSchroederFineMicroepochAfter,
+  schroederFusedCoarseTerminalTransactionState,
+  schroederFusedFineSubstepTransactionState,
+  validateSchroederFineMicroepochAuthority,
+  validateSchroederFusedCoarseTerminalTransaction
+} from '../src/runtime/sph/schroederFusedFineSubstepGpu.js';
+import {
+  releaseSchroederSpatialEpochGenerationAfterQueue,
+  runSchroederSpatialEpochGenerationWebGpu
+} from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import {
+  runMlsMpmGridUpdateWebGpu,
+  validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate,
+  validateSubmittedMlsMpmMechanicsFieldGridUpdate
+} from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
+import {
+  claimLocallySubmittedMlsMpmFusedG2pOutputForContinuation,
+  runMlsMpmG2pWebGpu,
+  validateLocallySubmittedMlsMpmFusedG2p
+} from '../src/runtime/sph/sphG2pGpuKernel.js';
+import {
+  createSchroederCrossLevelRefluxLedgerGpu,
+  createSchroederSpatialParentFieldMechanicsWorkspaceGpu,
+  validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu,
+  validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu
+} from '../src/runtime/sph/schroederSpatialParentFieldMechanicsWorkspaceGpu.js';
+import {
+  destroyMlsMpmResidentStepBuffers,
+  runMlsMpmResidentStepWithOptionalWebGpu
+} from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 function nearlyEqual(actual, expected, tolerance = 1e-5) {
@@ -232,6 +281,14 @@ function fakeP2gDevice() {
     clears,
     submissions,
     shaderModules,
+    limits: {
+      maxBufferSize: 256 * 1024 * 1024,
+      maxStorageBufferBindingSize: 128 * 1024 * 1024,
+      maxUniformBufferBindingSize: 64 * 1024,
+      maxStorageBuffersPerShaderStage: 16,
+      maxComputeWorkgroupsPerDimension: 65535,
+      minUniformBufferOffsetAlignment: 256
+    },
     queue: {
       writeBuffer(buffer, offset, data) {
         const copy = data instanceof ArrayBuffer
@@ -295,6 +352,9 @@ function fakeP2gDevice() {
             setBindGroup() {},
             dispatchWorkgroups(x, y = 1, z = 1) {
               dispatches.push([x, y, z]);
+            },
+            dispatchWorkgroupsIndirect(buffer, offset = 0) {
+              dispatches.push(['indirect', buffer, offset]);
             },
             end() {}
           };
@@ -379,6 +439,727 @@ function canonicalSpatialEpochGenerationFixture(device, {
       layout: { byteLength: 256 }
     }
   };
+}
+
+function fusedP2gProducerFixture({
+  fineSubstepCount = 1,
+  createMacroAuthority: shouldCreateMacroAuthority = true
+} = {}) {
+  const device = fakeP2gDevice();
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers({
+    position: [0.5, 0.5, 0.5],
+    smoothingLengthM: 0.25,
+    mechanicsDtS: 0.005
+  });
+  const stateBuffer = device.createBuffer({
+    label: 'fused-p2g-state',
+    size: sphParticleState.state.byteLength,
+    usage: 128
+  });
+  const thermoBuffer = device.createBuffer({
+    label: 'fused-p2g-thermo',
+    size: sphParticleState.thermo.byteLength,
+    usage: 128
+  });
+  const identityBuffer = device.createBuffer({
+    label: 'fused-p2g-identity',
+    size: Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const mechanicsBuffer = device.createBuffer({
+    label: 'fused-p2g-mechanics',
+    size: mlsMpmParticleState.mechanics.byteLength,
+    usage: 128
+  });
+  const assignmentBuffer = device.createBuffer({
+    label: 'fused-p2g-assignment',
+    size: 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  for (const buffer of [
+    stateBuffer,
+    thermoBuffer,
+    identityBuffer,
+    mechanicsBuffer,
+    assignmentBuffer
+  ]) {
+    tagWebGpuBufferDevice(buffer, device);
+  }
+  const levelAssignment = {
+    schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount: 1,
+    assignmentStrideFloats: 16,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignmentBuffer.size,
+    sourceStateBuffer: stateBuffer,
+    sourceStateBufferBorrowed: true,
+    storageGeneration: 11,
+    physicsTick: 13,
+    physicsSubstep: 0,
+    positionEpoch: 17,
+    topologyEpoch: 19,
+    chartEpoch: 23,
+    levelEpoch: 29,
+    supportEpoch: 31,
+    minLevel: 0,
+    maxLevel: 1,
+    chartId: 0,
+    baseGridSpacingM: 0.25
+  };
+  const fineGrid = createMlsMpmGridSpec({
+    boxDimsM: [1, 1, 1],
+    gridSpacingM: 0.25
+  });
+  const coarseGrid = createMlsMpmGridSpec({
+    boxDimsM: [1, 1, 1],
+    gridSpacingM: 0.5
+  });
+  fineGrid.gridShift = fineGrid.shift;
+  coarseGrid.gridShift = coarseGrid.shift;
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: 1,
+    particleIdentityBuffer: identityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsLevels: [
+      { selectedLevel: 0, mechanicsGrid: fineGrid },
+      { selectedLevel: 1, mechanicsGrid: coarseGrid }
+    ]
+  });
+  assert.equal(
+    generation.ready,
+    true,
+    `${generation.status}: ${generation.reason ?? 'no reason'}`
+  );
+  assert.ok(generation.parentFieldView);
+  const sphParticleUpload = {
+    schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    particleCount: 1,
+    stateBuffer,
+    thermoBuffer,
+    identityBuffer,
+    stateStrideBytes: 8 * Float32Array.BYTES_PER_ELEMENT,
+    thermoStrideBytes: 12 * Float32Array.BYTES_PER_ELEMENT,
+    identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+    stateBufferByteLength: stateBuffer.size,
+    thermoBufferByteLength: thermoBuffer.size,
+    identityBufferByteLength: identityBuffer.size
+  };
+  const mlsMpmParticleUpload = {
+    schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    particleCount: 1,
+    mechanicsBuffer,
+    mechanicsStrideBytes:
+      MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT,
+    mechanicsBufferByteLength: mechanicsBuffer.size
+  };
+  const canonicalEpoch = {
+    generation,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  };
+  if (!shouldCreateMacroAuthority) {
+    return {
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      canonicalEpoch,
+      generation,
+      levelAssignment,
+      fineGrid,
+      coarseGrid,
+      macroAuthority: null,
+      microepochAuthority: null,
+      particleContinuation: null,
+      transaction: null,
+      refluxLedger: null,
+      fineSubstepCount,
+      fineDt: 0.005,
+      macroDt: Math.fround(0.005 * fineSubstepCount),
+      predictorThetaDt: 0.005
+    };
+  }
+  const refluxLedger = createSchroederCrossLevelRefluxLedgerGpu(device, {
+    parentFieldCapacity: generation.parentFieldView.parentFieldCapacity,
+    coarseFieldCapacity: generation.parentFieldView.coarseFieldCapacity,
+    completionOrdinal: generation.execution.generationId,
+    fineSubstepCount,
+    fineLevel: 0,
+    coarseLevel: 1,
+    coarseGridSpacingM:
+      generation.parentFieldView.coarseFieldView.gridSpacingM
+  });
+  const macroAuthority = createSchroederTwoLevelMacroAuthority({
+    device,
+    canonicalEpoch,
+    refluxLedger,
+    fineSubstepCount,
+    fineLevel: 0,
+    coarseLevel: 1,
+    fineDt: 0.005,
+    macroDt: Math.fround(0.005 * fineSubstepCount)
+  });
+  const particleContinuation = createSchroederCanonicalParticleContinuation({
+    device,
+    macroAuthority,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    ordinal: 0
+  });
+  const microepochAuthority = createSchroederFineMicroepochAuthority({
+    device,
+    macroAuthority,
+    canonicalEpoch,
+    particleContinuation,
+    substepOrdinal: 0
+  });
+  const transaction = createSchroederFusedFineSubstepTransaction({
+    device,
+    macroAuthority,
+    microepochAuthority,
+    particleContinuation,
+    substepOrdinal: 0
+  });
+  return {
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    canonicalEpoch,
+    generation,
+    levelAssignment,
+    fineGrid,
+    coarseGrid,
+    macroAuthority,
+    microepochAuthority,
+    particleContinuation,
+    transaction,
+    refluxLedger,
+    fineSubstepCount,
+    fineDt: 0.005,
+    macroDt: Math.fround(0.005 * fineSubstepCount),
+    predictorThetaDt: 0.005
+  };
+}
+
+function runFusedP2gProducer(
+  fixture,
+  sphParticleUpload = fixture.sphParticleUpload,
+  projectionDt = fixture.fineDt
+) {
+  return runMlsMpmP2gGridProjectionWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    canonicalParticleContinuation: fixture.particleContinuation,
+    fusedFineSubstepTransaction: fixture.transaction,
+    gridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1],
+    dt: projectionDt,
+    readbackMode: 'no-full-readback'
+  });
+}
+
+function runTerminalP2gProducer(fixture, {
+  transaction,
+  generation,
+  continuation,
+  sphParticleUpload,
+  mlsMpmParticleUpload
+}, overrides = {}) {
+  return runMlsMpmP2gGridProjectionWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederSelectedLevel: transaction.macroAuthority.coarseLevel,
+    schroederSpatialEpochGeneration: generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    canonicalParticleContinuation: continuation,
+    fusedCoarseTerminalTransaction: transaction,
+    gridSpacingM: transaction.coarseFieldView.gridSpacingM,
+    boxDimsM: [1, 1, 1],
+    dt: transaction.macroAuthority.macroDt,
+    readbackMode: 'no-full-readback',
+    ...overrides
+  });
+}
+
+function runFusedGridUpdateProducer(fixture, p2gProjection, overrides = {}) {
+  return runMlsMpmGridUpdateWebGpu({
+    device: fixture.device,
+    p2gGridProjection: p2gProjection,
+    mechanicsFieldMode: 'required',
+    fusedFineSubstepTransaction: fixture.transaction,
+    mechanicsFieldEnergyReceipt: { deferSeal: true },
+    dt: 0.005,
+    gravityMPerS2: [0, -9.80665, 0],
+    boxDimsM: [1, 1, 1],
+    cflFactor: 0.4,
+    readbackMode: 'no-full-readback',
+    ...overrides
+  });
+}
+
+function runCoarseP2gProducer(
+  fixture,
+  projectionDt = fixture.predictorThetaDt
+) {
+  return runMlsMpmP2gGridProjectionWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    schroederSelectedLevel: 1,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    gridSpacingM: 0.5,
+    boxDimsM: [1, 1, 1],
+    dt: projectionDt,
+    readbackMode: 'no-full-readback'
+  });
+}
+
+async function fusedFineCorrectionWorkspace(fixture) {
+  const fineProjection = await runFusedP2gProducer(fixture);
+  const coarseProjection = await runCoarseP2gProducer(fixture);
+  const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+    fixture.device,
+    {
+      parentFieldCapacity: fixture.generation.parentFieldView.parentFieldCapacity,
+      fineFieldCapacity: fixture.generation.parentFieldView.fineFieldCapacity,
+      arenaCount: 1
+    }
+  );
+  const predictorEncoder = fixture.device.createCommandEncoder();
+  const execution = runtime.encodePredictors(predictorEncoder, {
+    parentFieldView: fixture.generation.parentFieldView,
+    fineP2gProjection: fineProjection,
+    coarseP2gProjection: coarseProjection,
+    dt: fixture.predictorThetaDt,
+    fineDt: fixture.fineDt,
+    macroDt: fixture.macroDt,
+    fineSubstepOrdinal: 0,
+    fineSubstepCount: fixture.fineSubstepCount,
+    gravityMPerS2: [0, -9.80665, 0],
+    boxDimsM: [1, 1, 1],
+    refluxLedger: fixture.refluxLedger,
+    fusedFineSubstepTransaction: fixture.transaction
+  });
+  fixture.device.queue.submit([predictorEncoder.finish()]);
+  runtime.markPredictorsSubmitted(execution);
+  const gridUpdate = await runFusedGridUpdateProducer(fixture, fineProjection);
+  return {
+    runtime,
+    execution,
+    fineProjection,
+    coarseProjection,
+    gridUpdate
+  };
+}
+
+async function submittedFusedFineCorrection(fixture) {
+  const chain = await fusedFineCorrectionWorkspace(fixture);
+  const encoder = fixture.device.createCommandEncoder();
+  const correction = chain.runtime.encodeFineCorrection(
+    encoder,
+    chain.execution,
+    {
+      fineGridUpdate: chain.gridUpdate,
+      fusedFineSubstepTransaction: fixture.transaction
+    }
+  );
+  fixture.device.queue.submit([encoder.finish()]);
+  chain.runtime.markTerminalSubmissionObserved(chain.execution);
+  chain.runtime.markTerminalSubmitted(chain.execution);
+  return { ...chain, correction };
+}
+
+function runFusedG2pProducer(fixture, correction, overrides = {}) {
+  return runMlsMpmG2pWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    gridUpdate: correction,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    dt: fixture.fineDt,
+    boxDimsM: [1, 1, 1],
+    internalPressureScale: correction.sourceProjection.internalPressureScale,
+    liquidWallDampingAlpha: 0,
+    liquidWallDampingDistanceM: 0,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: fixture.generation,
+    schroederSpatialMechanicalProposal: null,
+    fusedFineSubstepTransaction: fixture.transaction,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback',
+    ...overrides
+  });
+}
+
+function nextParticleUploads(fixture, g2p) {
+  return {
+    sphParticleUpload: {
+      ...fixture.sphParticleUpload,
+      stateBuffer: g2p.stateBuffer,
+      stateBufferByteLength: g2p.stateBufferByteLength
+    },
+    mlsMpmParticleUpload: {
+      ...fixture.mlsMpmParticleUpload,
+      mechanicsBuffer: g2p.mechanicsBuffer,
+      mechanicsBufferByteLength: g2p.mechanicsBufferByteLength
+    }
+  };
+}
+
+async function releaseFusedG2pFixture(fixture, chain, reason) {
+  await chain.runtime.releaseExecutionAfter(
+    chain.execution,
+    fixture.device.queue.onSubmittedWorkDone()
+  );
+  chain.runtime.destroy();
+  await abortSchroederTwoLevelMacroAuthorityAfter(
+    fixture.device,
+    fixture.macroAuthority,
+    {
+      microepochAuthority: fixture.microepochAuthority,
+      reason: new Error(reason)
+    }
+  );
+  fixture.refluxLedger.destroy();
+}
+
+async function fusedCoarseTerminalP2gFixture() {
+  const fixture = fusedP2gProducerFixture();
+  const chain = await submittedFusedFineCorrection(fixture);
+  const g2p = await runFusedG2pProducer(fixture, chain.correction);
+  const uploads = nextParticleUploads(fixture, g2p);
+  const continuation = createSchroederCanonicalParticleContinuation({
+    device: fixture.device,
+    macroAuthority: fixture.macroAuthority,
+    ...uploads,
+    ordinal: 1,
+    priorContinuation: fixture.particleContinuation,
+    sourceTransaction: fixture.transaction,
+    g2pReconstruction: g2p
+  });
+  const successorAssignmentBuffer = fixture.device.createBuffer({
+    label: 'terminal-p2g-successor-assignment',
+    size: fixture.levelAssignment.assignmentBufferByteLength,
+    usage: 128
+  });
+  tagWebGpuBufferDevice(successorAssignmentBuffer, fixture.device);
+  const successorLevelAssignment = {
+    ...fixture.levelAssignment,
+    assignmentBuffer: successorAssignmentBuffer,
+    assignmentBufferByteLength: successorAssignmentBuffer.size,
+    sourceStateBuffer: g2p.stateBuffer,
+    sourceAssignmentBuffer: fixture.levelAssignment.assignmentBuffer,
+    physicsSubstep: fixture.levelAssignment.physicsSubstep + 1,
+    positionEpoch: fixture.levelAssignment.positionEpoch + 1,
+    levelClassificationMode: 'frozen-macro-step-no-reclassification',
+    levelReclassificationPerformed: false
+  };
+  const successorGeneration = runSchroederSpatialEpochGenerationWebGpu({
+    device: fixture.device,
+    levelAssignment: successorLevelAssignment,
+    particleCount: 1,
+    particleIdentityBuffer: fixture.sphParticleUpload.identityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsLevels: [
+      { selectedLevel: 0, mechanicsGrid: fixture.fineGrid },
+      { selectedLevel: 1, mechanicsGrid: fixture.coarseGrid }
+    ]
+  });
+  assert.equal(successorGeneration.ready, true);
+  const successorCanonicalEpoch = {
+    generation: successorGeneration,
+    ...uploads
+  };
+  const successorMicroepoch = createSchroederFineMicroepochAuthority({
+    device: fixture.device,
+    macroAuthority: fixture.macroAuthority,
+    canonicalEpoch: successorCanonicalEpoch,
+    particleContinuation: continuation,
+    priorMicroepochAuthority: fixture.microepochAuthority,
+    substepOrdinal: 1
+  });
+  assert.equal(await retireSchroederFineMicroepochAfter(
+    fixture.device,
+    fixture.microepochAuthority,
+    { successorMicroepochAuthority: successorMicroepoch }
+  ), true);
+  const terminalTransaction = createSchroederFusedCoarseTerminalTransaction({
+    device: fixture.device,
+    macroAuthority: fixture.macroAuthority,
+    microepochAuthority: successorMicroepoch,
+    particleContinuation: continuation
+  });
+  return {
+    fixture,
+    chain,
+    g2p,
+    uploads,
+    continuation,
+    successorGeneration,
+    successorCanonicalEpoch,
+    successorMicroepoch,
+    terminalTransaction
+  };
+}
+
+function terminalP2gOptions(terminal, transaction = terminal.terminalTransaction) {
+  return {
+    terminalTransaction: transaction,
+    macroAuthority: terminal.fixture.macroAuthority,
+    microepochAuthority: terminal.successorMicroepoch,
+    particleContinuation: terminal.continuation,
+    fieldExecution: terminal.successorMicroepoch.parentFieldView.coarseFieldView,
+    mutationSegment: transaction.p2gMutation,
+    priorArtifact: null,
+    requireDeferred: true,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  };
+}
+
+function runTerminalFixtureP2g(
+  terminal,
+  transaction = terminal.terminalTransaction,
+  overrides = {}
+) {
+  return runTerminalP2gProducer(terminal.fixture, {
+    transaction,
+    generation: terminal.successorGeneration,
+    continuation: terminal.continuation,
+    ...terminal.uploads
+  }, overrides);
+}
+
+function runTerminalFixtureGridUpdate(
+  terminal,
+  p2gProjection,
+  transaction = terminal.terminalTransaction,
+  overrides = {}
+) {
+  return runMlsMpmGridUpdateWebGpu({
+    device: terminal.fixture.device,
+    p2gGridProjection: p2gProjection,
+    mechanicsFieldMode: 'required',
+    fusedCoarseTerminalTransaction: transaction,
+    mechanicsFieldEnergyReceipt: { deferSeal: true },
+    dt: transaction.macroAuthority.macroDt,
+    gravityMPerS2: [0, -9.80665, 0],
+    boxDimsM: [1, 1, 1],
+    cflFactor: 0.4,
+    readbackMode: 'no-full-readback',
+    ...overrides
+  });
+}
+
+function terminalGridUpdateOptions(
+  terminal,
+  p2gProjection,
+  transaction = terminal.terminalTransaction
+) {
+  return {
+    terminalTransaction: transaction,
+    macroAuthority: terminal.fixture.macroAuthority,
+    microepochAuthority: terminal.successorMicroepoch,
+    particleContinuation: terminal.continuation,
+    fieldExecution: terminal.successorMicroepoch.parentFieldView.coarseFieldView,
+    mutationSegment: transaction.gridUpdateMutation,
+    priorArtifact: p2gProjection,
+    requireDeferred: true,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  };
+}
+
+function terminalWorkspaceRuntime(terminal, { arenaCount = 1 } = {}) {
+  const parentFieldView = terminal.successorMicroepoch.parentFieldView;
+  return createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+    terminal.fixture.device,
+    {
+      parentFieldCapacity: parentFieldView.parentFieldCapacity,
+      fineFieldCapacity: parentFieldView.fineFieldCapacity,
+      arenaCount
+    }
+  );
+}
+
+function encodeTerminalWorkspace(
+  terminal,
+  coarseGridUpdate,
+  runtime = terminalWorkspaceRuntime(terminal),
+  overrides = {}
+) {
+  const encoder = overrides.encoder
+    ?? terminal.fixture.device.createCommandEncoder();
+  const transaction = overrides.fusedCoarseTerminalTransaction
+    ?? terminal.terminalTransaction;
+  const artifact = runtime.encodeCoarseTerminal(encoder, {
+    parentFieldView: terminal.successorMicroepoch.parentFieldView,
+    coarseGridUpdate,
+    refluxLedger: terminal.fixture.refluxLedger,
+    fineSubstepCount: terminal.fixture.macroAuthority.fineSubstepCount,
+    fineDt: terminal.fixture.macroAuthority.fineDt,
+    fusedCoarseTerminalTransaction: transaction,
+    ...overrides
+  });
+  return {
+    runtime,
+    encoder,
+    artifact,
+    execution: artifact.parentFieldMechanicsWorkspaceExecution
+  };
+}
+
+async function terminalWorkspaceInputFixture() {
+  const terminal = await fusedCoarseTerminalP2gFixture();
+  const p2gProjection = await runTerminalFixtureP2g(terminal);
+  const gridUpdate = await runTerminalFixtureGridUpdate(
+    terminal,
+    p2gProjection
+  );
+  return { terminal, p2gProjection, gridUpdate };
+}
+
+async function submittedTerminalWorkspaceFixture() {
+  const input = await terminalWorkspaceInputFixture();
+  const encoded = encodeTerminalWorkspace(input.terminal, input.gridUpdate);
+  input.terminal.fixture.device.queue.submit([encoded.encoder.finish()]);
+  encoded.runtime.markTerminalSubmissionObserved(encoded.execution);
+  encoded.runtime.markTerminalSubmitted(encoded.execution);
+  return { ...input, ...encoded };
+}
+
+function runTerminalG2pProducer(chain, overrides = {}) {
+  const { terminal, artifact } = chain;
+  const { fixture, terminalTransaction } = terminal;
+  return runMlsMpmG2pWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    gridUpdate: artifact,
+    ...terminal.uploads,
+    dt: fixture.macroAuthority.macroDt,
+    boxDimsM: [1, 1, 1],
+    internalPressureScale: artifact.sourceProjection.internalPressureScale,
+    liquidWallDampingAlpha: 0,
+    liquidWallDampingDistanceM: 0,
+    schroederSelectedLevel: fixture.macroAuthority.coarseLevel,
+    schroederSpatialEpochGeneration: terminal.successorGeneration,
+    schroederSpatialMechanicalProposal: null,
+    fusedCoarseTerminalTransaction: terminalTransaction,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback',
+    ...overrides
+  });
+}
+
+function terminalG2pOptions(chain, transaction = chain.terminal.terminalTransaction) {
+  const { terminal, artifact } = chain;
+  return {
+    terminalTransaction: transaction,
+    macroAuthority: terminal.fixture.macroAuthority,
+    microepochAuthority: terminal.successorMicroepoch,
+    particleContinuation: terminal.continuation,
+    fieldExecution: terminal.successorMicroepoch.parentFieldView.coarseFieldView,
+    priorArtifact: artifact,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  };
+}
+
+function terminalFinalParticleUploads(chain, g2p) {
+  return {
+    finalSphParticleUpload: {
+      ...chain.terminal.uploads.sphParticleUpload,
+      stateBuffer: g2p.stateBuffer,
+      stateBufferByteLength: g2p.stateBufferByteLength
+    },
+    finalMlsMpmParticleUpload: {
+      ...chain.terminal.uploads.mlsMpmParticleUpload,
+      mechanicsBuffer: g2p.mechanicsBuffer,
+      mechanicsBufferByteLength: g2p.mechanicsBufferByteLength
+    }
+  };
+}
+
+async function releaseTerminalG2pFixture(chain, reason) {
+  await chain.runtime.releaseExecutionAfter(
+    chain.execution,
+    chain.terminal.fixture.device.queue.onSubmittedWorkDone()
+  );
+  chain.runtime.destroy();
+  await releaseTerminalP2gFixture(chain.terminal, reason);
+}
+
+async function releaseTerminalP2gFixture(terminal, reason) {
+  const {
+    fixture,
+    chain,
+    successorGeneration,
+    successorMicroepoch,
+    terminalTransaction
+  } = terminal;
+  const state = schroederFusedCoarseTerminalTransactionState(
+    fixture.device,
+    terminalTransaction
+  );
+  if (state?.status === 'reserved') {
+    discardSchroederFusedCoarseTerminalTransaction(
+      fixture.device,
+      terminalTransaction,
+      { discardedEncoder: true }
+    );
+  }
+  await chain.runtime.releaseExecutionAfter(
+    chain.execution,
+    fixture.device.queue.onSubmittedWorkDone()
+  );
+  chain.runtime.destroy();
+  await abortSchroederTwoLevelMacroAuthorityAfter(
+    fixture.device,
+    fixture.macroAuthority,
+    {
+      microepochAuthority: successorMicroepoch,
+      reason: new Error(reason)
+    }
+  );
+  if (!successorGeneration.releaseScheduled) {
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      successorGeneration,
+      fixture.device
+    );
+  }
+  if (successorGeneration.releasePromise) {
+    await successorGeneration.releasePromise;
+  }
+  fixture.refluxLedger.destroy();
 }
 
 test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindings', () => {
@@ -546,7 +1327,3852 @@ test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', as
   );
 });
 
-test('CPU MLS-MPM P2G uses the ambient-referenced ideal-gas closure for admitted gas', () => {
+test('non-transaction mechanics-field P2G rejects particle-family drift before allocation', async () => {
+  const fixture = fusedP2gProducerFixture();
+  const field = fixture.generation.parentFieldView.coarseFieldView;
+  const fieldRuntime = field.ownerRuntime;
+  const allocationsBefore = fixture.device.createdBuffers.length;
+  const submissionsBefore = fixture.device.submissions.length;
+  fixture.sphParticleState.particleCount = 2;
+  fixture.mlsMpmParticleState.particleCount = 2;
+
+  await assert.rejects(
+    runCoarseP2gProducer(fixture),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_MECHANICS_FIELD_P2G_PARTICLE_FAMILY_MISMATCH'
+      );
+      return true;
+    }
+  );
+  assert.equal(fixture.device.createdBuffers.length, allocationsBefore);
+  assert.equal(fixture.device.submissions.length, submissionsBefore);
+  assert.deepEqual(fieldRuntime.stateMutationState(field), {
+    ordinal: 0,
+    encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+    operation: 'topology-ready',
+    pending: false,
+    publicationLocked: false,
+    quarantined: false
+  });
+
+  fixture.sphParticleState.particleCount = 1;
+  fixture.mlsMpmParticleState.particleCount = 1;
+  const projection = await runCoarseP2gProducer(fixture);
+  assert.equal(projection.mechanicsFieldViewExecution, field);
+  assert.equal(
+    projection.mechanicsFieldP2gReductionMode,
+    'stable-radix-ordered-field-reduction'
+  );
+  assert.equal(fieldRuntime.stateMutationState(field).ordinal, 1);
+  await abortSchroederTwoLevelMacroAuthorityAfter(
+    fixture.device,
+    fixture.macroAuthority,
+    {
+      microepochAuthority: fixture.microepochAuthority,
+      reason: new Error('non-transaction particle-family drift fixture cleanup')
+    }
+  );
+  fixture.refluxLedger.destroy();
+});
+
+test('non-transaction mechanics-field stages quarantine submitted state before failed publication', async (t) => {
+  const cleanup = async (fixture, reason) => {
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error(reason)
+      }
+    );
+    fixture.refluxLedger.destroy();
+  };
+
+  await t.test('P2G keeps the input field provenance pending and quarantined', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const field = fixture.generation.parentFieldView.coarseFieldView;
+    const fieldRuntime = field.ownerRuntime;
+    const originalMark = fieldRuntime.markStateMutationSubmitted;
+    const injected = new Error('injected standalone P2G artifact publication failure');
+    fieldRuntime.markStateMutationSubmitted = () => { throw injected; };
+    const submissionsBefore = fixture.device.submissions.length;
+
+    await assert.rejects(runCoarseP2gProducer(fixture), (error) => error === injected);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.deepEqual(fieldRuntime.stateMutationState(field), {
+      ordinal: 0,
+      encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+      operation: 'topology-ready',
+      pending: true,
+      publicationLocked: false,
+      quarantined: true
+    });
+    assert.equal(fieldRuntime.isCurrentStateArtifact(field, {
+      mutationOrdinal: 1,
+      stateEncoding:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
+    }), false);
+    fieldRuntime.markStateMutationSubmitted = originalMark;
+    await cleanup(fixture, 'standalone P2G quarantine test cleanup');
+  });
+
+  await t.test('grid update keeps P2G provenance pending and quarantined', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const field = fixture.generation.parentFieldView.coarseFieldView;
+    const fieldRuntime = field.ownerRuntime;
+    const projection = await runCoarseP2gProducer(fixture);
+    const originalMark = fieldRuntime.markStateMutationSubmitted;
+    const injected = new Error(
+      'injected standalone grid-update artifact publication failure'
+    );
+    fieldRuntime.markStateMutationSubmitted = () => { throw injected; };
+    const submissionsBefore = fixture.device.submissions.length;
+
+    await assert.rejects(runMlsMpmGridUpdateWebGpu({
+      device: fixture.device,
+      p2gGridProjection: projection,
+      mechanicsFieldMode: 'required',
+      mechanicsFieldEnergyReceipt: { deferSeal: true },
+      dt: fixture.predictorThetaDt,
+      gravityMPerS2: [0, -9.80665, 0],
+      boxDimsM: [1, 1, 1],
+      cflFactor: 0.4,
+      readbackMode: 'no-full-readback'
+    }), (error) => error === injected);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.deepEqual(fieldRuntime.stateMutationState(field), {
+      ordinal: 1,
+      encoding:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+      operation: 'p2g-mass-momentum-gradient-submitted',
+      pending: true,
+      publicationLocked: false,
+      quarantined: true
+    });
+    assert.equal(fieldRuntime.isCurrentStateArtifact(field, {
+      mutationOrdinal: 2,
+      stateEncoding:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
+    }), false);
+    fieldRuntime.markStateMutationSubmitted = originalMark;
+    await cleanup(fixture, 'standalone grid-update quarantine test cleanup');
+  });
+
+  await t.test('parent coarse terminal quarantines after submission but before publication', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const parentFieldView = fixture.generation.parentFieldView;
+    const field = parentFieldView.coarseFieldView;
+    const fieldRuntime = field.ownerRuntime;
+    const projection = await runCoarseP2gProducer(fixture, fixture.macroDt);
+    const gridUpdate = await runMlsMpmGridUpdateWebGpu({
+      device: fixture.device,
+      p2gGridProjection: projection,
+      mechanicsFieldMode: 'required',
+      mechanicsFieldEnergyReceipt: { deferSeal: true },
+      dt: fixture.macroDt,
+      gravityMPerS2: [0, -9.80665, 0],
+      boxDimsM: [1, 1, 1],
+      cflFactor: 0.4,
+      readbackMode: 'no-full-readback'
+    });
+    const workspaceRuntime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+      fixture.device,
+      {
+        parentFieldCapacity: parentFieldView.parentFieldCapacity,
+        fineFieldCapacity: parentFieldView.fineFieldCapacity,
+        arenaCount: 1
+      }
+    );
+    const encoder = fixture.device.createCommandEncoder();
+    const artifact = workspaceRuntime.encodeCoarseTerminal(encoder, {
+      parentFieldView,
+      coarseGridUpdate: gridUpdate,
+      refluxLedger: fixture.refluxLedger,
+      fineSubstepCount: fixture.fineSubstepCount,
+      fineDt: fixture.fineDt
+    });
+    const execution = artifact.parentFieldMechanicsWorkspaceExecution;
+    fixture.device.queue.submit([encoder.finish()]);
+    workspaceRuntime.markTerminalSubmissionObserved(execution);
+    const originalMark = fieldRuntime.markStateMutationSubmitted;
+    const injected = new Error(
+      'injected parent coarse-terminal artifact publication failure'
+    );
+    fieldRuntime.markStateMutationSubmitted = () => { throw injected; };
+
+    assert.throws(
+      () => workspaceRuntime.markTerminalSubmitted(execution),
+      (error) => error === injected
+    );
+    assert.deepEqual(fieldRuntime.stateMutationState(field), {
+      ordinal: 2,
+      encoding:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
+      operation: 'grid-update-mass-velocity-gradient-submitted',
+      pending: true,
+      publicationLocked: false,
+      quarantined: true
+    });
+    assert.equal(workspaceRuntime.isTerminalSubmitted(execution), false);
+    fieldRuntime.markStateMutationSubmitted = originalMark;
+    await workspaceRuntime.releaseExecutionAfter(
+      execution,
+      fixture.device.queue.onSubmittedWorkDone()
+    );
+    workspaceRuntime.destroy();
+    await cleanup(fixture, 'parent coarse-terminal quarantine test cleanup');
+  });
+});
+
+test('single-submit resident mechanics uses only the sparse field and quarantines failed publication', async (t) => {
+  const runFieldStep = (fixture) => runMlsMpmResidentStepWithOptionalWebGpu({
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    schroederLevelAssignment: fixture.levelAssignment,
+    schroederSelectedLevel: 1,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    observeCanonicalSpatialAuthority: false,
+    mechanicsFieldMode: 'required',
+    gridSpacingM: 0.5,
+    boxDimsM: [1, 1, 1],
+    preferWebGpu: true,
+    device: fixture.device,
+    readbackMode: 'no-full-readback',
+    fuseNoFullResidentMechanics: true,
+    summaryRunner: null
+  });
+  const releaseGeneration = async (fixture) => {
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(
+        fixture.generation,
+        fixture.device
+      ),
+      true
+    );
+    assert.equal(await fixture.generation.releasePromise, true);
+  };
+
+  await t.test('success allocates no dense P2G or updated-grid buffers', async () => {
+    const fixture = fusedP2gProducerFixture({ createMacroAuthority: false });
+    const createdBefore = fixture.device.createdBuffers.length;
+    const step = await runFieldStep(fixture);
+    const createdLabels = fixture.device.createdBuffers
+      .slice(createdBefore)
+      .map(({ label }) => label);
+
+    assert.equal(step.p2gGridProjection.mechanicsFieldViewEnabled, true);
+    assert.equal(step.gridUpdate.mechanicsFieldViewEnabled, true);
+    assert.equal(step.p2gGridProjection.gridBuffer, null);
+    assert.equal(step.gridUpdate.updatedGridBuffer, null);
+    assert.equal(step.p2gGridProjection.gridBufferByteLength, 0);
+    assert.equal(step.gridUpdate.updatedGridBufferByteLength, 0);
+    assert.equal(step.stageBuffersRetained, true);
+    assert.equal(step.residentBuffersRetained, true);
+    assert.equal(step.readbackMode, 'no-full-readback');
+    assert.equal(createdLabels.includes('ulg-mls-mpm-fused-p2g-grid-out'), false);
+    assert.equal(createdLabels.includes('ulg-mls-mpm-fused-grid-update-out'), false);
+    destroyMlsMpmResidentStepBuffers(step);
+    await releaseGeneration(fixture);
+  });
+
+  await t.test('post-submit commit failure leaves the sparse field quarantined', async () => {
+    const fixture = fusedP2gProducerFixture({ createMacroAuthority: false });
+    const field = fixture.generation.parentFieldView.coarseFieldView;
+    const fieldRuntime = field.ownerRuntime;
+    const originalMark = fieldRuntime.markStateMutationSubmitted;
+    const injected = new Error(
+      'injected single-submit mechanics artifact publication failure'
+    );
+    fieldRuntime.markStateMutationSubmitted = () => { throw injected; };
+    const createdBefore = fixture.device.createdBuffers.length;
+    const submissionsBefore = fixture.device.submissions.length;
+
+    await assert.rejects(runFieldStep(fixture), (error) => error === injected);
+    assert.ok(fixture.device.submissions.length > submissionsBefore);
+    assert.deepEqual(fieldRuntime.stateMutationState(field), {
+      ordinal: 0,
+      encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+      operation: 'topology-ready',
+      pending: true,
+      publicationLocked: false,
+      quarantined: true
+    });
+    const createdLabels = fixture.device.createdBuffers
+      .slice(createdBefore)
+      .map(({ label }) => label);
+    assert.equal(createdLabels.includes('ulg-mls-mpm-fused-p2g-grid-out'), false);
+    assert.equal(createdLabels.includes('ulg-mls-mpm-fused-grid-update-out'), false);
+    fieldRuntime.markStateMutationSubmitted = originalMark;
+    await releaseGeneration(fixture);
+  });
+});
+
+test('fused WebGPU P2G authenticates strict provenance and poisons post-submit failures', async (t) => {
+  const runFusedP2g = (
+    fixture,
+    sphParticleUpload = fixture.sphParticleUpload,
+    projectionDt = fixture.fineDt,
+    overrides = {}
+  ) => (
+    runMlsMpmP2gGridProjectionWebGpu({
+      device: fixture.device,
+      sphParticleState: fixture.sphParticleState,
+      mlsMpmParticleState: fixture.mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+      schroederSelectedLevel: 0,
+      schroederSpatialEpochGeneration: fixture.generation,
+      canonicalSpatialRequired: true,
+      mechanicsFieldMode: 'required',
+      canonicalParticleContinuation: fixture.particleContinuation,
+      fusedFineSubstepTransaction: fixture.transaction,
+      gridSpacingM: 0.25,
+      boxDimsM: [1, 1, 1],
+      dt: projectionDt,
+      readbackMode: 'no-full-readback',
+      ...overrides
+    })
+  );
+
+  await t.test('success advances exactly once and rejects clones', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const projection = await runFusedP2g(fixture);
+    const contributionBuffer = fixture.device.createdBuffers.find(({ label }) => (
+      label === 'ulg-mls-mpm-staged-p2g-deterministic-field-contributions'
+    ));
+    const stableOrderBuffer =
+      fixture.microepochAuthority.fineFieldView.stableCandidateOrderBuffer;
+    assert.ok(contributionBuffer);
+    assert.equal(
+      contributionBuffer.size,
+      fixture.sphParticleState.particleCount * 27 * 8 * Float32Array.BYTES_PER_ELEMENT
+    );
+    assert.equal(
+      projection.mechanicsFieldP2gContributionBufferAllocatedBytes,
+      contributionBuffer.size
+    );
+    assert.equal(
+      projection.mechanicsFieldP2gReductionMode,
+      'stable-radix-ordered-field-reduction'
+    );
+    assert.equal(
+      projection.mechanicsFieldP2gReductionOrder,
+      'stable-radix-equal-key-preserves-particle-stencil-candidate-order'
+    );
+    const deterministicP2gBindGroups = fixture.device.bindGroups.filter(({ entries }) => (
+      entries?.find(({ binding }) => binding === 5)?.resource?.buffer
+        === contributionBuffer
+    ));
+    assert.ok(deterministicP2gBindGroups.length > 0);
+    for (const group of deterministicP2gBindGroups) {
+      assert.equal(
+        group.entries.find(({ binding }) => binding === 6)?.resource?.buffer,
+        stableOrderBuffer
+      );
+      assert.equal(
+        group.layout.entries.find(({ binding }) => binding === 5)?.buffer?.type,
+        'storage'
+      );
+      assert.equal(
+        group.layout.entries.find(({ binding }) => binding === 6)?.buffer?.type,
+        'read-only-storage'
+      );
+    }
+    assert.ok(fixture.device.shaderModules.some(({ code }) => (
+      code.includes('fn p2g_field_group_lower_bound(field_index: u32)')
+      && code.includes(
+        '@binding(6) var<storage, read> p2g_field_sorted_candidate_indices'
+      )
+      && !code.includes('p2g_field_atomic_add_f32')
+    )));
+    const options = {
+      transaction: fixture.transaction,
+      macroAuthority: fixture.macroAuthority,
+      microepochAuthority: fixture.microepochAuthority,
+      particleContinuation: fixture.particleContinuation,
+      fieldExecution: fixture.microepochAuthority.fineFieldView,
+      mutationSegment: fixture.transaction.p2gMutation,
+      priorArtifact: null,
+      requireDeferred: true,
+      proposalMode: 'proposal-deferred-to-post-mechanics'
+    };
+    assert.equal(fixture.device.submissions.length, 2);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), true);
+    const substitutedStableOrderBuffer = fixture.device.createBuffer({
+      label: 'same-device-substituted-p2g-stable-order',
+      size: stableOrderBuffer.size,
+      usage: stableOrderBuffer.usage
+    });
+    tagWebGpuBufferDevice(substitutedStableOrderBuffer, fixture.device);
+    fixture.microepochAuthority.fineFieldView.stableCandidateOrderBuffer =
+      substitutedStableOrderBuffer;
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), false);
+    fixture.microepochAuthority.fineFieldView.stableCandidateOrderBuffer =
+      stableOrderBuffer;
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), true);
+    substitutedStableOrderBuffer.destroy();
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      { ...projection },
+      options
+    ), false);
+    projection.particleCount += 1;
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), false);
+    projection.particleCount -= 1;
+    const exactStateStrideBytes = fixture.sphParticleUpload.stateStrideBytes;
+    fixture.sphParticleUpload.stateStrideBytes += Float32Array.BYTES_PER_ELEMENT;
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), false);
+    fixture.sphParticleUpload.stateStrideBytes = exactStateStrideBytes;
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), true);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(contributionBuffer.destroyed, true);
+    assert.equal(stableOrderBuffer.destroyed, false);
+    assert.deepEqual(schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    ), {
+      status: 'p2g-submitted',
+      stageIndex: 1,
+      submissionObservedStage: null,
+      nextStage: 'grid-update',
+      submittedStageCount: 1,
+      g2pSubmitted: false,
+      gpuReceiptStatus: 'not-submitted',
+      gpuReceiptVerified: false,
+      quarantineReason: null
+    });
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('success fixture ends after P2G')
+      }
+    );
+  });
+
+  await t.test('count and particle ABI drift fail before allocation and release the claim', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const createdAtStart = fixture.device.createdBuffers.length;
+    const submissionsAtStart = fixture.device.submissions.length;
+    const assertStillReserved = () => {
+      const state = schroederFusedFineSubstepTransactionState(
+        fixture.device,
+        fixture.transaction
+      );
+      assert.equal(state.status, 'reserved');
+      assert.equal(state.stageIndex, 0);
+      assert.equal(fixture.device.createdBuffers.length, createdAtStart);
+      assert.equal(fixture.device.submissions.length, submissionsAtStart);
+    };
+
+    const originalSphCount = fixture.sphParticleState.particleCount;
+    const originalMlsCount = fixture.mlsMpmParticleState.particleCount;
+    fixture.sphParticleState.particleCount = originalSphCount + 1;
+    fixture.mlsMpmParticleState.particleCount = originalMlsCount + 1;
+    await assert.rejects(
+      runFusedP2g(fixture),
+      /exact pending transaction and particle continuation/
+    );
+    fixture.sphParticleState.particleCount = originalSphCount;
+    fixture.mlsMpmParticleState.particleCount = originalMlsCount;
+    assertStillReserved();
+
+    const exactSphUploadSchema = fixture.sphParticleUpload.schema;
+    fixture.sphParticleUpload.schema = ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA;
+    await assert.rejects(
+      runFusedP2g(fixture),
+      /exact pending transaction and particle continuation/
+    );
+    fixture.sphParticleUpload.schema = exactSphUploadSchema;
+    assertStillReserved();
+
+    const exactMlsUploadSchema = fixture.mlsMpmParticleUpload.schema;
+    fixture.mlsMpmParticleUpload.schema = ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA;
+    await assert.rejects(
+      runFusedP2g(fixture),
+      /exact pending transaction and particle continuation/
+    );
+    fixture.mlsMpmParticleUpload.schema = exactMlsUploadSchema;
+    assertStillReserved();
+
+    await assert.rejects(
+      runFusedP2g(fixture, {
+        ...fixture.sphParticleUpload,
+        stateStrideBytes:
+          fixture.sphParticleUpload.stateStrideBytes
+          + Float32Array.BYTES_PER_ELEMENT
+      }),
+      /exact pending transaction and particle continuation/
+    );
+    assertStillReserved();
+
+    await assert.rejects(
+      runFusedP2g(fixture, {
+        ...fixture.sphParticleUpload,
+        thermoBufferByteLength:
+          fixture.sphParticleUpload.thermoBufferByteLength
+          + Float32Array.BYTES_PER_ELEMENT
+      }),
+      /exact pending transaction and particle continuation/
+    );
+    assertStillReserved();
+
+    const exactStateBufferSize = fixture.sphParticleUpload.stateBuffer.size;
+    fixture.sphParticleUpload.stateBuffer.size = exactStateBufferSize - 4;
+    await assert.rejects(
+      runFusedP2g(fixture),
+      /exact pending transaction and particle continuation/
+    );
+    fixture.sphParticleUpload.stateBuffer.size = exactStateBufferSize;
+    assertStillReserved();
+
+    const foreignStateBuffer = {
+      label: 'foreign-fused-p2g-state',
+      size: fixture.sphParticleUpload.stateBufferByteLength,
+      destroyed: false,
+      destroy() {
+        this.destroyed = true;
+      }
+    };
+    tagWebGpuBufferDevice(foreignStateBuffer, {});
+    await assert.rejects(
+      runFusedP2g(fixture, {
+        ...fixture.sphParticleUpload,
+        stateBuffer: foreignStateBuffer
+      }),
+      /exact pending transaction and particle continuation/
+    );
+    assert.equal(foreignStateBuffer.destroyed, false);
+    assertStillReserved();
+
+    await runFusedP2g(fixture);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('particle ABI preflight fixture cleanup')
+      }
+    );
+  });
+
+  await t.test('post-import CPU count mutation is rejected before encoding and remains retryable', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const submissionsAtStart = fixture.device.submissions.length;
+    const pending = runFusedP2g(fixture);
+    fixture.sphParticleState.particleCount += 1;
+    fixture.mlsMpmParticleState.particleCount += 1;
+    await assert.rejects(
+      pending,
+      /producer claim or exact transaction provenance is stale/
+    );
+    fixture.sphParticleState.particleCount -= 1;
+    fixture.mlsMpmParticleState.particleCount -= 1;
+    assert.equal(fixture.device.submissions.length, submissionsAtStart);
+    assert.equal(schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    ).status, 'reserved');
+    await runFusedP2g(fixture);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('post-import count mutation fixture cleanup')
+      }
+    );
+  });
+
+  await t.test('r=2 rejects macro-dt P2G before submission and remains retryable', async () => {
+    const fixture = fusedP2gProducerFixture({ fineSubstepCount: 2 });
+    await assert.rejects(
+      runFusedP2g(fixture, fixture.sphParticleUpload, fixture.macroDt),
+      /exact pending transaction and particle continuation/
+    );
+    let state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'reserved');
+    assert.equal(state.stageIndex, 0);
+    assert.equal(state.submissionObservedStage, null);
+    assert.equal(fixture.device.submissions.length, 1);
+    await runFusedP2g(fixture);
+    state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'p2g-submitted');
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('wrong fine dt fixture cleanup')
+      }
+    );
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('wrong upload object fails before submission and exact retry succeeds', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const submissionsAtStart = fixture.device.submissions.length;
+    const createdAtStart = fixture.device.createdBuffers.length;
+    await assert.rejects(
+      runFusedP2g(fixture, { ...fixture.sphParticleUpload }),
+      /exact pending transaction and particle continuation/
+    );
+    assert.equal(fixture.device.submissions.length, submissionsAtStart);
+    assert.equal(fixture.device.createdBuffers.length, createdAtStart);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'reserved');
+    assert.equal(state.stageIndex, 0);
+    assert.equal(state.submissionObservedStage, null);
+    await runFusedP2g(fixture);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('wrong upload object fixture cleanup')
+      }
+    );
+  });
+
+  await t.test('post-submit upload ABI mutation quarantines and destroys the arena', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const fineField = fixture.microepochAuthority.fineFieldView;
+    const fieldRuntime = fineField.ownerRuntime;
+    const originalSubmit = fixture.device.queue.submit;
+    const exactStateStrideBytes = fixture.sphParticleUpload.stateStrideBytes;
+    fixture.device.queue.submit = (commandBuffers) => {
+      originalSubmit(commandBuffers);
+      fixture.sphParticleUpload.stateStrideBytes +=
+        Float32Array.BYTES_PER_ELEMENT;
+    };
+    await assert.rejects(
+      runFusedP2g(fixture),
+      /stage submission observation is stale|does not match its exact fused producer inputs/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    fixture.sphParticleUpload.stateStrideBytes = exactStateStrideBytes;
+    assert.equal(fixture.device.submissions.length, 2);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'quarantined');
+    assert.equal(state.stageIndex, 0);
+    assert.equal(state.submissionObservedStage, 'p2g');
+    assert.equal(fieldRuntime.isStateArtifactQuarantined(fineField), true);
+    assert.equal(fieldRuntime.quarantinedArenaCount(), 1);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('post-submit upload ABI mutation')
+      }
+    );
+    assert.equal(fieldRuntime.ownsExecution(fineField), false);
+    assert.equal(fineField.fieldViewBuffer.destroyed, true);
+  });
+
+  await t.test('synchronous queue-submit failure discards before observation and preserves reuse', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const fineField = fixture.microepochAuthority.fineFieldView;
+    const fieldRuntime = fineField.ownerRuntime;
+    const originalSubmit = fixture.device.queue.submit;
+    fixture.device.queue.submit = () => {
+      throw new Error('injected P2G queue.submit failure');
+    };
+    await assert.rejects(
+      runFusedP2g(fixture),
+      /injected P2G queue\.submit failure/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    assert.equal(fixture.device.submissions.length, 1);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'discarded');
+    assert.equal(state.stageIndex, 0);
+    assert.equal(state.submissionObservedStage, null);
+    assert.equal(fieldRuntime.stateMutationState(fineField).pending, false);
+    assert.equal(fieldRuntime.isStateArtifactQuarantined(fineField), false);
+    const usableBeforeRetirement = fieldRuntime.usableArenaCount();
+    const activeBeforeRetirement = fieldRuntime.activeExecutionCount();
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('pre-submit failure fixture cleanup')
+      }
+    );
+    assert.equal(fieldRuntime.ownsExecution(fineField), false);
+    assert.equal(fieldRuntime.activeExecutionCount(), activeBeforeRetirement - 1);
+    assert.equal(fieldRuntime.usableArenaCount(), usableBeforeRetirement);
+    assert.equal(fieldRuntime.retiredArenaCount(), 0);
+    assert.equal(fineField.fieldViewBuffer.destroyed, false);
+  });
+});
+
+test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', async (t) => {
+  await t.test('one claimed producer submits once and publishes only its exact artifact', async () => {
+    const terminal = await fusedCoarseTerminalP2gFixture();
+    const { fixture, terminalTransaction } = terminal;
+    const createdBefore = fixture.device.createdBuffers.length;
+    const submissionsBefore = fixture.device.submissions.length;
+    const pending = runTerminalFixtureP2g(terminal);
+    assert.throws(
+      () => markSchroederFusedCoarseTerminalStageSubmissionObserved(
+        fixture.device,
+        terminalTransaction,
+        { stage: 'p2g' }
+      ),
+      /submission observation is stale, foreign, or out of order/
+    );
+    const competing = runTerminalFixtureP2g(terminal);
+    const [first, second] = await Promise.allSettled([pending, competing]);
+    assert.equal(first.status, 'fulfilled');
+    assert.equal(second.status, 'rejected');
+    assert.match(second.reason.message, /already has an active producer/);
+    const projection = first.value;
+    const options = terminalP2gOptions(terminal);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), true);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      { ...projection },
+      options
+    ), false);
+    projection.particleCount += 1;
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), false);
+    projection.particleCount -= 1;
+    const identityStrideBytes = terminal.uploads.sphParticleUpload.identityStrideBytes;
+    terminal.uploads.sphParticleUpload.identityStrideBytes += 4;
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      options
+    ), false);
+    terminal.uploads.sphParticleUpload.identityStrideBytes = identityStrideBytes;
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    ).stageIndex, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    const owned = fixture.device.createdBuffers.slice(createdBefore);
+    assert.ok(owned.length > 0);
+    assert.equal(owned.every((buffer) => buffer.destroyed), true);
+    for (const borrowed of [
+      terminal.uploads.sphParticleUpload.stateBuffer,
+      terminal.uploads.sphParticleUpload.thermoBuffer,
+      terminal.uploads.sphParticleUpload.identityBuffer,
+      terminal.uploads.mlsMpmParticleUpload.mechanicsBuffer
+    ]) {
+      assert.equal(borrowed.destroyed, false);
+    }
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal P2G exact producer fixture cleanup'
+    );
+  });
+
+  await t.test('E_r, C_r, level, dt, count, and ABI drift fail before allocation', async () => {
+    const terminal = await fusedCoarseTerminalP2gFixture();
+    const { fixture, terminalTransaction } = terminal;
+    const createdBefore = fixture.device.createdBuffers.length;
+    const submissionsBefore = fixture.device.submissions.length;
+    const assertReservedWithoutWork = () => {
+      const state = schroederFusedCoarseTerminalTransactionState(
+        fixture.device,
+        terminalTransaction
+      );
+      assert.equal(state.status, 'reserved');
+      assert.equal(state.stageIndex, 0);
+      assert.equal(state.submissionObservedStage, null);
+      assert.equal(fixture.device.createdBuffers.length, createdBefore);
+      assert.equal(fixture.device.submissions.length, submissionsBefore);
+    };
+    const rejectPreflight = async (overrides) => {
+      await assert.rejects(
+        runTerminalFixtureP2g(terminal, terminalTransaction, overrides),
+        /requires exact E_r\/C_r, level, and macro timestep/
+      );
+      assertReservedWithoutWork();
+    };
+    await assert.rejects(
+      runTerminalFixtureP2g(terminal, terminalTransaction, {
+        fusedFineSubstepTransaction: fixture.transaction
+      }),
+      /either a fused fine transaction or fused coarse-terminal transaction, never both/
+    );
+    assertReservedWithoutWork();
+    await rejectPreflight({
+      schroederSpatialEpochGeneration: fixture.generation
+    });
+    await rejectPreflight({
+      canonicalParticleContinuation: fixture.particleContinuation
+    });
+    await rejectPreflight({
+      sphParticleUpload: { ...terminal.uploads.sphParticleUpload }
+    });
+    await rejectPreflight({ schroederSelectedLevel: 0 });
+    await rejectPreflight({ dt: fixture.fineDt });
+    await rejectPreflight({
+      sphParticleState: { ...fixture.sphParticleState, particleCount: 0 },
+      mlsMpmParticleState: { ...fixture.mlsMpmParticleState, particleCount: 0 }
+    });
+    await rejectPreflight({
+      sphParticleState: { ...fixture.sphParticleState, particleCount: 2 },
+      mlsMpmParticleState: { ...fixture.mlsMpmParticleState, particleCount: 2 }
+    });
+    const exactIdentityStrideBytes =
+      terminal.uploads.sphParticleUpload.identityStrideBytes;
+    terminal.uploads.sphParticleUpload.identityStrideBytes += 4;
+    await rejectPreflight({});
+    terminal.uploads.sphParticleUpload.identityStrideBytes =
+      exactIdentityStrideBytes;
+    const exactIdentityBufferByteLength =
+      terminal.uploads.sphParticleUpload.identityBufferByteLength;
+    terminal.uploads.sphParticleUpload.identityBufferByteLength += 4;
+    await rejectPreflight({});
+    terminal.uploads.sphParticleUpload.identityBufferByteLength =
+      exactIdentityBufferByteLength;
+    await rejectPreflight({
+      sphParticleUpload: {
+        ...terminal.uploads.sphParticleUpload,
+        stateBufferByteLength:
+          terminal.uploads.sphParticleUpload.stateBufferByteLength + 4
+      }
+    });
+    const exactStateSize = terminal.uploads.sphParticleUpload.stateBuffer.size;
+    terminal.uploads.sphParticleUpload.stateBuffer.size = exactStateSize - 4;
+    await rejectPreflight({});
+    terminal.uploads.sphParticleUpload.stateBuffer.size = exactStateSize;
+    const exactIdentityBufferSize =
+      terminal.uploads.sphParticleUpload.identityBuffer.size;
+    terminal.uploads.sphParticleUpload.identityBuffer.size = 0;
+    await rejectPreflight({});
+    terminal.uploads.sphParticleUpload.identityBuffer.size =
+      exactIdentityBufferSize;
+    terminal.uploads.sphParticleUpload.stateBuffer.destroyed = true;
+    await rejectPreflight({});
+    terminal.uploads.sphParticleUpload.stateBuffer.destroyed = false;
+    const foreignStateBuffer = {
+      size: terminal.uploads.sphParticleUpload.stateBufferByteLength,
+      destroyed: false,
+      destroy() {
+        this.destroyed = true;
+      }
+    };
+    tagWebGpuBufferDevice(foreignStateBuffer, {});
+    await rejectPreflight({
+      sphParticleUpload: {
+        ...terminal.uploads.sphParticleUpload,
+        stateBuffer: foreignStateBuffer
+      }
+    });
+    assert.equal(foreignStateBuffer.destroyed, false);
+
+    const createdBeforeAwaitDrift = fixture.device.createdBuffers.length;
+    const pending = runTerminalFixtureP2g(terminal);
+    fixture.sphParticleState.particleCount += 1;
+    fixture.mlsMpmParticleState.particleCount += 1;
+    await assert.rejects(
+      pending,
+      /producer claim or exact transaction provenance is stale/
+    );
+    fixture.sphParticleState.particleCount -= 1;
+    fixture.mlsMpmParticleState.particleCount -= 1;
+    assert.equal(fixture.device.submissions.length, submissionsBefore);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    ).status, 'reserved');
+    const awaitDriftAllocations = fixture.device.createdBuffers
+      .slice(createdBeforeAwaitDrift);
+    assert.ok(awaitDriftAllocations.length > 0);
+    assert.equal(awaitDriftAllocations.every((buffer) => buffer.destroyed), true);
+    const createdBeforeAbiAwaitDrift = fixture.device.createdBuffers.length;
+    const abiPending = runTerminalFixtureP2g(terminal);
+    terminal.uploads.sphParticleUpload.identityStrideBytes += 4;
+    await assert.rejects(
+      abiPending,
+      /producer claim or exact transaction provenance is stale/
+    );
+    terminal.uploads.sphParticleUpload.identityStrideBytes =
+      exactIdentityStrideBytes;
+    assert.equal(fixture.device.submissions.length, submissionsBefore);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    ).status, 'reserved');
+    const abiAwaitDriftAllocations = fixture.device.createdBuffers
+      .slice(createdBeforeAbiAwaitDrift);
+    assert.ok(abiAwaitDriftAllocations.length > 0);
+    assert.equal(
+      abiAwaitDriftAllocations.every((buffer) => buffer.destroyed),
+      true
+    );
+    const projection = await runTerminalFixtureP2g(terminal);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      projection,
+      terminalP2gOptions(terminal)
+    ), true);
+    for (const borrowed of [
+      terminal.uploads.sphParticleUpload.stateBuffer,
+      terminal.uploads.sphParticleUpload.thermoBuffer,
+      terminal.uploads.sphParticleUpload.identityBuffer,
+      terminal.uploads.mlsMpmParticleUpload.mechanicsBuffer
+    ]) {
+      assert.equal(borrowed.destroyed, false);
+    }
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal P2G preflight and await-drift fixture cleanup'
+    );
+  });
+
+  await t.test('partial create and write failures clean owned buffers and preserve retry', async () => {
+    const terminal = await fusedCoarseTerminalP2gFixture();
+    const { fixture, terminalTransaction } = terminal;
+    const submissionsBefore = fixture.device.submissions.length;
+    const borrowed = [
+      terminal.uploads.sphParticleUpload.stateBuffer,
+      terminal.uploads.sphParticleUpload.thermoBuffer,
+      terminal.uploads.sphParticleUpload.identityBuffer,
+      terminal.uploads.mlsMpmParticleUpload.mechanicsBuffer
+    ];
+    const originalCreateBuffer = fixture.device.createBuffer;
+    const createFailureBuffers = [];
+    fixture.device.createBuffer = (descriptor) => {
+      if (createFailureBuffers.length === 3) {
+        throw new Error('injected terminal P2G createBuffer failure');
+      }
+      const buffer = originalCreateBuffer(descriptor);
+      createFailureBuffers.push(buffer);
+      return buffer;
+    };
+    await assert.rejects(
+      runTerminalFixtureP2g(terminal),
+      /injected terminal P2G createBuffer failure/
+    );
+    fixture.device.createBuffer = originalCreateBuffer;
+    assert.equal(createFailureBuffers.length, 3);
+    assert.equal(createFailureBuffers.every((buffer) => buffer.destroyed), true);
+    assert.equal(fixture.device.submissions.length, submissionsBefore);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    ).status, 'reserved');
+
+    const originalWriteBuffer = fixture.device.queue.writeBuffer;
+    const writeFailureBuffers = [];
+    let oneShotDestroyCalls = 0;
+    fixture.device.createBuffer = (descriptor) => {
+      const buffer = originalCreateBuffer(descriptor);
+      writeFailureBuffers.push(buffer);
+      if (writeFailureBuffers.length === 1) {
+        const originalDestroy = buffer.destroy.bind(buffer);
+        buffer.destroy = () => {
+          oneShotDestroyCalls += 1;
+          if (oneShotDestroyCalls === 1) {
+            throw new Error('injected terminal P2G one-shot destroy failure');
+          }
+          originalDestroy();
+        };
+      }
+      return buffer;
+    };
+    fixture.device.queue.writeBuffer = () => {
+      throw new Error('injected terminal P2G writeBuffer failure');
+    };
+    await assert.rejects(
+      runTerminalFixtureP2g(terminal),
+      /injected terminal P2G writeBuffer failure/
+    );
+    fixture.device.createBuffer = originalCreateBuffer;
+    fixture.device.queue.writeBuffer = originalWriteBuffer;
+    assert.ok(writeFailureBuffers.length > 0);
+    assert.equal(oneShotDestroyCalls, 2);
+    assert.equal(writeFailureBuffers.every((buffer) => buffer.destroyed), true);
+    assert.equal(fixture.device.submissions.length, submissionsBefore);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    ).status, 'reserved');
+    assert.equal(borrowed.every((buffer) => buffer.destroyed === false), true);
+
+    await runTerminalFixtureP2g(terminal);
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal P2G partial allocation fixture cleanup'
+    );
+  });
+
+  await t.test('params-write and submit failures discard the old transaction and require a fresh brand', async () => {
+    for (const mode of ['params-write-lock-after-effect', 'submit-sequence-after-effect']) {
+      const terminal = await fusedCoarseTerminalP2gFixture();
+      const { fixture, successorMicroepoch } = terminal;
+      const oldTransaction = terminal.terminalTransaction;
+      const coarseField = successorMicroepoch.parentFieldView.coarseFieldView;
+      const fieldRuntime = coarseField.ownerRuntime;
+      const createdBefore = fixture.device.createdBuffers.length;
+      const submissionsBefore = fixture.device.submissions.length;
+      const originalWriteBuffer = fixture.device.queue.writeBuffer;
+      const originalSubmit = fixture.device.queue.submit;
+      const originalDiscardSequence = fieldRuntime.discardStateMutationSequence;
+      const originalDiscardLock = fieldRuntime.discardStatePublicationLock;
+      let cleanupHookCalls = 0;
+      if (mode.startsWith('params-write')) {
+        fixture.device.queue.writeBuffer = (buffer, ...args) => {
+          if (buffer.label === 'ulg-mls-mpm-p2g-mechanics-field-params') {
+            throw new Error('injected terminal P2G params write failure');
+          }
+          return originalWriteBuffer(buffer, ...args);
+        };
+        fieldRuntime.discardStatePublicationLock = (...args) => {
+          cleanupHookCalls += 1;
+          originalDiscardLock(...args);
+          throw new Error('injected lock discard throw after effect');
+        };
+      } else {
+        fixture.device.queue.submit = () => {
+          throw new Error('injected terminal P2G queue.submit failure');
+        };
+        fieldRuntime.discardStateMutationSequence = (...args) => {
+          cleanupHookCalls += 1;
+          originalDiscardSequence(...args);
+          throw new Error('injected sequence discard throw after effect');
+        };
+      }
+      await assert.rejects(
+        runTerminalFixtureP2g(terminal),
+        mode.startsWith('params-write')
+          ? /injected terminal P2G params write failure/
+          : /injected terminal P2G queue\.submit failure/
+      );
+      fixture.device.queue.writeBuffer = originalWriteBuffer;
+      fixture.device.queue.submit = originalSubmit;
+      fieldRuntime.discardStateMutationSequence = originalDiscardSequence;
+      fieldRuntime.discardStatePublicationLock = originalDiscardLock;
+      assert.equal(cleanupHookCalls, 1);
+      assert.equal(schroederFusedCoarseTerminalTransactionState(
+        fixture.device,
+        oldTransaction
+      ).status, 'discarded');
+      assert.equal(validateSchroederFusedCoarseTerminalTransaction(
+        fixture.device,
+        oldTransaction
+      ), false);
+      assert.equal(
+        fieldRuntime.stateMutationState(coarseField).pending,
+        false
+      );
+      assert.equal(
+        fieldRuntime.isStatePublicationLockActive(
+          coarseField,
+          oldTransaction.coarsePublicationLock
+        ),
+        false
+      );
+      assert.equal(fixture.device.submissions.length, submissionsBefore);
+      const failedAttemptBuffers = fixture.device.createdBuffers.slice(createdBefore);
+      assert.ok(failedAttemptBuffers.length > 0);
+      assert.equal(failedAttemptBuffers.every((buffer) => buffer.destroyed), true);
+      for (const borrowed of [
+        terminal.uploads.sphParticleUpload.stateBuffer,
+        terminal.uploads.sphParticleUpload.thermoBuffer,
+        terminal.uploads.sphParticleUpload.identityBuffer,
+        terminal.uploads.mlsMpmParticleUpload.mechanicsBuffer
+      ]) {
+        assert.equal(borrowed.destroyed, false);
+      }
+
+      const freshTransaction = createSchroederFusedCoarseTerminalTransaction({
+        device: fixture.device,
+        macroAuthority: fixture.macroAuthority,
+        microepochAuthority: successorMicroepoch,
+        particleContinuation: terminal.continuation
+      });
+      assert.notEqual(freshTransaction, oldTransaction);
+      terminal.terminalTransaction = freshTransaction;
+      const projection = await runTerminalFixtureP2g(terminal);
+      assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+        fixture.device,
+        projection,
+        terminalP2gOptions(terminal)
+      ), true);
+      await releaseTerminalP2gFixture(
+        terminal,
+        `terminal P2G ${mode} fixture cleanup`
+      );
+    }
+  });
+
+  await t.test('post-submit ABI drift quarantines both fields despite fence and cleanup failures', async () => {
+    for (const fenceMode of ['throw', 'reject']) {
+      const terminal = await fusedCoarseTerminalP2gFixture();
+      const { fixture, successorMicroepoch, terminalTransaction } = terminal;
+      const coarseField = successorMicroepoch.parentFieldView.coarseFieldView;
+      const fineField = successorMicroepoch.fineFieldView;
+      const coarseRuntime = coarseField.ownerRuntime;
+      const fineRuntime = fineField.ownerRuntime;
+      const originalCreateBuffer = fixture.device.createBuffer;
+      const originalSubmit = fixture.device.queue.submit;
+      const originalFence = fixture.device.queue.onSubmittedWorkDone;
+      const created = [];
+      let destroyCalls = 0;
+      fixture.device.createBuffer = (descriptor) => {
+        const buffer = originalCreateBuffer(descriptor);
+        created.push(buffer);
+        if (created.length === 1) {
+          const originalDestroy = buffer.destroy.bind(buffer);
+          buffer.destroy = () => {
+            destroyCalls += 1;
+            if (destroyCalls === 1) {
+              throw new Error('injected terminal P2G cleanup destroy failure');
+            }
+            originalDestroy();
+          };
+        }
+        return buffer;
+      };
+      const sphUpload = terminal.uploads.sphParticleUpload;
+      const exactStateStrideBytes = sphUpload.stateStrideBytes;
+      const exactIdentityByteLength = sphUpload.identityBufferByteLength;
+      fixture.device.queue.submit = (commandBuffers) => {
+        originalSubmit(commandBuffers);
+        if (fenceMode === 'throw') {
+          sphUpload.stateStrideBytes += Float32Array.BYTES_PER_ELEMENT;
+        } else {
+          sphUpload.identityBufferByteLength += Uint32Array.BYTES_PER_ELEMENT;
+        }
+      };
+      fixture.device.queue.onSubmittedWorkDone = fenceMode === 'throw'
+        ? () => {
+            throw new Error('injected terminal P2G cleanup fence throw');
+          }
+        : () => Promise.reject(
+            new Error('injected terminal P2G cleanup fence rejection')
+          );
+      await assert.rejects(
+        runTerminalFixtureP2g(terminal),
+        /submission observation is stale|does not match its exact fused producer inputs/
+      );
+      fixture.device.createBuffer = originalCreateBuffer;
+      fixture.device.queue.submit = originalSubmit;
+      fixture.device.queue.onSubmittedWorkDone = originalFence;
+      sphUpload.stateStrideBytes = exactStateStrideBytes;
+      sphUpload.identityBufferByteLength = exactIdentityByteLength;
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(created.length > 0);
+      assert.equal(destroyCalls, 2);
+      assert.equal(created.every((buffer) => buffer.destroyed), true);
+      const state = schroederFusedCoarseTerminalTransactionState(
+        fixture.device,
+        terminalTransaction
+      );
+      assert.equal(state.status, 'quarantined');
+      assert.equal(state.stageIndex, 0);
+      assert.equal(state.submissionObservedStage, 'p2g');
+      assert.equal(coarseRuntime.isStateArtifactQuarantined(coarseField), true);
+      assert.equal(fineRuntime.isStateArtifactQuarantined(fineField), true);
+      for (const borrowed of [
+        terminal.uploads.sphParticleUpload.stateBuffer,
+        terminal.uploads.sphParticleUpload.thermoBuffer,
+        terminal.uploads.sphParticleUpload.identityBuffer,
+        terminal.uploads.mlsMpmParticleUpload.mechanicsBuffer
+      ]) {
+        assert.equal(borrowed.destroyed, false);
+      }
+      await releaseTerminalP2gFixture(
+        terminal,
+        `terminal P2G post-submit ${fenceMode} fixture cleanup`
+      );
+      assert.equal(coarseRuntime.ownsExecution(coarseField), false);
+      assert.equal(fineRuntime.ownsExecution(fineField), false);
+      assert.equal(coarseField.fieldViewBuffer.destroyed, true);
+      assert.equal(fineField.fieldViewBuffer.destroyed, true);
+    }
+  });
+});
+
+test('fused coarse-terminal WebGPU grid update is exact, claimed, and retry-safe', async (t) => {
+  await t.test('one claimed producer advances 1→2 and only its exact artifact authenticates', async () => {
+    const terminal = await fusedCoarseTerminalP2gFixture();
+    const p2gProjection = await runTerminalFixtureP2g(terminal);
+    const { fixture, terminalTransaction } = terminal;
+    const createdBefore = fixture.device.createdBuffers.length;
+    const submissionsBefore = fixture.device.submissions.length;
+    const pending = runTerminalFixtureGridUpdate(terminal, p2gProjection);
+    const competing = runTerminalFixtureGridUpdate(terminal, p2gProjection);
+    const [first, second] = await Promise.allSettled([pending, competing]);
+    assert.equal(first.status, 'fulfilled');
+    assert.equal(second.status, 'rejected');
+    assert.match(second.reason.message, /already has a producer|not ready/);
+    const update = first.value;
+    const options = terminalGridUpdateOptions(terminal, p2gProjection);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(update.mechanicsFieldMutationInputOrdinal, 1);
+    assert.equal(update.mechanicsFieldMutationOutputOrdinal, 2);
+    assert.equal(update.fusedCoarseTerminalTransaction, terminalTransaction);
+    assert.equal(update.terminalMicroepochAuthority, terminal.successorMicroepoch);
+    assert.equal(update.sourceParticleContinuation, terminal.continuation);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate(
+      fixture.device,
+      update,
+      options
+    ), true);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate(
+      fixture.device,
+      { ...update },
+      options
+    ), false);
+    const forged = {};
+    Object.defineProperty(
+      forged,
+      Symbol.for('peercompute.ulg.mechanics-field-grid-update-origin-validator.v0'),
+      {
+        value: () => true,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      }
+    );
+    assert.equal(validateSubmittedMlsMpmMechanicsFieldGridUpdate(
+      fixture.device,
+      forged
+    ), false);
+    assert.deepEqual(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    ), {
+      status: 'grid-update-submitted',
+      stageIndex: 2,
+      submissionObservedStage: null,
+      nextStage: 'coarse-terminal',
+      submittedStageCount: 2,
+      g2pSubmitted: false,
+      outputClaimed: false,
+      gpuReceiptStatus: 'not-submitted',
+      quarantineReason: null
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const owned = fixture.device.createdBuffers.slice(createdBefore);
+    assert.equal(owned.length, 2);
+    assert.equal(owned.every((buffer) => buffer.destroyed), true);
+    assert.equal(
+      terminal.successorMicroepoch.parentFieldView.coarseFieldView
+        .fieldViewBuffer.destroyed,
+      false
+    );
+    const fineField = terminal.successorMicroepoch.fineFieldView;
+    const coarseField = terminal.successorMicroepoch.parentFieldView.coarseFieldView;
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal grid update exact producer fixture cleanup'
+    );
+    assert.equal(fineField.ownerRuntime.ownsExecution(fineField), false);
+    assert.equal(coarseField.ownerRuntime.ownsExecution(coarseField), false);
+    assert.equal(fineField.fieldViewBuffer.destroyed, true);
+    assert.equal(coarseField.fieldViewBuffer.destroyed, true);
+  });
+
+  await t.test('wrong mode, E_r, C_r, field, level, dt, prior, and receipt do zero work', async () => {
+    const terminal = await fusedCoarseTerminalP2gFixture();
+    const p2gProjection = await runTerminalFixtureP2g(terminal);
+    const { fixture, terminalTransaction } = terminal;
+    const createdBefore = fixture.device.createdBuffers.length;
+    const submissionsBefore = fixture.device.submissions.length;
+    const assertGridReadyWithoutWork = () => {
+      const state = schroederFusedCoarseTerminalTransactionState(
+        fixture.device,
+        terminalTransaction
+      );
+      assert.equal(state.status, 'p2g-submitted');
+      assert.equal(state.stageIndex, 1);
+      assert.equal(state.submissionObservedStage, null);
+      assert.equal(fixture.device.createdBuffers.length, createdBefore);
+      assert.equal(fixture.device.submissions.length, submissionsBefore);
+    };
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(terminal, p2gProjection, terminalTransaction, {
+        fusedFineSubstepTransaction: fixture.transaction
+      }),
+      /either a fused fine transaction or fused coarse-terminal transaction, never both/
+    );
+    assertGridReadyWithoutWork();
+    for (const [overrides, pattern] of [
+      [{ p2gGridProjection: { ...p2gProjection } }, /exact locally submitted P2G artifact/],
+      [{ fusedCoarseTerminalTransaction: { ...terminalTransaction } }, /exact locally submitted P2G artifact/],
+      [{ dt: terminalTransaction.macroAuthority.macroDt + 0.001 }, /exact locally submitted P2G artifact/],
+      [{ mechanicsFieldEnergyReceipt: { deferSeal: false } }, /deferred heat sealing/]
+    ]) {
+      await assert.rejects(
+        runTerminalFixtureGridUpdate(
+          terminal,
+          overrides.p2gGridProjection ?? p2gProjection,
+          overrides.fusedCoarseTerminalTransaction ?? terminalTransaction,
+          overrides
+        ),
+        pattern
+      );
+      assertGridReadyWithoutWork();
+    }
+    const exactLevel = p2gProjection.schroederLevelFilter.selectedLevel;
+    p2gProjection.schroederLevelFilter.selectedLevel = exactLevel + 1;
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(terminal, p2gProjection),
+      /exact locally submitted P2G artifact/
+    );
+    p2gProjection.schroederLevelFilter.selectedLevel = exactLevel;
+    assertGridReadyWithoutWork();
+    const exactField = p2gProjection.mechanicsFieldViewExecution;
+    p2gProjection.mechanicsFieldViewExecution = fixture.transaction.fineFieldView;
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(terminal, p2gProjection),
+      /exact locally submitted P2G artifact/
+    );
+    p2gProjection.mechanicsFieldViewExecution = exactField;
+    assertGridReadyWithoutWork();
+
+    const exactIdentityStrideBytes =
+      terminal.uploads.sphParticleUpload.identityStrideBytes;
+    terminal.uploads.sphParticleUpload.identityStrideBytes += 4;
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(terminal, p2gProjection),
+      /exact locally submitted P2G artifact/
+    );
+    terminal.uploads.sphParticleUpload.identityStrideBytes =
+      exactIdentityStrideBytes;
+    assertGridReadyWithoutWork();
+
+    // Same device, but an authentic E0/C0 fine transaction rather than this
+    // terminal producer's exact E_r/C_r authority pair.  This keeps the
+    // lineage rejection independent of the foreign-device preflight below.
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(
+        terminal,
+        p2gProjection,
+        fixture.transaction
+      ),
+      /exact locally submitted P2G artifact/
+    );
+    assertGridReadyWithoutWork();
+
+    const foreignTerminal = await fusedCoarseTerminalP2gFixture();
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(
+        terminal,
+        p2gProjection,
+        foreignTerminal.terminalTransaction
+      ),
+      /exact locally submitted P2G artifact/
+    );
+    assertGridReadyWithoutWork();
+    await releaseTerminalP2gFixture(
+      foreignTerminal,
+      'foreign authentic E_r C_r grid preflight fixture cleanup'
+    );
+
+    await runTerminalFixtureGridUpdate(terminal, p2gProjection);
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal grid update preflight fixture cleanup'
+    );
+  });
+
+  await t.test('TOCTOU, create, write, and submit failures clean up and retry stage 1', async () => {
+    const terminal = await fusedCoarseTerminalP2gFixture();
+    const p2gProjection = await runTerminalFixtureP2g(terminal);
+    const { fixture, terminalTransaction } = terminal;
+    const submissionsBefore = fixture.device.submissions.length;
+    const assertGridReady = () => {
+      const state = schroederFusedCoarseTerminalTransactionState(
+        fixture.device,
+        terminalTransaction
+      );
+      assert.equal(state.status, 'p2g-submitted');
+      assert.equal(state.stageIndex, 1);
+      assert.equal(state.submissionObservedStage, null);
+      assert.equal(fixture.device.submissions.length, submissionsBefore);
+    };
+
+    let createdBefore = fixture.device.createdBuffers.length;
+    const pending = runTerminalFixtureGridUpdate(terminal, p2gProjection);
+    const exactProjectionDt = p2gProjection.dt;
+    p2gProjection.dt += 0.001;
+    await assert.rejects(
+      pending,
+      /lost its exact pending transaction before submission/
+    );
+    p2gProjection.dt = exactProjectionDt;
+    assertGridReady();
+    let failedBuffers = fixture.device.createdBuffers.slice(createdBefore);
+    assert.equal(failedBuffers.length, 2);
+    assert.equal(failedBuffers.every((buffer) => buffer.destroyed), true);
+
+    const originalCreateBuffer = fixture.device.createBuffer;
+    const partialBuffers = [];
+    fixture.device.createBuffer = (descriptor) => {
+      if (partialBuffers.length === 1) {
+        throw new Error('injected terminal grid createBuffer failure');
+      }
+      const buffer = originalCreateBuffer(descriptor);
+      partialBuffers.push(buffer);
+      return buffer;
+    };
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(terminal, p2gProjection),
+      /injected terminal grid createBuffer failure/
+    );
+    fixture.device.createBuffer = originalCreateBuffer;
+    assert.equal(partialBuffers.length, 1);
+    assert.equal(partialBuffers[0].destroyed, true);
+    assertGridReady();
+
+    const originalWriteBuffer = fixture.device.queue.writeBuffer;
+    const writeBuffers = [];
+    let destroyCalls = 0;
+    fixture.device.createBuffer = (descriptor) => {
+      const buffer = originalCreateBuffer(descriptor);
+      writeBuffers.push(buffer);
+      if (writeBuffers.length === 1) {
+        const originalDestroy = buffer.destroy.bind(buffer);
+        buffer.destroy = () => {
+          destroyCalls += 1;
+          if (destroyCalls === 1) {
+            throw new Error('injected terminal grid destructor failure');
+          }
+          originalDestroy();
+        };
+      }
+      return buffer;
+    };
+    fixture.device.queue.writeBuffer = (buffer, ...args) => {
+      if (buffer.label === 'ulg-mls-mpm-mechanics-field-grid-update-params') {
+        throw new Error('injected terminal grid params write failure');
+      }
+      return originalWriteBuffer(buffer, ...args);
+    };
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(terminal, p2gProjection),
+      /injected terminal grid params write failure/
+    );
+    fixture.device.createBuffer = originalCreateBuffer;
+    fixture.device.queue.writeBuffer = originalWriteBuffer;
+    assert.equal(writeBuffers.length, 2);
+    assert.equal(destroyCalls, 2);
+    assert.equal(writeBuffers.every((buffer) => buffer.destroyed), true);
+    assertGridReady();
+
+    const originalSubmit = fixture.device.queue.submit;
+    createdBefore = fixture.device.createdBuffers.length;
+    fixture.device.queue.submit = () => {
+      throw new Error('injected terminal grid queue.submit failure');
+    };
+    await assert.rejects(
+      runTerminalFixtureGridUpdate(terminal, p2gProjection),
+      /injected terminal grid queue\.submit failure/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    failedBuffers = fixture.device.createdBuffers.slice(createdBefore);
+    assert.equal(failedBuffers.length, 2);
+    assert.equal(failedBuffers.every((buffer) => buffer.destroyed), true);
+    assertGridReady();
+    assert.equal(
+      terminal.successorMicroepoch.parentFieldView.coarseFieldView
+        .fieldViewBuffer.destroyed,
+      false
+    );
+
+    await runTerminalFixtureGridUpdate(terminal, p2gProjection);
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal grid retry fixture cleanup'
+    );
+  });
+
+  await t.test('post-submit drift quarantines both fields through fence failures', async () => {
+    for (const fenceMode of ['throw', 'reject']) {
+      const terminal = await fusedCoarseTerminalP2gFixture();
+      const p2gProjection = await runTerminalFixtureP2g(terminal);
+      const { fixture, terminalTransaction, successorMicroepoch } = terminal;
+      const fineField = successorMicroepoch.fineFieldView;
+      const coarseField = successorMicroepoch.parentFieldView.coarseFieldView;
+      const fineRuntime = fineField.ownerRuntime;
+      const coarseRuntime = coarseField.ownerRuntime;
+      const originalCreateBuffer = fixture.device.createBuffer;
+      const originalSubmit = fixture.device.queue.submit;
+      const originalFence = fixture.device.queue.onSubmittedWorkDone;
+      const created = [];
+      let destroyCalls = 0;
+      fixture.device.createBuffer = (descriptor) => {
+        const buffer = originalCreateBuffer(descriptor);
+        created.push(buffer);
+        if (created.length === 1) {
+          const originalDestroy = buffer.destroy.bind(buffer);
+          buffer.destroy = () => {
+            destroyCalls += 1;
+            if (destroyCalls === 1) {
+              throw new Error('injected terminal grid cleanup destroy failure');
+            }
+            originalDestroy();
+          };
+        }
+        return buffer;
+      };
+      const exactProjectionDt = p2gProjection.dt;
+      fixture.device.queue.submit = (commandBuffers) => {
+        originalSubmit(commandBuffers);
+        p2gProjection.dt += 0.001;
+      };
+      fixture.device.queue.onSubmittedWorkDone = fenceMode === 'throw'
+        ? () => {
+            throw new Error('injected terminal grid cleanup fence throw');
+          }
+        : () => Promise.reject(
+            new Error('injected terminal grid cleanup fence rejection')
+          );
+      await assert.rejects(
+        runTerminalFixtureGridUpdate(terminal, p2gProjection),
+        /does not match its exact fused producer inputs|stage is stale, foreign, or out of order/
+      );
+      fixture.device.createBuffer = originalCreateBuffer;
+      fixture.device.queue.submit = originalSubmit;
+      fixture.device.queue.onSubmittedWorkDone = originalFence;
+      p2gProjection.dt = exactProjectionDt;
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(created.length, 2);
+      assert.equal(destroyCalls, 2);
+      assert.equal(created.every((buffer) => buffer.destroyed), true);
+      const state = schroederFusedCoarseTerminalTransactionState(
+        fixture.device,
+        terminalTransaction
+      );
+      assert.equal(state.status, 'quarantined');
+      assert.equal(state.stageIndex, 1);
+      assert.equal(state.submissionObservedStage, 'grid-update');
+      assert.equal(fineRuntime.isStateArtifactQuarantined(fineField), true);
+      assert.equal(coarseRuntime.isStateArtifactQuarantined(coarseField), true);
+      assert.equal(coarseField.fieldViewBuffer.destroyed, false);
+      await releaseTerminalP2gFixture(
+        terminal,
+        `terminal grid post-submit ${fenceMode} fixture cleanup`
+      );
+      assert.equal(fineRuntime.ownsExecution(fineField), false);
+      assert.equal(coarseRuntime.ownsExecution(coarseField), false);
+      assert.equal(fineField.fieldViewBuffer.destroyed, true);
+      assert.equal(coarseField.fieldViewBuffer.destroyed, true);
+    }
+  });
+});
+
+test('fused coarse-terminal workspace owns exact reflux submission', async (t) => {
+  const strictOptions = (terminal, gridUpdate) => ({
+    terminalTransaction: terminal.terminalTransaction,
+    macroAuthority: terminal.fixture.macroAuthority,
+    microepochAuthority: terminal.successorMicroepoch,
+    particleContinuation: terminal.continuation,
+    fieldExecution:
+      terminal.successorMicroepoch.parentFieldView.coarseFieldView,
+    mutationSegment: terminal.terminalTransaction.coarseTerminalMutation,
+    priorArtifact: gridUpdate,
+    requireDeferred: true,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  });
+
+  await t.test('exact submit advances 2→3 and mints only a local artifact', async () => {
+    const { terminal, gridUpdate } = await terminalWorkspaceInputFixture();
+    const coarseField =
+      terminal.successorMicroepoch.parentFieldView.coarseFieldView;
+    const fieldBuffer = coarseField.fieldViewBuffer;
+    const runtimeBufferStart = terminal.fixture.device.createdBuffers.length;
+    const runtime = terminalWorkspaceRuntime(terminal);
+    const retainedBufferCount = terminal.fixture.device.createdBuffers.length;
+    const chain = encodeTerminalWorkspace(terminal, gridUpdate, runtime);
+    assert.equal(
+      terminal.fixture.device.createdBuffers.length,
+      retainedBufferCount
+    );
+    assert.equal(chain.artifact.previousGridUpdate, gridUpdate);
+    assert.equal(chain.artifact.sourceProjection, gridUpdate.sourceProjection);
+    assert.equal(
+      chain.artifact.fusedCoarseTerminalTransaction,
+      terminal.terminalTransaction
+    );
+    assert.equal(chain.artifact.terminalMicroepochAuthority, terminal.successorMicroepoch);
+    assert.equal(chain.artifact.sourceParticleContinuation, terminal.continuation);
+    assert.equal(chain.artifact.mechanicsFieldMutationInputOrdinal, 2);
+    assert.equal(chain.artifact.mechanicsFieldMutationOutputOrdinal, 3);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+      terminal.fixture.device,
+      chain.artifact,
+      strictOptions(terminal, gridUpdate)
+    ), false);
+    terminal.fixture.device.queue.submit([chain.encoder.finish()]);
+    chain.runtime.markTerminalSubmissionObserved(chain.execution);
+    chain.runtime.markTerminalSubmitted(chain.execution);
+    const state = schroederFusedCoarseTerminalTransactionState(
+      terminal.fixture.device,
+      terminal.terminalTransaction
+    );
+    assert.equal(state.status, 'coarse-terminal-submitted');
+    assert.equal(state.stageIndex, 3);
+    assert.equal(state.submissionObservedStage, null);
+    assert.equal(state.nextStage, 'g2p');
+    assert.equal(chain.artifact.status, 'submitted-unverified');
+    assert.equal(chain.artifact.fieldStateUpdateSubmittedInPlace, true);
+    assert.equal(chain.artifact.mechanicsFieldEnergyReceipt.deferSeal, false);
+    assert.equal(chain.artifact.mechanicsFieldEnergyReceipt.fieldMutationOrdinal, 3);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+      terminal.fixture.device,
+      chain.artifact,
+      strictOptions(terminal, gridUpdate)
+    ), true);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+      terminal.fixture.device,
+      { ...chain.artifact },
+      strictOptions(terminal, gridUpdate)
+    ), false);
+    const exactDt = chain.artifact.dt;
+    chain.artifact.dt += 0.001;
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+      terminal.fixture.device,
+      chain.artifact,
+      strictOptions(terminal, gridUpdate)
+    ), false);
+    chain.artifact.dt = exactDt;
+    await assert.rejects(
+      chain.runtime.releaseExecutionAfter(
+        chain.execution,
+        Promise.reject(new Error('injected terminal workspace fence rejection'))
+      ),
+      /injected terminal workspace fence rejection/
+    );
+    assert.equal(chain.runtime.activeExecutionCount(), 1);
+    assert.throws(
+      () => chain.runtime.destroy(),
+      /active executions/
+    );
+    assert.equal(
+      await chain.runtime.releaseExecutionAfter(
+        chain.execution,
+        terminal.fixture.device.queue.onSubmittedWorkDone()
+      ),
+      true
+    );
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+      terminal.fixture.device,
+      chain.artifact,
+      strictOptions(terminal, gridUpdate)
+    ), false);
+    assert.equal(chain.runtime.destroy(), true);
+    assert.equal(
+      terminal.fixture.device.createdBuffers
+        .slice(runtimeBufferStart)
+        .every((buffer) => buffer.destroyed),
+      true
+    );
+    assert.equal(fieldBuffer.destroyed, false);
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal workspace exact producer fixture cleanup'
+    );
+    assert.equal(fieldBuffer.destroyed, true);
+  });
+
+  await t.test('claim precedes encoder effects and discarded work is retryable', async () => {
+    const { terminal, gridUpdate } = await terminalWorkspaceInputFixture();
+    const runtime = terminalWorkspaceRuntime(terminal, { arenaCount: 2 });
+    const downgradedEncoder = terminal.fixture.device.createCommandEncoder();
+    const downgradedWrites = terminal.fixture.device.writes.length;
+    assert.throws(
+      () => runtime.encodeCoarseTerminal(downgradedEncoder, {
+        parentFieldView: terminal.successorMicroepoch.parentFieldView,
+        coarseGridUpdate: gridUpdate,
+        refluxLedger: terminal.fixture.refluxLedger,
+        fineSubstepCount: terminal.fixture.macroAuthority.fineSubstepCount,
+        fineDt: terminal.fixture.macroAuthority.fineDt,
+        fusedCoarseTerminalTransaction: null
+      }),
+      /exact submitted topology/
+    );
+    assert.equal(terminal.fixture.device.writes.length, downgradedWrites);
+    const first = encodeTerminalWorkspace(terminal, gridUpdate, runtime);
+    assert.throws(
+      () => markSchroederFusedCoarseTerminalStageSubmissionObserved(
+        terminal.fixture.device,
+        terminal.terminalTransaction,
+        { stage: 'coarse-terminal' }
+      ),
+      /stale, foreign, or out of order/
+    );
+    assert.throws(
+      () => markSchroederFusedCoarseTerminalStageSubmitted(
+        terminal.fixture.device,
+        terminal.terminalTransaction,
+        {
+          stage: 'coarse-terminal',
+          artifact: first.artifact,
+          priorArtifact: gridUpdate
+        }
+      ),
+      /stale, foreign, or out of order/
+    );
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      terminal.fixture.device,
+      terminal.terminalTransaction
+    ).stageIndex, 2);
+    const secondEncoder = terminal.fixture.device.createCommandEncoder();
+    const secondClearsBefore = terminal.fixture.device.clears.length;
+    const secondDispatchesBefore = terminal.fixture.device.dispatches.length;
+    const secondWritesBefore = terminal.fixture.device.writes.length;
+    assert.throws(
+      () => encodeTerminalWorkspace(terminal, gridUpdate, runtime, {
+        encoder: secondEncoder
+      }),
+      /already has a producer or is not ready/
+    );
+    assert.equal(terminal.fixture.device.clears.length, secondClearsBefore);
+    assert.equal(
+      terminal.fixture.device.dispatches.length,
+      secondDispatchesBefore
+    );
+    assert.equal(terminal.fixture.device.writes.length, secondWritesBefore);
+    assert.equal(runtime.activeExecutionCount(), 1);
+    assert.equal(runtime.releaseExecution(
+      first.execution,
+      { discardedEncoder: true }
+    ), true);
+    assert.equal(runtime.activeExecutionCount(), 0);
+
+    for (const [overrides, pattern] of [
+      [{ coarseGridUpdate: { ...gridUpdate } }, /already has a producer or is not ready/],
+      [{ refluxLedger: { ...terminal.fixture.refluxLedger } }, /exact submitted topology/],
+      [{ fineDt: terminal.fixture.macroAuthority.fineDt + 0.001 }, /exact E_r\/C_r/],
+      [{ parentFieldView: terminal.fixture.generation.parentFieldView }, /exact submitted topology/]
+    ]) {
+      const encoder = terminal.fixture.device.createCommandEncoder();
+      const writesBefore = terminal.fixture.device.writes.length;
+      const clearsBefore = terminal.fixture.device.clears.length;
+      const dispatchesBefore = terminal.fixture.device.dispatches.length;
+      assert.throws(
+        () => encodeTerminalWorkspace(terminal, gridUpdate, runtime, {
+          encoder,
+          ...overrides
+        }),
+        pattern
+      );
+      assert.equal(terminal.fixture.device.writes.length, writesBefore);
+      assert.equal(terminal.fixture.device.clears.length, clearsBefore);
+      assert.equal(terminal.fixture.device.dispatches.length, dispatchesBefore);
+      assert.equal(runtime.activeExecutionCount(), 0);
+      const state = schroederFusedCoarseTerminalTransactionState(
+        terminal.fixture.device,
+        terminal.terminalTransaction
+      );
+      assert.equal(state.status, 'grid-update-submitted');
+      assert.equal(state.stageIndex, 2);
+    }
+
+    const retry = encodeTerminalWorkspace(terminal, gridUpdate, runtime);
+    assert.equal(runtime.activeExecutionCount(), 1);
+    assert.equal(runtime.releaseExecution(
+      retry.execution,
+      { discardedEncoder: true }
+    ), true);
+    assert.equal(runtime.destroy(), true);
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal workspace claim fixture cleanup'
+    );
+  });
+
+  await t.test('partial encoder and callback TOCTOU require exact discard proof', async () => {
+    for (const failureMode of ['hostile-encoder', 'callback-toctou']) {
+      const { terminal, gridUpdate } = await terminalWorkspaceInputFixture();
+      const runtime = terminalWorkspaceRuntime(terminal);
+      const encoder = terminal.fixture.device.createCommandEncoder();
+      const originalBeginComputePass = encoder.beginComputePass;
+      let passOrdinal = 0;
+      if (failureMode === 'hostile-encoder') {
+        encoder.beginComputePass = (...args) => {
+          passOrdinal += 1;
+          if (passOrdinal === 2) {
+            const hostile = new Error(
+              'injected terminal workspace mid-encoder failure'
+            );
+            Object.defineProperty(hostile, 'code', {
+              value: 'HOSTILE_NON_WRITABLE_CODE',
+              configurable: false,
+              writable: false
+            });
+            throw hostile;
+          }
+          return originalBeginComputePass(...args);
+        };
+      } else {
+        encoder.beginComputePass = (...args) => {
+          const pass = originalBeginComputePass(...args);
+          const originalDispatch = pass.dispatchWorkgroups;
+          pass.dispatchWorkgroups = (...dispatchArgs) => {
+            originalDispatch(...dispatchArgs);
+            if (passOrdinal === 0) gridUpdate.dt += 0.001;
+            passOrdinal += 1;
+          };
+          return pass;
+        };
+      }
+      let failure = null;
+      assert.throws(
+        () => encodeTerminalWorkspace(terminal, gridUpdate, runtime, { encoder }),
+        (error) => {
+          failure = error;
+          return error?.code
+            === 'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_FAILED_ENCODING_PENDING_DISCARD'
+            && error?.failedEncoding?.schema
+              === 'peercompute.ulg.schroeder-parent-field-failed-terminal-encoding.v1';
+        }
+      );
+      assert.ok(terminal.fixture.device.clears.length > 0);
+      assert.ok(terminal.fixture.device.dispatches.length > 0);
+      assert.equal(runtime.activeExecutionCount(), 1);
+      assert.throws(
+        () => encodeTerminalWorkspace(terminal, gridUpdate, runtime),
+        /already has a producer or is not ready/
+      );
+      assert.throws(
+        () => runtime.destroy(),
+        /active executions/
+      );
+      assert.throws(
+        () => runtime.discardFailedTerminalEncoding(
+          { ...failure.failedEncoding },
+          { discardedEncoder: true }
+        ),
+        /stale or foreign/
+      );
+      assert.throws(
+        () => runtime.discardFailedTerminalEncoding(failure.failedEncoding),
+        /requires \{ discardedEncoder: true \}/
+      );
+      if (failureMode === 'callback-toctou') gridUpdate.dt -= 0.001;
+      assert.equal(runtime.discardFailedTerminalEncoding(
+        failure.failedEncoding,
+        { discardedEncoder: true }
+      ), true);
+      assert.equal(runtime.activeExecutionCount(), 0);
+      const state = schroederFusedCoarseTerminalTransactionState(
+        terminal.fixture.device,
+        terminal.terminalTransaction
+      );
+      assert.equal(state.status, 'grid-update-submitted');
+      assert.equal(state.stageIndex, 2);
+      const retry = encodeTerminalWorkspace(terminal, gridUpdate, runtime);
+      assert.equal(runtime.releaseExecution(
+        retry.execution,
+        { discardedEncoder: true }
+      ), true);
+      assert.equal(runtime.destroy(), true);
+      await releaseTerminalP2gFixture(
+        terminal,
+        `terminal workspace ${failureMode} failed-encoding cleanup`
+      );
+    }
+  });
+
+  await t.test('write and submit failures release the capability for exact retry', async () => {
+    const { terminal, gridUpdate } = await terminalWorkspaceInputFixture();
+    const runtime = terminalWorkspaceRuntime(terminal);
+    const originalWrite = terminal.fixture.device.queue.writeBuffer;
+    terminal.fixture.device.queue.writeBuffer = () => {
+      throw new Error('injected terminal workspace params write failure');
+    };
+    assert.throws(
+      () => encodeTerminalWorkspace(terminal, gridUpdate, runtime),
+      /injected terminal workspace params write failure/
+    );
+    terminal.fixture.device.queue.writeBuffer = originalWrite;
+    assert.equal(runtime.activeExecutionCount(), 0);
+    let state = schroederFusedCoarseTerminalTransactionState(
+      terminal.fixture.device,
+      terminal.terminalTransaction
+    );
+    assert.equal(state.status, 'grid-update-submitted');
+    assert.equal(state.stageIndex, 2);
+
+    const failedSubmit = encodeTerminalWorkspace(terminal, gridUpdate, runtime);
+    const originalSubmit = terminal.fixture.device.queue.submit;
+    terminal.fixture.device.queue.submit = () => {
+      throw new Error('injected terminal workspace queue.submit failure');
+    };
+    assert.throws(
+      () => terminal.fixture.device.queue.submit([failedSubmit.encoder.finish()]),
+      /injected terminal workspace queue\.submit failure/
+    );
+    terminal.fixture.device.queue.submit = originalSubmit;
+    assert.equal(runtime.releaseExecution(
+      failedSubmit.execution,
+      { discardedEncoder: true }
+    ), true);
+    state = schroederFusedCoarseTerminalTransactionState(
+      terminal.fixture.device,
+      terminal.terminalTransaction
+    );
+    assert.equal(state.status, 'grid-update-submitted');
+    assert.equal(state.stageIndex, 2);
+
+    const retry = encodeTerminalWorkspace(terminal, gridUpdate, runtime);
+    assert.equal(runtime.releaseExecution(
+      retry.execution,
+      { discardedEncoder: true }
+    ), true);
+    assert.equal(runtime.destroy(), true);
+    await releaseTerminalP2gFixture(
+      terminal,
+      'terminal workspace failure retry fixture cleanup'
+    );
+  });
+
+  await t.test('arena allocation and destroy retry clean every owned buffer', () => {
+    const device = fakeP2gDevice();
+    const originalCreateBuffer = device.createBuffer;
+    const partialBuffers = [];
+    let createCalls = 0;
+    let partialDestroyCalls = 0;
+    device.createBuffer = (descriptor) => {
+      createCalls += 1;
+      if (createCalls === 3) {
+        throw new Error('injected workspace partial arena allocation failure');
+      }
+      const buffer = originalCreateBuffer(descriptor);
+      partialBuffers.push(buffer);
+      if (partialBuffers.length === 1) {
+        const originalDestroy = buffer.destroy.bind(buffer);
+        buffer.destroy = () => {
+          partialDestroyCalls += 1;
+          if (partialDestroyCalls === 1) {
+            throw new Error('injected workspace partial cleanup failure');
+          }
+          originalDestroy();
+        };
+      }
+      return buffer;
+    };
+    assert.throws(
+      () => createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+        parentFieldCapacity: 1,
+        fineFieldCapacity: 1,
+        arenaCount: 1
+      }),
+      /injected workspace partial arena allocation failure/
+    );
+    device.createBuffer = originalCreateBuffer;
+    assert.equal(partialBuffers.length, 2);
+    assert.equal(partialDestroyCalls, 2);
+    assert.equal(partialBuffers.every((buffer) => buffer.destroyed), true);
+
+    const runtimeBufferStart = device.createdBuffers.length;
+    const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+      device,
+      {
+        parentFieldCapacity: 1,
+        fineFieldCapacity: 1,
+        arenaCount: 1
+      }
+    );
+    const runtimeBuffers = device.createdBuffers.slice(runtimeBufferStart);
+    let runtimeDestroyCalls = 0;
+    const originalDestroy = runtimeBuffers[0].destroy.bind(runtimeBuffers[0]);
+    runtimeBuffers[0].destroy = () => {
+      runtimeDestroyCalls += 1;
+      if (runtimeDestroyCalls === 1) {
+        throw new Error('injected workspace destroy retry failure');
+      }
+      originalDestroy();
+    };
+    assert.equal(runtime.destroy(), true);
+    assert.equal(runtimeDestroyCalls, 2);
+    assert.equal(runtimeBuffers.every((buffer) => buffer.destroyed), true);
+  });
+
+  await t.test('post-submit public and prior drift quarantine both fields', async () => {
+    for (const tamper of ['public-mirror', 'prior-grid']) {
+      const { terminal, gridUpdate } = await terminalWorkspaceInputFixture();
+      const fineField = terminal.successorMicroepoch.fineFieldView;
+      const coarseField =
+        terminal.successorMicroepoch.parentFieldView.coarseFieldView;
+      const fineRuntime = fineField.ownerRuntime;
+      const coarseRuntime = coarseField.ownerRuntime;
+      const chain = encodeTerminalWorkspace(terminal, gridUpdate);
+      terminal.fixture.device.queue.submit([chain.encoder.finish()]);
+      if (tamper === 'public-mirror') {
+        chain.execution.predictorDt += 0.001;
+        assert.throws(
+          () => chain.runtime.markTerminalSubmissionObserved(chain.execution),
+          /public mirrors changed/
+        );
+      } else {
+        gridUpdate.dt += 0.001;
+        chain.runtime.markTerminalSubmissionObserved(chain.execution);
+        assert.throws(
+          () => chain.runtime.markTerminalSubmitted(chain.execution),
+          /does not match its exact fused producer inputs|exact locally submitted P2G artifact|stale, foreign, or out of order/
+        );
+      }
+      const state = schroederFusedCoarseTerminalTransactionState(
+        terminal.fixture.device,
+        terminal.terminalTransaction
+      );
+      assert.equal(state.status, 'quarantined');
+      assert.equal(state.stageIndex, 2);
+      assert.equal(state.submissionObservedStage, 'coarse-terminal');
+      assert.equal(fineRuntime.isStateArtifactQuarantined(fineField), true);
+      assert.equal(coarseRuntime.isStateArtifactQuarantined(coarseField), true);
+      assert.equal(validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+        terminal.fixture.device,
+        chain.artifact,
+        strictOptions(terminal, gridUpdate)
+      ), false);
+      assert.equal(
+        await chain.runtime.releaseExecutionAfter(
+          chain.execution,
+          terminal.fixture.device.queue.onSubmittedWorkDone()
+        ),
+        true
+      );
+      assert.equal(chain.runtime.destroy(), true);
+      assert.equal(coarseField.fieldViewBuffer.destroyed, false);
+      await releaseTerminalP2gFixture(
+        terminal,
+        `terminal workspace ${tamper} quarantine fixture cleanup`
+      );
+      assert.equal(fineRuntime.ownsExecution(fineField), false);
+      assert.equal(coarseRuntime.ownsExecution(coarseField), false);
+      assert.equal(fineField.fieldViewBuffer.destroyed, true);
+      assert.equal(coarseField.fieldViewBuffer.destroyed, true);
+    }
+  });
+});
+
+test('fused WebGPU grid update consumes exact P2G once and isolates stale attempts', async (t) => {
+  const strictOptions = (fixture, p2gProjection) => ({
+    transaction: fixture.transaction,
+    macroAuthority: fixture.macroAuthority,
+    microepochAuthority: fixture.microepochAuthority,
+    particleContinuation: fixture.particleContinuation,
+    fieldExecution: fixture.microepochAuthority.fineFieldView,
+    mutationSegment: fixture.transaction.gridUpdateMutation,
+    priorArtifact: p2gProjection,
+    requireDeferred: true,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  });
+
+  await t.test('success advances exactly once and rejects clones', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const p2gProjection = await runFusedP2gProducer(fixture);
+    const update = await runFusedGridUpdateProducer(fixture, p2gProjection);
+    assert.equal(fixture.device.submissions.length, 3);
+    assert.equal(update.mechanicsFieldEnergyReceipt.deferSeal, true);
+    assert.equal(update.proposalMode, 'proposal-deferred-to-post-mechanics');
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate(
+      fixture.device,
+      update,
+      strictOptions(fixture, p2gProjection)
+    ), true);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate(
+      fixture.device,
+      { ...update },
+      strictOptions(fixture, p2gProjection)
+    ), false);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'grid-update-submitted');
+    assert.equal(state.stageIndex, 2);
+    assert.equal(state.submissionObservedStage, null);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('success fixture ends after grid update')
+      }
+    );
+  });
+
+  await t.test('nondeferred receipt fails before submission and stays grid-ready', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const p2gProjection = await runFusedP2gProducer(fixture);
+    await assert.rejects(
+      runFusedGridUpdateProducer(fixture, p2gProjection, {
+        mechanicsFieldEnergyReceipt: { deferSeal: false }
+      }),
+      /requires deferred heat sealing/
+    );
+    assert.equal(fixture.device.submissions.length, 2);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'p2g-submitted');
+    assert.equal(state.stageIndex, 1);
+    assert.equal(state.submissionObservedStage, null);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('nondeferred grid fixture cleanup')
+      }
+    );
+  });
+
+  await t.test('r=2 rejects macro-dt grid update before submission and retries fineDt', async () => {
+    const fixture = fusedP2gProducerFixture({ fineSubstepCount: 2 });
+    const p2gProjection = await runFusedP2gProducer(fixture);
+    await assert.rejects(
+      runFusedGridUpdateProducer(fixture, p2gProjection, {
+        dt: fixture.macroDt
+      }),
+      /exact locally submitted P2G artifact/
+    );
+    let state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'p2g-submitted');
+    assert.equal(state.stageIndex, 1);
+    assert.equal(state.submissionObservedStage, null);
+    assert.equal(fixture.device.submissions.length, 2);
+    await runFusedGridUpdateProducer(fixture, p2gProjection);
+    state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'grid-update-submitted');
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('wrong grid dt fixture cleanup')
+      }
+    );
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('post-submit source mutation quarantines before publication', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const p2gProjection = await runFusedP2gProducer(fixture);
+    const originalSubmit = fixture.device.queue.submit;
+    fixture.device.queue.submit = (commandBuffers) => {
+      originalSubmit(commandBuffers);
+      p2gProjection.dt += 0.001;
+    };
+    await assert.rejects(
+      runFusedGridUpdateProducer(fixture, p2gProjection),
+      /exact P2G projection|exact fused producer inputs|stale, foreign, or out of order/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    assert.equal(fixture.device.submissions.length, 3);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'quarantined');
+    assert.equal(state.stageIndex, 1);
+    assert.equal(state.submissionObservedStage, 'grid-update');
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      p2gProjection,
+      {
+        transaction: fixture.transaction,
+        macroAuthority: fixture.macroAuthority,
+        microepochAuthority: fixture.microepochAuthority,
+        particleContinuation: fixture.particleContinuation,
+        fieldExecution: fixture.microepochAuthority.fineFieldView,
+        mutationSegment: fixture.transaction.p2gMutation,
+        priorArtifact: null,
+        requireDeferred: true,
+        proposalMode: 'proposal-deferred-to-post-mechanics'
+      }
+    ), false);
+    const fineField = fixture.microepochAuthority.fineFieldView;
+    assert.equal(fineField.ownerRuntime.isStateArtifactQuarantined(fineField), true);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('post-submit grid mark failure')
+      }
+    );
+    assert.equal(fineField.ownerRuntime.ownsExecution(fineField), false);
+    assert.equal(fineField.fieldViewBuffer.destroyed, true);
+  });
+
+  await t.test('synchronous submit failure stays grid-ready for an exact retry', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const p2gProjection = await runFusedP2gProducer(fixture);
+    const originalSubmit = fixture.device.queue.submit;
+    fixture.device.queue.submit = () => {
+      throw new Error('injected grid queue.submit failure');
+    };
+    await assert.rejects(
+      runFusedGridUpdateProducer(fixture, p2gProjection),
+      /injected grid queue\.submit failure/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    let state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'p2g-submitted');
+    assert.equal(state.stageIndex, 1);
+    assert.equal(state.submissionObservedStage, null);
+    assert.equal(fixture.device.submissions.length, 2);
+    const update = await runFusedGridUpdateProducer(fixture, p2gProjection);
+    state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'grid-update-submitted');
+    assert.equal(state.stageIndex, 2);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate(
+      fixture.device,
+      update,
+      strictOptions(fixture, p2gProjection)
+    ), true);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('grid retry fixture cleanup')
+      }
+    );
+  });
+
+  await t.test('concurrent same-artifact calls submit once without poisoning the winner', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const p2gProjection = await runFusedP2gProducer(fixture);
+    const attempts = await Promise.allSettled([
+      runFusedGridUpdateProducer(fixture, p2gProjection),
+      runFusedGridUpdateProducer(fixture, p2gProjection)
+    ]);
+    assert.equal(attempts.filter(({ status }) => status === 'fulfilled').length, 1);
+    assert.equal(attempts.filter(({ status }) => status === 'rejected').length, 1);
+    assert.equal(fixture.device.submissions.length, 3);
+    const winner = attempts.find(({ status }) => status === 'fulfilled').value;
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'grid-update-submitted');
+    assert.equal(state.stageIndex, 2);
+    assert.equal(state.submissionObservedStage, null);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate(
+      fixture.device,
+      winner,
+      strictOptions(fixture, p2gProjection)
+    ), true);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('concurrent grid fixture cleanup')
+      }
+    );
+  });
+});
+
+test('fused WebGPU fine correction owns exact reflux provenance and observation', async (t) => {
+  const strictOptions = (fixture, chain) => ({
+    transaction: fixture.transaction,
+    macroAuthority: fixture.macroAuthority,
+    microepochAuthority: fixture.microepochAuthority,
+    particleContinuation: fixture.particleContinuation,
+    fieldExecution: fixture.microepochAuthority.fineFieldView,
+    mutationSegment: fixture.transaction.fineCorrectionMutation,
+    priorArtifact: chain.gridUpdate,
+    requireDeferred: true,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  });
+
+  await t.test('submission mints ordinal-3 receipt, advances once, and rejects clones', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await fusedFineCorrectionWorkspace(fixture);
+    const encoder = fixture.device.createCommandEncoder();
+    const correction = chain.runtime.encodeFineCorrection(
+      encoder,
+      chain.execution,
+      {
+        fineGridUpdate: chain.gridUpdate,
+        deltaScale: 1,
+        maxCorrectionMPerS: 0,
+        fusedFineSubstepTransaction: fixture.transaction
+      }
+    );
+    assert.equal(correction.mechanicsFieldEnergyReceipt, null);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+      fixture.device,
+      correction,
+      strictOptions(fixture, chain)
+    ), false);
+    fixture.device.queue.submit([encoder.finish()]);
+    chain.runtime.markTerminalSubmissionObserved(chain.execution);
+    chain.runtime.markTerminalSubmitted(chain.execution);
+    assert.equal(correction.mechanicsFieldMutationInputOrdinal, 2);
+    assert.equal(correction.mechanicsFieldMutationOutputOrdinal, 3);
+    assert.equal(correction.mechanicsFieldEnergyReceipt.fieldMutationOrdinal, 3);
+    assert.equal(correction.mechanicsFieldEnergyReceipt.deferSeal, false);
+    assert.equal(
+      correction.mechanicsFieldEnergyReceipt.status,
+      'energy-ready-submitted-unverified'
+    );
+    assert.equal(correction.mechanicsFieldEnergyReceipt.refluxLedger, fixture.refluxLedger);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+      fixture.device,
+      correction,
+      strictOptions(fixture, chain)
+    ), true);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+      fixture.device,
+      { ...correction },
+      strictOptions(fixture, chain)
+    ), false);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'fine-correction-submitted');
+    assert.equal(state.stageIndex, 3);
+    assert.equal(state.submissionObservedStage, null);
+    assert.throws(
+      () => chain.runtime.markTerminalSubmitted(chain.execution),
+      /not awaiting submission/
+    );
+    assert.equal(
+      await chain.runtime.releaseExecutionAfter(
+        chain.execution,
+        fixture.device.queue.onSubmittedWorkDone()
+      ),
+      true
+    );
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+      fixture.device,
+      correction,
+      strictOptions(fixture, chain)
+    ), false);
+    assert.equal(chain.runtime.destroy(), true);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('fine correction success fixture cleanup')
+      }
+    );
+    assert.equal(
+      fixture.refluxLedger.status,
+      'schroeder-cross-level-reflux-ledger-gpu-destroyed'
+    );
+    assert.equal(fixture.refluxLedger.buffer.destroyed, true);
+    assert.equal(fixture.refluxLedger.destroy(), false);
+  });
+
+  await t.test('r=2 and r=4 admit cumulative theta predictors instead of macro-dt predictors', async () => {
+    for (const fineSubstepCount of [2, 4]) {
+      const fixture = fusedP2gProducerFixture({ fineSubstepCount });
+      const chain = await fusedFineCorrectionWorkspace(fixture);
+      assert.equal(chain.fineProjection.dt, fixture.fineDt);
+      assert.equal(chain.gridUpdate.dt, fixture.fineDt);
+      assert.equal(chain.coarseProjection.dt, fixture.predictorThetaDt);
+      assert.equal(chain.execution.predictorDt, fixture.predictorThetaDt);
+      assert.notEqual(chain.coarseProjection.dt, fixture.macroDt);
+      const encoder = fixture.device.createCommandEncoder();
+      chain.runtime.encodeFineCorrection(encoder, chain.execution, {
+        fineGridUpdate: chain.gridUpdate,
+        fusedFineSubstepTransaction: fixture.transaction
+      });
+      fixture.device.queue.submit([encoder.finish()]);
+      chain.runtime.markTerminalSubmissionObserved(chain.execution);
+      chain.runtime.markTerminalSubmitted(chain.execution);
+      const state = schroederFusedFineSubstepTransactionState(
+        fixture.device,
+        fixture.transaction
+      );
+      assert.equal(state.status, 'fine-correction-submitted');
+      await chain.runtime.releaseExecutionAfter(
+        chain.execution,
+        fixture.device.queue.onSubmittedWorkDone()
+      );
+      chain.runtime.destroy();
+      await abortSchroederTwoLevelMacroAuthorityAfter(
+        fixture.device,
+        fixture.macroAuthority,
+        {
+          microepochAuthority: fixture.microepochAuthority,
+          reason: new Error(`r=${fineSubstepCount} theta fixture cleanup`)
+        }
+      );
+      fixture.refluxLedger.destroy();
+    }
+  });
+
+  await t.test('r=2 rejects a full-macro coarse predictor before workspace submission', async () => {
+    const fixture = fusedP2gProducerFixture({ fineSubstepCount: 2 });
+    const fineProjection = await runFusedP2gProducer(fixture);
+    const wrongCoarseProjection = await runCoarseP2gProducer(
+      fixture,
+      fixture.macroDt
+    );
+    const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+      fixture.device,
+      {
+        parentFieldCapacity: fixture.generation.parentFieldView.parentFieldCapacity,
+        fineFieldCapacity: fixture.generation.parentFieldView.fineFieldCapacity,
+        arenaCount: 1
+      }
+    );
+    assert.throws(
+      () => runtime.encodePredictors(fixture.device.createCommandEncoder(), {
+        parentFieldView: fixture.generation.parentFieldView,
+        fineP2gProjection: fineProjection,
+        coarseP2gProjection: wrongCoarseProjection,
+        dt: fixture.predictorThetaDt,
+        fineDt: fixture.fineDt,
+        macroDt: fixture.macroDt,
+        fineSubstepOrdinal: 0,
+        fineSubstepCount: 2,
+        gravityMPerS2: [0, -9.80665, 0],
+        boxDimsM: [1, 1, 1],
+        refluxLedger: fixture.refluxLedger,
+        fusedFineSubstepTransaction: fixture.transaction
+      }),
+      /exact local macro reflux ledger and substep/
+    );
+    assert.equal(runtime.activeExecutionCount(), 0);
+    runtime.destroy();
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('wrong theta fixture cleanup')
+      }
+    );
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('synchronous submit failure rolls back only the unsubmitted encoding and retries', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await fusedFineCorrectionWorkspace(fixture);
+    const firstEncoder = fixture.device.createCommandEncoder();
+    const firstCorrection = chain.runtime.encodeFineCorrection(
+      firstEncoder,
+      chain.execution,
+      {
+        fineGridUpdate: chain.gridUpdate,
+        fusedFineSubstepTransaction: fixture.transaction
+      }
+    );
+    const originalSubmit = fixture.device.queue.submit;
+    fixture.device.queue.submit = () => {
+      throw new Error('injected fine-correction queue.submit failure');
+    };
+    assert.throws(
+      () => fixture.device.queue.submit([firstEncoder.finish()]),
+      /injected fine-correction queue\.submit failure/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    let state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'grid-update-submitted');
+    assert.equal(state.stageIndex, 2);
+    assert.equal(state.submissionObservedStage, null);
+    assert.equal(chain.runtime.resetUnsubmittedFineCorrection(
+      chain.execution,
+      { discardedEncoder: true }
+    ), true);
+    assert.equal(
+      firstCorrection.status,
+      'parent-field-fine-correction-discarded-unsubmitted'
+    );
+    const retryEncoder = fixture.device.createCommandEncoder();
+    const retryCorrection = chain.runtime.encodeFineCorrection(
+      retryEncoder,
+      chain.execution,
+      {
+        fineGridUpdate: chain.gridUpdate,
+        fusedFineSubstepTransaction: fixture.transaction
+      }
+    );
+    assert.notEqual(retryCorrection, firstCorrection);
+    fixture.device.queue.submit([retryEncoder.finish()]);
+    chain.runtime.markTerminalSubmissionObserved(chain.execution);
+    chain.runtime.markTerminalSubmitted(chain.execution);
+    state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'fine-correction-submitted');
+    assert.equal(state.stageIndex, 3);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+      fixture.device,
+      retryCorrection,
+      strictOptions(fixture, chain)
+    ), true);
+    await chain.runtime.releaseExecutionAfter(
+      chain.execution,
+      fixture.device.queue.onSubmittedWorkDone()
+    );
+    chain.runtime.destroy();
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('fine correction submit retry fixture cleanup')
+      }
+    );
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('two workspaces cannot claim one correction transaction', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const fineProjection = await runFusedP2gProducer(fixture);
+    const coarseProjection = await runCoarseP2gProducer(fixture);
+    const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+      fixture.device,
+      {
+        parentFieldCapacity: fixture.generation.parentFieldView.parentFieldCapacity,
+        fineFieldCapacity: fixture.generation.parentFieldView.fineFieldCapacity,
+        arenaCount: 2
+      }
+    );
+    const predictorExecutions = Array.from({ length: 2 }, () => {
+      const encoder = fixture.device.createCommandEncoder();
+      const execution = runtime.encodePredictors(encoder, {
+        parentFieldView: fixture.generation.parentFieldView,
+        fineP2gProjection: fineProjection,
+        coarseP2gProjection: coarseProjection,
+        dt: fixture.predictorThetaDt,
+        fineDt: fixture.fineDt,
+        macroDt: fixture.macroDt,
+        fineSubstepOrdinal: 0,
+        fineSubstepCount: 1,
+        gravityMPerS2: [0, -9.80665, 0],
+        boxDimsM: [1, 1, 1],
+        refluxLedger: fixture.refluxLedger,
+        fusedFineSubstepTransaction: fixture.transaction
+      });
+      fixture.device.queue.submit([encoder.finish()]);
+      runtime.markPredictorsSubmitted(execution);
+      return execution;
+    });
+    const gridUpdate = await runFusedGridUpdateProducer(fixture, fineProjection);
+    const winnerEncoder = fixture.device.createCommandEncoder();
+    const winner = runtime.encodeFineCorrection(
+      winnerEncoder,
+      predictorExecutions[0],
+      {
+        fineGridUpdate: gridUpdate,
+        fusedFineSubstepTransaction: fixture.transaction
+      }
+    );
+    assert.throws(
+      () => runtime.encodeFineCorrection(
+        fixture.device.createCommandEncoder(),
+        predictorExecutions[1],
+        {
+          fineGridUpdate: gridUpdate,
+          fusedFineSubstepTransaction: fixture.transaction
+        }
+      ),
+      /exact deferred-receipt fine field update/
+    );
+    fixture.device.queue.submit([winnerEncoder.finish()]);
+    runtime.markTerminalSubmissionObserved(predictorExecutions[0]);
+    runtime.markTerminalSubmitted(predictorExecutions[0]);
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+      fixture.device,
+      winner,
+      {
+        transaction: fixture.transaction,
+        macroAuthority: fixture.macroAuthority,
+        microepochAuthority: fixture.microepochAuthority,
+        particleContinuation: fixture.particleContinuation,
+        fieldExecution: fixture.microepochAuthority.fineFieldView,
+        mutationSegment: fixture.transaction.fineCorrectionMutation,
+        priorArtifact: gridUpdate,
+        requireDeferred: true,
+        proposalMode: 'proposal-deferred-to-post-mechanics'
+      }
+    ), true);
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'fine-correction-submitted');
+    assert.equal(state.stageIndex, 3);
+    await Promise.all(predictorExecutions.map((execution) => (
+      runtime.releaseExecutionAfter(
+        execution,
+        fixture.device.queue.onSubmittedWorkDone()
+      )
+    )));
+    runtime.destroy();
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('fine correction claim concurrency cleanup')
+      }
+    );
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('post-submit public-kind tampering observes then quarantines', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await fusedFineCorrectionWorkspace(fixture);
+    const encoder = fixture.device.createCommandEncoder();
+    chain.runtime.encodeFineCorrection(encoder, chain.execution, {
+      fineGridUpdate: chain.gridUpdate,
+      fusedFineSubstepTransaction: fixture.transaction
+    });
+    fixture.device.queue.submit([encoder.finish()]);
+    chain.execution.terminalKind = 'forged-terminal-kind';
+    assert.throws(
+      () => chain.runtime.markTerminalSubmissionObserved(chain.execution),
+      /public mirrors changed/
+    );
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'quarantined');
+    assert.equal(state.submissionObservedStage, 'fine-correction');
+    await chain.runtime.releaseExecutionAfter(
+      chain.execution,
+      fixture.device.queue.onSubmittedWorkDone()
+    );
+    chain.runtime.destroy();
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('fine correction public-kind tamper cleanup')
+      }
+    );
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('post-encode artifact mutation or freezing cannot authenticate GPU work', async () => {
+    for (const tamper of ['dt', 'freeze']) {
+      const fixture = fusedP2gProducerFixture();
+      const chain = await fusedFineCorrectionWorkspace(fixture);
+      const encoder = fixture.device.createCommandEncoder();
+      const correction = chain.runtime.encodeFineCorrection(
+        encoder,
+        chain.execution,
+        {
+          fineGridUpdate: chain.gridUpdate,
+          fusedFineSubstepTransaction: fixture.transaction
+        }
+      );
+      if (tamper === 'dt') correction.dt += 0.001;
+      else Object.freeze(correction);
+      fixture.device.queue.submit([encoder.finish()]);
+      if (tamper === 'dt') {
+        assert.throws(
+          () => chain.runtime.markTerminalSubmissionObserved(chain.execution),
+          /public mirrors changed/
+        );
+      } else {
+        chain.runtime.markTerminalSubmissionObserved(chain.execution);
+        assert.throws(
+          () => chain.runtime.markTerminalSubmitted(chain.execution),
+          /read only|Cannot assign/
+        );
+      }
+      const state = schroederFusedFineSubstepTransactionState(
+        fixture.device,
+        fixture.transaction
+      );
+      assert.equal(state.status, 'quarantined');
+      assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+        fixture.device,
+        correction,
+        strictOptions(fixture, chain)
+      ), false);
+      await chain.runtime.releaseExecutionAfter(
+        chain.execution,
+        fixture.device.queue.onSubmittedWorkDone()
+      );
+      chain.runtime.destroy();
+      await abortSchroederTwoLevelMacroAuthorityAfter(
+        fixture.device,
+        fixture.macroAuthority,
+        {
+          microepochAuthority: fixture.microepochAuthority,
+          reason: new Error(`fine correction ${tamper} tamper cleanup`)
+        }
+      );
+      fixture.refluxLedger.destroy();
+    }
+  });
+
+  await t.test('post-submit workspace-lineage mutation deletes origin and quarantines', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await fusedFineCorrectionWorkspace(fixture);
+    const encoder = fixture.device.createCommandEncoder();
+    const capturedCorrection = chain.runtime.encodeFineCorrection(
+      encoder,
+      chain.execution,
+      {
+        fineGridUpdate: chain.gridUpdate,
+        fusedFineSubstepTransaction: fixture.transaction
+      }
+    );
+    fixture.device.queue.submit([encoder.finish()]);
+    chain.execution.predictorDt += 0.001;
+    assert.throws(
+      () => chain.runtime.markTerminalSubmissionObserved(chain.execution),
+      /public mirrors changed/
+    );
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'quarantined');
+    assert.equal(state.stageIndex, 2);
+    assert.equal(state.submissionObservedStage, 'fine-correction');
+    assert.equal(validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+      fixture.device,
+      capturedCorrection,
+      strictOptions(fixture, chain)
+    ), false);
+    assert.equal(
+      await chain.runtime.releaseExecutionAfter(
+        chain.execution,
+        fixture.device.queue.onSubmittedWorkDone()
+      ),
+      true
+    );
+    assert.equal(chain.runtime.destroy(), true);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('fine correction rejection fixture cleanup')
+      }
+    );
+    assert.equal(
+      fixture.refluxLedger.status,
+      'schroeder-cross-level-reflux-ledger-gpu-destroyed'
+    );
+    assert.equal(fixture.refluxLedger.buffer.destroyed, true);
+    assert.equal(fixture.refluxLedger.destroy(), false);
+  });
+});
+
+test('fused WebGPU G2P owns the exact correction and output continuation', async (t) => {
+  const strictOptions = (fixture, chain) => ({
+    transaction: fixture.transaction,
+    macroAuthority: fixture.macroAuthority,
+    microepochAuthority: fixture.microepochAuthority,
+    particleContinuation: fixture.particleContinuation,
+    fieldExecution: fixture.microepochAuthority.fineFieldView,
+    priorArtifact: chain.correction,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  });
+
+  await t.test('success submits once, defers proposals, and transfers output ownership', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await submittedFusedFineCorrection(fixture);
+    fixture.sphParticleState.state = new Float32Array(16);
+    fixture.mlsMpmParticleState.mechanics = new Float32Array(64);
+    const submissionsBefore = fixture.device.submissions.length;
+    const g2p = await runFusedG2pProducer(fixture, chain.correction);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(g2p.proposalMode, 'proposal-deferred-to-post-mechanics');
+    assert.equal(g2p.mechanicalProposalApplied, false);
+    assert.equal(g2p.stateBufferByteLength, 8 * Float32Array.BYTES_PER_ELEMENT);
+    assert.equal(
+      g2p.mechanicsBufferByteLength,
+      MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+        * Float32Array.BYTES_PER_ELEMENT
+    );
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      fixture.device,
+      g2p,
+      strictOptions(fixture, chain)
+    ), true);
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      fixture.device,
+      g2p,
+      {
+        ...strictOptions(fixture, chain),
+        transaction: undefined,
+        terminalTransaction: fixture.transaction
+      }
+    ), false);
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      fixture.device,
+      { ...g2p },
+      strictOptions(fixture, chain)
+    ), false);
+    assert.equal(schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    ).stageIndex, 4);
+
+    const uploads = nextParticleUploads(fixture, g2p);
+    assert.throws(() => createSchroederCanonicalParticleContinuation({
+      device: fixture.device,
+      macroAuthority: fixture.macroAuthority,
+      ...uploads,
+      ordinal: 1,
+      priorContinuation: fixture.particleContinuation,
+      sourceTransaction: fixture.transaction,
+      g2pReconstruction: { ...g2p }
+    }), /exact initial family|claim the exact live G2P/);
+    const continuation = createSchroederCanonicalParticleContinuation({
+      device: fixture.device,
+      macroAuthority: fixture.macroAuthority,
+      ...uploads,
+      ordinal: 1,
+      priorContinuation: fixture.particleContinuation,
+      sourceTransaction: fixture.transaction,
+      g2pReconstruction: g2p
+    });
+    assert.equal(continuation.stateBuffer, g2p.stateBuffer);
+    assert.equal(continuation.mechanicsBuffer, g2p.mechanicsBuffer);
+    assert.equal(g2p.destroyOutputParticleBuffers(), false);
+    assert.equal(g2p.stateBuffer.destroyed, false);
+    assert.equal(g2p.mechanicsBuffer.destroyed, false);
+    const successorAssignmentBuffer = fixture.device.createBuffer({
+      label: 'fused-g2p-successor-assignment',
+      size: fixture.levelAssignment.assignmentBufferByteLength,
+      usage: 128
+    });
+    tagWebGpuBufferDevice(successorAssignmentBuffer, fixture.device);
+    const successorLevelAssignment = {
+      ...fixture.levelAssignment,
+      assignmentBuffer: successorAssignmentBuffer,
+      assignmentBufferByteLength: successorAssignmentBuffer.size,
+      sourceStateBuffer: g2p.stateBuffer,
+      sourceAssignmentBuffer: fixture.levelAssignment.assignmentBuffer,
+      physicsSubstep: fixture.levelAssignment.physicsSubstep + 1,
+      positionEpoch: fixture.levelAssignment.positionEpoch + 1,
+      levelClassificationMode: 'frozen-macro-step-no-reclassification',
+      levelReclassificationPerformed: false
+    };
+    const successorGeneration = runSchroederSpatialEpochGenerationWebGpu({
+      device: fixture.device,
+      levelAssignment: successorLevelAssignment,
+      particleCount: 1,
+      particleIdentityBuffer: fixture.sphParticleUpload.identityBuffer,
+      particleIdentityStrideWords: 1,
+      mechanicsLevels: [
+        { selectedLevel: 0, mechanicsGrid: fixture.fineGrid },
+        { selectedLevel: 1, mechanicsGrid: fixture.coarseGrid }
+      ]
+    });
+    assert.equal(successorGeneration.ready, true);
+    const successorCanonicalEpoch = {
+      generation: successorGeneration,
+      ...uploads
+    };
+    const successorMicroepoch = createSchroederFineMicroepochAuthority({
+      device: fixture.device,
+      macroAuthority: fixture.macroAuthority,
+      canonicalEpoch: successorCanonicalEpoch,
+      particleContinuation: continuation,
+      priorMicroepochAuthority: fixture.microepochAuthority,
+      substepOrdinal: 1
+    });
+    assert.equal(validateSchroederFineMicroepochAuthority(
+      fixture.device,
+      successorMicroepoch,
+      {
+        canonicalEpoch: successorCanonicalEpoch,
+        particleContinuation: continuation,
+        substepOrdinal: 1
+      }
+    ), true);
+    assert.equal(await retireSchroederFineMicroepochAfter(
+      fixture.device,
+      fixture.microepochAuthority,
+      { successorMicroepochAuthority: successorMicroepoch }
+    ), true);
+    assert.equal(validateSchroederFineMicroepochAuthority(
+      fixture.device,
+      fixture.microepochAuthority
+    ), false);
+    assert.equal(validateSchroederFineMicroepochAuthority(
+      fixture.device,
+      fixture.microepochAuthority,
+      { requireLive: false }
+    ), true);
+    const terminalCoarseField =
+      successorMicroepoch.parentFieldView.coarseFieldView;
+    const terminalFineField = successorMicroepoch.fineFieldView;
+    const terminalCoarseRuntime = terminalCoarseField.ownerRuntime;
+    const terminalFineRuntime = terminalFineField.ownerRuntime;
+    const originalReserveTerminalSequence =
+      terminalCoarseRuntime.reserveStateMutationSequence;
+    const injectedReservationFailure = new Error(
+      'injected coarse-terminal sequence reservation failure'
+    );
+    terminalCoarseRuntime.reserveStateMutationSequence = () => {
+      throw injectedReservationFailure;
+    };
+    assert.throws(
+      () => createSchroederFusedCoarseTerminalTransaction({
+        device: fixture.device,
+        macroAuthority: fixture.macroAuthority,
+        microepochAuthority: successorMicroepoch,
+        particleContinuation: continuation
+      }),
+      (error) => error === injectedReservationFailure
+    );
+    terminalCoarseRuntime.reserveStateMutationSequence =
+      originalReserveTerminalSequence;
+    assert.equal(terminalCoarseRuntime.ownsExecution(terminalCoarseField), true);
+    assert.equal(
+      terminalCoarseRuntime.stateMutationState(terminalCoarseField)
+        .publicationLocked,
+      false
+    );
+
+    const terminalTransaction =
+      createSchroederFusedCoarseTerminalTransaction({
+        device: fixture.device,
+        macroAuthority: fixture.macroAuthority,
+        microepochAuthority: successorMicroepoch,
+        particleContinuation: continuation
+      });
+    assert.equal(validateSchroederFusedCoarseTerminalTransaction(
+      fixture.device,
+      terminalTransaction,
+      {
+        stage: 'p2g',
+        macroAuthority: fixture.macroAuthority,
+        microepochAuthority: successorMicroepoch,
+        particleContinuation: continuation
+      }
+    ), true);
+    assert.deepEqual(terminalTransaction.mutationSequence.stages.map(
+      (segment) => [segment.expectedOrdinal, segment.outputOrdinal]
+    ), [[0, 1], [1, 2], [2, 3]]);
+    assert.deepEqual(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    ), {
+      status: 'reserved',
+      stageIndex: 0,
+      submissionObservedStage: null,
+      nextStage: 'p2g',
+      submittedStageCount: 0,
+      g2pSubmitted: false,
+      outputClaimed: false,
+      gpuReceiptStatus: 'not-submitted',
+      quarantineReason: null
+    });
+    assert.equal(discardSchroederFusedCoarseTerminalTransaction(
+      fixture.device,
+      terminalTransaction,
+      { discardedEncoder: true }
+    ), true);
+    assert.equal(validateSchroederFusedCoarseTerminalTransaction(
+      fixture.device,
+      terminalTransaction
+    ), false);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      terminalTransaction
+    )?.status, 'discarded');
+    assert.equal(terminalCoarseRuntime.ownsExecution(terminalCoarseField), true);
+    assert.equal(
+      terminalCoarseRuntime.stateMutationState(terminalCoarseField)
+        .publicationLocked,
+      false
+    );
+    assert.equal(validateSchroederFineMicroepochAuthority(
+      fixture.device,
+      successorMicroepoch,
+      {
+        canonicalEpoch: successorCanonicalEpoch,
+        particleContinuation: continuation,
+        substepOrdinal: 1
+      }
+    ), true);
+    const retriedTerminalTransaction =
+      createSchroederFusedCoarseTerminalTransaction({
+        device: fixture.device,
+        macroAuthority: fixture.macroAuthority,
+        microepochAuthority: successorMicroepoch,
+        particleContinuation: continuation
+      });
+    assert.notEqual(retriedTerminalTransaction, terminalTransaction);
+    assert.equal(validateSchroederFusedCoarseTerminalTransaction(
+      fixture.device,
+      retriedTerminalTransaction,
+      { stage: 'p2g' }
+    ), true);
+    const terminalP2g = await runTerminalP2gProducer(fixture, {
+      transaction: retriedTerminalTransaction,
+      generation: successorGeneration,
+      continuation,
+      ...uploads
+    });
+    const terminalP2gOptions = {
+      terminalTransaction: retriedTerminalTransaction,
+      macroAuthority: fixture.macroAuthority,
+      microepochAuthority: successorMicroepoch,
+      particleContinuation: continuation,
+      fieldExecution: terminalCoarseField,
+      mutationSegment: retriedTerminalTransaction.p2gMutation,
+      priorArtifact: null,
+      requireDeferred: true,
+      proposalMode: 'proposal-deferred-to-post-mechanics'
+    };
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      terminalP2g,
+      terminalP2gOptions
+    ), true);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+      fixture.device,
+      { ...terminalP2g },
+      terminalP2gOptions
+    ), false);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      fixture.device,
+      retriedTerminalTransaction
+    ).stageIndex, 1);
+    assert.throws(() => discardSchroederFusedCoarseTerminalTransaction(
+      fixture.device,
+      terminalTransaction,
+      { discardedEncoder: true }
+    ), /only an unsubmitted fused coarse-terminal transaction can be discarded/);
+
+    fixture.device.lost = Promise.resolve({
+      reason: 'destroyed',
+      message: 'injected terminal lifecycle device loss'
+    });
+    let terminalFineQuarantineCount = 0;
+    const originalFineQuarantine =
+      terminalFineRuntime.quarantineCurrentStateArtifact;
+    terminalFineRuntime.quarantineCurrentStateArtifact = (...args) => {
+      terminalFineQuarantineCount += 1;
+      if (terminalFineQuarantineCount === 1) {
+        throw new Error('injected terminal fine-field quarantine failure');
+      }
+      return originalFineQuarantine(...args);
+    };
+    markSchroederFusedCoarseTerminalStageSubmissionObserved(
+      fixture.device,
+      retriedTerminalTransaction,
+      { stage: 'grid-update' }
+    );
+    assert.throws(
+      () => quarantineSchroederFusedCoarseTerminalTransaction(
+        fixture.device,
+        retriedTerminalTransaction,
+        new Error('injected post-observation terminal failure')
+      ),
+      /injected terminal fine-field quarantine failure/
+    );
+    assert.equal(
+      terminalCoarseRuntime.isStateArtifactQuarantined(terminalCoarseField),
+      true
+    );
+    assert.equal(
+      terminalFineRuntime.isStateArtifactQuarantined(terminalFineField),
+      false
+    );
+    assert.throws(
+      () => quarantineSchroederFusedCoarseTerminalTransaction(
+        fixture.device,
+        retriedTerminalTransaction
+      ),
+      /only a submitted fused coarse-terminal transaction can be quarantined/
+    );
+
+    let terminalFineRetirementCount = 0;
+    let terminalCoarseRetirementCount = 0;
+    const originalFineRetirement =
+      terminalFineRuntime.quarantineExecutionAfterDeviceLoss;
+    const originalCoarseRetirement =
+      terminalCoarseRuntime.quarantineExecutionAfterDeviceLoss;
+    terminalFineRuntime.quarantineExecutionAfterDeviceLoss = async (...args) => {
+      terminalFineRetirementCount += 1;
+      if (terminalFineRetirementCount === 1) {
+        throw new Error('injected terminal fine-field retirement failure');
+      }
+      return originalFineRetirement(...args);
+    };
+    terminalCoarseRuntime.quarantineExecutionAfterDeviceLoss = async (...args) => {
+      terminalCoarseRetirementCount += 1;
+      return originalCoarseRetirement(...args);
+    };
+    await chain.runtime.releaseExecutionAfter(
+      chain.execution,
+      fixture.device.queue.onSubmittedWorkDone()
+    );
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      fixture.device,
+      g2p,
+      strictOptions(fixture, chain)
+    ), false);
+    assert.equal(continuation.stateBuffer, g2p.stateBuffer);
+    chain.runtime.destroy();
+    await assert.rejects(
+      abortSchroederTwoLevelMacroAuthorityAfter(
+        fixture.device,
+        fixture.macroAuthority,
+        {
+          microepochAuthority: successorMicroepoch,
+          reason: new Error('first split terminal abort attempt'),
+          deviceLost: true
+        }
+      ),
+      /injected terminal fine-field retirement failure/
+    );
+    assert.equal(terminalFineQuarantineCount, 1);
+    assert.equal(terminalFineRetirementCount, 1);
+    assert.equal(terminalCoarseRetirementCount, 1);
+    assert.equal(terminalFineRuntime.ownsExecution(terminalFineField), true);
+    assert.equal(terminalCoarseRuntime.ownsExecution(terminalCoarseField), false);
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: successorMicroepoch,
+        reason: new Error('split terminal abort retry'),
+        deviceLost: true
+      }
+    );
+    assert.equal(terminalFineRetirementCount, 2);
+    assert.equal(terminalCoarseRetirementCount, 1);
+    assert.equal(terminalFineRuntime.ownsExecution(terminalFineField), false);
+    assert.equal(terminalCoarseRuntime.ownsExecution(terminalCoarseField), false);
+
+    let genericFieldRuntimeTouches = 0;
+    for (const fieldRuntime of [terminalFineRuntime, terminalCoarseRuntime]) {
+      for (const method of [
+        'ownsExecution',
+        'isExecutionSubmitted',
+        'releaseExecutionAfter'
+      ]) {
+        fieldRuntime[method] = () => {
+          genericFieldRuntimeTouches += 1;
+          throw new Error(`generic release touched retired field via ${method}`);
+        };
+      }
+    }
+    assert.equal(successorGeneration.releaseScheduled, false);
+    assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+      successorGeneration,
+      fixture.device
+    ), true);
+    assert.equal(await successorGeneration.releasePromise, true);
+    assert.equal(genericFieldRuntimeTouches, 0);
+    assert.equal(successorGeneration.releaseOperationResults.some(
+      ({ owner }) => owner.startsWith('mechanics-field-view-level-')
+    ), false);
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('destroyed producer output cannot mint a continuation', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await submittedFusedFineCorrection(fixture);
+    const g2p = await runFusedG2pProducer(fixture, chain.correction);
+    const uploads = nextParticleUploads(fixture, g2p);
+    assert.equal(g2p.destroyOutputParticleBuffers(), true);
+    assert.equal(g2p.destroyOutputParticleBuffers(), false);
+    assert.throws(() => createSchroederCanonicalParticleContinuation({
+      device: fixture.device,
+      macroAuthority: fixture.macroAuthority,
+      ...uploads,
+      ordinal: 1,
+      priorContinuation: fixture.particleContinuation,
+      sourceTransaction: fixture.transaction,
+      g2pReconstruction: g2p
+    }), /claim the exact live G2P/);
+    await releaseFusedG2pFixture(
+      fixture,
+      chain,
+      'destroyed fused G2P fixture cleanup'
+    );
+  });
+
+  await t.test('synchronous submit failure releases its claim for an exact retry', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await submittedFusedFineCorrection(fixture);
+    const originalSubmit = fixture.device.queue.submit;
+    fixture.device.queue.submit = () => {
+      throw new Error('injected fused G2P queue.submit failure');
+    };
+    await assert.rejects(
+      runFusedG2pProducer(fixture, chain.correction),
+      /injected fused G2P queue\.submit failure/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    assert.equal(schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    ).status, 'fine-correction-submitted');
+    const retry = await runFusedG2pProducer(fixture, chain.correction);
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      fixture.device,
+      retry,
+      strictOptions(fixture, chain)
+    ), true);
+    await releaseFusedG2pFixture(
+      fixture,
+      chain,
+      'retried fused G2P fixture cleanup'
+    );
+  });
+
+  await t.test('concurrent calls acquire one producer claim and submit once', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await submittedFusedFineCorrection(fixture);
+    const submissionsBefore = fixture.device.submissions.length;
+    const results = await Promise.allSettled([
+      runFusedG2pProducer(fixture, chain.correction),
+      runFusedG2pProducer(fixture, chain.correction)
+    ]);
+    assert.deepEqual(
+      results.map((result) => result.status).sort(),
+      ['fulfilled', 'rejected']
+    );
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.match(
+      String(results.find((result) => result.status === 'rejected').reason),
+      /already has an exact producer claim/
+    );
+    await releaseFusedG2pFixture(
+      fixture,
+      chain,
+      'concurrent fused G2P fixture cleanup'
+    );
+  });
+
+  await t.test('post-submit correction mutation quarantines and destroys outputs', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await submittedFusedFineCorrection(fixture);
+    const createdBefore = fixture.device.createdBuffers.length;
+    const originalSubmit = fixture.device.queue.submit;
+    fixture.device.queue.submit = (commandBuffers) => {
+      originalSubmit(commandBuffers);
+      chain.correction.dt += 0.001;
+    };
+    await assert.rejects(
+      runFusedG2pProducer(fixture, chain.correction),
+      /exact correction|exact fused artifact publication|does not match its exact correction/
+    );
+    fixture.device.queue.submit = originalSubmit;
+    const state = schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    );
+    assert.equal(state.status, 'quarantined');
+    assert.equal(state.stageIndex, 3);
+    assert.equal(state.submissionObservedStage, 'g2p');
+    await new Promise((resolve) => setImmediate(resolve));
+    const outputs = fixture.device.createdBuffers
+      .slice(createdBefore)
+      .filter((buffer) => [
+        'ulg-mls-mpm-g2p-state-out',
+        'ulg-mls-mpm-g2p-mechanics-out'
+      ].includes(buffer.label));
+    assert.equal(outputs.length, 2);
+    assert.equal(outputs.every((buffer) => buffer.destroyed), true);
+    await assert.rejects(
+      runFusedG2pProducer(fixture, chain.correction),
+      /exact correction|exact pending transaction|provenance/
+    );
+    await releaseFusedG2pFixture(
+      fixture,
+      chain,
+      'post-submit poisoned fused G2P fixture cleanup'
+    );
+  });
+
+  await t.test('partial allocation failure destroys prior buffers and remains retryable', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await submittedFusedFineCorrection(fixture);
+    const originalCreateBuffer = fixture.device.createBuffer;
+    const created = [];
+    fixture.device.createBuffer = (descriptor) => {
+      if (created.length === 1) {
+        throw new Error('injected fused G2P createBuffer failure');
+      }
+      const buffer = originalCreateBuffer(descriptor);
+      created.push(buffer);
+      return buffer;
+    };
+    await assert.rejects(
+      runFusedG2pProducer(fixture, chain.correction),
+      /injected fused G2P createBuffer failure/
+    );
+    fixture.device.createBuffer = originalCreateBuffer;
+    assert.equal(created.length, 1);
+    assert.equal(created[0].destroyed, true);
+    assert.equal(schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    ).status, 'fine-correction-submitted');
+    await runFusedG2pProducer(fixture, chain.correction);
+    await releaseFusedG2pFixture(
+      fixture,
+      chain,
+      'partial allocation fused G2P fixture cleanup'
+    );
+  });
+
+  await t.test('write failure survives fence and one-shot cleanup failures', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const chain = await submittedFusedFineCorrection(fixture);
+    const originalCreateBuffer = fixture.device.createBuffer;
+    const originalWriteBuffer = fixture.device.queue.writeBuffer;
+    const originalOnSubmittedWorkDone =
+      fixture.device.queue.onSubmittedWorkDone;
+    const created = [];
+    let throwingDestroyCalls = 0;
+    fixture.device.createBuffer = (descriptor) => {
+      const buffer = originalCreateBuffer(descriptor);
+      created.push(buffer);
+      if (descriptor.label === 'ulg-mls-mpm-g2p-state-out') {
+        const originalDestroy = buffer.destroy.bind(buffer);
+        buffer.destroy = () => {
+          throwingDestroyCalls += 1;
+          if (throwingDestroyCalls === 1) {
+            throw new Error('injected one-shot cleanup failure');
+          }
+          originalDestroy();
+        };
+      }
+      return buffer;
+    };
+    fixture.device.queue.writeBuffer = () => {
+      throw new Error('injected fused G2P writeBuffer failure');
+    };
+    fixture.device.queue.onSubmittedWorkDone = () => {
+      throw new Error('injected cleanup fence construction failure');
+    };
+    await assert.rejects(
+      runFusedG2pProducer(fixture, chain.correction),
+      /injected fused G2P writeBuffer failure/
+    );
+    fixture.device.createBuffer = originalCreateBuffer;
+    fixture.device.queue.writeBuffer = originalWriteBuffer;
+    fixture.device.queue.onSubmittedWorkDone = originalOnSubmittedWorkDone;
+    assert.ok(created.length >= 3);
+    assert.equal(throwingDestroyCalls, 2);
+    assert.equal(created.every((buffer) => buffer.destroyed), true);
+    assert.equal(schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    ).status, 'fine-correction-submitted');
+    await runFusedG2pProducer(fixture, chain.correction);
+    await releaseFusedG2pFixture(
+      fixture,
+      chain,
+      'write failure fused G2P fixture cleanup'
+    );
+  });
+});
+
+test('fused coarse-terminal WebGPU G2P owns the exact final S* output', async (t) => {
+  await t.test('success publishes stage four and transfers S* exactly once', async () => {
+    const chain = await submittedTerminalWorkspaceFixture();
+    const { terminal } = chain;
+    const submissionsBefore = terminal.fixture.device.submissions.length;
+    const g2p = await runTerminalG2pProducer(chain);
+    assert.equal(
+      terminal.fixture.device.submissions.length,
+      submissionsBefore + 1
+    );
+    assert.equal(g2p.proposalMode, 'proposal-deferred-to-post-mechanics');
+    assert.equal(g2p.mechanicalProposalApplied, false);
+    assert.equal(g2p.fusedCoarseTerminalTransaction, terminal.terminalTransaction);
+    assert.equal(g2p.fusedFineSubstepTransaction, undefined);
+    assert.equal(g2p.terminalMicroepochAuthority, terminal.successorMicroepoch);
+    assert.equal(g2p.fineMicroepochAuthority, undefined);
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      terminal.fixture.device,
+      g2p,
+      terminalG2pOptions(chain)
+    ), true);
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      terminal.fixture.device,
+      g2p,
+      {
+        ...terminalG2pOptions(chain),
+        terminalTransaction: undefined,
+        transaction: terminal.terminalTransaction
+      }
+    ), false);
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      terminal.fixture.device,
+      { ...g2p },
+      terminalG2pOptions(chain)
+    ), false);
+    assert.deepEqual(schroederFusedCoarseTerminalTransactionState(
+      terminal.fixture.device,
+      terminal.terminalTransaction
+    ), {
+      status: 'g2p-submitted-unverified',
+      stageIndex: 4,
+      submissionObservedStage: null,
+      nextStage: null,
+      submittedStageCount: 3,
+      g2pSubmitted: true,
+      outputClaimed: false,
+      gpuReceiptStatus: 'submitted-unverified',
+      quarantineReason: null
+    });
+
+    const finalUploads = terminalFinalParticleUploads(chain, g2p);
+    assert.equal(claimLocallySubmittedMlsMpmFusedG2pOutputForContinuation(
+      terminal.fixture.device,
+      g2p,
+      {
+        transaction: terminal.terminalTransaction,
+        macroAuthority: terminal.fixture.macroAuthority,
+        microepochAuthority: terminal.successorMicroepoch,
+        particleContinuation: terminal.continuation,
+        fieldExecution: terminal.terminalTransaction.coarseFieldView,
+        priorArtifact: chain.artifact,
+        proposalMode: 'proposal-deferred-to-post-mechanics',
+        nextOrdinal: terminal.continuation.ordinal + 1,
+        nextSphParticleUpload: finalUploads.finalSphParticleUpload,
+        nextMlsMpmParticleUpload: finalUploads.finalMlsMpmParticleUpload
+      }
+    ), false);
+    assert.throws(() => createSchroederCanonicalParticleContinuation({
+      device: terminal.fixture.device,
+      macroAuthority: terminal.fixture.macroAuthority,
+      sphParticleUpload: finalUploads.finalSphParticleUpload,
+      mlsMpmParticleUpload: finalUploads.finalMlsMpmParticleUpload,
+      ordinal: terminal.continuation.ordinal + 1,
+      priorContinuation: terminal.continuation,
+      sourceTransaction: terminal.terminalTransaction,
+      g2pReconstruction: g2p
+    }), /ordinal is replayed or out of order/);
+    const forgedFinalUploads = {
+      ...finalUploads,
+      finalSphParticleUpload: {
+        ...finalUploads.finalSphParticleUpload,
+        identityBufferByteLength:
+          finalUploads.finalSphParticleUpload.identityBufferByteLength + 4
+      }
+    };
+    assert.equal(claimSchroederFusedCoarseTerminalOutput(
+      terminal.fixture.device,
+      terminal.terminalTransaction,
+      { g2pReconstruction: g2p, ...forgedFinalUploads }
+    ), false);
+    assert.equal(claimSchroederFusedCoarseTerminalOutput(
+      terminal.fixture.device,
+      terminal.terminalTransaction,
+      { g2pReconstruction: { ...g2p }, ...finalUploads }
+    ), false);
+    assert.equal(claimSchroederFusedCoarseTerminalOutput(
+      terminal.fixture.device,
+      { ...terminal.terminalTransaction },
+      { g2pReconstruction: g2p, ...finalUploads }
+    ), false);
+    assert.equal(claimSchroederFusedCoarseTerminalOutput(
+      terminal.fixture.device,
+      terminal.fixture.transaction,
+      { g2pReconstruction: g2p, ...finalUploads }
+    ), false);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      terminal.fixture.device,
+      terminal.terminalTransaction
+    ).outputClaimed, false);
+    assert.equal(claimSchroederFusedCoarseTerminalOutput(
+      terminal.fixture.device,
+      terminal.terminalTransaction,
+      { g2pReconstruction: g2p, ...finalUploads }
+    ), true);
+    assert.equal(claimSchroederFusedCoarseTerminalOutput(
+      terminal.fixture.device,
+      terminal.terminalTransaction,
+      { g2pReconstruction: g2p, ...finalUploads }
+    ), false);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      terminal.fixture.device,
+      terminal.terminalTransaction
+    ).outputClaimed, true);
+    assert.equal(g2p.destroyOutputParticleBuffers(), false);
+    assert.equal(g2p.stateBuffer.destroyed, false);
+    assert.equal(g2p.mechanicsBuffer.destroyed, false);
+    await releaseTerminalG2pFixture(chain, 'terminal S* success cleanup');
+  });
+
+  await t.test('wrong mode, stripped brand, timing, and ABI fail before submit', async () => {
+    const chain = await submittedTerminalWorkspaceFixture();
+    const { terminal } = chain;
+    const device = terminal.fixture.device;
+    const submissionsBefore = device.submissions.length;
+    const rejectedRuns = [
+      {
+        fusedCoarseTerminalTransaction: null
+      },
+      {
+        gridUpdate: { ...chain.artifact },
+        fusedCoarseTerminalTransaction: null
+      },
+      {
+        dt: terminal.fixture.macroAuthority.macroDt + 0.001
+      },
+      {
+        schroederSelectedLevel: terminal.fixture.macroAuthority.fineLevel
+      },
+      {
+        sphParticleUpload: {
+          ...terminal.uploads.sphParticleUpload,
+          identityStrideBytes:
+            terminal.uploads.sphParticleUpload.identityStrideBytes + 4
+        }
+      }
+    ];
+    for (const overrides of rejectedRuns) {
+      await assert.rejects(
+        runTerminalG2pProducer(chain, overrides),
+        /brand|provenance|authenticate|exact|requires/
+      );
+    }
+    assert.equal(device.submissions.length, submissionsBefore);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      device,
+      terminal.terminalTransaction
+    ).stageIndex, 3);
+    await releaseTerminalG2pFixture(chain, 'terminal rejection matrix cleanup');
+  });
+
+  await t.test('synchronous submit failure and concurrent calls remain exact', async () => {
+    const submitFailureChain = await submittedTerminalWorkspaceFixture();
+    const submitFailureDevice = submitFailureChain.terminal.fixture.device;
+    const originalSubmit = submitFailureDevice.queue.submit;
+    submitFailureDevice.queue.submit = () => {
+      throw new Error('injected terminal G2P queue.submit failure');
+    };
+    await assert.rejects(
+      runTerminalG2pProducer(submitFailureChain),
+      /injected terminal G2P queue\.submit failure/
+    );
+    submitFailureDevice.queue.submit = originalSubmit;
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      submitFailureDevice,
+      submitFailureChain.terminal.terminalTransaction
+    ).stageIndex, 3);
+    const retry = await runTerminalG2pProducer(submitFailureChain);
+    assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
+      submitFailureDevice,
+      retry,
+      terminalG2pOptions(submitFailureChain)
+    ), true);
+    await releaseTerminalG2pFixture(
+      submitFailureChain,
+      'terminal submit retry cleanup'
+    );
+
+    const concurrentChain = await submittedTerminalWorkspaceFixture();
+    const concurrentDevice = concurrentChain.terminal.fixture.device;
+    const submissionsBefore = concurrentDevice.submissions.length;
+    const results = await Promise.allSettled([
+      runTerminalG2pProducer(concurrentChain),
+      runTerminalG2pProducer(concurrentChain)
+    ]);
+    assert.deepEqual(
+      results.map((result) => result.status).sort(),
+      ['fulfilled', 'rejected']
+    );
+    assert.equal(concurrentDevice.submissions.length, submissionsBefore + 1);
+    assert.match(
+      String(results.find((result) => result.status === 'rejected').reason),
+      /already has an exact producer claim/
+    );
+    await releaseTerminalG2pFixture(
+      concurrentChain,
+      'terminal concurrent producer cleanup'
+    );
+  });
+
+  await t.test('params-write mutation cleans immediately behind a pending fence and retries', async () => {
+    const chain = await submittedTerminalWorkspaceFixture();
+    const { terminal } = chain;
+    const device = terminal.fixture.device;
+    const upload = terminal.uploads.sphParticleUpload;
+    const originalIdentityStrideBytes = upload.identityStrideBytes;
+    const originalWriteBuffer = device.queue.writeBuffer;
+    const originalFence = device.queue.onSubmittedWorkDone;
+    const createdBefore = device.createdBuffers.length;
+    const submissionsBefore = device.submissions.length;
+    device.queue.onSubmittedWorkDone = () => new Promise(() => {});
+    device.queue.writeBuffer = (buffer, offset, data) => {
+      originalWriteBuffer(buffer, offset, data);
+      if (buffer.label === 'ulg-mls-mpm-g2p-params') {
+        upload.identityStrideBytes = originalIdentityStrideBytes + 4;
+      }
+    };
+    await assert.rejects(
+      runTerminalG2pProducer(chain),
+      /after parameter upload|provenance-lost-after-params-write|frozen input/
+    );
+    device.queue.writeBuffer = originalWriteBuffer;
+    device.queue.onSubmittedWorkDone = originalFence;
+    upload.identityStrideBytes = originalIdentityStrideBytes;
+    assert.equal(device.submissions.length, submissionsBefore);
+    const failedOwnedBuffers = device.createdBuffers
+      .slice(createdBefore)
+      .filter((buffer) => buffer.label?.startsWith('ulg-mls-mpm-g2p-'));
+    assert.ok(failedOwnedBuffers.length >= 3);
+    assert.equal(failedOwnedBuffers.every((buffer) => buffer.destroyed), true);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      device,
+      terminal.terminalTransaction
+    ).stageIndex, 3);
+    await runTerminalG2pProducer(chain);
+    await releaseTerminalG2pFixture(chain, 'terminal params TOCTOU cleanup');
+  });
+
+  await t.test('encoder-finish mutation produces zero submits and an exact retry', async () => {
+    const chain = await submittedTerminalWorkspaceFixture();
+    const { terminal } = chain;
+    const device = terminal.fixture.device;
+    const upload = terminal.uploads.sphParticleUpload;
+    const originalIdentityByteLength = upload.identityBufferByteLength;
+    const originalCreateCommandEncoder = device.createCommandEncoder;
+    const submissionsBefore = device.submissions.length;
+    device.createCommandEncoder = (...args) => {
+      const encoder = originalCreateCommandEncoder(...args);
+      const originalFinish = encoder.finish;
+      encoder.finish = (...finishArgs) => {
+        const commandBuffer = originalFinish(...finishArgs);
+        upload.identityBufferByteLength = originalIdentityByteLength + 4;
+        return commandBuffer;
+      };
+      return encoder;
+    };
+    await assert.rejects(
+      runTerminalG2pProducer(chain),
+      /after command encoding|provenance-lost-before-submit|frozen input/
+    );
+    device.createCommandEncoder = originalCreateCommandEncoder;
+    upload.identityBufferByteLength = originalIdentityByteLength;
+    assert.equal(device.submissions.length, submissionsBefore);
+    assert.equal(schroederFusedCoarseTerminalTransactionState(
+      device,
+      terminal.terminalTransaction
+    ).stageIndex, 3);
+    await runTerminalG2pProducer(chain);
+    await releaseTerminalG2pFixture(chain, 'terminal finish TOCTOU cleanup');
+  });
+
+  await t.test('post-submit input mutation quarantines both fields and destroys outputs', async () => {
+    const chain = await submittedTerminalWorkspaceFixture();
+    const { terminal } = chain;
+    const device = terminal.fixture.device;
+    const upload = terminal.uploads.sphParticleUpload;
+    const originalIdentityStrideBytes = upload.identityStrideBytes;
+    const originalSubmit = device.queue.submit;
+    const originalFence = device.queue.onSubmittedWorkDone;
+    const createdBefore = device.createdBuffers.length;
+    let resolveFence;
+    const submittedFence = new Promise((resolve) => {
+      resolveFence = resolve;
+    });
+    device.queue.onSubmittedWorkDone = () => submittedFence;
+    device.queue.submit = (commandBuffers) => {
+      originalSubmit(commandBuffers);
+      upload.identityStrideBytes = originalIdentityStrideBytes + 4;
+    };
+    await assert.rejects(
+      runTerminalG2pProducer(chain),
+      /exact fused artifact publication|frozen input|submission observation is stale/
+    );
+    device.queue.submit = originalSubmit;
+    upload.identityStrideBytes = originalIdentityStrideBytes;
+    const state = schroederFusedCoarseTerminalTransactionState(
+      device,
+      terminal.terminalTransaction
+    );
+    assert.equal(state.status, 'quarantined');
+    assert.equal(state.stageIndex, 3);
+    assert.equal(state.outputClaimed, false);
+    const fineField = terminal.successorMicroepoch.fineFieldView;
+    const coarseField = terminal.successorMicroepoch.parentFieldView.coarseFieldView;
+    assert.equal(fineField.ownerRuntime.isStateArtifactQuarantined(fineField), true);
+    assert.equal(
+      coarseField.ownerRuntime.isStateArtifactQuarantined(coarseField),
+      true
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const outputs = device.createdBuffers
+      .slice(createdBefore)
+      .filter((buffer) => [
+        'ulg-mls-mpm-g2p-state-out',
+        'ulg-mls-mpm-g2p-mechanics-out'
+      ].includes(buffer.label));
+    assert.equal(outputs.length, 2);
+    assert.equal(outputs.every((buffer) => buffer.destroyed === false), true);
+    resolveFence();
+    await submittedFence;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(outputs.every((buffer) => buffer.destroyed), true);
+    device.queue.onSubmittedWorkDone = originalFence;
+    await releaseTerminalG2pFixture(chain, 'terminal post-submit quarantine cleanup');
+  });
+
+  await t.test('field-completion callback mutation cannot escape stage-four publication', async () => {
+    const chain = await submittedTerminalWorkspaceFixture();
+    const { terminal } = chain;
+    const device = terminal.fixture.device;
+    const coarseField = terminal.successorMicroepoch.parentFieldView.coarseFieldView;
+    const fineField = terminal.successorMicroepoch.fineFieldView;
+    const fieldRuntime = coarseField.ownerRuntime;
+    const upload = terminal.uploads.sphParticleUpload;
+    const originalIdentityByteLength = upload.identityBufferByteLength;
+    const originalComplete = fieldRuntime.completeStateMutationSequence;
+    const createdBefore = device.createdBuffers.length;
+    fieldRuntime.completeStateMutationSequence = (...args) => {
+      const result = originalComplete(...args);
+      upload.identityBufferByteLength = originalIdentityByteLength + 4;
+      return result;
+    };
+    await assert.rejects(
+      runTerminalG2pProducer(chain),
+      /field completion|lifecycle publication|publication provenance/
+    );
+    fieldRuntime.completeStateMutationSequence = originalComplete;
+    upload.identityBufferByteLength = originalIdentityByteLength;
+    const state = schroederFusedCoarseTerminalTransactionState(
+      device,
+      terminal.terminalTransaction
+    );
+    assert.equal(state.status, 'quarantined');
+    assert.equal(state.outputClaimed, false);
+    assert.equal(fieldRuntime.isStateArtifactQuarantined(coarseField), true);
+    assert.equal(fineField.ownerRuntime.isStateArtifactQuarantined(fineField), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    const outputs = device.createdBuffers
+      .slice(createdBefore)
+      .filter((buffer) => [
+        'ulg-mls-mpm-g2p-state-out',
+        'ulg-mls-mpm-g2p-mechanics-out'
+      ].includes(buffer.label));
+    assert.equal(outputs.length, 2);
+    assert.equal(outputs.every((buffer) => buffer.destroyed === false), true);
+    await releaseTerminalG2pFixture(
+      chain,
+      'terminal completion callback quarantine cleanup'
+    );
+    assert.equal(outputs.every((buffer) => buffer.destroyed), true);
+  });
+
+  await t.test('retained output destruction is complete and retryable', async () => {
+    const chain = await submittedTerminalWorkspaceFixture();
+    const g2p = await runTerminalG2pProducer(chain);
+    const originalStateDestroy = g2p.stateBuffer.destroy.bind(g2p.stateBuffer);
+    const originalMechanicsDestroy =
+      g2p.mechanicsBuffer.destroy.bind(g2p.mechanicsBuffer);
+    let stateDestroyCalls = 0;
+    let mechanicsDestroyCalls = 0;
+    g2p.stateBuffer.destroy = () => {
+      stateDestroyCalls += 1;
+      if (stateDestroyCalls <= 2) {
+        throw new Error('injected retained state destroy failure');
+      }
+      originalStateDestroy();
+    };
+    g2p.mechanicsBuffer.destroy = () => {
+      mechanicsDestroyCalls += 1;
+      originalMechanicsDestroy();
+    };
+    assert.throws(
+      () => g2p.destroyOutputParticleBuffers(),
+      /destruction was incomplete/
+    );
+    assert.equal(g2p.stateBuffer.destroyed, false);
+    assert.equal(g2p.mechanicsBuffer.destroyed, true);
+    assert.equal(g2p.destroyOutputParticleBuffers(), true);
+    assert.equal(g2p.destroyOutputParticleBuffers(), false);
+    assert.equal(stateDestroyCalls, 3);
+    assert.equal(mechanicsDestroyCalls, 1);
+    assert.equal(g2p.stateBuffer.destroyed, true);
+    await releaseTerminalG2pFixture(chain, 'terminal output destructor cleanup');
+  });
+});
+
+test('CPU MLS-MPM P2G uses the ambient-referenced CFL-reduced gas closure for admitted gas', () => {
   const { sphParticleState, mlsMpmParticleState } = manualBuffers({
     velocity: [0, 0, 0],
     massKg: 1,
@@ -572,10 +5198,30 @@ test('CPU MLS-MPM P2G uses the ambient-referenced ideal-gas closure for admitted
     boxDimsM: [2, 2, 2],
     ambientPressurePa: 0
   });
+  const reducedSoundSpeedBuffers = manualBuffers({
+    velocity: [0, 0, 0],
+    massKg: 1,
+    restDensityKgPerM3: 1,
+    restVolumeM3: 1,
+    solidFlag: 0,
+    soundSpeedMPerS: 170,
+    eosModelId: 2,
+    phaseFractions: [0, 0, 1, 0],
+    mechanicsDtS: 0.01
+  });
+  const reducedSoundSpeedVacuum = projectMlsMpmP2gGridCpu({
+    ...reducedSoundSpeedBuffers,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    ambientPressurePa: 0
+  });
 
   assert.equal(atmosphere.ambientPressureAppliedInStressProjection, true);
   nearlyEqual(maxNodeMomentumAbs(atmosphere.gridNodes), 0, 1e-6);
-  assert.ok(maxNodeMomentumAbs(vacuum.gridNodes) > 0);
+  const vacuumMomentum = maxNodeMomentumAbs(vacuum.gridNodes);
+  const reducedSoundSpeedMomentum = maxNodeMomentumAbs(reducedSoundSpeedVacuum.gridNodes);
+  assert.ok(vacuumMomentum > 0);
+  nearlyEqual(reducedSoundSpeedMomentum / vacuumMomentum, 0.25, 1e-5);
 });
 
 test('WebGPU MLS-MPM P2G can filter particles by retained Schroeder level assignment', async () => {
@@ -1056,7 +5702,7 @@ test('CPU MLS-MPM P2G grid projection includes derived pressure stress contribut
   const gridSpec = createMlsMpmGridSpec({ gridSpacingM: 1, boxDimsM: [2, 2, 2] });
   const centerOffset = nodeOffset(gridSpec, 1, 1, 1);
   const centerWeight = 0.6875 ** 3;
-  const expectedPressurePa = 101325 * 2;
+  const expectedPressurePa = 10 ** 2 * 8;
   const expectedStressScale = -0.1 * 1 * 4;
   const expectedAffineDiagonal = expectedStressScale * -expectedPressurePa;
   const expectedNodeMomentum = centerWeight * expectedAffineDiagonal * -0.25;
@@ -1304,7 +5950,16 @@ test('optional MLS-MPM P2G grid projection accepts a parity-passing WebGPU resul
     navigatorRef: webGpuNavigator(),
     async webGpuRunner(args) {
       const result = projectMlsMpmP2gGridCpu(args);
-      return { ...result, backend: 'webgpu' };
+      return {
+        ...result,
+        backend: 'webgpu',
+        denseGridBufferAllocatedBytes: 4,
+        denseAccumulatorBufferAllocatedBytes: 0,
+        mechanicsFieldP2gContributionBufferAllocatedBytes: 864,
+        mechanicsFieldP2gReductionMode: 'stable-radix-ordered-field-reduction',
+        mechanicsFieldP2gReductionOrder:
+          'stable-radix-equal-key-preserves-particle-stencil-candidate-order'
+      };
     }
   });
 
@@ -1312,6 +5967,17 @@ test('optional MLS-MPM P2G grid projection accepts a parity-passing WebGPU resul
   assert.equal(execution.webgpuStatus.status, 'webgpu-executed');
   assert.equal(execution.webgpuParity.schema, ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA);
   assert.equal(execution.webgpuParity.status, 'pass');
+  assert.equal(execution.denseGridBufferAllocatedBytes, 4);
+  assert.equal(execution.denseAccumulatorBufferAllocatedBytes, 0);
+  assert.equal(execution.mechanicsFieldP2gContributionBufferAllocatedBytes, 864);
+  assert.equal(
+    execution.mechanicsFieldP2gReductionMode,
+    'stable-radix-ordered-field-reduction'
+  );
+  assert.equal(
+    execution.mechanicsFieldP2gReductionOrder,
+    'stable-radix-equal-key-preserves-particle-stencil-candidate-order'
+  );
 });
 
 test('optional MLS-MPM P2G grid projection forwards resident product mass into WebGPU runner metadata', async () => {

@@ -47,12 +47,34 @@ import {
   schroederSpatialMechanicsViewWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsViewWgsl.js';
 import {
+  validateSchroederSpatialHierarchyViewDescriptor
+} from '../ulg-gpu-abi/src/schroederSpatialHierarchyView.js';
+import {
+  validateSchroederSpatialParentFieldViewDescriptor
+} from '../ulg-gpu-abi/src/schroederSpatialParentFieldView.js';
+import {
+  validateSchroederSpatialAggregateViewDescriptor
+} from '../ulg-gpu-abi/src/schroederSpatialAggregateView.js';
+import {
   createSchroederSpatialEpochGpu,
+  quarantineSchroederSpatialEpochGenerationAfterDeviceLoss,
   releaseSchroederSpatialEpochGenerationAfterQueue,
   resolveSchroederSpatialDirectoryActiveNodeSource,
+  schroederSpatialEpochGenerationRetirementCapability,
   runSchroederSpatialEpochGenerationWebGpu,
   runSchroederSpatialEpochGenerationWithBackpressureWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  promise.catch(() => {});
+  return { promise, resolve, reject };
+}
 
 function createFakeDevice(overrides = {}) {
   const buffers = [];
@@ -98,7 +120,11 @@ function createFakeDevice(overrides = {}) {
       const buffer = {
         ...descriptor,
         destroyed: false,
-        destroy() { this.destroyed = true; }
+        destroyCount: 0,
+        destroy() {
+          this.destroyCount += 1;
+          this.destroyed = true;
+        }
       };
       buffers.push(buffer);
       return buffer;
@@ -242,6 +268,73 @@ function createDirectSpatialLevelAssignment(device, overrides = {}) {
   };
 }
 
+function createFullTwoLevelSpatialGeneration(device) {
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'loss-two-level-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const particleThermoBuffer = device.createBuffer({
+    label: 'loss-two-level-thermo-source',
+    size: levelAssignment.particleCount * 12 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const particleBufferSet = {
+    status: 'webgpu-uploaded',
+    particleCount: levelAssignment.particleCount,
+    stateStrideBytes: 8 * Float32Array.BYTES_PER_ELEMENT,
+    thermoStrideBytes: 12 * Float32Array.BYTES_PER_ELEMENT,
+    identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+    stateBuffer: levelAssignment.sourceStateBuffer,
+    thermoBuffer: particleThermoBuffer,
+    identityBuffer: particleIdentityBuffer,
+    storageGeneration: levelAssignment.storageGeneration,
+    physicsTick: levelAssignment.physicsTick,
+    physicsSubstep: levelAssignment.physicsSubstep,
+    positionEpoch: levelAssignment.positionEpoch,
+    topologyEpoch: levelAssignment.topologyEpoch,
+    chartEpoch: levelAssignment.chartEpoch,
+    levelEpoch: levelAssignment.levelEpoch,
+    supportEpoch: levelAssignment.supportEpoch
+  };
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    particleBufferSet,
+    mechanicsLevels: [
+      {
+        selectedLevel: 0,
+        mechanicsGrid: {
+          gridNodeCount: 512,
+          gridDims: [8, 8, 8],
+          gridShift: 2,
+          gridSpacingM: 0.25
+        }
+      },
+      {
+        selectedLevel: 1,
+        mechanicsGrid: {
+          gridNodeCount: 125,
+          gridDims: [5, 5, 5],
+          gridShift: 2,
+          gridSpacingM: 0.5
+        }
+      }
+    ]
+  });
+  return {
+    generation,
+    levelAssignment,
+    particleIdentityBuffer,
+    particleThermoBuffer,
+    particleBufferSet
+  };
+}
+
 test('spatial epoch ABI fixes exact keys, identity header, and compact directory offsets', () => {
   assert.equal(SCHROEDER_SPATIAL_EPOCH_HEADER_LAYOUT.length, 48);
   assert.equal(SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS, 48);
@@ -343,7 +436,7 @@ test('direct level-assignment generation publishes and retires one compact mecha
       gridSpacingM: 0.25
     }
   });
-  assert.equal(generation.ready, true);
+  assert.equal(generation.ready, true, generation.reason);
   assert.equal(generation.selected, true);
   assert.equal(device.submissions.length, 1);
   assert.equal(generation.execution.sourceBuffer, levelAssignment.assignmentBuffer);
@@ -385,6 +478,774 @@ test('direct level-assignment generation publishes and retires one compact mecha
   assert.equal(await generation.releasePromise, true);
   assert.equal(generation.execution.released, true);
   assert.equal(generation.mechanicsView.released, true);
+});
+
+test('one spatial generation owns exactly two adjacent compact mechanics and field views', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-two-level-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const particleThermoBuffer = device.createBuffer({
+    label: 'direct-spatial-two-level-thermo-source',
+    size: levelAssignment.particleCount * 12 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const particleBufferSet = {
+    status: 'webgpu-uploaded',
+    particleCount: levelAssignment.particleCount,
+    stateStrideBytes: 8 * Float32Array.BYTES_PER_ELEMENT,
+    thermoStrideBytes: 12 * Float32Array.BYTES_PER_ELEMENT,
+    identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+    stateBuffer: levelAssignment.sourceStateBuffer,
+    thermoBuffer: particleThermoBuffer,
+    identityBuffer: particleIdentityBuffer,
+    storageGeneration: levelAssignment.storageGeneration,
+    physicsTick: levelAssignment.physicsTick,
+    physicsSubstep: levelAssignment.physicsSubstep,
+    positionEpoch: levelAssignment.positionEpoch,
+    topologyEpoch: levelAssignment.topologyEpoch,
+    chartEpoch: levelAssignment.chartEpoch,
+    levelEpoch: levelAssignment.levelEpoch,
+    supportEpoch: levelAssignment.supportEpoch
+  };
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    particleBufferSet,
+    mechanicsLevels: [
+      {
+        selectedLevel: 0,
+        mechanicsGrid: {
+          gridNodeCount: 512,
+          gridDims: [8, 8, 8],
+          gridShift: 2,
+          gridSpacingM: 0.25
+        }
+      },
+      {
+        selectedLevel: 1,
+        mechanicsGrid: {
+          gridNodeCount: 125,
+          gridDims: [5, 5, 5],
+          gridShift: 2,
+          gridSpacingM: 0.5
+        }
+      }
+    ]
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.directoryBuildCount, 1);
+  assert.equal(generation.mechanicsLevelCount, 2);
+  assert.deepEqual(generation.mechanicsLevels, [0, 1]);
+  assert.equal(generation.hierarchyView.fineLevel, 0);
+  assert.equal(generation.hierarchyView.coarseLevel, 1);
+  assert.equal(generation.hierarchyView.spatialExecution, generation.execution);
+  assert.equal(
+    generation.hierarchyView.fineMechanicsView,
+    generation.mechanicsLevelViews[0].mechanicsView
+  );
+  assert.equal(
+    generation.hierarchyView.coarseMechanicsView,
+    generation.mechanicsLevelViews[1].mechanicsView
+  );
+  assert.equal(validateSchroederSpatialHierarchyViewDescriptor(
+    generation.hierarchyView,
+    { generationId: generation.execution.generationId, fineLevel: 0, coarseLevel: 1 }
+  ).admitted, true);
+  assert.equal(validateSchroederSpatialParentFieldViewDescriptor(
+    generation.parentFieldView,
+    { generationId: generation.execution.generationId, fineLevel: 0, coarseLevel: 1 }
+  ).admitted, true);
+  assert.equal(generation.parentFieldView.hierarchyView, generation.hierarchyView);
+  assert.equal(validateSchroederSpatialAggregateViewDescriptor(
+    generation.aggregateView,
+    { generationId: generation.execution.generationId }
+  ).admitted, true);
+  assert.equal(generation.aggregateView.particleBufferSet, particleBufferSet);
+  assert.equal(generation.mechanicsView, generation.mechanicsLevelViews[0].mechanicsView);
+  assert.equal(
+    generation.mechanicsFieldView,
+    generation.mechanicsLevelViews[0].mechanicsFieldView
+  );
+  for (const [index, levelView] of generation.mechanicsLevelViews.entries()) {
+    assert.equal(levelView.selectedLevel, index);
+    assert.equal(levelView.mechanicsView.directoryBuffer, generation.execution.directoryBuffer);
+    assert.equal(levelView.mechanicsFieldView.parentMechanicsView, levelView.mechanicsView);
+    assert.equal(levelView.mechanicsView.sourceBuffer, levelAssignment.assignmentBuffer);
+    assert.equal(levelView.mechanicsFieldView.sourceBuffer, levelAssignment.assignmentBuffer);
+    assert.equal(levelView.mechanicsView.released, false);
+    assert.equal(levelView.mechanicsFieldView.released, false);
+  }
+
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.execution.released, true);
+  for (const levelView of generation.mechanicsLevelViews) {
+    assert.equal(levelView.mechanicsView.released, true);
+    assert.equal(levelView.mechanicsFieldView.released, true);
+  }
+  assert.equal(generation.hierarchyView.released, true);
+  assert.equal(generation.parentFieldView.released, true);
+  assert.equal(generation.aggregateView.released, true);
+  assert.deepEqual(
+    generation.releaseOperationResults.map((result) => result.owner),
+    [
+      'spatial-directory',
+      'compact-mechanics-view-level-0',
+      'mechanics-field-view-level-0',
+      'compact-mechanics-view-level-1',
+      'mechanics-field-view-level-1',
+      'spatial-parent-field-view',
+      'spatial-aggregate-view',
+      'spatial-hierarchy-view'
+    ]
+  );
+});
+
+test('generation retirement permanently retires an already-quarantined mechanics field', async () => {
+  const device = createFakeDevice();
+  const { generation } = createFullTwoLevelSpatialGeneration(device);
+  assert.equal(generation.ready, true, generation.reason);
+  const field = generation.mechanicsLevelViews[1].mechanicsFieldView;
+  const runtime = generation.mechanicsLevelViews[1].mechanicsFieldViewRuntime;
+  const state = runtime.stateMutationState(field);
+  runtime.quarantineCurrentStateArtifact(field, {
+    mutationOrdinal: state.ordinal,
+    stateEncoding: state.encoding,
+    reason: new Error('injected post-submit field publication failure')
+  });
+  assert.equal(runtime.stateMutationState(field).quarantined, true);
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(field.released, true);
+  assert.equal(runtime.retiredArenaCount(), 1);
+  assert.equal(generation.releaseStatus,
+    'spatial-epoch-generation-released-after-final-consumer');
+  assert.equal(
+    generation.releaseOperationResults.find(
+      ({ owner }) => owner === 'mechanics-field-view-level-1'
+    )?.confirmed,
+    true
+  );
+});
+
+test('generation retirement joins a prestarted quarantined-field retirement', async () => {
+  const device = createFakeDevice();
+  const { generation } = createFullTwoLevelSpatialGeneration(device);
+  assert.equal(generation.ready, true, generation.reason);
+  const queueFence = deferred();
+  device.queue.onSubmittedWorkDone = () => queueFence.promise;
+  const field = generation.mechanicsLevelViews[1].mechanicsFieldView;
+  const runtime = generation.mechanicsLevelViews[1].mechanicsFieldViewRuntime;
+  const state = runtime.stateMutationState(field);
+  runtime.quarantineCurrentStateArtifact(field, {
+    mutationOrdinal: state.ordinal,
+    stateEncoding: state.encoding,
+    reason: new Error('prestarted quarantine retirement')
+  });
+  const fieldRetirement = runtime.retireQuarantinedExecutionAfter(field);
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  queueFence.resolve();
+  assert.equal(await fieldRetirement, true);
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(field.released, true);
+  assert.equal(runtime.retiredArenaCount(), 1);
+});
+
+test('depleted mechanics-field cache rolls an exact active owner and destroys it only after retirement', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'active-rollover-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const options = {
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    },
+    selectedLevel: 0
+  };
+  const permanentlyRetireThenRelease = async (generation, ordinal) => {
+    const runtime = generation.mechanicsFieldViewRuntime;
+    const field = generation.mechanicsFieldView;
+    const state = runtime.stateMutationState(field);
+    runtime.quarantineCurrentStateArtifact(field, {
+      mutationOrdinal: state.ordinal,
+      stateEncoding: state.encoding,
+      reason: new Error(`intentional active-rollover depletion ${ordinal}`)
+    });
+    assert.equal(await runtime.retireQuarantinedExecutionAfter(field), true);
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+      true
+    );
+    assert.equal(await generation.releasePromise, true);
+  };
+
+  const first = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(first.ready, true, first.reason);
+  const depletedRuntime = first.mechanicsFieldViewRuntime;
+  let destroyCount = 0;
+  const originalDestroy = depletedRuntime.destroy;
+  depletedRuntime.destroy = (...args) => {
+    destroyCount += 1;
+    return originalDestroy(...args);
+  };
+  await permanentlyRetireThenRelease(first, 1);
+  const second = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(second.mechanicsFieldViewRuntime, depletedRuntime);
+  await permanentlyRetireThenRelease(second, 2);
+
+  const retained = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(retained.ready, true, retained.reason);
+  assert.equal(retained.mechanicsFieldViewRuntime, depletedRuntime);
+  assert.equal(depletedRuntime.retiredArenaCount(), 2);
+  assert.equal(depletedRuntime.activeExecutionCount(), 1);
+  assert.equal(depletedRuntime.availableArenaCount(), 0);
+
+  const entry = retained.directRuntimeEntry;
+  const compactRuntime = retained.mechanicsViewRuntime;
+  const seededDrains = Array.from({ length: 6 }, (_, index) => ({
+    key: `inert-drain-${index}`,
+    retirementConfirmed: false,
+    destroyed: false
+  }));
+  for (const record of seededDrains) {
+    entry.mechanicsFieldViewDrainingRuntimes.add(record);
+  }
+  const submissionCountBeforeBoundedAttempt = device.submissions.length;
+  const bounded = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(bounded.ready, false);
+  assert.equal(
+    bounded.errorCode,
+    'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_CACHE_BACKPRESSURE'
+  );
+  assert.equal(entry.mechanicsFieldViewRuntimes.size, 1);
+  assert.equal(
+    [...entry.mechanicsFieldViewRuntimes.values()][0],
+    depletedRuntime
+  );
+  assert.equal(depletedRuntime.activeExecutionCount(), 1);
+  assert.equal(compactRuntime.activeExecutionCount(), 1);
+  assert.equal(entry.runtime.ownsExecution(retained.execution), true);
+  assert.equal(entry.liveGenerations.length, 1);
+  assert.equal(device.submissions.length, submissionCountBeforeBoundedAttempt);
+  for (const record of seededDrains) {
+    entry.mechanicsFieldViewDrainingRuntimes.delete(record);
+  }
+
+  const replacementGeneration = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(replacementGeneration.ready, true, replacementGeneration.reason);
+  assert.notEqual(
+    replacementGeneration.mechanicsFieldViewRuntime,
+    depletedRuntime
+  );
+  assert.equal(destroyCount, 0);
+  assert.equal(entry.mechanicsFieldViewRuntimes.size, 1);
+  assert.equal(
+    entry.mechanicsFieldViewDrainingRuntimes.size,
+    1
+  );
+  const [drainingRecord] =
+    entry.mechanicsFieldViewDrainingRuntimes;
+  assert.equal(drainingRecord.runtime, depletedRuntime);
+  assert.deepEqual(drainingRecord.executions, [retained.mechanicsFieldView]);
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(retained, device),
+    true
+  );
+  assert.equal(await retained.releasePromise, true);
+  assert.equal(await drainingRecord.completionPromise, true);
+  assert.equal(depletedRuntime.activeExecutionCount(), 0);
+  assert.equal(destroyCount, 1);
+  assert.equal(
+    entry.mechanicsFieldViewDrainingRuntimes.size,
+    0
+  );
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      replacementGeneration,
+      device
+    ),
+    true
+  );
+  assert.equal(await replacementGeneration.releasePromise, true);
+});
+
+test('fully depleted idle mechanics-field cache replaces and destroys immediately', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'idle-rollover-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const options = {
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    },
+    selectedLevel: 0
+  };
+  let depletedRuntime = null;
+  let destroyCount = 0;
+  for (let index = 0; index < 3; index += 1) {
+    const generation = runSchroederSpatialEpochGenerationWebGpu(options);
+    assert.equal(generation.ready, true, generation.reason);
+    depletedRuntime ??= generation.mechanicsFieldViewRuntime;
+    assert.equal(generation.mechanicsFieldViewRuntime, depletedRuntime);
+    if (index === 0) {
+      const originalDestroy = depletedRuntime.destroy;
+      depletedRuntime.destroy = (...args) => {
+        destroyCount += 1;
+        return originalDestroy(...args);
+      };
+    }
+    const state = depletedRuntime.stateMutationState(
+      generation.mechanicsFieldView
+    );
+    depletedRuntime.quarantineCurrentStateArtifact(
+      generation.mechanicsFieldView,
+      {
+        mutationOrdinal: state.ordinal,
+        stateEncoding: state.encoding,
+        reason: new Error(`intentional idle-rollover depletion ${index + 1}`)
+      }
+    );
+    assert.equal(await depletedRuntime.retireQuarantinedExecutionAfter(
+      generation.mechanicsFieldView
+    ), true);
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+      true
+    );
+    assert.equal(await generation.releasePromise, true);
+  }
+  assert.equal(depletedRuntime.activeExecutionCount(), 0);
+  assert.equal(depletedRuntime.availableArenaCount(), 0);
+  assert.equal(depletedRuntime.retiredArenaCount(), 3);
+
+  const replacementGeneration = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(replacementGeneration.ready, true, replacementGeneration.reason);
+  assert.notEqual(
+    replacementGeneration.mechanicsFieldViewRuntime,
+    depletedRuntime
+  );
+  assert.equal(destroyCount, 1);
+  assert.equal(
+    replacementGeneration.directRuntimeEntry
+      .mechanicsFieldViewDrainingRuntimes.size,
+    0
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      replacementGeneration,
+      device
+    ),
+    true
+  );
+  assert.equal(await replacementGeneration.releasePromise, true);
+});
+
+test('field-arena backpressure discards the current compact mechanics acquisition', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'field-backpressure-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const mechanicsGrid = {
+    gridNodeCount: 512,
+    gridDims: [8, 8, 8],
+    gridShift: 2,
+    gridSpacingM: 0.25
+  };
+  const retained = [];
+  for (let index = 0; index < 3; index += 1) {
+    const generation = runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment,
+      particleCount: levelAssignment.particleCount,
+      particleIdentityBuffer,
+      particleIdentityStrideWords: 1,
+      mechanicsGrid,
+      selectedLevel: 0
+    });
+    assert.equal(generation.ready, true, generation.reason);
+    retained.push(generation);
+    assert.equal(await generation.runtime.releaseExecutionAfter(
+      generation.execution,
+      Promise.resolve()
+    ), true);
+    assert.equal(await generation.mechanicsViewRuntime.releaseExecutionAfter(
+      generation.mechanicsView,
+      Promise.resolve()
+    ), true);
+  }
+
+  const compactRuntime = retained[0].mechanicsViewRuntime;
+  const fieldRuntime = retained[0].mechanicsFieldViewRuntime;
+  assert.equal(compactRuntime.activeExecutionCount(), 0);
+  assert.equal(fieldRuntime.activeExecutionCount(), 3);
+
+  const timestampBegins = [];
+  const timestampEnds = [];
+  const timestampDiscards = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(encoder, descriptor) {
+      const token = { encoder, descriptor };
+      timestampBegins.push(token);
+      return token;
+    },
+    endEncoderSpan(encoder, token) {
+      timestampEnds.push({ encoder, token });
+      return true;
+    },
+    discardEncoderSpans(encoder) {
+      timestampDiscards.push(encoder);
+      return timestampBegins.filter((token) => token.encoder === encoder).length;
+    }
+  };
+
+  const rejected = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsGrid,
+    selectedLevel: 0,
+    gpuTimestampRecorder
+  });
+  assert.equal(rejected.ready, false);
+  assert.equal(
+    rejected.status,
+    'schroeder-spatial-epoch-generation-backpressure'
+  );
+  assert.equal(
+    rejected.errorCode,
+    'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_ARENA_EXHAUSTED'
+  );
+  assert.equal(compactRuntime.activeExecutionCount(), 0);
+  assert.equal(fieldRuntime.activeExecutionCount(), 3);
+  assert.equal(timestampBegins.length, 6);
+  assert.equal(timestampEnds.length, 4);
+  assert.equal(timestampDiscards.length, 1);
+  const discardedEncoder = timestampDiscards[0];
+  assert.ok(timestampBegins.every((token) => token.encoder === discardedEncoder));
+  assert.ok(timestampEnds.every(({ encoder, token }) => (
+    encoder === discardedEncoder && token.encoder === discardedEncoder
+  )));
+  assert.deepEqual(
+    timestampBegins.map((token) => token.descriptor.producerId),
+    [
+      'schroeder-spatial-key-emission',
+      'webgpu-stable-radix-sort',
+      'webgpu-sorted-unique',
+      'schroeder-spatial-derived-view-build',
+      'schroeder-spatial-mechanics-view-build',
+      'schroeder-spatial-mechanics-field-view-build'
+    ]
+  );
+  assert.equal(device.submissions.length, 3);
+
+  for (const generation of retained) {
+    assert.equal(await generation.mechanicsFieldViewRuntime.releaseExecutionAfter(
+      generation.mechanicsFieldView,
+      Promise.resolve()
+    ), true);
+  }
+  assert.equal(fieldRuntime.activeExecutionCount(), 0);
+});
+
+test('exact device loss retires all eight generation artifacts without fencing or borrowed-buffer destruction', async () => {
+  const device = createFakeDevice();
+  const deviceLoss = deferred();
+  device.lost = deviceLoss.promise;
+  const {
+    generation,
+    levelAssignment,
+    particleIdentityBuffer,
+    particleThermoBuffer
+  } = createFullTwoLevelSpatialGeneration(device);
+  assert.equal(generation.ready, true, generation.reason);
+  let queueFenceCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    queueFenceCount += 1;
+    throw new Error('generation device-loss retirement must not fence the queue');
+  };
+  const directoryArenaBuffers = generation.runtime.allocationEntries()
+    .filter((entry) => entry.arenaIndex === generation.execution.arenaIndex)
+    .map((entry) => entry.buffer);
+  const borrowedBuffers = [
+    levelAssignment.assignmentBuffer,
+    levelAssignment.sourceStateBuffer,
+    particleIdentityBuffer,
+    particleThermoBuffer
+  ];
+  const capability = schroederSpatialEpochGenerationRetirementCapability(
+    generation,
+    device
+  );
+  assert.equal(
+    schroederSpatialEpochGenerationRetirementCapability(generation, device),
+    capability
+  );
+  const lossRetirement =
+    quarantineSchroederSpatialEpochGenerationAfterDeviceLoss(
+      generation,
+      device
+    );
+  assert.equal(
+    quarantineSchroederSpatialEpochGenerationAfterDeviceLoss(
+      generation,
+      device
+    ),
+    lossRetirement
+  );
+  assert.equal(queueFenceCount, 0);
+  assert.equal(directoryArenaBuffers.every((buffer) => !buffer.destroyed), true);
+  assert.equal(borrowedBuffers.every((buffer) => !buffer.destroyed), true);
+
+  deviceLoss.resolve({ reason: 'destroyed', message: 'injected generation loss' });
+  assert.equal(await lossRetirement, true);
+  assert.equal(await capability.completionPromise, true);
+  assert.equal(queueFenceCount, 0);
+  const artifactExecutions = [
+    generation.execution,
+    ...generation.mechanicsLevelViews.flatMap((levelView) => [
+      levelView.mechanicsView,
+      levelView.mechanicsFieldView
+    ]),
+    generation.parentFieldView,
+    generation.aggregateView,
+    generation.hierarchyView
+  ];
+  assert.equal(artifactExecutions.length, 8);
+  assert.equal(artifactExecutions.every((execution) => execution.released), true);
+  assert.deepEqual(
+    generation.releaseOperationResults.map((result) => result.owner),
+    [
+      'spatial-directory',
+      'compact-mechanics-view-level-0',
+      'mechanics-field-view-level-0',
+      'compact-mechanics-view-level-1',
+      'mechanics-field-view-level-1',
+      'spatial-parent-field-view',
+      'spatial-aggregate-view',
+      'spatial-hierarchy-view'
+    ]
+  );
+  assert.equal(generation.releaseOperationResults.every(
+    (result) => result.confirmed
+  ), true);
+  assert.equal(
+    generation.releaseStatus,
+    'spatial-epoch-generation-device-loss-retired'
+  );
+  assert.equal(directoryArenaBuffers.every((buffer) => buffer.destroyed), true);
+  assert.equal(directoryArenaBuffers.every(
+    (buffer) => buffer.destroyCount === 1
+  ), true);
+  assert.equal(borrowedBuffers.every((buffer) => !buffer.destroyed), true);
+  assert.equal(
+    quarantineSchroederSpatialEpochGenerationAfterDeviceLoss(
+      generation,
+      device
+    ),
+    capability.completionPromise
+  );
+  assert.throws(
+    () => generation.mechanicsViewRuntime.encode(createFakeEncoder(), {}),
+    (error) => error.code === 'ERR_SCHROEDER_SPATIAL_DEVICE_LOST'
+  );
+  assert.throws(
+    () => createFullTwoLevelSpatialGeneration(device),
+    (error) => error.code === 'ERR_SCHROEDER_SPATIAL_DEVICE_LOST'
+  );
+  assert.equal(generation.runtime.destroy(), true);
+  assert.equal(directoryArenaBuffers.every(
+    (buffer) => buffer.destroyCount === 1
+  ), true);
+});
+
+test('generation loss supersedes unresolved owner and prestarted mechanics-field fences', async () => {
+  const device = createFakeDevice();
+  const deviceLoss = deferred();
+  device.lost = deviceLoss.promise;
+  const { generation, levelAssignment, particleIdentityBuffer, particleThermoBuffer } =
+    createFullTwoLevelSpatialGeneration(device);
+  const queueFence = deferred();
+  let queueFenceCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    queueFenceCount += 1;
+    return queueFence.promise;
+  };
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  const normalAttempt = generation.releasePromise;
+  const lossCompletion =
+    quarantineSchroederSpatialEpochGenerationAfterDeviceLoss(
+      generation,
+      device
+    );
+  assert.equal(
+    quarantineSchroederSpatialEpochGenerationAfterDeviceLoss(
+      generation,
+      device
+    ),
+    lossCompletion
+  );
+  assert.equal(
+    queueFenceCount,
+    1 + generation.mechanicsLevelViews.length,
+    'one owner fence and one contemporaneous private fence per mechanics field'
+  );
+  deviceLoss.resolve({ reason: 'destroyed', message: 'loss beat owner fence' });
+  assert.equal(await lossCompletion, true);
+  assert.equal(await normalAttempt, true);
+  assert.equal(queueFenceCount, 1 + generation.mechanicsLevelViews.length);
+  assert.equal(generation.mechanicsLevelViews.every(({ mechanicsFieldView }) => (
+    mechanicsFieldView.released === true
+  )), true);
+  queueFence.reject(new Error('stale generation owner fence rejected'));
+  await Promise.resolve();
+  assert.equal(
+    generation.releaseStatus,
+    'spatial-epoch-generation-device-loss-retired'
+  );
+  assert.equal(levelAssignment.assignmentBuffer.destroyed, false);
+  assert.equal(levelAssignment.sourceStateBuffer.destroyed, false);
+  assert.equal(particleIdentityBuffer.destroyed, false);
+  assert.equal(particleThermoBuffer.destroyed, false);
+});
+
+test('selected-false post-submit cleanup exposes a fresh retry instead of a rejected cached promise', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const options = {
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  };
+  const seed = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(seed, device), true);
+  assert.equal(await seed.releasePromise, true);
+  const originalMark = seed.runtime.markExecutionSubmitted;
+  let rejectSubmissionOnce = true;
+  seed.runtime.markExecutionSubmitted = (execution) => {
+    if (rejectSubmissionOnce) {
+      rejectSubmissionOnce = false;
+      return false;
+    }
+    return originalMark(execution);
+  };
+  device.queue.onSubmittedWorkDone = () => Promise.reject(
+    new Error('injected post-submit cleanup fence failure')
+  );
+  const rejected = runSchroederSpatialEpochGenerationWebGpu(options);
+  seed.runtime.markExecutionSubmitted = originalMark;
+  assert.equal(rejected.ready, false);
+  assert.equal(rejected.selected, false);
+  const failedAttempt = rejected.releasePromise;
+  assert.equal(await failedAttempt, false);
+  const capability = schroederSpatialEpochGenerationRetirementCapability(
+    rejected,
+    device
+  );
+  assert.equal(
+    schroederSpatialEpochGenerationRetirementCapability(rejected, device),
+    capability
+  );
+  device.queue.onSubmittedWorkDone = () => Promise.resolve(true);
+  const retry = capability.retry();
+  assert.notEqual(retry, failedAttempt);
+  assert.equal(await retry, true);
+  assert.equal(await capability.completionPromise, true);
+  assert.equal(capability.retry(), capability.completionPromise);
+});
+
+test('direct spatial generation rejects a third, nonadjacent, or non-2:1 mechanics level', () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const grid = (gridSpacingM) => ({
+    gridNodeCount: 64,
+    gridDims: [4, 4, 4],
+    gridShift: 1,
+    gridSpacingM
+  });
+  for (const mechanicsLevels of [
+    [
+      { selectedLevel: 0, mechanicsGrid: grid(0.25) },
+      { selectedLevel: 1, mechanicsGrid: grid(0.5) },
+      { selectedLevel: 2, mechanicsGrid: grid(1) }
+    ],
+    [
+      { selectedLevel: 0, mechanicsGrid: grid(0.25) },
+      { selectedLevel: 2, mechanicsGrid: grid(0.5) }
+    ],
+    [
+      { selectedLevel: 0, mechanicsGrid: grid(0.25) },
+      { selectedLevel: 1, mechanicsGrid: grid(0.75) }
+    ]
+  ]) {
+    const generation = runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment,
+      particleCount: levelAssignment.particleCount,
+      mechanicsLevels
+    });
+    assert.equal(generation.ready, false);
+    assert.equal(
+      generation.status,
+      'schroeder-spatial-mechanics-view-rejected-level-contract'
+    );
+    assert.equal(generation.directoryBuildCount, 0);
+  }
+  assert.equal(device.submissions.length, 0);
 });
 
 test('compact mechanics generations retire under resident arena backpressure', async () => {
@@ -1392,6 +2253,127 @@ test('caller-owned runtime keeps two complete variable-count arenas resident and
   assert.deepEqual(runtime.allocationEntries().map(({ buffer }) => buffer), allocationBuffers);
   assert.equal(runtime.destroy(), true);
   assert.equal(allocationBuffers.every((buffer) => buffer.destroyed), true);
+});
+
+test('directory runtime loss supersedes radix retirement and never destroys its borrowed source', async () => {
+  const device = createFakeDevice();
+  const runtime = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 8,
+    cellCapacity: 8,
+    arenaCount: 2,
+    label: 'spatial-loss-test'
+  });
+  const sourceBuffer = device.createBuffer({
+    label: 'spatial-loss-borrowed-source',
+    size: 8 * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const execution = runtime.encode(createFakeEncoder(), {
+    activeNodeBuffer: sourceBuffer,
+    sourceCount: 4,
+    sortMode: 'bounded-atlas-u32',
+    atlas: {
+      chartMin: 0,
+      chartCount: 2,
+      levelMin: -1,
+      levelCount: 2,
+      cellMin: [-1, -1, 0],
+      cellCount: [2, 2, 2]
+    },
+    generationId: 1
+  });
+  runtime.markExecutionSubmitted(execution);
+  const owned = runtime.allocationEntries()
+    .filter((entry) => entry.arenaIndex === execution.arenaIndex)
+    .map((entry) => entry.buffer);
+  const queueFence = deferred();
+  const deviceLoss = deferred();
+  device.lost = deviceLoss.promise;
+  const normalAttempt = runtime.releaseExecutionAfter(
+    execution,
+    queueFence.promise
+  );
+  const lossAttempt = runtime.quarantineExecutionAfterDeviceLoss(execution);
+  assert.equal(runtime.quarantineExecutionAfterDeviceLoss(execution), lossAttempt);
+  const completion = runtime.executionRetirementCompletionPromise(execution);
+  assert.equal(owned.every((buffer) => !buffer.destroyed), true);
+  assert.equal(sourceBuffer.destroyed, false);
+  deviceLoss.resolve({ reason: 'destroyed' });
+  assert.equal(await lossAttempt, true);
+  assert.equal(execution.released, true);
+  assert.equal(owned.every((buffer) => buffer.destroyed), true);
+  assert.equal(owned.every((buffer) => buffer.destroyCount === 1), true);
+  assert.equal(sourceBuffer.destroyed, false);
+  queueFence.reject(new Error('stale radix fence rejected after loss'));
+  assert.equal(await normalAttempt, true);
+  assert.equal(runtime.quarantineExecutionAfterDeviceLoss(execution), completion);
+  assert.equal(await completion, true);
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), {
+      activeNodeBuffer: sourceBuffer,
+      sourceCount: 1
+    }),
+    (error) => error.code === 'ERR_SCHROEDER_SPATIAL_DEVICE_LOST'
+  );
+  assert.equal(runtime.destroy(), true);
+  assert.equal(owned.every((buffer) => buffer.destroyCount === 1), true);
+});
+
+test('directory loss retirement retries one incomplete owned-buffer destruction exactly', async () => {
+  const device = createFakeDevice();
+  const runtime = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 4,
+    cellCapacity: 4,
+    arenaCount: 1,
+    label: 'spatial-loss-retry-test'
+  });
+  const sourceBuffer = device.createBuffer({
+    label: 'spatial-loss-retry-borrowed-source',
+    size: 4 * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const execution = runtime.encode(createFakeEncoder(), {
+    activeNodeBuffer: sourceBuffer,
+    sourceCount: 2,
+    sortMode: 'bounded-atlas-u32',
+    atlas: {
+      chartMin: 0,
+      chartCount: 1,
+      levelMin: 0,
+      levelCount: 1,
+      cellMin: [0, 0, 0],
+      cellCount: [2, 2, 2]
+    }
+  });
+  runtime.markExecutionSubmitted(execution);
+  const owned = runtime.allocationEntries().map((entry) => entry.buffer);
+  const flaky = owned[0];
+  const originalDestroy = flaky.destroy;
+  let injected = true;
+  flaky.destroy = function destroyWithOneFailure() {
+    if (injected) {
+      injected = false;
+      this.destroyCount += 1;
+      throw new Error('injected spatial arena destroy failure');
+    }
+    return originalDestroy.call(this);
+  };
+  device.lost = Promise.resolve({ reason: 'destroyed' });
+  const completion = runtime.executionRetirementCompletionPromise(execution);
+  await assert.rejects(
+    runtime.quarantineExecutionAfterDeviceLoss(execution),
+    /injected spatial arena destroy failure/
+  );
+  assert.equal(runtime.ownsExecution(execution), true);
+  assert.equal(execution.released, false);
+  assert.equal(owned.slice(1).every((buffer) => buffer.destroyCount === 1), true);
+  assert.equal(await runtime.quarantineExecutionAfterDeviceLoss(execution), true);
+  assert.equal(await completion, true);
+  assert.equal(flaky.destroyCount, 2);
+  assert.equal(owned.slice(1).every((buffer) => buffer.destroyCount === 1), true);
+  assert.equal(sourceBuffer.destroyed, false);
+  assert.equal(runtime.destroy(), true);
+  assert.equal(owned.slice(1).every((buffer) => buffer.destroyCount === 1), true);
 });
 
 test('runtime rejects non-portable stage limits and active-node capacity ambiguity', () => {

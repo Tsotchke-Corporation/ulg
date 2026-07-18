@@ -31,6 +31,7 @@ import {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
   applyMlsMpmParticleSeparationCpu,
   createMlsMpmG2pParityReport,
+  destroyRetainedMlsMpmG2pOutputComponents,
   encodeMlsMpmParticleSeparationPasses,
   reconstructMlsMpmG2pCpu,
   runMlsMpmG2pWebGpu,
@@ -211,7 +212,7 @@ function canonicalSpatialGenerationFixture(device, { evidenceBufferSize = 80 } =
   };
 }
 
-function canonicalMechanicalProposalFixture(device, generation) {
+function canonicalMechanicalProposalFixture(device, generation, applyCalls = null) {
   const proposalBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'retained-schroeder-spatial-mechanical-proposals',
     size: 128,
@@ -252,7 +253,8 @@ function canonicalMechanicalProposalFixture(device, generation) {
     consumerReceipt(consumerId) {
       return consumerId === 'separation' ? separationReceipt : null;
     },
-    encodeApply(encoder) {
+    encodeApply(encoder, options = {}) {
+      applyCalls?.push(options);
       const pass = encoder.beginComputePass({
         label: 'ulg-schroeder-spatial-mechanical-proposal-apply'
       });
@@ -840,6 +842,39 @@ test('optional MLS-MPM G2P exposes retained output buffers after parity passes',
   assert.equal(mechanicsBuffer.destroyed, true);
 });
 
+test('WebGPU MLS-MPM G2P retires retained state and mechanics independently and replay-safely', async () => {
+  const device = fakeG2pDevice();
+  const result = await runMlsMpmG2pWebGpu({
+    ...twoParticleFixture(),
+    device,
+    boxDimsM: [3, 3, 3],
+    particleSeparationRelaxation: 0,
+    particleSeparationVelocityDamping: 0,
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  });
+  const stateBuffer = result.stateBuffer;
+  const mechanicsBuffer = result.mechanicsBuffer;
+
+  assert.equal(result.retainedOutputParticleBuffers, true);
+  assert.equal(stateBuffer.destroyed, false);
+  assert.equal(mechanicsBuffer.destroyed, false);
+  assert.equal(destroyRetainedMlsMpmG2pOutputComponents(result, {
+    state: true
+  }), true);
+  assert.equal(stateBuffer.destroyed, true);
+  assert.equal(mechanicsBuffer.destroyed, false);
+  assert.equal(destroyRetainedMlsMpmG2pOutputComponents(result, {
+    state: true
+  }), true);
+  assert.equal(mechanicsBuffer.destroyed, false);
+  assert.equal(destroyRetainedMlsMpmG2pOutputComponents(result, {
+    mechanics: true
+  }), true);
+  assert.equal(mechanicsBuffer.destroyed, true);
+  assert.equal(result.destroyOutputParticleBuffers(), false);
+});
+
 test('optional MLS-MPM G2P rejects parity drift and keeps CPU output', async () => {
   let destroyed = 0;
   const execution = await runMlsMpmG2pWithOptionalWebGpu({
@@ -907,7 +942,12 @@ test('WebGPU MLS-MPM G2P applies one authenticated resident proposal under the s
       return Reflect.get(target, property, receiver);
     }
   });
-  const mechanicalProposal = canonicalMechanicalProposalFixture(device, generation);
+  const proposalApplyCalls = [];
+  const mechanicalProposal = canonicalMechanicalProposalFixture(
+    device,
+    generation,
+    proposalApplyCalls
+  );
 
   const result = await runMlsMpmG2pWebGpu({
     ...twoParticleFixture(),
@@ -938,6 +978,8 @@ test('WebGPU MLS-MPM G2P applies one authenticated resident proposal under the s
   assert.equal(result.schroederLevelFilter.authorityBindingMode, 'canonical-spatial-epoch');
   assert.equal(result.schroederLevelFilter.oldLevelAssignmentLookupRemoved, true);
   assert.equal(result.schroederLevelFilter.assignmentBufferSource, null);
+  assert.equal(proposalApplyCalls.length, 1);
+  assert.equal(proposalApplyCalls[0].selectedLevel, 2);
   assert.equal(result.schroederLevelFilter.retainedAssignmentBuffer, false);
   assert.equal(result.separationCanonicalSpatialAuthorityGate, true);
   assert.equal(device.submissions.length, 1);

@@ -2,14 +2,178 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
+import {
   SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
   SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA,
   SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA,
   appendResidentStageOrderTrace,
+  residentGpuContinuationEvidenceReady,
   runRemoteResidentTaskGraphRefreshPrelude,
   summarizeResidentStageOrderExecution,
   workerRebuildResetGate
 } from '../src/visualization/sphPhaseDemoMount.js';
+
+function retainedGpuContinuationExecution(overrides = {}) {
+  return {
+    schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+    backend: 'webgpu',
+    readbackMode: 'no-full-readback',
+    continuationAvailable: true,
+    nextSphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 8
+    },
+    nextMlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 8
+    },
+    nextParticleUploads: {
+      sphParticleUpload: {
+        schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+        sourceSchema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+        status: 'webgpu-uploaded',
+        particleCount: 8,
+        stateBuffer: {},
+        thermoBuffer: {}
+      },
+      mlsMpmParticleUpload: {
+        schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+        sourceSchema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+        status: 'webgpu-uploaded',
+        particleCount: 8,
+        mechanicsBuffer: {}
+      }
+    },
+    ...overrides
+  };
+}
+
+test('resident GPU continuation accepts retained no-full-readback uploads', () => {
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution()),
+    true
+  );
+});
+
+test('resident GPU continuation accepts compact conservation telemetry without a full particle readback', () => {
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      readbackMode: 'compact-grid-conservation-summary-readback',
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: true
+    })),
+    true
+  );
+});
+
+test('resident GPU continuation fails closed for full readback or incomplete retained uploads', () => {
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      readbackMode: 'compact-grid-conservation-summary-readback',
+      fullParticleReadbackPerformed: true,
+      normalHotLoopReadbackFree: false
+    })),
+    false
+  );
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      nextParticleUploads: {
+        sphParticleUpload: {
+          schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+          sourceSchema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+          status: 'webgpu-uploaded',
+          particleCount: 8,
+          stateBuffer: {},
+          thermoBuffer: {}
+        },
+        mlsMpmParticleUpload: {
+          schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+          sourceSchema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+          status: 'webgpu-uploaded',
+          particleCount: 8
+        }
+      }
+    })),
+    false
+  );
+});
+
+test('resident GPU continuation rejects full readback claims while allowing compact telemetry', () => {
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      readbackMode: 'no-full-readback',
+      fullParticleReadbackPerformed: true,
+      normalHotLoopReadbackFree: false
+    })),
+    false
+  );
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      readbackMode: 'no-full-readback',
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: false
+    })),
+    true
+  );
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      readbackMode: 'no-full-readback',
+      finalStep: {
+        readbackMode: 'full-parity-readback'
+      }
+    })),
+    false
+  );
+});
+
+test('resident GPU continuation rejects non-canonical execution and particle schemas', () => {
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.future'
+    })),
+    false
+  );
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      nextSphParticleState: {
+        schema: 'peercompute.ulg.sph-gpu-particle-state.v0'
+      }
+    })),
+    false
+  );
+  assert.equal(
+    residentGpuContinuationEvidenceReady(retainedGpuContinuationExecution({
+      nextMlsMpmParticleState: {
+        schema: 'peercompute.ulg.mls-mpm-gpu-particle-state.v0'
+      }
+    })),
+    false
+  );
+});
+
+test('resident GPU continuation rejects destroyed or count-mismatched uploads', () => {
+  const destroyed = retainedGpuContinuationExecution();
+  destroyed.nextParticleUploads.sphParticleUpload.destroyed = true;
+  assert.equal(residentGpuContinuationEvidenceReady(destroyed), false);
+
+  const destroyedBuffer = retainedGpuContinuationExecution();
+  destroyedBuffer.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.destroyed = true;
+  assert.equal(residentGpuContinuationEvidenceReady(destroyedBuffer), false);
+
+  const mismatchedUpload = retainedGpuContinuationExecution();
+  mismatchedUpload.nextParticleUploads.mlsMpmParticleUpload.particleCount = 7;
+  assert.equal(residentGpuContinuationEvidenceReady(mismatchedUpload), false);
+
+  const mismatchedState = retainedGpuContinuationExecution();
+  mismatchedState.nextMlsMpmParticleState.particleCount = 9;
+  assert.equal(residentGpuContinuationEvidenceReady(mismatchedState), false);
+});
 
 test('remote resident task-graph refresh prelude is disabled by default', async () => {
   let factoryCalled = false;

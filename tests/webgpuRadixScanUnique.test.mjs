@@ -10,6 +10,7 @@ import {
   WEBGPU_RADIX_SCATTER_WORKGROUP_STORAGE_BYTES,
   WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT,
   webGpuDispatchShapeId,
+  webGpuSerialRadixHistogramScanWgsl,
   webGpuStableRadixWgsl,
   webGpuU32ExclusiveScanWgsl,
   webGpuSortedUniqueWgsl
@@ -70,6 +71,9 @@ function createFakeEncoder() {
     events,
     clearBuffer(buffer, offset = 0, size = null) {
       events.push({ kind: 'clear', label: buffer.label, offset, size });
+    },
+    writeTimestamp(querySet, queryIndex) {
+      events.push({ kind: 'timestamp', querySet, queryIndex });
     },
     beginComputePass(descriptor = {}) {
       const event = { kind: 'pass', descriptor, commands: [] };
@@ -250,7 +254,69 @@ test('stable dispatch-shape ids route grouped and timestamp passes through one G
   runtime.destroy();
 });
 
-test('scan and radix shaders use parallel portable workgroups without serial prefix kernels', () => {
+test('coarse timestamp recorder preserves grouped radix and unique production passes', () => {
+  const device = createFakeDevice();
+  const keyBuffer = device.createBuffer({
+    label: 'coarse-profiled-keys', size: 4096, usage: 128
+  });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 1024,
+    maxKeyWordCount: 1,
+    label: 'coarse-profiled-radix'
+  });
+  const encoder = createFakeEncoder();
+  const spans = [];
+  let queryIndex = 0;
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(targetEncoder, descriptor) {
+      const token = { descriptor, startQueryIndex: queryIndex++ };
+      targetEncoder.writeTimestamp({}, token.startQueryIndex);
+      spans.push(token);
+      return token;
+    },
+    endEncoderSpan(targetEncoder, token) {
+      token.endQueryIndex = queryIndex++;
+      targetEncoder.writeTimestamp({}, token.endQueryIndex);
+    }
+  };
+
+  runtime.encodeSortUnique(encoder, {
+    keyBuffer,
+    elementCount: 1000,
+    keyWordCount: 1,
+    keyStrideWords: 1,
+    generationId: 17,
+    gpuTimestampRecorder,
+    sortTimestampProducerId: 'test-coarse-radix-sort',
+    uniqueTimestampProducerId: 'test-coarse-radix-unique',
+    timestampMetadata: { taskId: 'coarse-production-shape' }
+  });
+
+  assert.equal(computePasses(encoder).length, 2);
+  assert.deepEqual(
+    computePasses(encoder).map((pass) => pass.descriptor.label),
+    ['coarse-profiled-radixGroupedRadixSort', 'coarse-profiled-radixGroupedUnique']
+  );
+  assert.equal(spans.length, 2);
+  assert.deepEqual(
+    spans.map((span) => span.descriptor.producerId),
+    ['test-coarse-radix-sort', 'test-coarse-radix-unique']
+  );
+  assert.deepEqual(spans.map((span) => span.descriptor.stage), ['sort', 'unique']);
+  assert.equal(spans.every((span) => (
+    span.descriptor.taskId === 'coarse-production-shape'
+    && Number.isInteger(span.startQueryIndex)
+    && Number.isInteger(span.endQueryIndex)
+  )), true);
+  assert.equal(
+    encoder.events.filter((event) => event.kind === 'timestamp').length,
+    4
+  );
+  runtime.destroy();
+});
+
+test('general scan and radix shaders remain parallel while the bounded serial kernel is isolated', () => {
   assert.match(webGpuU32ExclusiveScanWgsl, /@workgroup_size\(256\)[\s\S]*fn scan_blocks/);
   assert.match(webGpuU32ExclusiveScanWgsl, /var<workgroup> scan_values: array<u32, 512>/);
   assert.match(webGpuU32ExclusiveScanWgsl, /group_valid = linear_group < scan_group_count/);
@@ -261,9 +327,157 @@ test('scan and radix shaders use parallel portable workgroups without serial pre
   assert.match(webGpuStableRadixWgsl, /linear_group < radix_params\.workgroup_count/);
   assert.match(webGpuStableRadixWgsl, /for \(var offset = 1u; offset < 256u;/);
   assert.doesNotMatch(webGpuStableRadixWgsl, /@workgroup_size\(1\)[\s\S]*prefix/i);
+  assert.match(
+    webGpuSerialRadixHistogramScanWgsl,
+    /@compute @workgroup_size\(1\)[\s\S]*fn scan_histogram_serial/
+  );
+  assert.match(
+    webGpuSerialRadixHistogramScanWgsl,
+    /radix_histogram_offsets\[index\] = running;[\s\S]*running = running \+ radix_histograms\[index\]/
+  );
   assert.match(webGpuSortedUniqueWgsl, /fn mark_heads/);
   assert.match(webGpuSortedUniqueWgsl, /fn scatter_unique/);
   assert.match(webGpuSortedUniqueWgsl, /unique_output_offsets\[unique_count\]/);
+});
+
+test('opt-in bounded serial histogram scan removes one dispatch per measured mechanics radix digit', () => {
+  const device = createFakeDevice();
+  const encoder = createFakeEncoder();
+  const keyBuffer = device.createBuffer({
+    label: 'serial-mechanics-keys',
+    size: 124_416 * 3 * 4,
+    usage: 128
+  });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 124_416,
+    maxKeyWordCount: 3,
+    label: 'serial-mechanics-radix',
+    retainConstantScanParamsBuffers: true,
+    retainVariableScanParamsBuffers: true,
+    serialHistogramScanMaxElementCount: 8_192,
+    retainedParamsSlotCount: 1
+  });
+  const result = runtime.encodeSortUnique(encoder, {
+    keyBuffer,
+    elementCount: 124_416,
+    keyWordCount: 3,
+    keyStrideWords: 3,
+    generationId: 19
+  });
+  const commands = computeCommands(encoder);
+
+  assert.equal(result.histogramElementCount, 7_776);
+  assert.equal(result.radixPassCount, 24);
+  assert.equal(result.histogramScanMode, 'serial-small');
+  assert.equal(result.encodedDispatchCount, 79);
+  assert.equal(commands.length, 79);
+  assert.equal(
+    commands.filter((command) => (
+      command.pipeline === 'serial-mechanics-radix-serial-histogram-scan'
+    )).length,
+    24
+  );
+  assert.equal(
+    commands.some((command) => command.pipeline.includes('-histogram-scan-blocks')),
+    false
+  );
+  assert.equal(result.paramsWriteCount, 3);
+  assert.equal(runtime.pipelineCount, 13);
+  assert.equal(runtime.serialHistogramScanMaxElementCount, 8_192);
+
+  runtime.releaseExecution(result, { discardedEncoder: true });
+  runtime.destroy();
+});
+
+test('bounded serial histogram scan keeps tiny and over-threshold sorts on the parallel path', () => {
+  const device = createFakeDevice();
+  const keyBuffer = device.createBuffer({ label: 'serial-boundary-keys', size: 9000 * 4, usage: 128 });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 9000,
+    maxKeyWordCount: 1,
+    label: 'serial-boundary-radix',
+    serialHistogramScanMaxElementCount: 527
+  });
+  const tiny = runtime.encodeSort(createFakeEncoder(), {
+    keyBuffer,
+    elementCount: 8192,
+    keyWordCount: 1,
+    generationId: 1
+  });
+  assert.equal(tiny.histogramElementCount, 512);
+  assert.equal(tiny.histogramScanMode, 'parallel-scan');
+  runtime.releaseExecution(tiny, { discardedEncoder: true });
+
+  const aboveThreshold = runtime.encodeSort(createFakeEncoder(), {
+    keyBuffer,
+    elementCount: 8193,
+    keyWordCount: 1,
+    generationId: 2
+  });
+  assert.equal(aboveThreshold.histogramElementCount, 528);
+  assert.equal(aboveThreshold.histogramScanMode, 'parallel-scan');
+  runtime.releaseExecution(aboveThreshold, { discardedEncoder: true });
+  runtime.destroy();
+});
+
+test('bounded serial histogram scan preserves timestamp attribution and indirect gating', () => {
+  const device = createFakeDevice();
+  const encoder = createFakeEncoder();
+  const keyBuffer = device.createBuffer({ label: 'serial-gated-keys', size: 9000 * 4, usage: 128 });
+  const gateBuffer = device.createBuffer({ label: 'serial-gated-dispatches', size: 4096, usage: 384 });
+  const shapeOffsets = new Map();
+  const provider = {
+    buffer: gateBuffer,
+    byteOffsetFor(dispatch, shapeId) {
+      assert.equal(shapeId, webGpuDispatchShapeId(dispatch));
+      if (!shapeOffsets.has(shapeId)) shapeOffsets.set(shapeId, shapeOffsets.size * 12);
+      return shapeOffsets.get(shapeId);
+    }
+  };
+  const spans = [];
+  const timestampProfiler = {
+    active: true,
+    beginComputePassDescriptor(label, metadata) {
+      spans.push({ label, metadata });
+      return { label, metadata, timestampWrites: { querySet: {} } };
+    }
+  };
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 9000,
+    maxKeyWordCount: 1,
+    label: 'serial-gated-radix',
+    serialHistogramScanMaxElementCount: 8_192
+  });
+  const result = runtime.encodeSortUnique(encoder, {
+    keyBuffer,
+    elementCount: 8193,
+    keyWordCount: 1,
+    generationId: 23,
+    timestampProfiler,
+    timestampMetadata: { taskId: 'serial-gated-test' },
+    dispatchIndirectProvider: provider
+  });
+  const commands = computeCommands(encoder);
+
+  assert.equal(result.histogramScanMode, 'serial-small');
+  assert.equal(result.histogramElementCount, 528);
+  assert.equal(computePasses(encoder).length, result.encodedComputePassCount);
+  assert.equal(commands.length, result.encodedDispatchCount);
+  assert.equal(commands.every(({ dispatch, dispatchIndirect }) => (
+    dispatch === undefined
+      && dispatchIndirect?.label === gateBuffer.label
+      && dispatchIndirect.byteOffset % 12 === 0
+  )), true);
+  assert.equal(
+    spans.filter(({ label }) => label === 'serial-gated-radixRadixHistogramSerialScan').length,
+    8
+  );
+  assert.equal(spans.every(({ metadata }) => metadata.taskId === 'serial-gated-test'), true);
+  assert.ok(shapeOffsets.has(webGpuDispatchShapeId([1, 1, 1])));
+  assert.ok(shapeOffsets.has(webGpuDispatchShapeId([33, 1, 1])));
+
+  runtime.releaseExecution(result, { discardedEncoder: true });
+  runtime.destroy();
 });
 
 test('radix sort and unique encode a no-readback GPU CSR with indirect dispatch', () => {

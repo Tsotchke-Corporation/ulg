@@ -1768,6 +1768,8 @@ async function runBrowserProbe({
   compactSummaryScope,
   thermalWallRate,
   measureGpuQueueFence = false,
+  measureGpuTimestampInterval = false,
+  measureGpuStageTimestamps = false,
   materialInterfaceDiagnostic = false,
   materialInterfaceCandidateReadbackMode = 'compact-active-readback',
   nativeSurfaceDebugMode = 'none',
@@ -1971,6 +1973,8 @@ async function runBrowserProbe({
       compactSummaryScope: requestedCompactSummaryScope,
 	      thermalWallRate: requestedThermalWallRate,
 	      measureGpuQueueFence: requestedMeasureGpuQueueFence,
+	      measureGpuTimestampInterval: requestedMeasureGpuTimestampInterval,
+	      measureGpuStageTimestamps: requestedMeasureGpuStageTimestamps,
 	      materialInterfaceDiagnostic: requestedMaterialInterfaceDiagnostic,
 	      materialInterfaceCandidateReadbackMode: requestedMaterialInterfaceCandidateReadbackMode,
 	      nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
@@ -2002,6 +2006,590 @@ async function runBrowserProbe({
         if (value == null || value === '') return null;
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
+      };
+      const beginResidentGpuTimestampInterval = async (batchIndex) => {
+        const schema = 'peercompute.ulg.sph-probe-gpu-queue-interval.v0';
+        if (!requestedMeasureGpuTimestampInterval) {
+          return {
+            active: false,
+            evidence: {
+              schema,
+              status: 'not-requested',
+              requested: false,
+              batchIndex,
+              queryCount: 0,
+              validQueryCount: 0,
+              invalidQueryCount: 0,
+              markerSubmissionCount: 0,
+              queryResolveByteLength: 0,
+              mappedReadbackByteLength: 0,
+              mapAsyncCount: 0,
+              durationNs: null,
+              durationMs: null
+            },
+            async complete() { return this.evidence; },
+            abort() {}
+          };
+        }
+        const deviceResult = await sceneApi?.requestOpticalGpuDevice?.();
+        const device = deviceResult?.device || null;
+        const enabledFeatures = device?.features
+          ? [...device.features].map((feature) => String(feature))
+          : [];
+        const base = {
+          schema,
+          requested: true,
+          batchIndex,
+          timestampUnit: 'nanoseconds',
+          deviceStatus: deviceResult?.status ?? null,
+          timestampProfilingRequested:
+            deviceResult?.timestampProfilingRequested ?? null,
+          timestampQuerySupported:
+            deviceResult?.timestampQuerySupported ?? null,
+          timestampQueryStatus: deviceResult?.timestampQueryStatus ?? null,
+          requiredFeatures: [...(deviceResult?.requiredFeatures || [])],
+          enabledFeatures,
+          queryCount: 0,
+          validQueryCount: 0,
+          invalidQueryCount: 0,
+          markerSubmissionCount: 0,
+          queryResolveByteLength: 0,
+          mappedReadbackByteLength: 0,
+          mapAsyncCount: 0,
+          durationNs: null,
+          durationMs: null
+        };
+        const unavailable = (status, reason) => ({
+          active: false,
+          evidence: { ...base, status, reason },
+          async complete() { return this.evidence; },
+          abort() {}
+        });
+        if (!device) {
+          return unavailable(
+            'gpu-timestamp-device-unavailable',
+            deviceResult?.reason || 'resident GPUDevice unavailable'
+          );
+        }
+        if (!enabledFeatures.includes('timestamp-query')) {
+          return unavailable(
+            'gpu-timestamp-feature-not-enabled',
+            'resident GPUDevice does not expose timestamp-query'
+          );
+        }
+        if (
+          typeof device.createQuerySet !== 'function'
+          || typeof device.createBuffer !== 'function'
+          || typeof device.createCommandEncoder !== 'function'
+          || typeof device.queue?.submit !== 'function'
+        ) {
+          return unavailable(
+            'gpu-timestamp-api-unavailable',
+            'resident GPUDevice lacks timestamp query or queue methods'
+          );
+        }
+        let querySet = null;
+        let resolveBuffer = null;
+        let readbackBuffer = null;
+        let completed = false;
+        const destroy = () => {
+          querySet?.destroy?.();
+          resolveBuffer?.destroy?.();
+          readbackBuffer?.destroy?.();
+          querySet = null;
+          resolveBuffer = null;
+          readbackBuffer = null;
+        };
+        try {
+          querySet = device.createQuerySet({
+            label: `ulg-sph-probe-gpu-interval-${batchIndex}`,
+            type: 'timestamp',
+            count: 2
+          });
+          resolveBuffer = device.createBuffer({
+            label: `ulg-sph-probe-gpu-interval-resolve-${batchIndex}`,
+            size: 16,
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+          });
+          readbackBuffer = device.createBuffer({
+            label: `ulg-sph-probe-gpu-interval-readback-${batchIndex}`,
+            size: 16,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+          });
+          const startEncoder = device.createCommandEncoder({
+            label: `ulg-sph-probe-gpu-interval-start-${batchIndex}`
+          });
+          if (typeof startEncoder.writeTimestamp !== 'function') {
+            destroy();
+            return unavailable(
+              'gpu-timestamp-command-api-unavailable',
+              'GPUCommandEncoder.writeTimestamp is unavailable'
+            );
+          }
+          startEncoder.writeTimestamp(querySet, 0);
+          device.queue.submit([startEncoder.finish()]);
+        } catch (error) {
+          destroy();
+          return unavailable(
+            'gpu-timestamp-start-failed',
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+        return {
+          active: true,
+          evidence: {
+            ...base,
+            status: 'gpu-timestamp-start-submitted',
+            queryCount: 2,
+            markerSubmissionCount: 1
+          },
+          async complete() {
+            if (completed) return this.evidence;
+            completed = true;
+            try {
+              const endEncoder = device.createCommandEncoder({
+                label: `ulg-sph-probe-gpu-interval-end-${batchIndex}`
+              });
+              endEncoder.writeTimestamp(querySet, 1);
+              endEncoder.resolveQuerySet(querySet, 0, 2, resolveBuffer, 0);
+              endEncoder.copyBufferToBuffer(
+                resolveBuffer,
+                0,
+                readbackBuffer,
+                0,
+                16
+              );
+              device.queue.submit([endEncoder.finish()]);
+              await readbackBuffer.mapAsync(GPUMapMode.READ, 0, 16);
+              const copy = readbackBuffer.getMappedRange(0, 16).slice(0);
+              const timestamps = new BigUint64Array(copy);
+              const monotonic = timestamps[1] > timestamps[0];
+              const durationNs = monotonic
+                ? Number(timestamps[1] - timestamps[0])
+                : null;
+              const valid = monotonic
+                && Number.isFinite(durationNs)
+                && durationNs > 0;
+              this.evidence = {
+                ...base,
+                status: valid
+                  ? 'gpu-timestamp-interval-complete'
+                  : 'gpu-timestamp-interval-invalid',
+                reason: valid
+                  ? 'same-device queue markers resolved monotonically'
+                  : 'timestamp values were zero, equal, or non-monotonic',
+                queryCount: 2,
+                validQueryCount: valid ? 2 : 0,
+                invalidQueryCount: valid ? 0 : 2,
+                markerSubmissionCount: 2,
+                queryResolveByteLength: 16,
+                mappedReadbackByteLength: 16,
+                mapAsyncCount: 1,
+                startTimestampNs: timestamps[0].toString(),
+                endTimestampNs: timestamps[1].toString(),
+                durationNs,
+                durationMs: durationNs == null ? null : durationNs / 1e6,
+                intervalSemantics:
+                  'same-queue-start-to-end-markers-includes-production-work-and-queue-idle'
+              };
+              readbackBuffer.unmap?.();
+            } catch (error) {
+              this.evidence = {
+                ...base,
+                status: 'gpu-timestamp-interval-readback-failed',
+                reason: error instanceof Error ? error.message : String(error),
+                queryCount: 2,
+                invalidQueryCount: 2,
+                markerSubmissionCount: 2,
+                queryResolveByteLength: 16,
+                mappedReadbackByteLength: 0,
+                mapAsyncCount: 1
+              };
+            } finally {
+              destroy();
+            }
+            return this.evidence;
+          },
+          abort(reason = 'resident batch aborted before timestamp completion') {
+            if (completed) return;
+            completed = true;
+            this.evidence = {
+              ...base,
+              status: 'gpu-timestamp-interval-aborted',
+              reason,
+              queryCount: 2,
+              invalidQueryCount: 2,
+              markerSubmissionCount: 1
+            };
+            destroy();
+          }
+        };
+      };
+      const beginResidentGpuStageTimestampRecorder = async (batchIndex) => {
+        const schema = 'peercompute.ulg.sph-probe-gpu-stage-timestamps.v0';
+        const inactive = (status, reason = null) => ({
+          active: false,
+          recorder: null,
+          evidence: {
+            schema,
+            status,
+            reason,
+            requested: Boolean(requestedMeasureGpuStageTimestamps),
+            batchIndex,
+            queryCount: 0,
+            spanCount: 0,
+            validSpanCount: 0,
+            invalidSpanCount: 0,
+            markerSubmissionCount: 0,
+            queryResolveByteLength: 0,
+            mappedReadbackByteLength: 0,
+            mapAsyncCount: 0,
+            spans: []
+          },
+          async complete() { return this.evidence; },
+          abort() {}
+        });
+        if (!requestedMeasureGpuStageTimestamps) {
+          return inactive('not-requested');
+        }
+        const deviceResult = await sceneApi?.requestOpticalGpuDevice?.();
+        const device = deviceResult?.device || null;
+        const enabledFeatures = device?.features
+          ? [...device.features].map((feature) => String(feature))
+          : [];
+        if (!device) {
+          return inactive(
+            'gpu-stage-timestamp-device-unavailable',
+            deviceResult?.reason || 'resident GPUDevice unavailable'
+          );
+        }
+        if (!enabledFeatures.includes('timestamp-query')) {
+          return inactive(
+            'gpu-stage-timestamp-feature-not-enabled',
+            'resident GPUDevice does not expose timestamp-query'
+          );
+        }
+        const queryCapacity = 2048;
+        const byteCapacity = queryCapacity * BigUint64Array.BYTES_PER_ELEMENT;
+        let querySet = null;
+        let resolveBuffer = null;
+        let readbackBuffer = null;
+        let nextQueryIndex = 0;
+        let markerSubmissionCount = 0;
+        let completed = false;
+        let tokenSerial = 0;
+        const spans = [];
+        const pendingTokens = new Set();
+        const encoderSpanTokens = new WeakMap();
+        const destroy = () => {
+          querySet?.destroy?.();
+          resolveBuffer?.destroy?.();
+          readbackBuffer?.destroy?.();
+          querySet = null;
+          resolveBuffer = null;
+          readbackBuffer = null;
+        };
+        try {
+          querySet = device.createQuerySet({
+            label: `ulg-sph-probe-gpu-stage-query-set-${batchIndex}`,
+            type: 'timestamp',
+            count: queryCapacity
+          });
+          resolveBuffer = device.createBuffer({
+            label: `ulg-sph-probe-gpu-stage-resolve-${batchIndex}`,
+            size: byteCapacity,
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+          });
+          readbackBuffer = device.createBuffer({
+            label: `ulg-sph-probe-gpu-stage-readback-${batchIndex}`,
+            size: byteCapacity,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+          });
+        } catch (error) {
+          destroy();
+          return inactive(
+            'gpu-stage-timestamp-allocation-failed',
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+        const assertEncoder = (encoder) => {
+          if (typeof encoder?.writeTimestamp !== 'function') {
+            throw new Error(
+              'GPUCommandEncoder.writeTimestamp is unavailable for stage profiling'
+            );
+          }
+        };
+        const allocateQuery = () => {
+          if (nextQueryIndex >= queryCapacity) {
+            const error = new Error(
+              `GPU stage timestamp query capacity ${queryCapacity} exhausted`
+            );
+            error.code = 'ERR_SPH_GPU_STAGE_TIMESTAMP_CAPACITY';
+            throw error;
+          }
+          const index = nextQueryIndex;
+          nextQueryIndex += 1;
+          return index;
+        };
+        const recorder = {
+          schema,
+          active: true,
+          device,
+          beginEncoderSpan(encoder, descriptor = {}) {
+            assertEncoder(encoder);
+            const token = {
+              tokenId: ++tokenSerial,
+              descriptor: { ...descriptor },
+              startQueryIndex: allocateQuery(),
+              endQueryIndex: null,
+              beginEncoder: encoder,
+              endEncoder: null,
+              markerSubmissionMode: 'same-production-command-encoder'
+            };
+            encoder.writeTimestamp(querySet, token.startQueryIndex);
+            spans.push(token);
+            pendingTokens.add(token);
+            const encoderTokens = encoderSpanTokens.get(encoder) || [];
+            encoderTokens.push(token);
+            encoderSpanTokens.set(encoder, encoderTokens);
+            return token;
+          },
+          endEncoderSpan(encoder, token) {
+            assertEncoder(encoder);
+            if (!pendingTokens.has(token) || token.endQueryIndex !== null) {
+              throw new Error('GPU stage timestamp token was missing or replayed');
+            }
+            token.endQueryIndex = allocateQuery();
+            encoder.writeTimestamp(querySet, token.endQueryIndex);
+            token.endEncoder = encoder;
+            pendingTokens.delete(token);
+            return true;
+          },
+          discardEncoderSpans(encoder) {
+            const encoderTokens = encoderSpanTokens.get(encoder);
+            if (!encoderTokens?.length) return 0;
+            const spanSuffixOffset = spans.length - encoderTokens.length;
+            if (
+              spanSuffixOffset < 0
+              || encoderTokens.some((token, index) => (
+                spans[spanSuffixOffset + index] !== token
+              ))
+            ) {
+              throw new Error(
+                'Discarded GPU timestamp encoder spans were not the recorded suffix'
+              );
+            }
+            if (encoderTokens.some((token) => (
+              token.beginEncoder !== encoder
+              || (token.endEncoder !== null && token.endEncoder !== encoder)
+            ))) {
+              throw new Error(
+                'Discarded GPU timestamp encoder contained a cross-encoder span'
+              );
+            }
+            const queryIndices = encoderTokens.flatMap((token) => [
+              token.startQueryIndex,
+              ...(token.endQueryIndex === null ? [] : [token.endQueryIndex])
+            ]).sort((a, b) => a - b);
+            const rollbackStart = queryIndices[0];
+            if (
+              !Number.isInteger(rollbackStart)
+              || queryIndices.length !== nextQueryIndex - rollbackStart
+              || queryIndices.some((queryIndex, index) => (
+                queryIndex !== rollbackStart + index
+              ))
+            ) {
+              throw new Error(
+                'Discarded GPU timestamp encoder queries were not the allocation suffix'
+              );
+            }
+            for (const token of encoderTokens) {
+              pendingTokens.delete(token);
+            }
+            spans.splice(spanSuffixOffset, encoderTokens.length);
+            nextQueryIndex = rollbackStart;
+            encoderSpanTokens.delete(encoder);
+            return encoderTokens.length;
+          },
+          async measureQueueStage(descriptor, runner) {
+            if (typeof runner !== 'function') {
+              throw new TypeError('GPU queue stage profiler requires a runner');
+            }
+            const startEncoder = device.createCommandEncoder({
+              label: `ulg-sph-probe-stage-start-${batchIndex}-${tokenSerial + 1}`
+            });
+            const token = this.beginEncoderSpan(startEncoder, {
+              ...descriptor,
+              spanClass: descriptor?.spanClass || 'queue-stage'
+            });
+            token.markerSubmissionMode = 'same-queue-boundary-submissions';
+            device.queue.submit([startEncoder.finish()]);
+            markerSubmissionCount += 1;
+            try {
+              return await runner();
+            } finally {
+              const endEncoder = device.createCommandEncoder({
+                label: `ulg-sph-probe-stage-end-${batchIndex}-${token.tokenId}`
+              });
+              this.endEncoderSpan(endEncoder, token);
+              device.queue.submit([endEncoder.finish()]);
+              markerSubmissionCount += 1;
+            }
+          }
+        };
+        const evidenceBase = {
+          schema,
+          requested: true,
+          batchIndex,
+          timestampUnit: 'nanoseconds',
+          deviceStatus: deviceResult?.status ?? null,
+          timestampProfilingRequested:
+            deviceResult?.timestampProfilingRequested ?? null,
+          timestampQuerySupported:
+            deviceResult?.timestampQuerySupported ?? null,
+          requiredFeatures: [...(deviceResult?.requiredFeatures || [])],
+          enabledFeatures,
+          queryCapacity,
+          productionPassGroupingPreserved: true,
+          resolveSubmissionCount: 1,
+          mapAsyncCount: 1
+        };
+        return {
+          active: true,
+          recorder,
+          evidence: {
+            ...evidenceBase,
+            status: 'gpu-stage-timestamp-recorder-active',
+            queryCount: 0,
+            spanCount: 0,
+            validSpanCount: 0,
+            invalidSpanCount: 0,
+            markerSubmissionCount: 0,
+            queryResolveByteLength: 0,
+            mappedReadbackByteLength: 0,
+            spans: []
+          },
+          async complete() {
+            if (completed) return this.evidence;
+            completed = true;
+            try {
+              if (nextQueryIndex === 0 || pendingTokens.size !== 0) {
+                throw new Error(
+                  pendingTokens.size !== 0
+                    ? `${pendingTokens.size} GPU stage timestamp spans were left open`
+                    : 'no GPU stage timestamp spans were recorded'
+                );
+              }
+              const byteLength = nextQueryIndex
+                * BigUint64Array.BYTES_PER_ELEMENT;
+              const encoder = device.createCommandEncoder({
+                label: `ulg-sph-probe-gpu-stage-resolve-${batchIndex}`
+              });
+              encoder.resolveQuerySet(
+                querySet,
+                0,
+                nextQueryIndex,
+                resolveBuffer,
+                0
+              );
+              encoder.copyBufferToBuffer(
+                resolveBuffer,
+                0,
+                readbackBuffer,
+                0,
+                byteLength
+              );
+              device.queue.submit([encoder.finish()]);
+              await readbackBuffer.mapAsync(
+                GPUMapMode.READ,
+                0,
+                byteLength
+              );
+              const copy = readbackBuffer
+                .getMappedRange(0, byteLength)
+                .slice(0);
+              const timestamps = new BigUint64Array(copy);
+              const resolvedSpans = spans.map((span) => {
+                const start = timestamps[span.startQueryIndex];
+                const end = timestamps[span.endQueryIndex];
+                const monotonic = end > start;
+                const difference = monotonic ? end - start : 0n;
+                const durationNs = monotonic
+                  && difference <= BigInt(Number.MAX_SAFE_INTEGER)
+                  ? Number(difference)
+                  : null;
+                const valid = Number.isSafeInteger(durationNs)
+                  && durationNs > 0;
+                return {
+                  schema: 'peercompute.ulg.sph-probe-gpu-stage-span.v0',
+                  tokenId: span.tokenId,
+                  ...span.descriptor,
+                  markerSubmissionMode: span.markerSubmissionMode,
+                  startQueryIndex: span.startQueryIndex,
+                  endQueryIndex: span.endQueryIndex,
+                  startTimestampNs: start.toString(),
+                  endTimestampNs: end.toString(),
+                  durationNs,
+                  durationMs: durationNs == null ? null : durationNs / 1e6,
+                  valid
+                };
+              });
+              const validSpanCount = resolvedSpans.filter(
+                (span) => span.valid
+              ).length;
+              this.evidence = {
+                ...evidenceBase,
+                status: validSpanCount === resolvedSpans.length
+                  ? 'gpu-stage-timestamps-complete'
+                  : 'gpu-stage-timestamps-invalid',
+                queryCount: nextQueryIndex,
+                spanCount: resolvedSpans.length,
+                validSpanCount,
+                invalidSpanCount: resolvedSpans.length - validSpanCount,
+                markerSubmissionCount,
+                queryResolveByteLength: byteLength,
+                mappedReadbackByteLength: byteLength,
+                spans: resolvedSpans
+              };
+              readbackBuffer.unmap?.();
+            } catch (error) {
+              this.evidence = {
+                ...evidenceBase,
+                status: 'gpu-stage-timestamp-readback-failed',
+                reason: error instanceof Error ? error.message : String(error),
+                queryCount: nextQueryIndex,
+                spanCount: spans.length,
+                validSpanCount: 0,
+                invalidSpanCount: spans.length,
+                markerSubmissionCount,
+                queryResolveByteLength: 0,
+                mappedReadbackByteLength: 0,
+                spans: []
+              };
+            } finally {
+              destroy();
+            }
+            return this.evidence;
+          },
+          abort(reason = 'resident batch aborted before stage timestamp completion') {
+            if (completed) return;
+            completed = true;
+            this.evidence = {
+              ...evidenceBase,
+              status: 'gpu-stage-timestamps-aborted',
+              reason,
+              queryCount: nextQueryIndex,
+              spanCount: spans.length,
+              validSpanCount: 0,
+              invalidSpanCount: spans.length,
+              markerSubmissionCount,
+              queryResolveByteLength: 0,
+              mappedReadbackByteLength: 0,
+              spans: []
+            };
+            destroy();
+          }
+        };
       };
       const cloneFiniteVector = (value) => {
         if (!Array.isArray(value) || value.length < 3) return null;
@@ -3632,6 +4220,59 @@ async function runBrowserProbe({
           || sceneUserData.mlsMpmResidentSchroederAdoptedParticleStoragePublication
           || sceneUserData.schroederAdoptedParticleStoragePublication
           || null;
+        const finalResidentStep = residentStep || steps?.finalStep || null;
+        const twoLevelStepSummaries = Array.isArray(steps?.stepSummaries)
+          ? steps.stepSummaries
+          : [];
+        const twoLevelAuthoritativeStepCount = twoLevelStepSummaries.filter(
+          (summary) => (
+            summary?.status === 'schroeder-two-level-authoritative-step-executed'
+          )
+        ).length;
+        const twoLevelMechanicsRequested = Boolean(
+          config?.enableTwoLevelMechanics
+          || options?.schroederEnableTwoLevelMechanics
+        );
+        const twoLevelMechanicsAuthorityRequested = String(
+          options?.schroederTwoLevelMechanicsAuthority
+            ?? config?.twoLevelMechanicsAuthority
+            ?? 'observation'
+        ).trim().toLowerCase() === 'authoritative'
+          ? 'authoritative'
+          : 'observation';
+        const reportedTwoLevelAuthority =
+          finalResidentStep?.twoLevelMechanicsAuthority
+          ?? null;
+        const twoLevelMechanicsAuthorityObserved =
+          reportedTwoLevelAuthority === 'authoritative'
+          || reportedTwoLevelAuthority
+            === 'two-level-authoritative-resident-mechanics-replaced'
+            ? 'authoritative'
+            : (reportedTwoLevelAuthority ?? null);
+        const twoLevelFineSubstepCountRequested = finiteOrNull(
+          options?.schroederTwoLevelFineSubstepCount
+            ?? config?.twoLevelFineSubstepCount
+        );
+        const twoLevelFineSubstepCountObserved = finiteOrNull(
+          finalResidentStep?.twoLevelFineSubstepCount
+        );
+        const twoLevelMechanicsStepStatus = finalResidentStep?.status ?? null;
+        const twoLevelMechanicsActive = Boolean(
+          twoLevelMechanicsStepStatus
+            === 'schroeder-two-level-authoritative-step-executed'
+          && twoLevelAuthoritativeStepCount > 0
+        );
+        const twoLevelMechanicsCoverageComplete = Boolean(
+          twoLevelMechanicsRequested
+          && twoLevelMechanicsAuthorityRequested === 'authoritative'
+          && twoLevelMechanicsAuthorityObserved === 'authoritative'
+          && twoLevelMechanicsActive
+          && Number.isInteger(Number(steps?.completedStepCount))
+          && Number(steps.completedStepCount) > 0
+          && twoLevelAuthoritativeStepCount === Number(steps.completedStepCount)
+          && twoLevelFineSubstepCountObserved === twoLevelFineSubstepCountRequested
+          && finalResidentStep?.twoLevelAuthoritativeCommitVerified === true
+        );
         const stageWorkerLane = overlayRef?.__sphMountedMechanicsStageWorkerLane || null;
         const requested = Boolean(config?.enabled || options?.schroederSimulation);
         const active = Boolean(steps?.schroederSimulation || residentStep?.schroederSimulation);
@@ -3660,6 +4301,21 @@ async function runBrowserProbe({
             || residentStep?.schroederSameLevelSequenceStatus
             || null,
           mechanicsStatus: mechanics?.status ?? null,
+          twoLevelMechanicsRequested,
+          twoLevelMechanicsAuthorityRequested,
+          twoLevelFineSubstepCountRequested,
+          twoLevelMechanicsActive,
+          twoLevelMechanicsAuthorityObserved,
+          twoLevelFineSubstepCountObserved,
+          twoLevelMechanicsStepStatus,
+          twoLevelMechanicsStatus:
+            finalResidentStep?.twoLevelMechanicsStatus
+            ?? finalResidentStep?.stageStatus?.twoLevelMechanics
+            ?? null,
+          twoLevelAuthoritativeCommitVerified:
+            finalResidentStep?.twoLevelAuthoritativeCommitVerified === true,
+          twoLevelAuthoritativeStepCount,
+          twoLevelMechanicsCoverageComplete,
           residentComputeManagerMode: steps?.residentComputeManagerMode ?? null,
           portableSummaryStatus: portableSummary?.status ?? null,
           renderLodStatus: portableSummary?.renderLodStatus ?? renderLod?.status ?? null,
@@ -4022,6 +4678,20 @@ async function runBrowserProbe({
             nextUploadActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
             nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
             normalHotLoopReadbackFree: steps.normalHotLoopReadbackFree === true,
+            schroederTwoLevelAuthoritativeStepCount: Array.isArray(steps.stepSummaries)
+              ? steps.stepSummaries.filter((summary) => (
+                summary?.status === 'schroeder-two-level-authoritative-step-executed'
+              )).length
+              : null,
+            schroederTwoLevelMechanicsCoverageComplete:
+              compactSchroederTelemetry({
+                steps,
+                residentStep,
+                renderState,
+                surfaceDraw,
+                sceneUserData,
+                overlayRef: overlay
+              })?.twoLevelMechanicsCoverageComplete === true,
             residentExecutionPolicy: steps.residentExecutionPolicy || overlay?.__mlsMpmResidentExecutionPolicy || null,
             schroederSpatialEpochTransactionSummaries: Array.isArray(
               steps.schroederSpatialEpochTransactionSummaries
@@ -4077,6 +4747,16 @@ async function runBrowserProbe({
             status: residentStep.status ?? null,
             readbackMode: residentStep.readbackMode ?? null,
             sequenceIndex: residentStep.sequenceIndex ?? null,
+            twoLevelMechanicsAuthority:
+              residentStep.twoLevelMechanicsAuthority ?? null,
+            twoLevelMechanicsStatus:
+              residentStep.twoLevelMechanicsStatus
+              ?? residentStep.stageStatus?.twoLevelMechanics
+              ?? null,
+            twoLevelFineSubstepCount:
+              residentStep.twoLevelFineSubstepCount ?? null,
+            twoLevelAuthoritativeCommitVerified:
+              residentStep.twoLevelAuthoritativeCommitVerified === true,
             ambientPressurePa: finiteOrNull(residentStep.ambientPressurePa),
             ambientPressureAppliedInStressProjection:
               residentStep.ambientPressureAppliedInStressProjection === true,
@@ -5403,10 +6083,23 @@ async function runBrowserProbe({
           viewportRefreshMs: null,
           viewportRafMs: null,
           nativeSurfaceValidationWaitMs: null,
+          gpuTimestampInterval: null,
+          gpuStageTimestamps: null,
           totalBeforeSampleMs: null
         };
+        let residentGpuTimestampInterval = null;
+        let residentGpuStageTimestampRecorder = null;
         try {
           markProbeProgress('resident-batch-started', { batchIndex, batchSteps: requestedBatchSteps });
+          residentGpuTimestampInterval = await beginResidentGpuTimestampInterval(
+            batchIndex
+          );
+          probeResidentBatchTiming.gpuTimestampInterval =
+            residentGpuTimestampInterval.evidence;
+          residentGpuStageTimestampRecorder =
+            await beginResidentGpuStageTimestampRecorder(batchIndex);
+          probeResidentBatchTiming.gpuStageTimestamps =
+            residentGpuStageTimestampRecorder.evidence;
           const residentStepsAwaitStartedAtMs = performance.now();
           execution = await sceneApi.refreshMlsMpmResidentSteps({
             preferWebGpu: true,
@@ -5430,6 +6123,8 @@ async function runBrowserProbe({
             : undefined,
             ...residentExecutionPolicy,
             ...schroederExecutionOptions,
+            schroederGpuTimestampRecorder:
+              residentGpuStageTimestampRecorder.recorder,
             measureFusedSequenceQueueFence: Boolean(
               requestedMeasureGpuQueueFence
               || residentExecutionPolicy?.measureFusedSequenceQueueFence
@@ -5437,6 +6132,10 @@ async function runBrowserProbe({
           });
           probeResidentBatchTiming.residentStepsAwaitMs =
             performance.now() - residentStepsAwaitStartedAtMs;
+          probeResidentBatchTiming.gpuTimestampInterval =
+            await residentGpuTimestampInterval.complete();
+          probeResidentBatchTiming.gpuStageTimestamps =
+            await residentGpuStageTimestampRecorder.complete();
           markProbeProgress('resident-batch-completed', {
             batchIndex,
             batchMs: performance.now() - started,
@@ -5604,6 +6303,21 @@ async function runBrowserProbe({
             );
           }
         } catch (error) {
+          residentGpuTimestampInterval?.abort?.(
+            error instanceof Error ? error.message : String(error)
+          );
+          residentGpuStageTimestampRecorder?.abort?.(
+            error instanceof Error ? error.message : String(error)
+          );
+          if (residentGpuTimestampInterval?.evidence) {
+            probeResidentBatchTiming.gpuTimestampInterval =
+              residentGpuTimestampInterval.evidence;
+          }
+          if (residentGpuStageTimestampRecorder?.evidence) {
+            probeResidentBatchTiming.gpuStageTimestamps =
+              residentGpuStageTimestampRecorder.evidence;
+          }
+          overlay.__sphProbeResidentBatchTiming = probeResidentBatchTiming;
           markProbeProgress('resident-batch-error', {
             batchIndex,
             batchMs: performance.now() - started,
@@ -5716,6 +6430,8 @@ async function runBrowserProbe({
       compactSummaryScope,
       thermalWallRate,
       measureGpuQueueFence,
+      measureGpuTimestampInterval,
+      measureGpuStageTimestamps,
       materialInterfaceDiagnostic,
       materialInterfaceCandidateReadbackMode,
       nativeSurfaceDebugMode,
@@ -10410,6 +11126,15 @@ async function main() {
     ?? process.env.ULG_PROBE_MEASURE_FUSED_SEQUENCE_QUEUE_FENCE,
     false
   );
+  const measureGpuTimestampInterval = booleanEnv(
+    process.env.ULG_PROBE_MEASURE_GPU_TIMESTAMP_INTERVAL
+      ?? process.env.ULG_PROBE_MEASURE_GPU_TIMESTAMPS,
+    false
+  );
+  const measureGpuStageTimestamps = booleanEnv(
+    process.env.ULG_PROBE_MEASURE_GPU_STAGE_TIMESTAMPS,
+    false
+  );
   const renderReadbackModeEnv = String(process.env.ULG_PROBE_RENDER_READBACK_MODE || '').toLowerCase();
   const renderReadbackMode = renderReadbackModeEnv === 'no-full-readback'
     ? 'no-full-readback'
@@ -10648,12 +11373,14 @@ async function main() {
         anomalyRowReadback,
         residentBufferDebug,
         compactSummaryScope,
-	        thermalWallRate,
-      measureGpuQueueFence,
-      materialInterfaceDiagnostic,
-      materialInterfaceCandidateReadbackMode,
-      nativeSurfaceDebugMode,
-	        nativeSurfaceValidationWaitMs,
+        thermalWallRate,
+        measureGpuQueueFence,
+        measureGpuTimestampInterval,
+        measureGpuStageTimestamps,
+        materialInterfaceDiagnostic,
+        materialInterfaceCandidateReadbackMode,
+        nativeSurfaceDebugMode,
+        nativeSurfaceValidationWaitMs,
         captureFrames,
         visualIntervalCaptureRequested,
         captureProductSurfacesOnly,

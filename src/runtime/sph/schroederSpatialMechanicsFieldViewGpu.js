@@ -13,7 +13,9 @@ import {
 import {
   ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
-import { createWebGpuStableRadixScanUnique } from '../webgpuRadixScanUnique.js';
+import {
+  createWebGpuStableRadixScanUnique
+} from '../webgpuRadixScanUnique.js';
 import {
   tagWebGpuBufferDevice,
   webGpuBufferMatchesDevice,
@@ -28,6 +30,14 @@ const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
+// The published field ABI remains lexicographic u32x4.  The radix scratch key
+// packs the bounded family/material pair into one word, preserving that exact
+// order while eliminating eight radix digit rounds per generation.
+const FIELD_RADIX_KEY_WORDS = 3;
+// The current maximum production mechanics histogram is 7,776 rows. In that
+// bounded band one exact GPU invocation removes one command boundary per radix
+// digit; larger/general histograms retain the parallel scan.
+const FIELD_SERIAL_HISTOGRAM_SCAN_MAX_ELEMENT_COUNT = 8_192;
 
 function positiveInteger(value, label, max = 0xffff_ffff) {
   const number = Number(value);
@@ -107,15 +117,67 @@ function fieldParamsData(plan, parentExecution) {
   u32(156, parentExecution.nodeCapacity);
   u32(160, SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE);
   u32(164, 27);
+  // Legacy route-control fields are reserved in ABI v2 but the production
+  // construction is now one exact direct radix path.
+  for (let offset = 168; offset <= 188; offset += 4) u32(offset, 0);
   return data;
 }
 
-function encodePass(encoder, pipeline, bindGroup, workgroups, label) {
+function beginTimestampSpan(gpuTimestampRecorder, encoder, descriptor) {
+  return gpuTimestampRecorder?.active === true
+    && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+    ? gpuTimestampRecorder.beginEncoderSpan(encoder, descriptor)
+    : null;
+}
+
+function endTimestampSpan(gpuTimestampRecorder, encoder, token) {
+  if (!token) return;
+  gpuTimestampRecorder.endEncoderSpan(encoder, token);
+}
+
+function encodePass(
+  encoder,
+  pipeline,
+  bindGroup,
+  workgroups,
+  label,
+  gpuTimestampRecorder = null,
+  timestampDescriptor = null
+) {
+  const timestampSpan = timestampDescriptor
+    ? beginTimestampSpan(gpuTimestampRecorder, encoder, timestampDescriptor)
+    : null;
   const pass = encoder.beginComputePass({ label });
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(...workgroups);
   pass.end();
+  endTimestampSpan(gpuTimestampRecorder, encoder, timestampSpan);
+  return 1;
+}
+
+function encodeIndirectPass(
+  encoder,
+  pipeline,
+  bindGroup,
+  indirectBuffer,
+  indirectOffsetBytes,
+  label,
+  gpuTimestampRecorder = null,
+  timestampDescriptor = null
+) {
+  const timestampSpan = timestampDescriptor
+    ? beginTimestampSpan(gpuTimestampRecorder, encoder, timestampDescriptor)
+    : null;
+  const pass = encoder.beginComputePass({ label });
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+    throw new TypeError('mechanics field route requires indirect compute dispatch support');
+  }
+  pass.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffsetBytes);
+  pass.end();
+  endTimestampSpan(gpuTimestampRecorder, encoder, timestampSpan);
   return 1;
 }
 
@@ -175,7 +237,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     'device.limits.maxComputeWorkgroupsPerDimension'
   );
   const candidateKeyByteLength = template.layout.candidateCapacity
-    * SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS
+    * FIELD_RADIX_KEY_WORDS
     * UINT32_BYTES;
   const sourceByteLength = resolvedMaxSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT;
   const identityByteLength = resolvedMaxSourceCount
@@ -234,9 +296,17 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
   });
   const deviceId = webGpuDeviceId(device);
   let destroyed = false;
+  let deviceLossObserved = false;
   let serial = 0;
   let runtime = null;
   const executionOwnership = new WeakMap();
+  const executionRetirements = new WeakMap();
+  const mutationSequenceOwnership = new WeakMap();
+  const mutationSegmentOwnership = new WeakMap();
+  const mutationTokenSequenceOwnership = new WeakMap();
+  const publicationLockOwnership = new WeakMap();
+  const publicationCapabilityOwnership = new WeakMap();
+  const retiredQuarantineReasons = new WeakMap();
   const releasedExecutions = new WeakSet();
   const submittedExecutions = new WeakSet();
   const releaseInFlight = new WeakSet();
@@ -247,6 +317,10 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       arenaIndex,
       inUse: false,
       token: null,
+      retired: false,
+      quarantined: false,
+      destroyedOwnedBuffers: new Set(),
+      radixDeviceLossRetired: false,
       paramsBuffer: createOwnedBuffer(
         device,
         `${arenaLabel}-params`,
@@ -270,11 +344,13 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       ),
       radix: createWebGpuStableRadixScanUnique(device, {
         maxElementCount: template.layout.candidateCapacity,
-        maxKeyWordCount: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS,
+        maxKeyWordCount: FIELD_RADIX_KEY_WORDS,
         label: `${arenaLabel}-radix`,
         maxComputeWorkgroupsPerDimension,
         retainConstantScanParamsBuffers: true,
         retainVariableScanParamsBuffers: true,
+        serialHistogramScanMaxElementCount:
+          FIELD_SERIAL_HISTOGRAM_SCAN_MAX_ELEMENT_COUNT,
         retainedParamsSlotCount: 1
       })
     };
@@ -299,7 +375,14 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
 
   function acquireArena() {
     if (destroyed) throw new Error('mechanics field view runtime is destroyed');
-    const arena = arenas.find((candidate) => candidate.inUse === false);
+    if (deviceLossObserved) {
+      const error = new Error('mechanics field view runtime observed device loss');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_DEVICE_LOST';
+      throw error;
+    }
+    const arena = arenas.find((candidate) => (
+      candidate.inUse === false && candidate.retired !== true
+    ));
     if (!arena) {
       const error = new Error('mechanics field view arenas are under backpressure');
       error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_ARENA_EXHAUSTED';
@@ -316,6 +399,69 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     arena.inUse = false;
     arena.token = null;
     return true;
+  }
+
+  function destroyArenaOwnedBuffersAfterDeviceLoss(arena) {
+    const failures = [];
+    for (const { buffer } of allocationEntriesForArena(arena)) {
+      if (!buffer || arena.destroyedOwnedBuffers.has(buffer)) continue;
+      try {
+        buffer.destroy?.();
+        arena.destroyedOwnedBuffers.add(buffer);
+      } catch (error) {
+        if (buffer.destroyed === true) {
+          arena.destroyedOwnedBuffers.add(buffer);
+        } else {
+          failures.push(error);
+        }
+      }
+    }
+    if (failures.length > 0) {
+      throw failures.length === 1
+        ? failures[0]
+        : new AggregateError(
+          failures,
+          'mechanics field device-loss arena retirement was incomplete'
+        );
+    }
+    arena.radixDeviceLossRetired = true;
+    return true;
+  }
+
+  function createExecutionRetirementRecord(execution, ownership) {
+    let resolveCompletion;
+    const completionPromise = new Promise((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const record = {
+      execution,
+      ownership,
+      completed: false,
+      completionPromise,
+      resolveCompletion,
+      activeAttempt: null,
+      nextAttemptOrdinal: 0,
+      deviceLossEvidence: null
+    };
+    executionRetirements.set(execution, record);
+    return record;
+  }
+
+  function retirementRecordFor(execution) {
+    const record = executionRetirements.get(execution);
+    if (
+      !record
+      || execution?.ownerRuntime !== runtime
+      || execution.arenaIndex !== record.ownership.arena.arenaIndex
+      || execution.arenaGeneration !== record.ownership.token.serial
+    ) {
+      const error = new Error(
+        'mechanics field view execution is not owned by this runtime'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_FOREIGN_EXECUTION';
+      throw error;
+    }
+    return record;
   }
 
   function createBindings(pipeline, resources, bindings, bindLabel) {
@@ -336,7 +482,10 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     sourceRowLayoutId,
     identityStrideWords: requestedIdentityStrideWords = resolvedIdentityStrideWords,
     selectedLevel,
-    parentMechanicsView
+    parentMechanicsView,
+    forceRadixFallback = false,
+    gpuTimestampRecorder = null,
+    timestampMetadata = {}
   } = {}) {
     assertEncoder(encoder);
     if (!sourceBuffer || !webGpuBufferMatchesDevice(sourceBuffer, device)) {
@@ -357,6 +506,9 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     );
     if (resolvedStride !== resolvedIdentityStrideWords) {
       throw new RangeError('mechanics field identity stride does not match the retained runtime');
+    }
+    if (typeof forceRadixFallback !== 'boolean') {
+      throw new TypeError('forceRadixFallback must be a boolean');
     }
     let parentOwned = false;
     try {
@@ -425,7 +577,13 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     const { arena, token } = acquireArena();
     let radixUnique = null;
     try {
-      device.queue.writeBuffer(arena.paramsBuffer, 0, fieldParamsData(plan, parentMechanicsView));
+      const stageTimestampMetadata = {
+        ...timestampMetadata,
+        generationId: plan.generationId,
+        selectedLevel: plan.selectedLevel,
+        sourceCount: plan.sourceCount,
+        candidateCount: plan.candidateCount
+      };
       encoder.clearBuffer(
         arena.fieldViewBuffer,
         0,
@@ -452,16 +610,30 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         [Math.max(1, Math.ceil(
           plan.sourceCount / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
         )), 1, 1],
-        `${label}EmitCandidates`
+        `${label}EmitCandidates`,
+        gpuTimestampRecorder,
+        {
+          producerId: 'schroeder-spatial-mechanics-field-candidate-emission',
+          stage: 'candidate-emission',
+          spanClass: 'same-production-command-encoder',
+          ...stageTimestampMetadata
+        }
       );
       radixUnique = arena.radix.encodeSortUnique(encoder, {
         keyBuffer: arena.candidateKeyBuffer,
         elementCount: plan.candidateCount,
-        keyWordCount: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS,
-        keyStrideWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS,
+        keyWordCount: FIELD_RADIX_KEY_WORDS,
+        keyStrideWords: FIELD_RADIX_KEY_WORDS,
         generationId: plan.generationId,
         consumerWorkgroupSize: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
-        retainedParamsSlotIndex: 0
+        retainedParamsSlotIndex: 0,
+        gpuTimestampRecorder,
+        sortTimestampProducerId: 'schroeder-spatial-mechanics-field-radix-sort',
+        uniqueTimestampProducerId: 'schroeder-spatial-mechanics-field-radix-unique',
+        timestampMetadata: {
+          parentProducerId: 'schroeder-spatial-mechanics-field-view-build',
+          ...stageTimestampMetadata
+        }
       });
       encodedDispatchCount += radixUnique.encodedDispatchCount;
       const finalResources = new Map([
@@ -496,7 +668,14 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         [Math.max(1, Math.ceil(
           plan.candidateCount / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
         )), 1, 1],
-        `${label}MaterializeStencilMap`
+        `${label}MaterializeStencilMap`,
+        gpuTimestampRecorder,
+        {
+          producerId: 'schroeder-spatial-mechanics-field-stencil-map',
+          stage: 'stencil-map',
+          spanClass: 'same-production-command-encoder',
+          ...stageTimestampMetadata
+        }
       );
       encodedDispatchCount += encodePass(
         encoder,
@@ -505,14 +684,33 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         [Math.max(1, Math.ceil(
           plan.candidateCount / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
         )), 1, 1],
-        `${label}AssembleKeys`
+        `${label}AssembleKeys`,
+        gpuTimestampRecorder,
+        {
+          producerId: 'schroeder-spatial-mechanics-field-key-assembly',
+          stage: 'key-assembly',
+          spanClass: 'same-production-command-encoder',
+          ...stageTimestampMetadata
+        }
       );
       encodedDispatchCount += encodePass(
         encoder,
         pipelines.finalize,
         finalizeBindGroup,
         [1, 1, 1],
-        `${label}Finalize`
+        `${label}Finalize`,
+        gpuTimestampRecorder,
+        {
+          producerId: 'schroeder-spatial-mechanics-field-finalize',
+          stage: 'finalize',
+          spanClass: 'same-production-command-encoder',
+          ...stageTimestampMetadata
+        }
+      );
+      device.queue.writeBuffer(
+        arena.paramsBuffer,
+        0,
+        fieldParamsData(plan, parentMechanicsView)
       );
       const execution = {
         ...plan,
@@ -525,6 +723,20 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         identityBuffer,
         parentMechanicsView,
         candidateKeyBuffer: arena.candidateKeyBuffer,
+        stableCandidateOrderBuffer: radixUnique.sortedIndicesBuffer,
+        stableCandidateOrderCount: plan.candidateCount,
+        stableCandidateOrderPolicy:
+          'stable-radix-equal-key-preserves-particle-stencil-candidate-order',
+        ownsStableCandidateOrderBuffer: false,
+        radixSortKeyWordCount: FIELD_RADIX_KEY_WORDS,
+        radixHistogramScanMode: radixUnique.histogramScanMode,
+        routeControlBuffer: null,
+        routeControlWordLength: 0,
+        routeDispatchOffsetWords: 0,
+        radixGateOffsetWords: 0,
+        radixGateCount: 0,
+        forceRadixFallbackRequested: forceRadixFallback,
+        constructionRoutePolicy: 'gpu-authenticated-direct-exact-radix',
         fieldViewBuffer: arena.fieldViewBuffer,
         indirectDispatchBuffer: arena.fieldViewBuffer,
         indirectDispatchOffsetBytes:
@@ -549,13 +761,56 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         },
         enumerable: true
       });
-      executionOwnership.set(execution, {
+      const ownership = {
         arena,
         token,
         radixUnique,
+        stableCandidateOrderBuffer: radixUnique.sortedIndicesBuffer,
+        stableCandidateOrderCount: plan.candidateCount,
+        stableCandidateOrderPolicy:
+          'stable-radix-equal-key-preserves-particle-stencil-candidate-order',
         sourceBuffer,
         identityBuffer,
-        parentMechanicsView
+        parentMechanicsView,
+        stateMutation: {
+          ordinal: 0,
+          encoding: 0,
+          operation: 'topology-ready',
+          pending: null,
+          publicationLock: null,
+          quarantined: false,
+          quarantineReason: null
+        }
+      };
+      executionOwnership.set(execution, ownership);
+      createExecutionRetirementRecord(execution, ownership);
+      Object.defineProperties(execution, {
+        stateMutationOrdinal: {
+          get() {
+            return executionOwnership.get(execution)?.stateMutation?.ordinal ?? null;
+          },
+          enumerable: true
+        },
+        stateMutationEncoding: {
+          get() {
+            return executionOwnership.get(execution)?.stateMutation?.encoding ?? null;
+          },
+          enumerable: true
+        },
+        stateMutationOperation: {
+          get() {
+            return executionOwnership.get(execution)?.stateMutation?.operation ?? null;
+          },
+          enumerable: true
+        },
+        quarantineReason: {
+          get() {
+            return executionOwnership.get(execution)?.stateMutation?.quarantineReason
+              ?? retiredQuarantineReasons.get(execution)
+              ?? null;
+          },
+          enumerable: true
+        }
       });
       return execution;
     } catch (error) {
@@ -571,16 +826,22 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     }
   }
 
-  function ownershipFor(execution) {
+  function rawOwnershipFor(execution) {
     const ownership = executionOwnership.get(execution);
     if (
       !ownership
       || releasedExecutions.has(execution)
-      || releaseInFlight.has(execution)
       || ownership.arena.token !== ownership.token
       || ownership.arena.inUse !== true
       || execution.ownerRuntime !== runtime
       || execution.fieldViewBuffer !== ownership.arena.fieldViewBuffer
+      || execution.stableCandidateOrderBuffer
+        !== ownership.stableCandidateOrderBuffer
+      || execution.stableCandidateOrderCount
+        !== ownership.stableCandidateOrderCount
+      || execution.stableCandidateOrderPolicy
+        !== ownership.stableCandidateOrderPolicy
+      || execution.ownsStableCandidateOrderBuffer !== false
       || execution.sourceBuffer !== ownership.sourceBuffer
       || execution.identityBuffer !== ownership.identityBuffer
       || execution.parentMechanicsView !== ownership.parentMechanicsView
@@ -592,10 +853,32 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     return ownership;
   }
 
+  function ownershipFor(execution) {
+    const ownership = rawOwnershipFor(execution);
+    if (releaseInFlight.has(execution)) {
+      const error = new Error('mechanics field view execution is not owned by this runtime');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_FOREIGN_EXECUTION';
+      throw error;
+    }
+    return ownership;
+  }
+
   function ownsExecution(execution) {
     try {
       ownershipFor(execution);
       return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isExecutionRetirementInFlight(execution) {
+    try {
+      rawOwnershipFor(execution);
+      return submittedExecutions.has(execution)
+        && execution.submitPerformed === true
+        && releaseInFlight.has(execution)
+        && retirementRecordFor(execution).activeAttempt !== null;
     } catch {
       return false;
     }
@@ -619,7 +902,972 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       && execution.submitPerformed === true;
   }
 
-  function finalizeRelease(execution, ownership, { radixReleased = false } = {}) {
+  function stateMutationState(execution) {
+    const mutation = ownershipFor(execution).stateMutation;
+    return Object.freeze({
+      ordinal: mutation.ordinal,
+      encoding: mutation.encoding,
+      operation: mutation.operation,
+      pending: mutation.pending !== null,
+      publicationLocked: mutation.publicationLock !== null,
+      quarantined: mutation.quarantined === true
+    });
+  }
+
+  function isStateMutationReservationActive(execution, token) {
+    try {
+      const mutation = ownershipFor(execution).stateMutation;
+      return token?.execution === execution
+        && mutation.pending === token
+        && mutation.quarantined !== true
+        && mutation.ordinal === token.expectedOrdinal
+        && mutation.encoding === token.expectedEncoding
+        && token.outputOrdinal === token.expectedOrdinal + token.mutationCount
+        && token.publicationLock === mutation.publicationLock
+        && (token.publicationLock === null
+          || publicationLockOwnership.get(token.publicationLock)?.status
+            === 'active');
+    } catch {
+      return false;
+    }
+  }
+
+  function reserveStateMutation(execution, {
+    expectedOrdinal,
+    expectedEncoding,
+    outputEncoding,
+    operation,
+    mutationCount = 1,
+    publicationLock = null
+  } = {}) {
+    const ownership = ownershipFor(execution);
+    if (!submittedExecutions.has(execution)) {
+      throw new Error('mechanics field mutation requires a submitted field view');
+    }
+    const expected = Number(expectedOrdinal);
+    const expectedState = Number(expectedEncoding);
+    const outputState = Number(outputEncoding);
+    const count = Number(mutationCount);
+    const mutation = ownership.stateMutation;
+    const activePublicationLock = mutation.publicationLock;
+    const publicationLockAdmitted = activePublicationLock === null
+      ? publicationLock == null
+      : publicationLock === activePublicationLock
+        && publicationLockOwnership.get(publicationLock)?.execution === execution
+        && publicationLockOwnership.get(publicationLock)?.status === 'active';
+    if (
+      !Number.isSafeInteger(expected)
+      || expected < 0
+      || !Number.isSafeInteger(expectedState)
+      || expectedState < 0
+      || !Number.isSafeInteger(outputState)
+      || outputState < 0
+      || !Number.isSafeInteger(count)
+      || count < 1
+      || expected > 0xffff_ffff - count
+      || mutation.ordinal !== expected
+      || mutation.encoding !== expectedState
+      || mutation.pending !== null
+      || mutation.quarantined === true
+      || !publicationLockAdmitted
+      || typeof operation !== 'string'
+      || operation.length === 0
+    ) {
+      const error = new Error(
+        'mechanics field mutation ordinal is stale or malformed'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_STALE';
+      throw error;
+    }
+    const token = Object.freeze({
+      execution,
+      expectedOrdinal: expected,
+      outputOrdinal: expected + count,
+      expectedEncoding: expectedState,
+      outputEncoding: outputState,
+      mutationCount: count,
+      operation,
+      publicationLock: activePublicationLock
+    });
+    mutation.pending = token;
+    return token;
+  }
+
+  function markStateMutationSubmitted(token) {
+    const execution = token?.execution;
+    const mutation = ownershipFor(execution).stateMutation;
+    if (mutation.pending !== token || mutation.quarantined === true) {
+      const error = new Error('mechanics field mutation token is not pending');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_STALE';
+      throw error;
+    }
+    if (
+      token.publicationLock !== mutation.publicationLock
+      || (token.publicationLock !== null
+        && publicationLockOwnership.get(token.publicationLock)?.status !== 'active')
+    ) {
+      const error = new Error('mechanics field publication lock changed during mutation');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PUBLICATION_LOCK_STALE';
+      throw error;
+    }
+    mutation.ordinal = token.outputOrdinal;
+    mutation.encoding = token.outputEncoding;
+    mutation.operation = token.operation;
+    mutation.pending = null;
+    return stateMutationState(execution);
+  }
+
+  function discardStateMutation(token, { discardedEncoder = false } = {}) {
+    if (discardedEncoder !== true) {
+      throw new TypeError('discardStateMutation requires { discardedEncoder: true }');
+    }
+    const execution = token?.execution;
+    const mutation = ownershipFor(execution).stateMutation;
+    if (mutation.pending !== token || mutation.quarantined === true) {
+      const error = new Error('mechanics field mutation token is not pending');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_STALE';
+      throw error;
+    }
+    mutation.pending = null;
+    return true;
+  }
+
+  function quarantineStateMutation(token, {
+    submissionObserved = false,
+    reason = null
+  } = {}) {
+    if (submissionObserved !== true) {
+      throw new TypeError(
+        'quarantineStateMutation requires { submissionObserved: true }'
+      );
+    }
+    const execution = token?.execution;
+    const ownership = ownershipFor(execution);
+    const mutation = ownership.stateMutation;
+    if (mutation.pending !== token || mutation.quarantined === true) {
+      const error = new Error('mechanics field mutation token is not pending');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_STALE';
+      throw error;
+    }
+    mutation.quarantined = true;
+    mutation.quarantineReason = reason ?? null;
+    ownership.arena.quarantined = true;
+    const lockOwnership = publicationLockOwnership.get(mutation.publicationLock);
+    if (lockOwnership?.status === 'active') lockOwnership.status = 'quarantined';
+    return true;
+  }
+
+  function reserveStateMutationSequence(execution, {
+    expectedOrdinal,
+    expectedEncoding,
+    stages,
+    operation = 'mechanics-field-mutation-sequence',
+    publicationLock = null
+  } = {}) {
+    if (!Array.isArray(stages) || stages.length < 1 || stages.length > 16) {
+      throw new RangeError('mechanics field mutation sequence requires 1-16 stages');
+    }
+    let ordinal = Number(expectedOrdinal);
+    let encoding = Number(expectedEncoding);
+    if (!Number.isSafeInteger(ordinal) || ordinal < 0
+        || !Number.isSafeInteger(encoding) || encoding < 0) {
+      throw new RangeError(
+        'mechanics field mutation sequence requires exact initial provenance'
+      );
+    }
+    const normalizedStages = stages.map((stage, stageIndex) => {
+      const mutationCount = stage?.mutationCount == null
+        ? 1
+        : Number(stage.mutationCount);
+      const outputEncoding = Number(stage?.outputEncoding);
+      const stageOperation = stage?.operation;
+      if (!Number.isSafeInteger(mutationCount) || mutationCount < 1
+          || !Number.isSafeInteger(outputEncoding) || outputEncoding < 0
+          || typeof stageOperation !== 'string' || stageOperation.length === 0
+          || ordinal > 0xffff_ffff - mutationCount) {
+        throw new RangeError(
+          `mechanics field mutation sequence stage ${stageIndex} is malformed`
+        );
+      }
+      const segment = {
+        execution,
+        stageIndex,
+        expectedOrdinal: ordinal,
+        outputOrdinal: ordinal + mutationCount,
+        expectedEncoding: encoding,
+        outputEncoding,
+        mutationCount,
+        operation: stageOperation
+      };
+      ordinal = segment.outputOrdinal;
+      encoding = outputEncoding;
+      return segment;
+    });
+    const mutationCount = normalizedStages.reduce(
+      (sum, stage) => sum + stage.mutationCount,
+      0
+    );
+    const token = reserveStateMutation(execution, {
+      expectedOrdinal,
+      expectedEncoding,
+      outputEncoding: encoding,
+      operation,
+      mutationCount,
+      publicationLock
+    });
+    const sequence = {
+      execution,
+      expectedOrdinal: token.expectedOrdinal,
+      outputOrdinal: token.outputOrdinal,
+      expectedEncoding: token.expectedEncoding,
+      outputEncoding: token.outputEncoding,
+      mutationCount: token.mutationCount,
+      operation,
+      stages: null
+    };
+    const frozenStages = normalizedStages.map((stage) => {
+      const segment = { ...stage };
+      Object.defineProperty(segment, 'sequence', {
+        value: sequence,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      });
+      Object.freeze(segment);
+      mutationSegmentOwnership.set(segment, {
+        sequence,
+        stageIndex: stage.stageIndex
+      });
+      return segment;
+    });
+    sequence.stages = Object.freeze(frozenStages);
+    Object.freeze(sequence);
+    mutationSequenceOwnership.set(sequence, {
+      token,
+      stages: sequence.stages,
+      submittedStageCount: 0,
+      submissionObservedStageIndex: null,
+      completed: false,
+      discarded: false,
+      quarantined: false,
+      quarantineReason: null
+    });
+    mutationTokenSequenceOwnership.set(token, sequence);
+    return sequence;
+  }
+
+  function sequenceOwnershipFor(sequence) {
+    const ownership = mutationSequenceOwnership.get(sequence);
+    const execution = sequence?.execution;
+    const mutation = ownershipFor(execution).stateMutation;
+    if (
+      !ownership
+      || ownership.discarded
+      || ownership.completed
+      || mutation.pending !== ownership.token
+      || sequence.stages !== ownership.stages
+    ) {
+      const error = new Error('mechanics field mutation sequence is stale or foreign');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_SEQUENCE_STALE';
+      throw error;
+    }
+    return ownership;
+  }
+
+  function sequenceSegmentOwnershipFor(sequence, segment) {
+    const sequenceOwnership = sequenceOwnershipFor(sequence);
+    const segmentOwnership = mutationSegmentOwnership.get(segment);
+    if (
+      !segmentOwnership
+      || segmentOwnership.sequence !== sequence
+      || sequence.stages[segmentOwnership.stageIndex] !== segment
+    ) {
+      const error = new Error('mechanics field mutation segment is stale or foreign');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_SEQUENCE_STALE';
+      throw error;
+    }
+    return { sequenceOwnership, segmentOwnership };
+  }
+
+  function stateMutationSequenceState(sequence) {
+    const ownership = sequenceOwnershipFor(sequence);
+    return Object.freeze({
+      submittedStageCount: ownership.submittedStageCount,
+      submissionObservedStageIndex: ownership.submissionObservedStageIndex,
+      stageCount: ownership.stages.length,
+      completed: ownership.completed,
+      discarded: ownership.discarded,
+      quarantined: ownership.quarantined,
+      quarantineReason: ownership.quarantineReason
+    });
+  }
+
+  function isStateMutationSequenceSegmentReady(execution, sequence, segment) {
+    try {
+      if (sequence?.execution !== execution || segment?.execution !== execution) {
+        return false;
+      }
+      const { sequenceOwnership, segmentOwnership } =
+        sequenceSegmentOwnershipFor(sequence, segment);
+      return sequenceOwnership.quarantined !== true
+        && sequenceOwnership.submissionObservedStageIndex === null
+        && sequenceOwnership.submittedStageCount === segmentOwnership.stageIndex;
+    } catch {
+      return false;
+    }
+  }
+
+  function isStateMutationSequenceSegmentSubmitted(execution, sequence, segment) {
+    try {
+      if (sequence?.execution !== execution || segment?.execution !== execution) {
+        return false;
+      }
+      const { sequenceOwnership, segmentOwnership } =
+        sequenceSegmentOwnershipFor(sequence, segment);
+      return sequenceOwnership.quarantined !== true
+        && sequenceOwnership.submittedStageCount > segmentOwnership.stageIndex;
+    } catch {
+      return false;
+    }
+  }
+
+  function markStateMutationSequenceStageSubmissionObserved(sequence, segment) {
+    const { sequenceOwnership, segmentOwnership } =
+      sequenceSegmentOwnershipFor(sequence, segment);
+    if (
+      sequenceOwnership.quarantined
+      || sequenceOwnership.submissionObservedStageIndex !== null
+      || sequenceOwnership.submittedStageCount !== segmentOwnership.stageIndex
+    ) {
+      const error = new Error(
+        'mechanics field mutation sequence stage submission is replayed or out of order'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_SEQUENCE_ORDER';
+      throw error;
+    }
+    sequenceOwnership.submissionObservedStageIndex = segmentOwnership.stageIndex;
+    return stateMutationSequenceState(sequence);
+  }
+
+  function isStateMutationSequenceStageSubmissionObserved(
+    execution,
+    sequence,
+    segment
+  ) {
+    try {
+      if (sequence?.execution !== execution || segment?.execution !== execution) {
+        return false;
+      }
+      const { sequenceOwnership, segmentOwnership } =
+        sequenceSegmentOwnershipFor(sequence, segment);
+      return sequenceOwnership.quarantined !== true
+        && sequenceOwnership.submittedStageCount === segmentOwnership.stageIndex
+        && sequenceOwnership.submissionObservedStageIndex
+          === segmentOwnership.stageIndex;
+    } catch {
+      return false;
+    }
+  }
+
+  function markStateMutationSequenceStageSubmitted(sequence, segment) {
+    const { sequenceOwnership, segmentOwnership } =
+      sequenceSegmentOwnershipFor(sequence, segment);
+    if (
+      sequenceOwnership.quarantined
+      || sequenceOwnership.submittedStageCount !== segmentOwnership.stageIndex
+      || sequenceOwnership.submissionObservedStageIndex
+        !== segmentOwnership.stageIndex
+    ) {
+      const error = new Error(
+        'mechanics field mutation sequence stage is replayed or out of order'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_SEQUENCE_ORDER';
+      throw error;
+    }
+    sequenceOwnership.submissionObservedStageIndex = null;
+    sequenceOwnership.submittedStageCount += 1;
+    return stateMutationSequenceState(sequence);
+  }
+
+  function completeStateMutationSequence(sequence) {
+    const ownership = sequenceOwnershipFor(sequence);
+    if (
+      ownership.quarantined
+      || ownership.submittedStageCount !== ownership.stages.length
+    ) {
+      const error = new Error(
+        'mechanics field mutation sequence cannot publish before every stage submits'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_SEQUENCE_INCOMPLETE';
+      throw error;
+    }
+    const state = markStateMutationSubmitted(ownership.token);
+    ownership.completed = true;
+    return state;
+  }
+
+  function discardStateMutationSequence(sequence, {
+    discardedEncoder = false
+  } = {}) {
+    if (discardedEncoder !== true) {
+      throw new TypeError(
+        'discardStateMutationSequence requires { discardedEncoder: true }'
+      );
+    }
+    const ownership = sequenceOwnershipFor(sequence);
+    if (
+      ownership.submittedStageCount !== 0
+      || ownership.submissionObservedStageIndex !== null
+      || ownership.quarantined
+    ) {
+      const error = new Error(
+        'submitted mechanics field mutation sequence cannot be discarded'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_MUTATION_SEQUENCE_SUBMITTED';
+      throw error;
+    }
+    discardStateMutation(ownership.token, { discardedEncoder: true });
+    ownership.discarded = true;
+    return true;
+  }
+
+  function quarantineStateMutationSequence(sequence, reason = null) {
+    const ownership = sequenceOwnershipFor(sequence);
+    if (
+      ownership.submittedStageCount === 0
+      && ownership.submissionObservedStageIndex === null
+    ) {
+      throw new Error(
+        'unsubmitted mechanics field mutation sequence must be discarded, not quarantined'
+      );
+    }
+    ownership.quarantined = true;
+    ownership.quarantineReason = reason ?? null;
+    const mutation = ownershipFor(sequence.execution).stateMutation;
+    mutation.quarantined = true;
+    mutation.quarantineReason = reason ?? null;
+    ownershipFor(sequence.execution).arena.quarantined = true;
+    const lockOwnership = publicationLockOwnership.get(mutation.publicationLock);
+    if (lockOwnership?.status === 'active') lockOwnership.status = 'quarantined';
+    return true;
+  }
+
+  function acquireStatePublicationLock(execution, {
+    owner = null,
+    publicationReceiptValidator = null
+  } = {}) {
+    const ownership = ownershipFor(execution);
+    const mutation = ownership.stateMutation;
+    if (
+      !submittedExecutions.has(execution)
+      || mutation.pending !== null
+      || mutation.publicationLock !== null
+      || mutation.quarantined === true
+    ) {
+      const error = new Error('mechanics field publication lock cannot be acquired');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PUBLICATION_LOCK_STALE';
+      throw error;
+    }
+    const publicationLock = Object.freeze({
+      schema: 'peercompute.ulg.schroeder-mechanics-field-publication-lock.v0',
+      execution,
+      owner,
+      acquisitionOrdinal: mutation.ordinal,
+      acquisitionEncoding: mutation.encoding,
+      serial: ++serial
+    });
+    publicationLockOwnership.set(publicationLock, {
+      execution,
+      owner,
+      status: 'active',
+      publicationReceiptValidator: typeof publicationReceiptValidator === 'function'
+        ? publicationReceiptValidator
+        : null,
+      acquisitionOrdinal: mutation.ordinal,
+      acquisitionEncoding: mutation.encoding
+    });
+    mutation.publicationLock = publicationLock;
+    return publicationLock;
+  }
+
+  function isStatePublicationLockActive(execution, publicationLock) {
+    try {
+      const ownership = ownershipFor(execution);
+      const lockOwnership = publicationLockOwnership.get(publicationLock);
+      return ownership.stateMutation.publicationLock === publicationLock
+        && lockOwnership?.execution === execution
+        && lockOwnership.status === 'active';
+    } catch {
+      return false;
+    }
+  }
+
+  function discardStatePublicationLock(execution, publicationLock) {
+    const ownership = ownershipFor(execution);
+    const mutation = ownership.stateMutation;
+    const lockOwnership = publicationLockOwnership.get(publicationLock);
+    if (
+      !submittedExecutions.has(execution)
+      || mutation.publicationLock !== publicationLock
+      || lockOwnership?.execution !== execution
+      || lockOwnership.status !== 'active'
+      || mutation.pending !== null
+      || mutation.quarantined === true
+      || mutation.ordinal !== lockOwnership.acquisitionOrdinal
+      || mutation.encoding !== lockOwnership.acquisitionEncoding
+    ) {
+      const error = new Error(
+        'only an unmodified mechanics field publication lock can be discarded'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PUBLICATION_LOCK_STALE';
+      throw error;
+    }
+    mutation.publicationLock = null;
+    lockOwnership.status = 'discarded';
+    return true;
+  }
+
+  function mintStatePublicationCapability(execution, publicationLock, {
+    terminalClosureReceipt,
+    closureOrdinal
+  } = {}) {
+    const ownership = ownershipFor(execution);
+    const mutation = ownership.stateMutation;
+    const lockOwnership = publicationLockOwnership.get(publicationLock);
+    const resolvedClosureOrdinal = Number(closureOrdinal);
+    let receiptAdmitted = false;
+    try {
+      receiptAdmitted = terminalClosureReceipt?.schema
+          === 'peercompute.ulg.schroeder-mechanics-field-publication-receipt.v0'
+        && terminalClosureReceipt?.status === 'macro-closure-gpu-verified-private'
+        && terminalClosureReceipt?.particlePublicationAllowed === true
+        && lockOwnership?.publicationReceiptValidator?.(
+          device,
+          terminalClosureReceipt,
+          {
+          execution,
+          publicationLock,
+          mutationOrdinal: mutation.ordinal,
+          stateEncoding: mutation.encoding,
+          closureOrdinal: resolvedClosureOrdinal
+          }
+        ) === true;
+    } catch {
+      receiptAdmitted = false;
+    }
+    if (
+      mutation.publicationLock !== publicationLock
+      || lockOwnership?.execution !== execution
+      || lockOwnership.status !== 'active'
+      || mutation.pending !== null
+      || mutation.quarantined === true
+      || !Number.isSafeInteger(resolvedClosureOrdinal)
+      || resolvedClosureOrdinal < 0
+      || !receiptAdmitted
+    ) {
+      const error = new Error('mechanics field publication capability is stale');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PUBLICATION_LOCK_STALE';
+      throw error;
+    }
+    const capability = Object.freeze({
+      schema: 'peercompute.ulg.schroeder-mechanics-field-publication-capability.v0',
+      closureOrdinal: resolvedClosureOrdinal,
+      serial: ++serial
+    });
+    publicationCapabilityOwnership.set(capability, {
+      execution,
+      publicationLock,
+      terminalClosureReceipt,
+      closureOrdinal: resolvedClosureOrdinal,
+      mutationOrdinal: mutation.ordinal,
+      stateEncoding: mutation.encoding,
+      status: 'ready'
+    });
+    return capability;
+  }
+
+  function promoteStatePublicationLock(
+    execution,
+    publicationLock,
+    publicationCapability
+  ) {
+    const ownership = ownershipFor(execution);
+    const mutation = ownership.stateMutation;
+    const lockOwnership = publicationLockOwnership.get(publicationLock);
+    const capabilityOwnership = publicationCapabilityOwnership.get(
+      publicationCapability
+    );
+    if (
+      mutation.publicationLock !== publicationLock
+      || lockOwnership?.execution !== execution
+      || lockOwnership.status !== 'active'
+      || mutation.pending !== null
+      || mutation.quarantined === true
+      || capabilityOwnership?.execution !== execution
+      || capabilityOwnership?.publicationLock !== publicationLock
+      || capabilityOwnership.status !== 'ready'
+      || capabilityOwnership.mutationOrdinal !== mutation.ordinal
+      || capabilityOwnership.stateEncoding !== mutation.encoding
+    ) {
+      const error = new Error('mechanics field publication promotion is stale');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PUBLICATION_LOCK_STALE';
+      throw error;
+    }
+    capabilityOwnership.status = 'consumed';
+    lockOwnership.status = 'promoted';
+    mutation.publicationLock = null;
+    return true;
+  }
+
+  function markExecutionQuarantined(execution, ownership, reason = null) {
+    const mutation = ownership.stateMutation;
+    mutation.quarantined = true;
+    if (mutation.quarantineReason == null && reason != null) {
+      mutation.quarantineReason = reason;
+    }
+    ownership.arena.quarantined = true;
+    const lockOwnership = publicationLockOwnership.get(mutation.publicationLock);
+    if (
+      lockOwnership?.execution === execution
+      && (lockOwnership.status === 'active' || lockOwnership.status === 'retiring')
+    ) {
+      lockOwnership.status = 'quarantined';
+    }
+  }
+
+  function retireStatePublicationLockAfter(execution, publicationLock) {
+    try {
+      const retirementRecord = retirementRecordFor(execution);
+      if (retirementRecord.completed) return retirementRecord.completionPromise;
+      if (retirementRecord.activeAttempt) {
+        if (
+          retirementRecord.activeAttempt.mode === 'publication-lock-fence'
+          && retirementRecord.activeAttempt.publicationLock === publicationLock
+        ) {
+          return retirementRecord.activeAttempt.promise;
+        }
+        if (retirementRecord.activeAttempt.mode === 'device-loss') {
+          return retirementRecord.activeAttempt.promise;
+        }
+        const error = new Error('mechanics field private retirement is stale');
+        error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PUBLICATION_LOCK_STALE';
+        throw error;
+      }
+      const ownership = ownershipFor(execution);
+      const mutation = ownership.stateMutation;
+      const lockOwnership = publicationLockOwnership.get(publicationLock);
+      if (
+        !submittedExecutions.has(execution)
+        || mutation.publicationLock !== publicationLock
+        || lockOwnership?.execution !== execution
+        || lockOwnership.status !== 'active'
+        || mutation.pending !== null
+        || mutation.quarantined === true
+      ) {
+        const error = new Error('mechanics field private retirement is stale');
+        error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PUBLICATION_LOCK_STALE';
+        throw error;
+      }
+      if (typeof device.queue?.onSubmittedWorkDone !== 'function') {
+        throw new TypeError(
+          'retireStatePublicationLockAfter requires runtime-owned queue-fence support'
+        );
+      }
+      let submissionFence;
+      try {
+        submissionFence = device.queue.onSubmittedWorkDone();
+        if (!submissionFence?.then) {
+          throw new TypeError('queue fence did not return a thenable');
+        }
+      } catch (error) {
+        markExecutionQuarantined(execution, ownership, error);
+        throw error;
+      }
+      const attempt = {
+        mode: 'publication-lock-fence',
+        publicationLock,
+        ordinal: ++retirementRecord.nextAttemptOrdinal,
+        promise: null
+      };
+      retirementRecord.activeAttempt = attempt;
+      lockOwnership.status = 'retiring';
+      releaseInFlight.add(execution);
+      let radixRelease;
+      try {
+        radixRelease = ownership.arena.radix.releaseExecutionAfter(
+          ownership.radixUnique,
+          submissionFence
+        );
+      } catch (error) {
+        retirementRecord.activeAttempt = null;
+        releaseInFlight.delete(execution);
+        markExecutionQuarantined(execution, ownership, error);
+        throw error;
+      }
+      const retirementAttempt = Promise.race([
+        Promise.resolve(radixRelease).then((released) => ({
+          kind: 'radix-release',
+          released
+        })),
+        retirementRecord.completionPromise.then(() => ({
+          kind: 'terminal-completion',
+          released: true
+        }))
+      ]).then((result) => {
+        if (result.kind === 'terminal-completion') return true;
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        if (result.released !== true) {
+          throw new Error('mechanics field radix owner did not confirm release');
+        }
+        mutation.publicationLock = null;
+        lockOwnership.status = 'retired';
+        return finalizeRelease(execution, ownership, {
+          radixReleased: true,
+          retirementRecord
+        });
+      }).catch((error) => {
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        retirementRecord.activeAttempt = null;
+        releaseInFlight.delete(execution);
+        markExecutionQuarantined(execution, ownership, error);
+        throw error;
+      });
+      attempt.promise = retirementAttempt;
+      retirementAttempt.catch(() => {});
+      return retirementAttempt;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  function permanentlyRetireArena(
+    execution,
+    ownership,
+    retirementRecord = retirementRecordFor(execution)
+  ) {
+    if (retirementRecord.completed) return true;
+    const { arena } = ownership;
+    destroyArenaOwnedBuffersAfterDeviceLoss(arena);
+    arena.retired = true;
+    arena.quarantined = false;
+    const released = releaseArena(arena, ownership.token);
+    if (released) {
+      retiredQuarantineReasons.set(
+        execution,
+        ownership.stateMutation.quarantineReason ?? null
+      );
+      releasedExecutions.add(execution);
+      submittedExecutions.delete(execution);
+      executionOwnership.delete(execution);
+      releaseInFlight.delete(execution);
+      retirementRecord.activeAttempt = null;
+      retirementRecord.completed = true;
+      retirementRecord.resolveCompletion(true);
+    }
+    return released;
+  }
+
+  function retireQuarantinedExecutionAfter(
+    execution,
+    { deviceLost = false } = {}
+  ) {
+    try {
+      const retirementRecord = retirementRecordFor(execution);
+      if (retirementRecord.completed) return retirementRecord.completionPromise;
+      if (deviceLost === true) return quarantineExecutionAfterDeviceLoss(execution);
+      if (retirementRecord.activeAttempt?.mode === 'quarantine-fence') {
+        return retirementRecord.activeAttempt.promise;
+      }
+      if (retirementRecord.activeAttempt) {
+        return retirementRecord.activeAttempt.promise;
+      }
+      const ownership = rawOwnershipFor(execution);
+      const mutation = ownership.stateMutation;
+      if (
+        !submittedExecutions.has(execution)
+        || mutation.quarantined !== true
+      ) {
+        const error = new Error('mechanics field quarantine retirement is stale');
+        error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_QUARANTINE_STALE';
+        throw error;
+      }
+      const retirementEvidence = device.queue?.onSubmittedWorkDone?.();
+      if (!retirementEvidence?.then) {
+        throw new TypeError(
+          'retireQuarantinedExecutionAfter requires runtime-owned queue-fence evidence'
+        );
+      }
+      const attempt = {
+        mode: 'quarantine-fence',
+        ordinal: ++retirementRecord.nextAttemptOrdinal,
+        promise: null
+      };
+      retirementRecord.activeAttempt = attempt;
+      releaseInFlight.add(execution);
+      const retirementAttempt = Promise.race([
+        Promise.resolve(retirementEvidence).then(() => 'queue-fence'),
+        retirementRecord.completionPromise.then(() => 'terminal-completion')
+      ]).then((kind) => {
+        if (kind === 'terminal-completion') return true;
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        return permanentlyRetireArena(execution, ownership, retirementRecord);
+      }).catch((error) => {
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        retirementRecord.activeAttempt = null;
+        releaseInFlight.delete(execution);
+        throw error;
+      });
+      attempt.promise = retirementAttempt;
+      retirementAttempt.catch(() => {});
+      return retirementAttempt;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  function quarantineExecutionAfterDeviceLoss(execution, { reason = null } = {}) {
+    try {
+      const retirementRecord = retirementRecordFor(execution);
+      if (retirementRecord.completed) return retirementRecord.completionPromise;
+      const ownership = rawOwnershipFor(execution);
+      if (retirementRecord.activeAttempt?.mode === 'device-loss') {
+        return retirementRecord.activeAttempt.promise;
+      }
+      const exactLossEvidence = device?.lost;
+      if (!exactLossEvidence || typeof exactLossEvidence.then !== 'function') {
+        const error = new TypeError(
+          'mechanics field device-loss quarantine requires the exact GPUDevice.lost promise'
+        );
+        error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_DEVICE_LOSS_EVIDENCE';
+        throw error;
+      }
+      if (
+        retirementRecord.deviceLossEvidence != null
+        && retirementRecord.deviceLossEvidence !== exactLossEvidence
+      ) {
+        const error = new Error(
+          'mechanics field device-loss evidence changed for one execution'
+        );
+        error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_DEVICE_LOSS_EVIDENCE';
+        throw error;
+      }
+      retirementRecord.deviceLossEvidence = exactLossEvidence;
+      deviceLossObserved = true;
+      markExecutionQuarantined(execution, ownership, reason);
+      if (retirementRecord.activeAttempt) {
+        retirementRecord.activeAttempt.promise.catch(() => {});
+      }
+      const attempt = {
+        mode: 'device-loss',
+        ordinal: ++retirementRecord.nextAttemptOrdinal,
+        promise: null
+      };
+      retirementRecord.activeAttempt = attempt;
+      releaseInFlight.add(execution);
+      runtime.status =
+        'schroeder-spatial-mechanics-field-view-gpu-runtime-device-loss-quarantined';
+      const lossAttempt = Promise.resolve(exactLossEvidence).then(() => {
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        return permanentlyRetireArena(execution, ownership, retirementRecord);
+      }).catch((error) => {
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        retirementRecord.activeAttempt = null;
+        releaseInFlight.delete(execution);
+        throw error;
+      });
+      attempt.promise = lossAttempt;
+      lossAttempt.catch(() => {});
+      return lossAttempt;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  function executionRetirementCompletionPromise(execution) {
+    return retirementRecordFor(execution).completionPromise;
+  }
+
+  function quarantineCurrentStateArtifact(execution, {
+    mutationOrdinal,
+    stateEncoding,
+    reason = null
+  } = {}) {
+    const mutation = ownershipFor(execution).stateMutation;
+    if (
+      mutation.pending !== null
+      || mutation.ordinal !== mutationOrdinal
+      || mutation.encoding !== stateEncoding
+      || mutation.quarantined === true
+    ) {
+      const error = new Error('mechanics field current state cannot be quarantined');
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_QUARANTINE_STALE';
+      throw error;
+    }
+    mutation.quarantined = true;
+    mutation.quarantineReason = reason ?? null;
+    const ownership = ownershipFor(execution);
+    ownership.arena.quarantined = true;
+    const lockOwnership = publicationLockOwnership.get(mutation.publicationLock);
+    if (lockOwnership?.status === 'active') lockOwnership.status = 'quarantined';
+    return true;
+  }
+
+  function isStateArtifactQuarantined(execution) {
+    try {
+      return ownershipFor(execution).stateMutation.quarantined === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isCurrentStateArtifact(execution, {
+    mutationOrdinal,
+    stateEncoding,
+    publicationLock = null
+  } = {}) {
+    try {
+      const mutation = ownershipFor(execution).stateMutation;
+      const activePublicationLock = mutation.publicationLock;
+      const publicationAdmitted = activePublicationLock === null
+        ? publicationLock == null
+        : activePublicationLock === publicationLock
+          && publicationLockOwnership.get(publicationLock)?.status === 'active';
+      return mutation.pending === null
+        && mutation.quarantined !== true
+        && publicationAdmitted
+        && mutation.ordinal === mutationOrdinal
+        && mutation.encoding === stateEncoding;
+    } catch {
+      return false;
+    }
+  }
+
+  function finalizeRelease(execution, ownership, {
+    radixReleased = false,
+    retirementRecord = retirementRecordFor(execution)
+  } = {}) {
+    if (retirementRecord.completed) return true;
+    if (ownership.stateMutation.pending !== null) {
+      throw new Error('mechanics field view has a pending state mutation');
+    }
+    if (ownership.stateMutation.publicationLock !== null) {
+      throw new Error('mechanics field view has an active publication lock');
+    }
+    if (ownership.stateMutation.quarantined === true) {
+      throw new Error('quarantined mechanics field requires exact retirement evidence');
+    }
     if (!radixReleased) {
       ownership.arena.radix.releaseExecution(
         ownership.radixUnique,
@@ -631,6 +1879,10 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       releasedExecutions.add(execution);
       submittedExecutions.delete(execution);
       executionOwnership.delete(execution);
+      releaseInFlight.delete(execution);
+      retirementRecord.activeAttempt = null;
+      retirementRecord.completed = true;
+      retirementRecord.resolveCompletion(true);
     }
     return released;
   }
@@ -639,29 +1891,94 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     if (discardedEncoder !== true) {
       throw new TypeError('releaseExecution requires { discardedEncoder: true }');
     }
+    const retirementRecord = retirementRecordFor(execution);
+    if (retirementRecord.completed) return false;
     if (submittedExecutions.has(execution)) {
       throw new Error('submitted mechanics field view requires a queue fence');
     }
-    return finalizeRelease(execution, ownershipFor(execution));
+    return finalizeRelease(execution, ownershipFor(execution), { retirementRecord });
   }
 
-  async function releaseExecutionAfter(execution, submissionFence) {
-    if (!submissionFence?.then) {
-      throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
-    }
-    const ownership = ownershipFor(execution);
-    if (!submittedExecutions.has(execution)) {
-      throw new Error('unsubmitted mechanics field view requires discarded-encoder release');
-    }
-    releaseInFlight.add(execution);
+  function releaseExecutionAfter(execution) {
     try {
-      await ownership.arena.radix.releaseExecutionAfter(
-        ownership.radixUnique,
-        submissionFence
-      );
-      return finalizeRelease(execution, ownership, { radixReleased: true });
-    } finally {
-      releaseInFlight.delete(execution);
+      const retirementRecord = retirementRecordFor(execution);
+      if (retirementRecord.completed) return retirementRecord.completionPromise;
+      if (deviceLossObserved) return quarantineExecutionAfterDeviceLoss(execution);
+      if (retirementRecord.activeAttempt) {
+        return retirementRecord.activeAttempt.promise;
+      }
+      const ownership = rawOwnershipFor(execution);
+      if (!submittedExecutions.has(execution)) {
+        throw new Error('unsubmitted mechanics field view requires discarded-encoder release');
+      }
+      if (
+        ownership.stateMutation.pending !== null
+        || ownership.stateMutation.publicationLock !== null
+        || ownership.stateMutation.quarantined === true
+      ) {
+        throw new Error(
+          'mechanics field view requires exact pending/locked/quarantine retirement'
+        );
+      }
+      if (typeof device.queue?.onSubmittedWorkDone !== 'function') {
+        throw new TypeError('releaseExecutionAfter requires runtime-owned queue-fence support');
+      }
+      const submissionFence = device.queue.onSubmittedWorkDone();
+      if (!submissionFence?.then) {
+        throw new TypeError('runtime-owned queue fence did not return a thenable');
+      }
+      const attempt = {
+        mode: 'release-fence',
+        ordinal: ++retirementRecord.nextAttemptOrdinal,
+        promise: null
+      };
+      retirementRecord.activeAttempt = attempt;
+      releaseInFlight.add(execution);
+      let radixRelease;
+      try {
+        radixRelease = ownership.arena.radix.releaseExecutionAfter(
+          ownership.radixUnique,
+          submissionFence
+        );
+      } catch (error) {
+        retirementRecord.activeAttempt = null;
+        releaseInFlight.delete(execution);
+        throw error;
+      }
+      const releaseAttempt = Promise.race([
+        Promise.resolve(radixRelease).then((released) => ({
+          kind: 'radix-release',
+          released
+        })),
+        retirementRecord.completionPromise.then(() => ({
+          kind: 'terminal-completion',
+          released: true
+        }))
+      ]).then((result) => {
+        if (result.kind === 'terminal-completion') return true;
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        if (result.released !== true) {
+          throw new Error('mechanics field radix owner did not confirm release');
+        }
+        return finalizeRelease(execution, ownership, {
+          radixReleased: true,
+          retirementRecord
+        });
+      }).catch((error) => {
+        if (retirementRecord.activeAttempt !== attempt) {
+          return retirementRecord.completionPromise;
+        }
+        retirementRecord.activeAttempt = null;
+        releaseInFlight.delete(execution);
+        throw error;
+      });
+      attempt.promise = releaseAttempt;
+      releaseAttempt.catch(() => {});
+      return releaseAttempt;
+    } catch (error) {
+      return Promise.reject(error);
     }
   }
 
@@ -672,10 +1989,16 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     }
     destroyed = true;
     for (const arena of arenas) {
-      arena.paramsBuffer.destroy?.();
-      arena.candidateKeyBuffer.destroy?.();
-      arena.fieldViewBuffer.destroy?.();
-      arena.radix.destroy();
+      for (const buffer of [
+        arena.paramsBuffer,
+        arena.candidateKeyBuffer,
+        arena.fieldViewBuffer
+      ]) {
+        if (arena.destroyedOwnedBuffers.has(buffer)) continue;
+        buffer.destroy?.();
+        arena.destroyedOwnedBuffers.add(buffer);
+      }
+      if (!arena.radixDeviceLossRetired) arena.radix.destroy();
     }
     return true;
   }
@@ -692,16 +2015,58 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     gridSpacingM: template.gridSpacingM,
     arenaCount: resolvedArenaCount,
     layout: template.layout,
+    releaseFencePolicy: 'runtime-owned-current-queue-at-invocation',
     pipelineCount: 4 + arenas.reduce((sum, arena) => sum + arena.radix.pipelineCount, 0),
     retainedGpuBufferBytes,
     encode,
     ownsExecution,
     markExecutionSubmitted,
     isExecutionSubmitted,
+    stateMutationState,
+    isStateMutationReservationActive,
+    reserveStateMutation,
+    markStateMutationSubmitted,
+    discardStateMutation,
+    quarantineStateMutation,
+    reserveStateMutationSequence,
+    stateMutationSequenceState,
+    isStateMutationSequenceSegmentReady,
+    isStateMutationSequenceSegmentSubmitted,
+    markStateMutationSequenceStageSubmissionObserved,
+    isStateMutationSequenceStageSubmissionObserved,
+    markStateMutationSequenceStageSubmitted,
+    completeStateMutationSequence,
+    discardStateMutationSequence,
+    quarantineStateMutationSequence,
+    acquireStatePublicationLock,
+    isStatePublicationLockActive,
+    discardStatePublicationLock,
+    mintStatePublicationCapability,
+    promoteStatePublicationLock,
+    retireStatePublicationLockAfter,
+    retireQuarantinedExecutionAfter,
+    quarantineExecutionAfterDeviceLoss,
+    executionRetirementCompletionPromise,
+    isExecutionRetirementInFlight,
+    quarantineCurrentStateArtifact,
+    isStateArtifactQuarantined,
+    isCurrentStateArtifact,
     releaseExecution,
     releaseExecutionAfter,
     allocationEntries: () => arenas.flatMap(allocationEntriesForArena),
     activeExecutionCount: () => arenas.filter((arena) => arena.inUse).length,
+    availableArenaCount: () => arenas.filter((arena) => (
+      arena.inUse !== true
+      && arena.retired !== true
+      && arena.quarantined !== true
+    )).length,
+    usableArenaCount: () => arenas.filter((arena) => (
+      arena.retired !== true && arena.quarantined !== true
+    )).length,
+    quarantinedArenaCount: () => arenas.filter((arena) => (
+      arena.retired !== true && arena.quarantined === true
+    )).length,
+    retiredArenaCount: () => arenas.filter((arena) => arena.retired === true).length,
     destroy
   };
   return runtime;

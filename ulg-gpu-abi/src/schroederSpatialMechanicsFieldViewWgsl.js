@@ -42,12 +42,12 @@ struct MechanicsFieldViewParams {
   parent_node_capacity: u32,
   workgroup_size: u32,
   stencil_size: u32,
-  pad0: u32,
-  pad1: u32,
-  pad2: u32,
-  pad3: u32,
-  pad4: u32,
-  pad5: u32,
+  route_control_words: u32,
+  route_dispatch_offset_words: u32,
+  route_dispatch_count: u32,
+  radix_gate_offset_words: u32,
+  radix_gate_count: u32,
+  route_capacity_words: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_rows: array<f32>;
@@ -61,8 +61,8 @@ struct MechanicsFieldViewParams {
 @group(0) @binding(8) var<storage, read> sorted_candidate_indices: array<u32>;
 @group(0) @binding(9) var<storage, read> unique_group_by_sorted_position: array<u32>;
 
-const FIELD_MAGIC: u32 = 0x53464631u;
-const FIELD_VERSION: u32 = 1u;
+const FIELD_MAGIC: u32 = 0x53464632u;
+const FIELD_VERSION: u32 = 2u;
 const FIELD_STATUS_READY: u32 = 1u;
 const FIELD_STATUS_ADMITTED: u32 = 2u;
 const FIELD_STATUS_FAIL_CLOSED: u32 = 4u;
@@ -71,10 +71,15 @@ const FIELD_STATUS_CAPACITY_OVERFLOW: u32 = 16u;
 const FIELD_HEADER_WORDS: u32 = 64u;
 const FIELD_DESCRIPTOR_WORDS: u32 = 32u;
 const FIELD_KEY_WORDS: u32 = 4u;
+const FIELD_RADIX_KEY_WORDS: u32 = 3u;
+const FIELD_RADIX_MATERIAL_MASK: u32 = 0x00ffffffu;
 const FIELD_ACCUMULATOR_WORDS: u32 = 8u;
+const FIELD_RECEIPT_WORDS: u32 = 16u;
 const FIELD_STATE_WORDS: u32 = 8u;
 const FIELD_DISPATCH_OFFSET_WORDS: u32 = 60u;
 const FIELD_INVALID_KEY: u32 = 0xffffffffu;
+const FIELD_UNIQUE_STATUS_READY: u32 = 1u;
+const FIELD_UNIQUE_STATUS_UNIFORM_PARENT: u32 = 2u;
 const SOURCE_LAYOUT_LEVEL_ASSIGNMENT: u32 = 1u;
 const PARENT_MAGIC: u32 = 0x534d5631u;
 const PARENT_VERSION: u32 = 1u;
@@ -105,11 +110,10 @@ fn field_record_clipped_candidate() {
 }
 
 fn field_write_invalid_candidate(candidate_index: u32) {
-  let base = candidate_index * FIELD_KEY_WORDS;
+  let base = candidate_index * FIELD_RADIX_KEY_WORDS;
   candidate_keys[base] = FIELD_INVALID_KEY;
   candidate_keys[base + 1u] = FIELD_INVALID_KEY;
   candidate_keys[base + 2u] = FIELD_INVALID_KEY;
-  candidate_keys[base + 3u] = FIELD_INVALID_KEY;
 }
 
 fn field_parent_admitted() -> bool {
@@ -313,11 +317,10 @@ fn emit_field_candidates(@builtin(global_invocation_id) global_id: vec3<u32>) {
           field_record_clipped_candidate();
           continue;
         }
-        let key = candidate_index * FIELD_KEY_WORDS;
+        let key = candidate_index * FIELD_RADIX_KEY_WORDS;
         candidate_keys[key] = node_index;
-        candidate_keys[key + 1u] = mechanical_family_id;
-        candidate_keys[key + 2u] = material_id;
-        candidate_keys[key + 3u] = continuity_domain_id;
+        candidate_keys[key + 1u] = (mechanical_family_id << 24u) | material_id;
+        candidate_keys[key + 2u] = continuity_domain_id;
       }
     }
   }
@@ -331,14 +334,13 @@ fn field_unique_count_without_sentinel() -> u32 {
   if (unique_count == 0u || unique_count > params.field_capacity) {
     return unique_count;
   }
-  let last = (unique_count - 1u) * FIELD_KEY_WORDS;
+  let last = (unique_count - 1u) * FIELD_RADIX_KEY_WORDS;
   if (
     last <= arrayLength(&unique_keys)
-    && FIELD_KEY_WORDS <= arrayLength(&unique_keys) - last
+    && FIELD_RADIX_KEY_WORDS <= arrayLength(&unique_keys) - last
     && unique_keys[last] == FIELD_INVALID_KEY
     && unique_keys[last + 1u] == FIELD_INVALID_KEY
     && unique_keys[last + 2u] == FIELD_INVALID_KEY
-    && unique_keys[last + 3u] == FIELD_INVALID_KEY
   ) {
     return unique_count - 1u;
   }
@@ -346,9 +348,9 @@ fn field_unique_count_without_sentinel() -> u32 {
 }
 
 fn field_key_strictly_less(left: u32, right: u32) -> bool {
-  let left_base = left * FIELD_KEY_WORDS;
-  let right_base = right * FIELD_KEY_WORDS;
-  for (var word = 0u; word < FIELD_KEY_WORDS; word = word + 1u) {
+  let left_base = left * FIELD_RADIX_KEY_WORDS;
+  let right_base = right * FIELD_RADIX_KEY_WORDS;
+  for (var word = 0u; word < FIELD_RADIX_KEY_WORDS; word = word + 1u) {
     let a = unique_keys[left_base + word];
     let b = unique_keys[right_base + word];
     if (a < b) { return true; }
@@ -357,7 +359,7 @@ fn field_key_strictly_less(left: u32, right: u32) -> bool {
   return false;
 }
 
-fn field_parent_contains_node(node_index: u32) -> bool {
+fn field_parent_find_node(node_index: u32) -> u32 {
   let node_count = parent_mechanics_view[46u];
   let node_offset = parent_mechanics_view[53u];
   if (
@@ -365,7 +367,7 @@ fn field_parent_contains_node(node_index: u32) -> bool {
     || node_offset > arrayLength(&parent_mechanics_view)
     || node_count > arrayLength(&parent_mechanics_view) - node_offset
   ) {
-    return false;
+    return FIELD_INVALID_KEY;
   }
   var lower = 0u;
   var upper = node_count;
@@ -379,8 +381,17 @@ fn field_parent_contains_node(node_index: u32) -> bool {
       upper = middle;
     }
   }
-  return lower < node_count
-    && parent_mechanics_view[node_offset + lower] == node_index;
+  if (
+    lower < node_count
+    && parent_mechanics_view[node_offset + lower] == node_index
+  ) {
+    return lower;
+  }
+  return FIELD_INVALID_KEY;
+}
+
+fn field_parent_contains_node(node_index: u32) -> bool {
+  return field_parent_find_node(node_index) != FIELD_INVALID_KEY;
 }
 
 @compute @workgroup_size(64)
@@ -406,7 +417,7 @@ fn materialize_stencil_field_indices(
     atomicAdd(&field_view[58u], 1u);
     return;
   }
-  let candidate_key = candidate_index * FIELD_KEY_WORDS;
+  let candidate_key = candidate_index * FIELD_RADIX_KEY_WORDS;
   let destination = params.descriptor_offset_words
     + source_index * FIELD_DESCRIPTOR_WORDS + 4u + stencil_ordinal;
   if (candidate_keys[candidate_key] == FIELD_INVALID_KEY) {
@@ -442,7 +453,7 @@ fn assemble_field_keys(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (field_index >= field_count || field_index >= params.field_capacity) {
     return;
   }
-  let source_key = field_index * FIELD_KEY_WORDS;
+  let source_key = field_index * FIELD_RADIX_KEY_WORDS;
   let node_index = unique_keys[source_key];
   let ordered = field_index == 0u
     || field_key_strictly_less(field_index - 1u, field_index);
@@ -450,11 +461,29 @@ fn assemble_field_keys(@builtin(global_invocation_id) global_id: vec3<u32>) {
     atomicAdd(&field_view[58u], 1u);
     return;
   }
-  let destination_key = params.key_offset_words + source_key;
+  let packed_identity = unique_keys[source_key + 1u];
+  let mechanical_family_id = packed_identity >> 24u;
+  let material_id = packed_identity & FIELD_RADIX_MATERIAL_MASK;
+  let continuity_domain_id = unique_keys[source_key + 2u];
+  let identity_admitted = mechanical_family_id >= 1u
+    && mechanical_family_id <= 4u
+    && material_id >= 1u
+    && material_id <= FIELD_RADIX_MATERIAL_MASK
+    && ((mechanical_family_id << 24u) | material_id) == packed_identity
+    && select(
+      continuity_domain_id == 0u,
+      continuity_domain_id != 0u,
+      mechanical_family_id == 1u
+    );
+  if (!identity_admitted) {
+    atomicAdd(&field_view[58u], 1u);
+    return;
+  }
+  let destination_key = params.key_offset_words + field_index * FIELD_KEY_WORDS;
   field_store(destination_key, node_index);
-  field_store(destination_key + 1u, unique_keys[source_key + 1u]);
-  field_store(destination_key + 2u, unique_keys[source_key + 2u]);
-  field_store(destination_key + 3u, unique_keys[source_key + 3u]);
+  field_store(destination_key + 1u, mechanical_family_id);
+  field_store(destination_key + 2u, material_id);
+  field_store(destination_key + 3u, continuity_domain_id);
 }
 
 fn field_reject(flags: u32) {
@@ -469,45 +498,32 @@ fn field_reject(flags: u32) {
   field_store(44u, 0u);
   field_store(45u, 0u);
   field_store(46u, 0u);
+  for (var word = 50u; word < 60u; word = word + 1u) {
+    field_store(word, 0u);
+  }
   field_store(FIELD_DISPATCH_OFFSET_WORDS, 0u);
   field_store(FIELD_DISPATCH_OFFSET_WORDS + 1u, 0u);
   field_store(FIELD_DISPATCH_OFFSET_WORDS + 2u, 0u);
-  field_store(63u, params.completion_ordinal);
+  field_store(63u, 0u);
 }
 
-@compute @workgroup_size(1)
-fn finalize_field_view() {
-  let unique_ready = arrayLength(&unique_evidence) >= 8u
-    && unique_evidence[0u] == params.generation_id
-    && unique_evidence[1u] == params.candidate_count
-    && unique_evidence[3u] == 1u
-    && unique_evidence[4u] == 0u
-    && unique_evidence[5u] == FIELD_KEY_WORDS
-    && unique_evidence[6u] == FIELD_KEY_WORDS
-    && unique_evidence[7u] == 1u;
-  let field_count = field_unique_count_without_sentinel();
-  let invalid_source_count = field_load(35u);
-  if (field_count > params.field_capacity) {
-    field_reject(FIELD_STATUS_CAPACITY_OVERFLOW);
-    return;
-  }
-  if (
-    !unique_ready
-    || !field_parent_admitted()
-    || params.stencil_size != 27u
-    || params.key_words != FIELD_KEY_WORDS
-    || params.descriptor_words != FIELD_DESCRIPTOR_WORDS
-    || params.accumulator_words != FIELD_ACCUMULATOR_WORDS
-    || params.state_words != FIELD_STATE_WORDS
-    || params.capacity_words > arrayLength(&field_view)
-  ) {
-    field_reject(0u);
-    return;
-  }
-  if (invalid_source_count != 0u || field_load(58u) != 0u) {
-    field_reject(FIELD_STATUS_INVALID_SOURCE);
-    return;
-  }
+fn field_layout_admitted() -> bool {
+  return field_parent_admitted()
+    && params.stencil_size == 27u
+    && params.key_words == FIELD_KEY_WORDS
+    && params.descriptor_words == FIELD_DESCRIPTOR_WORDS
+    && params.accumulator_words == FIELD_ACCUMULATOR_WORDS
+    && params.state_words == FIELD_STATE_WORDS
+    && params.capacity_words <= arrayLength(&field_view);
+}
+
+fn field_publish(
+  field_count: u32,
+  unique_generation: u32,
+  unique_input_count: u32,
+  unique_count: u32,
+  unique_status: u32
+) {
   let dispatch_x = field_count / params.workgroup_size
     + select(0u, 1u, field_count % params.workgroup_size != 0u);
   let dispatch_yz = select(0u, 1u, field_count > 0u);
@@ -555,16 +571,20 @@ fn finalize_field_view() {
   // Generation construction does not clear mechanics-owned accumulators.
   // The consumer clear pass publishes/observes that boundary separately.
   field_store(43u, 0u);
+  let receipt_offset = params.state_offset_words - FIELD_RECEIPT_WORDS;
+  for (var word = 0u; word < FIELD_RECEIPT_WORDS; word = word + 1u) {
+    field_store(receipt_offset + word, 0u);
+  }
   field_store(44u, dispatch_x);
   field_store(45u, dispatch_yz);
   field_store(46u, dispatch_yz);
   field_store(47u, PARENT_MAGIC);
   field_store(48u, PARENT_VERSION);
   field_store(49u, params.parent_node_capacity);
-  field_store(50u, unique_evidence[0u]);
-  field_store(51u, unique_evidence[1u]);
-  field_store(52u, unique_evidence[2u]);
-  field_store(53u, unique_evidence[3u]);
+  field_store(50u, unique_generation);
+  field_store(51u, unique_input_count);
+  field_store(52u, unique_count);
+  field_store(53u, unique_status);
   field_store(54u, params.source_count);
   field_store(55u, 1u);
   field_store(56u, 1u);
@@ -574,6 +594,48 @@ fn finalize_field_view() {
   field_store(FIELD_DISPATCH_OFFSET_WORDS, dispatch_x);
   field_store(FIELD_DISPATCH_OFFSET_WORDS + 1u, dispatch_yz);
   field_store(FIELD_DISPATCH_OFFSET_WORDS + 2u, dispatch_yz);
-  field_store(63u, params.completion_ordinal);
+  // Mutable mechanics operations authenticate every in-place transition with
+  // this monotonically increasing generation-local ordinal. Word 38 retains
+  // the immutable topology build completion ordinal.
+  field_store(63u, 0u);
+}
+
+@compute @workgroup_size(1)
+fn finalize_field_view() {
+  if (
+    !field_layout_admitted()
+    || !field_parent_admitted()
+  ) {
+    field_reject(0u);
+    return;
+  }
+  let unique_ready = arrayLength(&unique_evidence) >= 8u
+    && unique_evidence[0u] == params.generation_id
+    && unique_evidence[1u] == params.candidate_count
+    && unique_evidence[3u] == FIELD_UNIQUE_STATUS_READY
+    && unique_evidence[4u] == 0u
+    && unique_evidence[5u] == FIELD_RADIX_KEY_WORDS
+    && unique_evidence[6u] == FIELD_RADIX_KEY_WORDS
+    && unique_evidence[7u] == 1u;
+  let field_count = field_unique_count_without_sentinel();
+  if (field_count > params.field_capacity) {
+    field_reject(FIELD_STATUS_CAPACITY_OVERFLOW);
+    return;
+  }
+  if (!unique_ready) {
+    field_reject(0u);
+    return;
+  }
+  if (field_load(35u) != 0u || field_load(58u) != 0u) {
+    field_reject(FIELD_STATUS_INVALID_SOURCE);
+    return;
+  }
+  field_publish(
+    field_count,
+    unique_evidence[0u],
+    unique_evidence[1u],
+    unique_evidence[2u],
+    unique_evidence[3u]
+  );
 }
 `;

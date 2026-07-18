@@ -16,7 +16,14 @@ import {
   resolveOpticalSurfaceVisibility
 } from './sphPhaseScene.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
-import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
+import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  hashPayload
+} from '../../ulg-gpu-abi/src/index.js';
 import {
   createSphPhaseDemo,
   gasPressureSummary,
@@ -534,6 +541,83 @@ export function residentMotionDiagnostic({
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+}
+
+export function residentGpuContinuationEvidenceReady(execution = null) {
+  const finalStep = execution?.finalStep ?? null;
+  const backend = execution?.backend ?? finalStep?.backend ?? null;
+  const readbackModes = [
+    execution?.readbackMode,
+    finalStep?.readbackMode
+  ].filter((value) => typeof value === 'string');
+  const fullParticleReadbackClaims = [
+    execution?.fullParticleReadbackPerformed,
+    finalStep?.fullParticleReadbackPerformed
+  ].filter((value) => typeof value === 'boolean');
+  const normalHotLoopReadbackFreeClaims = [
+    execution?.normalHotLoopReadbackFree,
+    finalStep?.normalHotLoopReadbackFree
+  ].filter((value) => typeof value === 'boolean');
+  const contradictoryReadbackEvidence = Boolean(
+    readbackModes.includes('full-parity-readback')
+    || fullParticleReadbackClaims.includes(true)
+  );
+  const noFullParticleReadback = Boolean(
+    !contradictoryReadbackEvidence
+    && (
+      readbackModes.includes('no-full-readback')
+    || (
+        fullParticleReadbackClaims.includes(false)
+        && normalHotLoopReadbackFreeClaims.includes(true)
+      )
+    )
+  );
+  const nextSphParticleState =
+    execution?.nextSphParticleState
+    ?? finalStep?.nextSphParticleState
+    ?? null;
+  const nextMlsMpmParticleState =
+    execution?.nextMlsMpmParticleState
+    ?? finalStep?.nextMlsMpmParticleState
+    ?? null;
+  const nextParticleUploads =
+    execution?.nextParticleUploads
+    ?? finalStep?.nextParticleUploads
+    ?? null;
+  const sphParticleUpload = nextParticleUploads?.sphParticleUpload ?? null;
+  const mlsMpmParticleUpload = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+  const particleCount = Number(nextSphParticleState?.particleCount);
+  const particleCountsMatch = Boolean(
+    Number.isInteger(particleCount)
+    && particleCount > 0
+    && Number(nextMlsMpmParticleState?.particleCount) === particleCount
+    && Number(sphParticleUpload?.particleCount) === particleCount
+    && Number(mlsMpmParticleUpload?.particleCount) === particleCount
+  );
+
+  return Boolean(
+    execution?.schema === ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA
+    && backend === 'webgpu'
+    && execution?.continuationAvailable === true
+    && noFullParticleReadback
+    && nextSphParticleState?.schema === ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+    && nextMlsMpmParticleState?.schema === ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA
+    && particleCountsMatch
+    && sphParticleUpload?.schema === ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && sphParticleUpload?.sourceSchema === ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+    && sphParticleUpload?.status === 'webgpu-uploaded'
+    && sphParticleUpload?.destroyed !== true
+    && sphParticleUpload?.stateBuffer
+    && sphParticleUpload.stateBuffer.destroyed !== true
+    && sphParticleUpload?.thermoBuffer
+    && sphParticleUpload.thermoBuffer.destroyed !== true
+    && mlsMpmParticleUpload?.schema === ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && mlsMpmParticleUpload?.sourceSchema === ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA
+    && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+    && mlsMpmParticleUpload?.destroyed !== true
+    && mlsMpmParticleUpload?.mechanicsBuffer
+    && mlsMpmParticleUpload.mechanicsBuffer.destroyed !== true
+  );
 }
 
 function compactResidentStageOrderFamilyOwners(familyOwners = {}) {
@@ -2784,6 +2868,13 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentGpuQueueFence'),
     false
   );
+  const initialResidentGpuTimestampProfilingEnabled = booleanUrlParam(
+    initialHash.get('residentGpuTimestampProfile')
+      ?? initialQuery.get('residentGpuTimestampProfile')
+      ?? initialHash.get('residentGpuTimestamp')
+      ?? initialQuery.get('residentGpuTimestamp'),
+    false
+  );
   const initialContactBinMetadataReadbackEnabled = booleanUrlParam(
     initialHash.get('contactBinMetadataReadback')
       ?? initialQuery.get('contactBinMetadataReadback')
@@ -2976,7 +3067,7 @@ export async function mountSphPhaseDemoOverlay({
       ['schroederTwoLevelSubsteps'],
       ['twoLevelFineSubstepCount', 'schroederTwoLevelFineSubstepCount']
     )
-  ) || 1;
+  ) || 2;
   const initialSchroederParticleStorageMaterializationEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederParticleStorageMaterialization', 'ssParticleStorageMaterialization'],
@@ -4730,6 +4821,8 @@ export async function mountSphPhaseDemoOverlay({
     rendererWebGpuPresentationUnsafe: initialThreeWebGpuRendererPresentationUnsafe,
     rendererWebGpuSurfaceBufferPresentation: initialThreeWebGpuSurfaceBufferPresentationEnabled,
     rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
+    residentGpuTimestampProfiling:
+      initialResidentGpuTimestampProfilingEnabled,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode(),
     backgroundColor: backgroundColorOf(),
@@ -5753,12 +5846,7 @@ export async function mountSphPhaseDemoOverlay({
   }
 
   function residentGpuContinuationReady(execution = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps) {
-    return Boolean(
-      execution?.schema
-      && execution?.backend === 'webgpu'
-      && execution?.readbackMode === 'no-full-readback'
-      && execution?.continuationAvailable
-    );
+    return residentGpuContinuationEvidenceReady(execution);
   }
 
   function currentPeerComputeRenderOwnershipPolicy() {
@@ -7467,9 +7555,7 @@ export async function mountSphPhaseDemoOverlay({
         }
       }
       scheduleContinuation = Boolean(
-        execution?.continuationAvailable
-        && execution?.readbackMode === 'no-full-readback'
-        && execution?.backend === 'webgpu'
+        residentGpuContinuationReady(execution)
         && continuationBudget > 0
         && generation === particleSyncGeneration
         && requiredInterfaceRefreshReady
@@ -8198,6 +8284,8 @@ export async function mountSphPhaseDemoOverlay({
       rendererWebGpuPresentationUnsafe: initialThreeWebGpuRendererPresentationUnsafe,
       rendererWebGpuSurfaceBufferPresentation: initialThreeWebGpuSurfaceBufferPresentationEnabled,
       rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
+      residentGpuTimestampProfiling:
+        initialResidentGpuTimestampProfilingEnabled,
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
       residentSurfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode(),
       backgroundColor: backgroundColorOf(),

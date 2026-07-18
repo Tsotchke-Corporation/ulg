@@ -1,7 +1,7 @@
 # SS Todo Routing
 
 Date: 2026-07-01 AKDT
-Updated: 2026-07-13 AKDT
+Updated: 2026-07-18 AKDT
 Active branch: `ss-spatial-authority-refactor`
 
 `SS` means Schroeder Simulation. This folder is now the active routing layer for
@@ -19,7 +19,7 @@ Required coherent-solid correction:
   mostly-solid and mixed solid-liquid scenes from human to planetary scale.
   Use GPU-native invariant/metamorphic validation; do not build a CPU mirror.
 
-Active execution plan (2026-07-13):
+Active execution plan (2026-07-18):
 
 - `shared-spatial-authority-refactor-plan.md` — build one canonical
   GPU-resident cell/hierarchy generation per immutable spatial epoch and derive
@@ -324,10 +324,22 @@ Historical implementation queue (superseded 2026-07-13 by
 
 Current implementation queue:
 
-1. Continue Slice 3 of `shared-spatial-authority-refactor-plan.md`: migrate one
-   same-epoch, pre-integration pressure/contact or mechanics consumer to the
-   verified GPU spatial epoch directory.
-2. Preserve the standalone Slice 2 directory as the fail-closed authority;
-   do not add a parallel per-law spatial lookup or a CPU hot-path bridge.
-3. Measure removed lookup work and end-to-end timing before claiming a
-   production performance improvement.
+1. Transport the verified Slice 7 snapshot: its paired non-target and
+   GPU-timestamp performance receipts, Pages build/static smoke, 87-path staged
+   secret/conflict audit, ICC completion oracle, readiness, and production
+   audit are recorded. Make the one requested full-slice commit, then non-force
+   push the branch and the same Pages-bearing commit to `main`; record the
+   immutable SHA/ref receipts in ICC and the final handoff.
+2. Start Slice 8 by adapting product/gas, coherent-solid proxy, sparse-render,
+   source-field, and surface routes where their coordinates and ownership match
+   the canonical spatial epoch. Delete duplicate bins, independent sorts,
+   fixed candidate queues, exhaustive fallbacks, and host feedback only as
+   their authoritative replacement is proved. Start with the measured
+   post-mechanics reaction hotspot (`364..369 ms` p50 in the Slice 7 target
+   characterization), not an unmeasured rewrite.
+3. Keep phase-resolved represented-current-volume and volume-gradient moments,
+   shared local/reflux pressure and drag, hydrostatic ambient or resolved air,
+   and conserved phase/reaction birth volume as an explicit gas-interface and
+   phase-volume transport follow-on. Steam rise/condensation and hydrogen rise
+   remain failed expectations until that work is verified; do not hide them by
+   relaxing the standard visual matrix.

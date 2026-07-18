@@ -16,6 +16,18 @@ const counts = String(
 const outputPath = process.env.ULG_BENCH_OUTPUT
   ? path.resolve(process.env.ULG_BENCH_OUTPUT)
   : path.join(repoDir, 'artifacts', 'sph-performance-benchmark.json');
+const dropMaterial = String(
+  process.env.ULG_BENCH_DROP_MATERIAL || 'h2o'
+).trim() || 'h2o';
+const baseMaterial = String(
+  process.env.ULG_BENCH_BASE_MATERIAL || 'h2o'
+).trim() || 'h2o';
+const dropTemperatureK = Number.isFinite(Number(
+  process.env.ULG_BENCH_DROP_TEMPERATURE_K
+)) ? Number(process.env.ULG_BENCH_DROP_TEMPERATURE_K) : 300;
+const baseTemperatureK = Number.isFinite(Number(
+  process.env.ULG_BENCH_BASE_TEMPERATURE_K
+)) ? Number(process.env.ULG_BENCH_BASE_TEMPERATURE_K) : 300;
 const probeScript = path.join(repoDir, 'scripts', 'sph-long-horizon-probe.mjs');
 const basePort = Math.max(1, Math.round(Number(process.env.ULG_BENCH_PORT || 5180) || 5180));
 const batches = Math.max(1, Math.round(Number(process.env.ULG_BENCH_BATCHES || 3) || 3));
@@ -119,6 +131,27 @@ const schroederCrossLevelCouplingRequested = booleanEnv(
   'ULG_BENCH_SCHROEDER_CROSS_LEVEL_COUPLING',
   false
 );
+const schroederTwoLevelMechanicsRequested = booleanEnv(
+  'ULG_BENCH_SCHROEDER_TWO_LEVEL',
+  false
+);
+const schroederTwoLevelMechanicsAuthority = (() => {
+  const requested = String(
+    process.env.ULG_BENCH_SCHROEDER_TWO_LEVEL_AUTHORITY
+      || (schroederTwoLevelMechanicsRequested ? 'authoritative' : 'observation')
+  ).trim().toLowerCase();
+  return requested === 'authoritative' ? 'authoritative' : 'observation';
+})();
+const schroederTwoLevelFineSubstepCount = Math.max(1, Math.min(4, Math.round(
+  Number(process.env.ULG_BENCH_SCHROEDER_TWO_LEVEL_SUBSTEPS || 2) || 2
+)));
+const schroederMaxLevel = Math.max(
+  schroederSelectedLevel,
+  Math.round(Number(
+    process.env.ULG_BENCH_SCHROEDER_MAX_LEVEL
+      || (schroederTwoLevelMechanicsRequested ? schroederSelectedLevel + 1 : schroederSelectedLevel)
+  ) || 0)
+);
 const schroederPhaseVolumeMigrationRequested = booleanEnv(
   'ULG_BENCH_SCHROEDER_PHASE_VOLUME_MIGRATION',
   false
@@ -154,6 +187,28 @@ const measureGpuQueueFence = booleanEnv(
   'ULG_BENCH_MEASURE_GPU_QUEUE_FENCE',
   false
 );
+const measureGpuTimestampInterval = booleanEnv(
+  'ULG_BENCH_MEASURE_GPU_TIMESTAMPS',
+  false
+);
+const measureGpuStageTimestamps = booleanEnv(
+  'ULG_BENCH_MEASURE_GPU_STAGE_TIMESTAMPS',
+  false
+);
+const requireMigratedLawGpuStageTimestamps = booleanEnv(
+  'ULG_BENCH_REQUIRE_MIGRATED_LAW_GPU_TIMESTAMPS',
+  false
+);
+const requireGpuTimestampInterval = booleanEnv(
+  'ULG_BENCH_REQUIRE_GPU_TIMESTAMPS',
+  measureGpuTimestampInterval
+);
+const gpuTimestampWarmupBatchCount = Math.max(0, Math.min(
+  Math.max(0, batches - 1),
+  Math.round(Number(
+    process.env.ULG_BENCH_GPU_TIMESTAMP_WARMUP_BATCHES || 0
+  ) || 0)
+));
 const materialInterfaceDiagnosticRequested =
   booleanEnv('ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC', false)
   || booleanEnv('ULG_BENCH_FORCE_MATERIAL_INTERFACE_REFRESH', false);
@@ -196,14 +251,61 @@ function edgeForApproxParticleCount(targetCount) {
   return Math.max(1, Math.round(Math.cbrt(Math.max(1, targetCount) / 2)));
 }
 
+export function createSchroederBenchmarkScenarioParams({
+  simulationRequested = false,
+  selectedLevel = 0,
+  maxLevel = selectedLevel,
+  portableSummaryRequested = false,
+  activeNodeIndexRequested = false,
+  lawQueueRequested = false,
+  lawNeighborCandidatesRequested = false,
+  crossLevelCouplingRequested = false,
+  phaseVolumeMigrationRequested = false,
+  twoLevelMechanicsRequested = false,
+  twoLevelMechanicsAuthority = 'observation',
+  twoLevelFineSubstepCount = 2
+} = {}) {
+  if (simulationRequested !== true) return {};
+  const normalizedSelectedLevel = Math.max(0, Math.round(Number(selectedLevel) || 0));
+  const normalizedTwoLevelRequested = twoLevelMechanicsRequested === true;
+  const normalizedMaxLevel = Math.max(
+    normalizedSelectedLevel + (normalizedTwoLevelRequested ? 1 : 0),
+    Math.round(Number(maxLevel) || 0)
+  );
+  const normalizedAuthority = String(twoLevelMechanicsAuthority).trim().toLowerCase()
+    === 'authoritative'
+    ? 'authoritative'
+    : 'observation';
+  const normalizedSubstepCount = Math.max(
+    1,
+    Math.min(4, Math.round(Number(twoLevelFineSubstepCount) || 2))
+  );
+  return {
+    ss: '1',
+    schroederLevel: String(normalizedSelectedLevel),
+    schroederMaxLevel: String(normalizedMaxLevel),
+    schroederPortableSummary: portableSummaryRequested ? '1' : '0',
+    schroederActiveNodeIndex: activeNodeIndexRequested ? '1' : '0',
+    schroederLawQueue: lawQueueRequested ? '1' : '0',
+    schroederLawNeighborCandidates: lawNeighborCandidatesRequested ? '1' : '0',
+    schroederCrossLevelCoupling: crossLevelCouplingRequested ? '1' : '0',
+    schroederPhaseVolumeMigration: phaseVolumeMigrationRequested ? '1' : '0',
+    ...(normalizedTwoLevelRequested ? {
+      schroederTwoLevel: '1',
+      schroederTwoLevelAuthority: normalizedAuthority,
+      schroederTwoLevelSubsteps: String(normalizedSubstepCount)
+    } : {})
+  };
+}
+
 function scenarioUrlForCount(targetCount) {
   const edge = edgeForApproxParticleCount(targetCount);
   const actualParticleCount = edge ** 3 * 2;
   const params = new URLSearchParams({
-    drop: 'h2o',
-    base: 'h2o',
-    dropt: '300',
-    baset: '300',
+    drop: dropMaterial,
+    base: baseMaterial,
+    dropt: String(dropTemperatureK),
+    baset: String(baseTemperatureK),
     iceh: '0',
     ironh: '1',
     boxx: '5',
@@ -218,25 +320,29 @@ function scenarioUrlForCount(targetCount) {
     ...(workerOffscreenPresentationRequested ? { workerOffscreenPresentation: '1' } : {}),
     ...(presentationWorkerResidentStagesRequested ? { presentationWorkerResidentStages: '1' } : {}),
     ...(retainedCompactSnapshotExportRequested ? { retainedCompactSnapshotExport: '1' } : {}),
-    ...(schroederSimulationRequested ? {
-      ss: '1',
-      schroederLevel: String(schroederSelectedLevel),
-      schroederPortableSummary: schroederPortableSummaryRequested ? '1' : '0',
-      schroederActiveNodeIndex: schroederActiveNodeIndexRequested ? '1' : '0',
-      schroederLawQueue: schroederLawQueueRequested ? '1' : '0',
-      schroederLawNeighborCandidates:
-        schroederLawNeighborCandidatesRequested ? '1' : '0',
-      schroederCrossLevelCoupling:
-        schroederCrossLevelCouplingRequested ? '1' : '0',
-      schroederPhaseVolumeMigration:
-        schroederPhaseVolumeMigrationRequested ? '1' : '0'
-    } : {}),
+    ...createSchroederBenchmarkScenarioParams({
+      simulationRequested: schroederSimulationRequested,
+      selectedLevel: schroederSelectedLevel,
+      maxLevel: schroederMaxLevel,
+      portableSummaryRequested: schroederPortableSummaryRequested,
+      activeNodeIndexRequested: schroederActiveNodeIndexRequested,
+      lawQueueRequested: schroederLawQueueRequested,
+      lawNeighborCandidatesRequested: schroederLawNeighborCandidatesRequested,
+      crossLevelCouplingRequested: schroederCrossLevelCouplingRequested,
+      phaseVolumeMigrationRequested: schroederPhaseVolumeMigrationRequested,
+      twoLevelMechanicsRequested: schroederTwoLevelMechanicsRequested,
+      twoLevelMechanicsAuthority: schroederTwoLevelMechanicsAuthority,
+      twoLevelFineSubstepCount: schroederTwoLevelFineSubstepCount
+    }),
     ...(renderOwnershipMode ? { renderOwnership: renderOwnershipMode } : {}),
     ...(renderOwnershipUseCase ? { renderUseCase: renderOwnershipUseCase } : {}),
     ...(residentInterfaceRefreshWarmupFrames != null
       ? { residentInterfaceRefreshWarmupFrames: String(residentInterfaceRefreshWarmupFrames) }
       : {}),
     ...(measureGpuQueueFence ? { residentQueueFence: '1' } : {}),
+    ...((measureGpuTimestampInterval || measureGpuStageTimestamps)
+      ? { residentGpuTimestampProfile: '1' }
+      : {}),
     lawt: lawThermal ? '1' : '0',
     lawr: lawReactions ? '1' : '0',
     lawv: lawViscosity ? '1' : '0',
@@ -395,7 +501,20 @@ export function scenarioPerformanceGate({
   schroederSimulationRequested = false,
   schroederSimulationRequestedObserved = null,
   schroederSimulationActive = null,
-  schroederTransactionCoverageComplete = null
+  schroederTransactionCoverageComplete = null,
+  schroederTwoLevelMechanicsRequested = false,
+  schroederTwoLevelMechanicsRequestedObserved = null,
+  schroederTwoLevelMechanicsCoverageComplete = null,
+  schroederTwoLevelMechanicsAuthorityRequested = null,
+  schroederTwoLevelMechanicsAuthorityObserved = null,
+  schroederTwoLevelFineSubstepCountRequested = null,
+  schroederTwoLevelFineSubstepCountObserved = null,
+  schroederTwoLevelMechanicsStepStatus = null,
+  schroederTwoLevelAuthoritativeCommitVerified = null,
+  gpuTimestampIntervalEvidence = null,
+  gpuTimestampRequired = requireGpuTimestampInterval,
+  gpuStageTimestampEvidence = null,
+  gpuStageTimestampsRequired = measureGpuStageTimestamps
 }) {
   const blockers = [];
   if (
@@ -415,6 +534,65 @@ export function scenarioPerformanceGate({
     && schroederTransactionCoverageComplete !== true
   ) {
     blockers.push('schroeder-spatial-transaction-coverage-incomplete');
+  }
+  if (
+    schroederTwoLevelMechanicsRequested === true
+    && schroederTwoLevelMechanicsRequestedObserved !== true
+  ) {
+    blockers.push('schroeder-two-level-request-not-observed');
+  }
+  if (
+    schroederTwoLevelMechanicsRequested === true
+    && schroederTwoLevelMechanicsCoverageComplete !== true
+  ) {
+    blockers.push('schroeder-two-level-batch-coverage-incomplete');
+  }
+  if (
+    schroederTwoLevelMechanicsRequested === true
+    && schroederTwoLevelMechanicsAuthorityObserved
+      !== schroederTwoLevelMechanicsAuthorityRequested
+  ) {
+    blockers.push('schroeder-two-level-authority-mismatch');
+  }
+  if (
+    schroederTwoLevelMechanicsRequested === true
+    && Number(schroederTwoLevelFineSubstepCountObserved)
+      !== Number(schroederTwoLevelFineSubstepCountRequested)
+  ) {
+    blockers.push('schroeder-two-level-substep-count-mismatch');
+  }
+  if (
+    schroederTwoLevelMechanicsRequested === true
+    && schroederTwoLevelMechanicsStepStatus
+      !== 'schroeder-two-level-authoritative-step-executed'
+  ) {
+    blockers.push('schroeder-two-level-authoritative-step-not-executed');
+  }
+  if (
+    schroederTwoLevelMechanicsRequested === true
+    && schroederTwoLevelAuthoritativeCommitVerified !== true
+  ) {
+    blockers.push('schroeder-two-level-authoritative-commit-unverified');
+  }
+  if (
+    gpuTimestampRequired === true
+    && (
+      gpuTimestampIntervalEvidence?.status !== 'complete'
+      || gpuTimestampIntervalEvidence?.batchCoverageComplete !== true
+      || gpuTimestampIntervalEvidence?.measurementCoverageComplete !== true
+    )
+  ) {
+    blockers.push('gpu-timestamp-interval-evidence-incomplete');
+  }
+  if (
+    gpuStageTimestampsRequired === true
+    && (
+      gpuStageTimestampEvidence?.status !== 'complete'
+      || gpuStageTimestampEvidence?.batchCoverageComplete !== true
+      || gpuStageTimestampEvidence?.stageCoverageComplete !== true
+    )
+  ) {
+    blockers.push('gpu-stage-timestamp-evidence-incomplete');
   }
   if (requireActiveGridGate && activeGridDispatch?.useActiveGrid !== true) {
     blockers.push('active-grid-dispatch-required');
@@ -459,6 +637,7 @@ export function scenarioPerformanceGate({
     blockers,
     requireActiveGrid: requireActiveGridGate,
     requireQueueFence: requireQueueFenceGate,
+    requireGpuTimestampInterval: gpuTimestampRequired === true,
     thresholds: {
       minResidentStageStepsPerSecond,
       maxResidentGpuCompletedStageMs,
@@ -474,9 +653,1360 @@ export function scenarioPerformanceGate({
       schroederSimulationRequestedObserved,
       schroederSimulationActive,
       schroederTransactionCoverageComplete,
+      schroederTwoLevelMechanicsRequested,
+      schroederTwoLevelMechanicsRequestedObserved,
+      schroederTwoLevelMechanicsCoverageComplete,
+      schroederTwoLevelMechanicsAuthorityRequested,
+      schroederTwoLevelMechanicsAuthorityObserved,
+      schroederTwoLevelFineSubstepCountRequested,
+      schroederTwoLevelFineSubstepCountObserved,
+      schroederTwoLevelMechanicsStepStatus,
+      schroederTwoLevelAuthoritativeCommitVerified,
+      gpuTimestampIntervalStatus:
+        gpuTimestampIntervalEvidence?.status ?? null,
+      gpuTimestampIntervalBatchCoverageComplete:
+        gpuTimestampIntervalEvidence?.batchCoverageComplete ?? null,
+      gpuTimestampIntervalMeasurementCoverageComplete:
+        gpuTimestampIntervalEvidence?.measurementCoverageComplete ?? null,
+      gpuTimestampIntervalMeasuredSampleCount:
+        gpuTimestampIntervalEvidence?.measuredSampleCount ?? null,
+      gpuTimestampIntervalP50Ms:
+        gpuTimestampIntervalEvidence?.p50Ms ?? null,
+      gpuTimestampIntervalP95Ms:
+        gpuTimestampIntervalEvidence?.p95Ms ?? null,
+      gpuStageTimestampStatus: gpuStageTimestampEvidence?.status ?? null,
+      gpuStageTimestampBatchCoverageComplete:
+        gpuStageTimestampEvidence?.batchCoverageComplete ?? null,
+      gpuStageTimestampProducerCount:
+        gpuStageTimestampEvidence?.producerSummaries?.length ?? null,
       activeGridUsed: activeGridDispatch?.useActiveGrid === true,
       queueFenceStatus: residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence ?? null,
       queueFenceBypassedBySidecarFallback: fusedResidentSequenceBlockedForSidecars === true
+    }
+  };
+}
+
+function percentile(values, fraction) {
+  const sorted = (Array.isArray(values) ? values : [])
+    .map(Number)
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const boundedFraction = Math.max(0, Math.min(1, Number(fraction) || 0));
+  const nearestRank = Math.max(1, Math.ceil(boundedFraction * sorted.length));
+  return sorted[nearestRank - 1];
+}
+
+/**
+ * Strictly summarize the two timestamp markers wrapped around each untouched
+ * production resident batch.  Every requested batch must publish exactly one
+ * complete, same-device interval; warmups are retained as evidence but are
+ * excluded from the reported p50/p95 measurement distribution.
+ */
+export function summarizeResidentGpuTimestampEvidence({
+  metrics = [],
+  requested = false,
+  requestedBatchCount = 0,
+  warmupBatchCount = 0
+} = {}) {
+  const expectedBatchCount = exactNonNegativeIntegerOrNull(requestedBatchCount);
+  const requestedShapeValid = Number.isInteger(expectedBatchCount)
+    && expectedBatchCount > 0;
+  const normalizedWarmupBatchCount = requestedShapeValid
+    ? Math.max(0, Math.min(
+      expectedBatchCount - 1,
+      exactNonNegativeIntegerOrNull(warmupBatchCount) ?? 0
+    ))
+    : 0;
+  if (requested !== true) {
+    return {
+      schema: 'peercompute.ulg.sph-performance-gpu-queue-interval-evidence.v0',
+      status: 'not-requested',
+      requested: false,
+      expectedBatchCount: requestedShapeValid ? expectedBatchCount : 0,
+      warmupBatchCount: normalizedWarmupBatchCount,
+      measuredSampleCount: 0,
+      batchCoverageComplete: null,
+      measurementCoverageComplete: null,
+      p50Ms: null,
+      p95Ms: null,
+      percentileEstimator: 'nearest-rank-ceil-nq',
+      profilingOverhead: {
+        markerSubmissionCount: 0,
+        queryResolveByteLength: 0,
+        mappedReadbackByteLength: 0,
+        mapAsyncCount: 0
+      },
+      samples: []
+    };
+  }
+  const residentBatchMetrics = (Array.isArray(metrics) ? metrics : [])
+    .filter((entry) => (
+      entry?.phase === 'resident-batch'
+      && Number.isInteger(Number(entry?.batchIndex))
+      && Number(entry.batchIndex) > 0
+    ));
+  const metricsByBatch = new Map();
+  for (const metric of residentBatchMetrics) {
+    const batchIndex = Number(metric.batchIndex);
+    const existing = metricsByBatch.get(batchIndex) || [];
+    existing.push(metric);
+    metricsByBatch.set(batchIndex, existing);
+  }
+  const expectedBatchIndices = requestedShapeValid
+    ? Array.from({ length: expectedBatchCount }, (_, index) => index + 1)
+    : [];
+  const samples = expectedBatchIndices.map((batchIndex) => {
+    const batchMetrics = metricsByBatch.get(batchIndex) || [];
+    const interval = batchMetrics.length === 1
+      ? batchMetrics[0]?.probeResidentBatchTiming?.gpuTimestampInterval || null
+      : null;
+    let monotonicTimestampPair = false;
+    let timestampPairDurationNs = null;
+    try {
+      const startTimestampNs = BigInt(interval?.startTimestampNs);
+      const endTimestampNs = BigInt(interval?.endTimestampNs);
+      const difference = endTimestampNs - startTimestampNs;
+      monotonicTimestampPair = difference > 0n;
+      if (difference <= BigInt(Number.MAX_SAFE_INTEGER)) {
+        timestampPairDurationNs = Number(difference);
+      }
+    } catch {
+      monotonicTimestampPair = false;
+    }
+    const durationNs = numberOrNull(interval?.durationNs);
+    const durationMs = numberOrNull(interval?.durationMs);
+    const requiredFeatures = Array.isArray(interval?.requiredFeatures)
+      ? interval.requiredFeatures.map(String)
+      : [];
+    const enabledFeatures = Array.isArray(interval?.enabledFeatures)
+      ? interval.enabledFeatures.map(String)
+      : [];
+    const durationConsistent = Number.isSafeInteger(durationNs)
+      && durationNs === timestampPairDurationNs
+      && Number.isFinite(durationMs)
+      && Math.abs(durationMs - durationNs / 1e6)
+        <= Math.max(1e-9, Math.abs(durationNs / 1e6) * 1e-12);
+    const complete = Boolean(
+      batchMetrics.length === 1
+      && interval?.schema === 'peercompute.ulg.sph-probe-gpu-queue-interval.v0'
+      && interval?.requested === true
+      && Number(interval?.batchIndex) === batchIndex
+      && interval?.status === 'gpu-timestamp-interval-complete'
+      && interval?.timestampUnit === 'nanoseconds'
+      && interval?.timestampProfilingRequested === true
+      && interval?.timestampQuerySupported === true
+      && requiredFeatures.includes('timestamp-query')
+      && enabledFeatures.includes('timestamp-query')
+      && Number(interval?.queryCount) === 2
+      && Number(interval?.validQueryCount) === 2
+      && Number(interval?.invalidQueryCount) === 0
+      && Number(interval?.markerSubmissionCount) === 2
+      && Number(interval?.queryResolveByteLength) === 16
+      && Number(interval?.mappedReadbackByteLength) === 16
+      && Number(interval?.mapAsyncCount) === 1
+      && monotonicTimestampPair
+      && durationConsistent
+      && durationNs > 0
+      && Number.isFinite(durationMs)
+      && durationMs > 0
+      && interval?.intervalSemantics
+        === 'same-queue-start-to-end-markers-includes-production-work-and-queue-idle'
+    );
+    return {
+      batchIndex,
+      warmup: batchIndex <= normalizedWarmupBatchCount,
+      metricCount: batchMetrics.length,
+      status: interval?.status ?? 'missing',
+      complete,
+      queryCount: numberOrNull(interval?.queryCount),
+      validQueryCount: numberOrNull(interval?.validQueryCount),
+      invalidQueryCount: numberOrNull(interval?.invalidQueryCount),
+      markerSubmissionCount: numberOrNull(interval?.markerSubmissionCount),
+      queryResolveByteLength: numberOrNull(interval?.queryResolveByteLength),
+      mappedReadbackByteLength: numberOrNull(interval?.mappedReadbackByteLength),
+      mapAsyncCount: numberOrNull(interval?.mapAsyncCount),
+      durationNs,
+      durationMs,
+      timestampPairDurationNs,
+      durationConsistent,
+      timestampProfilingRequested:
+        interval?.timestampProfilingRequested ?? null,
+      timestampQuerySupported: interval?.timestampQuerySupported ?? null,
+      requiredFeatures,
+      enabledFeatures
+    };
+  });
+  const observedBatchIndices = [...metricsByBatch.keys()].sort((a, b) => a - b);
+  const batchIndexCoverageComplete = requestedShapeValid
+    && residentBatchMetrics.length === expectedBatchCount
+    && observedBatchIndices.length === expectedBatchIndices.length
+    && observedBatchIndices.every(
+      (batchIndex, index) => batchIndex === expectedBatchIndices[index]
+    );
+  const batchCoverageComplete = batchIndexCoverageComplete
+    && samples.every((sample) => sample.complete);
+  const measuredSamples = samples.filter((sample) => !sample.warmup);
+  const measurementCoverageComplete = batchCoverageComplete
+    && measuredSamples.length === expectedBatchCount - normalizedWarmupBatchCount
+    && measuredSamples.length > 0
+    && measuredSamples.every((sample) => sample.complete);
+  const measuredDurationsMs = measurementCoverageComplete
+    ? measuredSamples.map((sample) => sample.durationMs)
+    : [];
+  return {
+    schema: 'peercompute.ulg.sph-performance-gpu-queue-interval-evidence.v0',
+    status: measurementCoverageComplete ? 'complete' : 'incomplete',
+    requested: true,
+    intervalSemantics:
+      'same-queue-start-to-end-markers-includes-production-work-and-queue-idle',
+    expectedBatchCount: requestedShapeValid ? expectedBatchCount : 0,
+    observedBatchCount: residentBatchMetrics.length,
+    observedBatchIndices,
+    warmupBatchCount: normalizedWarmupBatchCount,
+    expectedMeasuredSampleCount: requestedShapeValid
+      ? expectedBatchCount - normalizedWarmupBatchCount
+      : 0,
+    measuredSampleCount: measuredSamples.filter((sample) => sample.complete).length,
+    invalidSampleCount: samples.filter((sample) => !sample.complete).length,
+    batchIndexCoverageComplete,
+    batchCoverageComplete,
+    measurementCoverageComplete,
+    p50Ms: percentile(measuredDurationsMs, 0.5),
+    p95Ms: percentile(measuredDurationsMs, 0.95),
+    percentileEstimator: 'nearest-rank-ceil-nq',
+    minMs: measuredDurationsMs.length > 0
+      ? Math.min(...measuredDurationsMs)
+      : null,
+    maxMs: measuredDurationsMs.length > 0
+      ? Math.max(...measuredDurationsMs)
+      : null,
+    profilingOverhead: {
+      markerSubmissionCount: samples.reduce(
+        (sum, sample) => sum + (sample.markerSubmissionCount ?? 0),
+        0
+      ),
+      queryResolveByteLength: samples.reduce(
+        (sum, sample) => sum + (sample.queryResolveByteLength ?? 0),
+        0
+      ),
+      mappedReadbackByteLength: samples.reduce(
+        (sum, sample) => sum + (sample.mappedReadbackByteLength ?? 0),
+        0
+      ),
+      mapAsyncCount: samples.reduce(
+        (sum, sample) => sum + (sample.mapAsyncCount ?? 0),
+        0
+      ),
+      productionHotStateReadback: false,
+      classification: 'benchmark-only-timestamp-query-readback'
+    },
+    samples
+  };
+}
+
+/**
+ * Validate benchmark-only stage spans written into the unchanged production
+ * command encoders.  Canonical key/sort/unique/view counts are exact per
+ * generation; authoritative two-level traversal is exact per macrostep.
+ */
+export function summarizeResidentGpuStageTimestampEvidence({
+  metrics = [],
+  requested = false,
+  requestedBatchCount = 0,
+  requestedBatchStepCount = 1,
+  warmupBatchCount = 0,
+  twoLevelAuthoritative = false,
+  twoLevelFineSubstepCount = 2,
+  requireMigratedLawCoverage = false,
+  lawThermalEnabled = true,
+  lawReactionsEnabled = true
+} = {}) {
+  const schema = 'peercompute.ulg.sph-performance-gpu-stage-evidence.v0';
+  const expectedBatchCount = exactNonNegativeIntegerOrNull(
+    requestedBatchCount
+  );
+  const batchStepCount = Math.max(
+    1,
+    exactNonNegativeIntegerOrNull(requestedBatchStepCount) ?? 1
+  );
+  const fineSubstepCount = Math.max(
+    1,
+    exactNonNegativeIntegerOrNull(twoLevelFineSubstepCount) ?? 2
+  );
+  const normalizedWarmupBatchCount = Math.max(
+    0,
+    exactNonNegativeIntegerOrNull(warmupBatchCount) ?? 0
+  );
+  if (requested !== true) {
+    return {
+      schema,
+      status: 'not-requested',
+      requested: false,
+      batchCoverageComplete: null,
+      stageCoverageComplete: null,
+      producerSummaries: []
+    };
+  }
+  const residentMetrics = (Array.isArray(metrics) ? metrics : []).filter(
+    (metric) => metric?.phase === 'resident-batch'
+  );
+  const expectedGenerationCountPerBatch = batchStepCount * (
+    twoLevelAuthoritative ? fineSubstepCount + 2 : 1
+  );
+  const migratedLawProducerMappings = twoLevelAuthoritative
+    ? [
+        ...(lawReactionsEnabled ? [{
+          producerId:
+            'schroeder-hierarchy:two-level-post-mechanics-reaction-discovery-proposal',
+          consumerIds: ['reaction-discovery']
+        }] : []),
+        ...(lawThermalEnabled ? [{
+          producerId:
+            'schroeder-hierarchy:two-level-post-mechanics-thermal-proposal',
+          consumerIds: ['thermal-conduction', 'thermal-radiation']
+        }] : [])
+      ]
+    : [
+        {
+          producerId: 'mls-mpm-resident:spatialMechanicalProposal',
+          consumerIds: [
+            'pressure-contact-interface',
+            'separation',
+            'local-material-interface'
+          ]
+        },
+        ...(lawReactionsEnabled ? [{
+          producerId: 'mls-mpm-resident:spatialReactionDiscoveryProposal',
+          consumerIds: ['reaction-discovery']
+        }] : []),
+        ...(lawThermalEnabled ? [{
+          producerId: 'mls-mpm-resident:spatialThermalProposal',
+          consumerIds: ['thermal-conduction', 'thermal-radiation']
+        }] : [])
+      ];
+  const exactProducerCountPerBatch = new Map([
+    ['schroeder-spatial-key-emission', expectedGenerationCountPerBatch],
+    ['webgpu-stable-radix-sort', expectedGenerationCountPerBatch],
+    ['webgpu-sorted-unique', expectedGenerationCountPerBatch],
+    ['schroeder-spatial-derived-view-build', expectedGenerationCountPerBatch],
+    ['schroeder-spatial-aggregate-traversal',
+      twoLevelAuthoritative ? batchStepCount : 0],
+    ...(requireMigratedLawCoverage
+      ? migratedLawProducerMappings.map(({ producerId }) => [
+          producerId,
+          batchStepCount
+        ])
+      : [])
+  ]);
+  const exactProducerSpanContract = new Map([
+    ['schroeder-spatial-key-emission', {
+      spanClass: 'same-production-command-encoder',
+      markerSubmissionMode: 'same-production-command-encoder'
+    }],
+    ['webgpu-stable-radix-sort', {
+      spanClass: 'same-grouped-production-compute-pass',
+      markerSubmissionMode: 'same-production-command-encoder'
+    }],
+    ['webgpu-sorted-unique', {
+      spanClass: 'same-grouped-production-compute-pass',
+      markerSubmissionMode: 'same-production-command-encoder'
+    }],
+    ['schroeder-spatial-derived-view-build', {
+      spanClass: 'same-production-command-encoder',
+      markerSubmissionMode: 'same-production-command-encoder'
+    }],
+    ['schroeder-spatial-aggregate-traversal', {
+      spanClass: 'same-production-command-encoder',
+      markerSubmissionMode: 'same-production-command-encoder'
+    }],
+    ...migratedLawProducerMappings.map(({ producerId }) => [
+      producerId,
+      {
+        spanClass: twoLevelAuthoritative
+          ? 'hierarchy-queue-stage'
+          : 'resident-queue-stage',
+        markerSubmissionMode: 'same-queue-boundary-submissions'
+      }
+    ])
+  ]);
+  const batchEvidence = residentMetrics.map((metric) => {
+    const evidence = metric?.probeResidentBatchTiming?.gpuStageTimestamps
+      ?? null;
+    const spans = Array.isArray(evidence?.spans) ? evidence.spans : [];
+    const queryIndices = [];
+    const normalizedSpans = spans.map((span) => {
+      let timestampDifferenceNs = null;
+      try {
+        const start = BigInt(span?.startTimestampNs);
+        const end = BigInt(span?.endTimestampNs);
+        const difference = end - start;
+        if (difference > 0n && difference <= BigInt(Number.MAX_SAFE_INTEGER)) {
+          timestampDifferenceNs = Number(difference);
+        }
+      } catch {
+        timestampDifferenceNs = null;
+      }
+      const durationNs = numberOrNull(span?.durationNs);
+      const durationMs = numberOrNull(span?.durationMs);
+      const startQueryIndex = exactNonNegativeIntegerOrNull(
+        span?.startQueryIndex
+      );
+      const endQueryIndex = exactNonNegativeIntegerOrNull(span?.endQueryIndex);
+      if (startQueryIndex !== null) queryIndices.push(startQueryIndex);
+      if (endQueryIndex !== null) queryIndices.push(endQueryIndex);
+      const valid = Boolean(
+        span?.schema === 'peercompute.ulg.sph-probe-gpu-stage-span.v0'
+        && span?.valid === true
+        && typeof span?.producerId === 'string'
+        && span.producerId.length > 0
+        && Number.isSafeInteger(durationNs)
+        && durationNs > 0
+        && durationNs === timestampDifferenceNs
+        && Number.isFinite(durationMs)
+        && Math.abs(durationMs - durationNs / 1e6)
+          <= Math.max(1e-9, Math.abs(durationNs / 1e6) * 1e-12)
+        && startQueryIndex !== null
+        && endQueryIndex !== null
+        && endQueryIndex > startQueryIndex
+      );
+      return {
+        producerId: span?.producerId ?? null,
+        stage: span?.stage ?? null,
+        spanClass: span?.spanClass ?? null,
+        markerSubmissionMode: span?.markerSubmissionMode ?? null,
+        generationId: exactNonNegativeIntegerOrNull(span?.generationId),
+        durationNs,
+        durationMs,
+        startQueryIndex,
+        endQueryIndex,
+        valid
+      };
+    });
+    const producerCounts = Object.fromEntries([...exactProducerCountPerBatch]
+      .map(([producerId]) => [
+        producerId,
+        normalizedSpans.filter((span) => span.producerId === producerId).length
+      ]));
+    const exactProducerCoverageComplete = [...exactProducerCountPerBatch]
+      .every(([producerId, expectedCount]) => (
+        producerCounts[producerId] === expectedCount
+      ));
+    const exactProducerContractComplete = [...exactProducerCountPerBatch]
+      .every(([producerId, expectedCount]) => {
+        if (expectedCount === 0) return true;
+        const contract = exactProducerSpanContract.get(producerId);
+        return Boolean(contract) && normalizedSpans
+          .filter((span) => span.producerId === producerId)
+          .every((span) => (
+            span.spanClass === contract.spanClass
+            && span.markerSubmissionMode === contract.markerSubmissionMode
+          ));
+      });
+    const indicesContiguous = queryIndices.length === spans.length * 2
+      && new Set(queryIndices).size === queryIndices.length
+      && [...queryIndices].sort((a, b) => a - b).every(
+        (value, index) => value === index
+      );
+    const complete = Boolean(
+      evidence?.schema === 'peercompute.ulg.sph-probe-gpu-stage-timestamps.v0'
+      && evidence?.status === 'gpu-stage-timestamps-complete'
+      && evidence?.requested === true
+      && Number(evidence?.batchIndex) === Number(metric?.batchIndex)
+      && evidence?.timestampUnit === 'nanoseconds'
+      && evidence?.productionPassGroupingPreserved === true
+      && Number(evidence?.queryCount) === spans.length * 2
+      && Number(evidence?.spanCount) === spans.length
+      && Number(evidence?.validSpanCount) === spans.length
+      && Number(evidence?.invalidSpanCount) === 0
+      && Number(evidence?.resolveSubmissionCount) === 1
+      && Number(evidence?.mapAsyncCount) === 1
+      && Number(evidence?.queryResolveByteLength) === spans.length * 16
+      && Number(evidence?.mappedReadbackByteLength) === spans.length * 16
+      && spans.length > 0
+      && normalizedSpans.every((span) => span.valid)
+      && indicesContiguous
+      && exactProducerCoverageComplete
+      && exactProducerContractComplete
+    );
+    return {
+      batchIndex: Number(metric?.batchIndex),
+      status: evidence?.status ?? 'missing',
+      complete,
+      spanCount: spans.length,
+      queryCount: numberOrNull(evidence?.queryCount),
+      markerSubmissionCount: numberOrNull(
+        evidence?.markerSubmissionCount
+      ),
+      producerCounts,
+      exactProducerCoverageComplete,
+      exactProducerContractComplete,
+      spans: normalizedSpans
+    };
+  });
+  const expectedIndices = Number.isInteger(expectedBatchCount)
+    ? Array.from({ length: expectedBatchCount }, (_, index) => index + 1)
+    : [];
+  const observedIndices = batchEvidence.map((batch) => batch.batchIndex);
+  const batchCoverageComplete = expectedIndices.length > 0
+    && batchEvidence.length === expectedIndices.length
+    && observedIndices.every((value, index) => value === expectedIndices[index])
+    && batchEvidence.every((batch) => batch.complete);
+  const measuredBatches = batchEvidence.slice(normalizedWarmupBatchCount);
+  const measurementCoverageComplete = measuredBatches.length > 0
+    && measuredBatches.every((batch) => batch.complete);
+  const allRecordedSpans = batchEvidence.flatMap((batch) => batch.spans);
+  const measuredSpans = measuredBatches.flatMap((batch) => batch.spans);
+  const producerIds = [...new Set(measuredSpans.map((span) => span.producerId))]
+    .filter(Boolean)
+    .sort();
+  const producerSummaries = producerIds.map((producerId) => {
+    const samples = measuredSpans.filter(
+      (span) => span.producerId === producerId
+    );
+    const durationsMs = samples.map((span) => span.durationMs);
+    return {
+      producerId,
+      sampleCount: samples.length,
+      p50Ms: percentile(durationsMs, 0.5),
+      p95Ms: percentile(durationsMs, 0.95),
+      spanClasses: [...new Set(samples.map((span) => span.spanClass))],
+      markerSubmissionModes: [
+        ...new Set(samples.map((span) => span.markerSubmissionMode))
+      ]
+    };
+  });
+  const migratedLawConsumerMappings = migratedLawProducerMappings.map((mapping) => {
+    const summary = producerSummaries.find(
+      (candidate) => candidate.producerId === mapping.producerId
+    ) ?? null;
+    const expectedSampleCount = measuredBatches.length * batchStepCount;
+    return {
+      producerId: mapping.producerId,
+      consumerIds: [...mapping.consumerIds],
+      sharedProducerSpan: mapping.consumerIds.length > 1,
+      aggregationRule: mapping.consumerIds.length > 1
+        ? 'count-shared-producer-once-never-sum-per-consumer-aliases'
+        : 'count-producer-once',
+      expectedSampleCount,
+      sampleCount: summary?.sampleCount ?? 0,
+      p50Ms: summary?.p50Ms ?? null,
+      p95Ms: summary?.p95Ms ?? null,
+      coverageComplete: summary?.sampleCount === expectedSampleCount
+    };
+  });
+  const migratedLawCoverageComplete = migratedLawConsumerMappings.every(
+    (mapping) => mapping.coverageComplete
+  );
+  const stageCoverageComplete = batchCoverageComplete
+    && measurementCoverageComplete
+    && (!requireMigratedLawCoverage || migratedLawCoverageComplete);
+  return {
+    schema,
+    status: stageCoverageComplete ? 'complete' : 'incomplete',
+    requested: true,
+    expectedBatchCount: expectedBatchCount ?? 0,
+    observedBatchCount: batchEvidence.length,
+    warmupBatchCount: normalizedWarmupBatchCount,
+    measuredBatchCount: measuredBatches.length,
+    expectedGenerationCountPerBatch,
+    expectedTraversalCountPerBatch:
+      twoLevelAuthoritative ? batchStepCount : 0,
+    batchCoverageComplete,
+    measurementCoverageComplete,
+    stageCoverageComplete,
+    migratedLawCoverageRequired: requireMigratedLawCoverage,
+    migratedLawCoverageComplete,
+    requiredMigratedLawConsumerIds: requireMigratedLawCoverage
+      ? [...new Set(migratedLawProducerMappings.flatMap(
+          (mapping) => mapping.consumerIds
+        ))]
+      : [],
+    migratedLawConsumerMappings,
+    percentileEstimator: 'nearest-rank-ceil-nq',
+    profilingOverhead: {
+      markerSubmissionCount: batchEvidence.reduce(
+        (sum, batch) => sum + (batch.markerSubmissionCount ?? 0),
+        0
+      ),
+      queryResolveByteLength: allRecordedSpans.length * 16,
+      mappedReadbackByteLength: allRecordedSpans.length * 16,
+      mapAsyncCount: batchEvidence.length,
+      measuredQueryResolveByteLength: measuredSpans.length * 16,
+      measuredMappedReadbackByteLength: measuredSpans.length * 16,
+      measuredMapAsyncCount: measuredBatches.length,
+      productionHotStateReadback: false,
+      classification: 'benchmark-only-stage-timestamp-readback'
+    },
+    producerSummaries,
+    batches: batchEvidence
+  };
+}
+
+function finitePositiveNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function median(values) {
+  const sorted = (Array.isArray(values) ? values : [])
+    .map(Number)
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  if (sorted.length === 0) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function pairedTimestampArmEvidence(arm, {
+  requiredWarmupBatchCount,
+  requiredMeasuredSampleCount
+}) {
+  const timestamp = arm?.gpuTimestampIntervalEvidence
+    ?? arm?.gpuTimestampEvidence
+    ?? null;
+  const p50Ms = finitePositiveNumberOrNull(timestamp?.p50Ms);
+  const p95Ms = finitePositiveNumberOrNull(timestamp?.p95Ms);
+  const warmupBatchCount = exactNonNegativeIntegerOrNull(
+    timestamp?.warmupBatchCount
+  );
+  const measuredSampleCount = exactNonNegativeIntegerOrNull(
+    timestamp?.measuredSampleCount
+  );
+  const complete = Boolean(
+    timestamp?.schema
+      === 'peercompute.ulg.sph-performance-gpu-queue-interval-evidence.v0'
+    && timestamp?.status === 'complete'
+    && timestamp?.requested === true
+    && timestamp?.batchCoverageComplete === true
+    && timestamp?.measurementCoverageComplete === true
+    && timestamp?.percentileEstimator === 'nearest-rank-ceil-nq'
+    && warmupBatchCount !== null
+    && warmupBatchCount >= requiredWarmupBatchCount
+    && measuredSampleCount !== null
+    && measuredSampleCount >= requiredMeasuredSampleCount
+    && p50Ms !== null
+    && p95Ms !== null
+  );
+  return {
+    complete,
+    status: timestamp?.status ?? 'missing',
+    warmupBatchCount,
+    measuredSampleCount,
+    p50Ms,
+    p95Ms,
+    percentileEstimator: timestamp?.percentileEstimator ?? null
+  };
+}
+
+function pairedTimestampProvenanceEvidence(arm) {
+  const provenance = arm?.sourceProvenance ?? null;
+  const gitHead = typeof provenance?.gitHead === 'string'
+    ? provenance.gitHead.trim()
+    : '';
+  const sourceFingerprintBefore = typeof provenance?.sourceFingerprintBefore
+    === 'string'
+    ? provenance.sourceFingerprintBefore.trim()
+    : '';
+  const sourceFingerprintAfter = typeof provenance?.sourceFingerprintAfter
+    === 'string'
+    ? provenance.sourceFingerprintAfter.trim()
+    : '';
+  const commonConfigSignature = typeof provenance?.commonConfigSignature
+    === 'string'
+    ? provenance.commonConfigSignature.trim()
+    : '';
+  const armConfigSignature = typeof provenance?.armConfigSignature === 'string'
+    ? provenance.armConfigSignature.trim()
+    : '';
+  const complete = Boolean(
+    /^[0-9a-f]{40}$/i.test(gitHead)
+    && /^[0-9a-f]{64}$/i.test(sourceFingerprintBefore)
+    && sourceFingerprintBefore === sourceFingerprintAfter
+    && /^[0-9a-f]{64}$/i.test(commonConfigSignature)
+    && /^[0-9a-f]{64}$/i.test(armConfigSignature)
+  );
+  return {
+    complete,
+    gitHead: gitHead || null,
+    sourceFingerprintBefore: sourceFingerprintBefore || null,
+    sourceFingerprintAfter: sourceFingerprintAfter || null,
+    commonConfigSignature: commonConfigSignature || null,
+    armConfigSignature: armConfigSignature || null,
+    worktreeDirtyBefore: provenance?.worktreeDirtyBefore ?? null,
+    worktreeDirtyAfter: provenance?.worktreeDirtyAfter ?? null
+  };
+}
+
+/**
+ * Aggregate independent paired browser/device runs without treating sequential
+ * batches from one probe as independent samples.  This is intentionally pure:
+ * the campaign runner owns process/browser isolation and immutable source
+ * receipts, while this function owns the fail-closed statistical contract.
+ */
+export function summarizePairedGpuTimestampRuns({
+  runs = [],
+  requiredRunCount = 3,
+  requiredWarmupBatchCount = 4,
+  requiredMeasuredSampleCount = 9,
+  expectedRunOrders = ['AB', 'BA', 'AB'],
+  maxRegressionPercent = 5,
+  applyRegressionGate = true,
+  requireSameSource = true,
+  requireBaselineControl = true,
+  requireCandidateAuthoritative = true
+} = {}) {
+  const normalizedRequiredRunCount = Math.max(
+    1,
+    Math.round(Number(requiredRunCount) || 3)
+  );
+  const normalizedRequiredWarmups = Math.max(
+    0,
+    Math.round(Number(requiredWarmupBatchCount) || 0)
+  );
+  const normalizedRequiredMeasurements = Math.max(
+    1,
+    Math.round(Number(requiredMeasuredSampleCount) || 9)
+  );
+  const normalizedExpectedOrders = Array.from(
+    { length: normalizedRequiredRunCount },
+    (_, index) => String(
+      expectedRunOrders[index]
+        ?? (index % 2 === 0 ? 'AB' : 'BA')
+    ).toUpperCase()
+  );
+  const normalizedRuns = (Array.isArray(runs) ? runs : []).map(
+    (run, index) => {
+      const baselineTimestamp = pairedTimestampArmEvidence(run?.baseline, {
+        requiredWarmupBatchCount: normalizedRequiredWarmups,
+        requiredMeasuredSampleCount: normalizedRequiredMeasurements
+      });
+      const candidateTimestamp = pairedTimestampArmEvidence(run?.candidate, {
+        requiredWarmupBatchCount: normalizedRequiredWarmups,
+        requiredMeasuredSampleCount: normalizedRequiredMeasurements
+      });
+      const baselineProvenance = pairedTimestampProvenanceEvidence(
+        run?.baseline
+      );
+      const candidateProvenance = pairedTimestampProvenanceEvidence(
+        run?.candidate
+      );
+      const baselineScenario = run?.baseline?.scenario ?? null;
+      const candidateScenario = run?.candidate?.scenario ?? null;
+      const baselineControlComplete = requireBaselineControl !== true || Boolean(
+        baselineScenario?.schroederSimulationConfiguredRequested === true
+        && baselineScenario?.schroederTransactionCoverageComplete === true
+        && baselineScenario?.schroederTwoLevelMechanicsConfiguredRequested
+          === false
+      );
+      const candidateAuthoritativeComplete =
+        requireCandidateAuthoritative !== true || Boolean(
+          candidateScenario?.schroederSimulationConfiguredRequested === true
+          && candidateScenario?.schroederTransactionCoverageComplete === true
+          && candidateScenario?.schroederTwoLevelMechanicsConfiguredRequested
+            === true
+          && candidateScenario?.schroederTwoLevelMechanicsRequestedObserved
+            === true
+          && candidateScenario?.schroederTwoLevelMechanicsCoverageComplete
+            === true
+          && candidateScenario?.schroederTwoLevelMechanicsAuthorityRequested
+            === 'authoritative'
+          && candidateScenario?.schroederTwoLevelMechanicsAuthorityObserved
+            === 'authoritative'
+          && candidateScenario?.schroederTwoLevelAuthoritativeCommitVerified
+            === true
+        );
+      const p50Ratio = baselineTimestamp.p50Ms !== null
+        && candidateTimestamp.p50Ms !== null
+        ? candidateTimestamp.p50Ms / baselineTimestamp.p50Ms
+        : null;
+      const p95Ratio = baselineTimestamp.p95Ms !== null
+        && candidateTimestamp.p95Ms !== null
+        ? candidateTimestamp.p95Ms / baselineTimestamp.p95Ms
+        : null;
+      return {
+        runIndex: index + 1,
+        runId: String(run?.runId ?? ''),
+        order: String(run?.order ?? '').toUpperCase(),
+        baselineTimestamp,
+        candidateTimestamp,
+        baselineProvenance,
+        candidateProvenance,
+        baselineControlComplete,
+        candidateAuthoritativeComplete,
+        p50Ratio,
+        p95Ratio,
+        p50DeltaPercent: p50Ratio === null ? null : (p50Ratio - 1) * 100,
+        p95DeltaPercent: p95Ratio === null ? null : (p95Ratio - 1) * 100
+      };
+    }
+  );
+  const blockers = [];
+  if (normalizedRuns.length !== normalizedRequiredRunCount) {
+    blockers.push('independent-run-count-mismatch');
+  }
+  const runIds = normalizedRuns.map((run) => run.runId);
+  if (
+    runIds.some((runId) => !runId)
+    || new Set(runIds).size !== runIds.length
+  ) {
+    blockers.push('run-identities-missing-or-duplicated');
+  }
+  if (
+    normalizedRuns.some((run, index) => (
+      run.order !== normalizedExpectedOrders[index]
+    ))
+  ) {
+    blockers.push('run-order-not-ab-ba-alternating');
+  }
+  if (normalizedRuns.some((run) => !run.baselineTimestamp.complete)) {
+    blockers.push('baseline-timestamp-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidateTimestamp.complete)) {
+    blockers.push('candidate-timestamp-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.baselineProvenance.complete)) {
+    blockers.push('baseline-source-provenance-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidateProvenance.complete)) {
+    blockers.push('candidate-source-provenance-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.baselineControlComplete)) {
+    blockers.push('baseline-control-route-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidateAuthoritativeComplete)) {
+    blockers.push('candidate-authoritative-route-incomplete');
+  }
+  const commonConfigSignatures = new Set(normalizedRuns.flatMap((run) => [
+    run.baselineProvenance.commonConfigSignature,
+    run.candidateProvenance.commonConfigSignature
+  ]).filter(Boolean));
+  if (commonConfigSignatures.size !== 1) {
+    blockers.push('common-config-signature-mismatch');
+  }
+  const baselineSourceIdentities = new Set(normalizedRuns.map((run) => (
+    `${run.baselineProvenance.gitHead}:`
+    + `${run.baselineProvenance.sourceFingerprintBefore}`
+  )));
+  const candidateSourceIdentities = new Set(normalizedRuns.map((run) => (
+    `${run.candidateProvenance.gitHead}:`
+    + `${run.candidateProvenance.sourceFingerprintBefore}`
+  )));
+  if (baselineSourceIdentities.size !== 1) {
+    blockers.push('baseline-source-changed-between-runs');
+  }
+  if (candidateSourceIdentities.size !== 1) {
+    blockers.push('candidate-source-changed-between-runs');
+  }
+  if (
+    requireSameSource === true
+    && (
+      baselineSourceIdentities.size !== 1
+      || candidateSourceIdentities.size !== 1
+      || [...baselineSourceIdentities][0] !== [...candidateSourceIdentities][0]
+    )
+  ) {
+    blockers.push('paired-arms-do-not-share-exact-source');
+  }
+  const p50Ratios = normalizedRuns.map((run) => run.p50Ratio)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const p95Ratios = normalizedRuns.map((run) => run.p95Ratio)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (
+    p50Ratios.length !== normalizedRequiredRunCount
+    || p95Ratios.length !== normalizedRequiredRunCount
+  ) {
+    blockers.push('paired-ratio-coverage-incomplete');
+  }
+  const medianP50Ratio = median(p50Ratios);
+  const medianP95Ratio = median(p95Ratios);
+  const independentBaselineP50 = median(normalizedRuns.map(
+    (run) => run.baselineTimestamp.p50Ms
+  ));
+  const independentCandidateP50 = median(normalizedRuns.map(
+    (run) => run.candidateTimestamp.p50Ms
+  ));
+  const independentBaselineP95 = median(normalizedRuns.map(
+    (run) => run.baselineTimestamp.p95Ms
+  ));
+  const independentCandidateP95 = median(normalizedRuns.map(
+    (run) => run.candidateTimestamp.p95Ms
+  ));
+  const threshold = Number(maxRegressionPercent);
+  const regressionThresholdPercent = Number.isFinite(threshold)
+    ? threshold
+    : 5;
+  const medianP50DeltaPercent = medianP50Ratio === null
+    ? null
+    : (medianP50Ratio - 1) * 100;
+  const medianP95DeltaPercent = medianP95Ratio === null
+    ? null
+    : (medianP95Ratio - 1) * 100;
+  const p50WithinThreshold = medianP50DeltaPercent !== null
+    && medianP50DeltaPercent <= regressionThresholdPercent;
+  const p95WithinThreshold = medianP95DeltaPercent !== null
+    && medianP95DeltaPercent <= regressionThresholdPercent;
+  if (applyRegressionGate === true && !p50WithinThreshold) {
+    blockers.push('paired-p50-regression-exceeds-threshold');
+  }
+  if (applyRegressionGate === true && !p95WithinThreshold) {
+    blockers.push('paired-p95-regression-exceeds-threshold');
+  }
+  return {
+    schema: 'peercompute.ulg.sph-paired-gpu-timestamp-campaign.v0',
+    status: blockers.length === 0 ? 'pass' : 'fail',
+    blockers,
+    method: {
+      independentRunCount: normalizedRequiredRunCount,
+      requiredWarmupBatchCount: normalizedRequiredWarmups,
+      requiredMeasuredSampleCount: normalizedRequiredMeasurements,
+      expectedRunOrders: normalizedExpectedOrders,
+      percentileEstimator: 'nearest-rank-ceil-nq',
+      pairedAggregation: 'median-of-within-run-candidate-over-baseline-ratios',
+      applyRegressionGate: applyRegressionGate === true,
+      regressionThresholdPercent,
+      requireSameSource: requireSameSource === true
+    },
+    runCount: normalizedRuns.length,
+    runs: normalizedRuns,
+    paired: {
+      p50Ratios,
+      p95Ratios,
+      medianP50Ratio,
+      medianP95Ratio,
+      medianP50DeltaPercent,
+      medianP95DeltaPercent,
+      p50WithinThreshold,
+      p95WithinThreshold
+    },
+    independentMedianCrossCheck: {
+      baselineP50Ms: independentBaselineP50,
+      candidateP50Ms: independentCandidateP50,
+      p50Ratio: independentBaselineP50 && independentCandidateP50
+        ? independentCandidateP50 / independentBaselineP50
+        : null,
+      baselineP95Ms: independentBaselineP95,
+      candidateP95Ms: independentCandidateP95,
+      p95Ratio: independentBaselineP95 && independentCandidateP95
+        ? independentCandidateP95 / independentBaselineP95
+        : null
+    }
+  };
+}
+
+function pairedThroughputProvenanceEvidence(arm) {
+  const basic = pairedTimestampProvenanceEvidence(arm);
+  const provenance = arm?.sourceProvenance ?? null;
+  const worktreeStatusHashBefore = typeof provenance?.worktreeStatusHashBefore
+    === 'string'
+    ? provenance.worktreeStatusHashBefore.trim()
+    : '';
+  const worktreeStatusHashAfter = typeof provenance?.worktreeStatusHashAfter
+    === 'string'
+    ? provenance.worktreeStatusHashAfter.trim()
+    : '';
+  const trackedAndUntrackedFileCountBefore = exactNonNegativeIntegerOrNull(
+    provenance?.trackedAndUntrackedFileCountBefore
+  );
+  const trackedAndUntrackedFileCountAfter = exactNonNegativeIntegerOrNull(
+    provenance?.trackedAndUntrackedFileCountAfter
+  );
+  const complete = Boolean(
+    basic.complete
+    && /^[0-9a-f]{64}$/i.test(worktreeStatusHashBefore)
+    && worktreeStatusHashBefore === worktreeStatusHashAfter
+    && provenance?.worktreeDirtyBefore
+      === provenance?.worktreeDirtyAfter
+    && trackedAndUntrackedFileCountBefore !== null
+    && trackedAndUntrackedFileCountBefore
+      === trackedAndUntrackedFileCountAfter
+  );
+  return {
+    ...basic,
+    complete,
+    worktreeStatusHashBefore: worktreeStatusHashBefore || null,
+    worktreeStatusHashAfter: worktreeStatusHashAfter || null,
+    trackedAndUntrackedFileCountBefore,
+    trackedAndUntrackedFileCountAfter
+  };
+}
+
+function pairedThroughputArmEvidence(arm, {
+  requiredBatchCount,
+  requiredBatchStepCount,
+  historicalBaseline = false
+}) {
+  const scenario = arm?.scenario ?? null;
+  const physicsStepsPerSecond = finitePositiveNumberOrNull(
+    scenario?.physicsStepsPerSecond
+  );
+  const expectedTotalStepCount = requiredBatchCount
+    * requiredBatchStepCount;
+  const transactionCounters = scenario?.schroederTransactionCounterTotals
+    ?? null;
+  const historicalRouteCompatibilityComplete = Boolean(
+    historicalBaseline === true
+    && scenario?.schroederSimulationConfiguredRequested === true
+    && scenario?.schroederSimulationActive === true
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTransactionExpectedStepCount
+    ) === expectedTotalStepCount
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTransactionCompletedStepCount
+    ) === expectedTotalStepCount
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTransactionExpectedBatchCount
+    ) === requiredBatchCount
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTransactionObservedBatchCount
+    ) === requiredBatchCount
+    && scenario?.schroederTransactionBatchCoverageComplete === true
+    && scenario?.schroederTransactionCompletedStepCoverageComplete === true
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederSpatialEpochReleaseSettlementCount
+    ) === expectedTotalStepCount
+    && scenario?.schroederSpatialEpochReleaseSettlementCoverageComplete
+      === true
+    && scenario?.schroederTransactionNextStepStrideCoverageComplete === true
+    && scenario?.schroederTransactionStepIdentityCoverageComplete === true
+    && scenario?.schroederTransactionGenerationAlignmentComplete === true
+    && scenario?.schroederSpatialEpochGenerationCoverageComplete === true
+    && [
+      'epochCount',
+      'directoryBuildCount',
+      'sortUniqueCount',
+      'proposalSealCount',
+      'commitCount',
+      'releaseScheduleCount',
+      'releaseCount'
+    ].every((key) => (
+      exactNonNegativeIntegerOrNull(transactionCounters?.[key])
+        === expectedTotalStepCount
+    ))
+    && [
+      'privateCanonicalLookupBuildCount',
+      'releaseRetryCount',
+      'legacyPrivateLookupBuildCount',
+      'legacyExhaustiveTraversalCount'
+    ].every((key) => (
+      exactNonNegativeIntegerOrNull(transactionCounters?.[key]) === 0
+    ))
+  );
+  const performanceGateBlockers = Array.isArray(
+    scenario?.performanceGate?.blockers
+  ) ? [...scenario.performanceGate.blockers] : [];
+  const historicalInstrumentationCompatibilityGate = Boolean(
+    historicalRouteCompatibilityComplete
+    && arm?.reportPerformanceGateStatus === 'fail'
+    && arm?.scenarioStatus === 'bad'
+    && performanceGateBlockers.length === 1
+    && performanceGateBlockers[0]
+      === 'schroeder-spatial-transaction-coverage-incomplete'
+  );
+  const routeAndGateComplete = historicalBaseline
+    ? Boolean(
+      (
+        arm?.reportPerformanceGateStatus === 'pass'
+        && arm?.scenarioStatus === 'good'
+        && scenario?.schroederTransactionCoverageComplete === true
+      )
+      || historicalInstrumentationCompatibilityGate
+    )
+    : Boolean(
+      arm?.reportPerformanceGateStatus === 'pass'
+      && arm?.scenarioStatus === 'good'
+      && scenario?.schroederTransactionCoverageComplete === true
+    );
+  const complete = Boolean(
+    arm?.process?.exitCode === 0
+    && arm?.reportStatus === 'complete'
+    && routeAndGateComplete
+    && scenario?.probeMode === 'scene'
+    && scenario?.physicsStepsPerSecondSource === 'complete-engine-batch'
+    && physicsStepsPerSecond !== null
+    && exactNonNegativeIntegerOrNull(scenario?.batches)
+      === requiredBatchCount
+    && exactNonNegativeIntegerOrNull(scenario?.batchSteps)
+      === requiredBatchStepCount
+    && exactNonNegativeIntegerOrNull(scenario?.completedStepCount)
+      === requiredBatchStepCount
+    && scenario?.schroederSimulationConfiguredRequested === true
+    && scenario?.schroederSimulationActive === true
+    && scenario?.schroederTwoLevelMechanicsConfiguredRequested === false
+    && scenario?.schroederTwoLevelMechanicsRequestedObserved !== true
+  );
+  return {
+    complete,
+    processExitCode: arm?.process?.exitCode ?? null,
+    reportStatus: arm?.reportStatus ?? null,
+    reportPerformanceGateStatus:
+      arm?.reportPerformanceGateStatus ?? null,
+    performanceGateBlockers,
+    scenarioStatus: arm?.scenarioStatus ?? null,
+    probeMode: scenario?.probeMode ?? null,
+    physicsStepsPerSecondSource:
+      scenario?.physicsStepsPerSecondSource ?? null,
+    physicsStepsPerSecond,
+    batches: exactNonNegativeIntegerOrNull(scenario?.batches),
+    batchSteps: exactNonNegativeIntegerOrNull(scenario?.batchSteps),
+    completedStepCount:
+      exactNonNegativeIntegerOrNull(scenario?.completedStepCount),
+    schroederSimulationActive:
+      scenario?.schroederSimulationActive ?? null,
+    schroederTransactionCoverageComplete:
+      scenario?.schroederTransactionCoverageComplete ?? null,
+    historicalBaseline: historicalBaseline === true,
+    historicalRouteCompatibilityComplete,
+    historicalInstrumentationCompatibilityGate,
+    schroederTwoLevelMechanicsConfiguredRequested:
+      scenario?.schroederTwoLevelMechanicsConfiguredRequested ?? null,
+    probeIssues: Array.isArray(scenario?.probeIssues)
+      ? [...scenario.probeIssues]
+      : []
+  };
+}
+
+/**
+ * Compare a historical and candidate worktree on the same non-target visual
+ * SS route. Physics throughput is higher-is-better, so its ratio and gate are
+ * deliberately separate from the lower-is-better GPU duration campaign.
+ */
+export function summarizePairedPhysicsThroughputRuns({
+  runs = [],
+  requiredRunCount = 3,
+  expectedRunOrders = ['AB', 'BA', 'AB'],
+  requiredWarmupBatchCount = 4,
+  requiredMeasuredBatchCount = 1,
+  requiredBatchStepCount = 16,
+  expectedBaselineGitHead = null,
+  maxRegressionPercent = 5
+} = {}) {
+  const normalizedRequiredRunCount = Math.max(
+    1,
+    Math.round(Number(requiredRunCount) || 3)
+  );
+  const normalizedWarmupBatchCount = Math.max(
+    0,
+    Math.round(Number(requiredWarmupBatchCount) || 0)
+  );
+  const normalizedMeasuredBatchCount = Math.max(
+    1,
+    Math.round(Number(requiredMeasuredBatchCount) || 1)
+  );
+  const normalizedBatchCount = normalizedWarmupBatchCount
+    + normalizedMeasuredBatchCount;
+  const normalizedBatchStepCount = Math.max(
+    1,
+    Math.round(Number(requiredBatchStepCount) || 16)
+  );
+  const normalizedExpectedOrders = Array.from(
+    { length: normalizedRequiredRunCount },
+    (_, index) => String(
+      expectedRunOrders[index]
+        ?? (index % 2 === 0 ? 'AB' : 'BA')
+    ).toUpperCase()
+  );
+  const normalizedExpectedBaselineGitHead = typeof expectedBaselineGitHead
+    === 'string'
+    ? expectedBaselineGitHead.trim()
+    : '';
+  const normalizedRuns = (Array.isArray(runs) ? runs : []).map(
+    (run, index) => {
+      const baseline = pairedThroughputArmEvidence(run?.baseline, {
+        requiredBatchCount: normalizedBatchCount,
+        requiredBatchStepCount: normalizedBatchStepCount,
+        historicalBaseline: true
+      });
+      const candidate = pairedThroughputArmEvidence(run?.candidate, {
+        requiredBatchCount: normalizedBatchCount,
+        requiredBatchStepCount: normalizedBatchStepCount,
+        historicalBaseline: false
+      });
+      const baselineProvenance = pairedThroughputProvenanceEvidence(
+        run?.baseline
+      );
+      const candidateProvenance = pairedThroughputProvenanceEvidence(
+        run?.candidate
+      );
+      const throughputRatio = baseline.physicsStepsPerSecond !== null
+        && candidate.physicsStepsPerSecond !== null
+        ? candidate.physicsStepsPerSecond / baseline.physicsStepsPerSecond
+        : null;
+      return {
+        runIndex: index + 1,
+        runId: String(run?.runId ?? ''),
+        order: String(run?.order ?? '').toUpperCase(),
+        baseline,
+        candidate,
+        baselineProvenance,
+        candidateProvenance,
+        throughputRatio,
+        regressionPercent: throughputRatio === null
+          ? null
+          : (1 - throughputRatio) * 100
+      };
+    }
+  );
+  const blockers = [];
+  if (normalizedRuns.length !== normalizedRequiredRunCount) {
+    blockers.push('independent-run-count-mismatch');
+  }
+  const runIds = normalizedRuns.map((run) => run.runId);
+  if (
+    runIds.some((runId) => !runId)
+    || new Set(runIds).size !== runIds.length
+  ) {
+    blockers.push('run-identities-missing-or-duplicated');
+  }
+  if (normalizedRuns.some((run, index) => (
+    run.order !== normalizedExpectedOrders[index]
+  ))) {
+    blockers.push('run-order-not-ab-ba-alternating');
+  }
+  if (normalizedRuns.some((run) => !run.baseline.complete)) {
+    blockers.push('baseline-throughput-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidate.complete)) {
+    blockers.push('candidate-throughput-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.baselineProvenance.complete)) {
+    blockers.push('baseline-source-provenance-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidateProvenance.complete)) {
+    blockers.push('candidate-source-provenance-incomplete');
+  }
+  if (normalizedRuns.some((run) => (
+    run.baselineProvenance.worktreeDirtyBefore !== false
+    || run.baselineProvenance.worktreeDirtyAfter !== false
+  ))) {
+    blockers.push('historical-baseline-worktree-not-clean');
+  }
+  const commonConfigSignatures = new Set(normalizedRuns.flatMap((run) => [
+    run.baselineProvenance.commonConfigSignature,
+    run.candidateProvenance.commonConfigSignature
+  ]).filter(Boolean));
+  if (commonConfigSignatures.size !== 1) {
+    blockers.push('common-config-signature-mismatch');
+  }
+  const armConfigSignatures = new Set(normalizedRuns.flatMap((run) => [
+    run.baselineProvenance.armConfigSignature,
+    run.candidateProvenance.armConfigSignature
+  ]).filter(Boolean));
+  if (armConfigSignatures.size !== 1) {
+    blockers.push('non-target-route-signature-mismatch');
+  }
+  const baselineSourceIdentities = new Set(normalizedRuns.map((run) => (
+    `${run.baselineProvenance.gitHead}:`
+    + `${run.baselineProvenance.sourceFingerprintBefore}`
+  )));
+  const candidateSourceIdentities = new Set(normalizedRuns.map((run) => (
+    `${run.candidateProvenance.gitHead}:`
+    + `${run.candidateProvenance.sourceFingerprintBefore}`
+  )));
+  if (baselineSourceIdentities.size !== 1) {
+    blockers.push('baseline-source-changed-between-runs');
+  }
+  if (candidateSourceIdentities.size !== 1) {
+    blockers.push('candidate-source-changed-between-runs');
+  }
+  if (
+    baselineSourceIdentities.size === 1
+    && candidateSourceIdentities.size === 1
+    && [...baselineSourceIdentities][0] === [...candidateSourceIdentities][0]
+  ) {
+    blockers.push('historical-and-candidate-source-identities-match');
+  }
+  if (
+    normalizedExpectedBaselineGitHead
+    && (
+      !/^[0-9a-f]{40}$/i.test(normalizedExpectedBaselineGitHead)
+      || normalizedRuns.some((run) => (
+        run.baselineProvenance.gitHead
+          !== normalizedExpectedBaselineGitHead
+      ))
+    )
+  ) {
+    blockers.push('historical-baseline-git-head-mismatch');
+  }
+  const ratios = normalizedRuns.map((run) => run.throughputRatio)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (ratios.length !== normalizedRequiredRunCount) {
+    blockers.push('paired-throughput-ratio-coverage-incomplete');
+  }
+  const pairedMedianRatio = median(ratios);
+  const baselineMedianPhysicsStepsPerSecond = median(normalizedRuns.map(
+    (run) => run.baseline.physicsStepsPerSecond
+  ));
+  const candidateMedianPhysicsStepsPerSecond = median(normalizedRuns.map(
+    (run) => run.candidate.physicsStepsPerSecond
+  ));
+  const independentMedianRatio = baselineMedianPhysicsStepsPerSecond
+    && candidateMedianPhysicsStepsPerSecond
+    ? candidateMedianPhysicsStepsPerSecond
+      / baselineMedianPhysicsStepsPerSecond
+    : null;
+  const threshold = Number(maxRegressionPercent);
+  const regressionThresholdPercent = Number.isFinite(threshold)
+    ? threshold
+    : 5;
+  const minimumAcceptedRatio = 1 - regressionThresholdPercent / 100;
+  const pairedMedianRegressionPercent = pairedMedianRatio === null
+    ? null
+    : (1 - pairedMedianRatio) * 100;
+  const independentMedianRegressionPercent = independentMedianRatio === null
+    ? null
+    : (1 - independentMedianRatio) * 100;
+  const pairedWithinThreshold = pairedMedianRatio !== null
+    && pairedMedianRatio >= minimumAcceptedRatio;
+  const independentMedianWithinThreshold = independentMedianRatio !== null
+    && independentMedianRatio >= minimumAcceptedRatio;
+  if (!pairedWithinThreshold) {
+    blockers.push('paired-physics-throughput-regression-exceeds-threshold');
+  }
+  if (!independentMedianWithinThreshold) {
+    blockers.push(
+      'independent-median-physics-throughput-regression-exceeds-threshold'
+    );
+  }
+  return {
+    schema: 'peercompute.ulg.sph-paired-physics-throughput-campaign.v0',
+    status: blockers.length === 0 ? 'pass' : 'fail',
+    blockers,
+    method: {
+      independentRunCount: normalizedRequiredRunCount,
+      expectedRunOrders: normalizedExpectedOrders,
+      warmupBatchCount: normalizedWarmupBatchCount,
+      measuredBatchCount: normalizedMeasuredBatchCount,
+      batchStepCount: normalizedBatchStepCount,
+      metric: 'physicsStepsPerSecond',
+      metricSource: 'complete-engine-batch',
+      direction: 'higher-is-better',
+      pairedAggregation:
+        'median-of-within-run-candidate-over-historical-ratios',
+      independentMedianCrossCheckRequired: true,
+      regressionThresholdPercent,
+      minimumAcceptedRatio,
+      expectedBaselineGitHead:
+        normalizedExpectedBaselineGitHead || null
+    },
+    runCount: normalizedRuns.length,
+    runs: normalizedRuns,
+    paired: {
+      throughputRatios: ratios,
+      medianRatio: pairedMedianRatio,
+      medianRegressionPercent: pairedMedianRegressionPercent,
+      withinThreshold: pairedWithinThreshold
+    },
+    independentMedianCrossCheck: {
+      baselinePhysicsStepsPerSecond:
+        baselineMedianPhysicsStepsPerSecond,
+      candidatePhysicsStepsPerSecond:
+        candidateMedianPhysicsStepsPerSecond,
+      ratio: independentMedianRatio,
+      regressionPercent: independentMedianRegressionPercent,
+      withinThreshold: independentMedianWithinThreshold
     }
   };
 }
@@ -508,6 +2038,7 @@ const SCHROEDER_TRANSACTION_COUNTER_KEYS = Object.freeze([
   'privateCanonicalLookupBuildCount',
   'readerRejectCount',
   'proposalSealCount',
+  'privateAdvanceCount',
   'commitCount',
   'releaseScheduleCount',
   'releaseRetryCount',
@@ -560,7 +2091,12 @@ export function aggregateSchroederResidentBatchEvidence({
   metrics = [],
   requestedBatchCount,
   requestedBatchStepCount,
-  schroederSimulationRequested: simulationRequested = false
+  schroederSimulationRequested: simulationRequested = false,
+  schroederTwoLevelMechanicsRequested: twoLevelMechanicsRequested = false,
+  schroederTwoLevelMechanicsAuthority:
+    twoLevelMechanicsAuthorityRequested = 'authoritative',
+  schroederTwoLevelFineSubstepCount:
+    twoLevelFineSubstepCountRequested = 2
 } = {}) {
   const expectedBatchCount = exactNonNegativeIntegerOrNull(requestedBatchCount);
   const expectedBatchStepCount = exactNonNegativeIntegerOrNull(requestedBatchStepCount);
@@ -570,6 +2106,13 @@ export function aggregateSchroederResidentBatchEvidence({
   const expectedStepCount = requestedShapeValid
     ? expectedBatchCount * expectedBatchStepCount
     : 0;
+  // An authoritative two-level outer step legitimately consumes private fine
+  // generations and position epochs between consecutive public transactions.
+  // Physics ticks must remain contiguous; generation/position identities must
+  // remain exact, unique, increasing, and aligned with their summaries, but
+  // cannot truthfully be required to advance by exactly one.
+  const authoritativePrivateAdvance = twoLevelMechanicsRequested === true
+    && twoLevelMechanicsAuthorityRequested === 'authoritative';
   const residentBatchMetrics = (Array.isArray(metrics) ? metrics : [])
     .filter((entry) => (
       entry?.phase === 'resident-batch'
@@ -607,6 +2150,41 @@ export function aggregateSchroederResidentBatchEvidence({
     );
     const artifactLedgerSettlementComplete =
       residentSteps?.schroederHierarchyArtifactLedgerSettlementComplete === true;
+    const telemetry = entry?.schroederTelemetry || null;
+    const residentTwoLevelAuthoritativeStepCount = exactNonNegativeIntegerOrNull(
+      residentSteps?.schroederTwoLevelAuthoritativeStepCount
+    );
+    const telemetryTwoLevelAuthoritativeStepCount = exactNonNegativeIntegerOrNull(
+      telemetry?.twoLevelAuthoritativeStepCount
+    );
+    const twoLevelAuthoritativeStepCount =
+      residentTwoLevelAuthoritativeStepCount
+      ?? telemetryTwoLevelAuthoritativeStepCount;
+    const twoLevelAuthoritativeStepCountAgreement =
+      residentTwoLevelAuthoritativeStepCount !== null
+      && telemetryTwoLevelAuthoritativeStepCount !== null
+      && residentTwoLevelAuthoritativeStepCount
+        === telemetryTwoLevelAuthoritativeStepCount;
+    const twoLevelMechanicsCoverageComplete = twoLevelMechanicsRequested !== true
+      ? null
+      : Boolean(
+        telemetry?.twoLevelMechanicsRequested === true
+        && telemetry?.twoLevelMechanicsActive === true
+        && telemetry?.twoLevelMechanicsAuthorityRequested
+          === twoLevelMechanicsAuthorityRequested
+        && telemetry?.twoLevelMechanicsAuthorityObserved
+          === twoLevelMechanicsAuthorityRequested
+        && Number(telemetry?.twoLevelFineSubstepCountRequested)
+          === Number(twoLevelFineSubstepCountRequested)
+        && Number(telemetry?.twoLevelFineSubstepCountObserved)
+          === Number(twoLevelFineSubstepCountRequested)
+        && telemetry?.twoLevelMechanicsStepStatus
+          === 'schroeder-two-level-authoritative-step-executed'
+        && telemetry?.twoLevelAuthoritativeCommitVerified === true
+        && telemetry?.twoLevelMechanicsCoverageComplete === true
+        && twoLevelAuthoritativeStepCountAgreement
+        && twoLevelAuthoritativeStepCount === completedStepCount
+      );
     const physicsTicks = transactions.map(
       (transaction) => exactNonNegativeIntegerOrNull(transaction?.epochIdentity?.physicsTick)
     );
@@ -620,9 +2198,16 @@ export function aggregateSchroederResidentBatchEvidence({
       (generation) => exactNonNegativeIntegerOrNull(generation?.generationId)
     );
     const physicsTickSequence = exactIntegerSequenceEvidence(physicsTicks);
-    const positionEpochSequence = exactIntegerSequenceEvidence(positionEpochs);
-    const transactionGenerationSequence = exactIntegerSequenceEvidence(transactionGenerationIds);
-    const generationSummarySequence = exactIntegerSequenceEvidence(generationSummaryIds);
+    const positionEpochSequence = exactIntegerSequenceEvidence(positionEpochs, {
+      requireContiguous: !authoritativePrivateAdvance
+    });
+    const transactionGenerationSequence = exactIntegerSequenceEvidence(
+      transactionGenerationIds,
+      { requireContiguous: !authoritativePrivateAdvance }
+    );
+    const generationSummarySequence = exactIntegerSequenceEvidence(generationSummaryIds, {
+      requireContiguous: !authoritativePrivateAdvance
+    });
     const transactionGenerationAlignmentComplete = transactionGenerationIds.length === generationSummaryIds.length
       && transactionGenerationIds.every(
         (generationId, index) => generationId === generationSummaryIds[index]
@@ -647,7 +2232,12 @@ export function aggregateSchroederResidentBatchEvidence({
       releaseSettlementComplete,
       artifactLedgerSettlementCount,
       artifactLedgerSettlementComplete,
-      schroederSimulationActive: entry?.schroederTelemetry?.active === true,
+      schroederSimulationActive: telemetry?.active === true,
+      twoLevelMechanicsCoverageComplete,
+      twoLevelAuthoritativeStepCount,
+      residentTwoLevelAuthoritativeStepCount,
+      telemetryTwoLevelAuthoritativeStepCount,
+      twoLevelAuthoritativeStepCountAgreement,
       transactionCount: transactions.length,
       generationSummaryCount: generations.length,
       artifactLedgerSummaryCount: artifactLedgers.length,
@@ -713,10 +2303,16 @@ export function aggregateSchroederResidentBatchEvidence({
   const generationSummaryIds = generations.map(
     (generation) => exactNonNegativeIntegerOrNull(generation?.generationId)
   );
-  const transactionGenerationSequence = exactIntegerSequenceEvidence(transactionGenerationIds);
+  const transactionGenerationSequence = exactIntegerSequenceEvidence(transactionGenerationIds, {
+    requireContiguous: !authoritativePrivateAdvance
+  });
   const transactionPhysicsTickSequence = exactIntegerSequenceEvidence(transactionPhysicsTicks);
-  const transactionPositionEpochSequence = exactIntegerSequenceEvidence(transactionPositionEpochs);
-  const generationSummarySequence = exactIntegerSequenceEvidence(generationSummaryIds);
+  const transactionPositionEpochSequence = exactIntegerSequenceEvidence(transactionPositionEpochs, {
+    requireContiguous: !authoritativePrivateAdvance
+  });
+  const generationSummarySequence = exactIntegerSequenceEvidence(generationSummaryIds, {
+    requireContiguous: !authoritativePrivateAdvance
+  });
   const transactionGenerationAlignmentComplete = transactionGenerationIds.length === generationSummaryIds.length
     && transactionGenerationIds.every(
       (generationId, index) => generationId === generationSummaryIds[index]
@@ -752,7 +2348,10 @@ export function aggregateSchroederResidentBatchEvidence({
         && counters?.privateCanonicalLookupBuildCount === 0
         && counters?.readerRejectCount === 0
         && counters?.proposalSealCount === 1
-        && counters?.commitCount === 1
+        && counters?.privateAdvanceCount
+          === (authoritativePrivateAdvance ? 1 : 0)
+        && counters?.commitCount
+          === (authoritativePrivateAdvance ? 0 : 1)
         && counters?.releaseScheduleCount === 1
         && counters?.releaseRetryCount === 0
         && counters?.releaseCount === 1
@@ -768,7 +2367,10 @@ export function aggregateSchroederResidentBatchEvidence({
     && transactionCounterTotals.privateCanonicalLookupBuildCount === 0
     && transactionCounterTotals.readerRejectCount === 0
     && transactionCounterTotals.proposalSealCount === expectedStepCount
-    && transactionCounterTotals.commitCount === expectedStepCount
+    && transactionCounterTotals.privateAdvanceCount
+      === (authoritativePrivateAdvance ? expectedStepCount : 0)
+    && transactionCounterTotals.commitCount
+      === (authoritativePrivateAdvance ? 0 : expectedStepCount)
     && transactionCounterTotals.releaseScheduleCount === expectedStepCount
     && transactionCounterTotals.releaseRetryCount === 0
     && transactionCounterTotals.releaseCount === expectedStepCount
@@ -844,6 +2446,19 @@ export function aggregateSchroederResidentBatchEvidence({
   ).length;
   const schroederSimulationActive = batchIndexCoverageComplete
     && schroederSimulationActiveBatchCount === expectedBatchCount;
+  const twoLevelMechanicsCoverageComplete = twoLevelMechanicsRequested !== true
+    ? null
+    : Boolean(
+      batchIndexCoverageComplete
+      && batchEvidence.length === expectedBatchCount
+      && batchEvidence.every(
+        (batch) => batch.twoLevelMechanicsCoverageComplete === true
+      )
+    );
+  const twoLevelAuthoritativeStepCount = batchEvidence.reduce(
+    (sum, batch) => sum + (batch.twoLevelAuthoritativeStepCount ?? 0),
+    0
+  );
   const backpressureWaitCount = generations.reduce(
     (sum, generation) => sum + (exactNonNegativeIntegerOrNull(generation?.backpressureWaitCount) ?? 0),
     0
@@ -913,6 +2528,11 @@ export function aggregateSchroederResidentBatchEvidence({
     stepIdentityCoverageComplete,
     schroederSimulationActive,
     schroederSimulationActiveBatchCount,
+    twoLevelMechanicsRequested: twoLevelMechanicsRequested === true,
+    twoLevelMechanicsAuthorityRequested,
+    twoLevelFineSubstepCountRequested,
+    twoLevelMechanicsCoverageComplete,
+    twoLevelAuthoritativeStepCount,
     backpressureWaitCount,
     backpressureWaitMs,
     batchCoverage: batchEvidence.map((batch) => ({
@@ -921,6 +2541,16 @@ export function aggregateSchroederResidentBatchEvidence({
       completedStepCount: batch.completedStepCount,
       nextStep: batch.nextStep,
       schroederSimulationActive: batch.schroederSimulationActive,
+      twoLevelMechanicsCoverageComplete:
+        batch.twoLevelMechanicsCoverageComplete,
+      twoLevelAuthoritativeStepCount:
+        batch.twoLevelAuthoritativeStepCount,
+      residentTwoLevelAuthoritativeStepCount:
+        batch.residentTwoLevelAuthoritativeStepCount,
+      telemetryTwoLevelAuthoritativeStepCount:
+        batch.telemetryTwoLevelAuthoritativeStepCount,
+      twoLevelAuthoritativeStepCountAgreement:
+        batch.twoLevelAuthoritativeStepCountAgreement,
       transactionCount: batch.transactionCount,
       generationSummaryCount: batch.generationSummaryCount,
       physicsTickStart: batch.physicsTickSequence.start,
@@ -939,6 +2569,28 @@ export function aggregateSchroederResidentBatchEvidence({
 function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const analysis = result?.analysis || {};
   const metrics = Array.isArray(result?.timeline?.metrics) ? result.timeline.metrics : [];
+  const gpuTimestampIntervalEvidence = summarizeResidentGpuTimestampEvidence({
+    metrics,
+    requested: measureGpuTimestampInterval,
+    requestedBatchCount: batches,
+    warmupBatchCount: gpuTimestampWarmupBatchCount
+  });
+  const gpuStageTimestampEvidence =
+    summarizeResidentGpuStageTimestampEvidence({
+      metrics,
+      requested: measureGpuStageTimestamps,
+      requestedBatchCount: batches,
+      requestedBatchStepCount: batchSteps,
+      warmupBatchCount: gpuTimestampWarmupBatchCount,
+      twoLevelAuthoritative: Boolean(
+        schroederTwoLevelMechanicsRequested
+        && schroederTwoLevelMechanicsAuthority === 'authoritative'
+      ),
+      twoLevelFineSubstepCount: schroederTwoLevelFineSubstepCount,
+      requireMigratedLawCoverage: requireMigratedLawGpuStageTimestamps,
+      lawThermalEnabled: lawThermal,
+      lawReactionsEnabled: lawReactions
+    });
   const initialMetric = metrics.find((entry) => entry?.initial) || null;
   const initialParticleEdgeDiagnostics = initialMetric?.initial?.initialParticleEdgeDiagnostics || null;
   const metric = lastMetricWithRenderState(result);
@@ -1149,13 +2801,29 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     metrics,
     requestedBatchCount: batches,
     requestedBatchStepCount: batchSteps,
-    schroederSimulationRequested
+    schroederSimulationRequested,
+    schroederTwoLevelMechanicsRequested,
+    schroederTwoLevelMechanicsAuthority,
+    schroederTwoLevelFineSubstepCount
   });
   const schroederSimulationActive = schroederSimulationRequested === true
     ? schroederResidentBatchEvidence.schroederSimulationActive
     : (schroederTelemetry?.active ?? null);
   const schroederTransactionCoverageComplete =
     schroederResidentBatchEvidence.transactionCoverageComplete;
+  const schroederTwoLevelMechanicsRequestedObserved =
+    schroederTelemetry?.twoLevelMechanicsRequested ?? null;
+  const schroederTwoLevelMechanicsCoverageComplete =
+    schroederResidentBatchEvidence.twoLevelMechanicsCoverageComplete;
+  const schroederTwoLevelMechanicsAuthorityObserved =
+    schroederTelemetry?.twoLevelMechanicsAuthorityObserved ?? null;
+  const schroederTwoLevelFineSubstepCountObserved = numberOrNull(
+    schroederTelemetry?.twoLevelFineSubstepCountObserved
+  );
+  const schroederTwoLevelMechanicsStepStatus =
+    schroederTelemetry?.twoLevelMechanicsStepStatus ?? null;
+  const schroederTwoLevelAuthoritativeCommitVerified =
+    schroederTelemetry?.twoLevelAuthoritativeCommitVerified ?? null;
   const schroederTransactionMountedCount =
     schroederResidentBatchEvidence.transactionMountedCount;
   const schroederTransactionGenerationCount =
@@ -2721,16 +4389,46 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederSimulationRequested,
     schroederSimulationRequestedObserved,
     schroederSimulationActive,
-    schroederTransactionCoverageComplete
+    schroederTransactionCoverageComplete,
+    schroederTwoLevelMechanicsRequested,
+    schroederTwoLevelMechanicsRequestedObserved,
+    schroederTwoLevelMechanicsCoverageComplete,
+    schroederTwoLevelMechanicsAuthorityRequested:
+      schroederTwoLevelMechanicsAuthority,
+    schroederTwoLevelMechanicsAuthorityObserved,
+    schroederTwoLevelFineSubstepCountRequested:
+      schroederTwoLevelFineSubstepCount,
+    schroederTwoLevelFineSubstepCountObserved,
+    schroederTwoLevelMechanicsStepStatus,
+    schroederTwoLevelAuthoritativeCommitVerified,
+    gpuTimestampIntervalEvidence,
+    gpuTimestampRequired: requireGpuTimestampInterval,
+    gpuStageTimestampEvidence,
+    gpuStageTimestampsRequired: measureGpuStageTimestamps
   });
   const validDirectResidentLoop = effectiveProbeMode === 'direct-resident'
     && residentSteps?.status === 'resident-steps-executed'
-    && residentStep?.status === 'resident-step-webgpu-executed'
+    && (
+      residentStep?.status === 'resident-step-webgpu-executed'
+      || (
+        schroederTwoLevelMechanicsRequested
+        && residentStep?.status
+          === 'schroeder-two-level-authoritative-step-executed'
+      )
+    )
     && fusedResidentSequenceRequirementSatisfied
     && fusedResidentActiveGridRequirementSatisfied;
+  const scenarioTimingEvidenceAvailable = schroederTwoLevelMechanicsRequested
+    ? Boolean(
+      Number.isFinite(probeEngineBatchMs)
+      && probeEngineBatchMs > 0
+      && schroederTwoLevelMechanicsCoverageComplete === true
+    )
+    : Number.isFinite(residentStageMs);
   const benchmarkStatus = exit.code === 0
     && Number(browserConsoleIssueCount ?? 0) === 0
-    && Number.isFinite(residentStageMs)
+    && performanceGate.status === 'pass'
+    && scenarioTimingEvidenceAvailable
     && (effectiveProbeMode === 'direct-resident'
       ? validDirectResidentLoop
       : (
@@ -2788,7 +4486,13 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     residentGpuQueueFenceMs,
     residentGpuCompletedStageMs,
     residentStageStepsPerSecond,
+    scenarioTimingEvidenceAvailable,
+    scenarioTimingEvidenceSource: schroederTwoLevelMechanicsRequested
+      ? 'authoritative-two-level-complete-engine-batch'
+      : 'resident-stage-timing',
     performanceGate,
+    gpuTimestampIntervalEvidence,
+    gpuStageTimestampEvidence,
     probeResidentBatchTiming,
     probeResidentBatchResidentStepsAwaitMs,
     probeResidentBatchRenderRefreshAwaitMs,
@@ -2968,6 +4672,20 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederSimulationRequestedObserved,
     schroederSimulationActive,
     schroederTransactionCoverageComplete,
+    schroederTwoLevelMechanicsConfiguredRequested:
+      schroederTwoLevelMechanicsRequested,
+    schroederTwoLevelMechanicsRequestedObserved,
+    schroederTwoLevelMechanicsCoverageComplete,
+    schroederTwoLevelMechanicsAuthorityRequested:
+      schroederTwoLevelMechanicsAuthority,
+    schroederTwoLevelMechanicsAuthorityObserved,
+    schroederTwoLevelFineSubstepCountRequested:
+      schroederTwoLevelFineSubstepCount,
+    schroederTwoLevelFineSubstepCountObserved,
+    schroederTwoLevelMechanicsStepStatus,
+    schroederTwoLevelAuthoritativeCommitVerified,
+    schroederTwoLevelAuthoritativeStepCount:
+      schroederResidentBatchEvidence.twoLevelAuthoritativeStepCount,
     schroederTransactionExpectedStepCount: schroederSimulationRequested === true
       ? schroederResidentBatchEvidence.expectedStepCount
       : 0,
@@ -3429,6 +5147,10 @@ async function main() {
       ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID: fuseResidentMechanicsActiveGrid ? '1' : '0',
       ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH_MODE: activeGridDispatchPlanRefreshMode,
       ULG_PROBE_MEASURE_GPU_QUEUE_FENCE: measureGpuQueueFence ? '1' : '0',
+      ULG_PROBE_MEASURE_GPU_TIMESTAMP_INTERVAL:
+        measureGpuTimestampInterval ? '1' : '0',
+      ULG_PROBE_MEASURE_GPU_STAGE_TIMESTAMPS:
+        measureGpuStageTimestamps ? '1' : '0',
       ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC: materialInterfaceDiagnosticRequested ? '1' : '0',
       ULG_PROBE_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE: materialInterfaceCandidateReadbackMode,
       ...(fusedActiveGridSafetyCells ? {
@@ -3462,6 +5184,12 @@ async function main() {
     profile,
     repoDir,
     generatedAt: new Date().toISOString(),
+    materials: {
+      drop: dropMaterial,
+      base: baseMaterial,
+      dropTemperatureK,
+      baseTemperatureK
+    },
     batches,
     batchSteps,
     probeMode,
@@ -3495,11 +5223,15 @@ async function main() {
     surfaceDrawMode,
     schroederSimulationRequested,
     schroederSelectedLevel,
+    schroederMaxLevel,
     schroederPortableSummaryRequested,
     schroederActiveNodeIndexRequested,
     schroederLawQueueRequested,
     schroederLawNeighborCandidatesRequested,
     schroederCrossLevelCouplingRequested,
+    schroederTwoLevelMechanicsRequested,
+    schroederTwoLevelMechanicsAuthority,
+    schroederTwoLevelFineSubstepCount,
     schroederPhaseVolumeMigrationRequested,
     materialInterfaceDiagnosticRequested,
     materialInterfaceCandidateReadbackMode,
@@ -3508,12 +5240,19 @@ async function main() {
     activeGridDispatchPlanRefreshMode,
     fusedActiveGridSafetyCells,
     measureGpuQueueFence,
+    measureGpuTimestampInterval,
+    measureGpuStageTimestamps,
+    requireMigratedLawGpuStageTimestamps,
+    requireGpuTimestampInterval,
+    gpuTimestampWarmupBatchCount,
     performanceGate: {
       schema: 'peercompute.ulg.sph-performance-benchmark-suite-gate.v0',
       status: scenarios.every((scenario) => scenario.performanceGate?.status === 'pass') ? 'pass' : 'fail',
       failedScenarioCount: scenarios.filter((scenario) => scenario.performanceGate?.status !== 'pass').length,
       requireActiveGrid: requireActiveGridGate,
       requireQueueFence: requireQueueFenceGate,
+      requireGpuTimestampInterval,
+      requireGpuStageTimestamps: measureGpuStageTimestamps,
       thresholds: {
         minResidentStageStepsPerSecond,
         maxResidentGpuCompletedStageMs,

@@ -22,6 +22,27 @@ const HARTREE_J = 4.3597447222071e-18;
 const AVOGADRO = 6.02214076e23;
 const BASIS_MAX_Z = 18;
 
+function canonicalMaterialKey(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function sameMaterialKey(left, right) {
+  const leftKey = canonicalMaterialKey(left);
+  return leftKey.length > 0 && leftKey === canonicalMaterialKey(right);
+}
+
+function phaseRequirementsForMaterial(reaction, material) {
+  const requirements = reaction?.phaseRequirements;
+  if (!requirements || typeof requirements !== 'object') return null;
+  if (requirements[material] != null) return requirements[material];
+  const materialKey = canonicalMaterialKey(material);
+  if (requirements[materialKey] != null) return requirements[materialKey];
+  for (const [candidate, allowed] of Object.entries(requirements)) {
+    if (canonicalMaterialKey(candidate) === materialKey) return allowed;
+  }
+  return null;
+}
+
 function speciesInBasis(species) {
   return species.atoms.every((atom) => atom.Z <= BASIS_MAX_Z);
 }
@@ -534,7 +555,7 @@ function particlePhase(particle, materialProperties, phaseOf) {
 }
 
 function phaseRequirementSatisfied(particle, reaction, materialProperties, phaseOf) {
-  const allowed = reaction.phaseRequirements?.[particle.material];
+  const allowed = phaseRequirementsForMaterial(reaction, particle.material);
   if (!allowed || allowed.length === 0) return true;
   const phase = particlePhase(particle, materialProperties, phaseOf);
   return allowed.includes(phase);
@@ -565,7 +586,7 @@ function buildReactionSpatialIndex(particles, count, cellSizeM) {
   const coordsByIndex = new Array(count);
   for (let index = 0; index < count; index += 1) {
     const particle = particles[index];
-    const material = particle?.material;
+    const material = canonicalMaterialKey(particle?.material);
     if (!material) continue;
     const coords = cellCoordsForParticle(particle, cellSizeM);
     const cellKey = reactionCellKey(coords);
@@ -593,7 +614,7 @@ function neighborOffsets(radiusCells) {
 }
 
 function candidateNeighborIndices(index, material, radiusM, spatialIndex, offsetCache) {
-  const materialCells = spatialIndex.cellsByMaterial.get(material);
+  const materialCells = spatialIndex.cellsByMaterial.get(canonicalMaterialKey(material));
   const center = spatialIndex.coordsByIndex[index];
   if (!materialCells || !center) return [];
   const radiusCells = Math.max(1, Math.ceil(radiusM / spatialIndex.cellSizeM));
@@ -640,7 +661,7 @@ function createReactiveGateCache(particles, count, { temperatureOf, phaseOf, mat
 }
 
 function phaseRequirementSatisfiedCached(particle, index, reaction, gateCache) {
-  const allowed = reaction.phaseRequirements?.[particle.material];
+  const allowed = phaseRequirementsForMaterial(reaction, particle.material);
   if (!allowed || allowed.length === 0) return true;
   return allowed.includes(gateCache.phase(index));
 }
@@ -668,13 +689,13 @@ export function reactiveStep(state, { reactions, materialProperties, contactRadi
   for (const rx of reactions) {
     const radius = reactionContactRadiusM(rx, baseRadius);
     const r2 = radius * radius;
-    const reactantAIndices = spatialIndex.indicesByMaterial.get(rx.a) || [];
+    const reactantAIndices = spatialIndex.indicesByMaterial.get(canonicalMaterialKey(rx.a)) || [];
     for (const i of reactantAIndices) {
-      if (reacted[i] || particles[i].material !== rx.a) continue;
+      if (reacted[i] || !sameMaterialKey(particles[i].material, rx.a)) continue;
       if (!phaseRequirementSatisfiedCached(particles[i], i, rx, gateCache)) continue;
       const candidates = candidateNeighborIndices(i, rx.b, radius, spatialIndex, offsetCache);
       for (const j of candidates) {
-        if (reacted[j] || j === i || particles[j].material !== rx.b) continue;
+        if (reacted[j] || j === i || !sameMaterialKey(particles[j].material, rx.b)) continue;
         if (
           !phaseRequirementSatisfiedCached(particles[j], j, rx, gateCache)
         ) continue;

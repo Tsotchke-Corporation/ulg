@@ -515,6 +515,36 @@ fn scatter(
 }
 `;
 
+// Small radix histograms are often cheaper to scan with one bounded GPU
+// invocation than with a multi-dispatch hierarchical scan. This is an opt-in
+// path: the general radix primitive remains fully parallel by default.
+export const webGpuSerialRadixHistogramScanWgsl = /* wgsl */ `
+struct RadixParams {
+  element_count: u32,
+  workgroup_count: u32,
+  key_stride_words: u32,
+  key_word_index: u32,
+  bit_offset: u32,
+  key_word_count: u32,
+  generation_id: u32,
+  dispatch_x: u32,
+};
+
+@group(0) @binding(0) var<storage, read> radix_histograms: array<u32>;
+@group(0) @binding(1) var<storage, read_write> radix_histogram_offsets: array<u32>;
+@group(0) @binding(2) var<uniform> radix_params: RadixParams;
+
+@compute @workgroup_size(1)
+fn scan_histogram_serial() {
+  let histogram_element_count = radix_params.workgroup_count * 16u;
+  var running = 0u;
+  for (var index = 0u; index < histogram_element_count; index = index + 1u) {
+    radix_histogram_offsets[index] = running;
+    running = running + radix_histograms[index];
+  }
+}
+`;
+
 export const webGpuSortedUniqueWgsl = /* wgsl */ `
 struct UniqueParams {
   element_count: u32,
@@ -1272,11 +1302,17 @@ export function createWebGpuU32ExclusiveScan(device, {
   return runtime;
 }
 
-function createRadixPipelines(device, label) {
+function createRadixPipelines(device, label, { serialHistogramScanEnabled = false } = {}) {
   const radixModule = device.createShaderModule({
     label: `${label}-radix-shader`,
     code: webGpuStableRadixWgsl
   });
+  const serialHistogramScanModule = serialHistogramScanEnabled
+    ? device.createShaderModule({
+        label: `${label}-serial-histogram-scan-shader`,
+        code: webGpuSerialRadixHistogramScanWgsl
+      })
+    : null;
   const uniqueModule = device.createShaderModule({
     label: `${label}-unique-shader`,
     code: webGpuSortedUniqueWgsl
@@ -1290,6 +1326,15 @@ function createRadixPipelines(device, label) {
     initialize: pipeline('initialize', radixModule, 'initialize_indices'),
     histogram: pipeline('histogram', radixModule, 'histogram'),
     scatter: pipeline('scatter', radixModule, 'scatter'),
+    ...(serialHistogramScanModule
+      ? {
+          serialHistogramScan: pipeline(
+            'serial-histogram-scan',
+            serialHistogramScanModule,
+            'scan_histogram_serial'
+          )
+        }
+      : {}),
     markHeads: pipeline('mark-heads', uniqueModule, 'mark_heads'),
     scatterUnique: pipeline('scatter-unique', uniqueModule, 'scatter_unique'),
     finalizeUnique: pipeline('finalize-unique', uniqueModule, 'finalize_unique')
@@ -1303,6 +1348,7 @@ export function createWebGpuStableRadixScanUnique(device, {
   maxComputeWorkgroupsPerDimension: requestedMaxComputeWorkgroupsPerDimension = null,
   retainConstantScanParamsBuffers = false,
   retainVariableScanParamsBuffers = false,
+  serialHistogramScanMaxElementCount = 0,
   retainedParamsSlotCount = WEBGPU_RADIX_RETAINED_PARAMS_SLOT_COUNT_DEFAULT
 } = {}) {
   assertDevice(device);
@@ -1312,6 +1358,11 @@ export function createWebGpuStableRadixScanUnique(device, {
   const resolvedMaxKeyWordCount = positiveInteger(maxKeyWordCount, 'maxKeyWordCount', {
     max: WEBGPU_RADIX_MAX_KEY_WORDS
   });
+  const resolvedSerialHistogramScanMaxElementCount = nonNegativeInteger(
+    serialHistogramScanMaxElementCount,
+    'serialHistogramScanMaxElementCount',
+    { max: 0xffffffff }
+  );
   const deviceMaxComputeWorkgroupsPerDimension = positiveInteger(
     device.limits?.maxComputeWorkgroupsPerDimension ?? 65535,
     'device.limits.maxComputeWorkgroupsPerDimension',
@@ -1366,7 +1417,9 @@ export function createWebGpuStableRadixScanUnique(device, {
   };
   const maxWorkgroups = radixGroupCountFor(resolvedMaxElementCount);
   const maxHistogramElements = maxWorkgroups * WEBGPU_RADIX_BUCKET_COUNT;
-  const pipelines = createRadixPipelines(device, label);
+  const pipelines = createRadixPipelines(device, label, {
+    serialHistogramScanEnabled: resolvedSerialHistogramScanMaxElementCount > 0
+  });
   const sortedIndicesA = createBuffer(device, `${label}-sorted-indices-a`, resolvedMaxElementCount);
   const sortedIndicesB = createBuffer(device, `${label}-sorted-indices-b`, resolvedMaxElementCount);
   const histogramBuffer = createBuffer(device, `${label}-histograms`, maxHistogramElements);
@@ -1623,18 +1676,25 @@ export function createWebGpuStableRadixScanUnique(device, {
       maxComputeWorkgroupsPerDimension
     );
     const histogramElementCount = workgroupCount * WEBGPU_RADIX_BUCKET_COUNT;
-    const histogramScanEncoding = histogramScan.prepare({
-      inputBuffer: histogramBuffer,
-      outputBuffer: histogramOffsetsBuffer,
-      elementCount: histogramElementCount,
-      retainedParamsSlotIndex: retainVariableScanParamsBuffers
-        ? (retainedParamsLease?.slot?.slotIndex ?? 0)
-        : 0
-    });
-    attachPreparedScanLease(retainedParamsLease, histogramScan, histogramScanEncoding);
+    const serialHistogramScanEnabled = resolvedSerialHistogramScanMaxElementCount > 0
+      && histogramElementCount > WEBGPU_SCAN_ELEMENTS_PER_WORKGROUP
+      && histogramElementCount <= resolvedSerialHistogramScanMaxElementCount;
+    const histogramScanEncoding = serialHistogramScanEnabled
+      ? null
+      : histogramScan.prepare({
+          inputBuffer: histogramBuffer,
+          outputBuffer: histogramOffsetsBuffer,
+          elementCount: histogramElementCount,
+          retainedParamsSlotIndex: retainVariableScanParamsBuffers
+            ? (retainedParamsLease?.slot?.slotIndex ?? 0)
+            : 0
+        });
+    if (histogramScanEncoding) {
+      attachPreparedScanLease(retainedParamsLease, histogramScan, histogramScanEncoding);
+    }
     const transientBuffers = [
       ...(params.transientBuffer ? [params.transientBuffer] : []),
-      ...histogramScanEncoding.transientBuffers
+      ...(histogramScanEncoding?.transientBuffers ?? [])
     ];
     const bindGroupTelemetry = { created: 0, reused: 0 };
 
@@ -1653,6 +1713,23 @@ export function createWebGpuStableRadixScanUnique(device, {
       initializeEntries,
       bindGroupTelemetry
     );
+    const serialHistogramScanBindGroup = serialHistogramScanEnabled
+      ? retainedBindGroup(
+          retainedParamsLease?.slot,
+          'radix-serial-histogram-scan',
+          pipelines.serialHistogramScan,
+          `${label}-serial-histogram-scan-bind-group`,
+          [
+            { binding: 0, resource: { buffer: histogramBuffer } },
+            { binding: 1, resource: { buffer: histogramOffsetsBuffer } },
+            {
+              binding: 2,
+              resource: { buffer: paramsBuffer, offset: paramsBaseOffset, size: 32 }
+            }
+          ],
+          bindGroupTelemetry
+        )
+      : null;
     let input = sortedIndicesA;
     let output = sortedIndicesB;
     let passIndex = 0;
@@ -1753,13 +1830,36 @@ export function createWebGpuStableRadixScanUnique(device, {
         );
       }
 
-      histogramScan.encodePrepared(encoder, histogramScanEncoding, {
-        timestampProfiler,
-        timestampMetadata: commandMetadata,
-        labelPrefix: `${label}RadixHistogram`,
-        computePass: groupedPass,
-        dispatchIndirectProvider
-      });
+      if (serialHistogramScanEnabled) {
+        if (timestampActive) {
+          encodeProfiledComputeDispatch(
+            encoder,
+            timestampProfiler,
+            `${label}RadixHistogramSerialScan`,
+            commandMetadata,
+            pipelines.serialHistogramScan,
+            serialHistogramScanBindGroup,
+            [1, 1, 1],
+            dispatchIndirectProvider
+          );
+        } else {
+          encodeComputeDispatch(
+            groupedPass,
+            pipelines.serialHistogramScan,
+            serialHistogramScanBindGroup,
+            [1, 1, 1],
+            dispatchIndirectProvider
+          );
+        }
+      } else {
+        histogramScan.encodePrepared(encoder, histogramScanEncoding, {
+          timestampProfiler,
+          timestampMetadata: commandMetadata,
+          labelPrefix: `${label}RadixHistogram`,
+          computePass: groupedPass,
+          dispatchIndirectProvider
+        });
+      }
 
       if (timestampActive) {
         encodeProfiledComputeDispatch(
@@ -1793,21 +1893,26 @@ export function createWebGpuStableRadixScanUnique(device, {
       passCount: passIndex,
       sortedIndicesBuffer: input,
       histogramElementCount,
-      encodedDispatchCount: 1 + passIndex * (
-        2 + histogramScanEncoding.encodedDispatchCount
-      ),
+      histogramScanMode: serialHistogramScanEnabled ? 'serial-small' : 'parallel-scan',
+      encodedDispatchCount: 1 + passIndex * (serialHistogramScanEnabled
+        ? 3
+        : 2 + histogramScanEncoding.encodedDispatchCount),
       encodedComputePassCount: timestampActive
-        ? 1 + passIndex * (2 + histogramScanEncoding.encodedDispatchCount)
+        ? 1 + passIndex * (serialHistogramScanEnabled
+            ? 3
+            : 2 + histogramScanEncoding.encodedDispatchCount)
         : 1,
       bindGroupCreationCount: bindGroupTelemetry.created
-        + histogramScanEncoding.bindGroupCreationCount,
+        + (histogramScanEncoding?.bindGroupCreationCount ?? 0),
       bindGroupReuseCount: bindGroupTelemetry.reused
-        + Math.max(
-          0,
-          passIndex - (histogramScanEncoding.preparedScanCacheHit ? 0 : 1)
-        ) * histogramScanEncoding.encodedDispatchCount,
+        + (serialHistogramScanEnabled
+          ? Math.max(0, passIndex - 1)
+          : Math.max(
+              0,
+              passIndex - (histogramScanEncoding.preparedScanCacheHit ? 0 : 1)
+            ) * histogramScanEncoding.encodedDispatchCount),
       paramsBufferCreationCount: params.transientBuffer ? 1 : 0,
-      paramsWriteCount: 1 + (histogramScanEncoding.paramsWriteCount ?? 0),
+      paramsWriteCount: 1 + (histogramScanEncoding?.paramsWriteCount ?? 0),
       paramsSlotIndex: params.paramsSlotIndex,
       paramsBufferResidency: params.paramsBufferResidency,
       readbackPerformed: false,
@@ -2146,6 +2251,7 @@ export function createWebGpuStableRadixScanUnique(device, {
       + headScan.pipelineCount,
     maxElementCount: resolvedMaxElementCount,
     maxKeyWordCount: resolvedMaxKeyWordCount,
+    serialHistogramScanMaxElementCount: resolvedSerialHistogramScanMaxElementCount,
     retainedParamsSlotCount: resolvedRetainedParamsSlotCount,
     variableRetainedScanCounts: retainControlParams && retainVariableScanParamsBuffers === true,
     paramsOffsetAlignment,
@@ -2178,16 +2284,54 @@ export function createWebGpuStableRadixScanUnique(device, {
         ? acquireRetainedParamsSlot(args.retainedParamsSlotIndex)
         : null;
       try {
+        const gpuTimestampRecorder = args.gpuTimestampRecorder ?? null;
+        const sortTimestampProducerId = typeof args.sortTimestampProducerId === 'string'
+          && args.sortTimestampProducerId.trim()
+          ? args.sortTimestampProducerId.trim()
+          : 'webgpu-stable-radix-sort';
+        const uniqueTimestampProducerId = typeof args.uniqueTimestampProducerId === 'string'
+          && args.uniqueTimestampProducerId.trim()
+          ? args.uniqueTimestampProducerId.trim()
+          : 'webgpu-sorted-unique';
+        const sortTimestampSpan = gpuTimestampRecorder?.active === true
+          && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+          ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+              producerId: sortTimestampProducerId,
+              stage: 'sort',
+              spanClass: 'same-grouped-production-compute-pass',
+              ...(args.timestampMetadata || {}),
+              elementCount: Number(args.elementCount) || 0,
+              keyWordCount: Number(args.keyWordCount) || 0
+            })
+          : null;
         const sorted = encodeSortInternal(encoder, args, lease);
+        if (sortTimestampSpan) {
+          gpuTimestampRecorder.endEncoderSpan(encoder, sortTimestampSpan);
+        }
+        const uniqueTimestampSpan = gpuTimestampRecorder?.active === true
+          && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+          ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+              producerId: uniqueTimestampProducerId,
+              stage: 'unique',
+              spanClass: 'same-grouped-production-compute-pass',
+              ...(args.timestampMetadata || {}),
+              elementCount: Number(args.elementCount) || 0,
+              keyWordCount: Number(args.keyWordCount) || 0
+            })
+          : null;
         const unique = encodeUniqueInternal(encoder, {
           ...args,
           sortedIndicesBuffer: sorted.sortedIndicesBuffer
         }, lease);
+        if (uniqueTimestampSpan) {
+          gpuTimestampRecorder.endEncoderSpan(encoder, uniqueTimestampSpan);
+        }
         const execution = {
           ...unique,
           status: 'webgpu-stable-radix-sort-unique-csr-encoded',
           radixPassCount: sorted.passCount ?? 0,
           histogramElementCount: sorted.histogramElementCount ?? 0,
+          histogramScanMode: sorted.histogramScanMode ?? 'none',
           encodedDispatchCount: (sorted.encodedDispatchCount ?? 0)
             + (unique.encodedDispatchCount ?? 0),
           encodedComputePassCount: (sorted.encodedComputePassCount ?? 0)

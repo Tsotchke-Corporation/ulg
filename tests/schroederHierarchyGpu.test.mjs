@@ -110,7 +110,11 @@ import {
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
-  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+  ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
   SCHROEDER_ACTIVE_NODE_FLOATS,
@@ -289,6 +293,8 @@ import {
   runSchroederPhaseVolumeSplitMergeProposalWebGpu,
   runSchroederPhaseVolumeTargetAggregateWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
+  createSchroederHierarchyArtifactRetirementFence,
+  createSchroederTwoLevelCanonicalEpochController,
   schroederParticleStorageAllocatorAdmissionAllowsApplication,
   schroederParticleStorageMaterializationAdmissionAllowsApplication,
   schroederParticleStorageSlotAssignmentAdmissionAllowsApplication,
@@ -303,18 +309,51 @@ import {
 import { MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } from '../src/runtime/sph/sphGpuBuffers.js';
 import { webGpuDeviceId } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  buildSphThermalMaterialTable
+} from '../src/runtime/sph/sphThermalGpuKernel.js';
+import {
+  createReferenceMaterialClosures
+} from '../src/runtime/material/materialClosures.js';
+import {
   SCHROEDER_SPATIAL_EPOCH_READER,
   SCHROEDER_SPATIAL_EPOCH_READER_PHASE,
   admitSchroederSpatialEpochTransactionReader,
+  createSchroederSpatialEpochTransaction,
   sealSchroederSpatialEpochTransactionReaders,
   summarizeSchroederSpatialEpochTransaction
 } from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
+import {
+  runSchroederSpatialEpochGenerationWithBackpressureWebGpu,
+  runSchroederSpatialEpochGenerationWebGpu
+} from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import {
+  runSchroederSpatialMechanicalProposalWebGpu
+} from '../src/runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
 import {
   schroederLevelAssignmentWgsl,
   schroederParticleStorageMaterializationWgsl,
   schroederPhaseVolumeMigrationWgsl,
   schroederPhaseVolumeTargetAggregateWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
+
+const referenceMaterialClosures = createReferenceMaterialClosures();
+const canonicalSidecarThermalMaterialTable = buildSphThermalMaterialTable({
+  h2o: referenceMaterialClosures.h2o.properties
+});
+
+function canonicalSidecarReactionTable() {
+  const records = new Float32Array([
+    1, 2, 3, 900,
+    -1000, 0.35, 1, 2,
+    1, 0, 0, 0
+  ]);
+  return {
+    schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+    reactionCount: 1,
+    records,
+    combinedRecords: records
+  };
+}
 
 function manualBuffers({
   particleCount = 1,
@@ -418,12 +457,16 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
     },
     createCommandEncoder() {
       return {
+        clearBuffer() {},
         beginComputePass() {
           return {
             setPipeline() {},
             setBindGroup() {},
             dispatchWorkgroups(x, y = 1, z = 1) {
               dispatches.push([x, y, z]);
+            },
+            dispatchWorkgroupsIndirect() {
+              dispatches.push(['indirect']);
             },
             end() {}
           };
@@ -449,6 +492,287 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
         return undefined;
       }
     }
+  };
+}
+
+function authoritativeUploadFamily(device, {
+  particleCount,
+  storageGeneration = 1,
+  physicsTick = 0,
+  physicsSubstep = 0,
+  positionEpoch = 0,
+  topologyEpoch = 0,
+  chartEpoch = 0,
+  levelEpoch = 0,
+  supportEpoch = 0,
+  slot = 0,
+  prefix = 'authoritative-source'
+} = {}) {
+  const stateStrideBytes = 8 * Float32Array.BYTES_PER_ELEMENT;
+  const thermoStrideBytes = 12 * Float32Array.BYTES_PER_ELEMENT;
+  const mechanicsStrideBytes =
+    MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+    * Float32Array.BYTES_PER_ELEMENT;
+  const identityStrideBytes = Uint32Array.BYTES_PER_ELEMENT;
+  const stateBuffer = device.createBuffer({
+    label: `${prefix}-state`,
+    size: particleCount * stateStrideBytes,
+    usage: 128
+  });
+  const thermoBuffer = device.createBuffer({
+    label: `${prefix}-thermo`,
+    size: particleCount * thermoStrideBytes,
+    usage: 128
+  });
+  const identityBuffer = device.createBuffer({
+    label: `${prefix}-identity`,
+    size: particleCount * identityStrideBytes,
+    usage: 128
+  });
+  const mechanicsBuffer = device.createBuffer({
+    label: `${prefix}-mechanics`,
+    size: particleCount * mechanicsStrideBytes,
+    usage: 128
+  });
+  const epoch = {
+    storageGeneration,
+    bufferFamilyGeneration: storageGeneration,
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch
+  };
+  return {
+    sphParticleUpload: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+      status: 'webgpu-uploaded',
+      particleCount,
+      ...epoch,
+      stateStrideBytes,
+      thermoStrideBytes,
+      stateBufferByteLength: stateBuffer.size,
+      thermoBufferByteLength: thermoBuffer.size,
+      identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+      identityStrideBytes,
+      identityBufferByteLength: identityBuffer.size,
+      identityRequired: true,
+      stateBuffer,
+      thermoBuffer,
+      identityBuffer,
+      ownsStateBuffer: true,
+      ownsThermoBuffer: true,
+      ownsIdentityBuffer: true,
+      slot,
+      sourceSlot: slot,
+      nextSlot: slot === 0 ? 1 : 0,
+      step: physicsTick,
+      time: 0
+    },
+    mlsMpmParticleUpload: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+      status: 'webgpu-uploaded',
+      particleCount,
+      ...epoch,
+      mechanicsStrideBytes,
+      mechanicsBufferByteLength: mechanicsBuffer.size,
+      mechanicsBuffer,
+      ownsMechanicsBuffer: true,
+      slot,
+      sourceSlot: slot,
+      nextSlot: slot === 0 ? 1 : 0,
+      step: physicsTick,
+      time: 0
+    }
+  };
+}
+
+async function driveAuthoritativeCanonicalEpochs(options, {
+  prefix = 'authoritative-two-level',
+  terminalOwnsThermoBuffer = false
+} = {}) {
+  const controller = options.canonicalEpochController;
+  assert.ok(controller, 'authoritative runner must receive the canonical epoch controller');
+  let epoch = controller.initialEpoch;
+  let finalInternalUploads = null;
+  let postMechanicsEpoch = null;
+  for (let ordinal = 0; ordinal < 3; ordinal += 1) {
+    controller.admitP2g(epoch);
+    controller.admitG2p(epoch);
+    const sourceSph = epoch.sphParticleUpload;
+    const sourceMls = epoch.mlsMpmParticleUpload;
+    const nextSlot = (sourceSph.slot ?? 0) === 0 ? 1 : 0;
+    const nextStorageGeneration = sourceSph.storageGeneration + 1;
+    const nextPhysicsSubstep = epoch.generation.execution.physicsSubstep + 1;
+    const nextPositionEpoch = epoch.generation.execution.positionEpoch + 1;
+    const stateBuffer = options.device.createBuffer({
+      label: `${prefix}-state-${ordinal}`,
+      size: sourceSph.stateBufferByteLength,
+      usage: 128
+    });
+    const mechanicsBuffer = options.device.createBuffer({
+      label: `${prefix}-mechanics-${ordinal}`,
+      size: sourceMls.mechanicsBufferByteLength,
+      usage: 128
+    });
+    const commonEpoch = {
+      storageGeneration: nextStorageGeneration,
+      bufferFamilyGeneration: nextStorageGeneration,
+      bufferFamilyGenerationStatus:
+        'schroeder-two-level-substep-buffer-family-generation-advanced',
+      physicsTick: epoch.generation.execution.physicsTick,
+      physicsSubstep: nextPhysicsSubstep,
+      positionEpoch: nextPositionEpoch,
+      topologyEpoch: epoch.generation.execution.topologyEpoch,
+      chartEpoch: epoch.generation.execution.chartEpoch,
+      levelEpoch: epoch.generation.execution.levelEpoch,
+      supportEpoch: epoch.generation.execution.supportEpoch
+    };
+    finalInternalUploads = {
+      sphParticleUpload: {
+        ...sourceSph,
+        ...commonEpoch,
+        stateBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: ordinal === 2
+          ? terminalOwnsThermoBuffer
+          : false,
+        ownsIdentityBuffer: false,
+        slot: nextSlot,
+        sourceSlot: sourceSph.slot ?? 0,
+        nextSlot,
+        time: (sourceSph.time ?? 0) + (ordinal < 2 ? options.dt / 2 : 0)
+      },
+      mlsMpmParticleUpload: {
+        ...sourceMls,
+        ...commonEpoch,
+        mechanicsBuffer,
+        ownsMechanicsBuffer: true,
+        slot: nextSlot,
+        sourceSlot: sourceMls.slot ?? 0,
+        nextSlot,
+        time: (sourceMls.time ?? 0) + (ordinal < 2 ? options.dt / 2 : 0)
+      }
+    };
+    controller.commitAndRelease(epoch, {
+      nextParticleUploads: finalInternalUploads,
+      // E_r is always private. Even when no optional sidecar readers are
+      // enabled, the terminal S* family must be reclassified once at the
+      // macro boundary and committed through one public E* transaction.
+      terminal: ordinal === 2,
+      status: ordinal === 2
+        ? 'test-final-coarse-state-submitted'
+        : `test-fine-substep-${ordinal}-submitted`
+    });
+    if (ordinal < 2) {
+      const priorEpoch = epoch;
+      epoch = await controller.refresh({
+        priorEpoch,
+        currentSphParticleUpload: finalInternalUploads.sphParticleUpload,
+        currentMlsMpmParticleUpload: finalInternalUploads.mlsMpmParticleUpload
+      });
+      const priorFineField =
+        priorEpoch.generation.parentFieldView?.fineFieldView;
+      if (priorFineField?.ownerRuntime?.releaseExecutionAfter) {
+        assert.equal(
+          await priorFineField.ownerRuntime.releaseExecutionAfter(
+            priorFineField
+          ),
+          true
+        );
+      } else if (priorFineField) {
+        // Narrow dependency-injection seam for unit fixtures that provide a
+        // structurally exact generation without a live field runtime.
+        priorFineField.released = true;
+      }
+      controller.releaseFusedPriorEpochAfterSuccessor(priorEpoch, {
+        successorEpoch: epoch
+      });
+    }
+  }
+  postMechanicsEpoch = await controller.refreshForPostMechanics({
+    priorEpoch: epoch,
+    currentSphParticleUpload: finalInternalUploads.sphParticleUpload,
+    currentMlsMpmParticleUpload: finalInternalUploads.mlsMpmParticleUpload,
+    enabledConsumerReaderIds: options.postMechanicsConsumerReaderIds,
+    consumerSupportProfileIds:
+      options.postMechanicsConsumerSupportProfileIds
+  });
+  const sourceSlot = options.sphParticleUpload.slot ?? 0;
+  const nextSlot = sourceSlot === 0 ? 1 : 0;
+  const nextStep = (options.sphParticleState.step ?? 0) + 1;
+  const nextTime = (options.sphParticleState.time ?? 0) + options.dt;
+  const nextParticleUploads = {
+    sphParticleUpload: {
+      ...finalInternalUploads.sphParticleUpload,
+      sourceStage: 'schroeder-two-level-mechanics-step',
+      physicsTick: nextStep,
+      physicsSubstep: 0,
+      slot: nextSlot,
+      sourceSlot,
+      nextSlot,
+      step: nextStep,
+      time: nextTime
+    },
+    mlsMpmParticleUpload: {
+      ...finalInternalUploads.mlsMpmParticleUpload,
+      sourceStage: 'schroeder-two-level-mechanics-step',
+      physicsTick: nextStep,
+      physicsSubstep: 0,
+      slot: nextSlot,
+      sourceSlot,
+      nextSlot,
+      step: nextStep,
+      time: nextTime
+    }
+  };
+  return {
+    schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
+    status: 'schroeder-two-level-mechanics-step-submitted',
+    backend: 'webgpu',
+    readbackMode: 'no-full-readback',
+    normalHotLoopReadbackFree: true,
+    couplingMode: 'composite-grid-subcycled-delta-prolongation',
+    fineLevel: options.fineLevel,
+    coarseLevel: options.fineLevel + 1,
+    fineSubstepCount: options.fineSubstepCount,
+    fineSubstepDt: options.dt / options.fineSubstepCount,
+    internalPressureScale: options.internalPressureScale,
+    ambientPressurePa: options.ambientPressurePa,
+    ambientPressureAppliedInStressProjection: true,
+    fineGridSpacingM: options.baseGridSpacingM,
+    coarseGridSpacingM: options.baseGridSpacingM * 2,
+    conservation: { massResidualKg: 0 },
+    compactSummary: { compactGpuSummaryAvailable: true },
+    stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+    mechanicsBuffer: nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+    nextSphParticleState: {
+      ...options.sphParticleState,
+      status: 'gpu-resident-unread-ready',
+      step: nextStep,
+      time: nextTime,
+      physicsTick: nextStep,
+      physicsSubstep: 0
+    },
+    nextMlsMpmParticleState: {
+      ...options.mlsMpmParticleState,
+      status: 'gpu-resident-unread-ready',
+      step: nextStep,
+      time: nextTime,
+      physicsTick: nextStep,
+      physicsSubstep: 0
+    },
+    nextParticleUploads,
+    postMechanicsEpoch,
+    postMechanicsCanonicalUploads: Object.freeze({
+      sphParticleUpload: postMechanicsEpoch.sphParticleUpload,
+      mlsMpmParticleUpload: postMechanicsEpoch.mlsMpmParticleUpload
+    }),
+    canonicalEpochControllerSummary: controller.summary()
   };
 }
 
@@ -6967,6 +7291,11 @@ test('Schroeder same-level mechanics releases an owned spatial generation when t
 
   assert.equal(spatialGenerationCalls.length, 1);
   assert.ok(spatialGenerationCalls[0].levelAssignment.assignmentBuffer);
+  assert.equal(
+    spatialGenerationCalls[0].particleBufferSet,
+    null,
+    'single-level generations must not build the authoritative two-level aggregate view'
+  );
   assert.ok(capturedTransaction);
   const transactionSummary =
     summarizeSchroederSpatialEpochTransaction(capturedTransaction);
@@ -9789,6 +10118,7 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
     maxLevel: 6,
     enableTwoLevelMechanics: true,
     twoLevelFineSubstepCount: 2,
+    twoLevelConservationSummaryReadback: true,
     twoLevelMechanicsRunner,
     residentStepRunner,
     residentStepOptions: {
@@ -9842,49 +10172,24 @@ test('Schroeder same-level mechanics leaves two-level mode off by default', asyn
   assert.equal(result.twoLevelMechanics, null);
 });
 
-test('Schroeder same-level mechanics makes the two-level step authoritative without building an unused spatial directory', async () => {
+test('Schroeder two-level authority builds one canonical generation with two compact level views', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
   const residentCalls = [];
-  const spatialGenerationCalls = [];
-  const envelopeUploads = {
-    sphParticleUpload: {
-      status: 'webgpu-uploaded',
-      stateBuffer: { label: 'two-level-state-out' },
-      thermoBuffer: { label: 'two-level-thermo' },
-      particleCount: 3,
-      slot: 0
-    },
-    mlsMpmParticleUpload: {
-      status: 'webgpu-uploaded',
-      mechanicsBuffer: { label: 'two-level-mechanics-out' },
-      particleCount: 3,
-      slot: 0
-    }
+  let coupledResult = null;
+  let initialAggregateView = null;
+  const twoLevelMechanicsRunner = async (options) => {
+    initialAggregateView =
+      options.canonicalEpochController.initialEpoch.generation.aggregateView;
+    coupledResult = await driveAuthoritativeCanonicalEpochs(options);
+    return coupledResult;
   };
-  const twoLevelMechanicsRunner = async (options) => ({
-    schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
-    status: 'schroeder-two-level-mechanics-step-submitted',
-    couplingMode: 'composite-grid-subcycled-delta-prolongation',
-    fineLevel: options.fineLevel,
-    coarseLevel: options.fineLevel + 1,
-    fineSubstepCount: options.fineSubstepCount,
-    fineSubstepDt: options.dt / options.fineSubstepCount,
-    internalPressureScale: options.internalPressureScale,
-    ambientPressurePa: options.ambientPressurePa,
-    fineGridSpacingM: 0.25,
-    coarseGridSpacingM: 0.5,
-    conservation: { massResidualKg: 0 },
-    conservativeTransferStatus: 'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation',
-    retainOutputParticleBuffersRequested: options.retainOutputParticleBuffers === true,
-    nextSphParticleState: { step: 1, time: 5e-4 },
-    nextMlsMpmParticleState: { step: 1, time: 5e-4 },
-    nextParticleUploads: envelopeUploads
-  });
 
   const result = await runSchroederSameLevelMechanicsWebGpu({
     device,
     ...buffers,
+    ...uploads,
     selectedLevel: 0,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
@@ -9892,10 +10197,6 @@ test('Schroeder same-level mechanics makes the two-level step authoritative with
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
     twoLevelMechanicsRunner,
-    spatialEpochGenerationRunner: async (options) => {
-      spatialGenerationCalls.push(options);
-      return { selected: true, directoryBuildCount: 1 };
-    },
     residentStepOptions: {
       internalPressureScale: 0.75,
       ambientPressurePa: 101325
@@ -9909,14 +10210,19 @@ test('Schroeder same-level mechanics makes the two-level step authoritative with
   // The resident runner is replaced entirely; the synthesized step exposes
   // the scene-consumed envelope fields from the two-level outputs.
   assert.equal(residentCalls.length, 0);
-  assert.equal(spatialGenerationCalls.length, 0);
-  assert.equal(result.spatialEpochGeneration, null);
-  assert.equal(result.spatialEpochGenerationDirectoryBuildCount, 0);
-  assert.equal(result.spatialEpochGenerationReleaseScheduled, false);
-  assert.equal(result.spatialEpochTransactionMounted, false);
+  assert.equal(result.spatialEpochGeneration.selected, true);
+  assert.equal(result.spatialEpochGenerationDirectoryBuildCount, 1);
+  assert.equal(result.spatialEpochGeneration.mechanicsLevelCount, 2);
+  assert.deepEqual(result.spatialEpochGeneration.mechanicsLevels, [0, 1]);
+  assert.ok(
+    initialAggregateView,
+    'authoritative two-level generations retain their transaction-owned aggregate view'
+  );
+  assert.equal(result.spatialEpochGenerationReleaseScheduled, true);
+  assert.equal(result.spatialEpochTransactionMounted, true);
   assert.equal(
     result.spatialEpochTransactionStatus,
-    'schroeder-spatial-epoch-transaction-unsupported-two-level-authority'
+    'schroeder-spatial-epoch-transaction-released'
   );
   assert.equal(
     result.spatialEpochConsumerStatus,
@@ -9927,10 +10233,15 @@ test('Schroeder same-level mechanics makes the two-level step authoritative with
   assert.equal(step.backend, 'webgpu');
   assert.equal(step.readbackMode, 'no-full-readback');
   assert.equal(step.twoLevelMechanicsAuthority, 'authoritative');
+  assert.equal(step.twoLevelMechanicsStatus,
+    'schroeder-two-level-mechanics-step-submitted');
+  assert.equal(step.twoLevelFineSubstepCount, 2);
+  assert.equal(step.twoLevelAuthoritativeCommitVerified, true);
   assert.equal(step.internalPressureScale, 0.75);
   assert.equal(step.ambientPressurePa, 101325);
-  assert.equal(step.sidecars, 'none-two-level-mechanics-only');
-  assert.equal(step.nextParticleUploads, envelopeUploads);
+  assert.equal(step.sidecars, 'shared-post-mechanics-closure');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.schema,
+    ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA);
   assert.equal(step.particlePingPong.nextStep, 1);
   assert.equal(step.particlePingPong.nextTime, 5e-4);
   assert.equal(step.particlePingPong.nextSlot, 1);
@@ -9940,48 +10251,599 @@ test('Schroeder same-level mechanics makes the two-level step authoritative with
   );
   assert.equal(result.twoLevelMechanics.internalPressureScale, 0.75);
   assert.equal(result.twoLevelMechanics.ambientPressurePa, 101325);
+  assert.equal(
+    result.twoLevelMechanics.canonicalEpochControllerSummary.epochCount,
+    4
+  );
+  assert.equal(
+    step.publicAggregateTraversalReceipt.querySourceLayout,
+    'schroeder-level-assignment-v0'
+  );
+  assert.equal(
+    step.publicAggregateTraversalReceipt
+      .canonicalQueryProvenanceAuthenticated,
+    true
+  );
+  assert.equal(
+    step.publicAggregateTraversalReceipt.submissionAuthenticated,
+    true
+  );
+  assert.equal(step.publicAggregateTraversalReceipt.resultAuthenticated, false);
+  assert.equal(
+    step.publicAggregateTraversalReceipt.authoritativeStateMutationCount,
+    0
+  );
+  assert.deepEqual(
+    summarizeSchroederSpatialEpochTransaction(
+      coupledResult.postMechanicsEpoch.transaction
+    ).consumerReceipts.map((receipt) => receipt.consumerId),
+    [SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE]
+  );
+  assert.equal(
+    await result.schroederTwoLevelAggregateTraversalRetirementPromise,
+    true
+  );
+});
+
+test('canonical epoch refresh retires an orphaned submitted assignment when the prior owner cannot publish a fence', async () => {
+  const device = createFakeWebGpuDevice();
+  const uploads = authoritativeUploadFamily(device, { particleCount: 2 });
+  const refreshedAssignment = {
+    physicsTick: 0,
+    physicsSubstep: 1,
+    submitPerformed: false,
+    releaseScheduled: false
+  };
+  let encodeCount = 0;
+  let releaseCount = 0;
+  const refreshRuntime = {
+    encode() {
+      encodeCount += 1;
+      return refreshedAssignment;
+    },
+    markExecutionSubmitted(execution) {
+      assert.equal(execution, refreshedAssignment);
+      execution.submitPerformed = true;
+      return true;
+    },
+    releaseAfterQueue(execution) {
+      assert.equal(execution, refreshedAssignment);
+      releaseCount += 1;
+      execution.releaseScheduled = true;
+      return Promise.resolve(true);
+    }
+  };
+  const initialGeneration = {
+    selected: true,
+    ready: true,
+    releaseScheduled: true,
+    releasePromise: null,
+    execution: {
+      generationId: 1,
+      physicsTick: 0,
+      physicsSubstep: 0,
+      positionEpoch: 0,
+      topologyEpoch: 0,
+      chartEpoch: 0,
+      levelEpoch: 0,
+      supportEpoch: 0
+    },
+    hierarchyView: {}
+  };
+  const controller = createSchroederTwoLevelCanonicalEpochController({
+    device,
+    initialGeneration,
+    initialLevelAssignment: {
+      physicsTick: 0,
+      physicsSubstep: 0
+    },
+    initialTransaction: { twoLevelAuthoritative: true },
+    sphParticleState: { particleCount: 2 },
+    mlsMpmParticleState: { particleCount: 2 },
+    initialSphParticleUpload: uploads.sphParticleUpload,
+    initialMlsMpmParticleUpload: uploads.mlsMpmParticleUpload,
+    fineLevel: 0,
+    fineMechanicsGrid: {
+      gridNodeCount: 64,
+      gridDims: [4, 4, 4],
+      gridShift: 1,
+      gridSpacingM: 0.25
+    },
+    coarseMechanicsGrid: {
+      gridNodeCount: 27,
+      gridDims: [3, 3, 3],
+      gridShift: 1,
+      gridSpacingM: 0.5
+    },
+    boxDimsM: [5, 5, 5],
+    refreshRuntime,
+    spatialEpochGenerationRunner: async () => {
+      throw new Error('generation must not run after prior release failure');
+    },
+    mechanicalProposalRunner: () => ({
+      releaseAfterSubmittedWork() { return true; },
+      releasePromise: Promise.resolve(true)
+    })
+  });
+  controller.initialEpoch.committed = true;
+  await assert.rejects(
+    controller.refresh({
+      priorEpoch: controller.initialEpoch,
+      currentSphParticleUpload: uploads.sphParticleUpload,
+      currentMlsMpmParticleUpload: uploads.mlsMpmParticleUpload
+    }),
+    (error) => {
+      assert.equal(error.code, 'ERR_SCHROEDER_TWO_LEVEL_GENERATION_RELEASE');
+      return true;
+    }
+  );
+  assert.equal(encodeCount, 1);
+  assert.equal(refreshedAssignment.submitPerformed, true);
+  assert.equal(refreshedAssignment.releaseScheduled, true);
+  assert.equal(releaseCount, 1);
+});
+
+test('canonical refresh preserves the submission error while one stable orphan retry recovers a rejected fence', async () => {
+  const device = createFakeWebGpuDevice();
+  const uploads = authoritativeUploadFamily(device, { particleCount: 2 });
+  const secondFence = {};
+  secondFence.promise = new Promise((resolve) => {
+    secondFence.resolve = resolve;
+  });
+  const refreshedAssignment = {
+    physicsTick: 0,
+    physicsSubstep: 1,
+    submitPerformed: false,
+    releaseScheduled: false
+  };
+  let uncertainMarkCount = 0;
+  let releaseAttemptCount = 0;
+  const refreshRuntime = {
+    encode() { return refreshedAssignment; },
+    markExecutionSubmitted() { return false; },
+    markExecutionSubmissionUncertain(execution) {
+      assert.equal(execution, refreshedAssignment);
+      uncertainMarkCount += 1;
+      execution.submitPerformed = true;
+      return true;
+    },
+    releaseAfterQueue(execution) {
+      assert.equal(execution, refreshedAssignment);
+      releaseAttemptCount += 1;
+      return releaseAttemptCount === 1
+        ? Promise.reject(new Error('first orphan retirement fence rejected'))
+        : secondFence.promise;
+    }
+  };
+  const controller = createSchroederTwoLevelCanonicalEpochController({
+    device,
+    initialGeneration: {
+      selected: true,
+      ready: true,
+      execution: { generationId: 1 },
+      hierarchyView: {}
+    },
+    initialLevelAssignment: { physicsTick: 0, physicsSubstep: 0 },
+    initialTransaction: { twoLevelAuthoritative: true },
+    sphParticleState: { particleCount: 2 },
+    mlsMpmParticleState: { particleCount: 2 },
+    initialSphParticleUpload: uploads.sphParticleUpload,
+    initialMlsMpmParticleUpload: uploads.mlsMpmParticleUpload,
+    fineLevel: 0,
+    fineMechanicsGrid: {
+      gridNodeCount: 64,
+      gridDims: [4, 4, 4],
+      gridShift: 1,
+      gridSpacingM: 0.25
+    },
+    coarseMechanicsGrid: {
+      gridNodeCount: 27,
+      gridDims: [3, 3, 3],
+      gridShift: 1,
+      gridSpacingM: 0.5
+    },
+    boxDimsM: [5, 5, 5],
+    refreshRuntime,
+    spatialEpochGenerationRunner: async () => {
+      throw new Error('generation must not run after uncertain submission');
+    },
+    mechanicalProposalRunner: () => ({
+      releaseAfterSubmittedWork() { return true; },
+      releasePromise: Promise.resolve(true)
+    })
+  });
+  controller.initialEpoch.committed = true;
+  let originatingError = null;
+  await assert.rejects(
+    controller.refresh({
+      priorEpoch: controller.initialEpoch,
+      currentSphParticleUpload: uploads.sphParticleUpload,
+      currentMlsMpmParticleUpload: uploads.mlsMpmParticleUpload
+    }),
+    (error) => {
+      originatingError = error;
+      assert.equal(
+        error.code,
+        'ERR_SCHROEDER_TWO_LEVEL_REFRESH_SUBMISSION_UNCERTAIN'
+      );
+      assert.equal(typeof error.schroederRefreshCleanupRecovery, 'function');
+      assert.match(
+        error.schroederRefreshCleanupError.message,
+        /first orphan retirement fence rejected/
+      );
+      return true;
+    }
+  );
+  assert.equal(uncertainMarkCount, 1);
+  assert.equal(releaseAttemptCount, 1);
+
+  const recoveryA = originatingError.schroederRefreshCleanupRecovery();
+  const recoveryB = originatingError.schroederRefreshCleanupRecovery();
+  assert.equal(recoveryA, recoveryB);
+  assert.equal(releaseAttemptCount, 2);
+  secondFence.resolve(true);
+  assert.equal(await recoveryA, true);
+  assert.equal(await recoveryB, true);
+  assert.equal(
+    await originatingError.schroederRefreshCleanupCompletionPromise,
+    true
+  );
+  assert.equal(controller.summary().refreshAttemptCount, 1);
+  assert.equal(controller.summary().activeRefreshAttemptCount, 0);
+});
+
+test('canonical refresh does not duplicate uncertain acknowledgement when mark throws after submission', async () => {
+  const device = createFakeWebGpuDevice();
+  const uploads = authoritativeUploadFamily(device, { particleCount: 2 });
+  const refreshedAssignment = {
+    physicsTick: 0,
+    physicsSubstep: 1,
+    submitPerformed: false,
+    releaseScheduled: false
+  };
+  const acknowledgementError = new Error(
+    'mark submitted threw after recording exact submission'
+  );
+  let uncertainMarkCount = 0;
+  let releaseAttemptCount = 0;
+  const refreshRuntime = {
+    encode() { return refreshedAssignment; },
+    markExecutionSubmitted(execution) {
+      execution.submitPerformed = true;
+      throw acknowledgementError;
+    },
+    markExecutionSubmissionUncertain() {
+      uncertainMarkCount += 1;
+      return true;
+    },
+    releaseAfterQueue(execution) {
+      assert.equal(execution, refreshedAssignment);
+      releaseAttemptCount += 1;
+      return Promise.resolve(true);
+    }
+  };
+  const controller = createSchroederTwoLevelCanonicalEpochController({
+    device,
+    initialGeneration: {
+      selected: true,
+      ready: true,
+      execution: { generationId: 1 },
+      hierarchyView: {}
+    },
+    initialLevelAssignment: { physicsTick: 0, physicsSubstep: 0 },
+    initialTransaction: { twoLevelAuthoritative: true },
+    sphParticleState: { particleCount: 2 },
+    mlsMpmParticleState: { particleCount: 2 },
+    initialSphParticleUpload: uploads.sphParticleUpload,
+    initialMlsMpmParticleUpload: uploads.mlsMpmParticleUpload,
+    fineLevel: 0,
+    fineMechanicsGrid: {
+      gridNodeCount: 64,
+      gridDims: [4, 4, 4],
+      gridShift: 1,
+      gridSpacingM: 0.25
+    },
+    coarseMechanicsGrid: {
+      gridNodeCount: 27,
+      gridDims: [3, 3, 3],
+      gridShift: 1,
+      gridSpacingM: 0.5
+    },
+    boxDimsM: [5, 5, 5],
+    refreshRuntime,
+    spatialEpochGenerationRunner: async () => {
+      throw new Error('generation must not run after acknowledgement failure');
+    },
+    mechanicalProposalRunner: () => ({
+      releaseAfterSubmittedWork() { return true; },
+      releasePromise: Promise.resolve(true)
+    })
+  });
+  controller.initialEpoch.committed = true;
+  await assert.rejects(
+    controller.refresh({
+      priorEpoch: controller.initialEpoch,
+      currentSphParticleUpload: uploads.sphParticleUpload,
+      currentMlsMpmParticleUpload: uploads.mlsMpmParticleUpload
+    }),
+    (error) => {
+      assert.equal(error, acknowledgementError);
+      assert.equal(typeof error.schroederRefreshCleanupRecovery, 'function');
+      return true;
+    }
+  );
+  assert.equal(uncertainMarkCount, 0);
+  assert.equal(releaseAttemptCount, 1);
+  assert.equal(controller.summary().activeRefreshAttemptCount, 0);
+});
+
+test('canonical controller loss supersedes a post-generation refresh orphan without a stale queue callback', async () => {
+  const device = createFakeWebGpuDevice();
+  let resolveDeviceLoss;
+  const deviceLoss = new Promise((resolve) => { resolveDeviceLoss = resolve; });
+  let rejectNormalFence;
+  const normalFence = new Promise((_, reject) => { rejectNormalFence = reject; });
+  normalFence.catch(() => {});
+  let fenceRequestCount = 0;
+  device.lost = deviceLoss;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceRequestCount += 1;
+    return normalFence;
+  };
+
+  const particleCount = 2;
+  const uploads = authoritativeUploadFamily(device, { particleCount });
+  const continuationBuffers = authoritativeUploadFamily(device, {
+    particleCount,
+    storageGeneration: 2,
+    physicsTick: 0,
+    physicsSubstep: 1,
+    positionEpoch: 1,
+    prefix: 'loss-refresh-continuation'
+  });
+  const nextUploads = {
+    sphParticleUpload: {
+      ...uploads.sphParticleUpload,
+      storageGeneration: 2,
+      bufferFamilyGeneration: 2,
+      physicsSubstep: 1,
+      positionEpoch: 1,
+      stateBuffer: continuationBuffers.sphParticleUpload.stateBuffer,
+      ownsStateBuffer: true,
+      ownsThermoBuffer: false,
+      ownsIdentityBuffer: false,
+      slot: 1,
+      sourceSlot: 0,
+      nextSlot: 1
+    },
+    mlsMpmParticleUpload: {
+      ...uploads.mlsMpmParticleUpload,
+      storageGeneration: 2,
+      bufferFamilyGeneration: 2,
+      physicsSubstep: 1,
+      positionEpoch: 1,
+      mechanicsBuffer:
+        continuationBuffers.mlsMpmParticleUpload.mechanicsBuffer,
+      ownsMechanicsBuffer: true,
+      slot: 1,
+      sourceSlot: 0,
+      nextSlot: 1
+    }
+  };
+  const assignmentBuffer = device.createBuffer({
+    label: 'loss-refresh-initial-assignment',
+    size: particleCount * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const initialLevelAssignment = {
+    schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount,
+    assignmentStrideFloats: 16,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignmentBuffer.size,
+    sourceStateBuffer: uploads.sphParticleUpload.stateBuffer,
+    sourceStateBufferBorrowed: true,
+    storageGeneration: 1,
+    bufferFamilyGeneration: 1,
+    physicsTick: 0,
+    physicsSubstep: 0,
+    positionEpoch: 0,
+    topologyEpoch: 0,
+    chartEpoch: 0,
+    levelEpoch: 0,
+    supportEpoch: 0,
+    minLevel: 0,
+    maxLevel: 1,
+    chartId: 0,
+    baseGridSpacingM: 0.25
+  };
+  const fineMechanicsGrid = {
+    gridNodeCount: 64,
+    gridDims: [4, 4, 4],
+    gridShift: 1,
+    gridSpacingM: 0.25
+  };
+  const coarseMechanicsGrid = {
+    gridNodeCount: 27,
+    gridDims: [3, 3, 3],
+    gridShift: 1,
+    gridSpacingM: 0.5
+  };
+  const initialGeneration = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment: initialLevelAssignment,
+    particleCount,
+    particleIdentityBuffer: uploads.sphParticleUpload.identityBuffer,
+    particleIdentityStrideWords: 1,
+    particleBufferSet: uploads.sphParticleUpload,
+    mechanicsLevels: [
+      { selectedLevel: 0, mechanicsGrid: fineMechanicsGrid },
+      { selectedLevel: 1, mechanicsGrid: coarseMechanicsGrid }
+    ]
+  });
+  assert.equal(initialGeneration.selected, true);
+  const initialTransaction = createSchroederSpatialEpochTransaction({
+    device,
+    generation: initialGeneration,
+    sphParticleUpload: uploads.sphParticleUpload,
+    mlsMpmParticleUpload: uploads.mlsMpmParticleUpload,
+    twoLevelAuthoritative: true,
+    enabledConsumerReaderIds: [],
+    consumerSupportProfileIds: {}
+  });
+  let failedGeneration = null;
+  const controller = createSchroederTwoLevelCanonicalEpochController({
+    device,
+    initialGeneration,
+    initialLevelAssignment,
+    initialTransaction,
+    sphParticleState: { particleCount },
+    mlsMpmParticleState: { particleCount },
+    initialSphParticleUpload: uploads.sphParticleUpload,
+    initialMlsMpmParticleUpload: uploads.mlsMpmParticleUpload,
+    fineLevel: 0,
+    fineMechanicsGrid,
+    coarseMechanicsGrid,
+    boxDimsM: [1, 1, 1],
+    mechanicsEpochMode: 'fused-private-mechanics',
+    spatialEpochGenerationRunner: async (options) => {
+      failedGeneration = await
+        runSchroederSpatialEpochGenerationWithBackpressureWebGpu(options);
+      // Fail only after the exact generation owner exists. The refresh orphan
+      // ledger must retire this branded generation plus its assignment.
+      failedGeneration.mechanicsLevelCount = 1;
+      return failedGeneration;
+    }
+  });
+  controller.admitP2g(controller.initialEpoch);
+  controller.admitG2p(controller.initialEpoch);
+  controller.commitAndRelease(controller.initialEpoch, {
+    nextParticleUploads: nextUploads,
+    terminal: false,
+    status: 'loss-refresh-private-continuation'
+  });
+
+  const refreshOutcome = controller.refresh({
+    priorEpoch: controller.initialEpoch,
+    currentSphParticleUpload: nextUploads.sphParticleUpload,
+    currentMlsMpmParticleUpload: nextUploads.mlsMpmParticleUpload
+  }).then(
+    () => null,
+    (error) => error
+  );
+  await Promise.race([
+    (async () => {
+      while (!failedGeneration || fenceRequestCount < 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    })(),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('refresh orphan did not reach owner retirement')),
+      750
+    ))
+  ]);
+  const fenceCountBeforeLoss = fenceRequestCount;
+  let abortSettled = false;
+  const abort = controller.abortAllAfter(
+    new Error('controller loss superseded refresh orphan'),
+    {
+      mechanicsRetirement: Promise.resolve(true),
+      deviceLost: true
+    }
+  ).then((retired) => {
+    abortSettled = true;
+    return retired;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(abortSettled, false);
+  assert.equal(fenceRequestCount, fenceCountBeforeLoss);
+
+  resolveDeviceLoss({ reason: 'destroyed', message: 'refresh orphan loss' });
+  assert.equal(await Promise.race([
+    abort,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('controller loss cleanup did not complete')),
+      750
+    ))
+  ]), true);
+  const refreshError = await refreshOutcome;
+  assert.equal(refreshError.code, 'ERR_SCHROEDER_TWO_LEVEL_REFRESHED_GENERATION');
+  assert.equal(controller.summary().activeRefreshAttemptCount, 0);
+  assert.match(controller.summary().status, /cleanup-complete$/);
+  assert.equal(initialTransaction.state, 'aborted');
+  assert.equal(failedGeneration.releaseStatus,
+    'spatial-epoch-generation-device-loss-retired');
+  assert.equal(fenceRequestCount, fenceCountBeforeLoss);
+
+  rejectNormalFence(new Error('stale normal refresh fence after loss'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(initialTransaction.state, 'aborted');
+  assert.equal(failedGeneration.releaseStatus,
+    'spatial-epoch-generation-device-loss-retired');
+  assert.equal(fenceRequestCount, fenceCountBeforeLoss);
+  for (const buffer of [
+    uploads.sphParticleUpload.stateBuffer,
+    uploads.sphParticleUpload.thermoBuffer,
+    uploads.sphParticleUpload.identityBuffer,
+    uploads.mlsMpmParticleUpload.mechanicsBuffer,
+    nextUploads.sphParticleUpload.stateBuffer,
+    nextUploads.mlsMpmParticleUpload.mechanicsBuffer,
+    assignmentBuffer
+  ]) {
+    assert.equal(buffer.destroyCount, 0);
+  }
+});
+
+test('hierarchy artifact retirement waits for full controller completion and a fresh final fence', async () => {
+  let resolveController;
+  let resolveFinalFence;
+  const controllerCompletion = new Promise((resolve) => {
+    resolveController = resolve;
+  });
+  const finalFence = new Promise((resolve) => {
+    resolveFinalFence = resolve;
+  });
+  let finalFenceRequestCount = 0;
+  let settled = false;
+  const retirementFence = createSchroederHierarchyArtifactRetirementFence({
+    device: {
+      queue: {
+        onSubmittedWorkDone() {
+          finalFenceRequestCount += 1;
+          return finalFence;
+        }
+      }
+    },
+    ownerCompletion: controllerCompletion,
+    requirePostControllerQueueFence: true
+  });
+  retirementFence.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(finalFenceRequestCount, 0);
+  assert.equal(settled, false);
+  resolveController(true);
+  await Promise.resolve();
+  assert.equal(finalFenceRequestCount, 1);
+  assert.equal(settled, false);
+  resolveFinalFence();
+  assert.equal(await retirementFence, true);
+  assert.equal(settled, true);
 });
 
 test('Schroeder two-level authoritative mode adopts admitted merged storage over the coupled outputs', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
-  const fakeBuffer = (label) => ({ label, destroy() {} });
-  const envelopeUploads = {
-    sphParticleUpload: {
-      status: 'webgpu-uploaded',
-      stateBuffer: { label: 'two-level-state-out' },
-      thermoBuffer: { label: 'two-level-thermo' },
-      particleCount: 3,
-      slot: 0
-    },
-    mlsMpmParticleUpload: {
-      status: 'webgpu-uploaded',
-      mechanicsBuffer: { label: 'two-level-mechanics-out' },
-      particleCount: 3,
-      slot: 0
-    }
-  };
-  let twoLevelOutputsDestroyed = 0;
-  const twoLevelMechanicsRunner = async (options) => ({
-    schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
-    status: 'schroeder-two-level-mechanics-step-submitted',
-    couplingMode: 'composite-grid-subcycled-delta-prolongation',
-    fineLevel: options.fineLevel,
-    coarseLevel: options.fineLevel + 1,
-    fineSubstepCount: options.fineSubstepCount,
-    fineSubstepDt: options.dt / options.fineSubstepCount,
-    fineGridSpacingM: 0.25,
-    coarseGridSpacingM: 0.5,
-    conservation: { massResidualKg: 0 },
-    conservativeTransferStatus: 'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation',
-    nextSphParticleState: { step: 1, time: 5e-4, particleCount: 3 },
-    nextMlsMpmParticleState: { step: 1, time: 5e-4, particleCount: 3 },
-    nextParticleUploads: envelopeUploads,
-    destroyOutputParticleBuffers() { twoLevelOutputsDestroyed += 1; }
-  });
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  const fakeBuffer = (label, size = 4096) => ({ label, size, destroy() {} });
+  const twoLevelMechanicsRunner = (options) =>
+    driveAuthoritativeCanonicalEpochs(options, { prefix: 'adoption-two-level' });
   const result = await runSchroederSameLevelMechanicsWebGpu({
     device,
     ...buffers,
+    ...uploads,
     selectedLevel: 0,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
@@ -10002,14 +10864,25 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
       targetStateFamilies: [
         'sph-particle-state',
         'mls-mpm-particle-mechanics',
-        'sph-particle-thermo'
+        'sph-particle-thermo',
+        'sph-particle-identity'
       ],
       particleStateBuffer: fakeBuffer('merged-state'),
       particleThermoBuffer: fakeBuffer('merged-thermo'),
       particleMechanicsBuffer: fakeBuffer('merged-mechanics'),
+      particleIdentityBuffer: fakeBuffer(
+        'merged-identity',
+        6 * Uint32Array.BYTES_PER_ELEMENT
+      ),
       stateBufferByteLength: 6 * 8 * 4,
       thermoBufferByteLength: 6 * 12 * 4,
-      mechanicsBufferByteLength: 6 * 32 * 4
+      mechanicsBufferByteLength: 6 * 32 * 4,
+      identityBufferByteLength: 6 * Uint32Array.BYTES_PER_ELEMENT,
+      identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+      identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+      identityRequired: true,
+      particleIdentityMutationApproved: true,
+      identityRevision: 1
     },
     residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
   });
@@ -10032,54 +10905,32 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
   assert.equal(step.nextMlsMpmParticleState.particleCount, 2);
 });
 
-test('Schroeder two-level authoritative mode runs the thermal sidecar sequentially on the coupled outputs', async () => {
+test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequentially on the coupled outputs', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
-  const coupledStateBuffer = { label: 'two-level-state-out', destroy() {} };
-  const coupledThermoBuffer = { label: 'two-level-thermo', destroy() {} };
-  const envelopeUploads = {
-    sphParticleUpload: {
-      status: 'webgpu-uploaded',
-      stateBuffer: coupledStateBuffer,
-      thermoBuffer: coupledThermoBuffer,
-      ownsStateBuffer: true,
-      ownsThermoBuffer: false,
-      particleCount: 3,
-      slot: 0
-    },
-    mlsMpmParticleUpload: {
-      status: 'webgpu-uploaded',
-      mechanicsBuffer: { label: 'two-level-mechanics-out' },
-      particleCount: 3,
-      slot: 0
-    }
-  };
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  let coupledResult = null;
   const thermalCalls = [];
   const thermalStateBuffer = { label: 'thermal-state-out', destroy() {} };
   const thermalThermoBuffer = { label: 'thermal-thermo-out', destroy() {} };
   const result = await runSchroederSameLevelMechanicsWebGpu({
     device,
     ...buffers,
+    ...uploads,
     selectedLevel: 0,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
     enableTwoLevelMechanics: true,
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
-    twoLevelMechanicsRunner: async (options) => ({
-      schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
-      status: 'schroeder-two-level-mechanics-step-submitted',
-      fineLevel: options.fineLevel,
-      coarseLevel: options.fineLevel + 1,
-      conservation: { massResidualKg: 0 },
-      stateBuffer: coupledStateBuffer,
-      mechanicsBuffer: envelopeUploads.mlsMpmParticleUpload.mechanicsBuffer,
-      nextSphParticleState: { step: 1, time: 5e-4, particleCount: 3 },
-      nextMlsMpmParticleState: { step: 1, time: 5e-4, particleCount: 3 },
-      nextParticleUploads: envelopeUploads
-    }),
+    twoLevelMechanicsRunner: async (options) => {
+      coupledResult = await driveAuthoritativeCanonicalEpochs(options, {
+        prefix: 'thermal-two-level'
+      });
+      return coupledResult;
+    },
     residentStepOptions: {
-      thermalMaterialTable: { schema: 'thermal-table-stub', materialCount: 1 },
+      thermalMaterialTable: canonicalSidecarThermalMaterialTable,
       thermalStepRunner: async (options) => {
         thermalCalls.push(options);
         return {
@@ -10093,86 +10944,122 @@ test('Schroeder two-level authoritative mode runs the thermal sidecar sequential
   });
 
   const step = result.residentStep;
-  assert.equal(step.sidecars, 'thermal-post-two-level-sequential');
+  assert.equal(step.sidecars, 'shared-post-mechanics-closure');
   assert.equal(thermalCalls.length, 1);
-  // The sidecar consumes the coupled outputs (sequential operator split).
-  assert.equal(thermalCalls[0].sourceStateBuffer, coupledStateBuffer);
-  assert.equal(thermalCalls[0].sourceThermoBuffer, coupledThermoBuffer);
+  // The sidecar consumes the freshly classified public E* family, not the
+  // private S* descriptor or a later-mutated continuation wrapper.
+  assert.equal(
+    thermalCalls[0].sourceStateBuffer,
+    coupledResult.postMechanicsCanonicalUploads.sphParticleUpload.stateBuffer
+  );
+  assert.equal(
+    thermalCalls[0].sourceThermoBuffer,
+    coupledResult.postMechanicsCanonicalUploads.sphParticleUpload.thermoBuffer
+  );
   assert.equal(thermalCalls[0].readbackMode, 'no-full-readback');
+  assert.equal(
+    thermalCalls[0].schroederSpatialEpochGeneration,
+    coupledResult.postMechanicsEpoch.generation
+  );
+  assert.equal(
+    thermalCalls[0].schroederSpatialThermalProposal.generationId,
+    coupledResult.postMechanicsEpoch.generation.execution.generationId
+  );
+  assert.equal(
+    thermalCalls[0].schroederSpatialThermalProposal.exhaustiveTraversalCount,
+    0
+  );
+  assert.equal(
+    thermalCalls[0].schroederSpatialThermalProposal.privateBuildCount,
+    0
+  );
+  assert.deepEqual(
+    result.twoLevelMechanics.canonicalEpochControllerSummary.epochKinds,
+    ['mechanics', 'mechanics', 'mechanics', 'post-mechanics']
+  );
+  assert.equal(
+    result.twoLevelMechanics.canonicalEpochControllerSummary.committedEpochCount,
+    4
+  );
+  assert.deepEqual(
+    summarizeSchroederSpatialEpochTransaction(
+      coupledResult.postMechanicsEpoch.transaction
+    ).consumerReceipts.map((receipt) => receipt.consumerId),
+    [
+      SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
+      SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION,
+      SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE
+    ]
+  );
+  assert.match(
+    coupledResult.postMechanicsEpoch.transaction.state,
+    /^(release-scheduled|released)$/
+  );
   // The continuation chains the thermal outputs, not the raw coupled state.
   assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer, thermalStateBuffer);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, thermalThermoBuffer);
   assert.equal(
     step.nextParticleUploads.sphParticleUpload.sourceStage,
-    'schroeder-two-level-thermal-sidecar'
+    'schroeder-two-level-post-mechanics-closure'
   );
 });
 
-test('Schroeder two-level authoritative mode chains the reaction sidecar after thermal', async () => {
+test('M4: Schroeder two-level authoritative mode chains the reaction sidecar after thermal', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
-  const coupledStateBuffer = { label: 'two-level-state-out', destroy() {} };
-  const coupledThermoBuffer = { label: 'two-level-thermo', destroy() {} };
-  const coupledMechanicsBuffer = { label: 'two-level-mechanics-out', destroy() {} };
-  const envelopeUploads = {
-    sphParticleUpload: {
-      status: 'webgpu-uploaded',
-      stateBuffer: coupledStateBuffer,
-      thermoBuffer: coupledThermoBuffer,
-      ownsStateBuffer: true,
-      ownsThermoBuffer: false,
-      particleCount: 3,
-      slot: 0
-    },
-    mlsMpmParticleUpload: {
-      status: 'webgpu-uploaded',
-      mechanicsBuffer: coupledMechanicsBuffer,
-      particleCount: 3,
-      slot: 0
-    }
-  };
-  const thermalStateBuffer = { label: 'thermal-state-out', destroy() {} };
-  const thermalThermoBuffer = { label: 'thermal-thermo-out', destroy() {} };
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  let coupledResult = null;
+  const thermalStateBuffer = device.createBuffer({
+    label: 'thermal-state-out', size: 4096, usage: 128
+  });
+  const thermalThermoBuffer = device.createBuffer({
+    label: 'thermal-thermo-out', size: 4096, usage: 128
+  });
   const reactionCalls = [];
-  const reactionStateBuffer = { label: 'reaction-state-out', destroy() {} };
-  const reactionThermoBuffer = { label: 'reaction-thermo-out', destroy() {} };
-  const reactionMechanicsBuffer = { label: 'reaction-mechanics-out', destroy() {} };
+  const reactionStateBuffer = device.createBuffer({
+    label: 'reaction-state-out', size: 4096, usage: 128
+  });
+  const reactionThermoBuffer = device.createBuffer({
+    label: 'reaction-thermo-out', size: 4096, usage: 128
+  });
+  const reactionMechanicsBuffer = device.createBuffer({
+    label: 'reaction-mechanics-out', size: 4096, usage: 128
+  });
   const result = await runSchroederSameLevelMechanicsWebGpu({
     device,
     ...buffers,
+    ...uploads,
     selectedLevel: 0,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
     enableTwoLevelMechanics: true,
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
-    twoLevelMechanicsRunner: async (options) => ({
-      schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
-      status: 'schroeder-two-level-mechanics-step-submitted',
-      fineLevel: options.fineLevel,
-      coarseLevel: options.fineLevel + 1,
-      conservation: { massResidualKg: 0 },
-      stateBuffer: coupledStateBuffer,
-      mechanicsBuffer: coupledMechanicsBuffer,
-      nextSphParticleState: { step: 1, time: 5e-4, particleCount: 3 },
-      nextMlsMpmParticleState: { step: 1, time: 5e-4, particleCount: 3 },
-      nextParticleUploads: envelopeUploads
-    }),
+    twoLevelMechanicsRunner: async (options) => {
+      coupledResult = await driveAuthoritativeCanonicalEpochs(options, {
+        prefix: 'reaction-two-level',
+        terminalOwnsThermoBuffer: true
+      });
+      return coupledResult;
+    },
     residentStepOptions: {
-      thermalMaterialTable: { schema: 'thermal-table-stub', materialCount: 1 },
+      thermalMaterialTable: canonicalSidecarThermalMaterialTable,
       thermalStepRunner: async () => ({
         status: 'thermal-step-executed',
         stateBuffer: thermalStateBuffer,
         thermoBuffer: thermalThermoBuffer
       }),
-      reactionTable: { schema: 'reaction-table-stub', reactionCount: 1 },
+      reactionTable: canonicalSidecarReactionTable(),
       reactionStepRunner: async (options) => {
         reactionCalls.push(options);
         return {
           status: 'reaction-step-executed',
           stateBuffer: reactionStateBuffer,
           thermoBuffer: reactionThermoBuffer,
-          mechanicsBuffer: reactionMechanicsBuffer
+          mechanicsBuffer: reactionMechanicsBuffer,
+          ownsStateBuffer: false,
+          ownsThermoBuffer: false,
+          ownsMechanicsBuffer: false
         };
       }
     },
@@ -10180,20 +11067,74 @@ test('Schroeder two-level authoritative mode chains the reaction sidecar after t
   });
 
   const step = result.residentStep;
-  assert.equal(step.sidecars, 'thermal-reaction-post-two-level-sequential');
+  assert.equal(step.sidecars, 'shared-post-mechanics-closure');
   assert.equal(reactionCalls.length, 1);
   // Sequential chaining: the reaction consumes the thermal outputs and the
   // coupled mechanics.
   assert.equal(reactionCalls[0].sourceStateBuffer, thermalStateBuffer);
   assert.equal(reactionCalls[0].sourceThermoBuffer, thermalThermoBuffer);
-  assert.equal(reactionCalls[0].sourceMechanicsBuffer, coupledMechanicsBuffer);
+  assert.equal(reactionCalls[0].sourceMechanicsBuffer, coupledResult.mechanicsBuffer);
   assert.equal(reactionCalls[0].readbackMode, 'no-full-readback');
+  assert.equal(
+    reactionCalls[0].schroederSpatialEpochGeneration,
+    coupledResult.postMechanicsEpoch.generation
+  );
+  assert.equal(
+    reactionCalls[0].schroederSpatialReactionDiscoveryProposal.generationId,
+    coupledResult.postMechanicsEpoch.generation.execution.generationId
+  );
+  assert.equal(
+    reactionCalls[0].schroederSpatialReactionDiscoveryProposal
+      .privateLookupBuildCount,
+    0
+  );
+  assert.equal(
+    reactionCalls[0].schroederSpatialReactionDiscoveryProposal
+      .fixedCandidateBuildCount,
+    0
+  );
+  assert.equal(
+    reactionCalls[0].schroederSpatialReactionDiscoveryProposal
+      .exhaustiveTraversalCount,
+    0
+  );
+  assert.deepEqual(
+    result.twoLevelMechanics.canonicalEpochControllerSummary.epochKinds,
+    ['mechanics', 'mechanics', 'mechanics', 'post-mechanics']
+  );
+  assert.equal(
+    result.twoLevelMechanics.canonicalEpochControllerSummary.committedEpochCount,
+    4
+  );
+  assert.deepEqual(
+    summarizeSchroederSpatialEpochTransaction(
+      coupledResult.postMechanicsEpoch.transaction
+    ).consumerReceipts.map((receipt) => receipt.consumerId),
+    [
+      SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+      SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
+      SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION,
+      SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE
+    ]
+  );
   // The continuation chains the reaction outputs (highest sidecar tier).
   assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer, reactionStateBuffer);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, reactionThermoBuffer);
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer, reactionMechanicsBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.ownsStateBuffer, false);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.ownsThermoBuffer, false);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.ownsMechanicsBuffer, false);
   assert.equal(
     step.nextParticleUploads.sphParticleUpload.sourceStage,
-    'schroeder-two-level-reaction-sidecar'
+    'schroeder-two-level-post-mechanics-closure'
   );
+  await result.schroederTwoLevelPositiveCompletionPromise;
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const borrowedReplacement of [
+    reactionStateBuffer,
+    reactionThermoBuffer,
+    reactionMechanicsBuffer
+  ]) {
+    assert.equal(borrowedReplacement.destroyCount, 0);
+  }
 });

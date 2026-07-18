@@ -10,6 +10,18 @@ export * from './schroederSpatialMechanicsView.js';
 export * from './schroederSpatialMechanicsViewWgsl.js';
 export * from './schroederSpatialMechanicsFieldView.js';
 export * from './schroederSpatialMechanicsFieldViewWgsl.js';
+export * from './schroederSpatialHierarchyView.js';
+export * from './schroederSpatialHierarchyViewWgsl.js';
+export * from './schroederSpatialParentFieldView.js';
+export * from './schroederSpatialParentFieldViewWgsl.js';
+export * from './schroederSpatialParentFieldMechanicsWorkspace.js';
+export * from './schroederSpatialParentFieldMechanicsWorkspaceWgsl.js';
+export * from './schroederSpatialAggregateView.js';
+export * from './schroederSpatialAggregateViewWgsl.js';
+export * from './schroederFrozenLevelAssignmentRefreshWgsl.js';
+export * from './schroederCrossLevelInvariantEvidence.js';
+export * from './schroederCrossLevelInvariantEvidenceWgsl.js';
+export * from './schroederCrossLevelRefluxLedger.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';

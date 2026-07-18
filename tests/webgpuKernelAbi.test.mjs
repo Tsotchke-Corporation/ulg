@@ -12,7 +12,9 @@ import {
   mlsMpmParticleSeparationBinFillCanonicalSpatialWgsl,
   mlsMpmParticleSeparationBinFillCanonicalSpatialUnobservedWgsl,
   mlsMpmParticleSeparationComputeCanonicalSpatialWgsl,
-  mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl
+  mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl,
+  schroederSpatialAggregateStacklessTraversalWgsl,
+  schroederSpatialAggregateViewWgsl
 } from '../ulg-gpu-abi/src/index.js';
 import {
   sphThermalStepWgsl as canonicalSphThermalStepWgsl
@@ -88,8 +90,18 @@ function uniformBufferByteLength(source, label) {
 function writeUsesFactory(source, label, factoryName) {
   const labelIndex = source.indexOf(`label: '${label}'`);
   assert.notEqual(labelIndex, -1, `${label} label is missing`);
-  const writeIndex = source.indexOf(`device.queue.writeBuffer(paramsBuffer, 0, ${factoryName}(`, labelIndex);
-  assert.notEqual(writeIndex, -1, `${label} must be written with ${factoryName}()`);
+  const tail = source.slice(labelIndex);
+  const relativeWrite = tail.search(
+    /device\.queue\.writeBuffer\(\s*paramsBuffer\s*,\s*0\s*,/
+  );
+  assert.notEqual(relativeWrite, -1, `${label} params write is missing`);
+  const writeIndex = labelIndex + relativeWrite;
+  const nextWrite = source.indexOf('device.queue.writeBuffer(', writeIndex + 1);
+  assert.match(
+    source.slice(writeIndex, nextWrite < 0 ? source.length : nextWrite),
+    new RegExp(`\\b${escapeRegExp(factoryName)}\\s*\\(`),
+    `${label} must be written with ${factoryName}()`
+  );
 }
 
 function wgslScalarParamStructByteLengths(wgslSource, structName) {
@@ -130,6 +142,8 @@ const CONTRACTS = [
     // generation/storage/position/topology identity and admission. 96 -> 144:
     // the remaining device/lane/lease/source/tick/chart/level/support identity
     // fields required to reject a stale or cross-lane directory in WGSL.
+    // The mechanics-field specialization appends a separate 16-byte mutation
+    // claim tail without changing this base ABI.
     bytes: 144
   },
   {
@@ -283,6 +297,55 @@ test('SPH WGSL source avoids reserved local identifiers rejected by browsers', (
     wgslSource,
     /\b(?:let|var|const)\s+active\b/,
     'WGSL parser rejects active as a reserved local identifier'
+  );
+});
+
+test('Schroeder Morton-prefix aggregate and stackless traversal match their JS ABI', () => {
+  assert.deepEqual(
+    wgslScalarParamStructByteLengths(
+      schroederSpatialAggregateViewWgsl,
+      'AggregateParams'
+    ),
+    [256]
+  );
+  assert.deepEqual(
+    wgslScalarParamStructByteLengths(
+      schroederSpatialAggregateStacklessTraversalWgsl,
+      'AggregateTraversalParams'
+    ),
+    [128]
+  );
+  const buildBindings = wgslStorageBindingIndices(
+    schroederSpatialAggregateViewWgsl
+  );
+  assert.equal(new Set(buildBindings).size, buildBindings.length);
+  assert.equal(buildBindings.length, 9);
+  const traversalBindings = wgslStorageBindingIndices(
+    schroederSpatialAggregateStacklessTraversalWgsl
+  );
+  assert.equal(new Set(traversalBindings).size, traversalBindings.length);
+  assert.equal(traversalBindings.length, 3);
+  const runtimeSource = readRepoText(
+    'src/runtime/sph/schroederSpatialAggregateViewGpu.js'
+  );
+  assert.match(
+    runtimeSource,
+    /dispatchWorkgroupsIndirect\(buffer, offset\)/,
+    'aggregate prefix passes must execute from a separate indirect-dispatch buffer'
+  );
+  assert.match(
+    runtimeSource,
+    /indirectDispatchBuffer:\s*arena\.dispatchBuffer/,
+    'aggregate execution must expose the separate indirect-dispatch authority'
+  );
+  assert.doesNotMatch(
+    schroederSpatialAggregateStacklessTraversalWgsl,
+    /candidate_(?:rows|budget)/i
+  );
+  assert.doesNotMatch(
+    schroederSpatialAggregateViewWgsl,
+    /\b(?:let|var|const)\s+target\b/,
+    'WGSL parser rejects target as a reserved local identifier'
   );
 });
 

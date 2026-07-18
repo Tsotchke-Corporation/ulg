@@ -93,11 +93,14 @@ test('active metal reacts with liquid water at room temperature without requirin
   ];
   const events = reactiveStep({ particles: parts }, {
     reactions: [{
-      a: 'Na',
+      // Network discovery canonicalizes material keys while particle metadata
+      // preserves display casing. The CPU reference path must join the two by
+      // canonical material identity, just like the packed GPU table does.
+      a: 'na',
       b: 'h2o',
       product: 'naoh',
       activationTemperatureK: 0,
-      phaseRequirements: { h2o: ['liquid', 'gas'] },
+      phaseRequirements: { H2O: ['liquid', 'gas'] },
       specificEnthalpyJPerKg: -8.5e6
     }],
     contactRadiusM: 0.05,

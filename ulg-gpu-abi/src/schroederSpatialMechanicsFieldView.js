@@ -1,13 +1,14 @@
 export const ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-mechanics-field-view.v1';
+  'peercompute.ulg.schroeder-spatial-mechanics-field-view.v2';
 
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC = 0x53464631;
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION = 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC = 0x53464632;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION = 2;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS = 64;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DESCRIPTOR_WORDS = 32;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS = 4;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS = 8;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS = 16;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS = 8;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE = 27;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS = 60;
@@ -18,6 +19,51 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED = 1 << 1;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED = 1 << 2;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE = 1 << 3;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_CAPACITY_OVERFLOW = 1 << 4;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_UNIQUE_STATUS_READY = 1 << 0;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_UNIQUE_STATUS_UNIFORM_PARENT = 1 << 1;
+
+// Header word 59 is a GPU-authenticated phase tag for the mutable state rows.
+// P2G publishes mass/momentum/gradient; grid update (or a conservative
+// cross-level publisher) transitions those same rows to mass/velocity/gradient.
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY = 0;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT = 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT = 2;
+
+// Once stable-order P2G has materialized the immutable state rows, the still-zero
+// field accumulator bank becomes the field-local heat sidecar. The receipt tail is
+// deliberately outside the per-field rows so it can gate clear/build/consume
+// without duplicating the full keyed field dictionary or adding a binding.
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC = 0x53465232;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION = 2;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_READY = 1 << 0;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_ADMITTED = 1 << 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_FAIL_CLOSED = 1 << 2;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_EMPTY = 0;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_P2G_FINALIZED = 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_HEAT_CLEARING = 2;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_HEAT_BUILDING = 3;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_ENERGY_READY = 4;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_G2P_CLAIMED = 5;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_CONSUMED = 6;
+
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT = Object.freeze([
+  'magic:u32',
+  'abiVersion:u32',
+  'statusFlags:u32',
+  'phase:u32',
+  'macroSubstepOrdinal:u32',
+  'fieldMutationOrdinal:u32',
+  'fieldCount:u32',
+  'heatContributionCount:u32',
+  'totalHeatJ:f32-bits',
+  'publishedHeatJ:f32-bits',
+  'consumedHeatJ:f32-bits',
+  'maxSpecificHeatJPerKg:f32-bits',
+  'macroLedgerGeneration:u32',
+  'maxFineCflRatio:f32-bits',
+  'partitionOfUnityResidual:f32-bits',
+  'firstMomentResidualM:f32-bits'
+]);
 
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT = Object.freeze([
   'magic:u32',
@@ -79,11 +125,11 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT = Object.freez
   'continuityPolicy:u32',
   'mechanicalFamilyPolicy:u32',
   'invalidFieldKeyCount:u32',
-  'reserved59:u32',
+  'stateEncoding:u32',
   'dispatchIndirectX:u32',
   'dispatchIndirectY:u32',
   'dispatchIndirectZ:u32',
-  'finalizationOrdinal:u32'
+  'stateMutationOrdinal:u32'
 ]);
 
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ABI = Object.freeze({
@@ -109,12 +155,31 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ABI = Object.freeze({
   continuityPolicy:
     'solid-initial-body-domain;non-solid-material-continuum-domain-zero',
   construction:
-    'particle-stencil-candidates-stable-radix-scan-unique',
+    'gpu-authenticated-particle-stencil-packed-u32x3-stable-radix-scan-unique-to-public-u32x4',
+  constructionEvidenceStatusWord: 53,
+  constructionEvidenceStatuses: Object.freeze({
+    ready: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_UNIQUE_STATUS_READY,
+    uniformParent:
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_UNIQUE_STATUS_UNIFORM_PARENT
+  }),
   lookup:
     'generation-materialized-particle-stencil-to-field-index-o1-with-key-recheck',
   overflowPolicy: 'fail-closed-zero-indirect-dispatch',
   mutationPolicy:
-    'identity-layout-descriptors-keys-immutable;mechanics-may-publish-clear-evidence-and-fail-closed-zero-dispatch;accumulators-and-state-mechanics-owned'
+    'identity-layout-descriptors-keys-immutable;mechanics-may-publish-clear-evidence-state-encoding-and-fail-closed-zero-dispatch;accumulators-transition-p2g-to-local-heat-only-through-one-shot-receipt',
+  accumulatorLifecycle:
+    'particle-stencil-contribution-record-emission-then-stable-radix-ordered-field-reduction-with-exact-contribution-count-then-field-local-heat-receipt-until-g2p-consumed',
+  receiptControlWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  receiptControlLayout: SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT,
+  stateEncodingWord: 59,
+  stateMutationOrdinalWord: 63,
+  stateEncodings: Object.freeze({
+    empty: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+    massMomentumGradient:
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+    massVelocityGradient:
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
+  })
 });
 
 const UINT32_MAX = 0xffff_ffff;
@@ -190,9 +255,14 @@ export function createSchroederSpatialMechanicsFieldViewLayout({
     SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS,
     'field accumulator capacity words'
   );
-  const stateOffsetWords = checkedAdd(
+  const receiptControlOffsetWords = checkedAdd(
     accumulatorOffsetWords,
     accumulatorCapacityWords,
+    'field receipt control offset'
+  );
+  const stateOffsetWords = checkedAdd(
+    receiptControlOffsetWords,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
     'field state offset'
   );
   const stateCapacityWords = checkedProduct(
@@ -220,6 +290,8 @@ export function createSchroederSpatialMechanicsFieldViewLayout({
     accumulatorOffsetWords,
     accumulatorWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS,
     accumulatorCapacityWords,
+    receiptControlOffsetWords,
+    receiptControlWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
     stateOffsetWords,
     stateWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
     stateCapacityWords,
@@ -451,7 +523,14 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     || view.layout?.keyCapacityWords !== expectedLayout.keyCapacityWords
     || view.layout?.accumulatorOffsetWords !== expectedLayout.accumulatorOffsetWords
     || view.layout?.accumulatorCapacityWords !== expectedLayout.accumulatorCapacityWords
+    || view.layout?.receiptControlOffsetWords
+      !== expectedLayout.receiptControlOffsetWords
+    || view.layout?.receiptControlWords
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
     || view.layout?.stateOffsetWords !== expectedLayout.stateOffsetWords
+    || view.layout?.stateOffsetWords
+      !== view.layout.receiptControlOffsetWords
+        + view.layout.receiptControlWords
     || view.layout?.stateCapacityWords !== expectedLayout.stateCapacityWords
     || view.layout?.wordLength !== expectedLayout.wordLength
     || view.layout?.byteLength !== expectedLayout.byteLength

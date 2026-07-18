@@ -354,6 +354,46 @@ test('requestOpticalGpuDevice asks for adapter-scale resident buffer limits', as
   assert.equal(result.requiredLimits.maxStorageBufferBindingSize, adapterLimit);
 });
 
+test('requestOpticalGpuDevice enables timestamp-query only for an explicit profiling request', async () => {
+  const device = {
+    features: new Set(['timestamp-query']),
+    lost: new Promise(() => {})
+  };
+  const descriptors = [];
+  const navigatorRef = {
+    gpu: {
+      async requestAdapter() {
+        return {
+          features: new Set(['timestamp-query']),
+          limits: {},
+          async requestDevice(descriptor) {
+            descriptors.push(descriptor);
+            return device;
+          }
+        };
+      }
+    }
+  };
+
+  const ordinary = await requestOpticalGpuDevice(navigatorRef);
+  const profiled = await requestOpticalGpuDevice(navigatorRef, {
+    timestampProfilingRequested: true
+  });
+
+  assert.equal(descriptors[0], undefined);
+  assert.deepEqual(descriptors[1], { requiredFeatures: ['timestamp-query'] });
+  assert.equal(ordinary.timestampProfilingRequested, false);
+  assert.deepEqual(ordinary.requiredFeatures, []);
+  assert.equal(profiled.timestampProfilingRequested, true);
+  assert.deepEqual(profiled.requiredFeatures, ['timestamp-query']);
+  assert.deepEqual(profiled.enabledFeatures, ['timestamp-query']);
+  assert.equal(profiled.timestampQuerySupported, true);
+  assert.equal(
+    profiled.timestampQueryStatus,
+    'timestamp-query-supported-and-requested'
+  );
+});
+
 test('optical GPU table deduplicates material-phase records and preserves stable ids', () => {
   const table = buildOpticalGpuTable([
     { material: 'h2o', phase: 'liquid' },

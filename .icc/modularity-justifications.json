@@ -29,6 +29,27 @@
     },
     {
       "path_patterns": [
+        "src/runtime/sph/schroederCrossLevelCouplingGpu.js",
+        "src/runtime/sph/schroederFusedFineSubstepGpu.js",
+        "src/runtime/sph/schroederHierarchyGpu.js",
+        "src/runtime/sph/schroederSpatialEpochGpu.js",
+        "src/runtime/sph/schroederSpatialEpochTransaction.js",
+        "src/runtime/sph/schroederSpatialMechanicsFieldViewGpu.js",
+        "src/runtime/sph/schroederSpatialParentFieldMechanicsWorkspaceGpu.js",
+        "src/runtime/sph/sphG2pGpuKernel.js",
+        "src/runtime/sph/sphGridGpuKernel.js",
+        "src/runtime/sph/sphGridUpdateGpuKernel.js",
+        "src/runtime/sph/sphMarchingCubesSurfaceAdapter.js",
+        "src/runtime/sph/sphPressureInterfaceGpuKernel.js",
+        "src/runtime/sph/sphReactionGpuSummary.js"
+      ],
+      "status": "temporary_gpu_kernel_integration_boundary",
+      "task_id": "ss-spatial-authority-slice8-source-family-cleanup",
+      "reason": "These modules currently colocate host-side admission, same-device GPU resource lifetime, ABI validation, and embedded WGSL for one authoritative SPH or Schroeder operation. Keeping each operation together is temporary while the two-level hierarchy and shared spatial-view contracts stabilize, and avoids splitting queue ownership or fail-closed authentication across ambiguous boundaries during Slice 7 release verification.",
+      "mitigation": "Move stable shader sources and reusable lifecycle helpers into focused modules during Slice 8 source-family adapter cleanup, preserving the existing unit, native WebGPU, browser, generation-ledger, and performance gates. New unrelated behavior must not be added to these integration modules."
+    },
+    {
+      "path_patterns": [
         "docs/assets/*.js",
         "docs/service-assets/**/*.json",
         "docs/service-assets/**/*.js",

@@ -1,5 +1,6 @@
 import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
@@ -7,7 +8,10 @@ import {
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
-  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   SEPARATION_BIN_CAPACITY,
@@ -37,13 +41,40 @@ import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import {
   tagWebGpuBufferDevice,
+  webGpuBufferMatchesDevice,
+  webGpuDeviceId,
   webGpuDeviceMismatchInfo
 } from './sphGpuDeviceIdentity.js';
+import {
+  MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
+  MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+} from './sphGridGpuKernel.js';
+import {
+  validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu,
+  validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu,
+  validateSchroederCrossLevelRefluxLedgerGpuOwnership
+} from './schroederSpatialParentFieldMechanicsWorkspaceGpu.js';
+import {
+  claimSchroederFusedCoarseTerminalStageProducer,
+  claimSchroederFusedFineSubstepStageProducer,
+  markSchroederFusedCoarseTerminalStageSubmissionObserved,
+  markSchroederFusedCoarseTerminalStageSubmitted,
+  markSchroederFusedFineSubstepStageSubmissionObserved,
+  markSchroederFusedFineSubstepStageSubmitted,
+  quarantineSchroederFusedCoarseTerminalTransaction,
+  quarantineSchroederFusedFineSubstepTransaction,
+  releaseSchroederFusedCoarseTerminalStageProducer,
+  releaseSchroederFusedFineSubstepStageProducer,
+  validateSchroederCanonicalParticleContinuation,
+  validateSchroederFusedCoarseTerminalTransaction,
+  validateSchroederFusedFineSubstepTransaction
+} from './schroederFusedFineSubstepGpu.js';
 
 export {
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
@@ -95,6 +126,50 @@ const SEPARATION_BIN_MAX_CELLS = 262144;
 const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.v1';
 const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
+const refluxDummyBuffers = new WeakMap();
+const fusedG2pClaims = new WeakMap();
+const fusedG2pOrigins = new WeakMap();
+
+function crossLevelRefluxBindingBuffer(device, parentFieldWorkspace) {
+  const ledger = parentFieldWorkspace?.refluxLedger ?? null;
+  if (ledger) {
+    if (
+      ledger.schema !== ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA
+      || ![
+        'schroeder-cross-level-reflux-ledger-gpu-ready',
+        'schroeder-cross-level-reflux-ledger-arena-local'
+      ].includes(ledger.status)
+      || ledger.buffer !== parentFieldWorkspace.refluxLedgerBuffer
+      || !webGpuBufferMatchesDevice(ledger.buffer, device)
+      || (
+        ledger.status === 'schroeder-cross-level-reflux-ledger-gpu-ready'
+        && !validateSchroederCrossLevelRefluxLedgerGpuOwnership(device, ledger, {
+          minimumCoarseFieldCapacity: ledger.rowCapacity,
+          fineLevel: parentFieldWorkspace.parentFieldView?.fineLevel,
+          coarseLevel: parentFieldWorkspace.parentFieldView?.coarseLevel,
+          coarseGridSpacingM:
+            parentFieldWorkspace.parentFieldView?.coarseFieldView?.gridSpacingM
+        })
+      )
+    ) {
+      throw canonicalSpatialExecutionError(
+        'cross-level-reflux-ledger-rejected',
+        'Required parent-field G2P received an invalid or foreign reflux ledger'
+      );
+    }
+    return ledger.buffer;
+  }
+  let buffer = refluxDummyBuffers.get(device);
+  if (!buffer) {
+    buffer = tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-mls-mpm-g2p-empty-cross-level-reflux',
+      size: 16,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+    refluxDummyBuffers.set(device, buffer);
+  }
+  return buffer;
+}
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -108,6 +183,1112 @@ function finiteVector3(value, fallback) {
     finiteNumber(source?.[1], fallback[1]),
     finiteNumber(source?.[2], fallback[2])
   ];
+}
+
+function exactArrayMatches(value, snapshot) {
+  return Array.isArray(value)
+    && value.length === snapshot.length
+    && snapshot.every((entry, index) => Object.is(value[index], entry));
+}
+
+const SPH_PARTICLE_STATE_STRIDE_BYTES =
+  SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+const SPH_PARTICLE_THERMO_STRIDE_BYTES =
+  SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+const SPH_PARTICLE_IDENTITY_STRIDE_BYTES =
+  SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT;
+const MLS_MPM_PARTICLE_MECHANICS_STRIDE_BYTES =
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+
+function fusedParticleUploadAbiMatches(
+  device,
+  sphParticleUpload,
+  mlsMpmParticleUpload,
+  particleCount
+) {
+  if (!Number.isSafeInteger(particleCount) || particleCount <= 0) return false;
+  const expected = {
+    state: particleCount * SPH_PARTICLE_STATE_STRIDE_BYTES,
+    thermo: particleCount * SPH_PARTICLE_THERMO_STRIDE_BYTES,
+    identity: particleCount * SPH_PARTICLE_IDENTITY_STRIDE_BYTES,
+    mechanics: particleCount * MLS_MPM_PARTICLE_MECHANICS_STRIDE_BYTES
+  };
+  const buffers = [
+    [sphParticleUpload?.stateBuffer, expected.state],
+    [sphParticleUpload?.thermoBuffer, expected.thermo],
+    [sphParticleUpload?.identityBuffer, expected.identity],
+    [mlsMpmParticleUpload?.mechanicsBuffer, expected.mechanics]
+  ];
+  return Boolean(
+    sphParticleUpload?.particleCount === particleCount
+    && mlsMpmParticleUpload?.particleCount === particleCount
+    && sphParticleUpload?.stateStrideBytes === SPH_PARTICLE_STATE_STRIDE_BYTES
+    && sphParticleUpload?.thermoStrideBytes === SPH_PARTICLE_THERMO_STRIDE_BYTES
+    && sphParticleUpload?.identityStrideBytes
+      === SPH_PARTICLE_IDENTITY_STRIDE_BYTES
+    && mlsMpmParticleUpload?.mechanicsStrideBytes
+      === MLS_MPM_PARTICLE_MECHANICS_STRIDE_BYTES
+    && sphParticleUpload?.stateBufferByteLength === expected.state
+    && sphParticleUpload?.thermoBufferByteLength === expected.thermo
+    && sphParticleUpload?.identityBufferByteLength === expected.identity
+    && mlsMpmParticleUpload?.mechanicsBufferByteLength === expected.mechanics
+    && buffers.every(([buffer, minimumByteLength]) => {
+      const size = Number(buffer?.size);
+      return buffer
+        && buffer.destroyed !== true
+        && Number.isFinite(size)
+        && size >= minimumByteLength
+        && webGpuBufferMatchesDevice(buffer, device);
+    })
+  );
+}
+
+function captureFusedG2pInputSnapshot({
+  transaction,
+  transactionMode,
+  gridUpdate,
+  sphParticleUpload,
+  mlsMpmParticleUpload,
+  schroederSpatialEpochGeneration,
+  schroederSelectedLevel,
+  dt,
+  boxDimsM,
+  internalPressureScale,
+  liquidWallDampingAlpha,
+  liquidWallDampingDistanceM
+}) {
+  const continuation = transaction.particleContinuation;
+  return Object.freeze({
+    transaction,
+    transactionMode,
+    continuation,
+    gridUpdate,
+    sourceProjection: gridUpdate.sourceProjection,
+    previousGridUpdate: gridUpdate.previousGridUpdate,
+    fieldExecution: gridUpdate.mechanicsFieldViewExecution,
+    fieldBuffer: gridUpdate.mechanicsFieldViewBuffer,
+    parentFieldWorkspace: gridUpdate.parentFieldMechanicsWorkspaceExecution,
+    gridDt: gridUpdate.dt,
+    gridBoxDimsM: Object.freeze([...gridUpdate.boxDimsM]),
+    gridSpacingM: gridUpdate.gridSpacingM,
+    gridDims: Object.freeze([...gridUpdate.gridDims]),
+    gridNodeCount: gridUpdate.gridNodeCount,
+    gridShift: gridUpdate.gridShift,
+    internalPressureScale: Number(internalPressureScale),
+    sourceInternalPressureScale:
+      gridUpdate.sourceProjection?.internalPressureScale,
+    liquidWallDampingAlpha: Number(liquidWallDampingAlpha),
+    liquidWallDampingDistanceM: Number(liquidWallDampingDistanceM),
+    schroederSpatialEpochGeneration,
+    schroederSelectedLevel,
+    dt,
+    boxDimsM: Object.freeze([...boxDimsM]),
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    particleCount: sphParticleUpload.particleCount,
+    stateBuffer: sphParticleUpload.stateBuffer,
+    thermoBuffer: sphParticleUpload.thermoBuffer,
+    identityBuffer: sphParticleUpload.identityBuffer,
+    mechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer,
+    stateStrideBytes: sphParticleUpload.stateStrideBytes,
+    thermoStrideBytes: sphParticleUpload.thermoStrideBytes,
+    identityStrideBytes: sphParticleUpload.identityStrideBytes,
+    mechanicsStrideBytes: mlsMpmParticleUpload.mechanicsStrideBytes,
+    stateBufferByteLength: sphParticleUpload.stateBufferByteLength,
+    thermoBufferByteLength: sphParticleUpload.thermoBufferByteLength,
+    identityBufferByteLength: sphParticleUpload.identityBufferByteLength,
+    mechanicsBufferByteLength: mlsMpmParticleUpload.mechanicsBufferByteLength,
+    stateBufferSize: Number(sphParticleUpload.stateBuffer?.size),
+    thermoBufferSize: Number(sphParticleUpload.thermoBuffer?.size),
+    identityBufferSize: Number(sphParticleUpload.identityBuffer?.size),
+    mechanicsBufferSize: Number(mlsMpmParticleUpload.mechanicsBuffer?.size)
+  });
+}
+
+function fusedG2pInputSnapshotMatches(device, snapshot, current) {
+  const {
+    transaction,
+    transactionMode,
+    gridUpdate,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederSpatialEpochGeneration,
+    schroederSelectedLevel,
+    dt,
+    boxDimsM,
+    internalPressureScale,
+    liquidWallDampingAlpha,
+    liquidWallDampingDistanceM
+  } = current;
+  return Boolean(
+    snapshot
+    && transaction === snapshot.transaction
+    && transactionMode === snapshot.transactionMode
+    && transaction?.particleContinuation === snapshot.continuation
+    && gridUpdate === snapshot.gridUpdate
+    && gridUpdate?.sourceProjection === snapshot.sourceProjection
+    && gridUpdate?.previousGridUpdate === snapshot.previousGridUpdate
+    && gridUpdate?.mechanicsFieldViewExecution === snapshot.fieldExecution
+    && gridUpdate?.mechanicsFieldViewBuffer === snapshot.fieldBuffer
+    && gridUpdate?.parentFieldMechanicsWorkspaceExecution
+      === snapshot.parentFieldWorkspace
+    && Object.is(gridUpdate?.dt, snapshot.gridDt)
+    && exactArrayMatches(gridUpdate?.boxDimsM, snapshot.gridBoxDimsM)
+    && Object.is(gridUpdate?.gridSpacingM, snapshot.gridSpacingM)
+    && exactArrayMatches(gridUpdate?.gridDims, snapshot.gridDims)
+    && gridUpdate?.gridNodeCount === snapshot.gridNodeCount
+    && gridUpdate?.gridShift === snapshot.gridShift
+    && Object.is(
+      gridUpdate?.sourceProjection?.internalPressureScale,
+      snapshot.sourceInternalPressureScale
+    )
+    && sphParticleUpload === snapshot.sphParticleUpload
+    && mlsMpmParticleUpload === snapshot.mlsMpmParticleUpload
+    && sphParticleUpload?.stateBuffer === snapshot.stateBuffer
+    && sphParticleUpload?.thermoBuffer === snapshot.thermoBuffer
+    && sphParticleUpload?.identityBuffer === snapshot.identityBuffer
+    && mlsMpmParticleUpload?.mechanicsBuffer === snapshot.mechanicsBuffer
+    && sphParticleUpload?.stateStrideBytes === snapshot.stateStrideBytes
+    && sphParticleUpload?.thermoStrideBytes === snapshot.thermoStrideBytes
+    && sphParticleUpload?.identityStrideBytes === snapshot.identityStrideBytes
+    && mlsMpmParticleUpload?.mechanicsStrideBytes
+      === snapshot.mechanicsStrideBytes
+    && sphParticleUpload?.stateBufferByteLength
+      === snapshot.stateBufferByteLength
+    && sphParticleUpload?.thermoBufferByteLength
+      === snapshot.thermoBufferByteLength
+    && sphParticleUpload?.identityBufferByteLength
+      === snapshot.identityBufferByteLength
+    && mlsMpmParticleUpload?.mechanicsBufferByteLength
+      === snapshot.mechanicsBufferByteLength
+    && Number(sphParticleUpload?.stateBuffer?.size) === snapshot.stateBufferSize
+    && Number(sphParticleUpload?.thermoBuffer?.size) === snapshot.thermoBufferSize
+    && Number(sphParticleUpload?.identityBuffer?.size)
+      === snapshot.identityBufferSize
+    && Number(mlsMpmParticleUpload?.mechanicsBuffer?.size)
+      === snapshot.mechanicsBufferSize
+    && fusedParticleUploadAbiMatches(
+      device,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      snapshot.particleCount
+    )
+    && schroederSpatialEpochGeneration
+      === snapshot.schroederSpatialEpochGeneration
+    && schroederSelectedLevel === snapshot.schroederSelectedLevel
+    && Object.is(dt, snapshot.dt)
+    && exactArrayMatches(boxDimsM, snapshot.boxDimsM)
+    && Object.is(Number(internalPressureScale), snapshot.internalPressureScale)
+    && Object.is(
+      Number(liquidWallDampingAlpha),
+      snapshot.liquidWallDampingAlpha
+    )
+    && Object.is(
+      Number(liquidWallDampingDistanceM),
+      snapshot.liquidWallDampingDistanceM
+    )
+  );
+}
+
+function fusedG2pMatchesOrigin(reconstruction, origin, {
+  transaction = null,
+  terminalTransaction = null,
+  macroAuthority = null,
+  microepochAuthority = null,
+  particleContinuation = null,
+  fieldExecution = null,
+  priorArtifact = null,
+  proposalMode = null
+} = {}) {
+  const coarseTerminal = origin?.transactionMode === 'coarse-terminal';
+  return Boolean(
+    origin
+    && (origin.transactionMode === 'fine' || coarseTerminal)
+    && origin.destroyed !== true
+    && reconstruction === origin.reconstruction
+    && reconstruction?.schema === ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA
+    && reconstruction?.backend === 'webgpu'
+    && reconstruction?.status === 'reconstructed'
+    && (coarseTerminal
+      ? reconstruction?.fusedCoarseTerminalTransaction === origin.transaction
+        && reconstruction?.fusedFineSubstepTransaction == null
+        && reconstruction?.terminalMicroepochAuthority
+          === origin.microepochAuthority
+        && reconstruction?.fineMicroepochAuthority == null
+      : reconstruction?.fusedFineSubstepTransaction === origin.transaction
+        && reconstruction?.fusedCoarseTerminalTransaction == null
+        && reconstruction?.fineMicroepochAuthority === origin.microepochAuthority
+        && reconstruction?.terminalMicroepochAuthority == null)
+    && reconstruction?.sourceGridUpdate === origin.sourceGridUpdate
+    && reconstruction?.sourceParticleContinuation === origin.particleContinuation
+    && reconstruction?.proposalMode === origin.proposalMode
+    && reconstruction?.mechanicalProposalApplied === false
+    && reconstruction?.mechanicsFieldViewExecution === origin.fieldExecution
+    && reconstruction?.mechanicsFieldViewBuffer === origin.fieldBuffer
+    && reconstruction?.stateBuffer === origin.outputStateBuffer
+    && reconstruction?.mechanicsBuffer === origin.outputMechanicsBuffer
+    && webGpuBufferMatchesDevice(origin.outputStateBuffer, origin.device)
+    && webGpuBufferMatchesDevice(origin.outputMechanicsBuffer, origin.device)
+    && origin.outputStateBuffer?.destroyed !== true
+    && origin.outputMechanicsBuffer?.destroyed !== true
+    && Number(origin.outputStateBuffer?.size) === origin.outputStateBufferSize
+    && Number(origin.outputMechanicsBuffer?.size)
+      === origin.outputMechanicsBufferSize
+    && origin.outputStateBufferSize >= origin.stateBufferByteLength
+    && origin.outputMechanicsBufferSize >= origin.mechanicsBufferByteLength
+    && reconstruction?.stateBufferByteLength === origin.stateBufferByteLength
+    && reconstruction?.mechanicsBufferByteLength
+      === origin.mechanicsBufferByteLength
+    && reconstruction?.retainedOutputParticleBuffers === true
+    && reconstruction?.readbackMode === NO_FULL_READBACK_MODE
+    && reconstruction?.fullReadbackPerformed === false
+    && reconstruction?.normalHotLoopReadbackFree === true
+    && reconstruction?.particleCount === origin.particleCount
+    && Object.is(reconstruction?.dt, origin.dt)
+    && Object.is(
+      reconstruction?.internalPressureScale,
+      origin.internalPressureScale
+    )
+    && Object.is(
+      reconstruction?.liquidWallDampingAlpha,
+      origin.liquidWallDampingAlpha
+    )
+    && Object.is(
+      reconstruction?.liquidWallDampingDistanceM,
+      origin.liquidWallDampingDistanceM
+    )
+    && reconstruction?.stateStrideFloats === SPH_GPU_PARTICLE_STATE_FLOATS
+    && reconstruction?.mechanicsStrideFloats
+      === MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+    && exactArrayMatches(reconstruction?.boxDimsM, origin.boxDimsM)
+    && Object.is(reconstruction?.gridSpacingM, origin.gridSpacingM)
+    && exactArrayMatches(reconstruction?.gridDims, origin.gridDims)
+    && reconstruction?.gridNodeCount === origin.gridNodeCount
+    && reconstruction?.gridShift === origin.gridShift
+    && reconstruction?.schroederSelectedLevel === origin.selectedLevel
+    && reconstruction?.schroederSpatialEpochGeneration
+      === origin.canonicalGeneration
+    && origin.transaction?.macroAuthority === origin.macroAuthority
+    && origin.transaction?.microepochAuthority === origin.microepochAuthority
+    && origin.transaction?.particleContinuation === origin.particleContinuation
+    && (coarseTerminal
+      ? origin.transaction?.coarseFieldView === origin.fieldExecution
+      : origin.transaction?.fineFieldView === origin.fieldExecution)
+    && origin.transaction?.proposalMode === origin.proposalMode
+    && origin.sourceGridUpdate?.mechanicsFieldViewExecution
+      === origin.fieldExecution
+    && origin.sourceGridUpdate?.mechanicsFieldViewBuffer === origin.fieldBuffer
+    && Object.is(origin.sourceGridUpdate?.dt, origin.dt)
+    && exactArrayMatches(origin.sourceGridUpdate?.boxDimsM, origin.boxDimsM)
+    && Object.is(origin.sourceGridUpdate?.gridSpacingM, origin.gridSpacingM)
+    && exactArrayMatches(origin.sourceGridUpdate?.gridDims, origin.gridDims)
+    && origin.sourceGridUpdate?.gridNodeCount === origin.gridNodeCount
+    && origin.sourceGridUpdate?.gridShift === origin.gridShift
+    && Object.is(
+      origin.sourceGridUpdate?.sourceProjection?.internalPressureScale,
+      origin.internalPressureScale
+    )
+    && origin.particleContinuation?.sphParticleUpload === origin.sphParticleUpload
+    && origin.particleContinuation?.mlsMpmParticleUpload
+      === origin.mlsMpmParticleUpload
+    && origin.particleContinuation?.stateBuffer === origin.inputStateBuffer
+    && origin.particleContinuation?.thermoBuffer === origin.thermoBuffer
+    && origin.particleContinuation?.identityBuffer === origin.identityBuffer
+    && origin.particleContinuation?.mechanicsBuffer === origin.inputMechanicsBuffer
+    && origin.sphParticleUpload?.stateBuffer === origin.inputStateBuffer
+    && origin.sphParticleUpload?.thermoBuffer === origin.thermoBuffer
+    && origin.sphParticleUpload?.identityBuffer === origin.identityBuffer
+    && origin.mlsMpmParticleUpload?.mechanicsBuffer === origin.inputMechanicsBuffer
+    && origin.sphParticleUpload?.particleCount === origin.particleCount
+    && origin.mlsMpmParticleUpload?.particleCount === origin.particleCount
+    && origin.sphParticleUpload?.stateStrideBytes === origin.stateStrideBytes
+    && origin.sphParticleUpload?.thermoStrideBytes === origin.thermoStrideBytes
+    && origin.sphParticleUpload?.identityStrideBytes
+      === origin.identityStrideBytes
+    && origin.mlsMpmParticleUpload?.mechanicsStrideBytes
+      === origin.mechanicsStrideBytes
+    && origin.sphParticleUpload?.stateBufferByteLength
+      === origin.inputStateBufferByteLength
+    && origin.sphParticleUpload?.thermoBufferByteLength
+      === origin.thermoBufferByteLength
+    && origin.sphParticleUpload?.identityBufferByteLength
+      === origin.identityBufferByteLength
+    && origin.mlsMpmParticleUpload?.mechanicsBufferByteLength
+      === origin.inputMechanicsBufferByteLength
+    && Number(origin.inputStateBuffer?.size) === origin.inputStateBufferSize
+    && Number(origin.thermoBuffer?.size) === origin.thermoBufferSize
+    && Number(origin.identityBuffer?.size) === origin.identityBufferSize
+    && Number(origin.inputMechanicsBuffer?.size)
+      === origin.inputMechanicsBufferSize
+    && fusedParticleUploadAbiMatches(
+      origin.device,
+      origin.sphParticleUpload,
+      origin.mlsMpmParticleUpload,
+      origin.particleCount
+    )
+    && origin.inputStateBufferByteLength
+      === origin.particleCount * origin.stateStrideBytes
+    && origin.thermoBufferByteLength
+      === origin.particleCount * origin.thermoStrideBytes
+    && origin.identityBufferByteLength
+      === origin.particleCount * origin.identityStrideBytes
+    && origin.inputMechanicsBufferByteLength
+      === origin.particleCount * origin.mechanicsStrideBytes
+    && origin.stateBufferByteLength
+      === origin.particleCount * origin.stateStrideBytes
+    && origin.mechanicsBufferByteLength
+      === origin.particleCount * origin.mechanicsStrideBytes
+    && (coarseTerminal
+      ? validateSchroederFusedCoarseTerminalTransaction(
+          origin.device,
+          origin.transaction,
+          {
+            macroAuthority: origin.macroAuthority,
+            microepochAuthority: origin.microepochAuthority,
+            particleContinuation: origin.particleContinuation
+          }
+        )
+      : validateSchroederFusedFineSubstepTransaction(
+          origin.device,
+          origin.transaction,
+          {
+            macroAuthority: origin.macroAuthority,
+            microepochAuthority: origin.microepochAuthority,
+            particleContinuation: origin.particleContinuation
+          }
+        ))
+    && validateSchroederCanonicalParticleContinuation(
+      origin.device,
+      origin.particleContinuation,
+      {
+        macroAuthority: origin.macroAuthority,
+        ordinal: origin.transaction.substepOrdinal,
+        sphParticleUpload: origin.sphParticleUpload,
+        mlsMpmParticleUpload: origin.mlsMpmParticleUpload,
+        stateBuffer: origin.inputStateBuffer,
+        thermoBuffer: origin.thermoBuffer,
+        identityBuffer: origin.identityBuffer,
+        mechanicsBuffer: origin.inputMechanicsBuffer
+      }
+    )
+    && (coarseTerminal
+      ? validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+          origin.device,
+          origin.sourceGridUpdate,
+          {
+            terminalTransaction: origin.transaction,
+            macroAuthority: origin.macroAuthority,
+            microepochAuthority: origin.microepochAuthority,
+            particleContinuation: origin.particleContinuation,
+            fieldExecution: origin.fieldExecution,
+            mutationSegment: origin.transaction.coarseTerminalMutation,
+            priorArtifact: origin.sourceGridUpdate.previousGridUpdate,
+            requireDeferred: true,
+            proposalMode: origin.proposalMode
+          }
+        )
+      : validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+          origin.device,
+          origin.sourceGridUpdate,
+          {
+            transaction: origin.transaction,
+            macroAuthority: origin.macroAuthority,
+            microepochAuthority: origin.microepochAuthority,
+            particleContinuation: origin.particleContinuation,
+            fieldExecution: origin.fieldExecution,
+            mutationSegment: origin.transaction.fineCorrectionMutation,
+            priorArtifact: origin.sourceGridUpdate.previousGridUpdate,
+            requireDeferred: true,
+            proposalMode: origin.proposalMode
+          }
+        ))
+    && (coarseTerminal
+      ? transaction == null
+        && (terminalTransaction == null
+          || terminalTransaction === origin.transaction)
+      : terminalTransaction == null
+        && (transaction == null || transaction === origin.transaction))
+    && (macroAuthority == null || macroAuthority === origin.macroAuthority)
+    && (microepochAuthority == null
+      || microepochAuthority === origin.microepochAuthority)
+    && (particleContinuation == null
+      || particleContinuation === origin.particleContinuation)
+    && (fieldExecution == null || fieldExecution === origin.fieldExecution)
+    && (priorArtifact == null || priorArtifact === origin.sourceGridUpdate)
+    && (proposalMode == null || proposalMode === origin.proposalMode)
+  );
+}
+
+function durableSubmittedFusedG2pOutputMatchesOrigin(
+  device,
+  reconstruction,
+  origin,
+  { terminalTransaction = null } = {}
+) {
+  const receipt = origin?.durableProducerRetirementReceipt;
+  return Boolean(
+    origin?.deviceId === webGpuDeviceId(device)
+    && origin.transactionMode === 'coarse-terminal'
+    && origin.destroyed !== true
+    && origin.outputStateRetired !== true
+    && origin.outputMechanicsRetired !== true
+    && receipt?.device === device
+    && receipt.deviceId === origin.deviceId
+    && receipt.reconstruction === reconstruction
+    && receipt.transaction === origin.transaction
+    && receipt.transactionMode === origin.transactionMode
+    && receipt.sourceGridUpdate === origin.sourceGridUpdate
+    && receipt.outputStateBuffer === origin.outputStateBuffer
+    && receipt.outputMechanicsBuffer === origin.outputMechanicsBuffer
+    && receipt.outputStateBufferSize === origin.outputStateBufferSize
+    && receipt.outputMechanicsBufferSize === origin.outputMechanicsBufferSize
+    && receipt.stateBufferByteLength === origin.stateBufferByteLength
+    && receipt.mechanicsBufferByteLength === origin.mechanicsBufferByteLength
+    && receipt.particleCount === origin.particleCount
+    && receipt.outputStateBuffer === reconstruction?.stateBuffer
+    && receipt.outputMechanicsBuffer === reconstruction?.mechanicsBuffer
+    && receipt.outputStateBuffer?.destroyed !== true
+    && receipt.outputMechanicsBuffer?.destroyed !== true
+    && webGpuBufferMatchesDevice(receipt.outputStateBuffer, device)
+    && webGpuBufferMatchesDevice(receipt.outputMechanicsBuffer, device)
+    && Number(receipt.outputStateBuffer?.size)
+      === receipt.outputStateBufferSize
+    && Number(receipt.outputMechanicsBuffer?.size)
+      === receipt.outputMechanicsBufferSize
+    && receipt.outputStateBufferSize >= receipt.stateBufferByteLength
+    && receipt.outputMechanicsBufferSize >= receipt.mechanicsBufferByteLength
+    && reconstruction?.schema === ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA
+    && reconstruction?.backend === 'webgpu'
+    && reconstruction?.status === 'reconstructed'
+    && reconstruction?.fusedCoarseTerminalTransaction === receipt.transaction
+    && reconstruction?.fusedFineSubstepTransaction == null
+    && reconstruction?.stateBufferByteLength === receipt.stateBufferByteLength
+    && reconstruction?.mechanicsBufferByteLength
+      === receipt.mechanicsBufferByteLength
+    && reconstruction?.particleCount === receipt.particleCount
+    && reconstruction?.stateStrideFloats === SPH_GPU_PARTICLE_STATE_FLOATS
+    && reconstruction?.mechanicsStrideFloats
+      === MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+    && reconstruction?.retainedOutputParticleBuffers === true
+    && reconstruction?.readbackMode === NO_FULL_READBACK_MODE
+    && reconstruction?.fullReadbackPerformed === false
+    && reconstruction?.normalHotLoopReadbackFree === true
+    && (terminalTransaction == null
+      || terminalTransaction === receipt.transaction)
+  );
+}
+
+export function validateLocallySubmittedMlsMpmFusedG2p(
+  device,
+  reconstruction,
+  options = {}
+) {
+  const origin = reconstruction && fusedG2pOrigins.get(reconstruction);
+  return origin?.deviceId === webGpuDeviceId(device)
+    && fusedG2pMatchesOrigin(reconstruction, origin, options);
+}
+
+/** Retire retained state/mechanics outputs independently. */
+export function destroyRetainedMlsMpmG2pOutputComponents(
+  reconstruction,
+  {
+    state = false,
+    mechanics = false
+  } = {}
+) {
+  const source = reconstruction?.gpuResult || reconstruction;
+  if (
+    source?.retainedOutputParticleBuffers !== true
+    || typeof source.destroyOutputParticleBufferComponents !== 'function'
+  ) return false;
+  return source.destroyOutputParticleBufferComponents({ state, mechanics });
+}
+
+function fusedG2pOutputUploadsMatchOrigin(
+  device,
+  origin,
+  sphParticleUpload,
+  mlsMpmParticleUpload
+) {
+  return Boolean(
+    sphParticleUpload?.schema === ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && sphParticleUpload?.status === 'webgpu-uploaded'
+    && mlsMpmParticleUpload?.schema
+      === ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+    && sphParticleUpload?.stateBuffer === origin?.outputStateBuffer
+    && sphParticleUpload?.thermoBuffer === origin?.thermoBuffer
+    && sphParticleUpload?.identityBuffer === origin?.identityBuffer
+    && mlsMpmParticleUpload?.mechanicsBuffer === origin?.outputMechanicsBuffer
+    && fusedParticleUploadAbiMatches(
+      device,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      origin?.particleCount
+    )
+  );
+}
+
+export function claimLocallySubmittedMlsMpmFusedG2pOutputForContinuation(
+  device,
+  reconstruction,
+  {
+    nextOrdinal,
+    nextSphParticleUpload,
+    nextMlsMpmParticleUpload,
+    ...options
+  } = {}
+) {
+  const origin = reconstruction && fusedG2pOrigins.get(reconstruction);
+  if (
+    origin?.deviceId !== webGpuDeviceId(device)
+    || origin.transactionMode !== 'fine'
+    || origin.outputOwnership !== 'producer'
+    || !fusedG2pMatchesOrigin(reconstruction, origin, options)
+    || Number(nextOrdinal) !== origin.transaction.substepOrdinal + 1
+    || !fusedG2pOutputUploadsMatchOrigin(
+      device,
+      origin,
+      nextSphParticleUpload,
+      nextMlsMpmParticleUpload
+    )
+  ) {
+    return false;
+  }
+  origin.outputOwnership = 'canonical-continuation';
+  return true;
+}
+
+export function claimLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutput(
+  device,
+  reconstruction,
+  {
+    terminalTransaction = null,
+    finalSphParticleUpload = null,
+    finalMlsMpmParticleUpload = null
+  } = {}
+) {
+  const origin = reconstruction && fusedG2pOrigins.get(reconstruction);
+  if (
+    origin?.deviceId !== webGpuDeviceId(device)
+    || origin.transactionMode !== 'coarse-terminal'
+    || origin.transaction !== terminalTransaction
+    || origin.outputOwnership !== 'producer'
+    || !fusedG2pMatchesOrigin(reconstruction, origin, {
+      terminalTransaction,
+      macroAuthority: terminalTransaction?.macroAuthority,
+      microepochAuthority: terminalTransaction?.microepochAuthority,
+      particleContinuation: terminalTransaction?.particleContinuation,
+      fieldExecution: terminalTransaction?.coarseFieldView,
+      priorArtifact: reconstruction?.sourceGridUpdate,
+      proposalMode: 'proposal-deferred-to-post-mechanics'
+    })
+    || !fusedG2pOutputUploadsMatchOrigin(
+      device,
+      origin,
+      finalSphParticleUpload,
+      finalMlsMpmParticleUpload
+    )
+  ) {
+    return false;
+  }
+  const durableClaimReceipt = Object.freeze({
+    reconstruction,
+    terminalTransaction,
+    sourceGridUpdate: origin.sourceGridUpdate,
+    finalSphParticleUpload,
+    finalMlsMpmParticleUpload,
+    stateBuffer: origin.outputStateBuffer,
+    mechanicsBuffer: origin.outputMechanicsBuffer,
+    stateBufferSize: origin.outputStateBufferSize,
+    mechanicsBufferSize: origin.outputMechanicsBufferSize,
+    stateBufferByteLength: origin.stateBufferByteLength,
+    mechanicsBufferByteLength: origin.mechanicsBufferByteLength,
+    particleCount: origin.particleCount,
+    dt: origin.dt,
+    selectedLevel: origin.selectedLevel,
+    gridSpacingM: origin.gridSpacingM,
+    gridNodeCount: origin.gridNodeCount,
+    gridShift: origin.gridShift,
+    boxDimsM: origin.boxDimsM,
+    gridDims: origin.gridDims
+  });
+  origin.claimedFinalSphParticleUpload = finalSphParticleUpload;
+  origin.claimedFinalMlsMpmParticleUpload = finalMlsMpmParticleUpload;
+  origin.durableClaimReceipt = durableClaimReceipt;
+  origin.outputOwnership = 'coarse-terminal-output';
+  return true;
+}
+
+export function validateClaimedLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutput(
+  device,
+  reconstruction,
+  {
+    terminalTransaction = null,
+    finalSphParticleUpload = null,
+    finalMlsMpmParticleUpload = null
+  } = {}
+) {
+  const origin = reconstruction && fusedG2pOrigins.get(reconstruction);
+  const receipt = origin?.durableClaimReceipt;
+  return Boolean(
+    origin?.deviceId === webGpuDeviceId(device)
+    && origin.transactionMode === 'coarse-terminal'
+    && origin.outputOwnership === 'coarse-terminal-output'
+    && origin.destroyed !== true
+    && receipt?.reconstruction === reconstruction
+    && receipt.terminalTransaction === origin.transaction
+    && receipt.sourceGridUpdate === origin.sourceGridUpdate
+    && receipt.finalSphParticleUpload === origin.claimedFinalSphParticleUpload
+    && receipt.finalMlsMpmParticleUpload
+      === origin.claimedFinalMlsMpmParticleUpload
+    && receipt.stateBuffer === origin.outputStateBuffer
+    && receipt.mechanicsBuffer === origin.outputMechanicsBuffer
+    && receipt.stateBuffer === reconstruction?.stateBuffer
+    && receipt.mechanicsBuffer === reconstruction?.mechanicsBuffer
+    && receipt.stateBuffer?.destroyed !== true
+    && receipt.mechanicsBuffer?.destroyed !== true
+    && Number(receipt.stateBuffer?.size) === receipt.stateBufferSize
+    && Number(receipt.mechanicsBuffer?.size) === receipt.mechanicsBufferSize
+    && reconstruction?.stateBufferByteLength === receipt.stateBufferByteLength
+    && reconstruction?.mechanicsBufferByteLength
+      === receipt.mechanicsBufferByteLength
+    && reconstruction?.particleCount === receipt.particleCount
+    && Object.is(reconstruction?.dt, receipt.dt)
+    && reconstruction?.schroederSelectedLevel === receipt.selectedLevel
+    && Object.is(reconstruction?.gridSpacingM, receipt.gridSpacingM)
+    && reconstruction?.gridNodeCount === receipt.gridNodeCount
+    && reconstruction?.gridShift === receipt.gridShift
+    && exactArrayMatches(reconstruction?.boxDimsM, receipt.boxDimsM)
+    && exactArrayMatches(reconstruction?.gridDims, receipt.gridDims)
+    && (terminalTransaction == null
+      || terminalTransaction === receipt.terminalTransaction)
+    && (finalSphParticleUpload == null
+      || finalSphParticleUpload === receipt.finalSphParticleUpload)
+    && (finalMlsMpmParticleUpload == null
+      || finalMlsMpmParticleUpload === receipt.finalMlsMpmParticleUpload)
+  );
+}
+
+export function retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
+  device,
+  reconstruction,
+  {
+    terminalTransaction = null,
+    after = null
+  } = {}
+) {
+  const origin = reconstruction && fusedG2pOrigins.get(reconstruction);
+  if (
+    origin?.deviceId !== webGpuDeviceId(device)
+    || origin.transactionMode !== 'coarse-terminal'
+    || origin.transaction !== terminalTransaction
+    || ![
+      'producer',
+      'producer-retiring',
+      'coarse-terminal-output',
+      'coarse-terminal-output-retiring'
+    ]
+      .includes(origin.outputOwnership)
+  ) {
+    throw new Error(
+      'claimed coarse-terminal G2P output retirement is stale or foreign'
+    );
+  }
+  if (origin.destroyed === true) return Promise.resolve(true);
+  if (origin.outputRetirementPromise) return origin.outputRetirementPromise;
+  if (!after || typeof after.then !== 'function') {
+    throw new TypeError(
+      'claimed coarse-terminal G2P output retirement requires an owner fence'
+    );
+  }
+  const producerOwned = ['producer', 'producer-retiring'].includes(
+    origin.outputOwnership
+  );
+  const firstAttempt = !origin.outputOwnership.endsWith('-retiring');
+  const exactOutput = producerOwned
+    ? durableSubmittedFusedG2pOutputMatchesOrigin(
+      device,
+      reconstruction,
+      origin,
+      { terminalTransaction }
+    )
+    : validateClaimedLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutput(
+      device,
+      reconstruction,
+      { terminalTransaction }
+    );
+  if (firstAttempt && !exactOutput) {
+    throw new Error(
+      'coarse-terminal G2P output lost its authenticated producer receipt'
+    );
+  }
+  origin.outputOwnership = producerOwned
+    ? 'producer-retiring'
+    : 'coarse-terminal-output-retiring';
+  origin.outputRetirementFailureReason = null;
+  origin.outputRetirementPromise = Promise.resolve(after).then((confirmed) => {
+    if (confirmed !== true) {
+      throw new Error('coarse-terminal G2P output owner fence was not confirmed');
+    }
+    const errors = [];
+    if (producerOwned) {
+      try {
+        if (reconstruction.destroyOutputParticleBuffers?.() !== true) {
+          throw new Error(
+            'coarse-terminal producer did not confirm output destruction'
+          );
+        }
+        origin.outputStateRetired = true;
+        origin.outputMechanicsRetired = true;
+      } catch (error) {
+        errors.push(error);
+      }
+    } else {
+      if (!origin.outputStateRetired) {
+        try {
+          origin.outputStateBuffer?.destroy?.();
+          origin.outputStateRetired = true;
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (!origin.outputMechanicsRetired) {
+        try {
+          origin.outputMechanicsBuffer?.destroy?.();
+          origin.outputMechanicsRetired = true;
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+    }
+    if (errors.length > 0) {
+      throw errors.length === 1
+        ? errors[0]
+        : new AggregateError(
+          errors,
+          'coarse-terminal G2P output retirement was incomplete'
+        );
+    }
+    origin.destroyed = true;
+    origin.outputOwnership = 'coarse-terminal-output-retired';
+    return true;
+  }).then(
+    (retired) => {
+      origin.outputRetirementPromise = null;
+      return retired;
+    },
+    (error) => {
+      origin.outputRetirementFailureReason = error instanceof Error
+        ? error.message
+        : String(error);
+      origin.outputRetirementPromise = null;
+      throw error;
+    }
+  );
+  return origin.outputRetirementPromise;
+}
+
+function registerSubmittedFusedG2p(device, reconstruction, {
+  transaction,
+  transactionMode,
+  sourceGridUpdate,
+  sphParticleUpload,
+  mlsMpmParticleUpload,
+  canonicalGeneration,
+  selectedLevel,
+  inputStateBuffer,
+  thermoBuffer,
+  identityBuffer,
+  inputMechanicsBuffer,
+  outputStateBuffer,
+  outputMechanicsBuffer,
+  internalPressureScale,
+  liquidWallDampingAlpha,
+  liquidWallDampingDistanceM
+}) {
+  const deviceId = webGpuDeviceId(device);
+  const durableProducerRetirementReceipt = Object.freeze({
+    device,
+    deviceId,
+    reconstruction,
+    transaction,
+    transactionMode,
+    sourceGridUpdate,
+    outputStateBuffer,
+    outputMechanicsBuffer,
+    outputStateBufferSize: Number(outputStateBuffer?.size),
+    outputMechanicsBufferSize: Number(outputMechanicsBuffer?.size),
+    stateBufferByteLength: reconstruction.stateBufferByteLength,
+    mechanicsBufferByteLength: reconstruction.mechanicsBufferByteLength,
+    particleCount: reconstruction.particleCount
+  });
+  const origin = Object.seal({
+    device,
+    deviceId,
+    reconstruction,
+    transaction,
+    transactionMode,
+    macroAuthority: transaction.macroAuthority,
+    microepochAuthority: transaction.microepochAuthority,
+    particleContinuation: transaction.particleContinuation,
+    proposalMode: 'proposal-deferred-to-post-mechanics',
+    sourceGridUpdate,
+    fieldExecution: transactionMode === 'coarse-terminal'
+      ? transaction.coarseFieldView
+      : transaction.fineFieldView,
+    fieldBuffer: transactionMode === 'coarse-terminal'
+      ? transaction.coarseFieldView.fieldViewBuffer
+      : transaction.fineFieldView.fieldViewBuffer,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    canonicalGeneration,
+    selectedLevel,
+    inputStateBuffer,
+    thermoBuffer,
+    identityBuffer,
+    inputMechanicsBuffer,
+    outputStateBuffer,
+    outputMechanicsBuffer,
+    stateStrideBytes:
+      SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    thermoStrideBytes:
+      SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    identityStrideBytes:
+      SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    mechanicsStrideBytes:
+      MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    inputStateBufferByteLength: sphParticleUpload.stateBufferByteLength,
+    thermoBufferByteLength: sphParticleUpload.thermoBufferByteLength,
+    identityBufferByteLength: sphParticleUpload.identityBufferByteLength,
+    inputMechanicsBufferByteLength:
+      mlsMpmParticleUpload.mechanicsBufferByteLength,
+    inputStateBufferSize: Number(inputStateBuffer?.size),
+    thermoBufferSize: Number(thermoBuffer?.size),
+    identityBufferSize: Number(identityBuffer?.size),
+    inputMechanicsBufferSize: Number(inputMechanicsBuffer?.size),
+    outputStateBufferSize: Number(outputStateBuffer?.size),
+    outputMechanicsBufferSize: Number(outputMechanicsBuffer?.size),
+    stateBufferByteLength: reconstruction.stateBufferByteLength,
+    mechanicsBufferByteLength: reconstruction.mechanicsBufferByteLength,
+    particleCount: reconstruction.particleCount,
+    dt: reconstruction.dt,
+    internalPressureScale,
+    liquidWallDampingAlpha,
+    liquidWallDampingDistanceM,
+    boxDimsM: Object.freeze([...reconstruction.boxDimsM]),
+    gridSpacingM: reconstruction.gridSpacingM,
+    gridDims: Object.freeze([...reconstruction.gridDims]),
+    gridNodeCount: reconstruction.gridNodeCount,
+    gridShift: reconstruction.gridShift,
+    outputOwnership: 'producer',
+    claimedFinalSphParticleUpload: null,
+    claimedFinalMlsMpmParticleUpload: null,
+    durableClaimReceipt: null,
+    durableProducerRetirementReceipt,
+    outputStateRetired: false,
+    outputMechanicsRetired: false,
+    outputRetirementPromise: null,
+    outputRetirementFailureReason: null,
+    destroyed: false
+  });
+  if (!fusedG2pMatchesOrigin(reconstruction, origin, {
+    ...(transactionMode === 'coarse-terminal'
+      ? { terminalTransaction: transaction }
+      : { transaction }),
+    macroAuthority: transaction.macroAuthority,
+    microepochAuthority: transaction.microepochAuthority,
+    particleContinuation: transaction.particleContinuation,
+    fieldExecution: transactionMode === 'coarse-terminal'
+      ? transaction.coarseFieldView
+      : transaction.fineFieldView,
+    priorArtifact: sourceGridUpdate,
+    proposalMode: 'proposal-deferred-to-post-mechanics'
+  })) {
+    throw new TypeError(
+      'submitted fused G2P does not match its exact correction and continuation inputs'
+    );
+  }
+  fusedG2pOrigins.set(reconstruction, origin);
+  return reconstruction;
+}
+
+function fusedG2pInputsAdmitted({
+  device,
+  transaction,
+  transactionMode,
+  gridUpdate,
+  sphParticleState,
+  mlsMpmParticleState,
+  sphParticleUpload,
+  mlsMpmParticleUpload,
+  schroederSpatialEpochGeneration,
+  schroederSelectedLevel,
+  schroederSpatialMechanicalProposal,
+  dt,
+  boxDimsM,
+  internalPressureScale,
+  liquidWallDampingAlpha,
+  liquidWallDampingDistanceM,
+  mechanicsFieldMode,
+  retainOutputParticleBuffers,
+  readbackMode,
+  canonicalSpatialRequired,
+  submissionObserved = false
+}) {
+  const coarseTerminal = transactionMode === 'coarse-terminal';
+  const continuation = transaction?.particleContinuation ?? null;
+  const microepoch = transaction?.microepochAuthority ?? null;
+  const fieldExecution = coarseTerminal
+    ? transaction?.coarseFieldView ?? null
+    : transaction?.fineFieldView ?? null;
+  const publicationLock = coarseTerminal
+    ? transaction?.coarsePublicationLock ?? null
+    : transaction?.publicationLock ?? null;
+  return Boolean(
+    transaction
+    && gridUpdate
+    && (transactionMode === 'fine' || coarseTerminal)
+    && microepoch?.generation === schroederSpatialEpochGeneration
+    && microepoch?.canonicalEpoch?.generation === schroederSpatialEpochGeneration
+    && (coarseTerminal
+      ? microepoch?.parentFieldView?.coarseFieldView === fieldExecution
+      : microepoch?.fineFieldView === fieldExecution
+        && microepoch?.publicationLock === publicationLock)
+    && schroederSelectedLevel === (coarseTerminal
+      ? transaction.macroAuthority?.coarseLevel
+      : transaction.macroAuthority?.fineLevel)
+    && schroederSpatialMechanicalProposal == null
+    && canonicalSpatialRequired === true
+    && mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+    && retainOutputParticleBuffers === true
+    && readbackMode === NO_FULL_READBACK_MODE
+    && Object.is(Number(dt), coarseTerminal
+      ? transaction.macroAuthority?.macroDt
+      : transaction.macroAuthority?.fineDt)
+    && exactArrayMatches(boxDimsM, gridUpdate.boxDimsM)
+    && Object.is(
+      Number(internalPressureScale),
+      gridUpdate.sourceProjection?.internalPressureScale
+    )
+    && Object.is(Number(liquidWallDampingAlpha), 0)
+    && Object.is(Number(liquidWallDampingDistanceM), 0)
+    && sphParticleState?.particleCount === continuation?.sphParticleUpload?.particleCount
+    && mlsMpmParticleState?.particleCount
+      === continuation?.mlsMpmParticleUpload?.particleCount
+    && sphParticleState?.particleCount === mlsMpmParticleState?.particleCount
+    && (sphParticleState?.stateStrideBytes == null
+      || sphParticleState.stateStrideBytes
+        === SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+    && (mlsMpmParticleState?.mechanicsStrideBytes == null
+      || mlsMpmParticleState.mechanicsStrideBytes
+        === MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+    && sphParticleUpload === continuation?.sphParticleUpload
+    && mlsMpmParticleUpload === continuation?.mlsMpmParticleUpload
+    && fusedParticleUploadAbiMatches(
+      device,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      sphParticleState?.particleCount
+    )
+    && sphParticleUpload?.schema === ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && mlsMpmParticleUpload?.schema
+      === ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && sphParticleUpload?.stateStrideBytes
+      === SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && sphParticleUpload?.thermoStrideBytes
+      === SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && mlsMpmParticleUpload?.mechanicsStrideBytes
+      === MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && sphParticleUpload?.stateBufferByteLength
+      === sphParticleUpload.particleCount
+        * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && sphParticleUpload?.thermoBufferByteLength
+      === sphParticleUpload.particleCount
+        * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && mlsMpmParticleUpload?.mechanicsBufferByteLength
+      === mlsMpmParticleUpload.particleCount
+        * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && sphParticleUpload?.stateBuffer === continuation?.stateBuffer
+    && sphParticleUpload?.thermoBuffer === continuation?.thermoBuffer
+    && sphParticleUpload?.identityBuffer === continuation?.identityBuffer
+    && mlsMpmParticleUpload?.mechanicsBuffer === continuation?.mechanicsBuffer
+    && webGpuBufferMatchesDevice(continuation?.stateBuffer, device)
+    && webGpuBufferMatchesDevice(continuation?.thermoBuffer, device)
+    && webGpuBufferMatchesDevice(continuation?.mechanicsBuffer, device)
+    && Number(continuation?.stateBuffer?.size ?? 0)
+      >= continuation.sphParticleUpload.particleCount
+        * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && Number(continuation?.mechanicsBuffer?.size ?? 0)
+      >= continuation.mlsMpmParticleUpload.particleCount
+        * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    && (continuation?.identityBuffer == null
+      || webGpuBufferMatchesDevice(continuation.identityBuffer, device))
+    && fieldExecution?.ownerRuntime?.isStatePublicationLockActive?.(
+      fieldExecution,
+      publicationLock
+    ) === true
+    && (coarseTerminal
+      ? validateSchroederFusedCoarseTerminalTransaction(device, transaction, {
+          stage: submissionObserved ? null : 'g2p',
+          macroAuthority: transaction.macroAuthority,
+          microepochAuthority: transaction.microepochAuthority,
+          particleContinuation: continuation,
+          artifact: submissionObserved ? null : gridUpdate
+        })
+      : validateSchroederFusedFineSubstepTransaction(device, transaction, {
+          stage: submissionObserved ? null : 'g2p',
+          macroAuthority: transaction.macroAuthority,
+          microepochAuthority: transaction.microepochAuthority,
+          particleContinuation: continuation,
+          artifact: submissionObserved ? null : gridUpdate
+        }))
+    && validateSchroederCanonicalParticleContinuation(
+      device,
+      continuation,
+      {
+        macroAuthority: transaction.macroAuthority,
+        ordinal: transaction.substepOrdinal,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        stateBuffer: continuation.stateBuffer,
+        thermoBuffer: continuation.thermoBuffer,
+        identityBuffer: continuation.identityBuffer,
+        mechanicsBuffer: continuation.mechanicsBuffer
+      }
+    )
+    && (coarseTerminal
+      ? validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+          device,
+          gridUpdate,
+          {
+            terminalTransaction: transaction,
+            macroAuthority: transaction.macroAuthority,
+            microepochAuthority: transaction.microepochAuthority,
+            particleContinuation: continuation,
+            fieldExecution,
+            mutationSegment: transaction.coarseTerminalMutation,
+            priorArtifact: gridUpdate.previousGridUpdate,
+            requireDeferred: true,
+            proposalMode: 'proposal-deferred-to-post-mechanics'
+          }
+        )
+      : validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+          device,
+          gridUpdate,
+          {
+            transaction,
+            macroAuthority: transaction.macroAuthority,
+            microepochAuthority: transaction.microepochAuthority,
+            particleContinuation: continuation,
+            fieldExecution,
+            mutationSegment: transaction.fineCorrectionMutation,
+            priorArtifact: gridUpdate.previousGridUpdate,
+            requireDeferred: true,
+            proposalMode: 'proposal-deferred-to-post-mechanics'
+          }
+        ))
+  );
 }
 
 function particleWallClearanceM(restVolumeM3, boxDimsM = DEFAULT_BOX_DIMS_M, gridSpacingM = 0) {
@@ -570,6 +1751,21 @@ function outputEnvelope({
       schroederLevelFilter?.oldLevelAssignmentLookupRemoved === true,
     separationCanonicalSpatialAuthorityGate:
       separationCanonicalSpatialAuthorityGate === true,
+    mechanicsFieldMode:
+      gridUpdate.mechanicsFieldMode ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
+    mechanicsFieldViewEnabled:
+      gridUpdate.mechanicsFieldViewEnabled === true,
+    mechanicsFieldViewExecution:
+      gridUpdate.mechanicsFieldViewExecution ?? null,
+    mechanicsFieldViewBuffer:
+      gridUpdate.mechanicsFieldViewBuffer ?? null,
+    mechanicsFieldViewByteLength:
+      gridUpdate.mechanicsFieldViewByteLength ?? 0,
+    mechanicsFieldViewOwned: false,
+    gridStateAuthority:
+      gridUpdate.gridStateAuthority ?? 'dense-mls-mpm-grid-state',
+    denseGridAuthoritative:
+      gridUpdate.denseGridAuthoritative !== false,
     p2gProjectionValidation: false,
     stressProjectionValidation: false,
     gridUpdateValidation: false,
@@ -785,7 +1981,16 @@ function writeStorageBuffer(device, label, data) {
     size: byteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   });
-  if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
+  try {
+    if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
+  } catch (error) {
+    try {
+      buffer.destroy?.();
+    } catch {
+      // Preserve the originating upload failure.
+    }
+    throw error;
+  }
   return buffer;
 }
 
@@ -1052,6 +2257,10 @@ function createCanonicalParamsArray({
     0
   ))), true);
   view.setUint32(136, spatialEvidenceEnabled === true ? 1 : 0, true);
+  view.setUint32(140, Math.max(0, Math.round(finiteNumber(
+    baseParams.gridUpdate?.mechanicsFieldMutationOutputOrdinal,
+    0
+  ))), true);
   return buffer;
 }
 
@@ -1376,13 +2585,44 @@ export async function runMlsMpmG2pWebGpu({
   schroederSelectedLevel = null,
   schroederSpatialEpochGeneration = null,
   schroederSpatialMechanicalProposal = null,
+  fusedFineSubstepTransaction = null,
+  fusedCoarseTerminalTransaction = null,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
+  mechanicsFieldMode = gridUpdate?.mechanicsFieldMode
+    ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmG2pWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  if (
+    fusedFineSubstepTransaction != null
+    && fusedCoarseTerminalTransaction != null
+  ) {
+    throw new TypeError(
+      'G2P accepts either a fused fine transaction or fused coarse-terminal transaction, never both'
+    );
+  }
+  const fineArtifactTransaction = gridUpdate?.fusedFineSubstepTransaction ?? null;
+  const coarseArtifactTransaction =
+    gridUpdate?.fusedCoarseTerminalTransaction ?? null;
+  if (
+    (fineArtifactTransaction != null
+      && fineArtifactTransaction !== fusedFineSubstepTransaction)
+    || (coarseArtifactTransaction != null
+      && coarseArtifactTransaction !== fusedCoarseTerminalTransaction)
+    || (fusedFineSubstepTransaction != null
+      && (fineArtifactTransaction !== fusedFineSubstepTransaction
+        || coarseArtifactTransaction != null))
+    || (fusedCoarseTerminalTransaction != null
+      && (coarseArtifactTransaction !== fusedCoarseTerminalTransaction
+        || fineArtifactTransaction != null))
+  ) {
+    throw new TypeError(
+      'G2P fused artifact brand and transaction mode must match exactly'
+    );
   }
   if (schroederActiveNodeList) {
     // The compacted active-node list is tile/node-aligned, not
@@ -1390,6 +2630,14 @@ export async function runMlsMpmG2pWebGpu({
     // froze the simulation. Callers must pass the level assignment.
     throw new TypeError(
       'runMlsMpmG2pWebGpu no longer accepts schroederActiveNodeList; pass schroederLevelAssignment (particle-parallel rows) instead'
+    );
+  }
+  if (
+    mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_DISABLED
+    && mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+  ) {
+    throw new RangeError(
+      `mechanicsFieldMode must be '${MLS_MPM_MECHANICS_FIELD_MODE_DISABLED}' or '${MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED}'`
     );
   }
   assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
@@ -1402,6 +2650,44 @@ export async function runMlsMpmG2pWebGpu({
     canonicalSpatialRequired
   });
   const canonicalSpatialAuthority = schroederSpatialAuthority.enabled === true;
+  const mechanicsFieldRequired =
+    mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED;
+  if (mechanicsFieldRequired && !canonicalSpatialAuthority) {
+    throw canonicalSpatialExecutionError(
+      'mechanics-field-canonical-generation-required',
+      'Required mechanics-field G2P needs one selected canonical spatial generation'
+    );
+  }
+  if (
+    mechanicsFieldRequired
+    && gridUpdate.mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+  ) {
+    throw canonicalSpatialExecutionError(
+      'mechanics-field-grid-update-mode-rejected',
+      'Required mechanics-field G2P needs an explicitly required upstream grid update'
+    );
+  }
+  if (
+    !mechanicsFieldRequired
+    && gridUpdate.mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+  ) {
+    throw canonicalSpatialExecutionError(
+      'mechanics-field-mode-required',
+      'A required mechanics-field grid update cannot be consumed through dense G2P mode'
+    );
+  }
+  if (mechanicsFieldRequired && readbackMode !== NO_FULL_READBACK_MODE) {
+    throw canonicalSpatialExecutionError(
+      'mechanics-field-resident-readback-mode-required',
+      'Required mechanics-field G2P supports resident no-full-readback execution only'
+    );
+  }
+  if (!mechanicsFieldRequired && gridUpdate.mechanicsFieldViewEnabled === true) {
+    throw canonicalSpatialExecutionError(
+      'mechanics-field-mode-required',
+      'A mechanics-field grid update must be consumed with mechanicsFieldMode required'
+    );
+  }
   if (canonicalSpatialAuthority && (
     typeof schroederSelectedLevel !== 'number'
     || !Number.isInteger(schroederSelectedLevel)
@@ -1415,47 +2701,356 @@ export async function runMlsMpmG2pWebGpu({
   }
   const dtSeconds = finiteNumber(dt, 0);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
+  const fusedTransaction = fusedFineSubstepTransaction
+    ?? fusedCoarseTerminalTransaction;
+  const fusedG2p = fusedTransaction != null;
+  const fusedTransactionMode = fusedCoarseTerminalTransaction != null
+    ? 'coarse-terminal'
+    : 'fine';
+  const fusedAdmissionInputs = {
+    device,
+    transaction: fusedTransaction,
+    transactionMode: fusedTransactionMode,
+    gridUpdate,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederSpatialEpochGeneration,
+    schroederSelectedLevel,
+    schroederSpatialMechanicalProposal,
+    dt: dtSeconds,
+    boxDimsM: dims,
+    internalPressureScale,
+    liquidWallDampingAlpha,
+    liquidWallDampingDistanceM,
+    mechanicsFieldMode,
+    retainOutputParticleBuffers,
+    readbackMode,
+    canonicalSpatialRequired
+  };
+  if (fusedG2p && !fusedG2pInputsAdmitted(fusedAdmissionInputs)) {
+    throw canonicalSpatialExecutionError(
+      'fused-g2p-provenance-rejected',
+      'Fused G2P requires the exact correction or terminal field artifact, continuation, timing, and deferred-proposal transaction'
+    );
+  }
+  const fusedInputSnapshot = fusedG2p
+    ? captureFusedG2pInputSnapshot(fusedAdmissionInputs)
+    : null;
+  const fusedInputsRemainAdmitted = ({ submissionObserved = false } = {}) => (
+    !fusedG2p || Boolean(
+    fusedG2pInputsAdmitted({
+      ...fusedAdmissionInputs,
+      submissionObserved
+    })
+    && fusedG2pInputSnapshotMatches(
+      device,
+      fusedInputSnapshot,
+      fusedAdmissionInputs
+    )
+    )
+  );
+  let fusedG2pClaim = null;
+  let fusedStageProducerCapability = null;
+  if (fusedG2p) {
+    if (fusedG2pClaims.has(fusedTransaction)) {
+      throw canonicalSpatialExecutionError(
+        'fused-g2p-transaction-already-claimed',
+        'Fused G2P transaction already has an exact producer claim'
+      );
+    }
+    fusedStageProducerCapability = fusedTransactionMode === 'coarse-terminal'
+      ? claimSchroederFusedCoarseTerminalStageProducer(
+          device,
+          fusedTransaction,
+          { stage: 'g2p', priorArtifact: gridUpdate }
+        )
+      : claimSchroederFusedFineSubstepStageProducer(
+          device,
+          fusedTransaction,
+          { stage: 'g2p', priorArtifact: gridUpdate }
+        );
+    fusedG2pClaim = Object.freeze({
+      transaction: fusedTransaction,
+      transactionMode: fusedTransactionMode,
+      sourceGridUpdate: gridUpdate,
+      particleContinuation: fusedTransaction.particleContinuation,
+      producerCapability: fusedStageProducerCapability
+    });
+    fusedG2pClaims.set(fusedTransaction, fusedG2pClaim);
+  }
+  const fusedProducerClaimRemainsExact = (options = {}) => !fusedG2p || Boolean(
+    fusedInputsRemainAdmitted(options)
+    && fusedG2pClaims.get(fusedTransaction) === fusedG2pClaim
+    && fusedG2pClaim?.producerCapability === fusedStageProducerCapability
+    && fusedStageProducerCapability != null
+  );
+  const allocationLedger = new Set();
+  let allocationCleanupDelegated = false;
+  const ownAllocation = (resource) => {
+    if (resource?.destroy) allocationLedger.add(resource);
+    return resource;
+  };
+  const createOwnedTaggedBuffer = (descriptor) => {
+    const buffer = ownAllocation(device.createBuffer(descriptor));
+    return tagWebGpuBufferDevice(buffer, device);
+  };
+  const destroyOwnedAllocation = (resource) => {
+    if (!resource || !allocationLedger.has(resource)) return false;
+    try {
+      resource.destroy?.();
+      allocationLedger.delete(resource);
+    } catch {
+      // Cleanup must never replace the producer's originating result/error.
+      return false;
+    }
+    return true;
+  };
+  const destroyAllocationLedger = () => {
+    for (let attempt = 0; attempt < 2 && allocationLedger.size > 0; attempt += 1) {
+      for (const resource of [...allocationLedger]) {
+        destroyOwnedAllocation(resource);
+      }
+    }
+  };
+  let returnedRetainedOutputBuffers = false;
+  let separationTransientBuffers = [];
+  let fusedG2pQueueSubmitted = false;
+  let fusedG2pCommitted = false;
+  let fusedG2pArtifact = null;
+  let fusedG2pArtifactLifecycleDelegated = false;
+  let outputParticleBuffersDestroyed = false;
+  let outputStateBufferDestroyed = false;
+  let outputMechanicsBufferDestroyed = false;
+  try {
   // Never size GPU output buffers from the CPU arrays alone: under
   // GPU-resident continuation the CPU copies can be stale or detached
   // (byteLength 0), which would allocate 4-byte outputs and fail every
   // downstream binding. particleCount * stride is authoritative.
-  const stateByteLength = Math.max(
-    sphParticleState.state.byteLength,
-    sphParticleState.particleCount * (sphParticleState.stateStrideBytes
-      ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
-  );
-  const mechanicsByteLength = Math.max(
-    mlsMpmParticleState.mechanics.byteLength,
-    mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
-      ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
-  );
+  const stateByteLength = fusedG2p
+    ? fusedTransaction.particleContinuation.sphParticleUpload
+      .particleCount
+      * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    : Math.max(
+        sphParticleState.state.byteLength,
+        sphParticleState.particleCount * (sphParticleState.stateStrideBytes
+          ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+      );
+  const mechanicsByteLength = fusedG2p
+    ? fusedTransaction.particleContinuation.mlsMpmParticleUpload
+      .particleCount
+      * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    : Math.max(
+        mlsMpmParticleState.mechanics.byteLength,
+        mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
+          ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+      );
   const borrowedStateBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.stateBuffer : null;
   const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null;
   const borrowedMechanicsBuffer = mlsMpmParticleUpload?.status === 'webgpu-uploaded' ? mlsMpmParticleUpload.mechanicsBuffer : null;
-  const borrowedGridBuffer = updatedGridBuffer || gridUpdate.gpuResult?.updatedGridBuffer || gridUpdate.updatedGridBuffer || null;
+  if (mechanicsFieldRequired && updatedGridBuffer) {
+    throw canonicalSpatialExecutionError(
+      'mechanics-field-dense-grid-buffer-rejected',
+      'Required mechanics-field G2P cannot accept an explicit dense updated-grid buffer'
+    );
+  }
+  let mechanicsFieldKernelBundle = null;
+  let mechanicsFieldBinding = null;
+  let mechanicsFieldViewBuffer = null;
+  let parentFieldWorkspace = null;
+  if (mechanicsFieldRequired) {
+    mechanicsFieldKernelBundle = await import('./sphMlsMpmGpuStep.js');
+    if (!fusedInputsRemainAdmitted()) {
+      throw canonicalSpatialExecutionError(
+        'fused-g2p-provenance-lost-after-import',
+        'Fused G2P lost its exact terminal artifact or continuation before encoding'
+      );
+    }
+    mechanicsFieldBinding =
+      mechanicsFieldKernelBundle.createFusedSchroederActiveNodeBinding({
+        device,
+        schroederSpatialEpochGeneration,
+        canonicalSpatialRequired: true,
+        gridSpec: {
+          gridNodeCount: gridUpdate.gridNodeCount,
+          gridDims: Array.from(gridUpdate.gridDims || []),
+          shift: gridUpdate.gridShift,
+          gridSpacingM: gridUpdate.gridSpacingM
+        },
+        selectedLevel: schroederSelectedLevel,
+        particleStateBuffer: borrowedStateBuffer,
+        particleIdentityBuffer: sphParticleUpload?.identityBuffer ?? null,
+        labelPrefix: 'ulg-mls-mpm-staged-g2p'
+      });
+    mechanicsFieldViewBuffer = gridUpdate.mechanicsFieldViewBuffer ?? null;
+    const fieldExecution = gridUpdate.mechanicsFieldViewExecution ?? null;
+    const fieldRuntime = fieldExecution?.ownerRuntime ?? null;
+    const mutationOrdinal = gridUpdate.mechanicsFieldMutationOutputOrdinal;
+    const sourceProjection = gridUpdate.sourceProjection ?? null;
+    const previousGridUpdate = gridUpdate.previousGridUpdate ?? null;
+    const mutationLineageMatches = previousGridUpdate == null
+      ? sourceProjection?.mechanicsFieldMutationOutputOrdinal
+        === gridUpdate.mechanicsFieldMutationInputOrdinal
+      : previousGridUpdate?.mechanicsFieldViewExecution === fieldExecution
+        && previousGridUpdate?.sourceProjection === sourceProjection
+        && sourceProjection?.mechanicsFieldMutationOutputOrdinal
+          === previousGridUpdate?.mechanicsFieldMutationInputOrdinal
+        && previousGridUpdate?.mechanicsFieldMutationOutputOrdinal
+          === gridUpdate.mechanicsFieldMutationInputOrdinal
+        && previousGridUpdate?.mechanicsFieldMutationOutputStateEncoding
+          === SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT;
+    const fusedFieldExecution = fusedTransactionMode === 'coarse-terminal'
+      ? fusedTransaction?.coarseFieldView ?? null
+      : fusedTransaction?.fineFieldView ?? null;
+    const fusedPublicationLock = fusedTransactionMode === 'coarse-terminal'
+      ? fusedTransaction?.coarsePublicationLock ?? null
+      : fusedTransaction?.publicationLock ?? null;
+    const fusedFieldProvenanceAdmitted = !fusedG2p || Boolean(
+      fieldExecution === fusedFieldExecution
+      && fieldRuntime?.isStatePublicationLockActive?.(
+        fieldExecution,
+        fusedPublicationLock
+      ) === true
+      && (fusedTransactionMode === 'coarse-terminal'
+        ? validateLocallySubmittedSchroederSpatialParentFieldCoarseTerminalGpu(
+            device,
+            gridUpdate,
+            {
+              terminalTransaction: fusedTransaction,
+              macroAuthority: fusedTransaction.macroAuthority,
+              microepochAuthority: fusedTransaction.microepochAuthority,
+              particleContinuation: fusedTransaction.particleContinuation,
+              fieldExecution,
+              mutationSegment: fusedTransaction.coarseTerminalMutation,
+              priorArtifact: previousGridUpdate,
+              requireDeferred: true,
+              proposalMode: 'proposal-deferred-to-post-mechanics'
+            }
+          )
+        : validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu(
+            device,
+            gridUpdate,
+            {
+              transaction: fusedTransaction,
+              macroAuthority: fusedTransaction.macroAuthority,
+              microepochAuthority: fusedTransaction.microepochAuthority,
+              particleContinuation: fusedTransaction.particleContinuation,
+              fieldExecution,
+              mutationSegment: fusedTransaction.fineCorrectionMutation,
+              priorArtifact: previousGridUpdate,
+              requireDeferred: true,
+              proposalMode: 'proposal-deferred-to-post-mechanics'
+            }
+          ))
+    );
+    if (
+      mechanicsFieldBinding.mechanicsFieldViewEnabled !== true
+      || mechanicsFieldBinding.mechanicsFieldViewBuffer !== mechanicsFieldViewBuffer
+      || mechanicsFieldBinding.mechanicsFieldViewExecution
+        !== gridUpdate.mechanicsFieldViewExecution
+      || (
+        gridUpdate.fieldStateUpdateSubmittedInPlace !== true
+        && gridUpdate.fieldStateUpdatedInPlace !== true
+      )
+      || gridUpdate.gridStateAuthority
+        !== 'schroeder-spatial-mechanics-field-view-v1'
+      || gridUpdate.denseGridAuthoritative !== false
+      || !webGpuBufferMatchesDevice(mechanicsFieldViewBuffer, device)
+      || gridUpdate.mechanicsFieldMutationOutputStateEncoding
+        !== SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
+      || sourceProjection?.mechanicsFieldViewExecution !== fieldExecution
+      || mutationLineageMatches !== true
+      || (fusedG2p
+        ? fusedFieldProvenanceAdmitted !== true
+        : fieldRuntime?.isCurrentStateArtifact?.(fieldExecution, {
+            mutationOrdinal,
+            stateEncoding:
+              SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
+          }) !== true)
+    ) {
+      throw canonicalSpatialExecutionError(
+        'mechanics-field-grid-update-provenance-rejected',
+        'Required mechanics-field G2P could not authenticate the exact updated field view'
+      );
+    }
+    parentFieldWorkspace =
+      gridUpdate.parentFieldMechanicsWorkspaceExecution ?? null;
+    if (parentFieldWorkspace) {
+      let terminalSubmitted = false;
+      let terminalArtifactMatches = false;
+      try {
+        terminalSubmitted =
+          gridUpdate.parentFieldMechanicsTerminalSubmitted === true
+          && parentFieldWorkspace.terminalSubmitted === true
+          && parentFieldWorkspace.released !== true
+          && parentFieldWorkspace.ownerRuntime?.ownsExecution?.(
+            parentFieldWorkspace
+          ) === true
+          && parentFieldWorkspace.ownerRuntime?.isTerminalSubmitted?.(
+            parentFieldWorkspace
+          ) === true;
+        terminalArtifactMatches = parentFieldWorkspace.terminalKind
+          === 'fine-correction'
+          ? parentFieldWorkspace.fineCorrectedGridUpdate === gridUpdate
+            && parentFieldWorkspace.fineGridUpdate === previousGridUpdate
+            && parentFieldWorkspace.fineFieldView === fieldExecution
+            && parentFieldWorkspace.parentFieldView?.fineFieldView
+              === fieldExecution
+            && parentFieldWorkspace.parentFieldView?.fineLevel
+              === schroederSelectedLevel
+          : parentFieldWorkspace.terminalKind === 'coarse-terminal'
+            && parentFieldWorkspace.coarseGridUpdate === gridUpdate
+            && parentFieldWorkspace.inputCoarseGridUpdate === previousGridUpdate
+            && parentFieldWorkspace.coarseFieldView === fieldExecution
+            && parentFieldWorkspace.parentFieldView?.coarseFieldView
+              === fieldExecution
+            && parentFieldWorkspace.parentFieldView?.coarseLevel
+              === schroederSelectedLevel;
+      } catch {
+        terminalSubmitted = false;
+        terminalArtifactMatches = false;
+      }
+      if (!terminalSubmitted || !terminalArtifactMatches) {
+        throw canonicalSpatialExecutionError(
+          'parent-field-mechanics-terminal-provenance-rejected',
+          'Required mechanics-field G2P needs the exact artifact from its live submitted parent-field terminal operation'
+        );
+      }
+    }
+  }
+  const borrowedGridBuffer = mechanicsFieldRequired
+    ? mechanicsFieldViewBuffer
+    : (updatedGridBuffer
+      || gridUpdate.gpuResult?.updatedGridBuffer
+      || gridUpdate.updatedGridBuffer
+      || null);
+  const crossLevelRefluxBuffer = mechanicsFieldRequired
+    ? crossLevelRefluxBindingBuffer(device, parentFieldWorkspace)
+    : null;
   assertInputs({
     sphParticleState,
     mlsMpmParticleState,
     gridUpdate,
     requireUpdatedGridNodes: !borrowedGridBuffer
   });
-  const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-state-in', sphParticleState.state);
-  const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-thermo-in', sphParticleState.thermo);
-  const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-mechanics-in', mlsMpmParticleState.mechanics);
-  const gridBuffer = borrowedGridBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-grid-in', gridUpdate.updatedGridNodes);
-  const outStateBuffer = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC }), device);
-  const outMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC }), device);
+  const stateBuffer = borrowedStateBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-state-in', sphParticleState.state));
+  const thermoBuffer = borrowedThermoBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-thermo-in', sphParticleState.thermo));
+  const mechanicsBuffer = borrowedMechanicsBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-mechanics-in', mlsMpmParticleState.mechanics));
+  const gridBuffer = borrowedGridBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-grid-in', gridUpdate.updatedGridNodes));
+  const outStateBuffer = createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const outMechanicsBuffer = createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const paramsBuffer = !canonicalSpatialAuthority
-    ? device.createBuffer({
+    ? ownAllocation(device.createBuffer({
         label: 'ulg-mls-mpm-g2p-params',
         size: G2P_PARAMS_BYTES,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      })
-    : device.createBuffer({
+      }))
+    : ownAllocation(device.createBuffer({
         label: 'ulg-mls-mpm-g2p-params',
         size: G2P_CANONICAL_PARAMS_BYTES,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      });
+      }));
   const borrowedAssignmentBuffer = canonicalSpatialAuthority
     ? null
     : (schroederLevelAssignment?.assignmentBuffer
@@ -1474,13 +3069,13 @@ export async function runMlsMpmG2pWebGpu({
     && !borrowedAssignmentBuffer;
   const schroederAuthorityBuffer = canonicalSpatialAuthority
     ? schroederSpatialAuthority.evidenceBuffer
-    : (borrowedAssignmentBuffer || writeStorageBuffer(
+    : (borrowedAssignmentBuffer || ownAllocation(writeStorageBuffer(
         device,
         schroederActiveNodeFilterEnabled
           ? 'ulg-mls-mpm-g2p-schroeder-level-assignments-in'
           : 'ulg-mls-mpm-g2p-schroeder-level-assignments-dummy',
         assignmentRows || new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
-      ));
+      )));
   const schroederLevelFilter = {
     enabled: schroederLevelFilterEnabled,
     selectedLevel: schroederLevelFilterEnabled ? schroederSelectedLevel : null,
@@ -1509,14 +3104,25 @@ export async function runMlsMpmG2pWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const stateReadBuffer = noFullReadback
     ? null
-    : device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-readback', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
+    : ownAllocation(device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-readback', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST }));
   const mechanicsReadBuffer = noFullReadback
     ? null
-    : device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-readback', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
-  let returnedRetainedOutputBuffers = false;
-  let separationTransientBuffers = [];
-
+    : ownAllocation(device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-readback', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST }));
   try {
+    if (fusedG2p) {
+      if (!fusedInputsRemainAdmitted()) {
+        throw canonicalSpatialExecutionError(
+          'fused-g2p-provenance-lost-before-encoding',
+          'Fused G2P lost its exact terminal artifact or continuation before encoding'
+        );
+      }
+      if (fusedG2pClaims.get(fusedTransaction) !== fusedG2pClaim) {
+        throw canonicalSpatialExecutionError(
+          'fused-g2p-transaction-claim-lost',
+          'Fused G2P lost its exact producer claim before encoding'
+        );
+      }
+    }
     const paramsOptions = {
       particleCount: sphParticleState.particleCount,
       gridUpdate,
@@ -1539,21 +3145,37 @@ export async function runMlsMpmG2pWebGpu({
     } else {
       device.queue.writeBuffer(paramsBuffer, 0, createCanonicalParamsArray(paramsOptions));
     }
+    if (!fusedProducerClaimRemainsExact()) {
+      throw canonicalSpatialExecutionError(
+        'fused-g2p-provenance-lost-after-params-write',
+        'Fused G2P lost its frozen input family or exact producer claim after parameter upload'
+      );
+    }
     const g2pShader = canonicalSpatialAuthority
       ? (observeCanonicalSpatialAuthority === true
-          ? mlsMpmG2pReconstructCanonicalSpatialWgsl
-          : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl)
+          ? (mechanicsFieldRequired
+              ? mechanicsFieldKernelBundle
+                .mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl
+              : mlsMpmG2pReconstructCanonicalSpatialWgsl)
+          : (mechanicsFieldRequired
+              ? mechanicsFieldKernelBundle
+                .mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl
+              : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl))
       : mlsMpmG2pReconstructWgsl;
     const g2pVariant = canonicalSpatialAuthority
-      ? `canonical-spatial-epoch.v7.${observeCanonicalSpatialAuthority === true
+      ? `canonical-spatial-epoch.${mechanicsFieldRequired ? 'field.v3-reflux' : 'v7'}.${observeCanonicalSpatialAuthority === true
           ? 'observed'
           : 'unobserved'}`
       : 'precanonical-level-assignment.v5';
     const g2pBindings = [
       computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(1, mechanicsFieldRequired
+        ? 'storage'
+        : 'read-only-storage'),
       computeBufferBinding(2, 'read-only-storage'),
-      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(3, mechanicsFieldRequired
+        ? 'storage'
+        : 'read-only-storage'),
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'storage'),
       computeBufferBinding(6, 'uniform'),
@@ -1576,9 +3198,26 @@ export async function runMlsMpmG2pWebGpu({
         bindings: g2pBindings
       })
       : null;
+    const energyReceiptPipelines = mechanicsFieldRequired
+      ? [
+          ['claim', 'claim_g2p_energy_receipt'],
+          ['measure', 'measure_g2p_energy_receipt'],
+          ['consume-field', 'consume_g2p_energy_receipt'],
+          ['consume-fine-reflux', 'consume_g2p_fine_reflux_receipt'],
+          ['consume-coarse-reflux', 'consume_g2p_coarse_reflux_receipt']
+        ].map(([stage, entryPoint]) => createCachedExplicitComputePipeline(device, {
+          cacheKey: `ulg-mls-mpm-g2p-reconstruct.field-energy-${stage}.v2`,
+          label: `ulg-mls-mpm-g2p-field-energy-${stage}`,
+          code: g2pShader,
+          entryPoint,
+          bindings: g2pBindings
+        }))
+      : [];
     const g2pEntries = [
       { binding: 0, resource: { buffer: stateBuffer } },
-      { binding: 1, resource: { buffer: thermoBuffer } },
+      { binding: 1, resource: { buffer: mechanicsFieldRequired
+        ? crossLevelRefluxBuffer
+        : thermoBuffer } },
       { binding: 2, resource: { buffer: mechanicsBuffer } },
       { binding: 3, resource: { buffer: gridBuffer } },
       { binding: 4, resource: { buffer: outStateBuffer } },
@@ -1599,7 +3238,20 @@ export async function runMlsMpmG2pWebGpu({
         entries: g2pEntries
       })
       : null;
+    const energyReceiptBindGroups = energyReceiptPipelines.map(
+      (pipelineInfo) => device.createBindGroup({
+        layout: pipelineInfo.bindGroupLayout,
+        entries: g2pEntries
+      })
+    );
     const encoder = device.createCommandEncoder();
+    if (mechanicsFieldRequired) {
+      const claimReceiptPass = encoder.beginComputePass();
+      claimReceiptPass.setPipeline(energyReceiptPipelines[0].pipeline);
+      claimReceiptPass.setBindGroup(0, energyReceiptBindGroups[0]);
+      claimReceiptPass.dispatchWorkgroups(1);
+      claimReceiptPass.end();
+    }
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
@@ -1607,35 +3259,52 @@ export async function runMlsMpmG2pWebGpu({
     pass.end();
     let separation;
     if (canonicalSpatialAuthority) {
-      if (
+      if (fusedG2p) {
+        separation = {
+          enabled: false,
+          transientBuffers: [],
+          scratch: null,
+          canonicalSpatialAuthorityGate: true,
+          canonicalAuthorityRestoreFolded: false,
+          canonicalSpatialAuthorityEvidenceObserved:
+            observeCanonicalSpatialAuthority === true,
+          canonicalProposalSource: 'deferred-to-post-mechanics',
+          privateBinBuildCount: 0,
+          fixedCandidateBuildCount: 0,
+          exhaustiveParticleScanCount: 0
+        };
+      } else {
+        if (
         !canonicalMechanicalProposalAdmitted({
           proposal: schroederSpatialMechanicalProposal,
           generation: schroederSpatialEpochGeneration,
           spatialAuthority: schroederSpatialAuthority,
           device
         })
-      ) {
-        throw new Error(
-          'Canonical G2P requires one authenticated pre-integration contact/separation proposal'
-        );
+        ) {
+          throw new Error(
+            'Canonical G2P requires one authenticated pre-integration contact/separation proposal'
+          );
+        }
+        schroederSpatialMechanicalProposal.encodeApply(encoder, {
+          stateBuffer: outStateBuffer,
+          mechanicsBuffer,
+          selectedLevel: schroederSelectedLevel
+        });
+        separation = {
+          enabled: true,
+          transientBuffers: [],
+          scratch: null,
+          canonicalSpatialAuthorityGate: true,
+          canonicalAuthorityRestoreFolded: false,
+          canonicalSpatialAuthorityEvidenceObserved:
+            observeCanonicalSpatialAuthority === true,
+          canonicalProposalSource: 'pre-integration-ss-spatial-epoch.v1',
+          privateBinBuildCount: 0,
+          fixedCandidateBuildCount: 0,
+          exhaustiveParticleScanCount: 0
+        };
       }
-      schroederSpatialMechanicalProposal.encodeApply(encoder, {
-        stateBuffer: outStateBuffer,
-        mechanicsBuffer
-      });
-      separation = {
-        enabled: true,
-        transientBuffers: [],
-        scratch: null,
-        canonicalSpatialAuthorityGate: true,
-        canonicalAuthorityRestoreFolded: false,
-        canonicalSpatialAuthorityEvidenceObserved:
-          observeCanonicalSpatialAuthority === true,
-        canonicalProposalSource: 'pre-integration-ss-spatial-epoch.v1',
-        privateBinBuildCount: 0,
-        fixedCandidateBuildCount: 0,
-        exhaustiveParticleScanCount: 0
-      };
     } else {
       separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
         stateBuffer: outStateBuffer,
@@ -1652,6 +3321,35 @@ export async function runMlsMpmG2pWebGpu({
       });
     }
     separationTransientBuffers = separation.transientBuffers;
+    for (const transientBuffer of separationTransientBuffers) {
+      ownAllocation(transientBuffer);
+    }
+    if (mechanicsFieldRequired) {
+      const measureReceiptPass = encoder.beginComputePass();
+      measureReceiptPass.setPipeline(energyReceiptPipelines[1].pipeline);
+      measureReceiptPass.setBindGroup(0, energyReceiptBindGroups[1]);
+      measureReceiptPass.dispatchWorkgroups(
+        Math.max(1, Math.ceil(sphParticleState.particleCount / 64))
+      );
+      measureReceiptPass.end();
+      for (let receiptStage = 2;
+        receiptStage < energyReceiptPipelines.length;
+        receiptStage += 1) {
+        const consumeReceiptPass = encoder.beginComputePass();
+        consumeReceiptPass.setPipeline(
+          energyReceiptPipelines[receiptStage].pipeline
+        );
+        consumeReceiptPass.setBindGroup(
+          0,
+          energyReceiptBindGroups[receiptStage]
+        );
+        consumeReceiptPass.dispatchWorkgroups(1);
+        consumeReceiptPass.end();
+      }
+    }
+    // Receipt consumption can reject a candidate after the particle pass.
+    // Restore from the canonical input only after every receipt stage so the
+    // caller can never observe a failed transaction's output buffers.
     if (canonicalFinalize && separation.canonicalAuthorityRestoreFolded !== true) {
       const finalizePass = encoder.beginComputePass();
       finalizePass.setPipeline(canonicalFinalize.pipeline);
@@ -1665,7 +3363,42 @@ export async function runMlsMpmG2pWebGpu({
       encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
       encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
     }
-    device.queue.submit([encoder.finish()]);
+    const commandBuffer = encoder.finish();
+    if (!fusedProducerClaimRemainsExact()) {
+      throw canonicalSpatialExecutionError(
+        'fused-g2p-provenance-lost-before-submit',
+        'Fused G2P lost its frozen input family or exact producer claim after command encoding'
+      );
+    }
+    device.queue.submit([commandBuffer]);
+    fusedG2pQueueSubmitted = true;
+    if (fusedG2p) {
+      if (fusedTransactionMode === 'coarse-terminal') {
+        markSchroederFusedCoarseTerminalStageSubmissionObserved(
+          device,
+          fusedTransaction,
+          {
+            stage: 'g2p',
+            producerCapability: fusedStageProducerCapability
+          }
+        );
+      } else {
+        markSchroederFusedFineSubstepStageSubmissionObserved(
+          device,
+          fusedTransaction,
+          {
+            stage: 'g2p',
+            producerCapability: fusedStageProducerCapability
+          }
+        );
+      }
+    }
+    if (!fusedProducerClaimRemainsExact({ submissionObserved: true })) {
+      throw canonicalSpatialExecutionError(
+        'fused-g2p-provenance-lost-after-submit',
+        'Fused G2P lost its frozen input family before exact fused artifact publication'
+      );
+    }
     let state = new Float32Array();
     let mechanics = new Float32Array();
     if (!noFullReadback) {
@@ -1694,40 +3427,372 @@ export async function runMlsMpmG2pWebGpu({
       separationCanonicalSpatialAuthorityGate:
         separation.canonicalSpatialAuthorityGate === true
     });
+    reconstruction.mechanicsFieldMode = mechanicsFieldMode;
     if (retainOutputParticleBuffers) {
       reconstruction.stateBuffer = outStateBuffer;
       reconstruction.mechanicsBuffer = outMechanicsBuffer;
       reconstruction.stateBufferByteLength = stateByteLength;
       reconstruction.mechanicsBufferByteLength = mechanicsByteLength;
       reconstruction.retainedOutputParticleBuffers = true;
-      reconstruction.destroyOutputParticleBuffers = () => {
-        outStateBuffer.destroy?.();
-        outMechanicsBuffer.destroy?.();
+      reconstruction.destroyOutputParticleBufferComponents = ({
+        state = false,
+        mechanics = false
+      } = {}) => {
+        if (state !== true && mechanics !== true) return false;
+        const origin = fusedG2pOrigins.get(reconstruction);
+        if (origin && ![
+          'producer',
+          'producer-retiring'
+        ].includes(origin.outputOwnership)) return false;
+        const errors = [];
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          if (state === true && !outputStateBufferDestroyed) {
+            try {
+              outStateBuffer.destroy?.();
+              outputStateBufferDestroyed = true;
+              if (origin) origin.outputStateRetired = true;
+            } catch (error) {
+              errors.push(error);
+            }
+          }
+          if (mechanics === true && !outputMechanicsBufferDestroyed) {
+            try {
+              outMechanicsBuffer.destroy?.();
+              outputMechanicsBufferDestroyed = true;
+              if (origin) origin.outputMechanicsRetired = true;
+            } catch (error) {
+              errors.push(error);
+            }
+          }
+        }
+        if (outputStateBufferDestroyed && outputMechanicsBufferDestroyed) {
+          outputParticleBuffersDestroyed = true;
+          if (origin) origin.destroyed = true;
+        }
+        const requestedComplete = (state !== true || outputStateBufferDestroyed)
+          && (mechanics !== true || outputMechanicsBufferDestroyed);
+        if (requestedComplete) return true;
+        throw errors.length === 1
+          ? errors[0]
+          : new AggregateError(
+              errors,
+              'retained G2P output component destruction was incomplete'
+            );
       };
-      returnedRetainedOutputBuffers = true;
+      reconstruction.destroyOutputParticleBuffers = () => {
+        if (outputParticleBuffersDestroyed) return false;
+        return reconstruction.destroyOutputParticleBufferComponents({
+          state: true,
+          mechanics: true
+        });
+      };
+      if (!fusedG2p) returnedRetainedOutputBuffers = true;
+    }
+    if (fusedG2p) {
+      Object.defineProperties(reconstruction, {
+        stateBuffer: {
+          value: outStateBuffer,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        mechanicsBuffer: {
+          value: outMechanicsBuffer,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        stateBufferByteLength: {
+          value: stateByteLength,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        mechanicsBufferByteLength: {
+          value: mechanicsByteLength,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        retainedOutputParticleBuffers: {
+          value: true,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        ...(fusedTransactionMode === 'coarse-terminal'
+          ? {
+              fusedCoarseTerminalTransaction: {
+                value: fusedTransaction,
+                enumerable: false,
+                configurable: false,
+                writable: false
+              },
+              terminalMicroepochAuthority: {
+                value: fusedTransaction.microepochAuthority,
+                enumerable: false,
+                configurable: false,
+                writable: false
+              }
+            }
+          : {
+              fusedFineSubstepTransaction: {
+                value: fusedTransaction,
+                enumerable: false,
+                configurable: false,
+                writable: false
+              },
+              fineMicroepochAuthority: {
+                value: fusedTransaction.microepochAuthority,
+                enumerable: false,
+                configurable: false,
+                writable: false
+              }
+            }),
+        sourceGridUpdate: {
+          value: gridUpdate,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        sourceParticleContinuation: {
+          value: fusedTransaction.particleContinuation,
+          enumerable: false,
+          configurable: false,
+          writable: false
+        },
+        proposalMode: {
+          value: 'proposal-deferred-to-post-mechanics',
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        mechanicalProposalApplied: {
+          value: false,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        liquidWallDampingAlpha: {
+          value: Number(liquidWallDampingAlpha),
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        liquidWallDampingDistanceM: {
+          value: Number(liquidWallDampingDistanceM),
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        schroederSelectedLevel: {
+          value: schroederSelectedLevel,
+          enumerable: true,
+          configurable: false,
+          writable: false
+        },
+        schroederSpatialEpochGeneration: {
+          value: schroederSpatialEpochGeneration,
+          enumerable: false,
+          configurable: false,
+          writable: false
+        }
+      });
+      fusedG2pArtifact = reconstruction;
+      try {
+        registerSubmittedFusedG2p(device, reconstruction, {
+          transaction: fusedTransaction,
+          transactionMode: fusedTransactionMode,
+          sourceGridUpdate: gridUpdate,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          canonicalGeneration: schroederSpatialEpochGeneration,
+          selectedLevel: schroederSelectedLevel,
+          inputStateBuffer: borrowedStateBuffer,
+          thermoBuffer: borrowedThermoBuffer,
+          identityBuffer: sphParticleUpload.identityBuffer ?? null,
+          inputMechanicsBuffer: borrowedMechanicsBuffer,
+          outputStateBuffer: outStateBuffer,
+          outputMechanicsBuffer: outMechanicsBuffer,
+          internalPressureScale: Number(internalPressureScale),
+          liquidWallDampingAlpha: Number(liquidWallDampingAlpha),
+          liquidWallDampingDistanceM: Number(liquidWallDampingDistanceM)
+        });
+        if (fusedTransactionMode === 'coarse-terminal') {
+          markSchroederFusedCoarseTerminalStageSubmitted(
+            device,
+            fusedTransaction,
+            {
+              stage: 'g2p',
+              artifact: reconstruction,
+              priorArtifact: gridUpdate,
+              producerCapability: fusedStageProducerCapability
+            }
+          );
+        } else {
+          markSchroederFusedFineSubstepStageSubmitted(
+            device,
+            fusedTransaction,
+            {
+              stage: 'g2p',
+              artifact: reconstruction,
+              priorArtifact: gridUpdate,
+              producerCapability: fusedStageProducerCapability
+            }
+          );
+        }
+        fusedG2pArtifactLifecycleDelegated = true;
+        fusedStageProducerCapability = null;
+        returnedRetainedOutputBuffers = true;
+        if (!validateLocallySubmittedMlsMpmFusedG2p(
+          device,
+          reconstruction,
+          {
+            ...(fusedTransactionMode === 'coarse-terminal'
+              ? { terminalTransaction: fusedTransaction }
+              : { transaction: fusedTransaction }),
+            macroAuthority: fusedTransaction.macroAuthority,
+            microepochAuthority: fusedTransaction.microepochAuthority,
+            particleContinuation: fusedTransaction.particleContinuation,
+            fieldExecution: fusedTransactionMode === 'coarse-terminal'
+              ? fusedTransaction.coarseFieldView
+              : fusedTransaction.fineFieldView,
+            priorArtifact: gridUpdate,
+            proposalMode: 'proposal-deferred-to-post-mechanics'
+          }
+        )) {
+          throw canonicalSpatialExecutionError(
+            'fused-g2p-publication-provenance-lost',
+            'Fused G2P lost its exact input or output family during lifecycle publication'
+          );
+        }
+        fusedG2pCommitted = true;
+      } catch (error) {
+        if (!fusedG2pArtifactLifecycleDelegated) {
+          fusedG2pOrigins.delete(reconstruction);
+        }
+        throw error;
+      }
     }
     return reconstruction;
   } finally {
-    const cleanup = () => {
-      if (!borrowedStateBuffer) stateBuffer.destroy?.();
-      if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-      if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-      if (!borrowedGridBuffer) gridBuffer.destroy?.();
-      if (!retainOutputParticleBuffers || !returnedRetainedOutputBuffers) {
-        outStateBuffer.destroy?.();
-        outMechanicsBuffer.destroy?.();
+    if (fusedG2p && fusedG2pClaim && !fusedG2pCommitted) {
+      if (fusedG2pArtifact && !fusedG2pArtifactLifecycleDelegated) {
+        fusedG2pOrigins.delete(fusedG2pArtifact);
       }
-      if (ownsSchroederAuthorityBuffer) schroederAuthorityBuffer.destroy?.();
-      paramsBuffer.destroy?.();
-      for (const transientBuffer of separationTransientBuffers) transientBuffer.destroy?.();
-      stateReadBuffer?.destroy?.();
-      mechanicsReadBuffer?.destroy?.();
+      if (fusedG2pQueueSubmitted) {
+        try {
+          const reason = new Error(
+            'G2P submitted before exact fused artifact publication'
+          );
+          if (fusedTransactionMode === 'coarse-terminal') {
+            quarantineSchroederFusedCoarseTerminalTransaction(
+              device,
+              fusedTransaction,
+              reason
+            );
+          } else {
+            quarantineSchroederFusedFineSubstepTransaction(
+              device,
+              fusedTransaction,
+              reason
+            );
+          }
+        } catch {
+          // Preserve the originating post-submit failure.
+        }
+        fusedStageProducerCapability = null;
+      } else if (fusedStageProducerCapability != null) {
+        try {
+          if (fusedTransactionMode === 'coarse-terminal') {
+            releaseSchroederFusedCoarseTerminalStageProducer(
+              device,
+              fusedTransaction,
+              fusedStageProducerCapability
+            );
+          } else {
+            releaseSchroederFusedFineSubstepStageProducer(
+              device,
+              fusedTransaction,
+              fusedStageProducerCapability
+            );
+          }
+          fusedStageProducerCapability = null;
+        } catch {
+          // Preserve the originating pre-submit failure.
+        }
+      }
+    }
+    const cleanup = () => {
+      if (!borrowedStateBuffer) destroyOwnedAllocation(stateBuffer);
+      if (!borrowedThermoBuffer) destroyOwnedAllocation(thermoBuffer);
+      if (!borrowedMechanicsBuffer) destroyOwnedAllocation(mechanicsBuffer);
+      if (!borrowedGridBuffer) destroyOwnedAllocation(gridBuffer);
+      if (!retainOutputParticleBuffers || !returnedRetainedOutputBuffers) {
+        if (!outputParticleBuffersDestroyed) {
+          outputParticleBuffersDestroyed = true;
+          destroyOwnedAllocation(outStateBuffer);
+          destroyOwnedAllocation(outMechanicsBuffer);
+        }
+      } else {
+        allocationLedger.delete(outStateBuffer);
+        allocationLedger.delete(outMechanicsBuffer);
+      }
+      if (ownsSchroederAuthorityBuffer) {
+        destroyOwnedAllocation(schroederAuthorityBuffer);
+      }
+      destroyOwnedAllocation(paramsBuffer);
+      for (const transientBuffer of separationTransientBuffers) {
+        destroyOwnedAllocation(transientBuffer);
+      }
+      destroyOwnedAllocation(stateReadBuffer);
+      destroyOwnedAllocation(mechanicsReadBuffer);
+      destroyAllocationLedger();
     };
-    if (noFullReadback) {
-      deferSubmittedWorkCleanup(device, cleanup);
+    if (noFullReadback && fusedG2pQueueSubmitted) {
+      try {
+        allocationCleanupDelegated =
+          deferSubmittedWorkCleanup(device, cleanup) === true;
+      } catch {
+        allocationCleanupDelegated = false;
+        cleanup();
+      }
     } else {
       cleanup();
     }
+  }
+  } finally {
+    if (
+      fusedG2p
+      && fusedStageProducerCapability != null
+      && fusedG2pQueueSubmitted !== true
+    ) {
+      try {
+        if (fusedTransactionMode === 'coarse-terminal') {
+          releaseSchroederFusedCoarseTerminalStageProducer(
+            device,
+            fusedTransaction,
+            fusedStageProducerCapability
+          );
+        } else {
+          releaseSchroederFusedFineSubstepStageProducer(
+            device,
+            fusedTransaction,
+            fusedStageProducerCapability
+          );
+        }
+        fusedStageProducerCapability = null;
+      } catch {
+        // Preserve the originating pre-submit allocation/admission failure.
+      }
+    }
+    if (
+      fusedG2pClaim
+      && fusedG2pClaims.get(fusedTransaction) === fusedG2pClaim
+    ) {
+      fusedG2pClaims.delete(fusedTransaction);
+    }
+    if (!allocationCleanupDelegated) destroyAllocationLedger();
   }
 }
 
@@ -1823,6 +3888,8 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
     mechanicsBufferByteLength: reconstruction?.mechanicsBufferByteLength ?? 0,
     retainedOutputParticleBuffers: Boolean(reconstruction?.retainedOutputParticleBuffers),
     destroyOutputParticleBuffers: reconstruction?.destroyOutputParticleBuffers ?? null,
+    destroyOutputParticleBufferComponents:
+      reconstruction?.destroyOutputParticleBufferComponents ?? null,
     readbackMode: reconstruction?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: reconstruction?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: reconstruction?.normalHotLoopReadbackFree ?? false,
@@ -1844,6 +3911,21 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
       reconstruction?.oldLevelAssignmentLookupRemoved === true,
     separationCanonicalSpatialAuthorityGate:
       reconstruction?.separationCanonicalSpatialAuthorityGate === true,
+    mechanicsFieldMode:
+      reconstruction?.mechanicsFieldMode ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
+    mechanicsFieldViewEnabled:
+      reconstruction?.mechanicsFieldViewEnabled === true,
+    mechanicsFieldViewExecution:
+      reconstruction?.mechanicsFieldViewExecution ?? null,
+    mechanicsFieldViewBuffer:
+      reconstruction?.mechanicsFieldViewBuffer ?? null,
+    mechanicsFieldViewByteLength:
+      reconstruction?.mechanicsFieldViewByteLength ?? 0,
+    mechanicsFieldViewOwned: false,
+    gridStateAuthority:
+      reconstruction?.gridStateAuthority ?? 'dense-mls-mpm-grid-state',
+    denseGridAuthoritative:
+      reconstruction?.denseGridAuthoritative !== false,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -1889,8 +3971,12 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   schroederSelectedLevel = null,
   schroederSpatialEpochGeneration = null,
   schroederSpatialMechanicalProposal = null,
+  fusedFineSubstepTransaction = null,
+  fusedCoarseTerminalTransaction = null,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
+  mechanicsFieldMode = gridUpdate?.mechanicsFieldMode
+    ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -1904,6 +3990,16 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const canonicalSpatialIntent = canonicalSpatialRequired === true
     || schroederSpatialEpochGeneration?.selected === true;
+  const mechanicsFieldRequired =
+    mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED;
+  if (
+    mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_DISABLED
+    && !mechanicsFieldRequired
+  ) {
+    throw new RangeError(
+      `mechanicsFieldMode must be '${MLS_MPM_MECHANICS_FIELD_MODE_DISABLED}' or '${MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED}'`
+    );
+  }
   let cpuReference = null;
   const getCpuReference = () => {
     if (!cpuReference) {
@@ -1988,8 +4084,11 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       schroederSelectedLevel,
       schroederSpatialEpochGeneration,
       schroederSpatialMechanicalProposal,
+      fusedFineSubstepTransaction,
+      fusedCoarseTerminalTransaction,
       canonicalSpatialRequired,
       observeCanonicalSpatialAuthority,
+      mechanicsFieldMode,
       retainOutputParticleBuffers,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });

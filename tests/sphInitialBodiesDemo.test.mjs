@@ -8,6 +8,7 @@ import {
   surfaceEmissive,
   surfaceEmissiveTemperature
 } from '../src/runtime/sphPhaseDemo.js';
+import { createSphPhaseViewState } from '../src/runtime/sphPhaseViewState.js';
 import {
   SPH_INITIAL_BODIES_SCHEMA,
   SphInitialBodiesValidationError
@@ -184,6 +185,36 @@ test('initialBodies builds three independent rectangular lattices with stable id
   nearRelative(demo.initialParticleSpacing.totalMassKg, summedMassKg);
   assert.equal(demo.initialParticleSpacing.simulationPreflight.feasible, true);
   assert.deepEqual(demo.initialParticleSpacing.simulationPreflight.blockers, []);
+});
+
+test('initialBodies distinguishes live bodies from fixed MLS-MPM mechanics capacity', () => {
+  const driver = createSphPhaseDemo({
+    initialBodies: THREE_RECTANGULAR_BODIES,
+    allowFixtureMaterialProperties: true,
+    mechanics: 'mlsmpm'
+  });
+  const { demo } = driver;
+  const viewState = createSphPhaseViewState(driver);
+  const live = 38;
+  const spareProductSlots = 8;
+  const lineageCapacity = live + spareProductSlots;
+  const phaseCompanionSlots = lineageCapacity * 3;
+  const particleCapacity = lineageCapacity * 4;
+
+  assert.equal(demo.counts.live, live);
+  assert.equal(demo.counts.spareProductSlots, spareProductSlots);
+  assert.equal(demo.counts.phaseCompanionSlots, phaseCompanionSlots);
+  assert.equal(demo.counts.total, particleCapacity);
+  assert.equal(demo.state.phaseCarrierPlan.lineageCapacity, lineageCapacity);
+  assert.equal(demo.state.phaseCarrierPlan.particleCapacity, particleCapacity);
+  assert.equal(demo.state.particles.length, particleCapacity);
+  assert.equal(viewState.positionsM.length / 3, particleCapacity);
+  assert.equal(viewState.sphGpuParticleState.particleCount, particleCapacity);
+  assert.equal(viewState.mlsMpmGpuParticleState.particleCount, particleCapacity);
+  assert.equal(
+    viewState.initialParticleEdgeDiagnostics.totalGeneratedParticleCount,
+    live
+  );
 });
 
 test('initialBodies rejects empty, anisotropic, and incompatible cross-body sampling before allocation', () => {

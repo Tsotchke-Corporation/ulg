@@ -9,8 +9,7 @@ import {
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearTraversalWgsl.js';
 import {
   computeBufferBinding,
-  createCachedExplicitComputePipeline,
-  deferSubmittedWorkCleanup
+  createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
 import {
   tagWebGpuBufferDevice,
@@ -103,6 +102,7 @@ const GPU_BUFFER_USAGE = {
 const EXPECTATION_BYTES = 112;
 const MECHANICAL_PARAMS_BYTES = 96;
 const WORKGROUP_SIZE = 64;
+const MECHANICAL_APPLY_ALL_LEVELS = -0x8000_0000;
 const MECHANICAL_EVIDENCE_MAGIC = 0x4d45_5631;
 const MECHANICAL_PROPOSAL_HEADER_BYTES =
   SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_HEADER_WORDS * Uint32Array.BYTES_PER_ELEMENT;
@@ -449,7 +449,10 @@ function createMechanicalParamsArray({
   view.setUint32(32, SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1, true);
   view.setUint32(36, SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1, true);
   view.setUint32(40, SCHROEDER_SPATIAL_SUPPORT_PROFILE_MATERIAL_INTERFACE_LOCAL_V1, true);
-  view.setUint32(44, 0, true);
+  // Proposal construction is level-agnostic.  The apply pass overwrites this
+  // word with an exact selected level, or keeps INT32_MIN to apply to every
+  // particle for the legacy one-level caller.
+  view.setInt32(44, MECHANICAL_APPLY_ALL_LEVELS, true);
   view.setUint32(48, exactU32(execution?.generationId, 'execution.generationId', {
     positive: true
   }), true);
@@ -513,7 +516,7 @@ struct MechanicalProposalParams {
   contact_support_profile_id: u32,
   separation_support_profile_id: u32,
   interface_support_profile_id: u32,
-  _pad0: u32,
+  apply_selected_level: i32,
   generation_id: u32,
   support_epoch: u32,
   position_epoch: u32,
@@ -828,7 +831,7 @@ struct MechanicalProposalParams {
   contact_support_profile_id: u32,
   separation_support_profile_id: u32,
   interface_support_profile_id: u32,
-  _pad0: u32,
+  apply_selected_level: i32,
   generation_id: u32,
   support_epoch: u32,
   position_epoch: u32,
@@ -848,6 +851,7 @@ struct MechanicalProposalParams {
 @group(0) @binding(2) var<storage, read_write> output_state: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> mechanical_params: MechanicalProposalParams;
 @group(0) @binding(4) var<storage, read_write> traversal_evidence: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read> level_assignments: array<f32>;
 
 fn mechanical_apply_cbrt(volume_m3: f32) -> f32 {
   return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
@@ -906,6 +910,11 @@ fn mechanical_complete_proposal_admitted() -> bool {
 fn apply(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
   if (particle_index >= mechanical_params.particle_count) { return; }
+  if (
+    mechanical_params.apply_selected_level != -2147483648
+    && i32(round(level_assignments[particle_index * 16u]))
+      != mechanical_params.apply_selected_level
+  ) { return; }
   // A malformed or unauthenticated traversal invalidates the complete
   // consumer proposal set. Never partially apply rows from a torn epoch.
   if (!mechanical_complete_proposal_admitted()) { return; }
@@ -1148,6 +1157,17 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   const supportBuffer = pool.supportBuffer;
   const expectationBuffer = pool.expectationBuffer;
   const paramsBuffer = pool.paramsBuffer;
+  const uniformQueryLevel = authority.execution.queryMinLevel
+      === authority.execution.queryMaxLevel
+    ? exactI32(
+        authority.execution.queryMinLevel,
+        'execution uniform query level'
+      )
+    : null;
+  // The complete params upload below resets the retained arena slot to the
+  // all-level sentinel on every acquisition. Track later writes so repeated
+  // apply calls do not enqueue redundant four-byte queue operations.
+  let appliedParamsLevel = MECHANICAL_APPLY_ALL_LEVELS;
   device.queue.writeBuffer(
     expectationBuffer,
     0,
@@ -1205,7 +1225,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'uniform'),
-      computeBufferBinding(4, 'storage')
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'read-only-storage')
     ]
   });
   const entries = [
@@ -1295,6 +1316,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
 
   let released = false;
   let releaseScheduled = false;
+  let releasePromise = null;
   const releaseLease = () => {
     if (released) return false;
     released = true;
@@ -1309,7 +1331,21 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     if (releaseScheduled || released) return false;
     releaseScheduled = true;
     pool.releaseScheduled = true;
-    deferSubmittedWorkCleanup(device, releaseLease);
+    if (typeof device?.queue?.onSubmittedWorkDone === 'function') {
+      releasePromise = Promise.resolve(device.queue.onSubmittedWorkDone()).then(
+        () => releaseLease(),
+        (error) => {
+          // A rejected owner fence proves no retirement. Keep the proposal
+          // arena leased and make the exact same release capability retryable.
+          releaseScheduled = false;
+          pool.releaseScheduled = false;
+          releasePromise = null;
+          throw error;
+        }
+      );
+    } else {
+      releasePromise = Promise.resolve(releaseLease());
+    }
     return true;
   };
   const artifact = {
@@ -1369,18 +1405,51 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     candidateBudget: null,
     fullParticleReadbackPerformed: false,
     readbackMode: 'no-full-readback',
+    uniformQueryLevel,
+    applyLevelFilterPolicy: uniformQueryLevel == null
+      ? 'filter-authenticated-multi-level-assignment'
+      : 'omit-redundant-uniform-level-assignment-filter',
     bufferOwnership: 'device-arena-runtime-cache',
     ownsProposalBuffer: false,
     ownsEvidenceBuffer: false,
     encodeApply(encoder, {
       stateBuffer,
-      mechanicsBuffer = authority.mechanicsBuffer
+      mechanicsBuffer = authority.mechanicsBuffer,
+      selectedLevel = null
     } = {}) {
       if (released || releaseScheduled) {
         throw new Error('mechanical proposal cannot apply after arena release begins');
       }
       requireBuffer(device, stateBuffer, 'mechanical proposal apply stateBuffer');
       requireBuffer(device, mechanicsBuffer, 'mechanical proposal apply mechanicsBuffer');
+      const requestedApplyLevel = selectedLevel == null
+        ? MECHANICAL_APPLY_ALL_LEVELS
+        : Number(selectedLevel);
+      if (
+        !Number.isInteger(requestedApplyLevel)
+        || requestedApplyLevel < MECHANICAL_APPLY_ALL_LEVELS
+        || requestedApplyLevel > 0x7fff_ffff
+      ) {
+        throw new RangeError(
+          'mechanical proposal selectedLevel must be an exact i32 or null'
+        );
+      }
+      // An authenticated uniform generation cannot contain an off-level live
+      // row. Keep the all-level sentinel in that exact case, avoiding both a
+      // queue write and the shader's 64-byte-stride assignment load. Genuine
+      // multi-level generations retain the explicit selected-level filter.
+      const applyLevel = uniformQueryLevel != null
+          && requestedApplyLevel === uniformQueryLevel
+        ? MECHANICAL_APPLY_ALL_LEVELS
+        : requestedApplyLevel;
+      if (applyLevel !== appliedParamsLevel) {
+        device.queue.writeBuffer(
+          paramsBuffer,
+          44,
+          new Int32Array([applyLevel])
+        );
+        appliedParamsLevel = applyLevel;
+      }
       const bindGroup = device.createBindGroup({
         layout: applyPipeline.bindGroupLayout,
         entries: [
@@ -1388,7 +1457,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           { binding: 1, resource: { buffer: mechanicsBuffer } },
           { binding: 2, resource: { buffer: stateBuffer } },
           { binding: 3, resource: { buffer: paramsBuffer } },
-          { binding: 4, resource: { buffer: evidenceBuffer } }
+          { binding: 4, resource: { buffer: evidenceBuffer } },
+          { binding: 5, resource: { buffer: authority.source.sourceBuffer } }
         ]
       });
       const pass = encoder.beginComputePass({
@@ -1406,7 +1476,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     releaseAfterSubmittedWork,
     destroy: releaseAfterSubmittedWork,
     get released() { return released; },
-    get releaseScheduled() { return releaseScheduled; }
+    get releaseScheduled() { return releaseScheduled; },
+    get releasePromise() { return releasePromise; }
   };
   Object.freeze(artifact);
   liveMechanicalProposalArtifacts.add(artifact);

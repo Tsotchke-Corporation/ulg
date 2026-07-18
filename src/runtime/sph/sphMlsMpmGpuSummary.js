@@ -285,6 +285,14 @@ function outputBufferFromStage(stage, key) {
 }
 
 function updatedGridBufferFromGridUpdate(gridUpdate) {
+  if (gridUpdate?.mechanicsFieldViewEnabled === true) {
+    return gridUpdate.mechanicsFieldViewBuffer
+      ?? gridUpdate.mechanicsFieldView
+      ?? gridUpdate?.gpuResult?.mechanicsFieldViewBuffer
+      ?? gridUpdate?.gpuResult?.updatedGridBuffer
+      ?? gridUpdate?.updatedGridBuffer
+      ?? null;
+  }
   return gridUpdate?.gpuResult?.updatedGridBuffer ?? gridUpdate?.updatedGridBuffer ?? null;
 }
 

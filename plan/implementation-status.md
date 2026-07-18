@@ -1,43 +1,52 @@
 # Implementation Status
 
-## Current Focus - 2026-07-13 AKDT
+## Current Focus - 2026-07-18 AKDT
 
-Branch `ss-spatial-authority-refactor` starts at verified recovery checkpoint
-`bdd3eee`; standalone SS spatial epoch Slice 2 is durably committed as
-`9d48c98`. Slice 3 remains the first same-epoch production-consumer migration,
-but visible-loop repair currently outranks it.
+Branch `ss-spatial-authority-refactor` has completed Slice 7 implementation and
+precommit release verification as one staged implementation unit. ICC plan
+items M0 through M5 are verified: authenticated
+sparse-v2 fine/coarse mechanics-field admission, exact fine reflux, terminal
+coarse reflux, fused `r=1..4` production orchestration with device-loss/replay
+closure, and the Morton-prefix aggregate hierarchy plus shared post-mechanics
+publication path are complete. The immutable commit and remote-ref receipts are
+recorded out of band after the snapshot containing this document is committed.
 
-The in-flight checkpoint separates excluded-volume position projection from
-pair-normal velocity damping, uses retained per-particle `J`-adjusted render
-radii with an explicitly conservative sparse sampling proxy, fixes grouped
-reaction-event accounting, and makes the native harness capture a real retained
-GPU reduction at exact `step=0`, `time=0`. The 3.072-second water run is green:
-`maxSpeed=1.08636 m/s`, `minJ=0.981526`, `maxJ=1.000259`, no browser/WebGPU
-issues, retained native PBR/refraction accepted, and all requested checkpoints
-captured. Sequential frames prove motion, but water remains too cohesive and
-bead/lobe textured; the temporary `0.04` artificial-viscosity stabilizer is not
-physical viscosity.
+The current tree passes the complete unit suite at `1628` total, `1617` passed,
+`11` expected opt-in skips, and zero failures. The definitive Playwright run is
+green at `66` passed, two intentional capture-only skips, and zero failures.
+The product-event compaction gate now runs in its own fresh WebGPU browser
+process so accumulated Dawn/Chromium device lifetime cannot invalidate an
+otherwise bounded compaction receipt; condensed-product visibility remains a
+separate preceding chemistry assertion. Production build and material-property
+validation both pass.
 
-Sodium-water chemistry is now observable and correctly counted, but the scene
-is not accepted. The final-code probe captures time zero, counts nine events,
-and retains NaOH/H2 mass, yet reaches `65.0116 m/s`, hits `J=1000`, and is
-occluded by box-wide merged lobe/boulder surfaces. A decoded audit confirms
-that the mounted `blob=1` path uses full physical particle radii: the sparse
-point-sampling floor is inactive, water positions really expand almost across
-the container, and the four H2 rows are the `J=1000` cap hits. Next: add compact
-per-material and per-phase speed/J/volume reductions plus post-placement
-product provenance. A short
-A/B proves `alpha=0.04` without reaction is green (`1.17253 m/s`,
-`J=0.983976..1.008039`), but reaction-on still reaches `91.0991 m/s` and
-`J=1000`; changing the sodium damping preset alone is not a fix. Use the new
-reductions to isolate the `0.256..0.512 s` condensed-contact energy injection
-before implementing drag/terminal-velocity closure or changing render policy.
-The decisive same-seed reaction-off control remains bounded at `0.512 s`
-(`2.43 m/s`, `J=1.036`, `709 J`), while reaction-on reaches `62.56 m/s`,
-`J=1000`, and `33,976 J`; both were near `1.5 kJ` at `0.256 s`.
-Do not add uncoupled fractional buoyancy, widen the
-reaction radius, globally relax acceptance thresholds, or start Slice 3 while
-the visible physics loop remains untrustworthy.
+Fresh desktop and 390 x 844 DPR-3 mobile standard matrices each cover all four
+presets and three deterministic random pairs. Every one of the seven scenarios
+reports renderer and analysis status `good`, nonblank frames, and zero browser
+console, WebGPU, or visual-surface issues. Direct frame review retains opaque,
+refraction-led water, iron/ice contact and deformation, reactive sodium/water,
+visible dynamic fluorine with CsF product, and stable random-pair geometry.
+These are structural/rendering results, not a claim of complete gas transport:
+water-cycle steam still fails rise and condensation, and sodium/water hydrogen
+still fails its rise expectation. Those explicit post-Slice-7 phase-volume and
+gas-interface transport frontiers remain open.
+
+M5 performance is now closed. Grouping the unchanged 27-dispatch
+mechanics-field graph into one production compute pass and one post-G2P pass
+reduces the final three-run historical non-target median regression to
+`3.303618%`, below the five-percent gate; the independent medians are
+effectively flat. The final native target characterization has complete
+timestamp/stage/migrated-law coverage and identifies post-mechanics reaction
+work (`364..369 ms` p50) as the dominant Slice 8 optimization target. Pages
+build and static asset/browser smoke also pass. Before Slice 7 can be called
+released, only the one full-slice commit and non-force branch/Pages pushes
+remain. The staged 87-path secret/conflict/whitespace review is clean outside
+generated-bundle whitespace; ICC completion is `2/2`, scoped readiness is
+`100`, guard-diff passes without generated Pages assets, and the scoped
+production audit has no high-severity or blocking risk. After Git transport,
+the architecture queue advances to Slice 8 source-family adapters and cleanup;
+it does not reopen the verified two-level hierarchy to hide the steam/hydrogen
+transport debt.
 
 Updated: 2026-06-20 native marching-cubes vertex-row budget, GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 

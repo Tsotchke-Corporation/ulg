@@ -289,6 +289,9 @@ never `particleCount * fixedBudget`.
 
 ### Slice 7 - Two-level coupling and aggregate traversal
 
+- Status: implementation and precommit release verification complete in the
+  Slice 7 staged snapshot; the immutable commit and remote-ref receipts are
+  recorded out of band after this document is committed.
 - Keep the third level on hold.
 - Close constant/affine reproduction, partition of unity, mass, center of mass,
   linear/angular momentum, internal energy, positivity, CFL/correction, reflux,
@@ -1462,3 +1465,256 @@ cooling and steam-rise checks, and sodium/water still reaches `75.418 m/s` and
 three random pairs pass their current behavior gates. Those failures remain
 active solver/transport work; they are not hidden as Slice 3 acceptance and do
 not restore the removed canonical assignment lookup.
+
+## Slice 7 M0-M3 two-level coupling checkpoint - 2026-07-17
+
+ICC plan items M0 through M3 are verified. They establish the complete sparse
+two-level mechanics transaction that precedes M4 hierarchy closure; none of
+these stages materializes a dense field mirror or publishes an intermediate
+particle state as the next public epoch.
+
+M0 admits authenticated sparse-v2 fine and coarse mechanics fields before any
+coupling work. Field identity, compact-row bounds, active-word ranges, source
+generation, device, lane, and layout are checked together. Malformed active
+ends, capacity ends, key offsets, and state strides fail closed at field
+admission without partially admitting the parent workspace. The dedicated
+native Vulkan M0 run passes all `8/8` tests with zero validation or uncaptured
+errors:
+
+`ULG_RUN_NATIVE_PARENT_FIELD_MECHANICS_M0=1 node --test tests/schroederSpatialParentFieldMechanicsWorkspaceGpu.test.mjs`.
+
+M1 executes the exact fine correction and consumes its authenticated
+mechanics-field energy receipt through WebGPU G2P. Fine-route heat and local
+heat are accounted separately, their sum matches measured particle heat, and
+the correction changes only the admitted fine particle. Receipt consumption is
+single-use: replay leaves state and mechanics bit-exactly unchanged while the
+field and reflux ledgers record fail-closed phase/replay evidence. Its native
+Vulkan gate also passes `8/8`:
+
+`ULG_RUN_NATIVE_PARENT_FIELD_MECHANICS_M1=1 node --test tests/schroederSpatialParentFieldMechanicsWorkspaceGpu.test.mjs`.
+
+M2 executes one terminal coarse reflux in a distinct queue-fenced workspace
+arena. The terminal receipt binds the exact field count, contribution count,
+owner generation, scale words, and final mutation lineage; positivity, CFL,
+momentum, angular-momentum, and energy residuals all close within their packed
+tolerances. The synchronized coarse velocity/gradient field and deferred route
+heat are consumed once through WebGPU G2P, while a replay restores the input
+state/mechanics and rejects the reused terminal receipt. The native Vulkan M2
+gate passes `8/8`, and independent adversarial source/lifecycle review found no
+blocker:
+
+`ULG_RUN_NATIVE_PARENT_FIELD_MECHANICS_M2=1 node --test tests/schroederSpatialParentFieldMechanicsWorkspaceGpu.test.mjs`.
+
+M3 integrates those transactions into the production fused controller for
+fine-substep ratios `r=1..4`. Each ratio dispatches exactly `2r+1` P2G passes,
+`r+1` grid updates, and `r+1` G2P passes; performs `r` fine corrections and one
+terminal coarse operation; advances `r+1` authenticated private epochs; and
+publishes no generic or intermediate `S*`. Native Blackwell/Vulkan execution
+passes operator-split energy sealing, non-binary spacing identity, fixed
+three-arena bounded rollover, replay rejection, and zero post-cleanup live
+generations:
+
+`ULG_RUN_NATIVE_CROSS_LEVEL_M3_R1_R4=1 ULG_CROSS_LEVEL_M3_BASE_URL=https://127.0.0.1:5174/ node --test tests/schroederCrossLevelCouplingGpu.native.test.mjs`.
+
+Focused adversarial lifecycle coverage additionally proves submission failure,
+exact device-loss supersession without another queue fence, rollback,
+quarantine non-reuse, and exactly-once generation cleanup for the fused
+controller, mechanics-field runtimes, parent workspaces, frozen assignment
+refresh, and spatial generations.
+
+## Slice 7 hierarchy closure and gas-stability checkpoint - 2026-07-17
+
+Slice 7 M4 is complete. The canonical directory now feeds a true Morton-prefix
+binary hierarchy over compact canonical leaves rather than a rank-balanced
+surrogate. GPU construction retains the five-word Morton radix arenas, builds
+Karras-style internal topology and stackless escape ropes, reduces leaf and
+internal aggregates, authenticates the topology fingerprint, and publishes a
+replay-bound traversal receipt. Traversal materializes no candidate list and
+uses no per-source candidate budget. The shared post-mechanics closure adopts
+state, thermo, mechanics, reaction, and phase components independently, then
+publishes one coherent fresh public epoch with replay-safe retirement.
+
+Focused hierarchy, reflux, closure, and ABI verification passes `64/64`. The
+native Blackwell/Vulkan 4,097-source artifact at
+`/tmp/ulg-slice7-aggregate-native-final-4097.json` builds 4,097 leaves and
+4,096 internal nodes, covers every source exactly, conserves mass, first
+moment, momentum, angular momentum, internal energy, and kinetic energy, and
+reports zero compilation, validation, or lifecycle errors. Its stackless
+traversal visits `376.89` nodes on average while covering `4,091.79` far leaves
+per query. The paired corruption artifact at
+`/tmp/ulg-slice7-aggregate-native-final-corrupt.json` changes the root
+fingerprint and causes all 4,097 queries to reject before traversal. No
+corrupted result authenticates.
+
+The M4 visual audit also exposed a separate, older gas closure defect.
+Admitted gas P2G ignored the packed CFL-reduced sound speed and rebuilt an
+approximately one-atmosphere-per-density-ratio pressure. CPU and WGSL now use
+the same ambient-referenced linearized closure:
+
+`p_gauge = c_cfl^2 * (rho - rho0 * p_ambient / 101325 Pa)`.
+
+This preserves the existing condensed closures while reducing the fresh water
+control from about `90.9 m/s`, `minJ=0.1` to `1.086 m/s`,
+`J=0.999689..1.000266`, and sodium/water from about `62.1 m/s`, `minJ=0.1` to
+`5.282 m/s`, `J=0.95..1.033`. The accepted artifacts are
+`/tmp/ulg-visual-sanity-matrix/slice7-cfl-gas-water-20260717/summary.json` and
+`/tmp/ulg-visual-sanity-matrix/slice7-cfl-gas-sodium-20260717/summary.json`.
+Both keep opaque refraction-led water and continuous visible geometry with no
+blank, flickering, transparency, browser-console, or WebGPU regression.
+
+One bounded current-volume experiment was deliberately rejected and fully
+rolled back. Preserving `Vcurrent = V0 * J` only in mechanics refresh and
+phase-lane transfer passed its focused and native conservation tests, but it
+left reaction birth and phase-volume materialization on `mass / targetDensity`.
+The water visual then reached `J=1000` with 25 gas cap hits and still failed
+steam rise/condensation; sodium still failed hydrogen rise. Keeping that half
+of the authority would mint incompatible geometry at two adjacent producers.
+ICC records the attempt as
+`slice7-volume-authority-isolated-20260717:abandoned`; none of its source or
+test changes remain.
+
+### Follow-on - phase-resolved volume and gas-interface transport
+
+This is a dedicated post-Slice-7 solver slice, not a reason to reopen the
+verified hierarchy/reflux implementation. Steam and hydrogen currently have
+no complete buoyancy or phase-interface path, so their rise/condensation gates
+remain explicit pre-existing behavior frontiers.
+
+- [ ] Add authoritative represented-current-volume and volume-gradient moments
+  to each phase-resolved mechanics field node, sourced from valid `V0 * J`.
+- [ ] Implement one shared antisymmetric pressure/drag operator for both the
+  local mechanics-field grid update and the parent-field/reflux path, with
+  equal-and-opposite momentum and energy accounting.
+- [ ] Supply a hydrostatic ambient boundary ledger or explicit resolved air;
+  uniform gravity plus a shared grid cannot manufacture gas buoyancy.
+- [ ] Conserve consumed source current volume through phase change and reaction
+  birth. Direct products, spare placement, merge placement, and resident events
+  must partition source volume; target density remains an EOS target that
+  drives expansion work instead of teleporting geometry.
+- [ ] Materialize phase-volume split/merge consistently before mechanics
+  refresh. The older phase-volume migration record is adaptive representation
+  metadata, not thermodynamic phase-transfer authority.
+- [ ] Keep the legacy pressure-interface rows disabled. Their geometry comes
+  from render-derived support and cannot conservatively address mechanics
+  fields or the two-level reflux ledger.
+- [ ] Prove native partial sodium/water reactions conserve
+  `sum(active V0*J) + sum(live event support volume)` across direct, spare, and
+  merge routes; then require visible hydrogen rise, visible steam transport,
+  pressure-dependent condensation, iron/ice heat-transfer continuity, and less
+  than five-percent throughput regression.
+
+## Slice 7 M5 release-verification checkpoint - 2026-07-18
+
+M5 implementation and precommit release verification are complete in the
+staged Slice 7 snapshot. The immutable commit SHA and remote-ref results cannot
+be embedded in that same commit without changing its SHA; ICC attempt state and
+the final handoff record those transport receipts after the snapshot is
+committed and pushed.
+
+The release hardening closes three lifecycle/evidence ambiguities found during
+the complete suite. Mechanics-field and spatial-generation retirement now
+validate the exact in-flight owner and retire at the submitted queue boundary,
+including device-loss supersession, without destroying borrowed or published
+buffers. Resident continuation evidence now distinguishes a real full particle
+readback from compact summary or render-row refresh: the
+`fullParticleReadbackPerformed` flag is true only when full state/mechanics rows
+were actually read, while authenticated resident GPU continuation remains
+available from compact diagnostics. The outer execution envelopes preserve
+that distinction instead of recreating a false full-readback claim.
+
+The current complete unit run reports `1628` tests, `1617` passed, `11`
+expected opt-in skips, and zero failures. Production build passes, and material
+validation accepts all `111` element records and seven crystal records. Fresh
+M5 native hierarchy artifacts at
+`/tmp/ulg-slice7-aggregate-native-m5-final.json` and
+`/tmp/ulg-slice7-aggregate-native-m5-corrupt.json` respectively prove the
+4,097-source aggregate/traversal path and all-query topology-fingerprint
+fail-close behavior.
+
+The definitive Playwright run reports `66` passed, two intentional
+capture-only skips, and zero failures. Its bounded product-event compaction
+case is tagged for a dedicated fresh WebGPU browser process, preventing an
+accumulated Chromium/Dawn external-instance lifetime failure from being
+misreported as chemistry or compaction failure. The preceding condensed
+product test remains responsible for Al/O2-to-Al2O3 visibility; the compaction
+test owns only bounded event-buffer generations/bytes and clean runtime
+lifecycle.
+
+Fresh desktop and mobile standard visual matrices are recorded at
+`/tmp/ulg-slice7-visual-m5/slice7-m5-full-standard-desktop-final-20260718/summary.json`
+and
+`/tmp/ulg-slice7-visual-m5/slice7-m5-full-standard-mobile-final-20260718/summary.json`.
+Each runs all four presets and three deterministic random pairs. All seven
+scenarios report renderer and analysis status `good`, every capture is
+nonblank, and there are zero browser-console, WebGPU, or visual-surface issues.
+Direct frame review confirms continuous opaque/refraction-led water, persistent
+iron/ice contact and melt/deformation, reactive sodium/water surfaces, visible
+dynamic fluorine and CsF product, and stable random-pair geometry on both
+viewports.
+
+The matrix commands are not full behavior passes. Two scenario-level behavior
+failures remain: water-cycle steam does not rise or condense, and sodium/water
+hydrogen does not rise. Those three explicit expectations are the documented
+post-Slice-7 phase-volume/gas-interface transport frontier above, not renderer
+regressions, and have not been relaxed or hidden.
+
+The final historical non-target campaign is
+`/tmp/ulg-slice7-nontarget-detp2g-final-pass-consolidated.json`. It compares
+the dirty Slice 7 source fingerprint at Git head
+`43d355e59005b96ec2874af86c219b6078d06335` with the clean historical source
+at that same head, in three alternating `AB/BA/AB` runs with four warmup
+batches, one measured 16-step batch, and 1,024 realized particles per arm.
+The first unoptimized receipt failed at `10.753822%` paired median regression:
+the mechanics-field route encoded its 13 additional safety/contact dispatches
+as 13 additional compute passes. Keeping every dispatch and exact state
+transition but grouping production work into one ordered compute pass plus one
+post-G2P receipt/rollback pass reduces the final paired median regression to
+`3.303618%`, below the five-percent ceiling. The independent medians are
+`86.767896` historical versus `86.814976` candidate steps/s, a `0.054259%`
+candidate improvement. The campaign reports no blockers.
+
+The final authoritative target characterization is
+`/tmp/ulg-slice7-target-detp2g-final-pass-consolidated.json`. All three arms
+provide native timestamp-query support, four warmups, nine measured samples,
+complete batch/stage/migrated-law coverage, stable same-source fingerprints,
+and zero blockers. This is deliberately not a five-percent regression gate:
+it compares the `r=2` authoritative two-level mechanics and post-mechanics law
+chain with a single-level control, not two interchangeable implementations.
+The authoritative/control median ratios are `2.471602x` p50 and `2.266266x`
+p95. The timestamp evidence makes the next optimization priority explicit:
+post-mechanics `reactionStep` is roughly `364..369 ms` p50 per run, ahead of
+spatial-epoch generation at `61..63 ms`, derived-view build at about `44 ms`,
+and mechanics-field view build at about `4.1 ms`. Slice 8 must route that
+reaction work through admitted shared spatial views and remove its redundant
+lookup work before treating the target-path ratio as an optimization baseline.
+
+`npm run build:pages` passes after transforming `926` modules. The Pages
+verifier reports `30` files, one HTML entry, twelve JavaScript files, both
+hashed workers, the stable resident-compute facade, and all service assets
+preserved. A repository-root static server at `/docs/` returns the hashed
+entry, stable worker/facade assets, MoonLab JS/Wasm, Eshkol closure Wasm, and
+probe worker; MoonLab Wasm has `application/wasm` content type. A fresh Vulkan
+Chromium boot reports no failed requests, page errors, or console errors,
+mounts the scene and play control, creates two live `1280 x 800` canvases, and
+produces `/tmp/ulg-pages-static-smoke.png`; direct inspection confirms visible
+native geometry and controls rather than a blank deployment.
+
+The final staged audit covers all `87` changed paths. There are no unmerged
+entries, conflict markers, sensitive filenames, or recognized private-key,
+certificate, GitHub, OpenAI, AWS, Slack, or Google token signatures. Source,
+test, ABI, plan, and ICC policy paths pass the whitespace check; the only raw
+`git diff --cached --check` findings are pre-existing trailing spaces embedded
+inside the generated hashed Pages bundle. ICC `guard-diff` passes when generated
+Pages assets are excluded. The `no-regression` completion oracle passes both
+criteria, scoped readiness is `ready` at `100`, and the scoped production audit
+returns `ok=true`, `verdict=warn`, with zero high-severity or blocking risks.
+Its remaining warnings are the reviewed forward-replacement shape, explicitly
+justified temporary GPU integration boundaries, pre-existing portfolio task
+state, and the expected precommit dirty-tree receipt.
+
+### Post-commit transport receipt
+
+The one full-slice commit, branch push, and Pages-bearing `main` fast-forward
+are the only remaining transport operations. Their immutable SHA/ref results
+are recorded in ICC and the final handoff rather than by creating a second
+source commit solely to self-reference the first.

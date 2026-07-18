@@ -7745,9 +7745,10 @@ function normalizeRenderDomainId(value) {
 function normalizeRenderDomainCounts(counts = null) {
   const base = Math.max(0, Math.round(Number(counts?.base) || 0));
   const drop = Math.max(0, Math.round(Number(counts?.drop) || 0));
+  const live = Math.max(0, Math.round(Number(counts?.live) || (base + drop)));
   const total = Math.max(0, Math.round(Number(counts?.total) || (base + drop)));
   if (base <= 0 && drop <= 0) return null;
-  return { base, drop, total };
+  return { base, drop, live, total };
 }
 
 function cohortRangesFromRenderDomainCounts(counts = null) {
@@ -7817,14 +7818,22 @@ function renderDomainPositionBoundsFromPositions(positionsM, counts = null) {
   const base = rangeBounds('base', 0, normalized.base);
   const drop = rangeBounds('drop', normalized.base, normalized.base + normalized.drop);
   const expectedTotal = normalized.base + normalized.drop;
+  const capacityTailParticleCount = Math.max(0, particleCount - expectedTotal);
   return {
     schema: 'peercompute.ulg.sph-render-domain-position-bounds.v0',
-    status: expectedTotal === particleCount && normalized.total === particleCount
+    // Base/drop only describe live initial-body rows. The mechanics upload
+    // may also contain zero-mass reaction reserves and fixed phase-carrier
+    // lanes, so those live domains need to fit the capacity, not exhaust it.
+    status: expectedTotal === normalized.live
+      && normalized.live <= particleCount
+      && normalized.total === particleCount
       ? 'render-domain-position-bounds-ready'
       : 'render-domain-position-count-mismatch',
     source: 'set-particles-positions-render-domain-counts',
     particleCount,
     expectedTotal,
+    liveRenderDomainParticleCount: expectedTotal,
+    capacityTailParticleCount,
     renderDomainCounts: { ...normalized },
     base,
     drop
@@ -11068,6 +11077,7 @@ export function createSphPhaseScene(container, {
   rendererWebGpuSurfaceBufferPresentation = SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED,
   rendererWebGpuDeviceResult = null,
   preferWebGpuOpticalLookup = true,
+  residentGpuTimestampProfiling = false,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   residentSurfaceDrawDiagnosticMode = 'auto',
   backgroundColor = SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
@@ -11088,6 +11098,9 @@ export function createSphPhaseScene(container, {
   const useNativeWebGpuRenderer = requestedRendererBackend === 'native-webgpu';
   const enableNativeSurfacePixelValidation = Boolean(nativeSurfacePixelValidation);
   const enableThreeWebGpuResidentDevice = Boolean(rendererWebGpuResidentDevice);
+  const enableResidentGpuTimestampProfiling = Boolean(
+    residentGpuTimestampProfiling
+  );
   const requestedThreeWebGpuPresentation = Boolean(rendererWebGpuPresentation);
   const requestedThreeWebGpuSurfaceBufferPresentation = Boolean(rendererWebGpuSurfaceBufferPresentation);
   const resolvedMaterialInterfaceSurfaceTablePolicy = resolveMaterialInterfaceSurfaceTablePolicy(
@@ -11144,6 +11157,8 @@ export function createSphPhaseScene(container, {
   let radiusScale = surfaceRadiusScale; // mutable so the blob-size control is live (no rebuild)
   let currentWallTemperaturesK = null;
   const scene = new Three.Scene();
+  scene.userData.sphResidentGpuTimestampProfilingRequested =
+    enableResidentGpuTimestampProfiling;
   let sceneLightingMode = normalizeSphSceneLightingMode(lightingMode);
   let sceneLightingProfile = resolveSphSceneLightingProfile(sceneLightingMode);
   scene.environmentIntensity = sceneLightingProfile.environmentIntensity;
@@ -13972,7 +13987,9 @@ export function createSphPhaseScene(container, {
       });
     }
     if (!opticalGpuDeviceResultPromise) {
-      const requestPromise = requestOpticalGpuDevice(ref).then((requestedResult) => {
+      const requestPromise = requestOpticalGpuDevice(ref, {
+        timestampProfilingRequested: enableResidentGpuTimestampProfiling
+      }).then((requestedResult) => {
         const result = admitSphSceneWebGpuDeviceResult(requestedResult);
         result.rendererBackend = rendererBackendName();
         result.rendererOwnedDevice = false;
@@ -24417,6 +24434,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     schroederEnableTwoLevelMechanics = false,
     schroederTwoLevelMechanicsAuthority = 'observation',
     schroederTwoLevelFineSubstepCount = 1,
+    schroederGpuTimestampRecorder = null,
     schroederPortableSummaryPeerComputeUseCase = 'scene-native-schroeder-render-lod',
     schroederEnableActiveNodeIndex = false,
     schroederEnableActiveNodeSortedIndex = false,
@@ -24526,8 +24544,8 @@ fn fs_main() -> @location(0) vec4<f32> {
         ? 'authoritative'
         : 'observation';
     const requestedSchroederTwoLevelFineSubstepCount = Math.max(
-      1,
-      Math.round(Number(schroederTwoLevelFineSubstepCount) || 1)
+      requestedSchroederTwoLevelMechanicsAuthority === 'authoritative' ? 2 : 1,
+      Math.round(Number(schroederTwoLevelFineSubstepCount) || 2)
     );
     const requestedSchroederEnableActiveNodeIndex = Boolean(schroederEnableActiveNodeIndex);
     const requestedSchroederEnableActiveNodeSortedIndex = Boolean(schroederEnableActiveNodeSortedIndex);
@@ -26235,6 +26253,7 @@ fn fs_main() -> @location(0) vec4<f32> {
               enableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
               twoLevelMechanicsAuthority: requestedSchroederTwoLevelMechanicsAuthority,
               twoLevelFineSubstepCount: requestedSchroederTwoLevelFineSubstepCount,
+              gpuTimestampRecorder: schroederGpuTimestampRecorder,
               ...(requestedSchroederMinLevel !== null ? { minLevel: requestedSchroederMinLevel } : {}),
               ...(requestedSchroederMaxLevel !== null ? { maxLevel: requestedSchroederMaxLevel } : {}),
               ...(requestedSchroederTileCellCount !== null ? { tileCellCount: requestedSchroederTileCellCount } : {}),
@@ -26663,6 +26682,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             nextResidentProductMass: currentResidentProductMass,
             nextParticleBufferMode: finalStep?.nextParticleBufferMode ?? 'not-available',
             readbackMode: finalStep?.readbackMode ?? requestedReadbackMode,
+            fullParticleReadbackPerformed:
+              finalStep?.fullParticleReadbackPerformed === true,
             normalHotLoopReadbackFree: Boolean(
               schroederStepSummaries.length === count
               && schroederStepSummaries.every(

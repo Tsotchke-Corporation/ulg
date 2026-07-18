@@ -14,6 +14,7 @@ import { zForSymbol } from '../electronicStructure/periodicTable.js';
 import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
   residentSphWebGpuLimitsForAdapter,
+  residentSphWebGpuFeaturesForAdapter,
   webGpuDeviceDescriptorForResidentSph
 } from '../webgpuDeviceLimits.js';
 import {
@@ -808,7 +809,10 @@ function watchDeviceLost(device, onDeviceLost) {
   });
 }
 
-export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigator, { onDeviceLost = null } = {}) {
+export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigator, {
+  onDeviceLost = null,
+  timestampProfilingRequested = false
+} = {}) {
   if (!navigatorRef?.gpu) {
     return { status: 'blocked-webgpu-unavailable', reason: 'navigator.gpu unavailable', device: null };
   }
@@ -817,7 +821,12 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
     return { status: 'blocked-webgpu-unavailable', reason: 'requestAdapter returned null', device: null };
   }
   const { requiredLimits, adapterLimits } = residentSphWebGpuLimitsForAdapter(adapter);
-  const deviceDescriptor = webGpuDeviceDescriptorForResidentSph(adapter);
+  const featureEvidence = residentSphWebGpuFeaturesForAdapter(adapter, {
+    timestampProfilingRequested
+  });
+  const deviceDescriptor = webGpuDeviceDescriptorForResidentSph(adapter, {
+    timestampProfilingRequested
+  });
   const device = await adapter.requestDevice(deviceDescriptor);
   if (typeof onDeviceLost === 'function') {
     watchDeviceLost(device, onDeviceLost);
@@ -827,6 +836,14 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
     reason: 'device acquired',
     device,
     requiredLimits,
+    requiredFeatures: [...featureEvidence.requiredFeatures],
+    adapterFeatures: [...featureEvidence.adapterFeatures],
+    enabledFeatures: device?.features
+      ? [...device.features].map((feature) => String(feature))
+      : [],
+    timestampProfilingRequested: timestampProfilingRequested === true,
+    timestampQuerySupported: featureEvidence.timestampQuerySupported,
+    timestampQueryStatus: featureEvidence.timestampQueryStatus,
     adapterLimits: {
       ...adapterLimits
     }

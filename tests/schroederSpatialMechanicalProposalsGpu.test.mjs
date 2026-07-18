@@ -155,7 +155,11 @@ function taggedBuffer(device, label, size, usage = 128) {
   return tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
 }
 
-function createActiveNodeList(device, particleCount) {
+function createActiveNodeList(
+  device,
+  particleCount,
+  { minLevel = 0, maxLevel = minLevel } = {}
+) {
   return {
     schema: 'peercompute.ulg.schroeder-active-node-list-execution.v0',
     status: 'schroeder-active-node-list-submitted',
@@ -168,8 +172,8 @@ function createActiveNodeList(device, particleCount) {
     spatialEpochSourceReady: true,
     spatialEpochLevelSpacingMode: 'base-grid-spacing-times-pow2-level',
     spatialEpochPositionAuthority: 'same-epoch-pre-integration-particle-state',
-    spatialEpochMinLevel: 0,
-    spatialEpochMaxLevel: 0,
+    spatialEpochMinLevel: minLevel,
+    spatialEpochMaxLevel: maxLevel,
     spatialEpochBaseGridSpacingM: 0.25,
     spatialEpochChartId: 0,
     activeCandidateCount: particleCount,
@@ -191,7 +195,10 @@ function createActiveNodeList(device, particleCount) {
   };
 }
 
-function liveFixture(particleCount = 2, { identityEnabled = true } = {}) {
+function liveFixture(
+  particleCount = 2,
+  { identityEnabled = true, minLevel = 0, maxLevel = minLevel } = {}
+) {
   const device = createFakeDevice();
   const state = new Float32Array(particleCount * 8);
   const thermo = new Float32Array(particleCount * 12);
@@ -209,7 +216,10 @@ function liveFixture(particleCount = 2, { identityEnabled = true } = {}) {
     mechanics[index * 32 + 21] = 1;
     mechanics[index * 32 + 26] = 1;
   }
-  const activeNodeList = createActiveNodeList(device, particleCount);
+  const activeNodeList = createActiveNodeList(device, particleCount, {
+    minLevel,
+    maxLevel
+  });
   const generation = runSchroederSpatialEpochGenerationWebGpu({
     device,
     activeNodeList,
@@ -366,6 +376,12 @@ test('mechanical WGSL uses one exact-near traversal and a complete resident appl
     /atomicLoad\(&traversal_evidence\[6u\]\) == mechanical_params\.particle_count/);
   assert.match(schroederSpatialMechanicalProposalApplyWgsl,
     /atomicLoad\(&traversal_evidence\[14u\]\) == 0u/);
+  assert.match(schroederSpatialMechanicalProposalApplyWgsl,
+    /@binding\(5\) var<storage, read> level_assignments/);
+  assert.match(schroederSpatialMechanicalProposalApplyWgsl,
+    /mechanical_params\.apply_selected_level != -2147483648/);
+  assert.match(schroederSpatialMechanicalProposalApplyWgsl,
+    /level_assignments\[particle_index \* 16u\]/);
 });
 
 test('one resident traversal publishes three distinct receipts and reuses its arena buffers', async () => {
@@ -447,6 +463,8 @@ test('one resident traversal publishes three distinct receipts and reuses its ar
   );
 
   assert.equal(first.releaseAfterSubmittedWork(), true);
+  assert.ok(first.releasePromise instanceof Promise);
+  assert.equal(await first.releasePromise, true);
   await settleDeferredCleanup(fixture.device);
   assert.equal(first.proposalBuffer.destroyCount, 0);
   const bufferCountAfterWarmup = fixture.device.buffers.length;
@@ -457,6 +475,7 @@ test('one resident traversal publishes three distinct receipts and reuses its ar
   assert.equal(fixture.device.buffers.length, bufferCountAfterWarmup);
   assert.ok(fixture.device.buffers.length > beforeProposalBuffers);
   assert.equal(second.releaseAfterSubmittedWork(), true);
+  assert.equal(await second.releasePromise, true);
   await settleDeferredCleanup(fixture.device);
   assert.equal(second.proposalBuffer.destroyCount, 0);
   assert.equal(destroySchroederSpatialMechanicalProposalRuntime(fixture.device), true);
@@ -496,9 +515,74 @@ test('canonical G2P applies the authenticated proposal before authority finaliza
   ), false);
   assert.equal(result.separationCanonicalSpatialAuthorityGate, true);
   assert.equal(result.oldLevelAssignmentLookupRemoved, true);
+  const selectedLevelWrite = fixture.device.writes.find(({ buffer, offset }) => (
+    String(buffer?.label || '').startsWith(
+      'ulg-schroeder-spatial-mechanical-params-'
+    ) && offset === 44
+  ));
+  assert.equal(selectedLevelWrite, undefined);
+  assert.equal(proposal.uniformQueryLevel, 0);
+  assert.equal(
+    proposal.applyLevelFilterPolicy,
+    'omit-redundant-uniform-level-assignment-filter'
+  );
+  const applyDispatch = fixture.device.dispatches.slice(dispatchStart).find(
+    ({ pipeline }) => pipeline?.label
+      === 'ulg-schroeder-spatial-mechanical-proposal-apply'
+  );
+  assert.ok(applyDispatch);
+  assert.equal(
+    applyDispatch.bindGroup.entries.find(({ binding }) => binding === 5)
+      ?.resource?.buffer,
+    fixture.generation.source.sourceBuffer
+  );
   assert.equal(webGpuBufferMatchesDevice(result.stateBuffer, fixture.device), true);
   assert.equal(webGpuBufferMatchesDevice(result.mechanicsBuffer, fixture.device), true);
   result.destroyOutputParticleBuffers();
+  assert.equal(proposal.releaseAfterSubmittedWork(), true);
+  await settleDeferredCleanup(fixture.device);
+  destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+});
+
+test('mechanical proposal filters genuine multi-level apply and caches the level write', async () => {
+  const fixture = liveFixture(2, { minLevel: 0, maxLevel: 1 });
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+  assert.equal(proposal.uniformQueryLevel, null);
+  assert.equal(
+    proposal.applyLevelFilterPolicy,
+    'filter-authenticated-multi-level-assignment'
+  );
+  const apply = (selectedLevel) => proposal.encodeApply(
+    fixture.device.createCommandEncoder(),
+    {
+      stateBuffer: fixture.sphParticleUpload.stateBuffer,
+      mechanicsBuffer: fixture.mlsMpmParticleUpload.mechanicsBuffer,
+      selectedLevel
+    }
+  );
+  const selectedLevelWrites = () => fixture.device.writes.filter(
+    ({ buffer, offset }) => String(buffer?.label || '').startsWith(
+      'ulg-schroeder-spatial-mechanical-params-'
+    ) && offset === 44
+  );
+
+  assert.equal(apply(1), true);
+  assert.equal(selectedLevelWrites().length, 1);
+  assert.equal(new DataView(
+    selectedLevelWrites()[0].bytes.buffer,
+    selectedLevelWrites()[0].bytes.byteOffset,
+    selectedLevelWrites()[0].bytes.byteLength
+  ).getInt32(0, true), 1);
+  assert.equal(apply(1), true);
+  assert.equal(selectedLevelWrites().length, 1);
+  assert.equal(apply(0), true);
+  assert.equal(selectedLevelWrites().length, 2);
+  assert.equal(new DataView(
+    selectedLevelWrites()[1].bytes.buffer,
+    selectedLevelWrites()[1].bytes.byteOffset,
+    selectedLevelWrites()[1].bytes.byteLength
+  ).getInt32(0, true), 0);
+
   assert.equal(proposal.releaseAfterSubmittedWork(), true);
   await settleDeferredCleanup(fixture.device);
   destroySchroederSpatialMechanicalProposalRuntime(fixture.device);

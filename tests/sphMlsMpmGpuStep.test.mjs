@@ -23,6 +23,8 @@ import {
   SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
@@ -81,7 +83,18 @@ import {
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   destroyReactionOutputAfterFailedMechanicsRefresh,
+  FUSED_SINGLE_LEVEL_MECHANICS_FIELD_G2P_RECEIPT_ENTRY_POINTS,
+  mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+  reactionOutputComponentMutations,
   reactionOutputMutatesParticles,
+  resolveFusedSchroederMechanicsLevelView,
   runSphThermalPhaseStageComputeTask,
   runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
@@ -156,6 +169,215 @@ const RUN_NATIVE_PHASE_LINEAGE_SUMMARY =
   process.env.ULG_RUN_NATIVE_PHASE_LINEAGE_SUMMARY === '1';
 const NATIVE_PHASE_LINEAGE_SUMMARY_BASE_URL =
   process.env.ULG_PHASE_LINEAGE_SUMMARY_BASE_URL || 'https://127.0.0.1:5174/';
+
+test('single-level fused mechanics omits cross-level-only G2P receipt stages', () => {
+  assert.deepEqual(
+    FUSED_SINGLE_LEVEL_MECHANICS_FIELD_G2P_RECEIPT_ENTRY_POINTS,
+    [
+      { id: 'claim', entryPoint: 'claim_g2p_energy_receipt' },
+      { id: 'consume-field', entryPoint: 'consume_g2p_energy_receipt' }
+    ]
+  );
+});
+
+test('single-level fused mechanics G2P keeps local heat but omits route sampling', () => {
+  const variants = [
+    [
+      mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl,
+      mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl
+    ],
+    [
+      mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl,
+      mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl
+    ]
+  ];
+  const occurrenceCount = (source, needle) => source.split(needle).length - 1;
+  const sourceSection = (source, start, end) => {
+    const startIndex = source.indexOf(start);
+    const endIndex = source.indexOf(end, startIndex + start.length);
+    assert.notEqual(startIndex, -1);
+    assert.notEqual(endIndex, -1);
+    return source.slice(startIndex, endIndex);
+  };
+  for (const [crossLevel, singleLevel] of variants) {
+    assert.equal(occurrenceCount(
+      crossLevel,
+      'g2p_field_route_specific_energy('
+    ), 2);
+    assert.equal(occurrenceCount(
+      crossLevel,
+      'g2p_reflux_specific_energy('
+    ), 2);
+    assert.equal(occurrenceCount(
+      singleLevel,
+      'g2p_field_route_specific_energy('
+    ), 1);
+    assert.equal(occurrenceCount(
+      singleLevel,
+      'g2p_reflux_specific_energy('
+    ), 1);
+    assert.match(
+      singleLevel,
+      /This fused route always binds the four-word dummy reflux buffer\./
+    );
+    assert.match(
+      singleLevel,
+      /runFusedNoFullMlsMpmMechanicsWebGpu always binds the dummy ledger\./
+    );
+    assert.match(
+      sourceSection(
+        singleLevel,
+        'fn g2p_reflux_present()',
+        'fn g2p_reflux_admitted()'
+      ),
+      /return false;/
+    );
+    assert.doesNotMatch(
+      sourceSection(
+        singleLevel,
+        'fn g2p_field_find(',
+        'fn g2p_scale_close('
+      ),
+      /g2p_field_view_admitted\(\)/
+    );
+    assert.doesNotMatch(
+      sourceSection(
+        singleLevel,
+        'fn g2p_field_specific_energy(',
+        'fn g2p_field_route_specific_energy('
+      ),
+      /g2p_field_receipt_structural/
+    );
+    assert.match(
+      sourceSection(
+        crossLevel,
+        'fn g2p_field_specific_energy(',
+        'fn g2p_field_route_specific_energy('
+      ),
+      /g2p_field_receipt_structural/
+    );
+    assert.match(singleLevel, /g2p_field_receipt_offset\(\) \+ 10u/);
+    assert.match(singleLevel, /fn claim_g2p_energy_receipt\(\)/);
+    assert.match(singleLevel, /fn consume_g2p_energy_receipt\(\)/);
+    assert.doesNotMatch(singleLevel, /sampled_field_route_internal_energy_delta/);
+    assert.doesNotMatch(singleLevel, /sampled_route_internal_energy_delta/);
+    assert.match(crossLevel, /fn measure_g2p_energy_receipt\(/);
+    assert.match(crossLevel, /fn consume_g2p_fine_reflux_receipt\(\)/);
+    assert.match(crossLevel, /fn consume_g2p_coarse_reflux_receipt\(\)/);
+  }
+});
+
+test('mechanics-field P2G emits records and reduces them in retained stable order', () => {
+  const variants = [
+    [
+      mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl,
+      mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl
+    ],
+    [
+      mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl,
+      mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl
+    ]
+  ];
+  for (const [crossLevel, singleLevel] of variants) {
+    const finalizeSection = (source) => {
+      const start = source.indexOf('fn finalize_grid(');
+      const end = source.indexOf('\n\nfn compact_mechanics_view_word', start);
+      assert.notEqual(start, -1);
+      assert.notEqual(end, -1);
+      return source.slice(start, end);
+    };
+    for (const source of [crossLevel, singleLevel]) {
+      assert.match(
+        source,
+        /@binding\(5\) var<storage, read_write> product_events/
+      );
+      assert.match(
+        source,
+        /@binding\(6\) var<storage, read> p2g_field_sorted_candidate_indices/
+      );
+      assert.match(source, /fn p2g_field_group_lower_bound\(field_index: u32\)/);
+      assert.match(source, /candidate_index <= previous_candidate/);
+      assert.match(source, /contribution_published != 1\.0/);
+      assert.match(
+        source,
+        /p2g_field_word\(33u\) \/ P2G_FIELD_STENCIL_SIZE == params\.particle_count/
+      );
+      assert.doesNotMatch(source, /p2g_field_atomic_add_f32/);
+      assert.doesNotMatch(source, /bitcast<f32>\(candidate_index \+ 1u\)/);
+      assert.doesNotMatch(
+        finalizeSection(source),
+        /word < P2G_FIELD_ACCUMULATOR_WORDS/
+      );
+    }
+    assert.match(
+      finalizeSection(singleLevel),
+      /transient deterministic reduction buffer/
+    );
+    assert.doesNotMatch(
+      finalizeSection(crossLevel),
+      /transient deterministic reduction buffer/
+    );
+  }
+});
+
+test('fused mechanics resolves exact compact views per selected level', () => {
+  const fine = {
+    selectedLevel: 0,
+    mechanicsView: { id: 'fine-mechanics' },
+    mechanicsViewRuntime: { id: 'fine-mechanics-runtime' },
+    mechanicsFieldView: { id: 'fine-fields' },
+    mechanicsFieldViewRuntime: { id: 'fine-fields-runtime' }
+  };
+  const coarse = {
+    selectedLevel: 1,
+    mechanicsView: { id: 'coarse-mechanics' },
+    mechanicsViewRuntime: { id: 'coarse-mechanics-runtime' },
+    mechanicsFieldView: { id: 'coarse-fields' },
+    mechanicsFieldViewRuntime: { id: 'coarse-fields-runtime' }
+  };
+  const generation = {
+    mechanicsLevelViews: [fine, coarse],
+    mechanicsView: fine.mechanicsView,
+    mechanicsViewRuntime: fine.mechanicsViewRuntime,
+    mechanicsFieldView: fine.mechanicsFieldView,
+    mechanicsFieldViewRuntime: fine.mechanicsFieldViewRuntime
+  };
+
+  const selected = resolveFusedSchroederMechanicsLevelView(generation, 1);
+  assert.equal(selected.mechanicsView, coarse.mechanicsView);
+  assert.equal(selected.mechanicsViewRuntime, coarse.mechanicsViewRuntime);
+  assert.equal(selected.mechanicsFieldView, coarse.mechanicsFieldView);
+  assert.equal(
+    selected.mechanicsFieldViewRuntime,
+    coarse.mechanicsFieldViewRuntime
+  );
+  assert.equal(selected.matchedSelectedLevel, 1);
+  assert.equal(
+    selected.source,
+    'generation-mechanics-level-view-exact-match'
+  );
+
+  const missing = resolveFusedSchroederMechanicsLevelView(generation, 2);
+  assert.equal(missing.mechanicsView, null);
+  assert.equal(missing.mechanicsFieldView, null);
+  assert.equal(missing.mechanicsViewPublished, true);
+  assert.equal(missing.mechanicsFieldViewPublished, true);
+  assert.equal(
+    missing.source,
+    'generation-mechanics-level-view-missing-exact-match'
+  );
+
+  const oneLevel = resolveFusedSchroederMechanicsLevelView({
+    ...generation,
+    mechanicsLevelViews: [coarse]
+  }, null);
+  assert.equal(oneLevel.mechanicsView, coarse.mechanicsView);
+  assert.equal(oneLevel.mechanicsFieldView, coarse.mechanicsFieldView);
+  assert.equal(
+    oneLevel.source,
+    'generation-mechanics-level-view-one-level-alias'
+  );
+});
 
 function manualBuffers({
   position = [1.25, 1.25, 1.25],
@@ -1317,15 +1539,34 @@ test('resident product-event compaction rejects legacy or torn row strides befor
   );
 });
 
-test('reaction mutation authority requires one coherent state thermo mechanics buffer set', () => {
+test('reaction mutation authority exposes independent state thermo and mechanics components', () => {
   const stateBuffer = { label: 'reaction-state' };
   const thermoBuffer = { label: 'reaction-thermo' };
   const mechanicsBuffer = { label: 'reaction-mechanics' };
-  assert.equal(reactionOutputMutatesParticles({ stateBuffer }), false);
-  assert.equal(reactionOutputMutatesParticles({ stateBuffer, thermoBuffer }), false);
-  assert.equal(reactionOutputMutatesParticles({ stateBuffer, mechanicsBuffer }), false);
-  assert.equal(reactionOutputMutatesParticles({ thermoBuffer, mechanicsBuffer }), false);
+  assert.equal(reactionOutputMutatesParticles({ stateBuffer }), true);
+  assert.equal(reactionOutputMutatesParticles({ stateBuffer, thermoBuffer }), true);
+  assert.equal(reactionOutputMutatesParticles({ stateBuffer, mechanicsBuffer }), true);
+  assert.equal(reactionOutputMutatesParticles({ thermoBuffer, mechanicsBuffer }), true);
   assert.equal(reactionOutputMutatesParticles({ stateBuffer, thermoBuffer, mechanicsBuffer }), true);
+  assert.deepEqual(reactionOutputComponentMutations({ stateBuffer }), {
+    state: true,
+    thermo: false,
+    mechanics: false,
+    any: true,
+    complete: false,
+    summarySuppressed: false
+  });
+  assert.deepEqual(reactionOutputComponentMutations({
+    thermoBuffer,
+    mechanicsBuffer
+  }), {
+    state: false,
+    thermo: true,
+    mechanics: true,
+    any: true,
+    complete: false,
+    summarySuppressed: false
+  });
   assert.equal(reactionOutputMutatesParticles({
     stateBuffer,
     thermoBuffer,
@@ -2639,6 +2880,111 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
   assert.equal(identityDestroyCount, 1);
 });
 
+test('MLS-MPM resident step treats one exact mechanics field as retained stage storage', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  let fieldDestroyCount = 0;
+  const fieldBuffer = {
+    label: 'retained-mechanics-field',
+    size: 4096,
+    destroy() { fieldDestroyCount += 1; }
+  };
+  const fieldExecution = {
+    fieldViewBuffer: fieldBuffer,
+    submitPerformed: true,
+    ownerRuntime: {
+      ownsExecution(candidate) { return candidate === fieldExecution; },
+      isExecutionSubmitted(candidate) {
+        return candidate === fieldExecution && candidate.submitPerformed === true;
+      }
+    }
+  };
+  let projection = null;
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    p2gRunner(args) {
+      const result = projectMlsMpmP2gGridCpu(args);
+      projection = {
+        ...result,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        fullReadbackPerformed: false,
+        normalHotLoopReadbackFree: true,
+        gridBuffer: null,
+        gridBufferByteLength: 0,
+        denseGridAuthoritative: false,
+        gridStateAuthority: 'schroeder-spatial-mechanics-field-view-v1',
+        mechanicsFieldViewEnabled: true,
+        mechanicsFieldViewExecution: fieldExecution,
+        mechanicsFieldViewBuffer: fieldBuffer,
+        mechanicsFieldViewByteLength: fieldBuffer.size,
+        mechanicsFieldMutationOutputOrdinal: 1,
+        mechanicsFieldMutationOutputStateEncoding:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
+      };
+      return projection;
+    },
+    gridUpdateRunner(args) {
+      assert.equal(args.p2gGridBuffer, null);
+      const result = updateMlsMpmGridCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        fullReadbackPerformed: false,
+        normalHotLoopReadbackFree: true,
+        sourceProjection: projection,
+        updatedGridBuffer: null,
+        updatedGridBufferByteLength: 0,
+        denseGridAuthoritative: false,
+        gridStateAuthority: 'schroeder-spatial-mechanics-field-view-v1',
+        mechanicsFieldViewEnabled: true,
+        mechanicsFieldViewExecution: fieldExecution,
+        mechanicsFieldViewBuffer: fieldBuffer,
+        mechanicsFieldViewByteLength: fieldBuffer.size,
+        mechanicsFieldMutationInputOrdinal: 1,
+        mechanicsFieldMutationOutputOrdinal: 2,
+        mechanicsFieldMutationOutputStateEncoding:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
+      };
+    },
+    g2pRunner(args) {
+      assert.equal(args.updatedGridBuffer, null);
+      const result = reconstructMlsMpmG2pCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        fullReadbackPerformed: false,
+        normalHotLoopReadbackFree: true,
+        stateBuffer: tracker.buffer('field-g2p-state'),
+        mechanicsBuffer: tracker.buffer('field-g2p-mechanics'),
+        stateBufferByteLength: result.state.byteLength,
+        mechanicsBufferByteLength: result.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(step.stageBuffersRetained, true);
+  assert.equal(step.residentBuffersRetained, true);
+  assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.readbackDowngradeReasons.includes('stage-buffers-not-retained'), false);
+  assert.equal(step.p2gGridProjection.gridBuffer ?? null, null);
+  assert.equal(step.gridUpdate.updatedGridBuffer ?? null, null);
+  assert.equal(fieldDestroyCount, 0);
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(fieldDestroyCount, 0);
+});
+
 test('MLS-MPM resident step cleanup destroys locally retained hierarchy render buffers', () => {
   const destroyCounts = { activeNode: 0, aggregateNode: 0 };
   const activeNodeBuffer = {
@@ -3830,6 +4176,7 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
     mechanicsBuffer: sourceMechanicsBuffer,
     slot: 0
   };
+  const proposalApplyCalls = [];
   const canonicalMechanicalProposalRunner = async ({ generation }) => ({
     ready: true,
     generation,
@@ -3839,7 +4186,8 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
       buffer: tracker.buffer('canonical-mechanical-proposal-evidence')
     }),
     proposalBuffer: tracker.buffer('canonical-mechanical-proposals'),
-    encodeApply(encoder) {
+    encodeApply(encoder, options = {}) {
+      proposalApplyCalls.push(options);
       const pass = encoder.beginComputePass();
       pass.setPipeline({ compute: { entryPoint: 'apply' } });
       pass.dispatchWorkgroups(1);
@@ -3960,6 +4308,8 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
   );
   assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 6);
   assert.equal(step.stageTiming.dispatchTopology.spatialMechanicalProposalApply.enabled, true);
+  assert.equal(proposalApplyCalls.length, 1);
+  assert.equal(proposalApplyCalls[0].selectedLevel, 2);
   assert.equal(step.stageTiming.dispatchTopology.g2pAuthorityFinalize.enabled, true);
   assert.equal(
     step.stageTiming.dispatchTopology.g2pAuthorityFinalize.entryPoint,
@@ -3998,7 +4348,7 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
   assert.equal(step.g2pReconstruction.schroederOldLevelAssignmentLookupRemoved, true);
   const p2gParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-p2g-params');
   assert.ok(p2gParamWrite);
-  assert.equal(p2gParamWrite.byteLength, 144);
+  assert.equal(p2gParamWrite.byteLength, 160);
   const p2gParams = new DataView(p2gParamWrite.data);
   assert.equal(p2gParams.getUint32(44, true), 1);
   assert.equal(p2gParams.getInt32(48, true), 2);
@@ -4299,7 +4649,7 @@ test('MLS-MPM canonical fused mechanics consumes the SS compact mechanics view i
     (write) => write.label === 'ulg-mls-mpm-fused-p2g-params'
   );
   const p2gParams = new DataView(p2gParamsWrite.data);
-  assert.equal(p2gParamsWrite.byteLength, 144);
+  assert.equal(p2gParamsWrite.byteLength, 160);
   assert.equal(p2gParams.getUint32(136, true), 1);
   assert.equal(p2gParams.getUint32(140, true), generation.execution.buildOrdinal);
 
@@ -4986,6 +5336,13 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
   assert.equal(new DataView(p2gParamWrite.data).getFloat32(68, true), 101325);
   assert.equal(device.copies.length, 0);
   assert.equal(device.clears.length, 0);
+  assert.ok(device.shaderModules.length > 0);
+  assert.equal(
+    device.shaderModules.every((module) => (
+      typeof module.code === 'string' && module.code.length > 0
+    )),
+    true
+  );
   destroyMlsMpmResidentStepBuffers(step);
 });
 
@@ -10720,7 +11077,11 @@ test('MLS-MPM resident reaction sequence destroys its owned placement accumulato
   const accumulator = fixture.reactionCalls[0].productPlacementAccumulatorBuffer;
   assert.ok(accumulator);
   assert.equal(fixture.reactionCalls[1].productPlacementAccumulatorBuffer, accumulator);
-  assert.equal(fixture.queueFenceCount, 1);
+  // A failed resident sequence may also fence cleanup for the successfully
+  // submitted prefix. The accumulator's own lifetime guarantee is that at
+  // least one completion fence precedes its exact-once destruction, not that
+  // it is the only resource retired by the device in this failure path.
+  assert.ok(fixture.queueFenceCount >= 1);
   assert.equal(accumulator.destroyCallCount, 1);
 });
 

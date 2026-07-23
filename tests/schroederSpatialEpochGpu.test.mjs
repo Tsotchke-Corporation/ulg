@@ -56,6 +56,9 @@ import {
   validateSchroederSpatialPhaseVolumeMomentDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeMoment.js';
 import {
+  validateSchroederSpatialPhaseVolumeReceiptDescriptor
+} from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeReceipt.js';
+import {
   validateSchroederSpatialAggregateViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialAggregateView.js';
 import {
@@ -554,12 +557,40 @@ test('strict raw V0J sidecar attaches only to an exact borrowed mechanics family
     ).admitted,
     true
   );
+  assert.ok(generation.phaseVolumeReceipt);
+  assert.equal(
+    generation.phaseVolumeReceipt,
+    generation.mechanicsLevelViews[0].phaseVolumeReceipt
+  );
+  assert.equal(
+    generation.phaseVolumeReceipt.phaseVolumeMoment,
+    generation.phaseVolumeMoment
+  );
+  assert.equal(
+    generation.phaseVolumeReceipt.mechanicsFieldView,
+    generation.mechanicsFieldView
+  );
+  assert.equal(
+    generation.phaseVolumeReceipt.storageBindingCount,
+    6
+  );
+  assert.equal(
+    validateSchroederSpatialPhaseVolumeReceiptDescriptor(
+      generation.phaseVolumeReceipt,
+      { generationId: generation.execution.generationId }
+    ).admitted,
+    true
+  );
   const entryPoints = device.submissions[0][0].events
     .filter((event) => event.kind === 'pass')
     .flatMap((event) => event.commands.map((command) => command.pipeline));
   assert.equal(
     entryPoints.filter((label) => /phase-volume-moment/.test(label)).length,
     4
+  );
+  assert.equal(
+    entryPoints.filter((label) => /phase-volume-receipt/.test(label)).length,
+    3
   );
   const phaseVolumeTimestampProducerIds = timestampBegins
     .map(({ descriptor }) => descriptor.producerId)
@@ -578,14 +609,89 @@ test('strict raw V0J sidecar attaches only to an exact borrowed mechanics family
       'schroeder-spatial-phase-volume-moment'
     )
   )).length, 5);
+  const receiptTimestampProducerIds = timestampBegins
+    .map(({ descriptor }) => descriptor.producerId)
+    .filter((producerId) => producerId.startsWith(
+      'schroeder-spatial-phase-volume-receipt'
+    ));
+  assert.deepEqual(receiptTimestampProducerIds, [
+    'schroeder-spatial-phase-volume-receipt-build',
+    'schroeder-spatial-phase-volume-receipt-source-reduction',
+    'schroeder-spatial-phase-volume-receipt-field-reduction',
+    'schroeder-spatial-phase-volume-receipt-finalize'
+  ]);
+  assert.equal(timestampEnds.filter(({ token }) => (
+    token.descriptor.producerId.startsWith(
+      'schroeder-spatial-phase-volume-receipt'
+    )
+  )).length, 4);
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
   assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.phaseVolumeReceipt.released, true);
   assert.equal(generation.phaseVolumeMoment.released, true);
   assert.equal(sourceMechanicsBuffer.destroyCount, 0);
+  assert.ok(generation.releaseOperationResults.some(
+    (result) => result.owner === 'phase-volume-receipt-level-0'
+      && result.confirmed === true
+  ));
   assert.ok(generation.releaseOperationResults.some(
     (result) => result.owner === 'phase-volume-moment-level-0'
       && result.confirmed === true
   ));
+});
+
+test('diagnostic receipt A/B opt-out retains the exact S9-A sidecar without a mechanics fallback', async () => {
+  const device = createFakeDevice();
+  const sourceMechanicsBuffer = device.createBuffer({
+    label: 'direct-spatial-phase-volume-ab-mechanics-source',
+    size: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const levelAssignment = createDirectSpatialLevelAssignment(device, {
+    sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size
+  });
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-phase-volume-ab-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    },
+    phaseVolumeReceiptEnabled: false
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.phaseVolumeReceiptEnabled, false);
+  assert.ok(generation.phaseVolumeMoment);
+  assert.equal(generation.phaseVolumeReceipt, null);
+  assert.equal(generation.mechanicsLevelViews[0].phaseVolumeReceipt, null);
+  const entryPoints = device.submissions[0][0].events
+    .filter((event) => event.kind === 'pass')
+    .flatMap((event) => event.commands.map((command) => command.pipeline));
+  assert.equal(
+    entryPoints.filter((label) => /phase-volume-moment/.test(label)).length,
+    4
+  );
+  assert.equal(
+    entryPoints.filter((label) => /phase-volume-receipt/.test(label)).length,
+    0
+  );
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.phaseVolumeMoment.released, true);
+  assert.equal(sourceMechanicsBuffer.destroyCount, 0);
 });
 
 test('missing or unborrowed mechanics provenance leaves spatial generation intact without V0J sidecar', () => {
@@ -620,7 +726,9 @@ test('missing or unborrowed mechanics provenance leaves spatial generation intac
   });
   assert.equal(generation.ready, true, generation.reason);
   assert.equal(generation.phaseVolumeMoment, null);
+  assert.equal(generation.phaseVolumeReceipt, null);
   assert.equal(generation.mechanicsLevelViews[0].phaseVolumeMoment, null);
+  assert.equal(generation.mechanicsLevelViews[0].phaseVolumeReceipt, null);
   assert.equal(
     generation.source.sourceMechanicsProvenanceStatus,
     'schroeder-spatial-directory-source-mechanics-v0j-not-borrowed'
@@ -661,7 +769,9 @@ test('frozen fine refresh keeps the spatial generation live but suppresses stale
   });
   assert.equal(generation.ready, true, generation.reason);
   assert.equal(generation.phaseVolumeMoment, null);
+  assert.equal(generation.phaseVolumeReceipt, null);
   assert.equal(generation.mechanicsLevelViews[0].phaseVolumeMoment, null);
+  assert.equal(generation.mechanicsLevelViews[0].phaseVolumeReceipt, null);
   assert.equal(generation.source.sourceMechanicsBuffer, null);
   assert.equal(generation.source.sourceMechanicsBufferBorrowed, false);
   assert.equal(

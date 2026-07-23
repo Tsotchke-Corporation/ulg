@@ -193,7 +193,10 @@ function fixture({ generationId = 7, storageGeneration = 3 } = {}) {
   };
 }
 
-function twoLevelFixture() {
+function twoLevelFixture({
+  phaseVolume = false,
+  phaseVolumeReceiptEnabled = true
+} = {}) {
   const device = createLiveFakeDevice();
   const particleCount = 2;
   const buffer = (label, size = 4096) => tagWebGpuBufferDevice(
@@ -224,6 +227,12 @@ function twoLevelFixture() {
       particleCount * 16 * Float32Array.BYTES_PER_ELEMENT,
     sourceStateBuffer: sourceBuffers.stateBuffer,
     sourceStateBufferBorrowed: true,
+    ...(phaseVolume ? {
+      sourceMechanicsBuffer: sourceBuffers.mechanicsBuffer,
+      sourceMechanicsBufferBorrowed: true,
+      sourceMechanicsBufferByteLength:
+        particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+    } : {}),
     storageGeneration: 11,
     physicsTick: 13,
     physicsSubstep: 0,
@@ -281,7 +290,8 @@ function twoLevelFixture() {
           gridSpacingM: 0.5
         }
       }
-    ]
+    ],
+    phaseVolumeReceiptEnabled
   });
   return {
     device,
@@ -722,6 +732,68 @@ test('spatial epoch transaction admits one exact two-level generation only by ex
   });
 });
 
+test('two-level transaction exposes and freezes the submitted read-only phase-volume receipt', () => {
+  const f = twoLevelFixture({ phaseVolume: true });
+  assert.equal(f.generation.selected, true, f.generation.reason);
+  assert.ok(f.generation.phaseVolumeMoment);
+  assert.ok(f.generation.phaseVolumeReceipt);
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: true
+  });
+  assert.equal(transaction.phaseVolumeReceipt, f.generation.phaseVolumeReceipt);
+  assert.equal(
+    transaction.phaseVolumeReceiptRuntime,
+    f.generation.phaseVolumeReceiptRuntime
+  );
+  assert.equal(
+    transaction.phaseVolumeReceiptPolicy,
+    'read-only-future-law-eligibility-only'
+  );
+  let summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(
+    summary.phaseVolumeReceiptStatus,
+    'schroeder-spatial-phase-volume-receipt-gpu-build-submitted'
+  );
+  assert.equal(summary.phaseVolumeReceiptReadOnly, true);
+
+  const originalMutationPolicy = f.generation.phaseVolumeReceipt.stateMutationAllowed;
+  f.generation.phaseVolumeReceipt.stateMutationAllowed = true;
+  assert.equal(validateSchroederSpatialEpochTransactionSourceFamily(
+    transaction,
+    {
+      generation: f.generation,
+      sphParticleUpload: f.sphParticleUpload,
+      mlsMpmParticleUpload: f.mlsMpmParticleUpload
+    }
+  ), false);
+  f.generation.phaseVolumeReceipt.stateMutationAllowed = originalMutationPolicy;
+
+  assert.equal(validateSchroederSpatialEpochTransactionSourceFamily(
+    transaction,
+    {
+      generation: f.generation,
+      sphParticleUpload: f.sphParticleUpload,
+      mlsMpmParticleUpload: f.mlsMpmParticleUpload
+    }
+  ), true);
+  summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.phaseVolumeReceiptReadOnly, true);
+});
+
+test('two-level transaction refuses an A/B-only S9-A sidecar without its receipt', () => {
+  const f = twoLevelFixture({
+    phaseVolume: true,
+    phaseVolumeReceiptEnabled: false
+  });
+  assert.equal(f.generation.ready, true, f.generation.reason);
+  assert.ok(f.generation.phaseVolumeMoment);
+  assert.equal(f.generation.phaseVolumeReceipt, null);
+  assert.throws(() => createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: true
+  }), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_PHASE_VOLUME_RECEIPT_IDENTITY' });
+});
 test('two-level transaction admits one exact post-mechanics far-aggregate receipt after G2P', async () => {
   const f = twoLevelFixture();
   const transaction = createSchroederSpatialEpochTransaction({

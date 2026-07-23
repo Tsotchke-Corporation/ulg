@@ -18,6 +18,12 @@ import {
   validateSchroederSpatialMechanicsFieldViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
+  validateSchroederSpatialPhaseVolumeMomentDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeMoment.js';
+import {
+  validateSchroederSpatialPhaseVolumeReceiptDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeReceipt.js';
+import {
   SCHROEDER_SPATIAL_HIERARCHY_VIEW_DISPATCH_OFFSET_WORDS,
   SCHROEDER_SPATIAL_HIERARCHY_VIEW_FINE_DISPATCH_OFFSET_WORDS,
   validateSchroederSpatialHierarchyViewDescriptor
@@ -351,6 +357,129 @@ function sharedMechanicsViewExpectations(execution, epochIdentity, {
   };
 }
 
+/**
+ * S9-B intentionally publishes eligibility evidence only.  Keeping this
+ * check beside the transaction's other retained-view checks makes a later
+ * law prove that it received the exact submitted local receipt, rather than
+ * a CPU summary, a stale sidecar, or an inferred volume fallback.
+ */
+function resolveReadOnlyPhaseVolumeReceipt({
+  device,
+  execution,
+  epochIdentity,
+  sourceBuffers,
+  spatialSourceBuffer,
+  mechanicsFieldView,
+  selectedLevel,
+  phaseVolumeMoment = null,
+  phaseVolumeMomentRuntime = null,
+  phaseVolumeReceipt = null,
+  phaseVolumeReceiptRuntime = null
+}) {
+  const hasMoment = phaseVolumeMoment != null;
+  const hasReceipt = phaseVolumeReceipt != null;
+  if (!hasMoment && !hasReceipt) {
+    if (
+      phaseVolumeMomentRuntime != null
+      || phaseVolumeReceiptRuntime != null
+    ) {
+      throw transactionError(
+        'Phase-volume receipt runtime aliases require their exact local descriptors',
+        'ERR_SCHROEDER_SPATIAL_EPOCH_PHASE_VOLUME_RECEIPT_IDENTITY'
+      );
+    }
+    return Object.freeze({
+      phaseVolumeMoment: null,
+      phaseVolumeMomentRuntime: null,
+      phaseVolumeReceipt: null,
+      phaseVolumeReceiptRuntime: null
+    });
+  }
+  if (
+    !hasMoment
+    || !hasReceipt
+    || !mechanicsFieldView
+    || !Number.isInteger(selectedLevel)
+  ) {
+    throw transactionError(
+      'Phase-volume receipt publication requires one exact local S9-A moment and mechanics-field view',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_PHASE_VOLUME_RECEIPT_IDENTITY'
+    );
+  }
+  const expectations = {
+    generationId: execution.generationId,
+    deviceOrdinal: execution.deviceOrdinal,
+    laneOrdinal: execution.laneOrdinal,
+    leaseToken: execution.leaseToken,
+    sourceFamilyId: execution.sourceFamilyId,
+    ...epochIdentity,
+    completionOrdinal: execution.buildOrdinal,
+    sourceCount: execution.sourceCount,
+    selectedLevel
+  };
+  const momentAdmission = validateSchroederSpatialPhaseVolumeMomentDescriptor(
+    phaseVolumeMoment,
+    expectations
+  );
+  const receiptAdmission = validateSchroederSpatialPhaseVolumeReceiptDescriptor(
+    phaseVolumeReceipt,
+    expectations
+  );
+  let momentOwned = false;
+  let receiptOwned = false;
+  try {
+    momentOwned = phaseVolumeMomentRuntime?.ownsExecution?.(phaseVolumeMoment) === true;
+    receiptOwned = phaseVolumeReceiptRuntime?.ownsExecution?.(phaseVolumeReceipt) === true;
+  } catch {
+    momentOwned = false;
+    receiptOwned = false;
+  }
+  if (
+    momentAdmission.admitted !== true
+    || receiptAdmission.admitted !== true
+    || phaseVolumeMomentRuntime !== phaseVolumeMoment.ownerRuntime
+    || phaseVolumeReceiptRuntime !== phaseVolumeReceipt.ownerRuntime
+    || !momentOwned
+    || !receiptOwned
+    || phaseVolumeMoment.submitPerformed !== true
+    || phaseVolumeReceipt.submitPerformed !== true
+    || phaseVolumeMoment.released === true
+    || phaseVolumeReceipt.released === true
+    || phaseVolumeMoment.releaseScheduled === true
+    || phaseVolumeReceipt.releaseScheduled === true
+    || phaseVolumeMoment.sourceBuffer !== spatialSourceBuffer
+    || phaseVolumeMoment.sourceMechanicsBuffer !== sourceBuffers.mechanicsBuffer
+    || phaseVolumeMoment.mechanicsFieldView !== mechanicsFieldView
+    || phaseVolumeMoment.parentMechanicsFieldView !== mechanicsFieldView
+    || phaseVolumeReceipt.phaseVolumeMoment !== phaseVolumeMoment
+    || phaseVolumeReceipt.parentPhaseVolumeMoment !== phaseVolumeMoment
+    || phaseVolumeReceipt.sourceMechanicsBuffer !== sourceBuffers.mechanicsBuffer
+    || phaseVolumeReceipt.mechanicsFieldView !== mechanicsFieldView
+    || phaseVolumeReceipt.diagnosticOnly !== true
+    || phaseVolumeReceipt.stateMutationAllowed !== false
+    || phaseVolumeReceipt.readbackPerformed !== false
+    || phaseVolumeReceipt.fullParticleReadbackPerformed !== false
+    || !webGpuBufferMatchesDevice(phaseVolumeMoment.controlBuffer, device)
+    || !webGpuBufferMatchesDevice(phaseVolumeMoment.momentBuffer, device)
+    || !webGpuBufferMatchesDevice(phaseVolumeMoment.sourceMechanicsBuffer, device)
+    || !webGpuBufferMatchesDevice(mechanicsFieldView.fieldViewBuffer, device)
+    || !webGpuBufferMatchesDevice(phaseVolumeReceipt.controlBuffer, device)
+    || !webGpuBufferMatchesDevice(phaseVolumeReceipt.partialBuffer, device)
+    || !webGpuBufferMatchesDevice(phaseVolumeReceipt.paramsBuffer, device)
+  ) {
+    throw transactionError(
+      'Phase-volume receipt is not the exact submitted, same-device, read-only S9-A conservation artifact',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_PHASE_VOLUME_RECEIPT_IDENTITY'
+    );
+  }
+  return Object.freeze({
+    phaseVolumeMoment,
+    phaseVolumeMomentRuntime,
+    phaseVolumeReceipt,
+    phaseVolumeReceiptRuntime
+  });
+}
+
 function resolveAuthoritativeTwoLevelGeneration({
   device,
   generation,
@@ -493,6 +622,47 @@ function resolveAuthoritativeTwoLevelGeneration({
     );
   }
 
+  const phaseVolumeArtifacts = levelViews.map((levelView, index) => (
+    resolveReadOnlyPhaseVolumeReceipt({
+      device,
+      execution,
+      epochIdentity,
+      sourceBuffers,
+      spatialSourceBuffer,
+      mechanicsFieldView: mechanicsFieldViews[index],
+      selectedLevel: levelView.selectedLevel,
+      phaseVolumeMoment: levelView.phaseVolumeMoment ?? null,
+      phaseVolumeMomentRuntime: levelView.phaseVolumeMomentRuntime ?? null,
+      phaseVolumeReceipt: levelView.phaseVolumeReceipt ?? null,
+      phaseVolumeReceiptRuntime: levelView.phaseVolumeReceiptRuntime ?? null
+    })
+  ));
+  const phaseVolumeMoments = Object.freeze(phaseVolumeArtifacts.map(
+    ({ phaseVolumeMoment }) => phaseVolumeMoment
+  ));
+  const phaseVolumeMomentRuntimes = Object.freeze(phaseVolumeArtifacts.map(
+    ({ phaseVolumeMomentRuntime }) => phaseVolumeMomentRuntime
+  ));
+  const phaseVolumeReceipts = Object.freeze(phaseVolumeArtifacts.map(
+    ({ phaseVolumeReceipt }) => phaseVolumeReceipt
+  ));
+  const phaseVolumeReceiptRuntimes = Object.freeze(phaseVolumeArtifacts.map(
+    ({ phaseVolumeReceiptRuntime }) => phaseVolumeReceiptRuntime
+  ));
+  if (
+    (generation.phaseVolumeMoment ?? null) !== phaseVolumeMoments[0]
+    || (generation.phaseVolumeMomentRuntime ?? null)
+      !== phaseVolumeMomentRuntimes[0]
+    || (generation.phaseVolumeReceipt ?? null) !== phaseVolumeReceipts[0]
+    || (generation.phaseVolumeReceiptRuntime ?? null)
+      !== phaseVolumeReceiptRuntimes[0]
+  ) {
+    throw transactionError(
+      'Authoritative two-level mechanics fine aliases do not identify the submitted phase-volume receipt',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_PHASE_VOLUME_RECEIPT_IDENTITY'
+    );
+  }
+
   const hierarchyView = generation.hierarchyView;
   const hierarchyAdmission = validateSchroederSpatialHierarchyViewDescriptor(
     hierarchyView,
@@ -605,6 +775,10 @@ function resolveAuthoritativeTwoLevelGeneration({
     coarseLevelView,
     mechanicsViews: Object.freeze(mechanicsViews),
     mechanicsFieldViews: Object.freeze(mechanicsFieldViews),
+    phaseVolumeMoments,
+    phaseVolumeMomentRuntimes,
+    phaseVolumeReceipts,
+    phaseVolumeReceiptRuntimes,
     hierarchyView,
     hierarchyViewRuntime: generation.hierarchyViewRuntime,
     parentFieldView,
@@ -640,6 +814,18 @@ function authoritativeTwoLevelGenerationMatchesSnapshot(authority, generation) {
     && current.mechanicsViews[1] === snapshot.mechanicsViews[1]
     && current.mechanicsFieldViews[0] === snapshot.mechanicsFieldViews[0]
     && current.mechanicsFieldViews[1] === snapshot.mechanicsFieldViews[1]
+    && current.phaseVolumeMoments[0] === snapshot.phaseVolumeMoments[0]
+    && current.phaseVolumeMoments[1] === snapshot.phaseVolumeMoments[1]
+    && current.phaseVolumeMomentRuntimes[0]
+      === snapshot.phaseVolumeMomentRuntimes[0]
+    && current.phaseVolumeMomentRuntimes[1]
+      === snapshot.phaseVolumeMomentRuntimes[1]
+    && current.phaseVolumeReceipts[0] === snapshot.phaseVolumeReceipts[0]
+    && current.phaseVolumeReceipts[1] === snapshot.phaseVolumeReceipts[1]
+    && current.phaseVolumeReceiptRuntimes[0]
+      === snapshot.phaseVolumeReceiptRuntimes[0]
+    && current.phaseVolumeReceiptRuntimes[1]
+      === snapshot.phaseVolumeReceiptRuntimes[1]
     && current.hierarchyView === snapshot.hierarchyView
     && current.hierarchyViewRuntime === snapshot.hierarchyViewRuntime
     && current.parentFieldView === snapshot.parentFieldView
@@ -672,6 +858,12 @@ function generationMatchesSnapshot(authority, generation) {
     || (generation?.mechanicsFieldView ?? null) !== snapshot.mechanicsFieldView
     || (generation?.mechanicsFieldViewRuntime ?? null)
       !== snapshot.mechanicsFieldViewRuntime
+    || (generation?.phaseVolumeMoment ?? null) !== snapshot.phaseVolumeMoment
+    || (generation?.phaseVolumeMomentRuntime ?? null)
+      !== snapshot.phaseVolumeMomentRuntime
+    || (generation?.phaseVolumeReceipt ?? null) !== snapshot.phaseVolumeReceipt
+    || (generation?.phaseVolumeReceiptRuntime ?? null)
+      !== snapshot.phaseVolumeReceiptRuntime
     || !webGpuBufferMatchesDevice(snapshot.sourceBuffer, authority.device)
     || !webGpuBufferMatchesDevice(snapshot.directoryBuffer, authority.device)
     || (snapshot.mechanicsView && (
@@ -700,6 +892,56 @@ function generationMatchesSnapshot(authority, generation) {
       )
       || !webGpuBufferMatchesDevice(
         snapshot.mechanicsFieldIdentityBuffer,
+        authority.device
+      )
+    ))
+    || (snapshot.phaseVolumeMoment && (
+      generation.phaseVolumeMoment?.controlBuffer
+        !== snapshot.phaseVolumeMomentControlBuffer
+      || generation.phaseVolumeMoment?.momentBuffer
+        !== snapshot.phaseVolumeMomentBuffer
+      || generation.phaseVolumeMoment?.mechanicsFieldView
+        !== snapshot.mechanicsFieldView
+      || generation.phaseVolumeMoment?.submitPerformed !== true
+      || generation.phaseVolumeMoment?.released === true
+      || generation.phaseVolumeMoment?.releaseScheduled === true
+      || !webGpuBufferMatchesDevice(
+        snapshot.phaseVolumeMomentControlBuffer,
+        authority.device
+      )
+      || !webGpuBufferMatchesDevice(
+        snapshot.phaseVolumeMomentBuffer,
+        authority.device
+      )
+    ))
+    || (snapshot.phaseVolumeReceipt && (
+      generation.phaseVolumeReceipt?.controlBuffer
+        !== snapshot.phaseVolumeReceiptControlBuffer
+      || generation.phaseVolumeReceipt?.partialBuffer
+        !== snapshot.phaseVolumeReceiptPartialBuffer
+      || generation.phaseVolumeReceipt?.paramsBuffer
+        !== snapshot.phaseVolumeReceiptParamsBuffer
+      || generation.phaseVolumeReceipt?.phaseVolumeMoment
+        !== snapshot.phaseVolumeMoment
+      || generation.phaseVolumeReceipt?.parentPhaseVolumeMoment
+        !== snapshot.phaseVolumeMoment
+      || generation.phaseVolumeReceipt?.mechanicsFieldView
+        !== snapshot.mechanicsFieldView
+      || generation.phaseVolumeReceipt?.submitPerformed !== true
+      || generation.phaseVolumeReceipt?.released === true
+      || generation.phaseVolumeReceipt?.releaseScheduled === true
+      || generation.phaseVolumeReceipt?.diagnosticOnly !== true
+      || generation.phaseVolumeReceipt?.stateMutationAllowed !== false
+      || !webGpuBufferMatchesDevice(
+        snapshot.phaseVolumeReceiptControlBuffer,
+        authority.device
+      )
+      || !webGpuBufferMatchesDevice(
+        snapshot.phaseVolumeReceiptPartialBuffer,
+        authority.device
+      )
+      || !webGpuBufferMatchesDevice(
+        snapshot.phaseVolumeReceiptParamsBuffer,
         authority.device
       )
     ))
@@ -1234,6 +1476,32 @@ export function createSchroederSpatialEpochTransaction({
         epochIdentity
       })
     : null;
+  const directPhaseVolumeArtifacts = twoLevel
+    ? Object.freeze({
+        phaseVolumeMoment: twoLevel.phaseVolumeMoments[0],
+        phaseVolumeMomentRuntime: twoLevel.phaseVolumeMomentRuntimes[0],
+        phaseVolumeReceipt: twoLevel.phaseVolumeReceipts[0],
+        phaseVolumeReceiptRuntime: twoLevel.phaseVolumeReceiptRuntimes[0]
+      })
+    : resolveReadOnlyPhaseVolumeReceipt({
+        device,
+        execution,
+        epochIdentity,
+        sourceBuffers,
+        spatialSourceBuffer,
+        mechanicsFieldView,
+        selectedLevel: mechanicsFieldView?.selectedLevel ?? null,
+        phaseVolumeMoment: generation.phaseVolumeMoment ?? null,
+        phaseVolumeMomentRuntime: generation.phaseVolumeMomentRuntime ?? null,
+        phaseVolumeReceipt: generation.phaseVolumeReceipt ?? null,
+        phaseVolumeReceiptRuntime: generation.phaseVolumeReceiptRuntime ?? null
+      });
+  const phaseVolumeMoment = directPhaseVolumeArtifacts.phaseVolumeMoment;
+  const phaseVolumeMomentRuntime =
+    directPhaseVolumeArtifacts.phaseVolumeMomentRuntime;
+  const phaseVolumeReceipt = directPhaseVolumeArtifacts.phaseVolumeReceipt;
+  const phaseVolumeReceiptRuntime =
+    directPhaseVolumeArtifacts.phaseVolumeReceiptRuntime;
   if (!Array.isArray(requiredReaderIds) || !Array.isArray(enabledConsumerReaderIds)) {
     throw transactionError(
       'requiredReaderIds and enabledConsumerReaderIds must be arrays',
@@ -1323,6 +1591,15 @@ export function createSchroederSpatialEpochTransaction({
       mechanicsFieldViewRuntime: generation.mechanicsFieldViewRuntime ?? null,
       mechanicsFieldViewBuffer: mechanicsFieldView?.fieldViewBuffer ?? null,
       mechanicsFieldIdentityBuffer: mechanicsFieldView?.identityBuffer ?? null,
+      phaseVolumeMoment,
+      phaseVolumeMomentRuntime,
+      phaseVolumeMomentControlBuffer: phaseVolumeMoment?.controlBuffer ?? null,
+      phaseVolumeMomentBuffer: phaseVolumeMoment?.momentBuffer ?? null,
+      phaseVolumeReceipt,
+      phaseVolumeReceiptRuntime,
+      phaseVolumeReceiptControlBuffer: phaseVolumeReceipt?.controlBuffer ?? null,
+      phaseVolumeReceiptPartialBuffer: phaseVolumeReceipt?.partialBuffer ?? null,
+      phaseVolumeReceiptParamsBuffer: phaseVolumeReceipt?.paramsBuffer ?? null,
       twoLevel,
       generationId,
       buildOrdinal,
@@ -1391,6 +1668,9 @@ export function createSchroederSpatialEpochTransaction({
       ?? (generation.mechanicsView ? 1 : 0),
     mechanicsLevels: twoLevel?.mechanicsLevels ?? null,
     hierarchyView: twoLevel?.hierarchyView ?? null,
+    phaseVolumeReceipt,
+    phaseVolumeReceiptRuntime,
+    phaseVolumeReceiptPolicy: 'read-only-future-law-eligibility-only',
     epochIdentity: authority.epochIdentity,
     sourceBuffers,
     get state() {
@@ -2051,6 +2331,11 @@ export function summarizeSchroederSpatialEpochTransaction(transaction) {
     mechanicsLevels: authority.twoLevel?.mechanicsLevels ?? null,
     hierarchyViewStatus: authority.twoLevel?.hierarchyView.status ?? null,
     hierarchyTopology: authority.twoLevel?.hierarchyView.topology ?? null,
+    phaseVolumeReceiptStatus:
+      authority.generationSnapshot.phaseVolumeReceipt?.status ?? null,
+    phaseVolumeReceiptReadOnly:
+      authority.generationSnapshot.phaseVolumeReceipt?.diagnosticOnly === true
+      && authority.generationSnapshot.phaseVolumeReceipt?.stateMutationAllowed === false,
     epochIdentity: authority.epochIdentity,
     requiredReaderIds: Object.freeze([...authority.requiredReaders]),
     enabledConsumerReaderIds: Object.freeze([...authority.enabledConsumerReaders]),

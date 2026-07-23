@@ -8,6 +8,7 @@ import {
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
 import {
   SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING,
+  SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK,
   buildSphRenderFieldSourceLocalWebGpu
 } from '../src/runtime/sph/sphRenderFieldSourceLocalGpu.js';
 
@@ -23,6 +24,7 @@ function fakeComputeDevice() {
   const bindGroups = [];
   const dispatches = [];
   const submissions = [];
+  let mapAsyncCalls = 0;
 
   const device = {
     limits: {
@@ -49,6 +51,7 @@ function fakeComputeDevice() {
           this.destroyed = true;
         },
         async mapAsync() {
+          mapAsyncCalls += 1;
           return undefined;
         },
         getMappedRange() {
@@ -110,7 +113,17 @@ function fakeComputeDevice() {
     }
   };
 
-  return { device, buffers, shaderModules, bindGroups, dispatches, submissions };
+  return {
+    device,
+    buffers,
+    shaderModules,
+    bindGroups,
+    dispatches,
+    submissions,
+    get mapAsyncCalls() {
+      return mapAsyncCalls;
+    }
+  };
 }
 
 function renderRowsForSurface(surfaceTable) {
@@ -185,6 +198,74 @@ test('generic source-local shadow builder emits standard v1 field rows without a
   assert.match(SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING.sphRenderFieldSourceLocalSplatWgsl, /phase_partitioned_metaball_strength/);
   assert.match(SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING.sphRenderFieldSourceLocalResolveWgsl, /mean_temperature_k/);
   assert.ok(buffers.filter((buffer) => /source-local/.test(buffer.label)).every((buffer) => buffer.destroyed));
+});
+
+test('generic source-local diagnostic retains an owned no-readback field behind queue-fenced leases', async () => {
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'water-liquid',
+      material: 'H2O',
+      phase: 'liquid',
+      renderKey: 'H2O',
+      resolution: 8,
+      isolation: 80,
+      subtract: 24,
+      particleRadiusScale: 1,
+      colorLinear: [0.2, 0.6, 1]
+    }
+  ]);
+  const fake = fakeComputeDevice();
+  const result = await buildSphRenderFieldSourceLocalWebGpu({
+    device: fake.device,
+    renderRows: renderRowsForSurface(surfaceTable),
+    surfaceTable,
+    particleCount: 1,
+    sourceLocalMode: SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK,
+    readbackMode: 'no-full-readback',
+    retainFieldRowsBuffer: true,
+    retainSurfaceBuffer: true,
+    waitForQueueCompletion: false,
+    deferCleanup: true,
+    useQueueFenceForCleanup: true,
+    maxSplatCellsPerSource: 343
+  });
+
+  assert.equal(result.backend, 'webgpu-source-local-diagnostic');
+  assert.equal(result.status, 'render-field-source-local-diagnostic-submitted');
+  assert.equal(result.sourceLocalStrategy, 'diagnostic-no-readback');
+  assert.equal(result.sourceLocalDiagnosticNoReadback, true);
+  assert.equal(result.sourceLocalUsableForPresentation, false);
+  assert.equal(result.sourceLocalEligible, false);
+  assert.equal(result.sourceLocalOverflow, null);
+  assert.equal(result.renderFieldReadback, false);
+  assert.equal(result.fullReadbackPerformed, false);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(result.fieldRows.length, 0);
+  assert.equal(result.fieldRowsBufferRetained, true);
+  assert.equal(result.fieldRowsBufferOwnedByResult, true);
+  assert.equal(result.surfaceBufferRetained, true);
+  assert.equal(result.renderFieldDeferredCleanup, true);
+  assert.equal(fake.mapAsyncCalls, 0);
+  assert.equal(fake.submissions.length, 1);
+  assert.deepEqual(fake.dispatches, [
+    { label: 'ulg-sph-render-field-source-local-shadow-splat', x: 1, y: 1, z: 1 },
+    { label: 'ulg-sph-render-field-source-local-shadow-resolve', x: 8, y: 1, z: 1 }
+  ]);
+  await fake.device.queue.onSubmittedWorkDone();
+  await Promise.resolve();
+  assert.equal(fake.buffers.find((buffer) => buffer.label === 'ulg-sph-render-field-source-local-accum').destroyed, true);
+  assert.equal(result.fieldRowsBuffer.destroyed, false);
+  assert.equal(result.surfaceBuffer.destroyed, false);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);
+
+  result.destroyRenderFieldBuffers();
+  assert.equal(result.fieldRowsBuffer.destroyed, false);
+  assert.equal(result.surfaceBuffer.destroyed, false);
+  result.releaseRenderFieldBufferLeases();
+  result.destroyRenderFieldBuffers();
+  assert.equal(result.fieldRowsBuffer.destroyed, true);
+  assert.equal(result.surfaceBuffer.destroyed, true);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 0);
 });
 
 test('generic source-local builder routes normal no-readback and product inputs to exact dense GPU fallback', async () => {
@@ -322,6 +403,17 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           ...shared,
           maxSplatCellsPerSource: 1
         });
+        const diagnostic = await sourceLocal.buildSphRenderFieldSourceLocalWebGpu({
+          ...shared,
+          sourceLocalMode: sourceLocal.SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK,
+          readbackMode: 'no-full-readback',
+          retainFieldRowsBuffer: true,
+          retainSurfaceBuffer: true,
+          waitForQueueCompletion: false,
+          deferCleanup: true,
+          useQueueFenceForCleanup: true,
+          maxSplatCellsPerSource: 4096
+        });
         let maxDensityAbs = 0;
         let maxPaletteAbs = 0;
         let maxTemperatureAbs = 0;
@@ -339,6 +431,19 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           ));
         }
         await device.queue.onSubmittedWorkDone();
+        await Promise.resolve();
+        const diagnosticLeaseCountBeforeRelease = diagnostic.residentBufferLeaseActiveLeaseCount;
+        const diagnosticRetainedBuffers = Boolean(
+          diagnostic.fieldRowsBuffer
+          && diagnostic.surfaceBuffer
+          && diagnostic.fieldRowsBufferRetained
+          && diagnostic.surfaceBufferRetained
+        );
+        diagnostic.destroyRenderFieldBuffers();
+        const diagnosticDestroyBlockedByLease = diagnostic.residentBufferLeaseSummary.skippedDestroyCount;
+        diagnostic.releaseRenderFieldBufferLeases();
+        diagnostic.destroyRenderFieldBuffers();
+        const diagnosticDestroyedBufferCount = diagnostic.residentBufferLeaseSummary.destroyedResourceCount;
         const validationError = await device.popErrorScope();
         return {
           status: validationError ? 'validation-error' : 'complete',
@@ -349,6 +454,14 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           shadowPresentationUsable: shadow.sourceLocalUsableForPresentation,
           overflowStatus: overflow.status,
           overflowFlag: overflow.sourceLocalOverflow,
+          diagnosticStatus: diagnostic.status,
+          diagnosticReadback: diagnostic.renderFieldReadback,
+          diagnosticHotLoopReadbackFree: diagnostic.normalHotLoopReadbackFree,
+          diagnosticPresentationUsable: diagnostic.sourceLocalUsableForPresentation,
+          diagnosticRetainedBuffers,
+          diagnosticLeaseCountBeforeRelease,
+          diagnosticDestroyBlockedByLease,
+          diagnosticDestroyedBufferCount,
           maxDensityAbs,
           maxPaletteAbs,
           maxTemperatureAbs
@@ -369,6 +482,14 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
   assert.equal(native.shadowPresentationUsable, false);
   assert.equal(native.overflowStatus, 'render-field-shadow-overflow');
   assert.equal(native.overflowFlag, true);
+  assert.equal(native.diagnosticStatus, 'render-field-source-local-diagnostic-submitted');
+  assert.equal(native.diagnosticReadback, false);
+  assert.equal(native.diagnosticHotLoopReadbackFree, true);
+  assert.equal(native.diagnosticPresentationUsable, false);
+  assert.equal(native.diagnosticRetainedBuffers, true);
+  assert.equal(native.diagnosticLeaseCountBeforeRelease, 2);
+  assert.equal(native.diagnosticDestroyBlockedByLease, 2);
+  assert.equal(native.diagnosticDestroyedBufferCount, 2);
   assert.ok(native.maxDensityAbs <= 1e-3, JSON.stringify(native));
   assert.ok(native.maxPaletteAbs <= 1e-3, JSON.stringify(native));
   assert.ok(native.maxTemperatureAbs <= 2, JSON.stringify(native));

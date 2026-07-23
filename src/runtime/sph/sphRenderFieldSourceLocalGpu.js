@@ -4,8 +4,17 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   computeBufferBinding,
-  createCachedExplicitComputePipeline
+  createCachedExplicitComputePipeline,
+  deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
+import {
+  addResidentBufferLease,
+  createResidentBufferLeaseLedger,
+  destroyResidentBufferWithLease,
+  registerResidentBufferResource,
+  releaseResidentBufferLease,
+  summarizeResidentBufferLeaseLedger
+} from '../residentBufferLease.js';
 import {
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
   SPH_GPU_RENDER_ROW_FLOATS,
@@ -31,6 +40,8 @@ import {
 export const SPH_RENDER_FIELD_SOURCE_LOCAL_SCHEMA =
   'peercompute.ulg.sph-render-field-source-local.v0';
 export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW = 'shadow';
+export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK =
+  'diagnostic-no-readback';
 export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DISABLED = 'disabled';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
@@ -457,17 +468,51 @@ function fallbackReason({
   productEventBuffer,
   productEventCount,
   schroederSpatialSourceFamily,
-  targetFieldRowsBuffer
+  targetFieldRowsBuffer,
+  retainFieldRowsBuffer,
+  retainSurfaceBuffer,
+  hasQueueFence,
+  renderRowsBuffer,
+  waitForQueueCompletion,
+  deferCleanup,
+  useQueueFenceForCleanup
 }) {
   if (sourceLocalMode === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DISABLED) return 'source-local-disabled';
-  if (sourceLocalMode !== SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW) return 'source-local-mode-not-shadow';
-  if (readbackMode !== FULL_READBACK_MODE) return 'shadow-parity-requires-full-readback';
+  const shadowMode = sourceLocalMode === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW;
+  const diagnosticNoReadbackMode = sourceLocalMode
+    === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK;
+  if (!shadowMode && !diagnosticNoReadbackMode) return 'source-local-mode-not-supported';
+  if (shadowMode && readbackMode !== FULL_READBACK_MODE) {
+    return 'shadow-parity-requires-full-readback';
+  }
+  if (diagnosticNoReadbackMode && readbackMode !== NO_FULL_READBACK_MODE) {
+    return 'diagnostic-no-readback-requires-no-full-readback';
+  }
   if (finiteNumber(renderSmearDtS, 0) > 0) return 'velocity-smear-parity-not-yet-implemented';
   if (productEventRows || productEventBuffer || finiteNumber(productEventCount, 0) > 0) {
     return 'product-event-parity-not-yet-implemented';
   }
   if (schroederSpatialSourceFamily) return 'successor-lineage-parity-not-yet-implemented';
   if (targetFieldRowsBuffer) return 'shadow-mode-does-not-publish-pooled-output';
+  if (diagnosticNoReadbackMode && !retainFieldRowsBuffer) {
+    return 'diagnostic-no-readback-requires-retained-field-buffer';
+  }
+  if (diagnosticNoReadbackMode && !retainSurfaceBuffer) {
+    return 'diagnostic-no-readback-requires-retained-surface-buffer';
+  }
+  if (diagnosticNoReadbackMode && !hasQueueFence) {
+    return 'diagnostic-no-readback-requires-queue-fence';
+  }
+  if (diagnosticNoReadbackMode && renderRowsBuffer) {
+    return 'diagnostic-no-readback-requires-owned-render-rows';
+  }
+  if (
+    diagnosticNoReadbackMode
+    && !waitForQueueCompletion
+    && (!deferCleanup || !useQueueFenceForCleanup)
+  ) {
+    return 'diagnostic-no-readback-requires-queue-fenced-cleanup';
+  }
   return null;
 }
 
@@ -483,12 +528,145 @@ function sourceLocalFallbackResult(denseResult, reason) {
   };
 }
 
+function attachSourceLocalDiagnosticRetainedBufferLeases({
+  result,
+  fieldRowsBuffer,
+  fieldRowByteLength,
+  surfaceBuffer,
+  surfaceTable,
+  queueFencePromise = null
+}) {
+  const ledger = createResidentBufferLeaseLedger({
+    ledgerId: `sph-render-field-source-local-diagnostic:${surfaceTable.surfaceCount}:${surfaceTable.totalFieldCells}:buffer-leases`,
+    stateKey: 'sph-render-field-source-local-diagnostic',
+    scope: 'sph-render-field-source-local-diagnostic-buffer-leases'
+  });
+  const inspectionLeaseIds = [];
+  const queueFenceLeaseIds = [];
+  const registerRetainedBuffer = ({
+    resourceKey,
+    resourceKind,
+    buffer,
+    byteLength,
+    rowCount,
+    expectedConsumers,
+    queueFenceProtected = false
+  }) => {
+    registerResidentBufferResource(ledger, {
+      resourceKey,
+      resourceKind,
+      stateFamily: 'render-field-source-local-diagnostic',
+      ownerStage: 'source-local-render-field-diagnostic',
+      producerStage: 'source-local-render-field-diagnostic',
+      source: 'buildSphRenderFieldSourceLocalWebGpu',
+      status: 'resident-source-local-render-field-buffer-retained',
+      retained: true,
+      byteLength,
+      rowCount,
+      bufferLabel: buffer?.label,
+      expectedConsumers
+    });
+    for (const consumerStage of expectedConsumers) {
+      const lease = addResidentBufferLease(ledger, {
+        resourceKey,
+        consumerStage,
+        reason: 'retained-source-local-diagnostic-buffer'
+      });
+      inspectionLeaseIds.push(lease.leaseId);
+    }
+    if (queueFenceProtected) {
+      const queueFenceLease = addResidentBufferLease(ledger, {
+        resourceKey,
+        consumerStage: 'source-local-diagnostic-gpu-queue-fence',
+        reason: 'submitted-source-local-diagnostic-work'
+      });
+      queueFenceLeaseIds.push(queueFenceLease.leaseId);
+    }
+  };
+  const fieldRowsResourceKey = `source-local-render-field:field-rows:${surfaceTable.totalFieldCells}:${fieldRowByteLength}`;
+  const surfaceTableResourceKey = `source-local-render-field:surface-table:${surfaceTable.surfaceCount}:${surfaceTable.records.byteLength}`;
+  registerRetainedBuffer({
+    resourceKey: fieldRowsResourceKey,
+    resourceKind: 'render-field-rows-buffer',
+    buffer: fieldRowsBuffer,
+    byteLength: fieldRowByteLength,
+    rowCount: surfaceTable.totalFieldCells,
+    expectedConsumers: ['source-local-diagnostic-inspection'],
+    queueFenceProtected: Boolean(queueFencePromise)
+  });
+  registerRetainedBuffer({
+    resourceKey: surfaceTableResourceKey,
+    resourceKind: 'render-field-surface-table-buffer',
+    buffer: surfaceBuffer,
+    byteLength: surfaceTable.records.byteLength,
+    rowCount: surfaceTable.surfaceCount,
+    expectedConsumers: ['source-local-diagnostic-inspection'],
+    queueFenceProtected: Boolean(queueFencePromise)
+  });
+
+  const refreshLeaseSummary = () => {
+    result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(ledger);
+    result.residentBufferLeaseLedgerStatus = result.residentBufferLeaseSummary.status;
+    result.residentBufferLeaseResourceCount = result.residentBufferLeaseSummary.resourceCount;
+    result.residentBufferLeaseActiveLeaseCount = result.residentBufferLeaseSummary.activeLeaseCount;
+    return result.residentBufferLeaseSummary;
+  };
+  const destroyedResourceKeys = new Set();
+  const destroyBufferOnce = (resourceKey, buffer) => {
+    if (destroyedResourceKeys.has(resourceKey)) return;
+    destroyedResourceKeys.add(resourceKey);
+    buffer?.destroy?.();
+  };
+
+  result.residentBufferLeaseLedger = ledger;
+  refreshLeaseSummary();
+  result.releaseRenderFieldBufferLeases = ({ status = 'released' } = {}) => {
+    for (const leaseId of inspectionLeaseIds) {
+      releaseResidentBufferLease(ledger, leaseId, { status });
+    }
+    return refreshLeaseSummary();
+  };
+  result.destroyRenderFieldBuffers = ({
+    force = false,
+    releaseLeases = false,
+    reason = 'source-local-render-field-diagnostic-buffer-cleanup'
+  } = {}) => {
+    if (releaseLeases) result.releaseRenderFieldBufferLeases();
+    destroyResidentBufferWithLease(ledger, fieldRowsResourceKey, () => {
+      destroyBufferOnce(fieldRowsResourceKey, fieldRowsBuffer);
+    }, { force, reason });
+    destroyResidentBufferWithLease(ledger, surfaceTableResourceKey, () => {
+      destroyBufferOnce(surfaceTableResourceKey, surfaceBuffer);
+    }, { force, reason });
+    return refreshLeaseSummary();
+  };
+  if (queueFencePromise) {
+    result.sourceLocalQueueFenceStatus = 'queue-fence-pending';
+    Promise.resolve(queueFencePromise)
+      .then(
+        () => 'queue-fence-completed',
+        () => 'queue-fence-rejected'
+      )
+      .then((status) => {
+        for (const leaseId of queueFenceLeaseIds) {
+          releaseResidentBufferLease(ledger, leaseId, { status });
+        }
+        result.sourceLocalQueueFenceStatus = status;
+        refreshLeaseSummary();
+      });
+  } else {
+    result.sourceLocalQueueFenceStatus = 'queue-work-completed';
+  }
+  return result;
+}
+
 /**
  * Build a generic source-local render field for parity inspection only.
  *
- * It intentionally routes presentation/no-readback calls to the exact dense
- * native builder.  The returned shadow field is standard render-field schema
- * data, but sourceLocalUsableForPresentation is always false in this slice.
+ * It intentionally routes presentation-facing calls to the exact dense native
+ * builder.  A distinct diagnostic-no-readback mode can retain an owned field
+ * and surface artifact for lifetime/queue-fence proof, but it is never a
+ * presentation candidate in this slice.
  */
 export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   const {
@@ -506,6 +684,11 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     refEdgeM = 10,
     renderSmearDtS = 0,
     readbackMode = FULL_READBACK_MODE,
+    retainFieldRowsBuffer = false,
+    retainSurfaceBuffer = false,
+    waitForQueueCompletion = true,
+    deferCleanup = true,
+    useQueueFenceForCleanup = true,
     targetFieldRowsBuffer = null,
     sourceLocalMode = SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW,
     maxSplatCellsPerSource = DEFAULT_MAX_SPLAT_CELLS_PER_SOURCE
@@ -538,7 +721,14 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     productEventBuffer,
     productEventCount: resolvedProductEventCount,
     schroederSpatialSourceFamily,
-    targetFieldRowsBuffer
+    targetFieldRowsBuffer,
+    retainFieldRowsBuffer,
+    retainSurfaceBuffer,
+    hasQueueFence: Boolean(device.queue?.onSubmittedWorkDone),
+    renderRowsBuffer,
+    waitForQueueCompletion,
+    deferCleanup,
+    useQueueFenceForCleanup
   });
   if (reason) {
     const denseResult = await buildSphRenderFieldWebGpu(options);
@@ -665,6 +855,130 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     Math.max(1, surfaceTable.surfaceCount)
   );
   resolvePass.end();
+
+  const diagnosticNoReadback = sourceLocalMode
+    === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK;
+  const visitEstimate = estimateSourceLocalFieldVisits(surfaceTable, resolvedParticleCount);
+  if (diagnosticNoReadback) {
+    let transientCleanupDone = false;
+    const cleanupTransientBuffers = () => {
+      if (transientCleanupDone) return;
+      transientCleanupDone = true;
+      if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
+      accumBuffer.destroy?.();
+      overflowBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+    };
+    const cleanupAllBuffers = () => {
+      cleanupTransientBuffers();
+      surfaceBuffer.destroy?.();
+      fieldRowsBuffer.destroy?.();
+    };
+    let queueCompletionStatus = 'not-submitted';
+    let queueCompletionMethod = null;
+    let renderFieldDeferredCleanup = false;
+    let retainedOutputQueueFence = null;
+    try {
+      device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted-gpu-handoff-no-cpu-fence';
+      queueCompletionMethod = 'queue.submit(in-order-source-local-diagnostic-handoff)';
+      if (waitForQueueCompletion) {
+        await device.queue.onSubmittedWorkDone();
+        cleanupTransientBuffers();
+        queueCompletionStatus = 'queue-work-completed';
+        queueCompletionMethod = 'queue.onSubmittedWorkDone';
+      } else {
+        retainedOutputQueueFence = Promise.resolve(device.queue.onSubmittedWorkDone());
+        renderFieldDeferredCleanup = deferSubmittedWorkCleanup(device, cleanupTransientBuffers);
+        if (!renderFieldDeferredCleanup) {
+          throw new Error('source-local diagnostic requires queue-fenced transient cleanup');
+        }
+      }
+    } catch (error) {
+      cleanupAllBuffers();
+      throw error;
+    }
+
+    const diagnosticResult = {
+      schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+      backend: 'webgpu-source-local-diagnostic',
+      status: 'render-field-source-local-diagnostic-submitted',
+      kernelScope: SOURCE_LOCAL_KERNEL_SCOPE,
+      sourceLocalSchema: SPH_RENDER_FIELD_SOURCE_LOCAL_SCHEMA,
+      sourceLocalStrategy: 'diagnostic-no-readback',
+      sourceLocalShadowOnly: true,
+      sourceLocalDiagnosticNoReadback: true,
+      sourceLocalEligible: false,
+      sourceLocalUsableForPresentation: false,
+      sourceLocalOverflow: null,
+      sourceLocalOverflowStatus: 'not-readback-diagnostic-ineligible',
+      sourceLocalMaxSplatCellsPerSource: resolvedMaxSplatCellsPerSource,
+      sourceLocalDensityScale: SOURCE_LOCAL_DENSITY_SCALE,
+      sourceLocalPaletteScale: SOURCE_LOCAL_PALETTE_SCALE,
+      sourceLocalTemperatureScale: SOURCE_LOCAL_TEMPERATURE_SCALE,
+      sourceLocalEstimatedCellVisits: visitEstimate.estimatedCellVisits,
+      sourceLocalDenseCellParticlePairs: visitEstimate.denseCellParticlePairs,
+      sourceLocalEstimatedVisitRatio: visitEstimate.estimatedVisitRatio,
+      sourceLocalDispatchWorkgroups: {
+        splatX: Math.max(1, Math.ceil(resolvedParticleCount / 64)),
+        splatY: Math.max(1, surfaceTable.surfaceCount),
+        resolveX: Math.max(1, Math.ceil(Math.max(1, surfaceTable.maxFieldCellCount) / 64)),
+        resolveY: Math.max(1, surfaceTable.surfaceCount)
+      },
+      schroederSpatialLineageMode: 'non-schroeder-source-local-diagnostic',
+      schroederSpatialSourceFamily: null,
+      particleCount: resolvedParticleCount,
+      productEventCount: 0,
+      productEventBufferBound: false,
+      productEventBufferByteLength: 0,
+      surfaceCount: surfaceTable.surfaceCount,
+      totalFieldCells: surfaceTable.totalFieldCells,
+      maxFieldCellCount: surfaceTable.maxFieldCellCount,
+      surfaceTable,
+      rowLayout: [...SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT],
+      rowStrideFloats: SPH_GPU_RENDER_FIELD_CELL_FLOATS,
+      fieldRows: new Float32Array(),
+      fieldRowsBuffer,
+      fieldRowByteLength,
+      fieldPadding,
+      refEdgeM,
+      surfaceBuffer,
+      renderFieldInputSource: 'uploaded-render-rows-source-local-diagnostic',
+      readbackMode: NO_FULL_READBACK_MODE,
+      queueCompletionStatus,
+      queueCompletionMethod,
+      pipelineCacheStatus: splatPipelineState.cacheStatus === 'pipeline-cache-hit'
+        && resolvePipelineState.cacheStatus === 'pipeline-cache-hit'
+        ? 'pipeline-cache-hit'
+        : 'pipeline-cache-miss',
+      sourceLocalSplatPipelineCacheStatus: splatPipelineState.cacheStatus,
+      sourceLocalResolvePipelineCacheStatus: resolvePipelineState.cacheStatus,
+      renderFieldDeferredCleanup,
+      renderFieldReadback: false,
+      fullReadbackPerformed: false,
+      normalHotLoopReadbackFree: true,
+      fieldRowsBufferRetained: true,
+      fieldRowsBufferByteLength: fieldRowByteLength,
+      fieldRowsBufferBorrowed: false,
+      fieldRowsBufferReused: false,
+      fieldRowsBufferOwnedByResult: true,
+      surfaceBufferRetained: true,
+      surfaceBufferByteLength: surfaceTable.records.byteLength,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    return attachSourceLocalDiagnosticRetainedBufferLeases({
+      result: diagnosticResult,
+      fieldRowsBuffer,
+      fieldRowByteLength,
+      surfaceBuffer,
+      surfaceTable,
+      queueFencePromise: retainedOutputQueueFence
+    });
+  }
+
   device.queue.submit([encoder.finish()]);
 
   let fieldRows;
@@ -685,7 +999,6 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     paramsBuffer.destroy?.();
   }
 
-  const visitEstimate = estimateSourceLocalFieldVisits(surfaceTable, resolvedParticleCount);
   return {
     schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
     backend: 'webgpu-source-local-shadow',

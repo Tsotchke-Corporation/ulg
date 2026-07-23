@@ -44,6 +44,9 @@ import {
   createSchroederSpatialMechanicsFieldViewGpu
 } from './schroederSpatialMechanicsFieldViewGpu.js';
 import {
+  createSchroederSpatialPhaseVolumeMomentGpu
+} from './schroederSpatialPhaseVolumeMomentGpu.js';
+import {
   createSchroederSpatialHierarchyViewGpu
 } from './schroederSpatialHierarchyViewGpu.js';
 import {
@@ -418,6 +421,20 @@ export function resolveSchroederSpatialDirectoryLevelAssignmentSource(
       sourceStateMismatch
     );
   }
+  // Strict raw V0*J diagnostics are optional for the directory itself. Keep
+  // an exact borrowed mechanics source only when this assignment can prove it
+  // is same-device and large enough for the immutable 32-float mechanics row;
+  // otherwise leave the core spatial generation live and omit the sidecar.
+  const sourceMechanicsCandidate = source.sourceMechanicsBuffer || null;
+  const sourceMechanicsMismatch = sourceMechanicsCandidate
+    ? webGpuDeviceMismatchInfo({ buffer: sourceMechanicsCandidate, device })
+    : { mismatch: false };
+  // A frozen fine-substep refresh updates the assignment position/state source
+  // but does not rebind or authenticate a current mechanics-family buffer.
+  // Its spread prior pointer is therefore deliberately insufficient for raw
+  // V0*J lineage. A fresh macro-boundary classifier remains admissible.
+  const frozenFineRefresh = source.refreshMode === 'frozen-fine-substep'
+    || source.levelClassificationMode === 'frozen-macro-step-no-reclassification';
   const sourceCount = exactU32OrNull(source.particleCount);
   const expectedCount = particleCount == null ? sourceCount : exactU32OrNull(particleCount);
   const strideFloats = exactU32OrNull(source.assignmentStrideFloats);
@@ -446,6 +463,27 @@ export function resolveSchroederSpatialDirectoryLevelAssignmentSource(
       { sourceCount }
     );
   }
+  const requiredMechanicsBytes = sourceCount * 32 * Float32Array.BYTES_PER_ELEMENT;
+  const sourceMechanicsByteLength = Number(sourceMechanicsCandidate?.size);
+  const sourceMechanicsAdmitted = Boolean(
+    sourceMechanicsCandidate
+    && source.sourceMechanicsBufferBorrowed === true
+    && frozenFineRefresh !== true
+    && sourceMechanicsMismatch.mismatch !== true
+    && (!Number.isFinite(sourceMechanicsByteLength)
+      || sourceMechanicsByteLength >= requiredMechanicsBytes)
+  );
+  const sourceMechanicsProvenanceStatus = sourceMechanicsAdmitted
+    ? 'schroeder-spatial-directory-source-mechanics-v0j-ready'
+    : sourceMechanicsCandidate == null
+      ? 'schroeder-spatial-directory-source-mechanics-v0j-unavailable'
+      : sourceMechanicsMismatch.mismatch === true
+        ? 'schroeder-spatial-directory-source-mechanics-v0j-device-mismatch'
+      : source.sourceMechanicsBufferBorrowed !== true
+          ? 'schroeder-spatial-directory-source-mechanics-v0j-not-borrowed'
+          : frozenFineRefresh === true
+            ? 'schroeder-spatial-directory-source-mechanics-v0j-frozen-refresh-unreproved'
+          : 'schroeder-spatial-directory-source-mechanics-v0j-buffer-too-small';
   const identity = {
     storageGeneration: exactU32OrNull(source.storageGeneration, { positive: true }),
     physicsTick: exactU32OrNull(source.physicsTick),
@@ -493,6 +531,12 @@ export function resolveSchroederSpatialDirectoryLevelAssignmentSource(
     sourceAssignmentBuffer: source.sourceAssignmentBuffer ?? null,
     sourceStateBuffer,
     sourceStateBufferBorrowed: source.sourceStateBufferBorrowed === true,
+    sourceMechanicsBuffer: sourceMechanicsAdmitted ? sourceMechanicsCandidate : null,
+    sourceMechanicsBufferBorrowed: sourceMechanicsAdmitted,
+    sourceMechanicsBufferByteLength: sourceMechanicsAdmitted
+      ? requiredMechanicsBytes
+      : 0,
+    sourceMechanicsProvenanceStatus,
     sourceCount,
     chartId,
     minLevel,
@@ -515,6 +559,12 @@ export function resolveSchroederSpatialDirectoryLevelAssignmentSource(
     sourceBuffer,
     sourceStateBuffer,
     sourceStateBufferBorrowed: source.sourceStateBufferBorrowed === true,
+    sourceMechanicsBuffer: sourceMechanicsAdmitted ? sourceMechanicsCandidate : null,
+    sourceMechanicsBufferBorrowed: sourceMechanicsAdmitted,
+    sourceMechanicsBufferByteLength: sourceMechanicsAdmitted
+      ? requiredMechanicsBytes
+      : 0,
+    sourceMechanicsProvenanceStatus,
     sourceCount,
     sourceRowLayoutId: SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
     sourceRowStrideFloats: strideFloats,
@@ -1834,6 +1884,7 @@ function directSpatialEpochRuntime(device, sourceCount) {
     mechanicsViewRuntimes: new Map(),
     mechanicsFieldViewRuntimes: new Map(),
     mechanicsFieldViewDrainingRuntimes: new Set(),
+    phaseVolumeMomentRuntimes: new Map(),
     hierarchyViewRuntimes: new Map(),
     parentFieldViewRuntimes: new Map(),
     aggregateViewRuntime: null,
@@ -2085,6 +2136,54 @@ function directMechanicsFieldViewRuntime(device, entry, mechanicsGrid, identityS
   return runtime;
 }
 
+function directPhaseVolumeMomentRuntime(device, entry, mechanicsFieldView) {
+  if (!mechanicsFieldView) return null;
+  const arenaCount = entry.directArenaCount ?? DIRECT_SPATIAL_EPOCH_ARENA_COUNT;
+  const runtimeCacheLimit = 4;
+  const key = [
+    mechanicsFieldView.sourceCapacity,
+    mechanicsFieldView.fieldCapacity
+  ].join(':');
+  let runtime = entry.phaseVolumeMomentRuntimes.get(key);
+  if (runtime) {
+    entry.phaseVolumeMomentRuntimes.delete(key);
+    entry.phaseVolumeMomentRuntimes.set(key, runtime);
+    return runtime;
+  }
+  if (
+    entry.phaseVolumeMomentRuntimes.size
+      >= runtimeCacheLimit
+  ) {
+    const retired = [...entry.phaseVolumeMomentRuntimes.entries()].find(
+      ([, candidate]) => candidate.activeExecutionCount?.() === 0
+    );
+    if (!retired) {
+      const error = new Error(
+        'phase-volume moment runtime cache is under live-generation backpressure'
+      );
+      error.code = 'ERR_SCHROEDER_PHASE_VOLUME_MOMENT_CACHE_BACKPRESSURE';
+      throw error;
+    }
+    const [retiredKey, retiredRuntime] = retired;
+    entry.phaseVolumeMomentRuntimes.delete(retiredKey);
+    if (retiredRuntime.destroy() !== true) {
+      const error = new Error(
+        'idle phase-volume moment runtime destruction was not confirmed'
+      );
+      error.code = 'ERR_SCHROEDER_PHASE_VOLUME_MOMENT_CACHE_BACKPRESSURE';
+      throw error;
+    }
+  }
+  runtime = createSchroederSpatialPhaseVolumeMomentGpu(device, {
+    maxSourceCount: mechanicsFieldView.sourceCapacity,
+    fieldCapacity: mechanicsFieldView.fieldCapacity,
+    arenaCount,
+    label: `ulg-schroeder-direct-phase-volume-moment-${mechanicsFieldView.sourceCapacity}-${mechanicsFieldView.fieldCapacity}-arenas-${arenaCount}`
+  });
+  entry.phaseVolumeMomentRuntimes.set(key, runtime);
+  return runtime;
+}
+
 function directMechanicsViewRuntime(device, entry, mechanicsGrid) {
   if (!mechanicsGrid) return null;
   const dims = Array.from(mechanicsGrid.gridDims || []);
@@ -2295,15 +2394,22 @@ function generationMechanicsLevelViews(generation) {
   if (Array.isArray(generation?.mechanicsLevelViews)) {
     return generation.mechanicsLevelViews;
   }
-  if (!generation?.mechanicsView && !generation?.mechanicsFieldView) return [];
+  if (
+    !generation?.mechanicsView
+    && !generation?.mechanicsFieldView
+    && !generation?.phaseVolumeMoment
+  ) return [];
   return [{
     selectedLevel: generation?.mechanicsView?.selectedLevel
       ?? generation?.mechanicsFieldView?.selectedLevel
+      ?? generation?.phaseVolumeMoment?.selectedLevel
       ?? null,
     mechanicsView: generation.mechanicsView || null,
     mechanicsViewRuntime: generation.mechanicsViewRuntime || null,
     mechanicsFieldView: generation.mechanicsFieldView || null,
-    mechanicsFieldViewRuntime: generation.mechanicsFieldViewRuntime || null
+    mechanicsFieldViewRuntime: generation.mechanicsFieldViewRuntime || null,
+    phaseVolumeMoment: generation.phaseVolumeMoment || null,
+    phaseVolumeMomentRuntime: generation.phaseVolumeMomentRuntime || null
   }];
 }
 
@@ -2436,12 +2542,23 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       releaseScheduled: false
     };
   }
+  const phaseVolumeMomentSourceAdmitted = Boolean(
+    source.sourceRowLayoutId
+      === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    && source.sourceMechanicsBuffer
+    && source.sourceMechanicsBufferBorrowed === true
+    && source.sourceMechanicsProvenanceStatus
+      === 'schroeder-spatial-directory-source-mechanics-v0j-ready'
+    && webGpuBufferMatchesDevice(source.sourceMechanicsBuffer, device)
+  );
   let cache = null;
   let execution = null;
   let mechanicsViewExecution = null;
   let mechanicsViewRuntime = null;
   let mechanicsFieldViewExecution = null;
   let mechanicsFieldViewRuntime = null;
+  let phaseVolumeMomentExecution = null;
+  let phaseVolumeMomentRuntime = null;
   let mechanicsLevelViews = [];
   let hierarchyViewExecution = null;
   let hierarchyViewRuntime = null;
@@ -2559,7 +2676,9 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         mechanicsView: levelMechanicsViewExecution,
         mechanicsViewRuntime: levelMechanicsViewRuntime,
         mechanicsFieldView: null,
-        mechanicsFieldViewRuntime: null
+        mechanicsFieldViewRuntime: null,
+        phaseVolumeMoment: null,
+        phaseVolumeMomentRuntime: null
       };
       mechanicsLevelViews.push(levelView);
       if (particleIdentityBuffer) {
@@ -2611,12 +2730,54 @@ export function runSchroederSpatialEpochGenerationWebGpu({
             mechanicsFieldTimestampSpan
           );
         }
+        if (phaseVolumeMomentSourceAdmitted) {
+          levelView.phaseVolumeMomentRuntime = directPhaseVolumeMomentRuntime(
+            device,
+            entry,
+            levelView.mechanicsFieldView
+          );
+          const phaseVolumeMomentTimestampSpan = gpuTimestampRecorder?.active === true
+            && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+            ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+                producerId: 'schroeder-spatial-phase-volume-moment-build',
+                stage: 'phase-volume-moment-build',
+                spanClass: 'same-production-command-encoder',
+                generationId,
+                laneId,
+                selectedLevel: levelSpec.selectedLevel,
+                sourceFamily: resolvedSourceFamily,
+                physicsTick: source.physicsTick,
+                physicsSubstep: source.physicsSubstep
+              })
+            : null;
+          levelView.phaseVolumeMoment = levelView.phaseVolumeMomentRuntime.encode(encoder, {
+            sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
+            sourceMechanicsBuffer: source.sourceMechanicsBuffer,
+            sourceMechanicsBufferBorrowed: true,
+            mechanicsFieldView: levelView.mechanicsFieldView,
+            gpuTimestampRecorder,
+            timestampMetadata: {
+              laneId,
+              sourceFamily: resolvedSourceFamily,
+              physicsTick: source.physicsTick,
+              physicsSubstep: source.physicsSubstep
+            }
+          });
+          if (phaseVolumeMomentTimestampSpan) {
+            gpuTimestampRecorder.endEncoderSpan(
+              encoder,
+              phaseVolumeMomentTimestampSpan
+            );
+          }
+        }
       }
     }
     mechanicsViewExecution = mechanicsLevelViews[0]?.mechanicsView || null;
     mechanicsViewRuntime = mechanicsLevelViews[0]?.mechanicsViewRuntime || null;
     mechanicsFieldViewExecution = mechanicsLevelViews[0]?.mechanicsFieldView || null;
     mechanicsFieldViewRuntime = mechanicsLevelViews[0]?.mechanicsFieldViewRuntime || null;
+    phaseVolumeMomentExecution = mechanicsLevelViews[0]?.phaseVolumeMoment || null;
+    phaseVolumeMomentRuntime = mechanicsLevelViews[0]?.phaseVolumeMomentRuntime || null;
     if (mechanicsLevelViews.length === 2) {
       hierarchyViewRuntime = directHierarchyViewRuntime(
         device,
@@ -2677,6 +2838,12 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     ))) {
       throw new Error('mechanics field view runtime did not authenticate the submitted execution');
     }
+    if (mechanicsLevelViews.some((levelView) => !markSubmittedOrConfirm(
+      levelView.phaseVolumeMomentRuntime,
+      levelView.phaseVolumeMoment
+    ))) {
+      throw new Error('phase-volume moment runtime did not authenticate the submitted execution');
+    }
     if (!markSubmittedOrConfirm(hierarchyViewRuntime, hierarchyViewExecution)) {
       throw new Error('spatial hierarchy view runtime did not authenticate the submitted execution');
     }
@@ -2701,6 +2868,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       mechanicsViewRuntime,
       mechanicsFieldView: mechanicsFieldViewExecution,
       mechanicsFieldViewRuntime,
+      phaseVolumeMoment: phaseVolumeMomentExecution,
+      phaseVolumeMomentRuntime,
       mechanicsLevelViews: Object.freeze(mechanicsLevelViews.map((levelView) => (
         Object.freeze(levelView)
       ))),
@@ -2758,6 +2927,12 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           levelView.mechanicsFieldView
         )
       ));
+      const phaseVolumeMomentSubmitted = mechanicsLevelViews.every((levelView) => (
+        markSubmittedOrConfirm(
+          levelView.phaseVolumeMomentRuntime,
+          levelView.phaseVolumeMoment
+        )
+      ));
       const hierarchySubmitted = markSubmittedOrConfirm(
         hierarchyViewRuntime,
         hierarchyViewExecution
@@ -2776,6 +2951,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         spatialSubmitted
         && mechanicsSubmitted
         && mechanicsFieldSubmitted
+        && phaseVolumeMomentSubmitted
         && hierarchySubmitted
         && parentFieldSubmitted
         && aggregateSubmitted
@@ -2793,6 +2969,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           mechanicsViewRuntime,
           mechanicsFieldView: mechanicsFieldViewExecution,
           mechanicsFieldViewRuntime,
+          phaseVolumeMoment: phaseVolumeMomentExecution,
+          phaseVolumeMomentRuntime,
           mechanicsLevelViews: Object.freeze(mechanicsLevelViews.map((levelView) => (
             Object.freeze(levelView)
           ))),
@@ -2860,6 +3038,14 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           // Preserve the original build/admission error.
         }
         try {
+          levelView.phaseVolumeMomentRuntime?.releaseExecution?.(
+            levelView.phaseVolumeMoment,
+            { discardedEncoder: true }
+          );
+        } catch {
+          // Preserve the original build/admission error.
+        }
+        try {
           levelView.mechanicsFieldViewRuntime?.releaseExecution?.(
             levelView.mechanicsFieldView,
             { discardedEncoder: true }
@@ -2883,11 +3069,13 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         error?.code === 'ERR_SCHROEDER_SPATIAL_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_ARENA_EXHAUSTED'
+        || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_MOMENT_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_HIERARCHY_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_PARENT_FIELD_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_AGGREGATE_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_VIEW_CACHE_BACKPRESSURE'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_CACHE_BACKPRESSURE'
+        || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_MOMENT_CACHE_BACKPRESSURE'
         || error?.code === 'ERR_SCHROEDER_HIERARCHY_VIEW_CACHE_BACKPRESSURE'
         || error?.code === 'ERR_SCHROEDER_PARENT_FIELD_VIEW_CACHE_BACKPRESSURE'
       )
@@ -3466,6 +3654,10 @@ export async function runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
           (levelView) => levelView.mechanicsFieldView == null
             || levelView.mechanicsFieldView.released === true
         ),
+        phaseVolumeMomentReleased: generationMechanicsLevelViews(liveGeneration).every(
+          (levelView) => levelView.phaseVolumeMoment == null
+            || levelView.phaseVolumeMoment.released === true
+        ),
         hierarchyReleased: liveGeneration?.hierarchyView == null
           || liveGeneration.hierarchyView.released === true,
         parentFieldReleased: liveGeneration?.parentFieldView == null
@@ -3502,6 +3694,11 @@ function generationOwnedArtifacts(generation) {
       role: `mechanics-field-view-level-${levelView.selectedLevel}`,
       execution: levelView.mechanicsFieldView,
       runtime: levelView.mechanicsFieldViewRuntime
+    }] : []),
+    ...(levelView.phaseVolumeMoment ? [{
+      role: `phase-volume-moment-level-${levelView.selectedLevel}`,
+      execution: levelView.phaseVolumeMoment,
+      runtime: levelView.phaseVolumeMomentRuntime
     }] : [])
   ]), ...(generation?.parentFieldView ? [{
     role: 'spatial-parent-field-view',

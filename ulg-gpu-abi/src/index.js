@@ -10,6 +10,8 @@ export * from './schroederSpatialMechanicsView.js';
 export * from './schroederSpatialMechanicsViewWgsl.js';
 export * from './schroederSpatialMechanicsFieldView.js';
 export * from './schroederSpatialMechanicsFieldViewWgsl.js';
+export * from './schroederSpatialPhaseVolumeMoment.js';
+export * from './schroederSpatialPhaseVolumeMomentWgsl.js';
 export * from './schroederSpatialHierarchyView.js';
 export * from './schroederSpatialHierarchyViewWgsl.js';
 export * from './schroederSpatialParentFieldView.js';

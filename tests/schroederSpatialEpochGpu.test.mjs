@@ -53,6 +53,9 @@ import {
   validateSchroederSpatialParentFieldViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialParentFieldView.js';
 import {
+  validateSchroederSpatialPhaseVolumeMomentDescriptor
+} from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeMoment.js';
+import {
   validateSchroederSpatialAggregateViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialAggregateView.js';
 import {
@@ -478,6 +481,193 @@ test('direct level-assignment generation publishes and retires one compact mecha
   assert.equal(await generation.releasePromise, true);
   assert.equal(generation.execution.released, true);
   assert.equal(generation.mechanicsView.released, true);
+});
+
+test('strict raw V0J sidecar attaches only to an exact borrowed mechanics family', async () => {
+  const device = createFakeDevice();
+  const timestampBegins = [];
+  const timestampEnds = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(encoder, descriptor) {
+      const token = { encoder, descriptor };
+      timestampBegins.push(token);
+      return token;
+    },
+    endEncoderSpan(encoder, token) {
+      timestampEnds.push({ encoder, token });
+      return true;
+    }
+  };
+  const sourceMechanicsBuffer = device.createBuffer({
+    label: 'direct-spatial-phase-volume-mechanics-source',
+    size: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const levelAssignment = createDirectSpatialLevelAssignment(device, {
+    sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size
+  });
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-phase-volume-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    },
+    gpuTimestampRecorder
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(
+    generation.source.sourceMechanicsProvenanceStatus,
+    'schroeder-spatial-directory-source-mechanics-v0j-ready'
+  );
+  assert.ok(generation.phaseVolumeMoment);
+  assert.equal(
+    generation.phaseVolumeMoment,
+    generation.mechanicsLevelViews[0].phaseVolumeMoment
+  );
+  assert.equal(
+    generation.phaseVolumeMoment.sourceMechanicsBuffer,
+    sourceMechanicsBuffer
+  );
+  assert.equal(
+    generation.phaseVolumeMoment.mechanicsFieldView,
+    generation.mechanicsFieldView
+  );
+  assert.equal(
+    validateSchroederSpatialPhaseVolumeMomentDescriptor(
+      generation.phaseVolumeMoment,
+      { generationId: generation.execution.generationId }
+    ).admitted,
+    true
+  );
+  const entryPoints = device.submissions[0][0].events
+    .filter((event) => event.kind === 'pass')
+    .flatMap((event) => event.commands.map((command) => command.pipeline));
+  assert.equal(
+    entryPoints.filter((label) => /phase-volume-moment/.test(label)).length,
+    4
+  );
+  const phaseVolumeTimestampProducerIds = timestampBegins
+    .map(({ descriptor }) => descriptor.producerId)
+    .filter((producerId) => producerId.startsWith(
+      'schroeder-spatial-phase-volume-moment'
+    ));
+  assert.deepEqual(phaseVolumeTimestampProducerIds, [
+    'schroeder-spatial-phase-volume-moment-build',
+    'schroeder-spatial-phase-volume-moment-emit',
+    'schroeder-spatial-phase-volume-moment-ranges',
+    'schroeder-spatial-phase-volume-moment-reduce',
+    'schroeder-spatial-phase-volume-moment-finalize'
+  ]);
+  assert.equal(timestampEnds.filter(({ token }) => (
+    token.descriptor.producerId.startsWith(
+      'schroeder-spatial-phase-volume-moment'
+    )
+  )).length, 5);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.phaseVolumeMoment.released, true);
+  assert.equal(sourceMechanicsBuffer.destroyCount, 0);
+  assert.ok(generation.releaseOperationResults.some(
+    (result) => result.owner === 'phase-volume-moment-level-0'
+      && result.confirmed === true
+  ));
+});
+
+test('missing or unborrowed mechanics provenance leaves spatial generation intact without V0J sidecar', () => {
+  const device = createFakeDevice();
+  const sourceMechanicsBuffer = device.createBuffer({
+    label: 'direct-spatial-unborrowed-mechanics-source',
+    size: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const levelAssignment = createDirectSpatialLevelAssignment(device, {
+    sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: false
+  });
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-unborrowed-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.phaseVolumeMoment, null);
+  assert.equal(generation.mechanicsLevelViews[0].phaseVolumeMoment, null);
+  assert.equal(
+    generation.source.sourceMechanicsProvenanceStatus,
+    'schroeder-spatial-directory-source-mechanics-v0j-not-borrowed'
+  );
+});
+
+test('frozen fine refresh keeps the spatial generation live but suppresses stale V0J lineage', () => {
+  const device = createFakeDevice();
+  const sourceMechanicsBuffer = device.createBuffer({
+    label: 'direct-spatial-frozen-mechanics-source',
+    size: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const levelAssignment = createDirectSpatialLevelAssignment(device, {
+    sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
+    refreshMode: 'frozen-fine-substep'
+  });
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-frozen-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.phaseVolumeMoment, null);
+  assert.equal(generation.mechanicsLevelViews[0].phaseVolumeMoment, null);
+  assert.equal(generation.source.sourceMechanicsBuffer, null);
+  assert.equal(generation.source.sourceMechanicsBufferBorrowed, false);
+  assert.equal(
+    generation.source.sourceMechanicsProvenanceStatus,
+    'schroeder-spatial-directory-source-mechanics-v0j-frozen-refresh-unreproved'
+  );
 });
 
 test('one spatial generation owns exactly two adjacent compact mechanics and field views', async () => {

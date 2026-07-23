@@ -7564,6 +7564,14 @@ export async function runSchroederLevelAssignmentWebGpu({
       normalHotLoopReadbackFree: noFullReadback,
       sourceStateBuffer: stateBuffer,
       sourceStateBufferBorrowed: Boolean(borrowedStateBuffer),
+      // Keep the exact retained mechanics source alongside the assignment.
+      // Consumers that require strict V0 * J provenance must use this buffer
+      // directly rather than the assignment's intentionally fallback-capable
+      // volume columns.
+      sourceMechanicsBuffer: mechanicsBuffer,
+      sourceMechanicsBufferBorrowed: Boolean(borrowedMechanicsBuffer),
+      sourceMechanicsBufferByteLength: bufferFamilyGeneration
+        .requiredMechanicsBufferByteLength,
       retainedAssignmentBuffer: Boolean(retainAssignmentBuffer),
       assignmentBufferByteLength: plan.assignmentByteLength,
       assignments,

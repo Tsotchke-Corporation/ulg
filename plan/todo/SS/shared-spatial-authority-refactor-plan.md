@@ -1712,6 +1712,61 @@ Its remaining warnings are the reviewed forward-replacement shape, explicitly
 justified temporary GPU integration boundaries, pre-existing portfolio task
 state, and the expected precommit dirty-tree receipt.
 
+## Slice 9A strict raw-volume moment sidecar checkpoint - 2026-07-23
+
+Slice 9A begins the phase-resolved volume/transport follow-on without quietly
+changing mechanics, EOS, phase transfer, reaction placement, or rendering. It
+adds a retained, GPU-resident diagnostic sidecar to each admitted mechanics
+field view. The sidecar reads only the exact borrowed MLS-MPM mechanics words
+for rest volume (`V0`, word 19) and volume ratio (`J`, word 18), forms strict
+finite-positive `V0 * J`, and scatters it with the existing 27-point quadratic
+stencil to the exact existing mechanics-field identity. It emits per-field
+current-volume and volume-gradient rows. There is no density, phase-reference,
+render, or host fallback: invalid raw values, source lineage, buffer identity,
+or field-header evidence fail the entire sidecar closed.
+
+The control ABI (`schroeder-spatial-phase-volume-moment.v1`) carries exact
+source/field/generation identity, source and field capacities, raw mechanics
+layout words, indirect field dispatch, compact counters, and an explicit
+diagnostic-only/no-state-mutation policy. Candidate-to-field indices and field
+ranges share one bounded scratch binding, keeping every shader entry point at
+the portable eight-storage-binding limit. Four caller-encoded passes (emit,
+range materialization, per-field reduction, and finalization) operate in the
+same production command encoder before P2G. The sidecar owns only its retained
+arena buffers; it neither destroys nor mutates the borrowed source, mechanics,
+directory, or mechanics-field buffers. Normal retirement is fence-safe and
+device loss quarantines only sidecar-owned resources.
+
+Frozen fine-substep refreshes deliberately suppress this diagnostic until a
+fresh mechanics-source family can be re-proven; a carried pointer is not
+mistaken for current `V0 * J` authority. This is diagnostic groundwork, not yet
+the phase-transfer or pressure/drag operator promised by the follow-on plan.
+
+Verification is green:
+
+- focused ABI/runtime/epoch coverage passes `43/43` non-opt-in checks, with
+  the native proof kept separately opt-in;
+- the opt-in native Chromium/Vulkan proof passes `6/6`, including a
+  manufactured `V0=0.003`, `J=2` result (`sum V=0.006`) and a `J=0`
+  fail-closed result;
+- the full repository suite passes `1878/1896`, with `18` expected skips and
+  zero failures; `npm run build` and `git diff --check` pass;
+- the native desktop visual matrix records all seven standard/random scenarios
+  nonblank with zero WebGPU/browser or visual-surface issues. Its three
+  steam/hydrogen-rise behavior failures exactly match the established Slice 7/8
+  transport frontier rather than introducing a new rendering regression; and
+- real SS GPU-stage timestamps confirm the sidecar is active and has zero
+  particle readback. At 1,024 particles it measures `0.520640 ms` p50 /
+  `0.754528 ms` p95 per spatial epoch, versus `6.068320 / 8.112672 ms` for
+  the whole spatial command-encoder span. At 8,192 particles it measures
+  `0.748352 / 0.767104 ms`, versus `13.929728 / 14.655264 ms`. These isolated
+  sidecar spans are evidence, not an A/B throughput-regression claim.
+
+Artifacts are
+`/tmp/ulg-visual-sanity-matrix/s9a-visual-gate-20260723/summary.json`,
+`/tmp/ulg-s9a-ss-stage-timing-20260723.json`, and
+`/tmp/ulg-s9a-ss-stage-timing-8192-20260723.json`.
+
 ### Post-commit transport receipt
 
 The one full-slice commit, branch push, and Pages-bearing `main` fast-forward

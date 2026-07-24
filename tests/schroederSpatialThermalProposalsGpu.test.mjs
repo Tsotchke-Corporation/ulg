@@ -46,12 +46,14 @@ import {
   SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_DIAGNOSTIC_WORDS,
   ULG_SCHROEDER_SPATIAL_THERMAL_CANDIDATE_CSR_SCHEMA,
   armSchroederSpatialThermalExhaustiveShadowForNativeTest,
+  armSchroederSpatialThermalSourceCellTreeShadowForNativeTest,
   armSchroederSpatialThermalTreeShadowForNativeTest,
   classicThermalBinnedProposalWgsl,
   classicThermalCandidateProposalWgsl,
   classicThermalProposalWgsl,
   createClassicThermalProposalWebGpuEncoderStage,
   createSchroederSpatialThermalExhaustiveShadowWgslForNativeTest,
+  createSchroederSpatialThermalSourceCellTreeShadowWgslForNativeTest,
   createSchroederSpatialThermalTreeShadowWgslForNativeTest,
   createSchroederSpatialMatchedTimeThermalProposalEncoderStage,
   destroyClassicThermalProposalRuntime,
@@ -63,7 +65,10 @@ import {
 } from '../src/runtime/sph/schroederSpatialThermalProposalsGpu.js';
 import {
   isSchroederSpatialExactNearResidentConsumerBinding,
+  ownsSchroederSpatialEpochGenerationConsumerLease,
   quarantineSchroederSpatialEpochGenerationAfterDeviceLoss,
+  releaseSchroederSpatialEpochGenerationConsumerLease,
+  releaseSchroederSpatialEpochGenerationAfterQueue,
   runSchroederSpatialEpochGenerationWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
 import {
@@ -816,6 +821,107 @@ test('native-only thermal tree shadow replaces only exact directory enumeration'
   assert.doesNotMatch(unobserved, /thermal_tree_shadow_diagnostics/);
 });
 
+test('native-only source-cell thermal tree shadow seals one cell walk before bounded 2D rows', () => {
+  const source =
+    createSchroederSpatialThermalSourceCellTreeShadowWgslForNativeTest({
+      sourceCapacity: 64,
+      cellCapacity: 32,
+      nodeCapacity: 63,
+      observeTraversalCounters: true
+    });
+  const unobserved =
+    createSchroederSpatialThermalSourceCellTreeShadowWgslForNativeTest({
+      sourceCapacity: 64,
+      cellCapacity: 32,
+      nodeCapacity: 63,
+      observeTraversalCounters: false
+    });
+  assert.match(
+    source,
+    /@binding\(12\) var<storage, read> exact_near_cell_tree/
+  );
+  assert.match(
+    source,
+    /@binding\(14\) var<storage, read_write> thermal_source_cell_batch/
+  );
+  assert.match(source, /fn initialize_source_cell_batch/);
+  assert.match(source, /fn materialize_source_cell_projection/);
+  assert.match(source, /fn build_source_cell_batch/);
+  assert.match(source, /fn finalize_source_cell_batch/);
+  assert.match(
+    source,
+    /global_support_m \+ 2\.0 \* displacement_m/
+  );
+  assert.match(
+    source,
+    /source_bounds\[0\][\s\S]*outward_slack_m[\s\S]*source_bounds\[1\]/
+  );
+  assert.match(
+    source,
+    /thermal_source_cell_validate_leaf_members[\s\S]*ss_exact_near_cell_for_source[\s\S]*floor\(frozen\.xyz \/ spacing_m\)/
+  );
+  assert.match(
+    source,
+    /all\(bounds\[0\] <= expected_bounds\[0\]\)[\s\S]*all\(bounds\[1\] >= expected_bounds\[1\]\)/
+  );
+  assert.match(
+    source,
+    /atomicOr\([\s\S]*1u << \(target_cell % 32u\)/
+  );
+  assert.match(
+    source,
+    /@builtin\(workgroup_id\)[\s\S]*@builtin\(num_workgroups\)/
+  );
+  assert.match(
+    source,
+    /workgroup_id\.y \* 64u \+ local_invocation_index/
+  );
+  assert.match(
+    source,
+    /let uniform = thermal_uniform_completion_admitted\(\)[\s\S]*projection_mode[\s\S]*!= THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK[\s\S]*thermal_publish_uniform_completion_row/
+  );
+  assert.match(
+    source,
+    /projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL[\s\S]*ordinal != source_rank[\s\S]*thermal_active_source_rank_sidecar_word\(source_rank\)/
+  );
+  assert.match(
+    source,
+    /any\(cell_order < minimum_order\)[\s\S]*any\(cell_order > maximum_order\)/
+  );
+  assert.match(source, /thermal_csr_replay_admitted/);
+  assert.match(source, /thermal_visit_fused_pair/);
+  assert.match(
+    source,
+    /thermal_source_cell_batch_add\([\s\S]*select\(36u, 32u, budget_mode\)/
+  );
+  for (const word of [27, 28, 29, 30]) {
+    assert.match(
+      source,
+      new RegExp(`thermal_source_cell_batch_add\\(${word}u`)
+    );
+    assert.doesNotMatch(
+      unobserved,
+      new RegExp(`thermal_source_cell_batch_add\\(${word}u`)
+    );
+  }
+  assert.doesNotMatch(
+    unobserved,
+    /select\(36u, 32u, budget_mode\)/
+  );
+  assert.match(
+    source,
+    /let source_cell_counter_base = select\(37u, 33u, budget_mode\)/
+  );
+  assert.doesNotMatch(
+    unobserved,
+    /let source_cell_counter_base = select\(37u, 33u, budget_mode\)/
+  );
+  assert.equal(source.match(/fn budget\(/g)?.length, 1);
+  assert.equal(source.match(/fn propose\(/g)?.length, 1);
+  assert.doesNotMatch(source, /var level_ordinal = 0u/);
+  assert.doesNotMatch(source, /thermal_csr_unused/);
+});
+
 test('native-only thermal exhaustive shadow preserves the pair and CSR core', () => {
   const source =
     createSchroederSpatialThermalExhaustiveShadowWgslForNativeTest();
@@ -1091,6 +1197,129 @@ test('native-only thermal tree shadow binds the submitted same-generation tree a
   await fixture.device.queue.onSubmittedWorkDone();
 });
 
+test('native-only source-cell tree shadow binds a sealed batch and dispatches 2D rows indirectly', async () => {
+  const fixture = liveFixture(2);
+  const result = runSchroederSpatialThermalProposalWebGpu({
+    ...fixture,
+    dtS: 0.001
+  });
+  const receipt =
+    armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result,
+      observeTraversalCounters: true
+    });
+  assert.equal(receipt.nativeTestOnly, true);
+  assert.equal(receipt.fallback, null);
+  assert.equal(receipt.generation, fixture.generation);
+  assert.equal(receipt.tree, fixture.generation.exactNearCellTree);
+  assert.equal(
+    receipt.treeBuffer,
+    fixture.generation.exactNearCellTree.treeBuffer
+  );
+  assert.equal(
+    receipt.directoryBuffer,
+    fixture.generation.exactNearCellTree.directoryBuffer
+  );
+  assert.equal(receipt.plan.cellCapacity, 2);
+  assert.equal(receipt.plan.nodeCapacity, 3);
+  assert.equal(receipt.plan.bitsetRowWords, 1);
+  assert.equal(receipt.dispatchByteOffset, 16 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.throws(
+    () => armSchroederSpatialThermalTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result
+    }),
+    /exactly once/
+  );
+  assert.throws(
+    () => armSchroederSpatialThermalExhaustiveShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result
+    }),
+    /exactly once/
+  );
+
+  const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+    device: fixture.device,
+    currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+    currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+    thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+    ...result.preparedLawConfig,
+    schroederSpatialThermalProposal: result
+  });
+  assert.equal(stage.nativeTestSourceCellTreeShadow, receipt);
+  assert.equal(
+    stage.thermalCandidateCsrFallbackMode,
+    'sealed-source-cell-bitset-rewalk-on-unsealed-row-receipt'
+  );
+  const encoder = fixture.device.createCommandEncoder({
+    label: 'thermal-source-cell-tree-shadow-unit-encoder'
+  });
+  stage.encode(encoder);
+  fixture.device.queue.submit([encoder.finish()]);
+  assert.equal(stage.markSubmittedWork(), true);
+  const event = fixture.device.encoders.at(-1);
+  assert.deepEqual(event.passes.map(({ descriptor }) => descriptor.label), [
+    'ulg-schroeder-spatial-thermal-derived-prepass',
+    'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
+    'ulg-native-test-s9d5-thermal-source-cell-initialize',
+    'ulg-native-test-s9d5-thermal-source-cell-projection',
+    'ulg-native-test-s9d5-thermal-source-cell-build',
+    'ulg-native-test-s9d5-thermal-source-cell-finalize',
+    'ulg-schroeder-spatial-thermal-directional-budget',
+    'ulg-schroeder-spatial-thermal-csr-validate-rows',
+    'ulg-schroeder-spatial-thermal-csr-seal',
+    'ulg-schroeder-spatial-thermal-budget-resolve',
+    'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal'
+  ]);
+  for (const label of [
+    'ulg-native-test-s9d5-thermal-source-cell-initialize',
+    'ulg-native-test-s9d5-thermal-source-cell-projection',
+    'ulg-native-test-s9d5-thermal-source-cell-build',
+    'ulg-native-test-s9d5-thermal-source-cell-finalize',
+    'ulg-schroeder-spatial-thermal-directional-budget',
+    'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal'
+  ]) {
+    const pass = event.passes.find(
+      ({ descriptor }) => descriptor.label === label
+    );
+    assert.equal(
+      pass.bindGroup.bindGroup.entries.find(
+        ({ binding }) => binding === 14
+      ).resource.buffer,
+      receipt.batchBuffer
+    );
+  }
+  for (const label of [
+    'ulg-schroeder-spatial-thermal-directional-budget',
+    'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal'
+  ]) {
+    const pass = event.passes.find(
+      ({ descriptor }) => descriptor.label === label
+    );
+    assert.deepEqual(pass.commands[0].dispatchIndirect, {
+      buffer: receipt.dispatchBuffer,
+      offset: 0
+    });
+  }
+  assert.ok(event.copies.some((copy) => (
+    copy.source === receipt.batchBuffer
+    && copy.sourceOffset === receipt.dispatchByteOffset
+    && copy.destination === receipt.dispatchBuffer
+    && copy.destinationOffset === 0
+    && copy.size === 3 * Uint32Array.BYTES_PER_ELEMENT
+  )));
+  assert.ok(event.clears.some(({ buffer, size }) => (
+    buffer === receipt.batchBuffer && size === receipt.batchByteLength
+  )));
+  assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
+  await fixture.device.queue.onSubmittedWorkDone();
+  await Promise.resolve();
+  assert.equal(receipt.batchBuffer.destroyCount, 1);
+  assert.equal(receipt.dispatchBuffer.destroyCount, 1);
+});
+
 test('native-only thermal exhaustive shadow runs through the production bind ABI', async () => {
   const fixture = liveFixture(2);
   const result = runSchroederSpatialThermalProposalWebGpu({
@@ -1208,6 +1437,292 @@ test('native-only thermal tree shadow arming is atomic on pipeline failure', asy
   );
   assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
   await fixture.device.queue.onSubmittedWorkDone();
+});
+
+test('native-only source-cell tree arming is atomic and rejects unbounded storage or dispatch', async () => {
+  const fixture = liveFixture(2);
+  const result = runSchroederSpatialThermalProposalWebGpu({
+    ...fixture,
+    dtS: 0.001
+  });
+  const createComputePipeline = fixture.device.createComputePipeline;
+  fixture.device.createComputePipeline = (descriptor) => {
+    if (
+      descriptor.label
+        === 'ulg-native-test-s9d5-thermal-source-cell-proposal'
+    ) {
+      throw new Error('injected source-cell proposal compile failure');
+    }
+    return createComputePipeline(descriptor);
+  };
+  assert.throws(
+    () => armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result
+    }),
+    /injected source-cell proposal compile failure/
+  );
+  fixture.device.createComputePipeline = createComputePipeline;
+  const failedBatch = fixture.device.buffers.find(
+    ({ label }) => label
+      === 'ulg-native-test-s9d5-thermal-source-cell-batch'
+  );
+  assert.equal(failedBatch?.destroyCount, 1);
+  const failedDispatch = fixture.device.buffers.find(
+    ({ label }) => label
+      === 'ulg-native-test-s9d5-thermal-source-cell-dispatch'
+  );
+  assert.equal(failedDispatch?.destroyCount, 1);
+  const tree = fixture.generation.exactNearCellTree;
+  const probeLease = tree.ownerRuntime.acquireExecutionConsumerLease(tree, {
+    consumerId: 'source-cell-atomic-failure-probe'
+  });
+  assert.equal(
+    tree.ownerRuntime.releaseExecutionConsumerLease(
+      probeLease,
+      { discardedEncoder: true }
+    ),
+    true
+  );
+
+  fixture.device.limits.maxStorageBuffersPerShaderStage = 11;
+  assert.throws(
+    () => armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result
+    }),
+    /requires 12 storage bindings/
+  );
+  fixture.device.limits.maxStorageBuffersPerShaderStage = 12;
+  fixture.device.limits.maxStorageBufferBindingSize = 128;
+  assert.throws(
+    () => armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result
+    }),
+    /exceeding the WebGPU storage limit/
+  );
+  fixture.device.limits.maxStorageBufferBindingSize = 128 * 1024 * 1024;
+  fixture.device.limits.maxComputeWorkgroupsPerDimension = 1;
+  assert.throws(
+    () => armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result
+    }),
+    /two-dimensional WebGPU dispatch limits/
+  );
+  fixture.device.limits.maxComputeWorkgroupsPerDimension = 65_535;
+
+  const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+    device: fixture.device,
+    currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+    currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+    thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+    ...result.preparedLawConfig,
+    schroederSpatialThermalProposal: result
+  });
+  assert.equal(stage.nativeTestSourceCellTreeShadow, null);
+  const encoder = fixture.device.createCommandEncoder({
+    label: 'thermal-source-cell-atomic-arm-failure'
+  });
+  stage.encode(encoder);
+  fixture.device.queue.submit([encoder.finish()]);
+  assert.equal(stage.markSubmittedWork(), true);
+  assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
+  await fixture.device.queue.onSubmittedWorkDone();
+});
+
+test('native-only source-cell tree lease spans bind, encode, submission, and arena release', async () => {
+  const fixture = liveFixture(2);
+  const result = runSchroederSpatialThermalProposalWebGpu({
+    ...fixture,
+    dtS: 0.001
+  });
+  const receipt =
+    armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result,
+      observeTraversalCounters: false
+    });
+  const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+    device: fixture.device,
+    currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+    currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+    thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+    ...result.preparedLawConfig,
+    schroederSpatialThermalProposal: result
+  });
+  const tree = fixture.generation.exactNearCellTree;
+  const treeRuntime = fixture.generation.exactNearCellTreeRuntime;
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      fixture.generation,
+      fixture.device
+    ),
+    true
+  );
+  const pendingGenerationRelease = fixture.generation.releasePromise;
+  assert.equal(fixture.generation.releaseScheduled, true);
+  assert.equal(
+    treeRuntime.ownsExecutionConsumerLease(
+      receipt.treeConsumerLease,
+      tree
+    ),
+    true
+  );
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(
+      receipt.generationConsumerLease,
+      fixture.generation
+    ),
+    true
+  );
+  await Promise.resolve();
+  assert.equal(fixture.generation.execution.released, false);
+  const encoder = fixture.device.createCommandEncoder({
+    label: 'thermal-source-cell-spanning-lease'
+  });
+  assert.doesNotThrow(() => stage.encode(encoder));
+  fixture.device.queue.submit([encoder.finish()]);
+  assert.equal(stage.markSubmittedWork(), true);
+  assert.equal(await pendingGenerationRelease, true);
+  assert.equal(receipt.treeConsumerLease.released, true);
+  assert.equal(receipt.generationConsumerLease.released, true);
+  assert.equal(tree.released, true);
+  assert.equal(fixture.generation.execution.released, true);
+  assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
+  await fixture.device.queue.onSubmittedWorkDone();
+});
+
+test('native-only source-cell binding requires both exact unscheduled consumer leases', async () => {
+  {
+    const fixture = liveFixture(2);
+    const result = runSchroederSpatialThermalProposalWebGpu({
+      ...fixture,
+      dtS: 0.001
+    });
+    const receipt =
+      armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+        device: fixture.device,
+        schroederSpatialThermalProposal: result,
+        observeTraversalCounters: false
+      });
+    receipt.tree.ownerRuntime.releaseExecutionConsumerLease(
+      receipt.treeConsumerLease,
+      { discardedEncoder: true }
+    );
+    assert.equal(
+      await receipt.tree.ownerRuntime.releaseExecutionAfter(
+        receipt.tree,
+        Promise.resolve()
+      ),
+      true
+    );
+    const replacementEncoder = fixture.device.createCommandEncoder({
+      label: 'thermal-source-cell-released-tree-arena-reuse'
+    });
+    const replacementTree = receipt.tree.ownerRuntime.encode(
+      replacementEncoder,
+      { spatialExecution: receipt.tree.spatialExecution }
+    );
+    fixture.device.queue.submit([replacementEncoder.finish()]);
+    assert.equal(
+      receipt.tree.ownerRuntime.markExecutionSubmitted(replacementTree),
+      true
+    );
+    assert.equal(replacementTree.treeBuffer, receipt.tree.treeBuffer);
+    assert.ok(
+      replacementTree.arenaGeneration > receipt.tree.arenaGeneration
+    );
+    fixture.generation.exactNearCellTree = replacementTree;
+    const before = {
+      bindGroups: fixture.device.bindGroups.length,
+      encoders: fixture.device.encoders.length,
+      submissions: fixture.device.submissions.length
+    };
+    assert.throws(
+      () => createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+        device: fixture.device,
+        currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+        currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+        thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+        ...result.preparedLawConfig,
+        schroederSpatialThermalProposal: result
+      }),
+      {
+        code: 'ERR_SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_STALE_BINDING'
+      }
+    );
+    assert.deepEqual(
+      {
+        bindGroups: fixture.device.bindGroups.length,
+        encoders: fixture.device.encoders.length,
+        submissions: fixture.device.submissions.length
+      },
+      before
+    );
+    assert.equal(result.abandonPreparedWork('released-tree-lease-unit'), true);
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(
+        fixture.generation,
+        fixture.device
+      ),
+      true
+    );
+    assert.equal(await fixture.generation.releasePromise, true);
+    assert.equal(receipt.generationConsumerLease.released, true);
+  }
+
+  {
+    const fixture = liveFixture(2);
+    const result = runSchroederSpatialThermalProposalWebGpu({
+      ...fixture,
+      dtS: 0.001
+    });
+    const receipt =
+      armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+        device: fixture.device,
+        schroederSpatialThermalProposal: result,
+        observeTraversalCounters: false
+      });
+    const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+      device: fixture.device,
+      currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+      currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+      thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+      ...result.preparedLawConfig,
+      schroederSpatialThermalProposal: result
+    });
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationConsumerLease(
+        receipt.generationConsumerLease,
+        { discardedEncoder: true }
+      ),
+      true
+    );
+    const encoder = fixture.device.createCommandEncoder({
+      label: 'thermal-source-cell-released-generation-lease'
+    });
+    const encoderEvent = fixture.device.encoders.at(-1);
+    assert.throws(
+      () => stage.encode(encoder),
+      {
+        code: 'ERR_SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_STALE_BINDING'
+      }
+    );
+    assert.deepEqual(encoderEvent.clears, []);
+    assert.deepEqual(encoderEvent.passes, []);
+    assert.equal(result.abandonPreparedWork('released-generation-lease-unit'), true);
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(
+        fixture.generation,
+        fixture.device
+      ),
+      true
+    );
+    assert.equal(await fixture.generation.releasePromise, true);
+    assert.equal(receipt.treeConsumerLease.released, true);
+  }
 });
 
 test('native-only thermal tree shadow rejects foreign, swapped, and released tree lifecycles', async () => {
@@ -1499,6 +2014,60 @@ test('native-only thermal tree shadow is quarantined and released on device loss
       submissions: fixture.device.submissions.length
     },
     beforeLossRejection
+  );
+});
+
+test('native-only source-cell tree batch and consumer lease retire on device loss', async () => {
+  const fixture = liveFixture(2);
+  let reportDeviceLoss;
+  fixture.device.lost = new Promise((resolve) => {
+    reportDeviceLoss = resolve;
+  });
+  const result = runSchroederSpatialThermalProposalWebGpu({
+    ...fixture,
+    dtS: 0.001
+  });
+  const receipt =
+    armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result,
+      observeTraversalCounters: true
+    });
+  assert.equal(receipt.treeConsumerLease.released, false);
+  assert.equal(receipt.generationConsumerLease.released, false);
+  const generationQuarantine =
+    quarantineSchroederSpatialEpochGenerationAfterDeviceLoss(
+      fixture.generation,
+      fixture.device
+    );
+  reportDeviceLoss({
+    reason: 'destroyed',
+    message: 'source-cell thermal lifecycle unit loss'
+  });
+  await Promise.all([
+    fixture.device.lost,
+    generationQuarantine
+  ]);
+  await Promise.resolve();
+
+  assert.equal(result.released, true);
+  assert.equal(result.terminalDisposition, 'device-lost-quarantined');
+  assert.match(result.terminalReason, /source-cell thermal lifecycle/);
+  assert.equal(receipt.treeConsumerLease.released, true);
+  assert.equal(receipt.generationConsumerLease.released, true);
+  assert.equal(receipt.batchBuffer.destroyCount, 1);
+  assert.equal(receipt.dispatchBuffer.destroyCount, 1);
+  assert.equal(fixture.generation.exactNearCellTree.released, true);
+  assert.throws(
+    () => createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+      device: fixture.device,
+      currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+      currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+      thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+      ...result.preparedLawConfig,
+      schroederSpatialThermalProposal: result
+    }),
+    /device is lost/
   );
 });
 

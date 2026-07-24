@@ -41900,3 +41900,50 @@ Validation and review:
   still reports a documented name-only false positive for an unrelated classic
   neighbor-bin helper named `fallback` and lacks machine-readable runtime trace
   ingestion; this was not “fixed” by changing valid production code.
+
+## 2026-07-24 AKDT - S9D-5 source-cell thermal comparator rejected
+
+- Added an explicit native-test-only source-cell-batched thermal tree control.
+  It reuses the immutable same-generation exact-cell tree, expands frozen
+  source-cell AABBs by `R + 2D`, seals bounded candidate-cell rows, and uses a
+  bounded two-dimensional dispatch. Production remains direct-only with no
+  selector, fallback, private index, or mounted caller.
+- Direct, per-particle-tree, and source-cell-tree outputs are exact across all
+  compared derived/proposal/evidence/dispatch/CSR/apply bytes on ten campaigns;
+  the independent particle-index control preserves semantic parity. Coverage
+  includes nonzero radiation and local dormant projection. Eight malformed
+  tree cases emit zero rows and no fallback.
+- Added exact tree and whole-generation leases through submission/fence plus
+  real-browser fail-closed probes for released leases, bind-to-encode staleness,
+  physical arena reuse, and device loss on an isolated logical `GPUDevice`.
+- PASS: focused suites `68/68`; full suite `1939/1960` with zero failures and
+  `21` expected skips; production build, syntax, and `git diff --check`.
+- PASS: native Vulkan `1/1` in `58.4 s` on NVIDIA Blackwell. Four warmups and
+  nine balanced measured trios per fixture retain exact output with diagnostic
+  counters disabled. Source-cell composite is `1.1959788824x` paired /
+  `1.1754972367x` independent (`2.27328 ms` versus `1.933888 ms` direct);
+  sparse full-route is `2.72538708735x / 2.71867749420x` and sparse traversal
+  is `3.88607594937x / 3.85316455696x`.
+- The per-particle composite is `0.9734063355x / 0.9594930006x`
+  (`1.855552 ms`) but still fails its per-fixture guard. Final decision:
+  `perParticleAccepted=false`, `sourceCellAccepted=false`,
+  `experimentalDecision=source-cell-benchmark-rejected`, and
+  `productionDecision=retain-direct`.
+- Presentation PASS:
+  `/tmp/ulg-visual-sanity-matrix/s9d5-source-cell-thermal-20260724-r2/summary.json`
+  covers four standard presets and three deterministic random pairs. All seven
+  are structurally good, renderer-matched, nonblank, current, and free of
+  browser-console and visual-surface issues. Direct early/mid/late review
+  retains evolving opaque/refraction-led water, iron/ice contact and breakup,
+  reactive sodium/water, visible dynamic fluorine and CsF product, and stable
+  random-pair geometry.
+- Steam rise/condensation and hydrogen rise remain the same explicit inherited
+  gas-interface transport debt. No behavior threshold was relaxed.
+- Performance PASS:
+  `/tmp/ulg-s9d5-nontarget-throughput-20260724-r2.json` freezes exact baseline
+  and candidate fingerprints across four `AB/BA/AB/BA` runs. Its paired
+  candidate/baseline median is `0.9686949013x` (`3.1305099%` regression inside
+  the `5%` ceiling), while the independent-median cross-check is
+  `1.0001372023x` (`0.0137202%` improvement). All arms and provenance gates
+  pass with no blockers.
+- Final ICC closeout remains in progress before the one slice commit and push.

@@ -2120,3 +2120,46 @@ frozen source cell, expanding each source-cell AABB by the maximum support
 radius plus `2D`. It must compare against both the current per-particle tree
 and direct-directory routes on the same sparse, clustered, and dense fixtures;
 production stays direct unless every no-material-regression gate passes.
+
+### S9D-5 source-cell-batched thermal comparator rejected for production - 2026-07-24
+
+S9D-5 implemented the bounded experiment described by S9D-4 without changing
+the mounted thermal route. The native-test-only comparator groups exact source
+ranks by frozen canonical source cell, traverses the existing immutable
+same-generation cell tree once per source cell with a conservative `R + 2D`
+AABB envelope, seals a bounded candidate-cell bitset, and evaluates source rows
+through a bounded two-dimensional dispatch. The canonical directory, exact
+pair predicates, reciprocal energy semantics, CSR replay/re-walk behavior, and
+production direct pipelines remain unchanged; there is no private spatial
+index, selector, fallback, or production caller.
+
+Correctness evidence closes the prior proposal gaps. Direct, per-particle tree,
+and source-cell tree routes are exact across the full derived/proposal/
+evidence/dispatch/CSR/apply byte family on ten same-generation campaigns; an
+independent particle-index traversal preserves semantic parity. The campaigns
+include a nonzero radiative-energy case, local and base-active dormant
+projection, multilevel and negative/boundary cells, both `R + 2D` displacement
+directions, dense CSR re-walk, and uniform completion. Eight malformed tree
+families publish no rows or fallback. Exact tree plus whole-generation leases
+span bind through submitted-work completion, and native lifecycle probes reject
+released leases, stale bind-to-encode state, physical arena reuse, and a real
+browser device-loss event while the source-cell shadow is armed.
+
+The measured route is nevertheless rejected. Four warmups and nine balanced
+three-route NVIDIA Blackwell samples per fixture run without source-cell
+diagnostic counters; an isolated observed probe retains bounded counter and
+seal evidence. The source-cell full-route composite is
+`1.1959788824x` paired / `1.1754972367x` independent (`2.27328 ms` versus
+`1.933888 ms` direct). Sparse full-route and traversal ratios are respectively
+`2.72538708735x / 2.71867749420x` and
+`3.88607594937x / 3.85316455696x`. The per-particle comparator's favorable
+composite (`0.9734063355x / 0.9594930006x`) does not override its own
+per-fixture rejection. The authoritative receipt is therefore
+`sourceCellAccepted=false`, `experimentalDecision=source-cell-benchmark-rejected`,
+and `productionDecision=retain-direct`.
+
+This slice proves that source-cell batching can preserve the physics and
+lifecycle contracts, but not that this implementation is a viable production
+accelerator. No thermal migration follows. Any later hierarchy consumer or
+layout experiment requires a new task, lease, native receipt, and
+no-material-regression gate; direct remains authoritative.

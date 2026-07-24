@@ -2,58 +2,72 @@
 
 ## Current Focus - 2026-07-24 AKDT
 
-Slice S9D-4 is at its commit boundary with a measured production rejection.
-The canonical GPU-resident direct exact-cell directory remains the only
-production thermal traversal. A native-test-only exact-cell-tree shadow and an
-independent particle-index brute-force control now exercise the unchanged
-thermal law, projection, evidence, active-dispatch, CSR, and apply stages
-without exposing a production selector or fallback.
+Slice S9D-5 is in final closeout with exact semantic and lifecycle evidence and
+a measured production rejection. The canonical GPU-resident direct exact-cell
+directory remains the only production thermal traversal. The new route is an
+explicit native-test-only comparator: it groups frozen source ranks by their
+immutable canonical source cell, traverses the existing same-generation exact
+cell tree once per source cell against that cell AABB expanded by the shared
+interaction radius plus `2D`, seals a bounded candidate-cell bitset, and uses a
+bounded source-cell-by-member-chunk dispatch. It adds no private tree or
+directory, runtime selector, production fallback, CPU readback hot path, or
+mounted consumer.
 
-Direct and tree routes preserve exact proposal/evidence/apply behavior. The
-independent control preserves the same derived state, proposal semantics, CSR
-row states, and applied state/thermo bytes while intentionally allowing
-different candidate-visit evidence and floating-point proposal order. Tree
-admission fails closed on stale/released/lost generations, foreign devices,
-malformed topology or AABBs, cleared or duplicate live leaves, partial pipeline
-creation, arena reuse, and the bind-to-encode release race.
+Ten same-generation campaigns preserve exact direct/per-particle-tree/
+source-cell-tree output across derived rows, proposal rows, conduction and
+radiation evidence, active dispatch, CSR replay and row state, and applied
+state/thermo. The independent particle-index control preserves the declared
+semantic parity. Coverage includes nonzero wide-support radiation, multilevel
+and negative/boundary cells, both matched-time displacement directions,
+aggregate/base-active/local projection, dense CSR re-walk, and uniform
+completion. All eight malformed-tree cases publish zero rows and no fallback.
+Exact tree and whole-generation consumer leases span bind, encode, submission,
+and the queue fence; released leases, a physically reused tree arena, the
+bind-to-encode stale window, and a real browser device-loss event on a separate
+logical `GPUDevice` all fail closed.
 
-Four warmups and nine alternating AB/BA native NVIDIA Blackwell samples reject
-all three fixtures under the no-material-regression policy. Sparse full-route
-ratios are `1.2285x` paired / `1.2361x` independent; clustered ratios are
-`1.0843x` / `1.0605x`; dense is favorable in the aggregate at `0.9611x` /
-`0.9616x` but breaches the order-stratum guard at `1.1379x` tree-first. The
-composite traversal ratio is `0.9791x`, which is not an adoption basis because
-dense work dominates it. The next bounded experiment is a native-test-only
-source-cell-batched tree comparator using source-cell AABBs, radius expansion,
-and two-dimensional dispatch.
+The NVIDIA Blackwell campaign uses one separate observed counter probe, then
+four warmups and nine balanced three-route measurements per fixture with
+source-cell diagnostic counters disabled. Every measured trio preserves exact
+bytes for all compared artifacts. The source-cell full-route composite is
+`1.1959788824x` paired / `1.1754972367x` independent: direct is
+`1.933888 ms` median and source-cell is `2.27328 ms`. The sparse fixture alone
+is `2.72538708735x / 2.71867749420x` for the full route and
+`3.88607594937x / 3.85316455696x` for traversal. The existing per-particle
+comparator has a favorable composite (`0.9734063355x / 0.9594930006x`,
+`1.855552 ms`) but still fails its per-fixture no-material-regression gate.
+Therefore `perParticleAccepted=false`, `sourceCellAccepted=false`,
+`experimentalDecision=source-cell-benchmark-rejected`, and
+`productionDecision=retain-direct`.
 
 Final verification reports:
 
-- full Node suite: `1953` tests, `1932` passed, `21` expected skips, zero
+- full Node suite: `1960` tests, `1939` passed, `21` expected skips, zero
   failures;
-- focused touched suites: `32/32` passed;
-- physics atomics: `11/11` required checks passed, with three opt-in
-  long-horizon skips;
-- native Vulkan tree/direct/brute campaign: passed on an identifiable NVIDIA
-  Blackwell adapter with timestamp queries;
+- focused touched suites: `68/68` passed;
+- native Vulkan direct/per-particle/source-cell/independent campaign: `1/1`
+  passed in `58.4 s` on an identifiable NVIDIA Blackwell adapter, including
+  exact parity, physical arena reuse, bind-to-encode staleness, and isolated
+  real-device-loss probes;
 - production build and `git diff --check`: passed;
-- GitHub Pages build: passed with `972` transformed modules and a verified
-  `45`-file bundle containing both runtime workers and preserved service assets;
-- seven-scenario standard/random visual matrix plus an iron/ice rerun: all
-  structural and renderer checks good/nonblank, with zero console or
-  visual-surface issues.
+- live-source audit: production thermal WGSL and the classic proposal
+  generator remain byte-identical to the branch baseline, and the source-cell
+  route has no production caller;
+- seven-scenario standard/random visual matrix: all scenarios are structurally
+  good, renderer-matched, nonblank, current, and free of browser-console and
+  visual-surface issues. Direct early/mid/late review confirms continuously
+  evolving water, iron/ice contact and breakup, reactive sodium/water, visible
+  dynamic fluorine and CsF product, and stable random-pair geometry;
+- immutable Slice 7 paired non-target throughput gate: four
+  `AB/BA/AB/BA` runs retain stable source fingerprints, pass with a `0.968695x`
+  paired median ratio (`3.13051%` regression inside the `5%` ceiling), and
+  report an independent-median ratio of `1.000137x` (`0.01372%` improvement).
 
-The unchanged steam-rise, condensation, hydrogen-rise, nonzero radiation-energy
-coverage, and real-device-loss-with-armed-shadow gaps remain explicit
-follow-ons. A real production consumer would also require a generation lease
-covering encode through submit. ICC index and memory are fresh, the
-source-scoped guard diff has no violations or warnings, and verified attempt
-`20260724-125103-verified` records the complete gate campaign under a
-generated-bundle-aware guard policy. Generic readiness remains blocked only by
-a name-only false positive on the classic neighbor-bin helper named `fallback`
-and absent machine-readable trace ingestion; neither identifies a tree-shadow
-production caller. The remaining closeout action is the authorized slice
-commit/push.
+The final ICC freshness/audit receipt and single slice commit/push remain in
+progress. The unchanged steam-rise, steam-condensation, and hydrogen-rise
+failures remain the inherited gas-interface transport frontier rather than
+being relabeled as passing. Any later thermal-tree adoption remains a new,
+separately gated task; S9D-5 does not authorize a mounted route.
 
 ## Previous Focus - 2026-07-21 AKDT
 

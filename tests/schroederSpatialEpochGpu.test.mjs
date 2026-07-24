@@ -66,8 +66,12 @@ import {
 } from '../ulg-gpu-abi/src/schroederSpatialAggregateView.js';
 import {
   ULG_SCHROEDER_SPATIAL_GPU_LOGICAL_COUNT_SOURCE_SCHEMA,
+  acquireSchroederSpatialEpochGenerationConsumerLease,
   createSchroederSpatialEpochGpu,
+  ownsSchroederSpatialEpochGenerationConsumerLease,
   quarantineSchroederSpatialEpochGenerationAfterDeviceLoss,
+  releaseSchroederSpatialEpochGenerationConsumerLease,
+  releaseSchroederSpatialEpochGenerationConsumerLeaseAfter,
   releaseSchroederSpatialEpochGenerationAfterQueue,
   resolveSchroederSpatialDirectoryActiveNodeSource,
   schroederSpatialEpochGenerationRetirementCapability,
@@ -522,6 +526,78 @@ test('direct level-assignment generation publishes and retires one compact mecha
   ), true);
   assert.equal(await generation.releasePromise, true);
   assert.equal(generation.execution.released, true);
+  assert.equal(generation.mechanicsView.released, true);
+});
+
+test('generation consumer lease holds the complete spatial artifact family past an earlier owner fence', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    }
+  });
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'generation-family-retirement-unit' }
+  );
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    true
+  );
+
+  const ownerFence = deferred();
+  device.queue.onSubmittedWorkDone = () => ownerFence.promise;
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(generation.releaseScheduled, true);
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    true
+  );
+  ownerFence.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(generation.execution.released, false);
+  assert.equal(generation.exactNearCellTree.released, false);
+
+  const consumerFence = deferred();
+  const leaseRelease =
+    releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+      lease,
+      consumerFence.promise
+    );
+  assert.equal(lease.releaseScheduled, true);
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLease(
+      lease,
+      { discardedEncoder: true }
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_CONSUMER_LEASE_RELEASE_SCHEDULED'
+    }
+  );
+  assert.equal(generation.execution.released, false);
+  consumerFence.resolve();
+  assert.equal(await leaseRelease, true);
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(lease.released, true);
+  assert.equal(generation.execution.released, true);
+  assert.equal(generation.exactNearCellTree.released, true);
   assert.equal(generation.mechanicsView.released, true);
 });
 

@@ -272,6 +272,10 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
   const submittedExecutions = new WeakSet();
   const releasedExecutions = new WeakSet();
   const releaseInFlight = new WeakSet();
+  const executionConsumerLeases = new WeakMap();
+  const consumerLeaseOwnership = new WeakMap();
+  const consumerDrainWaiters = new WeakMap();
+  let consumerLeaseSerial = 0;
   let runtime = null;
   const arenas = Array.from({ length: resolvedArenaCount }, (_, arenaIndex) => {
     const prefix = `${label}-arena-${arenaIndex}`;
@@ -367,6 +371,14 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
 
   function releaseOwnedExecution(execution, ownership = ownershipFor(execution)) {
     if (releasedExecutions.has(execution)) return false;
+    const activeConsumerLeases = executionConsumerLeases.get(execution);
+    if (activeConsumerLeases?.size > 0) {
+      const error = new Error(
+        'exact-near cell tree still has active consumer leases'
+      );
+      error.code = 'ERR_SCHROEDER_EXACT_CELL_TREE_ACTIVE_CONSUMERS';
+      throw error;
+    }
     if (ownership.arena.inUse && ownership.arena.token === ownership.token) {
       ownership.arena.inUse = false;
       ownership.arena.token = null;
@@ -401,6 +413,176 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
       && execution.submitPerformed === true;
   }
 
+  function activeConsumerLeaseSet(execution) {
+    let leases = executionConsumerLeases.get(execution);
+    if (!leases) {
+      leases = new Set();
+      executionConsumerLeases.set(execution, leases);
+    }
+    return leases;
+  }
+
+  function ownsExecutionConsumerLease(lease, execution = null) {
+    const record = consumerLeaseOwnership.get(lease);
+    return Boolean(
+      record
+      && record.runtime === runtime
+      && record.active === true
+      && record.releaseScheduled !== true
+      && (!execution || record.execution === execution)
+      && activeConsumerLeaseSet(record.execution).has(lease)
+      && ownsExecution(record.execution)
+      && lease?.ownerRuntime === runtime
+      && lease?.execution === record.execution
+      && lease?.treeBuffer === record.execution.treeBuffer
+      && lease?.arenaGeneration === record.execution.arenaGeneration
+      && lease?.releaseScheduled !== true
+    );
+  }
+
+  function acquireExecutionConsumerLease(execution, {
+    consumerId = 'anonymous-exact-cell-tree-consumer'
+  } = {}) {
+    const ownership = ownershipFor(execution);
+    if (
+      !submittedExecutions.has(execution)
+      || execution.releaseScheduled === true
+      || execution.deviceLost === true
+    ) {
+      const error = new Error(
+        'exact-near cell tree consumer lease requires one live submitted execution'
+      );
+      error.code = 'ERR_SCHROEDER_EXACT_CELL_TREE_CONSUMER_LEASE_ADMISSION';
+      throw error;
+    }
+    const serial = ++consumerLeaseSerial;
+    const lease = {
+      schema: 'peercompute.ulg.schroeder-spatial-exact-near-cell-tree-consumer-lease.v0',
+      status: 'schroeder-spatial-exact-near-cell-tree-consumer-lease-active',
+      ownerRuntime: runtime,
+      execution,
+      consumerId: String(consumerId),
+      serial,
+      arenaIndex: ownership.arena.arenaIndex,
+      arenaGeneration: ownership.token.serial,
+      treeBuffer: ownership.arena.treeBuffer,
+      releaseScheduled: false,
+      releasePromise: null
+    };
+    const record = {
+      runtime,
+      execution,
+      ownership,
+      active: true,
+      releaseScheduled: false
+    };
+    Object.defineProperty(lease, 'released', {
+      get() { return record.active !== true; },
+      enumerable: true
+    });
+    consumerLeaseOwnership.set(lease, record);
+    activeConsumerLeaseSet(execution).add(lease);
+    return lease;
+  }
+
+  function resolveConsumerDrain(execution) {
+    const leases = executionConsumerLeases.get(execution);
+    if (leases?.size > 0) return false;
+    const waiters = consumerDrainWaiters.get(execution);
+    if (!waiters) return true;
+    consumerDrainWaiters.delete(execution);
+    for (const resolve of waiters) resolve();
+    return true;
+  }
+
+  function releaseOwnedConsumerLease(lease, record) {
+    if (!record?.active) return false;
+    record.active = false;
+    record.releaseScheduled = false;
+    lease.status =
+      'schroeder-spatial-exact-near-cell-tree-consumer-lease-released';
+    lease.releaseScheduled = false;
+    const leases = executionConsumerLeases.get(record.execution);
+    leases?.delete(lease);
+    resolveConsumerDrain(record.execution);
+    return true;
+  }
+
+  function releaseExecutionConsumerLease(
+    lease,
+    { discardedEncoder = false } = {}
+  ) {
+    if (discardedEncoder !== true) {
+      throw new TypeError(
+        'releaseExecutionConsumerLease requires { discardedEncoder: true }'
+      );
+    }
+    const record = consumerLeaseOwnership.get(lease);
+    if (!record || record.runtime !== runtime) {
+      const error = new Error('foreign exact-near cell tree consumer lease');
+      error.code = 'ERR_SCHROEDER_EXACT_CELL_TREE_FOREIGN_CONSUMER_LEASE';
+      throw error;
+    }
+    if (!record.active) return false;
+    if (record.releaseScheduled) {
+      const error = new Error(
+        'scheduled exact-near cell tree consumer lease requires its queue fence'
+      );
+      error.code =
+        'ERR_SCHROEDER_EXACT_CELL_TREE_CONSUMER_LEASE_RELEASE_SCHEDULED';
+      throw error;
+    }
+    return releaseOwnedConsumerLease(lease, record);
+  }
+
+  function releaseExecutionConsumerLeaseAfter(lease, submissionFence) {
+    if (!submissionFence?.then) {
+      throw new TypeError(
+        'releaseExecutionConsumerLeaseAfter requires a submission-fence thenable'
+      );
+    }
+    const record = consumerLeaseOwnership.get(lease);
+    if (!record || record.runtime !== runtime) {
+      const error = new Error('foreign exact-near cell tree consumer lease');
+      error.code = 'ERR_SCHROEDER_EXACT_CELL_TREE_FOREIGN_CONSUMER_LEASE';
+      throw error;
+    }
+    if (!record.active) return Promise.resolve(false);
+    if (record.releaseScheduled) return lease.releasePromise;
+    record.releaseScheduled = true;
+    lease.releaseScheduled = true;
+    lease.status =
+      'schroeder-spatial-exact-near-cell-tree-consumer-lease-release-scheduled';
+    const completion = Promise.resolve(submissionFence)
+      .then(() => releaseOwnedConsumerLease(lease, record))
+      .catch((error) => {
+        if (record.active) {
+          record.releaseScheduled = false;
+          lease.releaseScheduled = false;
+          lease.status =
+            'schroeder-spatial-exact-near-cell-tree-consumer-lease-release-blocked';
+        }
+        throw error;
+      });
+    lease.releasePromise = completion;
+    completion.catch(() => {});
+    return completion;
+  }
+
+  function waitForExecutionConsumerDrain(execution) {
+    if ((executionConsumerLeases.get(execution)?.size ?? 0) === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let waiters = consumerDrainWaiters.get(execution);
+      if (!waiters) {
+        waiters = new Set();
+        consumerDrainWaiters.set(execution, waiters);
+      }
+      waiters.add(resolve);
+    });
+  }
+
   function releaseExecution(execution, { discardedEncoder = false } = {}) {
     if (discardedEncoder !== true) {
       throw new TypeError('releaseExecution requires { discardedEncoder: true }');
@@ -428,6 +610,7 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
     }
     releaseInFlight.add(execution);
     const completion = Promise.resolve(submissionFence)
+      .then(() => waitForExecutionConsumerDrain(execution))
       .then(() => releaseOwnedExecution(execution, ownership))
       .catch((error) => {
         execution.releaseScheduled = false;
@@ -445,6 +628,10 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
     if (releasedExecutions.has(execution)) return false;
     const ownership = ownershipFor(execution);
     execution.deviceLost = true;
+    for (const lease of executionConsumerLeases.get(execution) ?? []) {
+      const record = consumerLeaseOwnership.get(lease);
+      releaseOwnedConsumerLease(lease, record);
+    }
     return releaseOwnedExecution(execution, ownership);
   }
 
@@ -648,6 +835,10 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
     ownsExecution,
     markExecutionSubmitted,
     isExecutionSubmitted,
+    acquireExecutionConsumerLease,
+    ownsExecutionConsumerLease,
+    releaseExecutionConsumerLease,
+    releaseExecutionConsumerLeaseAfter,
     releaseExecution,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
@@ -660,16 +851,28 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
 /** Validate the exact tree handoff before a law binds it as a storage input. */
 export function resolveSchroederSpatialExactNearCellTreeForConsumer(
   cellTree,
-  { device, spatialExecution, supportProfileId = null } = {}
+  {
+    device,
+    spatialExecution,
+    supportProfileId = null,
+    consumerLease = null
+  } = {}
 ) {
   let owned = false;
   let submitted = false;
+  let leased = false;
   try {
     owned = cellTree?.ownerRuntime?.ownsExecution?.(cellTree) === true;
     submitted = cellTree?.ownerRuntime?.isExecutionSubmitted?.(cellTree) === true;
+    leased = consumerLease != null
+      && cellTree?.ownerRuntime?.ownsExecutionConsumerLease?.(
+        consumerLease,
+        cellTree
+      ) === true;
   } catch {
     owned = false;
     submitted = false;
+    leased = false;
   }
   const identityFields = [
     'generationId', 'deviceOrdinal', 'laneOrdinal', 'leaseToken',
@@ -685,7 +888,8 @@ export function resolveSchroederSpatialExactNearCellTreeForConsumer(
     || cellTree?.schema !== ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA
     || cellTree?.status !== 'schroeder-spatial-exact-near-cell-tree-build-submitted'
     || cellTree?.released === true
-    || cellTree?.releaseScheduled === true
+    || (consumerLease != null && !leased)
+    || (cellTree?.releaseScheduled === true && !leased)
     || cellTree?.deviceLost === true
     || cellTree?.submitPerformed !== true
     || cellTree?.spatialExecution !== spatialExecution
@@ -703,6 +907,7 @@ export function resolveSchroederSpatialExactNearCellTreeForConsumer(
     ready: true,
     status: 'schroeder-spatial-exact-near-cell-tree-admitted-consumer-identity',
     treeBuffer: cellTree.treeBuffer,
-    tree: cellTree
+    tree: cellTree,
+    consumerLease: leased ? consumerLease : null
   });
 }

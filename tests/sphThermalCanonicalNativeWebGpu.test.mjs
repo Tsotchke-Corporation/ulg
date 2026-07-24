@@ -97,6 +97,53 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       device.addEventListener('uncapturederror', (event) => {
         uncapturedErrors.push(event.error?.message || String(event.error));
       });
+      const recordCleanupFailure = (label, error) => {
+        uncapturedErrors.push(
+          `${label}: ${error?.message || String(error)}`
+        );
+      };
+      const captureCleanup = async (label, cleanup) => {
+        try {
+          return await cleanup();
+        } catch (error) {
+          recordCleanupFailure(`${label} cleanup failed`, error);
+          return null;
+        }
+      };
+      const settleQueueForCleanup = async (label) => {
+        try {
+          await device.queue.onSubmittedWorkDone();
+        } catch (error) {
+          recordCleanupFailure(`${label} queue cleanup failed`, error);
+        }
+      };
+      const drainAbortedValidationScope = async (label) => {
+        try {
+          const error = await device.popErrorScope();
+          if (error) {
+            recordCleanupFailure(`${label} validation failed`, error);
+          }
+        } catch (error) {
+          recordCleanupFailure(`${label} validation scope pop failed`, error);
+        }
+      };
+      const settleProposalRelease = async (label, proposal) => {
+        if (!proposal) return true;
+        await settleQueueForCleanup(label);
+        for (
+          let ordinal = 0;
+          ordinal < 100 && proposal.released !== true;
+          ordinal += 1
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (proposal.released === true) return true;
+        recordCleanupFailure(
+          `${label} proposal arena`,
+          new Error('did not release')
+        );
+        return false;
+      };
       device.pushErrorScope('validation');
       device.pushErrorScope('internal');
       device.pushErrorScope('out-of-memory');
@@ -173,14 +220,21 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         import('/src/runtime/sph/sphState.js')
       ]);
 
-      const createTaggedBuffer = (label, values, usage) => {
-        const buffer = device.createBuffer({
+      const createTaggedBuffer = (
+        label,
+        values,
+        usage,
+        targetDevice = device
+      ) => {
+        const buffer = targetDevice.createBuffer({
           label,
           size: Math.max(4, Math.ceil(values.byteLength / 4) * 4),
           usage
         });
-        if (values.byteLength > 0) device.queue.writeBuffer(buffer, 0, values);
-        return identity.tagWebGpuBufferDevice(buffer, device);
+        if (values.byteLength > 0) {
+          targetDevice.queue.writeBuffer(buffer, 0, values);
+        }
+        return identity.tagWebGpuBufferDevice(buffer, targetDevice);
       };
       const readBuffer = async (source, byteLength, label) => {
         const size = Math.max(4, Math.ceil(byteLength / 4) * 4);
@@ -307,8 +361,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             for (const token of tokens) {
               const start = values[token.queryIndex];
               const end = values[token.queryIndex + 1];
+              const fineSourceCellSpan =
+                token.descriptor.stage.startsWith('source-cell-');
               requireTrue(
-                end > start
+                end >= start
+                  && (fineSourceCellSpan || end > start)
                   && end - start <= BigInt(Number.MAX_SAFE_INTEGER),
                 `${label}: non-monotonic timestamp for ${
                   token.descriptor.stage
@@ -366,6 +423,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       const graphSet = thermal.buildSphThermalClosureGraphBuffers(
         thermalMaterialTable
       );
+      const radiationPhaseResponseTable =
+        thermal.buildSphThermalPhaseResponseTable(
+          thermalMaterialTable,
+          graphSet
+        );
+      let radiationResponseUpload = null;
       const phaseResponseTable = thermal.buildSphThermalPhaseResponseTable(
         thermalMaterialTable,
         graphSet
@@ -380,12 +443,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       ) {
         phaseResponseTable.records[offset + 4] = 0;
       }
-      const responseUpload = thermal.uploadSphThermalResponseGraphBuffers(device, {
-        thermalMaterialTable,
-        thermalClosureGraphSet: graphSet,
-        thermalClosureGraphBank: graphSet.graphBank,
-        thermalPhaseResponseTable: phaseResponseTable
-      });
+      let responseUpload = null;
       const boilingPlateau = thermalMaterialTable.segmentMetadata.find(
         (segment) => (
           segment.material === 'h2o'
@@ -471,6 +529,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         expectCandidateCsrRoute = null,
         includePairLedgerInResult = true,
         requireThermalExchange = true,
+        requireConductionExchange = requireThermalExchange,
+        radiationEnabled = false,
+        requireRadiationExchange = radiationEnabled,
         useAggregate = true,
         useActiveRank = false,
         producerTraversal = 'direct',
@@ -478,20 +539,34 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         includeAppliedRowsInResult = false,
         particleLevels = null,
         sameGenerationTreeShadow = false,
+        sameGenerationSourceCellTreeShadow = false,
         sameGenerationExhaustiveShadow = false
       }) => {
+        const fixturePhaseResponseTable = radiationEnabled
+          ? radiationPhaseResponseTable
+          : phaseResponseTable;
+        const fixtureResponseUpload = radiationEnabled
+          ? radiationResponseUpload
+          : responseUpload;
         requireTrue(
           !(useAggregate && useActiveRank),
           `${name}: aggregate and base active-rank projections are mutually exclusive`
         );
         requireTrue(
           producerTraversal === 'direct'
-            || producerTraversal === 'native-test-tree-shadow',
+            || producerTraversal === 'native-test-tree-shadow'
+            || producerTraversal
+              === 'native-test-source-cell-tree-shadow',
           `${name}: unsupported producer traversal ${producerTraversal}`
         );
         requireTrue(
           !sameGenerationTreeShadow || producerTraversal === 'direct',
           `${name}: same-generation tree comparator requires the direct control arm`
+        );
+        requireTrue(
+          !sameGenerationSourceCellTreeShadow
+            || producerTraversal === 'direct',
+          `${name}: same-generation source-cell comparator requires the direct control arm`
         );
         requireTrue(
           !sameGenerationExhaustiveShadow || producerTraversal === 'direct',
@@ -754,8 +829,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         let classicBinAuthority = null;
         let transactionMechanicsBuffer = null;
         let treeShadowReceipt = null;
+        let sourceCellTreeShadowReceipt = null;
         let sameGenerationTreeParity = null;
+        let sameGenerationSourceCellTreeParity = null;
         let sameGenerationExhaustiveParity = null;
+        let canonicalSubmitted = false;
+        let canonicalValidationScopeOpen = false;
+        let classicValidationScopeOpen = false;
         try {
           generation = spatial.runSchroederSpatialEpochGenerationWebGpu({
             device,
@@ -860,7 +940,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             sphParticleState: proposalCpuState,
             sphParticleUpload: particleUpload,
             mlsMpmParticleUpload,
-            thermalResponseGraphUpload: responseUpload,
+            thermalResponseGraphUpload: fixtureResponseUpload,
             dtS,
             smoothingLengthM: packed.smoothingLengthM,
             conductionRate
@@ -880,27 +960,43 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 && treeShadowReceipt.fallback == null,
               `${name}: native tree shadow did not bind the exact generation tree`
             );
-            if (corruptTreeWord) {
-              const corruptTreeWordIndex =
-                typeof corruptTreeWord.word === 'function'
-                  ? corruptTreeWord.word(generation.exactNearCellTree)
-                  : corruptTreeWord.word;
-              requireTrue(
-                Number.isInteger(corruptTreeWordIndex)
-                  && corruptTreeWordIndex >= 0
-                  && corruptTreeWordIndex
-                    < generation.exactNearCellTree.layout.wordLength
-                  && Number.isInteger(corruptTreeWord.value)
-                  && corruptTreeWord.value >= 0
-                  && corruptTreeWord.value <= 0xffff_ffff,
-                `${name}: invalid tree-word corruption request`
-              );
-              device.queue.writeBuffer(
-                treeShadowReceipt.treeBuffer,
-                corruptTreeWordIndex * Uint32Array.BYTES_PER_ELEMENT,
-                new Uint32Array([corruptTreeWord.value])
-              );
-            }
+          } else if (
+            producerTraversal === 'native-test-source-cell-tree-shadow'
+          ) {
+            sourceCellTreeShadowReceipt = proposalModule
+              .armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+                device,
+                schroederSpatialThermalProposal: proposal,
+                observeTraversalCounters: true
+              });
+            requireTrue(
+              sourceCellTreeShadowReceipt?.nativeTestOnly === true
+                && sourceCellTreeShadowReceipt.tree
+                  === generation.exactNearCellTree
+                && sourceCellTreeShadowReceipt.fallback == null,
+              `${name}: native source-cell shadow did not bind the exact generation tree`
+            );
+          }
+          if (corruptTreeWord) {
+            const corruptTreeWordIndex =
+              typeof corruptTreeWord.word === 'function'
+                ? corruptTreeWord.word(generation.exactNearCellTree)
+                : corruptTreeWord.word;
+            requireTrue(
+              Number.isInteger(corruptTreeWordIndex)
+                && corruptTreeWordIndex >= 0
+                && corruptTreeWordIndex
+                  < generation.exactNearCellTree.layout.wordLength
+                && Number.isInteger(corruptTreeWord.value)
+                && corruptTreeWord.value >= 0
+                && corruptTreeWord.value <= 0xffff_ffff,
+              `${name}: invalid tree-word corruption request`
+            );
+            device.queue.writeBuffer(
+              (treeShadowReceipt || sourceCellTreeShadowReceipt).treeBuffer,
+              corruptTreeWordIndex * Uint32Array.BYTES_PER_ELEMENT,
+              new Uint32Array([corruptTreeWord.value])
+            );
           }
           requireTrue(
             proposal.activeSourceProjectionMode === (
@@ -950,8 +1046,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             thermalMaterialTable,
             thermalClosureGraphSet: graphSet,
             thermalClosureGraphBank: graphSet.graphBank,
-            thermalPhaseResponseTable: phaseResponseTable,
-            thermalResponseGraphUpload: responseUpload,
+            thermalPhaseResponseTable: fixturePhaseResponseTable,
+            thermalResponseGraphUpload: fixtureResponseUpload,
             sphParticleUpload: particleUpload,
             proposalStateBuffer: currentStateBuffer,
             proposalThermoBuffer: particleUpload.thermoBuffer,
@@ -969,14 +1065,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             schroederSpatialThermalProposal: proposal
           });
           device.pushErrorScope('validation');
+          canonicalValidationScopeOpen = true;
           const canonicalEncoder = device.createCommandEncoder({
             label: `ulg-native-thermal-${name}-producer-apply`
           });
           canonicalThermalStage.encode(canonicalEncoder);
           device.queue.submit([canonicalEncoder.finish()]);
+          canonicalSubmitted = true;
           canonicalThermalStage.markSubmittedWork();
           await device.queue.onSubmittedWorkDone();
           const canonicalProducerValidationError = await device.popErrorScope();
+          canonicalValidationScopeOpen = false;
           requireTrue(
             !canonicalProducerValidationError,
             `${name}: canonical thermal producer validation failed: ${
@@ -1047,6 +1146,14 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 `ulg-native-thermal-${name}-tree-shadow-diagnostics-readback`
               )))
             : null;
+          const sourceCellTreeShadowBatchControl =
+            sourceCellTreeShadowReceipt?.batchBuffer
+              ? Array.from(new Uint32Array(await readBuffer(
+                  sourceCellTreeShadowReceipt.batchBuffer,
+                  64 * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-source-cell-batch-control-readback`
+                )))
+              : null;
           if (treeShadowDiagnostics && !expectedFailClosed) {
             const gpuPairwiseTemperatureUniform = derivedWords[2]
               === ((~derivedWords[3]) >>> 0);
@@ -1292,6 +1399,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               name,
               producerTraversal,
               treeShadowDiagnostics,
+              sourceCellTreeShadowBatchControl,
               useAggregate,
               useActiveRank,
               activeSourceProjectionMode: proposal.activeSourceProjectionMode,
@@ -1441,16 +1549,22 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             );
           }
           requireTrue(
-            requireThermalExchange
+            requireConductionExchange
               ? conductionEvidence[4] > 0
               : conductionEvidence[4] === 0,
             `${name}: conduction support-mask hits were ${conductionEvidence[4]}`
+          );
+          requireTrue(
+            !requireRadiationExchange || radiationEvidence[4] > 0,
+            `${name}: radiation support-mask hits were ${radiationEvidence[4]}`
           );
 
           const derivedRows = [];
           const proposalRows = [];
           let reciprocalProposalEnergyJ = 0;
           let absoluteProposalEnergyJ = 0;
+          let absoluteConductionEnergyJ = 0;
+          let absoluteRadiationEnergyJ = 0;
           let inactiveProposalRowCount = 0;
           for (let index = 0; index < packed.particleCount; index += 1) {
             const stateOffset = index * 8;
@@ -1513,17 +1627,43 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               proposalRow[2] <= sourceU && sourceU <= proposalRow[3],
               `${name}: source U ${sourceU} escaped proposal domain ${proposalRow[2]}..${proposalRow[3]}`
             );
-            requireTrue(
-              Math.abs(proposalRow[1]) <= 1.0e-7,
-              `${name}: pair radiation was not disabled at row ${index}: ${proposalRow[1]}`
-            );
+            if (!requireRadiationExchange) {
+              requireTrue(
+                Math.abs(proposalRow[1]) <= 1.0e-7,
+                `${name}: pair radiation was not disabled at row ${index}: ${proposalRow[1]}`
+              );
+            }
             const pairDu = proposalRow[0] + proposalRow[1];
             reciprocalProposalEnergyJ += massKg * pairDu;
             absoluteProposalEnergyJ += Math.abs(massKg * pairDu);
+            absoluteConductionEnergyJ += Math.abs(
+              massKg * proposalRow[0]
+            );
+            absoluteRadiationEnergyJ += Math.abs(
+              massKg * proposalRow[1]
+            );
           }
           requireTrue(
+            requireConductionExchange
+              ? absoluteConductionEnergyJ > 1.0e-4
+              : absoluteConductionEnergyJ <= 1.0e-7,
+            `${name}: absolute conduction proposal energy was ${
+              absoluteConductionEnergyJ
+            } J`
+          );
+          requireTrue(
+            requireRadiationExchange
+              ? absoluteRadiationEnergyJ > 1.0e-7
+              : absoluteRadiationEnergyJ <= 1.0e-7,
+            `${name}: absolute radiation proposal energy was ${
+              absoluteRadiationEnergyJ
+            } J`
+          );
+          requireTrue(
             requireThermalExchange
-              ? absoluteProposalEnergyJ > 1.0e-4
+              ? absoluteProposalEnergyJ > (
+                  requireConductionExchange ? 1.0e-4 : 1.0e-7
+                )
               : absoluteProposalEnergyJ <= 1.0e-7,
             `${name}: absolute proposal energy was ${absoluteProposalEnergyJ} J`
           );
@@ -1735,6 +1875,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             let treeStage = null;
             let treeSubmitted = false;
             let sameGenerationTreeReceipt = null;
+            let treeValidationScopeOpen = false;
             try {
               treeProposal =
                 proposalModule.runSchroederSpatialThermalProposalWebGpu({
@@ -1744,7 +1885,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   sphParticleState: proposalCpuState,
                   sphParticleUpload: particleUpload,
                   mlsMpmParticleUpload,
-                  thermalResponseGraphUpload: responseUpload,
+                  thermalResponseGraphUpload: fixtureResponseUpload,
                   dtS,
                   smoothingLengthM: packed.smoothingLengthM,
                   conductionRate
@@ -1768,8 +1909,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 thermalMaterialTable,
                 thermalClosureGraphSet: graphSet,
                 thermalClosureGraphBank: graphSet.graphBank,
-                thermalPhaseResponseTable: phaseResponseTable,
-                thermalResponseGraphUpload: responseUpload,
+                thermalPhaseResponseTable: fixturePhaseResponseTable,
+                thermalResponseGraphUpload: fixtureResponseUpload,
                 sphParticleUpload: particleUpload,
                 proposalStateBuffer: currentStateBuffer,
                 proposalThermoBuffer: particleUpload.thermoBuffer,
@@ -1787,15 +1928,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 schroederSpatialThermalProposal: treeProposal
               });
               device.pushErrorScope('validation');
+              treeValidationScopeOpen = true;
               const treeEncoder = device.createCommandEncoder({
                 label: `ulg-native-thermal-${name}-same-generation-tree`
               });
               treeStage.encode(treeEncoder);
               device.queue.submit([treeEncoder.finish()]);
-              treeStage.markSubmittedWork();
               treeSubmitted = true;
+              treeStage.markSubmittedWork();
               await device.queue.onSubmittedWorkDone();
               const treeValidationError = await device.popErrorScope();
+              treeValidationScopeOpen = false;
               requireTrue(
                 !treeValidationError,
                 `${name}: same-generation tree validation failed: ${
@@ -1923,8 +2066,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               const diagnostics = Array.from(
                 new Uint32Array(treeDiagnosticBytes)
               );
-              const uniform = conductionEvidence[3] === 0
-                && radiationEvidence[3] === 0;
+              const uniform = derivedWords[2]
+                === ((~derivedWords[3]) >>> 0);
               requireTrue(
                 uniform
                   ? diagnostics.every((value) => value === 0)
@@ -1945,18 +2088,408 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 diagnostics
               };
             } finally {
-              if (treeStage) {
-                if (treeSubmitted) {
-                  treeStage.cleanupSubmittedWork?.();
-                } else {
-                  treeStage.cleanupAbortedWork?.();
-                }
-              } else {
-                treeProposal?.abandonPreparedWork?.(
-                  'same-generation-tree-shadow-setup-failed'
+              await settleQueueForCleanup(
+                `${name} same-generation tree shadow`
+              );
+              if (treeValidationScopeOpen) {
+                await drainAbortedValidationScope(
+                  `${name} same-generation tree shadow`
                 );
+                treeValidationScopeOpen = false;
               }
+              await captureCleanup(
+                `${name} same-generation tree shadow`,
+                () => (
+                  treeStage
+                    ? (
+                        treeSubmitted
+                          ? treeStage.cleanupSubmittedWork?.()
+                          : treeStage.cleanupAbortedWork?.()
+                      )
+                    : treeProposal?.abandonPreparedWork?.(
+                        'same-generation-tree-shadow-setup-failed'
+                  )
+                )
+              );
+              await settleProposalRelease(
+                `${name} same-generation tree shadow`,
+                treeProposal
+              );
+            }
+          }
+
+          if (sameGenerationSourceCellTreeShadow) {
+            for (
+              let waitOrdinal = 0;
+              waitOrdinal < 100 && proposal.released !== true;
+              waitOrdinal += 1
+            ) {
               await device.queue.onSubmittedWorkDone();
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            requireTrue(
+              proposal.released === true
+                && generation.released !== true
+                && generation.exactNearCellTree.released !== true,
+              `${name}: direct proposal did not release before the source-cell control`
+            );
+            let sourceCellProposal = null;
+            let sourceCellStage = null;
+            let sourceCellSubmitted = false;
+            let sourceCellReceipt = null;
+            let sourceCellValidationScopeOpen = false;
+            try {
+              sourceCellProposal =
+                proposalModule.runSchroederSpatialThermalProposalWebGpu({
+                  device,
+                  generation,
+                  schroederSpatialEpochTransaction,
+                  sphParticleState: proposalCpuState,
+                  sphParticleUpload: particleUpload,
+                  mlsMpmParticleUpload,
+                  thermalResponseGraphUpload: fixtureResponseUpload,
+                  dtS,
+                  smoothingLengthM: packed.smoothingLengthM,
+                  conductionRate
+                });
+              sourceCellReceipt = proposalModule
+                .armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+                  device,
+                  schroederSpatialThermalProposal: sourceCellProposal,
+                  observeTraversalCounters: true
+                });
+              requireTrue(
+                sourceCellProposal.generationId === proposal.generationId
+                  && sourceCellProposal.supportEpoch === proposal.supportEpoch
+                  && sourceCellReceipt.tree
+                    === generation.exactNearCellTree
+                  && sourceCellReceipt.batchBuffer != null
+                  && sourceCellReceipt.batchWordCount
+                    === sourceCellReceipt.plan.wordLength
+                  && sourceCellReceipt.batchByteLength
+                    === sourceCellReceipt.plan.byteLength
+                  && sourceCellReceipt.fallback == null,
+                `${name}: same-generation source-cell shadow changed epoch or batch identity`
+              );
+              sourceCellStage =
+                thermal.createSphThermalStepWebGpuEncoderStage({
+                  device,
+                  sphParticleState: packed,
+                  thermalMaterialTable,
+                  thermalClosureGraphSet: graphSet,
+                  thermalClosureGraphBank: graphSet.graphBank,
+                  thermalPhaseResponseTable: fixturePhaseResponseTable,
+                  thermalResponseGraphUpload: fixtureResponseUpload,
+                  sphParticleUpload: particleUpload,
+                  proposalStateBuffer: currentStateBuffer,
+                  proposalThermoBuffer: particleUpload.thermoBuffer,
+                  sourceStateBuffer: currentStateBuffer,
+                  sourceThermoBuffer: particleUpload.thermoBuffer,
+                  wallTemperaturesK: {},
+                  boxDimsM: [10, 10, 10],
+                  dtS,
+                  conductionRate,
+                  wallRate: 0,
+                  wallLayerM: 0,
+                  ambientTemperatureK: 0,
+                  readbackMode: 'full-parity-readback',
+                  schroederSpatialEpochGeneration: generation,
+                  schroederSpatialThermalProposal: sourceCellProposal
+              });
+              device.pushErrorScope('validation');
+              sourceCellValidationScopeOpen = true;
+              const sourceCellEncoder = device.createCommandEncoder({
+                label:
+                  `ulg-native-thermal-${name}-same-generation-source-cell`
+              });
+              sourceCellStage.encode(sourceCellEncoder);
+              device.queue.submit([sourceCellEncoder.finish()]);
+              sourceCellSubmitted = true;
+              sourceCellStage.markSubmittedWork();
+              await device.queue.onSubmittedWorkDone();
+              const sourceCellValidationError = await device.popErrorScope();
+              sourceCellValidationScopeOpen = false;
+              requireTrue(
+                !sourceCellValidationError,
+                `${name}: same-generation source-cell validation failed: ${
+                  sourceCellValidationError?.message
+                    || String(sourceCellValidationError)
+                }`
+              );
+              const [
+                sourceCellDerivedBytes,
+                sourceCellProposalBytes,
+                sourceCellConductionEvidenceBytes,
+                sourceCellRadiationEvidenceBytes,
+                sourceCellFinalStateBytes,
+                sourceCellFinalThermoBytes,
+                sourceCellActiveDispatchBytes,
+                sourceCellCandidateCsrReplayBytes,
+                sourceCellCandidateCsrRowStateBytes,
+                sourceCellBatchControlBytes
+              ] = await Promise.all([
+                readBuffer(
+                  sourceCellProposal.thermalDerivedBudgetBuffer,
+                  sourceCellProposal.activeDerivedByteLength,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-derived`
+                ),
+                readBuffer(
+                  sourceCellProposal.proposalBuffer,
+                  sourceCellProposal.activeProposalByteLength,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-proposal`
+                ),
+                readBuffer(
+                  sourceCellProposal.conductionEvidenceBuffer,
+                  sourceCellProposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-conduction`
+                ),
+                readBuffer(
+                  sourceCellProposal.radiationEvidenceBuffer,
+                  sourceCellProposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-radiation`
+                ),
+                readBuffer(
+                  sourceCellStage.stateBuffer,
+                  packed.state.byteLength,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-state`
+                ),
+                readBuffer(
+                  sourceCellStage.thermoBuffer,
+                  packed.thermo.byteLength,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-thermo`
+                ),
+                readBuffer(
+                  sourceCellProposal.activeDispatchBuffer,
+                  3 * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-active-dispatch`
+                ),
+                sourceCellProposal.thermalCandidateCsr
+                  ? readBuffer(
+                      sourceCellProposal.thermalCandidateCsr.replayBuffer,
+                      (
+                        proposalModule
+                          .SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
+                          + sourceCellProposal
+                            .thermalCandidateCsr.candidateCapacity
+                      ) * Uint32Array.BYTES_PER_ELEMENT,
+                      `ulg-native-thermal-${name}-same-generation-source-cell-csr-replay`
+                    )
+                  : Promise.resolve(null),
+                sourceCellProposal.thermalCandidateCsr
+                  ? readBuffer(
+                      sourceCellProposal
+                        .thermalCandidateCsr.sourceRowStateBuffer,
+                      sourceCellProposal.thermalCandidateCsr.sourceCapacity
+                        * Uint32Array.BYTES_PER_ELEMENT,
+                      `ulg-native-thermal-${name}-same-generation-source-cell-csr-row-states`
+                    )
+                  : Promise.resolve(null),
+                readBuffer(
+                  sourceCellReceipt.batchBuffer,
+                  64 * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-batch-control`
+                )
+              ]);
+              const exactBytes = (left, right) => {
+                const a = new Uint8Array(left);
+                const b = new Uint8Array(right);
+                return a.length === b.length
+                  && a.every((value, index) => value === b[index]);
+              };
+              const exactOptionalBytes = (left, right) => (
+                left == null || right == null
+                  ? left == null && right == null
+                  : exactBytes(left, right)
+              );
+              const byteReceipts = {
+                derived: exactBytes(
+                  derivedBytes,
+                  sourceCellDerivedBytes
+                ),
+                proposal: exactBytes(
+                  proposalBytes,
+                  sourceCellProposalBytes
+                ),
+                conductionEvidence: exactBytes(
+                  conductionEvidenceBytes,
+                  sourceCellConductionEvidenceBytes
+                ),
+                radiationEvidence: exactBytes(
+                  radiationEvidenceBytes,
+                  sourceCellRadiationEvidenceBytes
+                ),
+                activeDispatch: exactBytes(
+                  activeDispatchBytes,
+                  sourceCellActiveDispatchBytes
+                ),
+                candidateCsrReplay: exactOptionalBytes(
+                  thermalCandidateCsrReplayBytes,
+                  sourceCellCandidateCsrReplayBytes
+                ),
+                candidateCsrRowStates: exactOptionalBytes(
+                  thermalCandidateCsrRowStateBytes,
+                  sourceCellCandidateCsrRowStateBytes
+                ),
+                appliedState: exactBytes(
+                  finalStateBytes,
+                  sourceCellFinalStateBytes
+                ),
+                appliedThermo: exactBytes(
+                  finalThermoBytes,
+                  sourceCellFinalThermoBytes
+                )
+              };
+              requireTrue(
+                Object.values(byteReceipts).every(Boolean),
+                `${name}: same-generation direct/source-cell byte parity failed: ${
+                  JSON.stringify(byteReceipts)
+                }`
+              );
+              const batchControl = Array.from(
+                new Uint32Array(sourceCellBatchControlBytes)
+              );
+              const uniform = derivedWords[2]
+                === ((~derivedWords[3]) >>> 0);
+              const sourceCellCandidateCsrHeader =
+                sourceCellCandidateCsrReplayBytes
+                  ? new Uint32Array(
+                      sourceCellCandidateCsrReplayBytes,
+                      0,
+                      proposalModule
+                        .SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
+                    )
+                  : null;
+              const sourceCellCandidateCsrRoute =
+                sourceCellCandidateCsrHeader?.[
+                  proposalModule
+                    .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_WORD
+                ] ?? 0;
+              const sourceCellReplayed = (
+                sourceCellCandidateCsrRoute
+                  & proposalModule
+                    .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY
+              ) !== 0;
+              const batchControlReceipts = {
+                wordCount: batchControl.length === 64,
+                magic: batchControl[0] === 0x5343_4231,
+                version: batchControl[1] === 1,
+                ready: batchControl[2] === 2,
+                generationId:
+                  batchControl[3] === proposal.generationId,
+                supportEpoch:
+                  batchControl[4] === proposal.supportEpoch,
+                capacities:
+                  batchControl[5] > 0
+                    && batchControl[5]
+                      <= sourceCellReceipt.plan.cellCapacity
+                    && batchControl[6]
+                      === sourceCellReceipt.plan.cellCapacity
+                    && batchControl[7]
+                      === sourceCellReceipt.plan.sourceCapacity,
+                layout:
+                  batchControl[8]
+                      === sourceCellReceipt.plan.bitsetRowWords
+                    && batchControl[9]
+                      === sourceCellReceipt.plan.wordLength
+                    && batchControl[10]
+                      === sourceCellReceipt.plan
+                        .inverseSourceRankOffsetWords
+                    && batchControl[11]
+                      === sourceCellReceipt.plan
+                        .cellRowStateOffsetWords
+                    && batchControl[12]
+                      === sourceCellReceipt.plan.bitsetOffsetWords,
+                dispatch:
+                  batchControl[16] === batchControl[5]
+                    && batchControl[17]
+                      === Math.ceil(batchControl[26] / 64)
+                    && batchControl[18] === 1,
+                tree:
+                  batchControl[20]
+                      === sourceCellReceipt.plan.nodeCapacity
+                    && batchControl[21] === 0
+                    && batchControl[22] === batchControl[5]
+                    && batchControl[23] === 0
+                    && batchControl[27] === batchControl[5]
+                    && batchControl[28] > 0
+                    && batchControl[29] > 0
+                    && batchControl[30] > 0,
+                projection:
+                  batchControl[24] === activeSourceCount
+                    && batchControl[25] === 0
+                    && batchControl[26] > 0,
+                traversal: uniform
+                  ? batchControl
+                    .slice(32, 40)
+                    .every((value) => value === 0)
+                  : (
+                      batchControl[32] === activeSourceCount
+                        && batchControl[36] === activeSourceCount
+                        && batchControl
+                          .slice(33, 36)
+                          .every((value) => value > 0)
+                        && (
+                          sourceCellReplayed
+                            ? batchControl
+                              .slice(37, 40)
+                              .every((value) => value === 0)
+                            : batchControl
+                              .slice(37, 40)
+                              .every((value) => value > 0)
+                        )
+                    )
+              };
+              requireTrue(
+                Object.values(batchControlReceipts).every(Boolean),
+                `${name}: source-cell batch control was not sealed: ${
+                  JSON.stringify({
+                    batchControlReceipts,
+                    batchControl
+                  })
+                }`
+              );
+              sameGenerationSourceCellTreeParity = {
+                exact: true,
+                generationId: proposal.generationId,
+                supportEpoch: proposal.supportEpoch,
+                treeArenaIndex: generation.exactNearCellTree.arenaIndex,
+                treeArenaGeneration:
+                  generation.exactNearCellTree.arenaGeneration,
+                uniform,
+                byteReceipts,
+                batchControlReceipts,
+                batchControl
+              };
+            } finally {
+              await settleQueueForCleanup(
+                `${name} same-generation source-cell shadow`
+              );
+              if (sourceCellValidationScopeOpen) {
+                await drainAbortedValidationScope(
+                  `${name} same-generation source-cell shadow`
+                );
+                sourceCellValidationScopeOpen = false;
+              }
+              await captureCleanup(
+                `${name} same-generation source-cell shadow`,
+                () => (
+                  sourceCellStage
+                    ? (
+                        sourceCellSubmitted
+                          ? sourceCellStage.cleanupSubmittedWork?.()
+                          : sourceCellStage.cleanupAbortedWork?.()
+                      )
+                    : sourceCellProposal?.abandonPreparedWork?.(
+                        'same-generation-source-cell-shadow-setup-failed'
+                  )
+                )
+              );
+              await settleProposalRelease(
+                `${name} same-generation source-cell shadow`,
+                sourceCellProposal
+              );
             }
           }
 
@@ -1977,6 +2510,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             let exhaustiveProposal = null;
             let exhaustiveStage = null;
             let exhaustiveSubmitted = false;
+            let exhaustiveValidationScopeOpen = false;
             try {
               exhaustiveProposal =
                 proposalModule.runSchroederSpatialThermalProposalWebGpu({
@@ -1986,7 +2520,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   sphParticleState: proposalCpuState,
                   sphParticleUpload: particleUpload,
                   mlsMpmParticleUpload,
-                  thermalResponseGraphUpload: responseUpload,
+                  thermalResponseGraphUpload: fixtureResponseUpload,
                   dtS,
                   smoothingLengthM: packed.smoothingLengthM,
                   conductionRate
@@ -2010,8 +2544,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   thermalMaterialTable,
                   thermalClosureGraphSet: graphSet,
                   thermalClosureGraphBank: graphSet.graphBank,
-                  thermalPhaseResponseTable: phaseResponseTable,
-                  thermalResponseGraphUpload: responseUpload,
+                  thermalPhaseResponseTable: fixturePhaseResponseTable,
+                  thermalResponseGraphUpload: fixtureResponseUpload,
                   sphParticleUpload: particleUpload,
                   proposalStateBuffer: currentStateBuffer,
                   proposalThermoBuffer: particleUpload.thermoBuffer,
@@ -2027,18 +2561,20 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   readbackMode: 'full-parity-readback',
                   schroederSpatialEpochGeneration: generation,
                   schroederSpatialThermalProposal: exhaustiveProposal
-                });
+              });
               device.pushErrorScope('validation');
+              exhaustiveValidationScopeOpen = true;
               const exhaustiveEncoder = device.createCommandEncoder({
                 label:
                   `ulg-native-thermal-${name}-same-generation-exhaustive`
               });
               exhaustiveStage.encode(exhaustiveEncoder);
               device.queue.submit([exhaustiveEncoder.finish()]);
-              exhaustiveStage.markSubmittedWork();
               exhaustiveSubmitted = true;
+              exhaustiveStage.markSubmittedWork();
               await device.queue.onSubmittedWorkDone();
               const exhaustiveValidationError = await device.popErrorScope();
+              exhaustiveValidationScopeOpen = false;
               requireTrue(
                 !exhaustiveValidationError,
                 `${name}: same-generation exhaustive validation failed: ${
@@ -2245,18 +2781,33 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 maximumProposalAbsoluteDifference
               };
             } finally {
-              if (exhaustiveStage) {
-                if (exhaustiveSubmitted) {
-                  exhaustiveStage.cleanupSubmittedWork?.();
-                } else {
-                  exhaustiveStage.cleanupAbortedWork?.();
-                }
-              } else {
-                exhaustiveProposal?.abandonPreparedWork?.(
-                  'same-generation-exhaustive-shadow-setup-failed'
+              await settleQueueForCleanup(
+                `${name} same-generation exhaustive shadow`
+              );
+              if (exhaustiveValidationScopeOpen) {
+                await drainAbortedValidationScope(
+                  `${name} same-generation exhaustive shadow`
                 );
+                exhaustiveValidationScopeOpen = false;
               }
-              await device.queue.onSubmittedWorkDone();
+              await captureCleanup(
+                `${name} same-generation exhaustive shadow`,
+                () => (
+                  exhaustiveStage
+                    ? (
+                        exhaustiveSubmitted
+                          ? exhaustiveStage.cleanupSubmittedWork?.()
+                          : exhaustiveStage.cleanupAbortedWork?.()
+                      )
+                    : exhaustiveProposal?.abandonPreparedWork?.(
+                        'same-generation-exhaustive-shadow-setup-failed'
+                  )
+                )
+              );
+              await settleProposalRelease(
+                `${name} same-generation exhaustive shadow`,
+                exhaustiveProposal
+              );
             }
           }
 
@@ -2294,16 +2845,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               producerSubmission: {
                 commandBuffer: classicBinProducerCommandBuffer
               }
-            });
+          });
           device.pushErrorScope('validation');
+          classicValidationScopeOpen = true;
           const classicResult = await thermal.runSphThermalStepWebGpu({
             device,
             sphParticleState: packed,
             thermalMaterialTable,
             thermalClosureGraphSet: graphSet,
             thermalClosureGraphBank: graphSet.graphBank,
-            thermalPhaseResponseTable: phaseResponseTable,
-            thermalResponseGraphUpload: responseUpload,
+            thermalPhaseResponseTable: fixturePhaseResponseTable,
+            thermalResponseGraphUpload: fixtureResponseUpload,
             sphParticleUpload: particleUpload,
             sourceStateBuffer: currentStateBuffer,
             sourceThermoBuffer: particleUpload.thermoBuffer,
@@ -2318,6 +2870,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             neighborBins: classicBinAuthority
           });
           const classicValidationError = await device.popErrorScope();
+          classicValidationScopeOpen = false;
           requireTrue(
             !classicValidationError,
             `${name}: classic thermal validation failed: ${
@@ -2600,6 +3153,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             name,
             producerTraversal,
             treeShadowDiagnostics,
+            sourceCellTreeShadowBatchControl,
             treeArenaIndex: generation.exactNearCellTree.arenaIndex,
             treeArenaGeneration:
               generation.exactNearCellTree.arenaGeneration,
@@ -2612,6 +3166,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             initialEnergyJ,
             finalEnergyJ,
             reciprocalProposalEnergyJ,
+            absoluteConductionEnergyJ,
+            absoluteRadiationEnergyJ,
             proposalConservationToleranceJ,
             appliedEnergyDeltaJ,
             applyConservationToleranceJ,
@@ -2621,6 +3177,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             centralFinalTemperatureK: result.thermo[2],
             maxPositionDisplacementM:
               derivedFloats[displacementHeaderWord],
+            gpuPairwiseTemperatureUniform:
+              derivedWords[2] === ((~derivedWords[3]) >>> 0),
             activeDispatch,
             currentActiveCount:
               derivedWords[currentActiveCountHeaderWord],
@@ -2646,6 +3204,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             boundaryEvidence,
             exactTouchEvidence,
             sameGenerationTreeParity,
+            sameGenerationSourceCellTreeParity,
             sameGenerationExhaustiveParity,
             classicMaxTemperatureDeltaK,
             classicMaxSpecificEnergyDeltaJPerKg,
@@ -2658,59 +3217,76 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               : null
           };
         } finally {
-          canonicalThermalStage?.cleanupAbortedWork?.();
+          if (canonicalSubmitted) {
+            await settleQueueForCleanup(`${name} canonical thermal`);
+          }
+          if (classicValidationScopeOpen) {
+            await drainAbortedValidationScope(`${name} classic thermal`);
+            classicValidationScopeOpen = false;
+          }
+          if (canonicalValidationScopeOpen) {
+            await drainAbortedValidationScope(`${name} canonical thermal`);
+            canonicalValidationScopeOpen = false;
+          }
+          await captureCleanup(`${name} canonical thermal stage`, () => (
+            canonicalSubmitted
+              ? canonicalThermalStage?.cleanupSubmittedWork?.()
+              : canonicalThermalStage?.cleanupAbortedWork?.()
+          ));
           if (classicBinAuthority) {
-            binAuthorityModule
-              .releasePostSeparationThermalBinAuthorityAfterQueue(
-                classicBinAuthority,
-                { device }
-              );
-            await binAuthorityModule
-              .postSeparationThermalBinAuthorityLiveness(classicBinAuthority)
-              ?.releasePromise;
+            await captureCleanup(`${name} classic-bin authority`, async () => {
+              binAuthorityModule
+                .releasePostSeparationThermalBinAuthorityAfterQueue(
+                  classicBinAuthority,
+                  { device }
+                );
+              await binAuthorityModule
+                .postSeparationThermalBinAuthorityLiveness(classicBinAuthority)
+                ?.releasePromise;
+            });
           } else {
-            classicBinsBuffer?.destroy?.();
+            await captureCleanup(`${name} classic-bin buffer`, () => (
+              classicBinsBuffer?.destroy?.()
+            ));
           }
-          proposal?.releaseAfterCanonicalApplySubmittedWork?.();
+          await captureCleanup(`${name} thermal proposal`, () => (
+            proposal?.releaseAfterCanonicalApplySubmittedWork?.()
+          ));
           if (generation) {
-            spatial.releaseSchroederSpatialEpochGenerationAfterQueue(
-              generation,
-              device
-            );
+            await captureCleanup(`${name} spatial generation`, () => (
+              spatial.releaseSchroederSpatialEpochGenerationAfterQueue(
+                generation,
+                device
+              )
+            ));
           }
-          try {
-            await device.queue.onSubmittedWorkDone();
-          } catch (error) {
-            const lost = await Promise.race([
-              device.lost,
-              new Promise((resolve) => setTimeout(
-                () => resolve(null),
-                1000
-              ))
-            ]);
-            fail(
-              `${name}: queue completion failed: ${error?.message || String(error)}; `
-              + `deviceLost=${lost ? `${lost.reason}: ${lost.message}` : 'not-reported'}; `
-              + `uncaptured=${uncapturedErrors.join(' | ') || 'none'}`
-            );
-          }
+          await settleQueueForCleanup(`${name} final generation`);
           if (generation?.releasePromise) {
-            await generation.releasePromise;
+            await captureCleanup(`${name} generation release`, () => (
+              generation.releasePromise
+            ));
           }
-          gpuBuffers.destroySphGpuParticleBuffers(particleUpload);
-          if (currentStateBuffer && currentStateBuffer !== particleUpload.stateBuffer) {
-            currentStateBuffer.destroy?.();
-          }
-          transactionMechanicsBuffer?.destroy?.();
-          activeNodeBuffer.destroy();
-          levelAssignmentBuffer?.destroy?.();
+          await captureCleanup(`${name} fixture inputs`, () => {
+            gpuBuffers.destroySphGpuParticleBuffers(particleUpload);
+            if (
+              currentStateBuffer
+              && currentStateBuffer !== particleUpload.stateBuffer
+            ) {
+              currentStateBuffer.destroy?.();
+            }
+            transactionMechanicsBuffer?.destroy?.();
+            activeNodeBuffer.destroy();
+            levelAssignmentBuffer?.destroy?.();
+          });
         }
       };
 
       const cases = [];
       const treeShadowComparisons = [];
       const treeShadowFailureCases = [];
+      const sourceCellTreeShadowFailureCases = [];
       let thermalTreeTiming = null;
+      let sourceCellLifecycle = null;
       const compareTreeAndDirect = (name, direct, tree) => {
         for (const field of [
           'derivedRows',
@@ -2742,8 +3318,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           );
         }
         const diagnostics = tree.treeShadowDiagnostics;
-        const uniform = direct.conductionEvidence[3] === 0
-          && direct.radiationEvidence[3] === 0;
+        const uniform = direct.gpuPairwiseTemperatureUniform === true;
         requireTrue(
           diagnostics?.length
               === proposalModule
@@ -2773,13 +3348,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       const thermalTimingStages = [
         'thermal-producer-apply-total',
         'derived-prepass',
+        'source-cell-initialize',
+        'source-cell-projection',
+        'source-cell-build',
+        'source-cell-finalize',
         'directional-budget',
         'candidate-csr-validate-rows',
         'candidate-csr-seal',
         'budget-resolve',
         'reciprocal-limited-proposal'
       ];
-      const runThermalTimingPair = async ({
+      const runThermalTimingTrio = async ({
         name,
         particles,
         order,
@@ -2788,7 +3367,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         smoothingLengthM = 0.1,
         spatialCellSizeM = 0.1,
         dtS = 0.001,
-        conductionRate = 1500
+        conductionRate = 1500,
+        observeSourceCellCounters = false,
+        detailedSourceCellTimestamps = false
       }) => {
         epochOrdinal += 1;
         const timingEpoch = epochOrdinal;
@@ -2958,7 +3539,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   smoothingLengthM: packed.smoothingLengthM,
                   conductionRate
                 });
-              if (route === 'tree') {
+              let sourceCellReceipt = null;
+              if (route === 'perParticle') {
                 const receipt = proposalModule
                   .armSchroederSpatialThermalTreeShadowForNativeTest({
                     device,
@@ -2970,10 +3552,31 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                     && receipt.diagnosticBuffer == null,
                   `${name}/${ordinal}: timing tree was not unobserved`
                 );
+              } else if (route === 'sourceCell') {
+                sourceCellReceipt = proposalModule
+                  .armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+                    device,
+                    schroederSpatialThermalProposal: proposal,
+                    observeTraversalCounters:
+                      observeSourceCellCounters
+                  });
+                requireTrue(
+                  sourceCellReceipt.tree === generation.exactNearCellTree
+                    && sourceCellReceipt.batchBuffer != null
+                    && sourceCellReceipt.batchWordCount
+                      === sourceCellReceipt.plan.wordLength,
+                  `${name}/${ordinal}: timing source-cell batch was not bound`
+                );
               }
               timer = createTimestampRecorder(
                 `ulg-native-thermal-timing-${name}-${ordinal}-${route}`,
-                thermalTimingStages
+                thermalTimingStages.filter((stageName) => (
+                  !stageName.startsWith('source-cell-')
+                    || (
+                      route === 'sourceCell'
+                      && detailedSourceCellTimestamps
+                    )
+                ))
               );
               stage = thermal.createSphThermalStepWebGpuEncoderStage({
                 device,
@@ -3005,15 +3608,15 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   `ulg-native-thermal-timing-${name}-${ordinal}-${route}`
               });
               const totalSpan = timer.recorder.beginEncoderSpan(encoder, {
-                producerId: `s9d4-thermal-${route}`,
+                producerId: `s9d5-thermal-${route}`,
                 stage: 'thermal-producer-apply-total',
                 generationId: generation.execution.generationId
               });
               stage.encode(encoder);
               timer.recorder.endEncoderSpan(encoder, totalSpan);
               device.queue.submit([encoder.finish()]);
-              stage.markSubmittedWork();
               submitted = true;
+              stage.markSubmittedWork();
               const timing = await timer.complete();
               const csrHeader = Array.from(new Uint32Array(await readBuffer(
                 proposal.thermalCandidateCsr.replayBuffer,
@@ -3027,87 +3630,966 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               const csrRoute = csrHeader[
                 proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_WORD
               ];
+              const replayExpected = expectedRoute
+                === proposalModule
+                  .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY;
+              const expectedCsrStatus = replayExpected
+                ? (
+                    proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY
+                    | proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_ROWS_FINALIZED
+                    | proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_VALIDATED
+                  )
+                : (
+                    proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_INVALID
+                    | proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_OVERFLOW
+                    | proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_ROWS_FINALIZED
+                    | proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_VALIDATED
+                  );
               requireTrue(
-                (csrRoute & expectedRoute) !== 0
-                  && (
-                    expectedRoute
-                      === proposalModule
-                        .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY
-                      ? (
-                          csrStatus
-                            & proposalModule
-                              .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY
-                        ) !== 0
-                      : (
-                          csrStatus
-                            & proposalModule
-                              .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_OVERFLOW
-                        ) !== 0
-                  ),
+                csrRoute === expectedRoute
+                  && csrStatus === expectedCsrStatus,
                 `${name}/${ordinal}/${route}: unexpected CSR status/route ${
                   csrStatus
-                }/${csrRoute}`
+                }/${csrRoute}; expected ${
+                  expectedCsrStatus
+                }/${expectedRoute}`
               );
-              return { timing, csrStatus, csrRoute };
-            } finally {
-              timer?.destroy?.();
-              if (stage) {
-                if (submitted) {
-                  stage.cleanupSubmittedWork?.();
-                } else {
-                  stage.cleanupAbortedWork?.();
-                }
-              } else {
-                proposal?.abandonPreparedWork?.(
-                  `timing-${route}-setup-failed`
+              const batchControl = sourceCellReceipt
+                ? Array.from(new Uint32Array(await readBuffer(
+                    sourceCellReceipt.batchBuffer,
+                    64 * Uint32Array.BYTES_PER_ELEMENT,
+                    `ulg-native-thermal-timing-${name}-${ordinal}-${route}-batch-control`
+                  )))
+                : null;
+              if (batchControl) {
+                requireTrue(
+                  batchControl.length === 64
+                    && batchControl[0] === 0x5343_4231
+                    && batchControl[1] === 1
+                    && batchControl[2] === 2
+                    && batchControl[3]
+                      === generation.execution.generationId
+                    && batchControl[4]
+                      === generation.execution.supportEpoch
+                    && batchControl[5] > 0
+                    && batchControl[20]
+                      === sourceCellReceipt.plan.nodeCapacity
+                    && batchControl[21] === 0
+                    && batchControl[22] === batchControl[5]
+                    && batchControl[23] === 0
+                    && batchControl[25] === 0
+                    && (
+                      observeSourceCellCounters
+                        ? (
+                            batchControl[27] === batchControl[5]
+                            && batchControl[28] > 0
+                            && batchControl[29] > 0
+                            && batchControl[30] > 0
+                            && batchControl[32] === packed.particleCount
+                            && batchControl[36] === packed.particleCount
+                            && batchControl
+                              .slice(33, 36)
+                              .every((value) => value > 0)
+                            && (
+                              replayExpected
+                                ? batchControl
+                                  .slice(37, 40)
+                                  .every((value) => value === 0)
+                                : batchControl
+                                  .slice(37, 40)
+                                  .every((value) => value > 0)
+                            )
+                          )
+                        : (
+                            batchControl
+                              .slice(27, 31)
+                              .every((value) => value === 0)
+                            && batchControl
+                              .slice(32, 40)
+                              .every((value) => value === 0)
+                          )
+                    ),
+                  `${name}/${ordinal}/${route}: timing batch control was not sealed: ${
+                    JSON.stringify(batchControl)
+                  }`
                 );
               }
-              await device.queue.onSubmittedWorkDone();
-              for (
-                let waitOrdinal = 0;
-                waitOrdinal < 100 && proposal?.released !== true;
-                waitOrdinal += 1
-              ) {
-                await new Promise((resolve) => setTimeout(resolve, 0));
-              }
-              requireTrue(
-                proposal?.released === true,
-                `${name}/${ordinal}/${route}: proposal arena did not release`
+              const parityBytes = await Promise.all([
+                readBuffer(
+                  proposal.thermalDerivedBudgetBuffer,
+                  proposal.activeDerivedByteLength,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-derived`
+                ),
+                readBuffer(
+                  proposal.proposalBuffer,
+                  proposal.activeProposalByteLength,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-proposal`
+                ),
+                readBuffer(
+                  proposal.conductionEvidenceBuffer,
+                  proposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-conduction`
+                ),
+                readBuffer(
+                  proposal.radiationEvidenceBuffer,
+                  proposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-radiation`
+                ),
+                readBuffer(
+                  proposal.activeDispatchBuffer,
+                  3 * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-dispatch`
+                ),
+                readBuffer(
+                  proposal.thermalCandidateCsr.replayBuffer,
+                  (
+                    proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
+                    + proposal.thermalCandidateCsr.candidateCapacity
+                  ) * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-csr-replay`
+                ),
+                readBuffer(
+                  proposal.thermalCandidateCsr.sourceRowStateBuffer,
+                  proposal.thermalCandidateCsr.sourceCapacity
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-csr-rows`
+                ),
+                readBuffer(
+                  stage.stateBuffer,
+                  packed.state.byteLength,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-state`
+                ),
+                readBuffer(
+                  stage.thermoBuffer,
+                  packed.thermo.byteLength,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-thermo`
+                )
+              ]);
+              return {
+                timing,
+                csrStatus,
+                csrRoute,
+                batchControl,
+                parityBytes
+              };
+            } finally {
+              await settleQueueForCleanup(
+                `${name}/${ordinal}/${route} timing arm`
+              );
+              await captureCleanup(
+                `${name}/${ordinal}/${route} timing arm`,
+                () => {
+                  timer?.destroy?.();
+                  if (stage) {
+                    return submitted
+                      ? stage.cleanupSubmittedWork?.()
+                      : stage.cleanupAbortedWork?.();
+                  } else {
+                    return proposal?.abandonPreparedWork?.(
+                      `timing-${route}-setup-failed`
+                    );
+                  }
+                }
+              );
+              await settleProposalRelease(
+                `${name}/${ordinal}/${route} timing arm`,
+                proposal
               );
             }
           };
 
-          const firstRoute = order === 'direct-tree' ? 'direct' : 'tree';
-          const secondRoute = firstRoute === 'direct' ? 'tree' : 'direct';
-          const first = await runArm(firstRoute);
-          const second = await runArm(secondRoute);
+          const routes = order.split('-');
+          requireTrue(
+            routes.length === 3
+              && new Set(routes).size === 3
+              && ['direct', 'perParticle', 'sourceCell'].every(
+                (route) => routes.includes(route)
+              ),
+            `${name}/${ordinal}: invalid balanced trio order ${order}`
+          );
+          const arms = {};
+          for (const route of routes) {
+            arms[route] = await runArm(route);
+          }
+          const parityFields = [
+            'derived',
+            'proposal',
+            'conductionEvidence',
+            'radiationEvidence',
+            'activeDispatch',
+            'candidateCsrReplay',
+            'candidateCsrRowStates',
+            'appliedState',
+            'appliedThermo'
+          ];
+          const exactBytes = (left, right) => {
+            const a = new Uint8Array(left);
+            const b = new Uint8Array(right);
+            return a.length === b.length
+              && a.every((value, index) => value === b[index]);
+          };
+          const parityReceipts = Object.fromEntries(
+            ['perParticle', 'sourceCell'].map((route) => [
+              route,
+              Object.fromEntries(parityFields.map((field, index) => [
+                field,
+                exactBytes(
+                  arms.direct.parityBytes[index],
+                  arms[route].parityBytes[index]
+                )
+              ]))
+            ])
+          );
+          requireTrue(
+            Object.values(parityReceipts).every((receipt) => (
+              Object.values(receipt).every(Boolean)
+            )),
+            `${name}/${ordinal}: timed trio output parity failed: ${
+              JSON.stringify(parityReceipts)
+            }`
+          );
+          const withoutParityBytes = ({ parityBytes, ...arm }) => arm;
           return {
             name,
             order,
             ordinal,
             particleCount: packed.particleCount,
             treeBuildMs: buildTiming['exact-near-cell-tree-build'],
-            direct: firstRoute === 'direct' ? first : second,
-            tree: firstRoute === 'tree' ? first : second
+            parityReceipts,
+            direct: withoutParityBytes(arms.direct),
+            perParticle: withoutParityBytes(arms.perParticle),
+            sourceCell: withoutParityBytes(arms.sourceCell)
           };
         } finally {
-          treeBuildTimer?.destroy?.();
           if (generation) {
-            spatial.releaseSchroederSpatialEpochGenerationAfterQueue(
-              generation,
-              device
+            await captureCleanup(
+              `${name}/${ordinal} timing generation`,
+              () => spatial.releaseSchroederSpatialEpochGenerationAfterQueue(
+                generation,
+                device
+              )
             );
           }
-          await device.queue.onSubmittedWorkDone();
+          await settleQueueForCleanup(`${name}/${ordinal} timing generation`);
           if (generation?.releasePromise) {
-            await generation.releasePromise;
+            await captureCleanup(
+              `${name}/${ordinal} timing generation release`,
+              () => generation.releasePromise
+            );
           }
-          mechanicsBuffer.destroy?.();
-          assignmentBuffer.destroy?.();
-          gpuBuffers.destroySphGpuParticleBuffers(particleUpload);
+          await captureCleanup(`${name}/${ordinal} timing inputs`, () => {
+            treeBuildTimer?.destroy?.();
+            mechanicsBuffer.destroy?.();
+            assignmentBuffer.destroy?.();
+            gpuBuffers.destroySphGpuParticleBuffers(particleUpload);
+          });
+        }
+      };
+      const runSourceCellLifecycleCampaign = async () => {
+        const lifecycleAdapter = await navigator.gpu.requestAdapter({
+          powerPreference: 'high-performance'
+        });
+        requireTrue(
+          lifecycleAdapter != null,
+          'source-cell lifecycle adapter unavailable'
+        );
+        const lifecycleDevice = await lifecycleAdapter.requestDevice(
+          deviceLimits.webGpuDeviceDescriptorForResidentSph(
+            lifecycleAdapter,
+            { timestampProfilingRequested: false }
+          )
+        );
+        requireTrue(
+          lifecycleDevice !== device,
+          'source-cell lifecycle campaign reused the timed GPUDevice'
+        );
+        const lifecycleAdapterInfo =
+          typeof lifecycleAdapter.info === 'object'
+            ? {
+                vendor: lifecycleAdapter.info.vendor || null,
+                architecture: lifecycleAdapter.info.architecture || null,
+                device: lifecycleAdapter.info.device || null,
+                description: lifecycleAdapter.info.description || null
+              }
+            : null;
+        const lifecycleAdapterDescription = Object.values(
+          lifecycleAdapterInfo || {}
+        ).filter(Boolean).join(' ').toLowerCase();
+        requireTrue(
+          /nvidia/.test(lifecycleAdapterDescription)
+            && !/(swiftshader|llvmpipe|software)/.test(
+              lifecycleAdapterDescription
+            ),
+          `source-cell lifecycle requires NVIDIA hardware: ${
+            JSON.stringify(lifecycleAdapterInfo)
+          }`
+        );
+        const lifecycleUncapturedErrors = [];
+        lifecycleDevice.addEventListener('uncapturederror', (event) => {
+          lifecycleUncapturedErrors.push(
+            event.error?.message || String(event.error)
+          );
+        });
+
+        let lifecycleResponseUpload = null;
+        let deviceDestroyed = false;
+        let lifecycleOrdinal = 700_000;
+        const syncError = (label, operation) => {
+          try {
+            operation();
+          } catch (error) {
+            return {
+              name: error?.name || null,
+              code: error?.code || null,
+              message: error?.message || String(error)
+            };
+          }
+          fail(`${label}: expected a synchronous rejection`);
+        };
+        const waitUntil = async (label, predicate) => {
+          for (let ordinal = 0; ordinal < 100; ordinal += 1) {
+            if (predicate()) return true;
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          fail(`${label}: condition did not settle`);
+        };
+        const taggedBuffer = (label, values, usage) => (
+          createTaggedBuffer(
+            label,
+            values,
+            usage,
+            lifecycleDevice
+          )
+        );
+        const makeFixture = async (name) => {
+          lifecycleOrdinal += 1;
+          const smoothingLengthM = 0.1;
+          const spatialCellSizeM = 0.1;
+          const particles = [
+            {
+              id: `${name}-ice`,
+              material: 'h2o',
+              x: [5, 5, 5],
+              v: [0, 0, 0],
+              massKg: 1.0e-3,
+              specificInternalEnergyJPerKg: productionIceColdU
+            },
+            {
+              id: `${name}-iron`,
+              material: 'fe',
+              x: [5.05, 5, 5],
+              v: [0, 0, 0],
+              massKg: 1.0e-2,
+              specificInternalEnergyJPerKg: ironHotU
+            }
+          ];
+          const source = sphStateModule.createSphState({
+            smoothingLengthM,
+            dimension: 3,
+            step: lifecycleOrdinal,
+            particles
+          });
+          const packed = gpuBuffers.buildSphGpuParticleBuffers(source, {
+            materialProperties
+          });
+          const epoch = {
+            storageGeneration: lifecycleOrdinal,
+            physicsTick: lifecycleOrdinal,
+            physicsSubstep: 0,
+            positionEpoch: lifecycleOrdinal,
+            topologyEpoch: 0,
+            chartEpoch: 0,
+            levelEpoch: lifecycleOrdinal,
+            supportEpoch: lifecycleOrdinal
+          };
+          Object.assign(packed, epoch);
+          const particleUpload = gpuBuffers.uploadSphGpuParticleBuffers(
+            lifecycleDevice,
+            packed
+          );
+          Object.assign(particleUpload, epoch, {
+            bufferFamilyGenerationStatus:
+              'schroeder-particle-buffer-family-generation-ready',
+            slot: 0,
+            sourceSlot: 0,
+            nextSlot: 1
+          });
+
+          const activeRows = new Float32Array(packed.particleCount * 16);
+          for (
+            let index = 0;
+            index < packed.particleCount;
+            index += 1
+          ) {
+            const stateOffset = index * 8;
+            const x = packed.state[stateOffset];
+            const y = packed.state[stateOffset + 1];
+            const z = packed.state[stateOffset + 2];
+            const cellX = Math.floor(x / spatialCellSizeM);
+            const cellY = Math.floor(y / spatialCellSizeM);
+            const cellZ = Math.floor(z / spatialCellSizeM);
+            activeRows.set([
+              0, cellX, cellY, cellZ,
+              cellX, cellY, cellZ, spatialCellSizeM,
+              spatialCellSizeM, 2 * smoothingLengthM, index, 1,
+              x, y, z, 0
+            ], index * 16);
+          }
+          const activeNodeBuffer = taggedBuffer(
+            `ulg-native-s9d5-lifecycle-${name}-active-nodes`,
+            activeRows,
+            GPUBufferUsage.STORAGE
+              | GPUBufferUsage.COPY_SRC
+              | GPUBufferUsage.COPY_DST
+          );
+          const activeNodeList = {
+            schema:
+              'peercompute.ulg.schroeder-active-node-list-execution.v0',
+            status: 'schroeder-active-node-list-submitted',
+            particleCount: packed.particleCount,
+            activeCandidateCount: packed.particleCount,
+            activeNodeStrideFloats: 16,
+            activeNodeBuffer,
+            sourceStateBuffer: particleUpload.stateBuffer,
+            sourceStateBufferBorrowed: true,
+            phaseVolumeAssignmentOverlayEnabled: false,
+            spatialDirectorySourceSchema:
+              'peercompute.ulg.schroeder-spatial-directory-active-node-source.v1',
+            spatialDirectorySourceStatus:
+              'schroeder-spatial-directory-source-ready',
+            spatialDirectorySourceReady: true,
+            spatialEpochSourceSchema:
+              'peercompute.ulg.schroeder-spatial-active-node-source.v1',
+            spatialEpochSourceStatus:
+              'schroeder-spatial-active-node-source-ready',
+            spatialEpochSourceReady: true,
+            spatialEpochLevelSpacingMode:
+              'base-grid-spacing-times-pow2-level',
+            spatialEpochPositionAuthority:
+              'same-epoch-pre-integration-particle-state',
+            spatialEpochMinLevel: 0,
+            spatialEpochMaxLevel: 0,
+            spatialEpochBaseGridSpacingM: spatialCellSizeM,
+            spatialEpochChartId: 0,
+            spatialEpochStorageGeneration: epoch.storageGeneration,
+            spatialEpochPhysicsTick: epoch.physicsTick,
+            spatialEpochPhysicsSubstep: epoch.physicsSubstep,
+            spatialEpochPositionEpoch: epoch.positionEpoch,
+            spatialEpochTopologyEpoch: epoch.topologyEpoch,
+            spatialEpochChartEpoch: epoch.chartEpoch,
+            spatialEpochLevelEpoch: epoch.levelEpoch,
+            spatialEpochSupportEpoch: epoch.supportEpoch
+          };
+          const mechanicsBuffer = taggedBuffer(
+            `ulg-native-s9d5-lifecycle-${name}-mechanics`,
+            new Float32Array(packed.particleCount * 24),
+            GPUBufferUsage.STORAGE
+              | GPUBufferUsage.COPY_SRC
+              | GPUBufferUsage.COPY_DST
+          );
+          const mlsMpmParticleUpload = { mechanicsBuffer };
+          const generation =
+            spatial.runSchroederSpatialEpochGenerationWebGpu({
+              device: lifecycleDevice,
+              activeNodeList,
+              particleCount: packed.particleCount,
+              particleIdentityBuffer: particleUpload.identityBuffer,
+              particleIdentityStrideWords: 1,
+              particleBufferSet: particleUpload,
+              laneId: `native-s9d5-lifecycle-${name}`,
+              sourceFamily: `native-s9d5-lifecycle-${name}`,
+              mechanicsLevels: [],
+              directArenaCount: 1
+            });
+          requireTrue(
+            generation.ready === true && generation.selected === true,
+            `${name}: lifecycle spatial generation rejected: ${
+              generation.status
+            }`
+          );
+          const consumerSupportProfileIds = Object.fromEntries(
+            proposalModule.SCHROEDER_SPATIAL_THERMAL_CONSUMERS.map(
+              (consumer) => [
+                consumer.consumerId,
+                consumer.supportProfileId
+              ]
+            )
+          );
+          const transaction = transactionModule
+            .createSchroederSpatialEpochTransaction({
+              device: lifecycleDevice,
+              generation,
+              sphParticleUpload: particleUpload,
+              mlsMpmParticleUpload,
+              requiredReaderIds: [],
+              enabledConsumerReaderIds:
+                Object.keys(consumerSupportProfileIds),
+              consumerSupportProfileIds
+            });
+          requireTrue(
+            transactionModule
+              .validateSchroederSpatialEpochTransactionSourceFamily(
+                transaction,
+                {
+                  generation,
+                  sphParticleUpload: particleUpload,
+                  mlsMpmParticleUpload
+                }
+              ) === true,
+            `${name}: lifecycle transaction source family rejected`
+          );
+          const proposal =
+            proposalModule.runSchroederSpatialThermalProposalWebGpu({
+              device: lifecycleDevice,
+              generation,
+              schroederSpatialEpochTransaction: transaction,
+              sphParticleState: packed,
+              sphParticleUpload: particleUpload,
+              mlsMpmParticleUpload,
+              thermalResponseGraphUpload: lifecycleResponseUpload,
+              dtS: 0.1,
+              smoothingLengthM: packed.smoothingLengthM,
+              conductionRate: 1500
+            });
+          requireTrue(proposal.ready === true, `${name}: proposal not ready`);
+          const receipt = proposalModule
+            .armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+              device: lifecycleDevice,
+              schroederSpatialThermalProposal: proposal,
+              observeTraversalCounters: false
+            });
+          requireTrue(
+            receipt.tree === generation.exactNearCellTree
+              && receipt.treeConsumerLease.released === false
+              && receipt.generationConsumerLease.released === false,
+            `${name}: source-cell lifecycle receipt was not live`
+          );
+          await lifecycleDevice.queue.onSubmittedWorkDone();
+          return {
+            name,
+            packed,
+            particleUpload,
+            activeNodeBuffer,
+            activeNodeList,
+            mechanicsBuffer,
+            generation,
+            proposal,
+            receipt
+          };
+        };
+        const cleanupLiveFixture = async (fixture, reason) => {
+          if (!fixture) return;
+          const { proposal, generation } = fixture;
+          if (proposal && proposal.released !== true) {
+            proposal.abandonPreparedWork(reason);
+            await lifecycleDevice.queue.onSubmittedWorkDone();
+            await waitUntil(
+              `${fixture.name}: proposal release`,
+              () => proposal.released === true
+            );
+          }
+          if (generation?.execution?.released !== true) {
+            const scheduled =
+              spatial.releaseSchroederSpatialEpochGenerationAfterQueue(
+                generation,
+                lifecycleDevice
+              );
+            requireTrue(
+              scheduled === true || generation.releasePromise?.then,
+              `${fixture.name}: generation release was not scheduled`
+            );
+            await lifecycleDevice.queue.onSubmittedWorkDone();
+            if (generation.releasePromise?.then) {
+              requireTrue(
+                await generation.releasePromise === true,
+                `${fixture.name}: generation retirement was not confirmed`
+              );
+            }
+          }
+          requireTrue(
+            generation.execution.released === true
+              && generation.exactNearCellTree.released === true,
+            `${fixture.name}: generation/tree remained live after cleanup`
+          );
+          gpuBuffers.destroySphGpuParticleBuffers(fixture.particleUpload);
+          fixture.mechanicsBuffer.destroy?.();
+          fixture.activeNodeBuffer.destroy?.();
+        };
+
+        let reuseReceipt = null;
+        let bindEncodeReceipt = null;
+        let liveFixture = null;
+        let lossFixture = null;
+        try {
+          lifecycleResponseUpload =
+            thermal.uploadSphThermalResponseGraphBuffers(
+              lifecycleDevice,
+              {
+                thermalMaterialTable,
+                thermalClosureGraphSet: graphSet,
+                thermalClosureGraphBank: graphSet.graphBank,
+                thermalPhaseResponseTable: phaseResponseTable
+              }
+            );
+        try {
+          liveFixture = await makeFixture('released-reused-tree');
+          const oldTree = liveFixture.generation.exactNearCellTree;
+          const oldArenaIndex = oldTree.arenaIndex;
+          const oldArenaGeneration = oldTree.arenaGeneration;
+          const oldTreeBuffer = oldTree.treeBuffer;
+          requireTrue(
+            oldTree.ownerRuntime.releaseExecutionConsumerLease(
+              liveFixture.receipt.treeConsumerLease,
+              { discardedEncoder: true }
+            ) === true,
+            'released-reused-tree: tree consumer lease did not release'
+          );
+          requireTrue(
+            await oldTree.ownerRuntime.releaseExecutionAfter(
+              oldTree,
+              lifecycleDevice.queue.onSubmittedWorkDone()
+            ) === true,
+            'released-reused-tree: old exact tree did not retire'
+          );
+          const replacementEncoder = lifecycleDevice.createCommandEncoder({
+            label: 'ulg-native-s9d5-lifecycle-replacement-tree'
+          });
+          const replacementTree = oldTree.ownerRuntime.encode(
+            replacementEncoder,
+            {
+              spatialExecution: oldTree.spatialExecution,
+              supportProfileId: oldTree.supportProfileId
+            }
+          );
+          lifecycleDevice.queue.submit([replacementEncoder.finish()]);
+          requireTrue(
+            oldTree.ownerRuntime.markExecutionSubmitted(replacementTree)
+              === true,
+            'released-reused-tree: replacement submit was not authenticated'
+          );
+          await lifecycleDevice.queue.onSubmittedWorkDone();
+          requireTrue(
+            replacementTree.treeBuffer === oldTreeBuffer
+              && replacementTree.arenaIndex === oldArenaIndex
+              && replacementTree.arenaGeneration > oldArenaGeneration,
+            'released-reused-tree: exact physical arena was not reused'
+          );
+          liveFixture.generation.exactNearCellTree = replacementTree;
+          const staleBindingError = syncError(
+            'released-reused-tree stale binding',
+            () => proposalModule
+              .createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+                device: lifecycleDevice,
+                schroederSpatialThermalProposal: liveFixture.proposal,
+                currentStateBuffer:
+                  liveFixture.particleUpload.stateBuffer,
+                currentThermoBuffer:
+                  liveFixture.particleUpload.thermoBuffer,
+                thermalResponseGraphUpload: lifecycleResponseUpload,
+                ...liveFixture.proposal.preparedLawConfig
+              })
+          );
+          requireTrue(
+            staleBindingError.code
+              === 'ERR_SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_STALE_BINDING',
+            `released-reused-tree: wrong rejection ${
+              JSON.stringify(staleBindingError)
+            }`
+          );
+          reuseReceipt = {
+            oldTreeReleased: oldTree.released === true,
+            sameTreeBuffer: replacementTree.treeBuffer === oldTreeBuffer,
+            sameArenaIndex: replacementTree.arenaIndex === oldArenaIndex,
+            oldArenaGeneration,
+            replacementArenaGeneration:
+              replacementTree.arenaGeneration,
+            staleBindingError
+          };
+        } finally {
+          await cleanupLiveFixture(
+            liveFixture,
+            'native-s9d5-released-reused-tree-probe-complete'
+          );
+          liveFixture = null;
+        }
+
+        try {
+          liveFixture = await makeFixture('released-generation-lease');
+          const stage = proposalModule
+            .createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+              device: lifecycleDevice,
+              schroederSpatialThermalProposal: liveFixture.proposal,
+              currentStateBuffer: liveFixture.particleUpload.stateBuffer,
+              currentThermoBuffer: liveFixture.particleUpload.thermoBuffer,
+              thermalResponseGraphUpload: lifecycleResponseUpload,
+              ...liveFixture.proposal.preparedLawConfig
+            });
+          requireTrue(
+            spatial.releaseSchroederSpatialEpochGenerationConsumerLease(
+              liveFixture.receipt.generationConsumerLease,
+              { discardedEncoder: true }
+            ) === true,
+            'released-generation-lease: generation lease did not release'
+          );
+          const discardedEncoder = lifecycleDevice.createCommandEncoder({
+            label: 'ulg-native-s9d5-lifecycle-stale-before-encode'
+          });
+          const staleEncodeError = syncError(
+            'released-generation-lease stale encode',
+            () => stage.encode(discardedEncoder)
+          );
+          requireTrue(
+            staleEncodeError.code
+              === 'ERR_SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_STALE_BINDING',
+            `released-generation-lease: wrong rejection ${
+              JSON.stringify(staleEncodeError)
+            }`
+          );
+          bindEncodeReceipt = {
+            boundBeforeRelease: true,
+            generationLeaseReleased:
+              liveFixture.receipt.generationConsumerLease.released === true,
+            staleEncodeError
+          };
+        } finally {
+          await cleanupLiveFixture(
+            liveFixture,
+            'native-s9d5-released-generation-lease-probe-complete'
+          );
+          liveFixture = null;
+        }
+
+        try {
+          lossFixture = await makeFixture('device-loss');
+          await lifecycleDevice.queue.onSubmittedWorkDone();
+          const lossPromise = lifecycleDevice.lost;
+          const retirement =
+            spatial.quarantineSchroederSpatialEpochGenerationAfterDeviceLoss(
+              lossFixture.generation,
+              lifecycleDevice
+            );
+          requireTrue(
+            retirement?.then,
+            'device-loss: generation quarantine did not return a promise'
+          );
+          lifecycleDevice.destroy();
+          deviceDestroyed = true;
+          const [lossInfo, retired] = await Promise.all([
+            lossPromise,
+            retirement
+          ]);
+          await waitUntil(
+            'device-loss: thermal proposal release',
+            () => lossFixture.proposal.released === true
+          );
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          requireTrue(
+            lossInfo?.reason === 'destroyed',
+            `device-loss: browser reported ${lossInfo?.reason}`
+          );
+          requireTrue(
+            retired === true,
+            'device-loss: generation quarantine was not confirmed'
+          );
+          requireTrue(
+            lossFixture.generation.releaseStatus
+              === 'spatial-epoch-generation-device-loss-retired',
+            `device-loss: wrong generation status ${
+              lossFixture.generation.releaseStatus
+            }`
+          );
+          requireTrue(
+            lossFixture.generation.execution.released === true
+              && lossFixture.generation.exactNearCellTree.released === true
+              && lossFixture.generation.exactNearCellTree.deviceLost === true,
+            'device-loss: directory/tree did not retire as lost'
+          );
+          requireTrue(
+            lossFixture.generation.releaseOperationResults?.every(
+              ({ confirmed }) => confirmed === true
+            ) === true,
+            `device-loss: artifact retirement incomplete ${
+              JSON.stringify(
+                lossFixture.generation.releaseOperationResults
+              )
+            }`
+          );
+          requireTrue(
+            lossFixture.proposal.terminalDisposition
+                === 'device-lost-quarantined'
+              && lossFixture.proposal.released === true
+              && lossFixture.receipt.treeConsumerLease.released === true
+              && lossFixture.receipt.generationConsumerLease.released
+                === true,
+            'device-loss: proposal or source-cell leases remained live'
+          );
+          const materializeAfterLossError = syncError(
+            'device-loss materialization',
+            () => proposalModule
+              .createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+                device: lifecycleDevice,
+                schroederSpatialThermalProposal: lossFixture.proposal,
+                currentStateBuffer:
+                  lossFixture.particleUpload.stateBuffer,
+                currentThermoBuffer:
+                  lossFixture.particleUpload.thermoBuffer,
+                thermalResponseGraphUpload: lifecycleResponseUpload,
+                ...lossFixture.proposal.preparedLawConfig
+              })
+          );
+          requireTrue(
+            materializeAfterLossError.message
+              === 'Matched-time thermal proposal device is lost',
+            `device-loss: wrong materialization rejection ${
+              JSON.stringify(materializeAfterLossError)
+            }`
+          );
+          const rearmAfterLossError = syncError(
+            'device-loss source-cell rearm',
+            () => proposalModule
+              .armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+                device: lifecycleDevice,
+                schroederSpatialThermalProposal: lossFixture.proposal,
+                observeTraversalCounters: false
+              })
+          );
+          requireTrue(
+            rearmAfterLossError.message
+              === 'Native thermal source-cell tree shadow requires the live proposal device',
+            `device-loss: wrong rearm rejection ${
+              JSON.stringify(rearmAfterLossError)
+            }`
+          );
+          const spatialReentryError = syncError(
+            'device-loss spatial reentry',
+            () => spatial.runSchroederSpatialEpochGenerationWebGpu({
+              device: lifecycleDevice,
+              activeNodeList: lossFixture.activeNodeList,
+              particleCount: lossFixture.packed.particleCount,
+              particleIdentityBuffer:
+                lossFixture.particleUpload.identityBuffer,
+              particleIdentityStrideWords: 1,
+              particleBufferSet: lossFixture.particleUpload,
+              laneId: 'native-s9d5-lifecycle-device-loss-reentry',
+              sourceFamily:
+                'native-s9d5-lifecycle-device-loss-reentry',
+              mechanicsLevels: [],
+              directArenaCount: 1
+            })
+          );
+          requireTrue(
+            spatialReentryError.code
+              === 'ERR_SCHROEDER_SPATIAL_DEVICE_LOST',
+            `device-loss: wrong spatial rejection ${
+              JSON.stringify(spatialReentryError)
+            }`
+          );
+          requireTrue(
+            lifecycleUncapturedErrors.length === 0,
+            `lifecycle uncaptured errors: ${
+              lifecycleUncapturedErrors.join(' | ')
+            }`
+          );
+          return {
+            schema:
+              'peercompute.ulg.native-test.s9d5-source-cell-lifecycle.v0',
+            isolatedDevice: lifecycleDevice !== device,
+            adapterInfo: lifecycleAdapterInfo,
+            reuse: reuseReceipt,
+            bindToEncode: bindEncodeReceipt,
+            deviceLoss: {
+              reason: lossInfo.reason,
+              message: lossInfo.message || null,
+              generationReleaseStatus:
+                lossFixture.generation.releaseStatus,
+              operationCount:
+                lossFixture.generation.releaseOperationResults?.length ?? 0,
+              operationsConfirmed:
+                lossFixture.generation.releaseOperationResults?.every(
+                  ({ confirmed }) => confirmed === true
+                ) === true,
+              treeDeviceLost:
+                lossFixture.generation.exactNearCellTree.deviceLost === true,
+              treeReleased:
+                lossFixture.generation.exactNearCellTree.released === true,
+              proposalDisposition:
+                lossFixture.proposal.terminalDisposition,
+              proposalReleased: lossFixture.proposal.released === true,
+              treeLeaseReleased:
+                lossFixture.receipt.treeConsumerLease.released === true,
+              generationLeaseReleased:
+                lossFixture.receipt.generationConsumerLease.released
+                  === true,
+              materializeAfterLossError,
+              rearmAfterLossError,
+              spatialReentryError
+            },
+            uncapturedErrors: lifecycleUncapturedErrors
+          };
+        } finally {
+          if (!deviceDestroyed) {
+            await cleanupLiveFixture(
+              lossFixture,
+              'native-s9d5-device-loss-probe-aborted-before-destroy'
+            );
+            if (lifecycleResponseUpload) {
+              thermal.destroySphThermalResponseGraphBuffers(
+                lifecycleResponseUpload
+              );
+              lifecycleResponseUpload = null;
+            }
+            lifecycleDevice.destroy();
+            deviceDestroyed = true;
+          }
+        }
+        } finally {
+          if (!deviceDestroyed) {
+            try {
+              await cleanupLiveFixture(
+                liveFixture,
+                'native-s9d5-lifecycle-campaign-aborted'
+              );
+              await cleanupLiveFixture(
+                lossFixture,
+                'native-s9d5-lifecycle-loss-campaign-aborted'
+              );
+              if (lifecycleResponseUpload) {
+                thermal.destroySphThermalResponseGraphBuffers(
+                  lifecycleResponseUpload
+                );
+                lifecycleResponseUpload = null;
+              }
+            } finally {
+              lifecycleDevice.destroy();
+              deviceDestroyed = true;
+            }
+          }
         }
       };
       try {
+        radiationResponseUpload =
+          thermal.uploadSphThermalResponseGraphBuffers(device, {
+            thermalMaterialTable,
+            thermalClosureGraphSet: graphSet,
+            thermalClosureGraphBank: graphSet.graphBank,
+            thermalPhaseResponseTable: radiationPhaseResponseTable
+          });
+        responseUpload = thermal.uploadSphThermalResponseGraphBuffers(device, {
+          thermalMaterialTable,
+          thermalClosureGraphSet: graphSet,
+          thermalClosureGraphBank: graphSet.graphBank,
+          thermalPhaseResponseTable: phaseResponseTable
+        });
         const mixedBoilingParticles = [
           {
             id: 'h2o-mixed-boiling-carrier',
@@ -3155,6 +4637,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           particles: mixedBoilingParticles,
           includeAppliedRowsInResult: runNativeTreeShadow,
           sameGenerationTreeShadow: runNativeTreeShadow,
+          sameGenerationSourceCellTreeShadow: runNativeTreeShadow,
           sameGenerationExhaustiveShadow: runNativeTreeShadow
         }));
         requireTrue(
@@ -3202,6 +4685,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           mixedComparison.sameGeneration = true;
           mixedComparison.byteReceipts =
             sameGenerationTree.byteReceipts;
+          mixedComparison.sourceCellByteReceipts =
+            cases[0].sameGenerationSourceCellTreeParity.byteReceipts;
+          mixedComparison.sourceCellBatchControlReceipts =
+            cases[0].sameGenerationSourceCellTreeParity
+              .batchControlReceipts;
           mixedComparison.exhaustiveByteReceipts =
             cases[0].sameGenerationExhaustiveParity.byteReceipts;
           mixedComparison.exhaustiveSemanticReceipts =
@@ -4338,6 +5826,36 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               }
             },
             {
+              name: 'radiation-only-nonzero-wide-support',
+              args: {
+                particles: [
+                  {
+                    id: 'radiation-wide-cold-water',
+                    material: 'h2o',
+                    x: [0, 0, 0],
+                    v: [0, 0, 0],
+                    massKg: 1.0e-3,
+                    specificInternalEnergyJPerKg: productionIceColdU
+                  },
+                  {
+                    id: 'radiation-wide-hot-iron',
+                    material: 'fe',
+                    x: [0.03, 0, 0],
+                    v: [0, 0, 0],
+                    massKg: 1.0e-2,
+                    specificInternalEnergyJPerKg: ironHotU
+                  }
+                ],
+                smoothingLengthM: 0.005,
+                spatialCellSizeM: 0.01,
+                dtS: 0.001,
+                requireConductionExchange: false,
+                radiationEnabled: true,
+                requireRadiationExchange: true,
+                useAggregate: false
+              }
+            },
+            {
               name: 'matched-time-current-contact-frozen-separated',
               args: {
                 particles: [
@@ -4409,6 +5927,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               }
             },
             {
+              name: 'local-rank-dormant-projection',
+              args: {
+                particles: frozenSlabParticles,
+                smoothingLengthM: productionSmoothingLengthM,
+                spatialCellSizeM: productionPitchM,
+                nativeGridSpacingM: productionPitchM,
+                exactTouchPlane: true,
+                useAggregate: false
+              }
+            },
+            {
               name: 'dense-csr-overflow-exact-rewalk',
               args: {
                 particles: denseOverflowParticles,
@@ -4436,6 +5965,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               includeAppliedRowsInResult: true,
               includePairLedgerInResult: false,
               sameGenerationTreeShadow: true,
+              sameGenerationSourceCellTreeShadow: true,
               sameGenerationExhaustiveShadow: true
             });
             requireTrue(
@@ -4445,6 +5975,21 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 ).every(Boolean),
               `${campaign.name}: same-generation byte comparator failed: ${
                 JSON.stringify(direct.sameGenerationTreeParity)
+              }`
+            );
+            requireTrue(
+              direct.sameGenerationSourceCellTreeParity?.exact === true
+                && Object.values(
+                  direct.sameGenerationSourceCellTreeParity.byteReceipts
+                ).every(Boolean)
+                && Object.values(
+                  direct.sameGenerationSourceCellTreeParity
+                    .batchControlReceipts
+                ).every(Boolean),
+              `${campaign.name}: source-cell byte/batch comparator failed: ${
+                JSON.stringify(
+                  direct.sameGenerationSourceCellTreeParity
+                )
               }`
             );
             requireTrue(
@@ -4467,6 +6012,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               sameGeneration: true,
               byteReceipts:
                 direct.sameGenerationTreeParity.byteReceipts,
+              sourceCellByteReceipts:
+                direct.sameGenerationSourceCellTreeParity.byteReceipts,
+              sourceCellBatchControlReceipts:
+                direct.sameGenerationSourceCellTreeParity
+                  .batchControlReceipts,
               exhaustiveByteReceipts:
                 direct.sameGenerationExhaustiveParity.byteReceipts,
               exhaustiveSemanticReceipts:
@@ -4552,6 +6102,45 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 rejected.radiationEvidence[15]
               ]
             });
+            const sourceCellRejected = await runFixture({
+              name:
+                `source-cell-tree-shadow-corrupt-${corruption.name}-fails-closed`,
+              particles: mixedBoilingParticles,
+              producerTraversal:
+                'native-test-source-cell-tree-shadow',
+              corruptTreeWord: corruption,
+              expectTreeFailClosed: true,
+              includePairLedgerInResult: false
+            });
+            const sourceCellFallbackCounts = [
+              sourceCellRejected.conductionEvidence[13],
+              sourceCellRejected.conductionEvidence[14],
+              sourceCellRejected.conductionEvidence[15],
+              sourceCellRejected.radiationEvidence[13],
+              sourceCellRejected.radiationEvidence[14],
+              sourceCellRejected.radiationEvidence[15]
+            ];
+            requireTrue(
+              sourceCellRejected.expectedFailClosed === true
+                && sourceCellRejected.publishedRowCount === 0
+                && sourceCellRejected.proposalInvalidCounts.every(
+                  (count) => count > 0
+                )
+                && sourceCellRejected
+                  .sourceCellTreeShadowBatchControl?.length === 64
+                && sourceCellRejected
+                  .sourceCellTreeShadowBatchControl[2] === 4
+                && sourceCellFallbackCounts.every((count) => count === 0),
+              `corrupt ${corruption.name} source-cell tree did not fail closed: ${
+                JSON.stringify(sourceCellRejected)
+              }`
+            );
+            sourceCellTreeShadowFailureCases.push({
+              name: corruption.name,
+              failClosed: true,
+              batchRejected: true,
+              fallbackCounts: sourceCellFallbackCounts
+            });
           }
 
           const timingParticle = (index, position, prefix) => {
@@ -4619,21 +6208,21 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             }
           ];
           const warmupOrders = [
-            'direct-tree',
-            'tree-direct',
-            'direct-tree',
-            'tree-direct'
+            'direct-perParticle-sourceCell',
+            'sourceCell-perParticle-direct',
+            'perParticle-sourceCell-direct',
+            'direct-sourceCell-perParticle'
           ];
           const measuredOrders = [
-            'direct-tree',
-            'tree-direct',
-            'direct-tree',
-            'tree-direct',
-            'direct-tree',
-            'tree-direct',
-            'direct-tree',
-            'tree-direct',
-            'direct-tree'
+            'direct-perParticle-sourceCell',
+            'direct-sourceCell-perParticle',
+            'perParticle-direct-sourceCell',
+            'perParticle-sourceCell-direct',
+            'sourceCell-direct-perParticle',
+            'sourceCell-perParticle-direct',
+            'direct-perParticle-sourceCell',
+            'perParticle-sourceCell-direct',
+            'sourceCell-direct-perParticle'
           ];
           const timingCampaigns = [];
           for (
@@ -4642,13 +6231,20 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             fixtureIndex += 1
           ) {
             const fixture = timingFixtures[fixtureIndex];
+            const counterProbe = await runThermalTimingTrio({
+              ...fixture,
+              order: warmupOrders[fixtureIndex % warmupOrders.length],
+              ordinal: 9_000 + fixtureIndex,
+              observeSourceCellCounters: true,
+              detailedSourceCellTimestamps: true
+            });
             const warmups = [];
             for (
               let orderIndex = 0;
               orderIndex < warmupOrders.length;
               orderIndex += 1
             ) {
-              warmups.push(await runThermalTimingPair({
+              warmups.push(await runThermalTimingTrio({
                 ...fixture,
                 order: warmupOrders[orderIndex],
                 ordinal:
@@ -4661,7 +6257,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               orderIndex < measuredOrders.length;
               orderIndex += 1
             ) {
-              measurements.push(await runThermalTimingPair({
+              measurements.push(await runThermalTimingTrio({
                 ...fixture,
                 order: measuredOrders[orderIndex],
                 ordinal:
@@ -4672,33 +6268,76 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               name: fixture.name,
               warmupCount: warmups.length,
               measuredOrders,
+              counterProbe,
               measurements
             });
           }
           const ratioReceipt = (
             measurements,
             directValue,
-            treeValue
+            contenderValue,
+            contenderRoute
           ) => {
             const direct = measurements.map(directValue);
-            const tree = measurements.map(treeValue);
+            const contender = measurements.map(contenderValue);
             const paired = measurements.map((sample, index) => (
-              tree[index] / direct[index]
+              contender[index] / direct[index]
             ));
-            const orderRatios = (order) => measurements
-              .map((sample, index) => ({ sample, ratio: paired[index] }))
-              .filter(({ sample }) => sample.order === order)
+            const directionalRatios = (directFirst) => measurements
+              .map((sample, index) => ({
+                routes: sample.order.split('-'),
+                ratio: paired[index]
+              }))
+              .filter(({ routes }) => (
+                directFirst
+                  ? routes.indexOf('direct')
+                    < routes.indexOf(contenderRoute)
+                  : routes.indexOf(contenderRoute)
+                    < routes.indexOf('direct')
+              ))
               .map(({ ratio }) => ratio);
+            const positionMedians = (route, values) => (
+              [0, 1, 2].map((position) => median(
+                measurements
+                  .map((sample, index) => ({ sample, value: values[index] }))
+                  .filter(({ sample }) => (
+                    sample.order.split('-')[position] === route
+                  ))
+                  .map(({ value }) => value)
+              ))
+            );
+            const directBefore = directionalRatios(true);
+            const contenderBefore = directionalRatios(false);
+            requireTrue(
+              directBefore.length + contenderBefore.length
+                  === measurements.length
+                && Math.min(
+                  directBefore.length,
+                  contenderBefore.length
+                ) === 4
+                && Math.max(
+                  directBefore.length,
+                  contenderBefore.length
+                ) === 5,
+              `timing pair directions were not balanced for ${
+                contenderRoute
+              }: ${directBefore.length}/${contenderBefore.length}`
+            );
             return {
               directMedianMs: median(direct),
-              treeMedianMs: median(tree),
+              contender: contenderRoute,
+              contenderMedianMs: median(contender),
               pairedRatioMedian: median(paired),
               independentRatio:
-                median(tree) / median(direct),
-              directFirstRatioMedian:
-                median(orderRatios('direct-tree')),
-              treeFirstRatioMedian:
-                median(orderRatios('tree-direct'))
+                median(contender) / median(direct),
+              directBeforeContenderCount: directBefore.length,
+              contenderBeforeDirectCount: contenderBefore.length,
+              directBeforeContenderRatioMedian: median(directBefore),
+              contenderBeforeDirectRatioMedian: median(contenderBefore),
+              directPositionMediansMs:
+                positionMedians('direct', direct),
+              contenderPositionMediansMs:
+                positionMedians(contenderRoute, contender)
             };
           };
           const stageValue = (route, stage) => (sample) => (
@@ -4708,6 +6347,15 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             sample[route].timing['directional-budget']
               + sample[route].timing['reciprocal-limited-proposal']
           );
+          const sourceCellSetupValue = (sample) => (
+            sample.sourceCell.timing['source-cell-initialize']
+              + sample.sourceCell.timing['source-cell-projection']
+              + sample.sourceCell.timing['source-cell-build']
+              + sample.sourceCell.timing['source-cell-finalize']
+          );
+          const sourceCellTraversalValue = (sample) => (
+            traversalValue('sourceCell')(sample)
+          );
           const totalValue = (route) => (sample) => (
             sample[route].timing['thermal-producer-apply-total']
           );
@@ -4715,39 +6363,41 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             sample.treeBuildMs
               + sample[route].timing['thermal-producer-apply-total']
           );
-          const timingFixtureReceipts = timingCampaigns.map((campaign) => {
+          const candidateTimingReceipt = (
+            campaign,
+            contenderRoute,
+            contenderTraversalValue
+          ) => {
             const receipt = {
-              name: campaign.name,
-              warmupSamples: campaign.warmupCount,
-              measuredSamples: campaign.measurements.length,
-              measuredOrders: campaign.measuredOrders,
-              treeBuildMedianMs: median(campaign.measurements.map(
-                ({ treeBuildMs }) => treeBuildMs
-              )),
               directionalBudget: ratioReceipt(
                 campaign.measurements,
                 stageValue('direct', 'directional-budget'),
-                stageValue('tree', 'directional-budget')
+                stageValue(contenderRoute, 'directional-budget'),
+                contenderRoute
               ),
               reciprocalProposal: ratioReceipt(
                 campaign.measurements,
                 stageValue('direct', 'reciprocal-limited-proposal'),
-                stageValue('tree', 'reciprocal-limited-proposal')
+                stageValue(contenderRoute, 'reciprocal-limited-proposal'),
+                contenderRoute
               ),
               traversal: ratioReceipt(
                 campaign.measurements,
                 traversalValue('direct'),
-                traversalValue('tree')
+                contenderTraversalValue,
+                contenderRoute
               ),
               fullThermalRoute: ratioReceipt(
                 campaign.measurements,
                 totalValue('direct'),
-                totalValue('tree')
+                totalValue(contenderRoute),
+                contenderRoute
               ),
               sharedTreePlusThermal: ratioReceipt(
                 campaign.measurements,
                 sharedValue('direct'),
-                sharedValue('tree')
+                sharedValue(contenderRoute),
+                contenderRoute
               )
             };
             const ratioFields = [
@@ -4758,8 +6408,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             const noMaterialRegression = ratioFields.every((metric) => (
               metric.pairedRatioMedian <= 1.05
                 && metric.independentRatio <= 1.05
-                && metric.directFirstRatioMedian <= 1.05
-                && metric.treeFirstRatioMedian <= 1.05
+                && metric.directBeforeContenderRatioMedian <= 1.05
+                && metric.contenderBeforeDirectRatioMedian <= 1.05
             ));
             const denseProposalAccepted =
               campaign.name !== 'dense-one-cell-overflow-rewalk'
@@ -4778,9 +6428,114 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               && denseProposalAccepted
               && topologyWin;
             return receipt;
+          };
+          const timingFixtureReceipts = timingCampaigns.map((campaign) => {
+            const routePositionCounts = Object.fromEntries(
+              ['direct', 'perParticle', 'sourceCell'].map((route) => [
+                route,
+                [0, 1, 2].map((position) => (
+                  campaign.measurements.filter((sample) => (
+                    sample.order.split('-')[position] === route
+                  )).length
+                ))
+              ])
+            );
+            requireTrue(
+              Object.values(routePositionCounts).every((counts) => (
+                counts.every((count) => count === 3)
+              )),
+              `${campaign.name}: timing trio positions were not balanced: ${
+                JSON.stringify(routePositionCounts)
+              }`
+            );
+            const sourceCellBatchControls = [
+              campaign.counterProbe.sourceCell.batchControl
+            ];
+            const receipt = {
+              name: campaign.name,
+              warmupSamples: campaign.warmupCount,
+              measuredSamples: campaign.measurements.length,
+              measuredOrders: campaign.measuredOrders,
+              treeBuildMedianMs: median(campaign.measurements.map(
+                ({ treeBuildMs }) => treeBuildMs
+              )),
+              routePositionCounts,
+              perParticle: candidateTimingReceipt(
+                campaign,
+                'perParticle',
+                traversalValue('perParticle')
+              ),
+              sourceCell: candidateTimingReceipt(
+                campaign,
+                'sourceCell',
+                sourceCellTraversalValue
+              ),
+              sourceCellSetupMedianMs:
+                sourceCellSetupValue(campaign.counterProbe),
+              measuredParityExact: campaign.measurements.every(
+                ({ parityReceipts }) => Object.values(
+                  parityReceipts
+                ).every((parity) => Object.values(parity).every(Boolean))
+              ),
+              rawSamples: campaign.measurements.map((sample) => ({
+                order: sample.order,
+                ordinal: sample.ordinal,
+                treeBuildMs: sample.treeBuildMs,
+                parityReceipts: sample.parityReceipts,
+                direct: {
+                  timing: sample.direct.timing,
+                  csrStatus: sample.direct.csrStatus,
+                  csrRoute: sample.direct.csrRoute
+                },
+                perParticle: {
+                  timing: sample.perParticle.timing,
+                  csrStatus: sample.perParticle.csrStatus,
+                  csrRoute: sample.perParticle.csrRoute
+                },
+                sourceCell: {
+                  timing: sample.sourceCell.timing,
+                  csrStatus: sample.sourceCell.csrStatus,
+                  csrRoute: sample.sourceCell.csrRoute
+                }
+              })),
+              sourceCellBatchControl: {
+                allSealed: sourceCellBatchControls.every((header) => (
+                  header?.length === 64
+                    && header[0] === 0x5343_4231
+                    && header[1] === 1
+                    && header[2] === 2
+                    && header[21] === 0
+                    && header[23] === 0
+                    && header[25] === 0
+                )),
+                validatedNodeCountMedian: median(
+                  sourceCellBatchControls.map((header) => header[20])
+                ),
+                builtCellRowCountMedian: median(
+                  sourceCellBatchControls.map((header) => header[22])
+                ),
+                sourceCellTreeWalkCountMedian: median(
+                  sourceCellBatchControls.map((header) => header[27])
+                ),
+                buildNodeVisitCountMedian: median(
+                  sourceCellBatchControls.map((header) => header[28])
+                ),
+                buildCandidateCellCountMedian: median(
+                  sourceCellBatchControls.map((header) => header[30])
+                ),
+                budgetSourceRowCountMedian: median(
+                  sourceCellBatchControls.map((header) => header[32])
+                ),
+                proposalSourceRowCountMedian: median(
+                  sourceCellBatchControls.map((header) => header[36])
+                )
+              }
+            };
+            return receipt;
           });
           const compositeDirect = [];
-          const compositeTree = [];
+          const compositePerParticle = [];
+          const compositeSourceCell = [];
           for (
             let sampleIndex = 0;
             sampleIndex < measuredOrders.length;
@@ -4791,44 +6546,86 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 + totalValue('direct')(campaign.measurements[sampleIndex]),
               0
             ));
-            compositeTree.push(timingCampaigns.reduce(
+            compositePerParticle.push(timingCampaigns.reduce(
               (sum, campaign) => sum
-                + totalValue('tree')(campaign.measurements[sampleIndex]),
+                + totalValue('perParticle')(
+                  campaign.measurements[sampleIndex]
+                ),
+              0
+            ));
+            compositeSourceCell.push(timingCampaigns.reduce(
+              (sum, campaign) => sum
+                + totalValue('sourceCell')(
+                  campaign.measurements[sampleIndex]
+                ),
               0
             ));
           }
-          const composite = {
-            pairedRatioMedian: median(compositeTree.map(
+          const compositeReceipt = (contender) => ({
+            pairedRatioMedian: median(contender.map(
               (value, index) => value / compositeDirect[index]
             )),
             independentRatio:
-              median(compositeTree) / median(compositeDirect),
+              median(contender) / median(compositeDirect),
             directMedianMs: median(compositeDirect),
-            treeMedianMs: median(compositeTree)
+            contenderMedianMs: median(contender)
+          });
+          const composite = {
+            perParticle: compositeReceipt(compositePerParticle),
+            sourceCell: compositeReceipt(compositeSourceCell)
           };
-          const accepted = timingFixtureReceipts.every(
-            ({ accepted: fixtureAccepted }) => fixtureAccepted
+          const perParticleAccepted = timingFixtureReceipts.every(
+            ({ perParticle }) => perParticle.accepted
           )
-            && composite.pairedRatioMedian <= 1.0
-            && composite.independentRatio <= 1.0;
+            && composite.perParticle.pairedRatioMedian <= 1.0
+            && composite.perParticle.independentRatio <= 1.0;
+          const sourceCellAccepted = timingFixtureReceipts.every(
+            ({
+              sourceCell,
+              sourceCellBatchControl,
+              measuredParityExact
+            }) => (
+              sourceCell.accepted
+                && sourceCellBatchControl.allSealed
+                && measuredParityExact
+            )
+          )
+            && composite.sourceCell.pairedRatioMedian <= 1.0
+            && composite.sourceCell.independentRatio <= 1.0;
           thermalTreeTiming = {
             schema:
-              'peercompute.ulg.native-test.s9d4-thermal-tree-timing.v0',
+              'peercompute.ulg.native-test.s9d5-thermal-source-cell-tree-timing.v0',
             timestampQueryRequired: true,
+            arms: ['direct', 'perParticle', 'sourceCell'],
             warmupSamplesPerFixture: warmupOrders.length,
             measuredSamplesPerFixture: measuredOrders.length,
+            warmupOrders,
+            measuredOrders,
             fixtures: timingFixtureReceipts,
             composite,
-            accepted,
-            productionDecision: accepted
-              ? 'admit-tree'
-              : 'retain-direct'
+            perParticleAccepted,
+            sourceCellAccepted,
+            accepted: sourceCellAccepted,
+            experimentalDecision: sourceCellAccepted
+              ? 'source-cell-benchmark-admitted-for-later-gate'
+              : 'source-cell-benchmark-rejected',
+            productionDecision: 'retain-direct'
           };
         }
       } finally {
-        thermal.destroySphThermalResponseGraphBuffers(responseUpload);
+        if (responseUpload) {
+          thermal.destroySphThermalResponseGraphBuffers(responseUpload);
+        }
+        if (radiationResponseUpload) {
+          thermal.destroySphThermalResponseGraphBuffers(
+            radiationResponseUpload
+          );
+        }
       }
 
+      if (runNativeTreeShadow) {
+        sourceCellLifecycle = await runSourceCellLifecycleCampaign();
+      }
       await device.queue.onSubmittedWorkDone();
       const scopeErrors = [];
       for (const label of ['out-of-memory', 'internal', 'validation']) {
@@ -4855,6 +6652,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         cases,
         treeShadowComparisons,
         treeShadowFailureCases,
+        sourceCellTreeShadowFailureCases,
+        sourceCellLifecycle,
         thermalTreeTiming
       };
     }, { runNativeTreeShadow: RUN_NATIVE_TREE });
@@ -4880,6 +6679,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       adapterDescription,
       /swiftshader|software|llvmpipe|lavapipe/,
       `native thermal tree timing rejects software adapters: ${
+        JSON.stringify(native.adapterInfo)
+      }`
+    );
+    assert.match(
+      adapterDescription,
+      /nvidia/,
+      `native thermal tree timing requires NVIDIA hardware: ${
         JSON.stringify(native.adapterInfo)
       }`
     );
@@ -4938,6 +6744,39 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       true,
       JSON.stringify(native.cases[0].sameGenerationTreeParity)
     );
+    assert.deepEqual(
+      native.cases[0].sameGenerationSourceCellTreeParity?.byteReceipts,
+      {
+        derived: true,
+        proposal: true,
+        conductionEvidence: true,
+        radiationEvidence: true,
+        activeDispatch: true,
+        candidateCsrReplay: true,
+        candidateCsrRowStates: true,
+        appliedState: true,
+        appliedThermo: true
+      },
+      JSON.stringify(
+        native.cases[0].sameGenerationSourceCellTreeParity
+      )
+    );
+    assert.equal(
+      native.cases[0].sameGenerationSourceCellTreeParity?.exact,
+      true,
+      JSON.stringify(
+        native.cases[0].sameGenerationSourceCellTreeParity
+      )
+    );
+    assert.ok(
+      Object.values(
+        native.cases[0].sameGenerationSourceCellTreeParity
+          ?.batchControlReceipts || {}
+      ).every(Boolean),
+      JSON.stringify(
+        native.cases[0].sameGenerationSourceCellTreeParity
+      )
+    );
     assert.equal(
       native.cases[0].sameGenerationExhaustiveParity?.semanticExact,
       true,
@@ -4968,6 +6807,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         { name: 'mixed-boiling-plateau-four-neighbor', exact: true },
         { name: 'multilevel-fine-base-coarse', exact: true },
         { name: 'negative-coordinate-cell-boundary', exact: true },
+        { name: 'radiation-only-nonzero-wide-support', exact: true },
         {
           name: 'matched-time-current-contact-frozen-separated',
           exact: true
@@ -4977,6 +6817,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           exact: true
         },
         { name: 'base-active-rank-dormant-projection', exact: true },
+        { name: 'local-rank-dormant-projection', exact: true },
         { name: 'dense-csr-overflow-exact-rewalk', exact: true },
         { name: 'gpu-uniform-zero-traversal', exact: true }
       ]
@@ -5001,6 +6842,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       native.treeShadowComparisons.every((receipt) => (
         receipt.sameGeneration === true
           && Object.values(receipt.byteReceipts).every(Boolean)
+          && Object.values(receipt.sourceCellByteReceipts).every(Boolean)
+          && Object.values(
+            receipt.sourceCellBatchControlReceipts
+          ).every(Boolean)
           && Object.values(receipt.exhaustiveSemanticReceipts).every(Boolean)
       )),
       JSON.stringify(native.treeShadowComparisons)
@@ -5050,9 +6895,108 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         }
       ]
     );
+    assert.deepEqual(
+      native.sourceCellTreeShadowFailureCases,
+      [
+        'status',
+        'generation-id',
+        'position-epoch',
+        'node-capacity',
+        'node-offset',
+        'root-aabb-nan',
+        'live-child-status-cleared',
+        'duplicate-live-leaf'
+      ].map((name) => ({
+        name,
+        failClosed: true,
+        batchRejected: true,
+        fallbackCounts: [0, 0, 0, 0, 0, 0]
+      }))
+    );
+    assert.equal(native.sourceCellLifecycle?.isolatedDevice, true);
+    assert.match(
+      Object.values(native.sourceCellLifecycle.adapterInfo || {})
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase(),
+      /nvidia/
+    );
+    assert.equal(
+      native.sourceCellLifecycle?.reuse?.oldTreeReleased,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle?.reuse?.sameTreeBuffer,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle?.reuse?.sameArenaIndex,
+      true
+    );
+    assert.ok(
+      native.sourceCellLifecycle.reuse.replacementArenaGeneration
+        > native.sourceCellLifecycle.reuse.oldArenaGeneration
+    );
+    assert.equal(
+      native.sourceCellLifecycle.reuse.staleBindingError.code,
+      'ERR_SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_STALE_BINDING'
+    );
+    assert.equal(
+      native.sourceCellLifecycle.bindToEncode.boundBeforeRelease,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.bindToEncode.generationLeaseReleased,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.bindToEncode.staleEncodeError.code,
+      'ERR_SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_STALE_BINDING'
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.reason,
+      'destroyed'
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.generationReleaseStatus,
+      'spatial-epoch-generation-device-loss-retired'
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.operationsConfirmed,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.treeDeviceLost,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.treeReleased,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.proposalDisposition,
+      'device-lost-quarantined'
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.proposalReleased,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.treeLeaseReleased,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.generationLeaseReleased,
+      true
+    );
+    assert.equal(
+      native.sourceCellLifecycle.deviceLoss.spatialReentryError.code,
+      'ERR_SCHROEDER_SPATIAL_DEVICE_LOST'
+    );
+    assert.deepEqual(native.sourceCellLifecycle.uncapturedErrors, []);
     assert.equal(
       native.thermalTreeTiming?.schema,
-      'peercompute.ulg.native-test.s9d4-thermal-tree-timing.v0'
+      'peercompute.ulg.native-test.s9d5-thermal-source-cell-tree-timing.v0'
     );
     assert.equal(
       native.thermalTreeTiming?.warmupSamplesPerFixture,
@@ -5061,6 +7005,33 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
     assert.equal(
       native.thermalTreeTiming?.measuredSamplesPerFixture,
       9
+    );
+    assert.deepEqual(
+      native.thermalTreeTiming?.arms,
+      ['direct', 'perParticle', 'sourceCell']
+    );
+    assert.deepEqual(
+      native.thermalTreeTiming?.warmupOrders,
+      [
+        'direct-perParticle-sourceCell',
+        'sourceCell-perParticle-direct',
+        'perParticle-sourceCell-direct',
+        'direct-sourceCell-perParticle'
+      ]
+    );
+    assert.deepEqual(
+      native.thermalTreeTiming?.measuredOrders,
+      [
+        'direct-perParticle-sourceCell',
+        'direct-sourceCell-perParticle',
+        'perParticle-direct-sourceCell',
+        'perParticle-sourceCell-direct',
+        'sourceCell-direct-perParticle',
+        'sourceCell-perParticle-direct',
+        'direct-perParticle-sourceCell',
+        'perParticle-sourceCell-direct',
+        'sourceCell-direct-perParticle'
+      ]
     );
     assert.deepEqual(
       native.thermalTreeTiming?.fixtures.map(({ name }) => name),
@@ -5074,40 +7045,59 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       native.thermalTreeTiming.fixtures.every((fixture) => (
         fixture.measuredSamples === 9
           && fixture.treeBuildMedianMs > 0
-          && fixture.traversal.directMedianMs > 0
-          && fixture.traversal.treeMedianMs > 0
-          && fixture.fullThermalRoute.directMedianMs > 0
-          && fixture.fullThermalRoute.treeMedianMs > 0
+          && Object.values(fixture.routePositionCounts).every(
+            (counts) => counts.every((count) => count === 3)
+          )
+          && fixture.perParticle.traversal.directMedianMs > 0
+          && fixture.perParticle.traversal.contenderMedianMs > 0
+          && fixture.perParticle.fullThermalRoute.directMedianMs > 0
+          && fixture.perParticle.fullThermalRoute.contenderMedianMs > 0
+          && fixture.sourceCellSetupMedianMs > 0
+          && fixture.sourceCell.traversal.directMedianMs > 0
+          && fixture.sourceCell.traversal.contenderMedianMs > 0
+          && fixture.sourceCell.fullThermalRoute.directMedianMs > 0
+          && fixture.sourceCell.fullThermalRoute.contenderMedianMs > 0
+          && fixture.sourceCellBatchControl.allSealed === true
+          && fixture.measuredParityExact === true
+          && fixture.rawSamples.length === 9
       )),
       JSON.stringify(native.thermalTreeTiming)
     );
     assert.equal(
       native.thermalTreeTiming.productionDecision,
-      native.thermalTreeTiming.accepted
-        ? 'admit-tree'
-        : 'retain-direct'
+      'retain-direct'
     );
     const timingSummary = {
       adapterInfo: native.adapterInfo,
       accepted: native.thermalTreeTiming.accepted,
+      perParticleAccepted:
+        native.thermalTreeTiming.perParticleAccepted,
+      sourceCellAccepted:
+        native.thermalTreeTiming.sourceCellAccepted,
+      experimentalDecision:
+        native.thermalTreeTiming.experimentalDecision,
       productionDecision:
         native.thermalTreeTiming.productionDecision,
       composite: native.thermalTreeTiming.composite,
       fixtures: native.thermalTreeTiming.fixtures.map((fixture) => ({
         name: fixture.name,
-        accepted: fixture.accepted,
         treeBuildMedianMs: fixture.treeBuildMedianMs,
-        directionalBudget: fixture.directionalBudget,
-        reciprocalProposal: fixture.reciprocalProposal,
-        traversal: fixture.traversal,
-        fullThermalRoute: fixture.fullThermalRoute,
-        sharedTreePlusThermal: fixture.sharedTreePlusThermal
+        routePositionCounts: fixture.routePositionCounts,
+        perParticle: fixture.perParticle,
+        sourceCell: fixture.sourceCell,
+        sourceCellSetupMedianMs: fixture.sourceCellSetupMedianMs,
+        sourceCellBatchControl: fixture.sourceCellBatchControl,
+        measuredParityExact: fixture.measuredParityExact,
+        rawSamples: fixture.rawSamples
       }))
     };
-    console.log(`S9D4_THERMAL_TREE_TIMING ${JSON.stringify(timingSummary)}`);
+    console.log(
+      `S9D5_THERMAL_SOURCE_CELL_TIMING ${JSON.stringify(timingSummary)}`
+    );
   } else {
     assert.deepEqual(native.treeShadowComparisons, []);
     assert.deepEqual(native.treeShadowFailureCases, []);
+    assert.equal(native.sourceCellLifecycle, null);
     assert.equal(native.thermalTreeTiming, null);
   }
 });

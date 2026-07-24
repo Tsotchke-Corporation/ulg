@@ -29,6 +29,10 @@ import {
   webGpuBufferMatchesDevice
 } from './sphGpuDeviceIdentity.js';
 import {
+  acquireSchroederSpatialEpochGenerationConsumerLease,
+  ownsSchroederSpatialEpochGenerationConsumerLease,
+  releaseSchroederSpatialEpochGenerationConsumerLease,
+  releaseSchroederSpatialEpochGenerationConsumerLeaseAfter,
   SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_STATUS,
   bindSchroederSpatialExactNearResidentConsumerEvidence,
   resolveSchroederSpatialExactNearConsumerGeneration
@@ -57,6 +61,8 @@ export const ULG_SCHROEDER_SPATIAL_MATCHED_TIME_THERMAL_ENCODER_STAGE_SCHEMA =
   'peercompute.ulg.schroeder-spatial-matched-time-thermal-encoder-stage.v0';
 export const ULG_SCHROEDER_SPATIAL_THERMAL_CANDIDATE_CSR_SCHEMA =
   'peercompute.ulg.schroeder-spatial-thermal-candidate-csr.v1';
+export const ULG_SCHROEDER_SPATIAL_THERMAL_SOURCE_CELL_BATCH_SCHEMA =
+  'peercompute.ulg.native-test.s9d5-thermal-source-cell-batch.v0';
 
 export const SCHROEDER_SPATIAL_THERMAL_CONSUMER = Object.freeze({
   CONDUCTION: 'thermal-conduction',
@@ -209,6 +215,13 @@ const PAIR_CONDUCTION_RATE_DEFAULT = 1500;
 const STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670374419e-8;
 const RADIATION_PAIR_RANGE_RADII = 4;
 const CLASSIC_THERMAL_MAX_BIN_SCAN_RADIUS_CELLS = 5;
+const THERMAL_SOURCE_CELL_BATCH_HEADER_WORDS = 64;
+const THERMAL_SOURCE_CELL_BATCH_MAGIC = 0x5343_4231;
+const THERMAL_SOURCE_CELL_BATCH_VERSION = 1;
+const THERMAL_SOURCE_CELL_BATCH_STATUS_BUILDING = 1;
+const THERMAL_SOURCE_CELL_BATCH_STATUS_READY = 2;
+const THERMAL_SOURCE_CELL_BATCH_STATUS_REJECTED = 4;
+const THERMAL_SOURCE_CELL_BATCH_DISPATCH_WORD = 16;
 
 const GPU_BUFFER_USAGE = Object.freeze({
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -516,6 +529,123 @@ function positiveSafeInteger(value, label) {
     throw new RangeError(`${label} must be a positive safe integer`);
   }
   return value;
+}
+
+function thermalSourceCellBatchPlan(device, {
+  sourceCapacity,
+  cellCapacity,
+  nodeCapacity
+}) {
+  const resolvedSourceCapacity = exactU32(
+    sourceCapacity,
+    'thermal source-cell sourceCapacity',
+    { positive: true }
+  );
+  const resolvedCellCapacity = exactU32(
+    cellCapacity,
+    'thermal source-cell cellCapacity',
+    { positive: true }
+  );
+  const resolvedNodeCapacity = exactU32(
+    nodeCapacity,
+    'thermal source-cell nodeCapacity',
+    { positive: true }
+  );
+  const bitsetRowWords = positiveSafeInteger(
+    Math.ceil(resolvedCellCapacity / 32),
+    'thermal source-cell bitset row words'
+  );
+  const inverseSourceRankOffsetWords = THERMAL_SOURCE_CELL_BATCH_HEADER_WORDS;
+  const cellRowStateOffsetWords = positiveSafeInteger(
+    inverseSourceRankOffsetWords + resolvedSourceCapacity,
+    'thermal source-cell row-state offset'
+  );
+  const bitsetOffsetWords = positiveSafeInteger(
+    cellRowStateOffsetWords + resolvedCellCapacity,
+    'thermal source-cell bitset offset'
+  );
+  const bitsetWordLength = positiveSafeInteger(
+    resolvedCellCapacity * bitsetRowWords,
+    'thermal source-cell bitset word length'
+  );
+  const wordLength = positiveSafeInteger(
+    bitsetOffsetWords + bitsetWordLength,
+    'thermal source-cell batch word length'
+  );
+  const byteLength = positiveSafeInteger(
+    wordLength * Uint32Array.BYTES_PER_ELEMENT,
+    'thermal source-cell batch byte length'
+  );
+  const limits = [
+    Number(device?.limits?.maxBufferSize),
+    Number(device?.limits?.maxStorageBufferBindingSize)
+  ].filter((value) => Number.isFinite(value) && value > 0);
+  const storageLimit = limits.length > 0
+    ? Math.min(...limits)
+    : Number.MAX_SAFE_INTEGER;
+  if (byteLength > storageLimit) {
+    throw new RangeError(
+      `thermal source-cell batch requires ${byteLength} bytes, exceeding the WebGPU storage limit`
+    );
+  }
+  const maxWorkgroups = Math.floor(finiteNumber(
+    device?.limits?.maxComputeWorkgroupsPerDimension,
+    65_535
+  ));
+  const maxStorageBindings = Math.floor(finiteNumber(
+    device?.limits?.maxStorageBuffersPerShaderStage,
+    12
+  ));
+  const maxInvocations = Math.floor(finiteNumber(
+    device?.limits?.maxComputeInvocationsPerWorkgroup,
+    256
+  ));
+  const maxWorkgroupSizeX = Math.floor(finiteNumber(
+    device?.limits?.maxComputeWorkgroupSizeX,
+    256
+  ));
+  if (
+    maxStorageBindings < 12
+    || maxInvocations < WORKGROUP_SIZE
+    || maxWorkgroupSizeX < WORKGROUP_SIZE
+  ) {
+    throw new RangeError(
+      'thermal source-cell batch requires 12 storage bindings and a 64-lane compute workgroup'
+    );
+  }
+  const sourceChunks = Math.ceil(resolvedSourceCapacity / WORKGROUP_SIZE);
+  const buildWorkgroups = Math.ceil(resolvedNodeCapacity / WORKGROUP_SIZE);
+  const initializeWorkgroups = Math.ceil(
+    Math.max(resolvedSourceCapacity, resolvedCellCapacity) / WORKGROUP_SIZE
+  );
+  if (
+    maxWorkgroups < 1
+    || resolvedCellCapacity > maxWorkgroups
+    || sourceChunks > maxWorkgroups
+    || buildWorkgroups > maxWorkgroups
+    || initializeWorkgroups > maxWorkgroups
+  ) {
+    throw new RangeError(
+      'thermal source-cell batch exceeds the bounded two-dimensional WebGPU dispatch limits'
+    );
+  }
+  return Object.freeze({
+    sourceCapacity: resolvedSourceCapacity,
+    cellCapacity: resolvedCellCapacity,
+    nodeCapacity: resolvedNodeCapacity,
+    bitsetRowWords,
+    inverseSourceRankOffsetWords,
+    cellRowStateOffsetWords,
+    bitsetOffsetWords,
+    wordLength,
+    byteLength,
+    sourceChunks,
+    buildWorkgroups,
+    initializeWorkgroups,
+    projectionWorkgroups: Math.ceil(resolvedSourceCapacity / WORKGROUP_SIZE),
+    dispatchByteOffset:
+      THERMAL_SOURCE_CELL_BATCH_DISPATCH_WORD * Uint32Array.BYTES_PER_ELEMENT
+  });
 }
 
 function thermalCsrReplayWordLength(sourceCapacity, candidateCapacity) {
@@ -5309,6 +5439,1371 @@ fn thermal_tree_shadow_flush(word: u32, count: u32) -> bool {
   return source;
 }
 
+function createThermalSourceCellBatchControlWgsl(
+  plan,
+  { observeTraversalCounters = true } = {}
+) {
+  const buildCounterDeclarations = observeTraversalCounters === true
+    ? /* wgsl */ `
+  var node_visits = 0u;
+  var leaf_visits = 0u;
+  var candidate_count = 0u;`
+    : '';
+  const nodeVisitCounter = observeTraversalCounters === true
+    ? '\n    node_visits = node_visits + 1u;'
+    : '';
+  const leafVisitCounters = observeTraversalCounters === true
+    ? /* wgsl */ `
+      leaf_visits = leaf_visits + 1u;
+      candidate_count = candidate_count + 1u;`
+    : '';
+  const buildCounterFlush = observeTraversalCounters === true
+    ? /* wgsl */ `
+  if (
+    !thermal_source_cell_batch_add(27u, 1u)
+    || !thermal_source_cell_batch_add(28u, node_visits)
+    || !thermal_source_cell_batch_add(29u, leaf_visits)
+    || !thermal_source_cell_batch_add(30u, candidate_count)
+  ) {
+    return false;
+  }`
+    : '';
+  return /* wgsl */ `
+const THERMAL_SOURCE_CELL_BATCH_MAGIC: u32 = 0x${THERMAL_SOURCE_CELL_BATCH_MAGIC.toString(16)}u;
+const THERMAL_SOURCE_CELL_BATCH_VERSION: u32 = ${THERMAL_SOURCE_CELL_BATCH_VERSION}u;
+const THERMAL_SOURCE_CELL_BATCH_BUILDING: u32 = ${THERMAL_SOURCE_CELL_BATCH_STATUS_BUILDING}u;
+const THERMAL_SOURCE_CELL_BATCH_READY: u32 = ${THERMAL_SOURCE_CELL_BATCH_STATUS_READY}u;
+const THERMAL_SOURCE_CELL_BATCH_REJECTED: u32 = ${THERMAL_SOURCE_CELL_BATCH_STATUS_REJECTED}u;
+const THERMAL_SOURCE_CELL_BATCH_HEADER_WORDS: u32 = ${THERMAL_SOURCE_CELL_BATCH_HEADER_WORDS}u;
+const THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY: u32 = ${plan.sourceCapacity}u;
+const THERMAL_SOURCE_CELL_BATCH_CELL_CAPACITY: u32 = ${plan.cellCapacity}u;
+const THERMAL_SOURCE_CELL_BATCH_NODE_CAPACITY: u32 = ${plan.nodeCapacity}u;
+const THERMAL_SOURCE_CELL_BATCH_ROW_WORDS: u32 = ${plan.bitsetRowWords}u;
+const THERMAL_SOURCE_CELL_BATCH_INVERSE_OFFSET: u32 = ${plan.inverseSourceRankOffsetWords}u;
+const THERMAL_SOURCE_CELL_BATCH_ROW_STATE_OFFSET: u32 = ${plan.cellRowStateOffsetWords}u;
+const THERMAL_SOURCE_CELL_BATCH_BITSET_OFFSET: u32 = ${plan.bitsetOffsetWords}u;
+const THERMAL_SOURCE_CELL_BATCH_WORD_LENGTH: u32 = ${plan.wordLength}u;
+const THERMAL_SOURCE_CELL_BATCH_INVALID: u32 = 0xffffffffu;
+const THERMAL_SOURCE_CELL_BATCH_ROW_READY: u32 = 1u;
+const THERMAL_SOURCE_CELL_BATCH_ROW_REJECTED: u32 = 2u;
+
+fn thermal_source_cell_batch_load(word: u32) -> u32 {
+  return atomicLoad(&thermal_source_cell_batch[word]);
+}
+
+fn thermal_source_cell_batch_store(word: u32, value: u32) {
+  atomicStore(&thermal_source_cell_batch[word], value);
+}
+
+fn thermal_source_cell_batch_add(word: u32, value: u32) -> bool {
+  if (value == 0u) { return true; }
+  let previous = atomicAdd(&thermal_source_cell_batch[word], value);
+  return previous <= 0xffffffffu - value;
+}
+
+fn thermal_source_cell_batch_static_header_admitted() -> bool {
+  return arrayLength(&thermal_source_cell_batch)
+      >= THERMAL_SOURCE_CELL_BATCH_WORD_LENGTH
+    && thermal_source_cell_batch_load(0u)
+      == THERMAL_SOURCE_CELL_BATCH_MAGIC
+    && thermal_source_cell_batch_load(1u)
+      == THERMAL_SOURCE_CELL_BATCH_VERSION
+    && thermal_source_cell_batch_load(3u)
+      == conduction_expectation.expected_generation_id
+    && thermal_source_cell_batch_load(4u)
+      == conduction_expectation.expected_support_epoch
+    && thermal_source_cell_batch_load(6u)
+      == THERMAL_SOURCE_CELL_BATCH_CELL_CAPACITY
+    && thermal_source_cell_batch_load(7u)
+      == THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY
+    && thermal_source_cell_batch_load(8u)
+      == THERMAL_SOURCE_CELL_BATCH_ROW_WORDS
+    && thermal_source_cell_batch_load(9u)
+      == THERMAL_SOURCE_CELL_BATCH_WORD_LENGTH
+    && thermal_source_cell_batch_load(10u)
+      == THERMAL_SOURCE_CELL_BATCH_INVERSE_OFFSET
+    && thermal_source_cell_batch_load(11u)
+      == THERMAL_SOURCE_CELL_BATCH_ROW_STATE_OFFSET
+    && thermal_source_cell_batch_load(12u)
+      == THERMAL_SOURCE_CELL_BATCH_BITSET_OFFSET;
+}
+
+fn thermal_source_cell_batch_admitted(
+  expected: SchroederSpatialExactNearExpectationV1
+) -> bool {
+  let cell_count = spatial_directory[SS_EXACT_NEAR_HEADER_CELL_COUNT];
+  let maximum_members = thermal_source_cell_batch_load(26u);
+  return thermal_source_cell_batch_static_header_admitted()
+    && thermal_source_cell_batch_load(2u)
+      == THERMAL_SOURCE_CELL_BATCH_READY
+    && thermal_source_cell_batch_load(3u)
+      == expected.expected_generation_id
+    && thermal_source_cell_batch_load(4u)
+      == expected.expected_support_epoch
+    && thermal_source_cell_batch_load(5u) == cell_count
+    && cell_count > 0u
+    && cell_count <= THERMAL_SOURCE_CELL_BATCH_CELL_CAPACITY
+    && maximum_members > 0u
+    && maximum_members <= THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY
+    && thermal_source_cell_batch_load(16u) == cell_count
+    && thermal_source_cell_batch_load(17u)
+      == (maximum_members + 63u) / 64u
+    && thermal_source_cell_batch_load(18u) == 1u
+    && ss_exact_near_directory_admitted(expected)
+    && ss_exact_cell_tree_admitted(expected);
+}
+
+fn thermal_source_cell_expected_leaf_bounds(
+  cell_index: u32
+) -> array<vec3<f32>, 2> {
+  let cell_level_order = ss_exact_near_cell_key_word(
+    conduction_expectation,
+    cell_index,
+    1u
+  );
+  let level = bitcast<i32>(cell_level_order ^ 0x80000000u);
+  let cell_coord = vec3<i32>(
+    bitcast<i32>(
+      ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        2u
+      ) ^ 0x80000000u
+    ),
+    bitcast<i32>(
+      ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        3u
+      ) ^ 0x80000000u
+    ),
+    bitcast<i32>(
+      ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        4u
+      ) ^ 0x80000000u
+    )
+  );
+  let spacing_m = conduction_expectation.base_grid_spacing_m
+    * exp2(f32(level));
+  let raw_cell_minimum = vec3<f32>(
+    f32(cell_coord.x),
+    f32(cell_coord.y),
+    f32(cell_coord.z)
+  );
+  let raw_cell_maximum = raw_cell_minimum + vec3<f32>(1.0);
+  let coordinate_magnitude = max(
+    max(abs(raw_cell_minimum), abs(raw_cell_maximum)),
+    vec3<f32>(1.0)
+  );
+  let halo_cells = vec3<f32>(2.0)
+    + coordinate_magnitude * 0.000000476837158203125;
+  let halo_m = halo_cells * spacing_m;
+  var result: array<vec3<f32>, 2>;
+  result[0] = raw_cell_minimum * spacing_m - halo_m;
+  result[1] = raw_cell_maximum * spacing_m + halo_m;
+  return result;
+}
+
+fn thermal_source_cell_node_bounds(
+  node_index: u32
+) -> array<vec3<f32>, 2> {
+  let base = ss_exact_cell_tree_node_base(node_index);
+  var result: array<vec3<f32>, 2>;
+  result[0] = vec3<f32>(
+    bitcast<f32>(exact_near_cell_tree[base]),
+    bitcast<f32>(exact_near_cell_tree[base + 1u]),
+    bitcast<f32>(exact_near_cell_tree[base + 2u])
+  );
+  result[1] = vec3<f32>(
+    bitcast<f32>(exact_near_cell_tree[base + 3u]),
+    bitcast<f32>(exact_near_cell_tree[base + 4u]),
+    bitcast<f32>(exact_near_cell_tree[base + 5u])
+  );
+  return result;
+}
+
+fn thermal_source_cell_finite_bounds(
+  bounds: array<vec3<f32>, 2>
+) -> bool {
+  return ss_exact_near_finite(bounds[0].x)
+    && ss_exact_near_finite(bounds[0].y)
+    && ss_exact_near_finite(bounds[0].z)
+    && ss_exact_near_finite(bounds[1].x)
+    && ss_exact_near_finite(bounds[1].y)
+    && ss_exact_near_finite(bounds[1].z)
+    && all(bounds[0] <= bounds[1]);
+}
+
+fn thermal_source_cell_validate_leaf_members(cell_index: u32) -> bool {
+  let member_range = ss_exact_near_cell_member_range(
+    conduction_expectation,
+    cell_index
+  );
+  if (
+    member_range.admitted == 0u
+    || member_range.begin >= member_range.end
+    || member_range.end > thermal_params.particle_count
+  ) {
+    return false;
+  }
+  let cell_level_order = ss_exact_near_cell_key_word(
+    conduction_expectation,
+    cell_index,
+    1u
+  );
+  let level = bitcast<i32>(cell_level_order ^ 0x80000000u);
+  let spacing_m = conduction_expectation.base_grid_spacing_m
+    * exp2(f32(level));
+  if (!ss_exact_near_finite(spacing_m) || spacing_m <= 0.0) {
+    return false;
+  }
+  let expected_cell = vec3<i32>(
+    bitcast<i32>(
+      ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        2u
+      ) ^ 0x80000000u
+    ),
+    bitcast<i32>(
+      ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        3u
+      ) ^ 0x80000000u
+    ),
+    bitcast<i32>(
+      ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        4u
+      ) ^ 0x80000000u
+    )
+  );
+  for (
+    var source_rank = member_range.begin;
+    source_rank < member_range.end;
+    source_rank = source_rank + 1u
+  ) {
+    let lookup = ss_exact_near_source_at_member(
+      conduction_expectation,
+      source_rank
+    );
+    if (lookup.admitted == 0u) { return false; }
+    let reverse = ss_exact_near_cell_for_source(
+      conduction_expectation,
+      lookup.source_index
+    );
+    let frozen = directory_position_state[lookup.source_index * 2u];
+    if (
+      reverse.admitted == 0u
+      || reverse.source_index != cell_index
+      || !ss_exact_near_finite(frozen.x)
+      || !ss_exact_near_finite(frozen.y)
+      || !ss_exact_near_finite(frozen.z)
+      || any(vec3<i32>(floor(frozen.xyz / spacing_m)) != expected_cell)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn thermal_source_cell_validate_node(node_index: u32) -> bool {
+  let leaf_capacity = exact_near_cell_tree[20u];
+  let node_capacity = exact_near_cell_tree[21u];
+  let tree_depth = exact_near_cell_tree[23u];
+  let cell_count = exact_near_cell_tree[18u];
+  if (
+    node_index >= node_capacity
+    || node_capacity != THERMAL_SOURCE_CELL_BATCH_NODE_CAPACITY
+  ) {
+    return false;
+  }
+  let level_index = node_index + 1u;
+  let node_depth = 31u - countLeadingZeros(level_index);
+  let level_start = (1u << node_depth) - 1u;
+  let leaves_per_node = leaf_capacity >> node_depth;
+  let first_leaf = (node_index - level_start) * leaves_per_node;
+  let expected_live = first_leaf < cell_count;
+  let base = ss_exact_cell_tree_node_base(node_index);
+  let status = exact_near_cell_tree[base + 6u];
+  if (!expected_live) { return status == 0u; }
+  let expected_leaf = node_depth == tree_depth;
+  let expected_status = select(
+    SS_EXACT_CELL_TREE_NODE_VALID | SS_EXACT_CELL_TREE_NODE_INTERNAL,
+    SS_EXACT_CELL_TREE_NODE_VALID | SS_EXACT_CELL_TREE_NODE_LEAF,
+    expected_leaf
+  );
+  let payload = exact_near_cell_tree[base + 7u];
+  let bounds = thermal_source_cell_node_bounds(node_index);
+  if (
+    status != expected_status
+    || !thermal_source_cell_finite_bounds(bounds)
+    || (
+      expected_leaf
+        && (payload != first_leaf || first_leaf >= cell_count)
+    )
+    || (
+      !expected_leaf
+        && payload != SS_EXACT_CELL_TREE_INVALID_U32
+    )
+  ) {
+    return false;
+  }
+  if (expected_leaf) {
+    let expected_bounds = thermal_source_cell_expected_leaf_bounds(first_leaf);
+    return thermal_source_cell_finite_bounds(expected_bounds)
+      && all(bounds[0] <= expected_bounds[0])
+      && all(bounds[1] >= expected_bounds[1])
+      && thermal_source_cell_validate_leaf_members(first_leaf);
+  }
+  if (node_index > (0xffffffffu - 2u) / 2u) { return false; }
+  let left = node_index * 2u + 1u;
+  let right = left + 1u;
+  if (right >= node_capacity) { return false; }
+  for (var child = left; child <= right; child = child + 1u) {
+    let child_level_index = child + 1u;
+    let child_depth = 31u - countLeadingZeros(child_level_index);
+    let child_level_start = (1u << child_depth) - 1u;
+    let child_leaves_per_node = leaf_capacity >> child_depth;
+    let child_first_leaf = (
+      child - child_level_start
+    ) * child_leaves_per_node;
+    let child_live = child_first_leaf < cell_count;
+    let child_base = ss_exact_cell_tree_node_base(child);
+    let child_status = exact_near_cell_tree[child_base + 6u];
+    if (!child_live) {
+      if (child_status != 0u) { return false; }
+      continue;
+    }
+    let child_bounds = thermal_source_cell_node_bounds(child);
+    if (
+      (child_status & SS_EXACT_CELL_TREE_NODE_VALID) == 0u
+      || !thermal_source_cell_finite_bounds(child_bounds)
+      || any(bounds[0] > child_bounds[0])
+      || any(bounds[1] < child_bounds[1])
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn thermal_source_cell_tree_node_shape_valid(node_index: u32) -> bool {
+  let leaf_capacity = exact_near_cell_tree[20u];
+  let node_capacity = exact_near_cell_tree[21u];
+  let tree_depth = exact_near_cell_tree[23u];
+  let cell_count = exact_near_cell_tree[18u];
+  if (node_index >= node_capacity) { return false; }
+  let level_index = node_index + 1u;
+  let node_depth = 31u - countLeadingZeros(level_index);
+  let level_start = (1u << node_depth) - 1u;
+  let leaves_per_node = leaf_capacity >> node_depth;
+  let first_leaf = (node_index - level_start) * leaves_per_node;
+  if (first_leaf >= cell_count) {
+    return exact_near_cell_tree[
+      ss_exact_cell_tree_node_base(node_index) + 6u
+    ] == 0u;
+  }
+  let expected_leaf = node_depth == tree_depth;
+  let expected_status = select(
+    SS_EXACT_CELL_TREE_NODE_VALID | SS_EXACT_CELL_TREE_NODE_INTERNAL,
+    SS_EXACT_CELL_TREE_NODE_VALID | SS_EXACT_CELL_TREE_NODE_LEAF,
+    expected_leaf
+  );
+  let base = ss_exact_cell_tree_node_base(node_index);
+  let payload = exact_near_cell_tree[base + 7u];
+  return exact_near_cell_tree[base + 6u] == expected_status
+    && thermal_source_cell_finite_bounds(
+      thermal_source_cell_node_bounds(node_index)
+    )
+    && select(
+      payload == SS_EXACT_CELL_TREE_INVALID_U32,
+      payload == first_leaf,
+      expected_leaf
+    );
+}
+
+fn thermal_source_cell_build_row(cell_index: u32) -> bool {
+  let cell_count = exact_near_cell_tree[18u];
+  let leaf_capacity = exact_near_cell_tree[20u];
+  let node_capacity = exact_near_cell_tree[21u];
+  if (cell_index >= cell_count) { return false; }
+  let source_leaf = leaf_capacity - 1u + cell_index;
+  if (
+    source_leaf >= node_capacity
+    || !thermal_source_cell_tree_node_shape_valid(source_leaf)
+  ) {
+    return false;
+  }
+  let source_bounds = thermal_source_cell_node_bounds(source_leaf);
+  let global_max_radius_m = bitcast<f32>(
+    atomicLoad(&thermal_derived[0u])
+  );
+  let displacement_m = bitcast<f32>(atomicLoad(&thermal_derived[4u]));
+  let global_support_m = max(
+    2.0 * thermal_params.smoothing_length_m,
+    max(
+      2.0 * global_max_radius_m,
+      thermal_params.radiation_pair_range_radii
+        * 2.0 * global_max_radius_m
+    )
+  );
+  let envelope_m = global_support_m + 2.0 * displacement_m;
+  let scale_m = max(
+    max(
+      max(abs(source_bounds[0]), abs(source_bounds[1])),
+      vec3<f32>(max(envelope_m, 1.0))
+    ),
+    vec3<f32>(1.0)
+  );
+  let outward_slack_m = scale_m * 0.000000476837158203125;
+  let query_minimum = source_bounds[0]
+    - vec3<f32>(envelope_m) - outward_slack_m;
+  let query_maximum = source_bounds[1]
+    + vec3<f32>(envelope_m) + outward_slack_m;
+  if (
+    !ss_exact_near_finite(global_max_radius_m)
+    || global_max_radius_m < 0.0
+    || !ss_exact_near_finite(displacement_m)
+    || displacement_m < 0.0
+    || !ss_exact_near_finite(global_support_m)
+    || global_support_m <= 0.0
+    || !ss_exact_near_finite(envelope_m)
+    || !thermal_source_cell_finite_bounds(
+      array<vec3<f32>, 2>(query_minimum, query_maximum)
+    )
+  ) {
+    return false;
+  }
+  var stack: array<u32, 32>;
+  var stack_size = 1u;
+  stack[0] = 0u;
+  var iteration = 0u;
+${buildCounterDeclarations}
+  for (
+    iteration = 0u;
+    iteration < node_capacity && stack_size > 0u;
+    iteration = iteration + 1u
+  ) {
+    stack_size = stack_size - 1u;
+    let node_index = stack[stack_size];
+${nodeVisitCounter}
+    if (!thermal_source_cell_tree_node_shape_valid(node_index)) {
+      return false;
+    }
+    if (!ss_exact_cell_tree_node_intersects(
+      node_index,
+      query_minimum,
+      query_maximum
+    )) {
+      continue;
+    }
+    if (ss_exact_cell_tree_node_is_leaf(node_index)) {
+      let target_cell = ss_exact_cell_tree_leaf_cell_index(node_index);
+      if (target_cell >= cell_count) { return false; }
+      let row_word = THERMAL_SOURCE_CELL_BATCH_BITSET_OFFSET
+        + cell_index * THERMAL_SOURCE_CELL_BATCH_ROW_WORDS
+        + target_cell / 32u;
+      if (row_word >= THERMAL_SOURCE_CELL_BATCH_WORD_LENGTH) {
+        return false;
+      }
+      atomicOr(
+        &thermal_source_cell_batch[row_word],
+        1u << (target_cell % 32u)
+      );
+${leafVisitCounters}
+      continue;
+    }
+    if (
+      !ss_exact_cell_tree_node_is_internal(node_index)
+      || node_index > (0xffffffffu - 2u) / 2u
+      || stack_size > 30u
+    ) {
+      return false;
+    }
+    let left = node_index * 2u + 1u;
+    let right = left + 1u;
+    if (right >= node_capacity) { return false; }
+    stack[stack_size] = right;
+    stack_size = stack_size + 1u;
+    stack[stack_size] = left;
+    stack_size = stack_size + 1u;
+  }
+  if (stack_size != 0u || iteration > node_capacity) { return false; }
+  let member_range = ss_exact_near_cell_member_range(
+    conduction_expectation,
+    cell_index
+  );
+  if (
+    member_range.admitted == 0u
+    || member_range.begin >= member_range.end
+  ) {
+    return false;
+  }
+  atomicMax(
+    &thermal_source_cell_batch[26u],
+    member_range.end - member_range.begin
+  );
+${buildCounterFlush}
+  return true;
+}
+
+@compute @workgroup_size(64)
+fn initialize_source_cell_batch(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let index = global_id.x;
+  if (index == 0u) {
+    thermal_source_cell_batch_store(
+      0u,
+      THERMAL_SOURCE_CELL_BATCH_MAGIC
+    );
+    thermal_source_cell_batch_store(
+      1u,
+      THERMAL_SOURCE_CELL_BATCH_VERSION
+    );
+    thermal_source_cell_batch_store(
+      2u,
+      THERMAL_SOURCE_CELL_BATCH_BUILDING
+    );
+    thermal_source_cell_batch_store(
+      3u,
+      conduction_expectation.expected_generation_id
+    );
+    thermal_source_cell_batch_store(
+      4u,
+      conduction_expectation.expected_support_epoch
+    );
+    thermal_source_cell_batch_store(
+      5u,
+      spatial_directory[SS_EXACT_NEAR_HEADER_CELL_COUNT]
+    );
+    thermal_source_cell_batch_store(
+      6u,
+      THERMAL_SOURCE_CELL_BATCH_CELL_CAPACITY
+    );
+    thermal_source_cell_batch_store(
+      7u,
+      THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY
+    );
+    thermal_source_cell_batch_store(
+      8u,
+      THERMAL_SOURCE_CELL_BATCH_ROW_WORDS
+    );
+    thermal_source_cell_batch_store(
+      9u,
+      THERMAL_SOURCE_CELL_BATCH_WORD_LENGTH
+    );
+    thermal_source_cell_batch_store(
+      10u,
+      THERMAL_SOURCE_CELL_BATCH_INVERSE_OFFSET
+    );
+    thermal_source_cell_batch_store(
+      11u,
+      THERMAL_SOURCE_CELL_BATCH_ROW_STATE_OFFSET
+    );
+    thermal_source_cell_batch_store(
+      12u,
+      THERMAL_SOURCE_CELL_BATCH_BITSET_OFFSET
+    );
+    thermal_source_cell_batch_store(16u, 1u);
+    thermal_source_cell_batch_store(17u, 1u);
+    thermal_source_cell_batch_store(18u, 1u);
+  }
+  if (index < THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY) {
+    thermal_source_cell_batch_store(
+      THERMAL_SOURCE_CELL_BATCH_INVERSE_OFFSET + index,
+      THERMAL_SOURCE_CELL_BATCH_INVALID
+    );
+  }
+  if (index < THERMAL_SOURCE_CELL_BATCH_CELL_CAPACITY) {
+    thermal_source_cell_batch_store(
+      THERMAL_SOURCE_CELL_BATCH_ROW_STATE_OFFSET + index,
+      0u
+    );
+  }
+}
+
+@compute @workgroup_size(64)
+fn materialize_source_cell_projection(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let ordinal = global_id.x;
+  if (
+    !thermal_source_cell_batch_static_header_admitted()
+    || thermal_source_cell_batch_load(2u)
+      != THERMAL_SOURCE_CELL_BATCH_BUILDING
+    || !ss_exact_near_directory_admitted(conduction_expectation)
+    || !ss_exact_cell_tree_admitted(conduction_expectation)
+  ) {
+    if (ordinal == 0u) {
+      thermal_source_cell_batch_add(25u, 1u);
+    }
+    return;
+  }
+  let projection_mode = thermal_params.active_member_projection_enabled;
+  let expected_active_count = atomicLoad(
+    &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+  );
+  var source_rank = THERMAL_SOURCE_CELL_BATCH_INVALID;
+  if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE) {
+    if (ordinal >= thermal_params.particle_count) { return; }
+    source_rank = ordinal;
+  } else if (
+    projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL
+  ) {
+    if (ordinal >= thermal_params.particle_count) { return; }
+    let sidecar_word = thermal_active_source_rank_sidecar_word(ordinal);
+    if (sidecar_word >= arrayLength(&thermal_derived)) {
+      thermal_source_cell_batch_add(25u, 1u);
+      return;
+    }
+    source_rank = atomicLoad(&thermal_derived[sidecar_word]);
+    if (source_rank == THERMAL_SOURCE_CELL_BATCH_INVALID) { return; }
+    if (source_rank != ordinal) {
+      thermal_source_cell_batch_add(25u, 1u);
+      return;
+    }
+  } else if (
+    projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE
+  ) {
+    if (ordinal >= expected_active_count) { return; }
+    let lookup = thermal_active_source_rank_at_ordinal(ordinal);
+    if (lookup.admitted == 0u) {
+      thermal_source_cell_batch_add(25u, 1u);
+      return;
+    }
+    source_rank = lookup.source_rank;
+    let sidecar_word = thermal_active_source_rank_sidecar_word(ordinal);
+    if (sidecar_word >= arrayLength(&thermal_derived)) {
+      thermal_source_cell_batch_add(25u, 1u);
+      return;
+    }
+    atomicStore(&thermal_derived[sidecar_word], source_rank);
+    atomicAdd(
+      &thermal_derived[THERMAL_ACTIVE_SOURCE_RANK_COUNT_WORD],
+      1u
+    );
+  } else if (
+    projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+  ) {
+    if (ordinal >= expected_active_count) { return; }
+    let lookup = thermal_active_rank_view_source_at_ordinal(
+      ordinal,
+      false
+    );
+    if (lookup.admitted == 0u) {
+      thermal_source_cell_batch_add(25u, 1u);
+      return;
+    }
+    source_rank = lookup.source_rank;
+    let sidecar_word = thermal_active_source_rank_sidecar_word(ordinal);
+    if (sidecar_word >= arrayLength(&thermal_derived)) {
+      thermal_source_cell_batch_add(25u, 1u);
+      return;
+    }
+    atomicStore(&thermal_derived[sidecar_word], source_rank);
+  } else {
+    thermal_source_cell_batch_add(25u, 1u);
+    return;
+  }
+  let source_lookup = ss_exact_near_source_at_member(
+    conduction_expectation,
+    source_rank
+  );
+  if (
+    source_rank >= THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY
+    || source_lookup.admitted == 0u
+  ) {
+    thermal_source_cell_batch_add(25u, 1u);
+    return;
+  }
+  let inverse_word = THERMAL_SOURCE_CELL_BATCH_INVERSE_OFFSET
+    + source_rank;
+  let previous = atomicExchange(
+    &thermal_source_cell_batch[inverse_word],
+    ordinal
+  );
+  if (previous != THERMAL_SOURCE_CELL_BATCH_INVALID) {
+    thermal_source_cell_batch_add(25u, 1u);
+    return;
+  }
+  thermal_source_cell_batch_add(24u, 1u);
+}
+
+@compute @workgroup_size(64)
+fn build_source_cell_batch(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let index = global_id.x;
+  if (
+    !thermal_source_cell_batch_static_header_admitted()
+    || thermal_source_cell_batch_load(2u)
+      != THERMAL_SOURCE_CELL_BATCH_BUILDING
+    || !ss_exact_near_directory_admitted(conduction_expectation)
+    || !ss_exact_cell_tree_admitted(conduction_expectation)
+  ) {
+    if (index == 0u) {
+      thermal_source_cell_batch_add(21u, 1u);
+      thermal_source_cell_batch_add(23u, 1u);
+    }
+    return;
+  }
+  if (index < THERMAL_SOURCE_CELL_BATCH_NODE_CAPACITY) {
+    if (thermal_source_cell_validate_node(index)) {
+      thermal_source_cell_batch_add(20u, 1u);
+    } else {
+      thermal_source_cell_batch_add(21u, 1u);
+    }
+  }
+  let cell_count = exact_near_cell_tree[18u];
+  if (index >= cell_count) { return; }
+  let row_state_word = THERMAL_SOURCE_CELL_BATCH_ROW_STATE_OFFSET + index;
+  if (thermal_source_cell_build_row(index)) {
+    thermal_source_cell_batch_store(
+      row_state_word,
+      THERMAL_SOURCE_CELL_BATCH_ROW_READY
+    );
+    thermal_source_cell_batch_add(22u, 1u);
+  } else {
+    thermal_source_cell_batch_store(
+      row_state_word,
+      THERMAL_SOURCE_CELL_BATCH_ROW_REJECTED
+    );
+    thermal_source_cell_batch_add(23u, 1u);
+  }
+}
+
+@compute @workgroup_size(1)
+fn finalize_source_cell_batch() {
+  let cell_count = spatial_directory[SS_EXACT_NEAR_HEADER_CELL_COUNT];
+  let projection_mode = thermal_params.active_member_projection_enabled;
+  let expected_projected_count = select(
+    atomicLoad(
+      &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+    ),
+    thermal_params.particle_count,
+    projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE
+  );
+  let maximum_members = thermal_source_cell_batch_load(26u);
+  var admitted = thermal_source_cell_batch_static_header_admitted()
+    && thermal_source_cell_batch_load(2u)
+      == THERMAL_SOURCE_CELL_BATCH_BUILDING
+    && ss_exact_near_directory_admitted(conduction_expectation)
+    && ss_exact_near_directory_admitted(radiation_expectation)
+    && ss_exact_cell_tree_admitted(conduction_expectation)
+    && ss_exact_cell_tree_admitted(radiation_expectation)
+    && atomicLoad(&thermal_derived[1u]) == 0u
+    && thermal_source_cell_batch_load(20u)
+      == THERMAL_SOURCE_CELL_BATCH_NODE_CAPACITY
+    && thermal_source_cell_batch_load(21u) == 0u
+    && thermal_source_cell_batch_load(22u) == cell_count
+    && thermal_source_cell_batch_load(23u) == 0u
+    && thermal_source_cell_batch_load(24u) == expected_projected_count
+    && thermal_source_cell_batch_load(25u) == 0u
+    && maximum_members > 0u
+    && maximum_members <= THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY
+    && cell_count > 0u
+    && cell_count <= THERMAL_SOURCE_CELL_BATCH_CELL_CAPACITY;
+  if (projection_mode != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE) {
+    admitted = admitted
+      && thermal_active_member_projection_admitted()
+      && atomicLoad(
+        &thermal_derived[THERMAL_ACTIVE_SOURCE_RANK_COUNT_WORD]
+      ) == expected_projected_count;
+  }
+  if (!admitted) {
+    thermal_source_cell_batch_store(
+      2u,
+      THERMAL_SOURCE_CELL_BATCH_REJECTED
+    );
+    thermal_source_cell_batch_store(16u, 1u);
+    thermal_source_cell_batch_store(17u, 1u);
+    thermal_source_cell_batch_store(18u, 1u);
+    return;
+  }
+  thermal_source_cell_batch_store(16u, cell_count);
+  thermal_source_cell_batch_store(
+    17u,
+    (maximum_members + 63u) / 64u
+  );
+  thermal_source_cell_batch_store(18u, 1u);
+  thermal_source_cell_batch_store(
+    2u,
+    THERMAL_SOURCE_CELL_BATCH_READY
+  );
+}
+`;
+}
+
+function createThermalSourceCellBatchTraversalWgsl({
+  memberTraversalWgsl,
+  observeTraversalCounters
+}) {
+  const counterDeclarations = observeTraversalCounters
+    ? /* wgsl */ `
+  var source_cell_bitset_words = 0u;
+  var source_cell_admitted_cells = 0u;
+  var source_cell_target_members = 0u;`
+    : '';
+  const bitsetCounter = observeTraversalCounters
+    ? /* wgsl */ `
+    if (!thermal_add_local(&source_cell_bitset_words, 1u)) {
+      local_count_overflow = true;
+      malformed = true;
+      break;
+    }`
+    : '';
+  const cellCounter = observeTraversalCounters
+    ? /* wgsl */ `
+    if (!thermal_add_local(&source_cell_admitted_cells, 1u)) {
+      local_count_overflow = true;
+      malformed = true;
+      break;
+    }`
+    : '';
+  const memberCounter = observeTraversalCounters
+    ? /* wgsl */ `
+          if (!thermal_add_local(
+            &source_cell_target_members,
+            member_range.end - member_range.begin
+          )) {
+            local_count_overflow = true;
+            malformed = true;
+            break;
+          }`
+    : '';
+  const counterFlush = observeTraversalCounters
+    ? /* wgsl */ `
+  let source_cell_counter_base = select(37u, 33u, budget_mode);
+  if (
+    !thermal_source_cell_batch_add(
+      source_cell_counter_base,
+      source_cell_bitset_words
+    )
+    || !thermal_source_cell_batch_add(
+      source_cell_counter_base + 1u,
+      source_cell_admitted_cells
+    )
+    || !thermal_source_cell_batch_add(
+      source_cell_counter_base + 2u,
+      source_cell_target_members
+    )
+  ) {
+    local_count_overflow = true;
+    malformed = true;
+  }`
+    : '';
+  return /* wgsl */ `  let source_cell_lookup = ss_exact_near_cell_for_source(
+    conduction_expectation,
+    particle_index
+  );
+  if (
+    source_cell_lookup.admitted == 0u
+    || source_cell_lookup.source_index
+      >= THERMAL_SOURCE_CELL_BATCH_CELL_CAPACITY
+    || thermal_source_cell_batch_load(
+      THERMAL_SOURCE_CELL_BATCH_ROW_STATE_OFFSET
+        + source_cell_lookup.source_index
+    ) != THERMAL_SOURCE_CELL_BATCH_ROW_READY
+  ) {
+    malformed = true;
+  }
+  let source_cell_index = source_cell_lookup.source_index;
+  let directory_pos_mass = directory_position_state[particle_index * 2u];
+${counterDeclarations}
+  for (
+    var source_cell_word = 0u;
+    source_cell_word < THERMAL_SOURCE_CELL_BATCH_ROW_WORDS
+      && !malformed;
+    source_cell_word = source_cell_word + 1u
+  ) {${bitsetCounter}
+    let bitset_word_index = THERMAL_SOURCE_CELL_BATCH_BITSET_OFFSET
+      + source_cell_index * THERMAL_SOURCE_CELL_BATCH_ROW_WORDS
+      + source_cell_word;
+    if (bitset_word_index >= THERMAL_SOURCE_CELL_BATCH_WORD_LENGTH) {
+      malformed = true;
+      break;
+    }
+    let candidate_bits = thermal_source_cell_batch_load(bitset_word_index);
+    for (var bit = 0u; bit < 32u; bit = bit + 1u) {
+      if ((candidate_bits & (1u << bit)) == 0u) { continue; }
+      let cell_index = source_cell_word * 32u + bit;
+      if (cell_index >= exact_near_cell_tree[18u]) {
+        malformed = true;
+        break;
+      }
+      let cell_chart = ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        0u
+      );
+      let cell_level_order = ss_exact_near_cell_key_word(
+        conduction_expectation,
+        cell_index,
+        1u
+      );
+      let minimum_level_order = ss_exact_near_signed_order_key(
+        conduction_expectation.min_level
+      );
+      if (
+        cell_chart != conduction_expectation.chart_id
+        || cell_level_order < minimum_level_order
+        || cell_level_order - minimum_level_order
+          >= conduction_expectation.level_count
+      ) {
+        continue;
+      }
+      let level_ordinal = cell_level_order - minimum_level_order;
+      if (!ss_exact_near_level_occupied(
+        conduction_expectation,
+        level_ordinal
+      )) {
+        continue;
+      }
+      let level = bitcast<i32>(cell_level_order ^ 0x80000000u);
+      let spacing_m = conduction_expectation.base_grid_spacing_m
+        * exp2(f32(level));
+      if (!ss_exact_near_finite(spacing_m) || spacing_m <= 0.0) {
+        malformed = true;
+        break;
+      }
+      let center_cell = vec3<i32>(floor(directory_pos_mass.xyz / spacing_m));
+      let radius_cells = max(
+        0,
+        i32(min(
+          ceil(directory_query_radius_m / spacing_m) + 1.0,
+          2147483520.0
+        ))
+      );
+      let minimum_cell = vec3<i32>(
+        ss_exact_near_saturating_sub_radius(center_cell.x, radius_cells),
+        ss_exact_near_saturating_sub_radius(center_cell.y, radius_cells),
+        ss_exact_near_saturating_sub_radius(center_cell.z, radius_cells)
+      );
+      let maximum_cell = vec3<i32>(
+        ss_exact_near_saturating_add_radius(center_cell.x, radius_cells),
+        ss_exact_near_saturating_add_radius(center_cell.y, radius_cells),
+        ss_exact_near_saturating_add_radius(center_cell.z, radius_cells)
+      );
+      let cell_order = vec3<u32>(
+        ss_exact_near_cell_key_word(
+          conduction_expectation,
+          cell_index,
+          2u
+        ),
+        ss_exact_near_cell_key_word(
+          conduction_expectation,
+          cell_index,
+          3u
+        ),
+        ss_exact_near_cell_key_word(
+          conduction_expectation,
+          cell_index,
+          4u
+        )
+      );
+      let minimum_order = vec3<u32>(
+        ss_exact_near_signed_order_key(minimum_cell.x),
+        ss_exact_near_signed_order_key(minimum_cell.y),
+        ss_exact_near_signed_order_key(minimum_cell.z)
+      );
+      let maximum_order = vec3<u32>(
+        ss_exact_near_signed_order_key(maximum_cell.x),
+        ss_exact_near_signed_order_key(maximum_cell.y),
+        ss_exact_near_signed_order_key(maximum_cell.z)
+      );
+      if (
+        any(cell_order < minimum_order)
+        || any(cell_order > maximum_order)
+      ) {
+        continue;
+      }${cellCounter}
+${memberTraversalWgsl}${memberCounter}
+      if (malformed) { break; }
+    }
+  }${counterFlush}
+`;
+}
+
+function createThermalSourceCellBatchEntryPointsWgsl({
+  observeTraversalCounters
+}) {
+  const sourceRowCounter = observeTraversalCounters === true
+    ? /* wgsl */ `
+  thermal_source_cell_batch_add(
+    select(36u, 32u, budget_mode),
+    1u
+  );`
+    : '';
+  return /* wgsl */ `
+fn thermal_source_cell_global_projection_admitted() -> bool {
+  let projection_mode = thermal_params.active_member_projection_enabled;
+  if (atomicLoad(&thermal_derived[1u]) != 0u) { return false; }
+  if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE) {
+    return true;
+  }
+  let expected_active_count = atomicLoad(
+    &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+  );
+  return thermal_active_member_projection_admitted()
+    && atomicLoad(
+      &thermal_derived[THERMAL_CURRENT_ACTIVE_SOURCE_COUNT_WORD]
+    ) == expected_active_count
+    && atomicLoad(
+      &thermal_derived[THERMAL_ACTIVE_SOURCE_RANK_COUNT_WORD]
+    ) == expected_active_count;
+}
+
+fn thermal_source_cell_source_rank(
+  workgroup_id: vec3<u32>,
+  local_invocation_index: u32,
+  num_workgroups: vec3<u32>
+) -> ThermalActiveSourceRankLookup {
+  if (
+    workgroup_id.z != 0u
+    || num_workgroups.z != 1u
+    || num_workgroups.x != thermal_source_cell_batch_load(16u)
+    || num_workgroups.y != thermal_source_cell_batch_load(17u)
+    || workgroup_id.x >= exact_near_cell_tree[18u]
+    || workgroup_id.y > (0xffffffffu - local_invocation_index) / 64u
+  ) {
+    return thermal_invalid_active_source_rank();
+  }
+  let range = ss_exact_near_cell_member_range(
+    conduction_expectation,
+    workgroup_id.x
+  );
+  if (range.admitted == 0u) {
+    return thermal_invalid_active_source_rank();
+  }
+  let local_member = workgroup_id.y * 64u + local_invocation_index;
+  if (local_member >= range.end - range.begin) {
+    return thermal_invalid_active_source_rank();
+  }
+  return ThermalActiveSourceRankLookup(1u, range.begin + local_member);
+}
+
+fn thermal_source_cell_rank_is_projected(source_rank: u32) -> bool {
+  let projection_mode = thermal_params.active_member_projection_enabled;
+  if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE) {
+    return true;
+  }
+  if (source_rank >= THERMAL_SOURCE_CELL_BATCH_SOURCE_CAPACITY) {
+    return false;
+  }
+  let ordinal = thermal_source_cell_batch_load(
+    THERMAL_SOURCE_CELL_BATCH_INVERSE_OFFSET + source_rank
+  );
+  if (
+    projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL
+  ) {
+    if (
+      source_rank >= thermal_params.particle_count
+      || ordinal != source_rank
+    ) {
+      return false;
+    }
+    let local_sidecar_word =
+      thermal_active_source_rank_sidecar_word(source_rank);
+    return local_sidecar_word < arrayLength(&thermal_derived)
+      && atomicLoad(&thermal_derived[local_sidecar_word]) == source_rank;
+  }
+  let expected_active_count = atomicLoad(
+    &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+  );
+  if (ordinal >= expected_active_count) { return false; }
+  let sidecar_word = thermal_active_source_rank_sidecar_word(ordinal);
+  return sidecar_word < arrayLength(&thermal_derived)
+    && atomicLoad(&thermal_derived[sidecar_word]) == source_rank;
+}
+
+fn thermal_source_cell_fail_global() {
+  let source_count = thermal_params.particle_count;
+  thermal_evidence_add(0u, source_count, true);
+  thermal_evidence_add(0u, source_count, false);
+  thermal_evidence_add(2u, source_count, true);
+  thermal_evidence_add(2u, source_count, false);
+  thermal_evidence_add(5u, source_count, true);
+  thermal_evidence_add(5u, source_count, false);
+  atomicAdd(&thermal_proposals[6u], source_count);
+  atomicAdd(&thermal_proposals[7u], source_count);
+}
+
+fn thermal_source_cell_dispatch(
+  budget_mode: bool,
+  workgroup_id: vec3<u32>,
+  local_invocation_index: u32,
+  num_workgroups: vec3<u32>
+) {
+  let batch_ready = thermal_source_cell_batch_admitted(
+    conduction_expectation
+  ) && thermal_source_cell_batch_admitted(radiation_expectation);
+  if (!batch_ready || !thermal_source_cell_global_projection_admitted()) {
+    if (
+      workgroup_id.x == 0u
+      && workgroup_id.y == 0u
+      && local_invocation_index == 0u
+    ) {
+      thermal_source_cell_fail_global();
+    }
+    return;
+  }
+  let source_rank_lookup = thermal_source_cell_source_rank(
+    workgroup_id,
+    local_invocation_index,
+    num_workgroups
+  );
+  let uniform = thermal_uniform_completion_admitted();
+  if (uniform) {
+    let projection_mode = thermal_params.active_member_projection_enabled;
+    if (
+      workgroup_id.x == 0u
+      && workgroup_id.y == 0u
+      && local_invocation_index == 0u
+    ) {
+      thermal_record_uniform_completion(budget_mode);
+    }
+    if (
+      !budget_mode
+      && source_rank_lookup.admitted != 0u
+      && (
+        projection_mode
+            != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+        || thermal_source_cell_rank_is_projected(
+          source_rank_lookup.source_rank
+        )
+      )
+    ) {
+      let source = ss_exact_near_source_at_member(
+        conduction_expectation,
+        source_rank_lookup.source_rank
+      );
+      if (source.admitted == 0u) {
+        thermal_fail_active_source_rank_lookup();
+        return;
+      }
+      thermal_publish_uniform_completion_row(source.source_index);
+    }
+    return;
+  }
+  if (
+    workgroup_id.x == 0u
+    && workgroup_id.y == 0u
+    && local_invocation_index == 0u
+    && thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE
+  ) {
+    thermal_bulk_dormant_projection_evidence(
+      atomicLoad(
+        &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+      ),
+      budget_mode
+    );
+  }
+  if (
+    source_rank_lookup.admitted == 0u
+    || !thermal_source_cell_rank_is_projected(
+      source_rank_lookup.source_rank
+    )
+  ) {
+    return;
+  }
+${sourceRowCounter}
+  thermal_traverse_exact_source_rank(
+    source_rank_lookup.source_rank,
+    budget_mode,
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+  );
+}
+
+@compute @workgroup_size(64)
+fn budget(
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(local_invocation_index) local_invocation_index: u32,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+  thermal_source_cell_dispatch(
+    true,
+    workgroup_id,
+    local_invocation_index,
+    num_workgroups
+  );
+}
+
+@compute @workgroup_size(64)
+fn propose(
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(local_invocation_index) local_invocation_index: u32,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+  thermal_source_cell_dispatch(
+    false,
+    workgroup_id,
+    local_invocation_index,
+    num_workgroups
+  );
+}
+`;
+}
+
+export function createSchroederSpatialThermalSourceCellTreeShadowWgslForNativeTest({
+  sourceCapacity,
+  cellCapacity,
+  nodeCapacity,
+  observeTraversalCounters = true
+} = {}) {
+  const plan = Object.freeze({
+    sourceCapacity: exactU32(
+      sourceCapacity,
+      'thermal source-cell WGSL sourceCapacity',
+      { positive: true }
+    ),
+    cellCapacity: exactU32(
+      cellCapacity,
+      'thermal source-cell WGSL cellCapacity',
+      { positive: true }
+    ),
+    nodeCapacity: exactU32(
+      nodeCapacity,
+      'thermal source-cell WGSL nodeCapacity',
+      { positive: true }
+    )
+  });
+  const bitsetRowWords = Math.ceil(plan.cellCapacity / 32);
+  const inverseSourceRankOffsetWords = THERMAL_SOURCE_CELL_BATCH_HEADER_WORDS;
+  const cellRowStateOffsetWords =
+    inverseSourceRankOffsetWords + plan.sourceCapacity;
+  const bitsetOffsetWords = cellRowStateOffsetWords + plan.cellCapacity;
+  const wordLength =
+    bitsetOffsetWords + plan.cellCapacity * bitsetRowWords;
+  for (const [value, label] of [
+    [bitsetRowWords, 'bitsetRowWords'],
+    [cellRowStateOffsetWords, 'cellRowStateOffsetWords'],
+    [bitsetOffsetWords, 'bitsetOffsetWords'],
+    [wordLength, 'wordLength']
+  ]) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > 0xffff_ffff) {
+      throw new RangeError(
+        `thermal source-cell WGSL ${label} exceeds the u32 address space`
+      );
+    }
+  }
+  const wgslPlan = Object.freeze({
+    ...plan,
+    bitsetRowWords,
+    inverseSourceRankOffsetWords,
+    cellRowStateOffsetWords,
+    bitsetOffsetWords,
+    wordLength
+  });
+  let source = schroederSpatialThermalProposalWgsl;
+  const memberStartNeedle =
+    '          let member_range = ss_exact_near_cell_member_range(';
+  const memberEndNeedle = `          if (malformed) { break; }
+        }
+        if (malformed) { break; }
+        y_cursor = y_end;`;
+  const memberSection = singleWgslSection(
+    source,
+    memberStartNeedle,
+    memberEndNeedle,
+    'source-cell canonical member traversal'
+  );
+  const memberTraversalWgsl = source.slice(
+    memberSection.start,
+    memberSection.end
+      + '          if (malformed) { break; }\n'.length
+  );
+  const directoryStartNeedle = `  for (
+    var level_ordinal = 0u;
+    level_ordinal < conduction_expectation.level_count;`;
+  const directoryEndNeedle =
+    '  // ULG_THERMAL_CANDIDATE_CSR_FINALIZE_CAPTURE_BEGIN';
+  const directorySection = singleWgslSection(
+    source,
+    directoryStartNeedle,
+    directoryEndNeedle,
+    'source-cell direct directory traversal'
+  );
+  source = source.slice(0, directorySection.start)
+    + createThermalSourceCellBatchTraversalWgsl({
+        memberTraversalWgsl,
+        observeTraversalCounters: observeTraversalCounters === true
+      })
+    + source.slice(directorySection.end);
+
+  if (!source.includes(spatialThermalExactEntryPointsWgsl)) {
+    throw new Error('Unable to replace native source-cell thermal entrypoints');
+  }
+  const exactBudgetEntryOffset = spatialThermalExactEntryPointsWgsl.indexOf(
+    '@compute @workgroup_size(64)\nfn budget('
+  );
+  if (exactBudgetEntryOffset < 0) {
+    throw new Error(
+      'Unable to retain native source-cell exact traversal helpers'
+    );
+  }
+  source = source.replace(
+    spatialThermalExactEntryPointsWgsl,
+    spatialThermalExactEntryPointsWgsl.slice(0, exactBudgetEntryOffset)
+      + createThermalSourceCellBatchEntryPointsWgsl({
+          observeTraversalCounters: observeTraversalCounters === true
+        })
+  );
+  const unusedBinding =
+    '@group(0) @binding(12) var<storage, read_write> thermal_csr_unused: array<atomic<u32>>;';
+  const binding13 =
+    '@group(0) @binding(13) var<storage, read_write> thermal_csr_control_and_peers: array<atomic<u32>>;';
+  if (!source.includes(unusedBinding) || !source.includes(binding13)) {
+    throw new Error('Unable to bind the native thermal source-cell tree shadow');
+  }
+  source = source.replace(
+    unusedBinding,
+    '@group(0) @binding(12) var<storage, read> exact_near_cell_tree: array<u32>;'
+  );
+  source = source.replace(
+    binding13,
+    `${binding13}
+@group(0) @binding(14) var<storage, read_write> thermal_source_cell_batch: array<atomic<u32>>;`
+  );
+  const constantsNeedle = 'const THERMAL_PROPOSAL_HEADER_WORDS: u32 = ';
+  const constantsOffset = source.indexOf(constantsNeedle);
+  if (constantsOffset < 0) {
+    throw new Error('Unable to install native source-cell traversal helpers');
+  }
+  for (const expectationName of [
+    'conduction_expectation',
+    'radiation_expectation'
+  ]) {
+    const directoryAdmission =
+      `&& ss_exact_near_directory_admitted(${expectationName})`;
+    if (!source.includes(directoryAdmission)) {
+      throw new Error(
+        `Unable to strengthen native source-cell admission for ${expectationName}`
+      );
+    }
+    source = source.replaceAll(
+      directoryAdmission,
+      `${directoryAdmission}
+    && ss_exact_cell_tree_admitted(${expectationName})
+    && thermal_source_cell_batch_admitted(${expectationName})`
+    );
+  }
+  source = source.slice(0, constantsOffset)
+    + thermalExactCellTreeTraversalWgsl
+    + createThermalSourceCellBatchControlWgsl(wgslPlan, {
+        observeTraversalCounters: observeTraversalCounters === true
+      })
+    + source.slice(constantsOffset);
+  return source;
+}
+
 export function createSchroederSpatialThermalExhaustiveShadowWgslForNativeTest() {
   let source = schroederSpatialThermalProposalWgsl;
   const directoryStartNeedle = `  for (
@@ -6690,7 +8185,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
       'seal'
     );
   const resolveNativeTestTreeShadowBinding = (phase) => {
-    const treeShadow = artifactRecord.nativeTestTreeShadow;
+    const sourceCellTreeShadow =
+      artifactRecord.nativeTestSourceCellTreeShadow;
+    const treeShadow = sourceCellTreeShadow
+      || artifactRecord.nativeTestTreeShadow;
     if (!treeShadow) return null;
     const treeAdmission =
       resolveSchroederSpatialExactNearCellTreeForConsumer(
@@ -6698,13 +8196,25 @@ export function runSchroederSpatialThermalProposalWebGpu({
         {
           device,
           spatialExecution: execution,
-          supportProfileId: null
+          supportProfileId: null,
+          consumerLease: sourceCellTreeShadow?.treeConsumerLease
         }
       );
     if (
       treeAdmission.ready !== true
       || treeAdmission.tree !== treeShadow.tree
       || treeAdmission.treeBuffer !== treeShadow.treeBuffer
+      || (
+        sourceCellTreeShadow
+        && (
+          treeAdmission.consumerLease
+            !== sourceCellTreeShadow.treeConsumerLease
+          || !ownsSchroederSpatialEpochGenerationConsumerLease(
+            sourceCellTreeShadow.generationConsumerLease,
+            artifactRecord.generation
+          )
+        )
+      )
     ) {
       const error = new Error(
         `Native thermal tree shadow became stale before matched-time ${phase}`
@@ -6719,7 +8229,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
     currentStateBuffer,
     currentThermoBuffer
   }) => {
-    const treeShadow = artifactRecord.nativeTestTreeShadow;
+    const sourceCellTreeShadow =
+      artifactRecord.nativeTestSourceCellTreeShadow;
+    const treeShadow = sourceCellTreeShadow
+      || artifactRecord.nativeTestTreeShadow;
     const treeShadowBindBuffer =
       resolveNativeTestTreeShadowBinding('binding');
     const derivedEntries = [
@@ -6808,7 +8321,14 @@ export function runSchroederSpatialThermalProposalWebGpu({
             resource: { buffer: treeShadowBindBuffer }
           },
           candidateCsrEntries[2],
-          ...(treeShadow.observeTraversalCounters
+          ...(sourceCellTreeShadow
+            ? [{
+                binding: 14,
+                resource: {
+                  buffer: sourceCellTreeShadow.batchBuffer
+                }
+              }]
+            : treeShadow.observeTraversalCounters
             ? [{
                 binding: 14,
                 resource: { buffer: treeShadow.diagnosticBuffer }
@@ -6837,6 +8357,14 @@ export function runSchroederSpatialThermalProposalWebGpu({
     const thermalCandidateCsrSealBindGroup = candidateCsrControlBindGroup(
       thermalCandidateCsrSealPipeline
     );
+    const sourceCellControlBindGroup = (pipelineInfo) => (
+      !pipelineInfo || !sourceCellTreeShadow
+        ? null
+        : device.createBindGroup({
+            layout: pipelineInfo.bindGroupLayout,
+            entries: [...proposalEntries, ...traversalEntries]
+          })
+    );
     return Object.freeze({
       derivedBindGroup,
       activeDispatchFinalizeBindGroup,
@@ -6844,7 +8372,19 @@ export function runSchroederSpatialThermalProposalWebGpu({
       budgetBindGroup,
       proposalBindGroup,
       thermalCandidateCsrValidateBindGroup,
-      thermalCandidateCsrSealBindGroup
+      thermalCandidateCsrSealBindGroup,
+      sourceCellInitializeBindGroup: sourceCellControlBindGroup(
+        sourceCellTreeShadow?.initializePipeline
+      ),
+      sourceCellProjectionBindGroup: sourceCellControlBindGroup(
+        sourceCellTreeShadow?.projectionPipeline
+      ),
+      sourceCellBuildBindGroup: sourceCellControlBindGroup(
+        sourceCellTreeShadow?.buildPipeline
+      ),
+      sourceCellFinalizeBindGroup: sourceCellControlBindGroup(
+        sourceCellTreeShadow?.finalizePipeline
+      )
     });
   };
   const workgroups = Math.max(1, Math.ceil(particleCount / WORKGROUP_SIZE));
@@ -6922,6 +8462,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     thermalCandidateCsrValidatePipeline,
     thermalCandidateCsrSealPipeline,
     nativeTestTreeShadow: null,
+    nativeTestSourceCellTreeShadow: null,
     nativeTestExhaustiveShadow: null,
     resolveNativeTestTreeShadowBinding,
     createMatchedTimeBindGroups,
@@ -6937,6 +8478,61 @@ export function runSchroederSpatialThermalProposalWebGpu({
     );
     if (sourceAuthorityRecord) sourceAuthorityRecord.active = false;
     artifactRecord.nativeTestTreeShadow?.diagnosticBuffer?.destroy?.();
+    const sourceCellTreeShadow =
+      artifactRecord.nativeTestSourceCellTreeShadow;
+    sourceCellTreeShadow?.batchBuffer?.destroy?.();
+    sourceCellTreeShadow?.dispatchBuffer?.destroy?.();
+    const treeConsumerLease = sourceCellTreeShadow?.treeConsumerLease;
+    const generationConsumerLease =
+      sourceCellTreeShadow?.generationConsumerLease;
+    const treeRuntime = sourceCellTreeShadow?.tree?.ownerRuntime;
+    const treeLeaseActive = Boolean(
+      treeConsumerLease
+      && treeRuntime?.ownsExecutionConsumerLease?.(
+        treeConsumerLease,
+        sourceCellTreeShadow.tree
+      )
+    );
+    const generationLeaseActive = Boolean(
+      generationConsumerLease
+      && ownsSchroederSpatialEpochGenerationConsumerLease(
+        generationConsumerLease,
+        artifactRecord.generation
+      )
+    );
+    if (treeLeaseActive || generationLeaseActive) {
+      if (
+        artifactRecord.submissionObserved
+        && !lostThermalProposalDevices.has(device)
+      ) {
+        const submissionFence = device.queue.onSubmittedWorkDone();
+        if (treeLeaseActive) {
+          treeRuntime.releaseExecutionConsumerLeaseAfter(
+            treeConsumerLease,
+            submissionFence
+          );
+        }
+        if (generationLeaseActive) {
+          releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+            generationConsumerLease,
+            submissionFence
+          );
+        }
+      } else {
+        if (treeLeaseActive) {
+          treeRuntime.releaseExecutionConsumerLease(
+            treeConsumerLease,
+            { discardedEncoder: true }
+          );
+        }
+        if (generationLeaseActive) {
+          releaseSchroederSpatialEpochGenerationConsumerLease(
+            generationConsumerLease,
+            { discardedEncoder: true }
+          );
+        }
+      }
+    }
     entry.inUseGenerationId = null;
     entry.releaseScheduled = false;
     return true;
@@ -7190,6 +8786,7 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
     || record.encoded
     || record.lifecycleStatus !== 'prepared'
     || record.nativeTestTreeShadow
+    || record.nativeTestSourceCellTreeShadow
     || record.nativeTestExhaustiveShadow
   ) {
     throw new Error(
@@ -7316,6 +8913,281 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
 }
 
 /**
+ * Native-test-only S9D-5 control. It builds a sealed source-cell candidate
+ * bitset by traversing the exact same immutable tree once per canonical cell,
+ * then dispatches source-cell x 64-member-chunk workgroups. The production
+ * direct traversal is neither selected nor retained as a failure route.
+ */
+export function armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+  device,
+  schroederSpatialThermalProposal,
+  observeTraversalCounters = true
+} = {}) {
+  const artifact = schroederSpatialThermalProposal;
+  const record = thermalProposalArtifacts.get(artifact);
+  if (!record || record.artifact !== artifact) {
+    throw new TypeError(
+      'Native thermal source-cell tree shadow requires the exact runtime-issued proposal artifact'
+    );
+  }
+  if (device !== record.device || lostThermalProposalDevices.has(device)) {
+    throw new TypeError(
+      'Native thermal source-cell tree shadow requires the live proposal device'
+    );
+  }
+  if (
+    record.released
+    || record.releaseScheduled
+    || record.materialized
+    || record.encoded
+    || record.lifecycleStatus !== 'prepared'
+    || record.nativeTestTreeShadow
+    || record.nativeTestSourceCellTreeShadow
+    || record.nativeTestExhaustiveShadow
+  ) {
+    throw new Error(
+      'Native thermal source-cell tree shadow must arm one fresh prepared proposal exactly once'
+    );
+  }
+  if (
+    artifact.consumerAuthentications.length
+      !== SCHROEDER_SPATIAL_THERMAL_CONSUMERS.length
+    || artifact.consumerAuthentications.some((authentication) => (
+      authentication?.ready !== true
+      || authentication.authenticated !== true
+    ))
+  ) {
+    throw new Error(
+      'Native thermal source-cell tree shadow requires both authenticated thermal support profiles'
+    );
+  }
+  const treeAdmission = resolveSchroederSpatialExactNearCellTreeForConsumer(
+    record.generation?.exactNearCellTree,
+    {
+      device,
+      spatialExecution: record.execution,
+      supportProfileId: null
+    }
+  );
+  if (treeAdmission.ready !== true) {
+    const error = new Error(
+      `Native thermal source-cell tree shadow rejected exact-cell tree: ${
+        treeAdmission.status || 'unknown tree admission'
+      }`
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_THERMAL_SOURCE_CELL_TREE_SHADOW_ADMISSION';
+    throw error;
+  }
+  const sourceCapacity = exactU32(
+    treeAdmission.tree.sourceCapacity,
+    'native thermal source-cell tree sourceCapacity',
+    { positive: true }
+  );
+  const cellCapacity = exactU32(
+    treeAdmission.tree.layout?.cellCapacity,
+    'native thermal source-cell tree cellCapacity',
+    { positive: true }
+  );
+  const nodeCapacity = exactU32(
+    treeAdmission.tree.layout?.nodeCapacity,
+    'native thermal source-cell tree nodeCapacity',
+    { positive: true }
+  );
+  const plan = thermalSourceCellBatchPlan(device, {
+    sourceCapacity,
+    cellCapacity,
+    nodeCapacity
+  });
+  const observed = observeTraversalCounters === true;
+  const code =
+    createSchroederSpatialThermalSourceCellTreeShadowWgslForNativeTest({
+      sourceCapacity,
+      cellCapacity,
+      nodeCapacity,
+      observeTraversalCounters: observed
+    });
+  const treeRuntime = treeAdmission.tree.ownerRuntime;
+  if (
+    typeof treeRuntime?.acquireExecutionConsumerLease !== 'function'
+    || typeof treeRuntime?.releaseExecutionConsumerLease !== 'function'
+    || typeof treeRuntime?.releaseExecutionConsumerLeaseAfter !== 'function'
+  ) {
+    throw new Error(
+      'Native thermal source-cell tree shadow requires a spanning tree consumer lease'
+    );
+  }
+  const generationConsumerLease =
+    acquireSchroederSpatialEpochGenerationConsumerLease(
+      record.generation,
+      { consumerId: 's9d5-native-thermal-source-cell-tree-shadow' }
+    );
+  let treeConsumerLease = null;
+  try {
+    treeConsumerLease = treeRuntime.acquireExecutionConsumerLease(
+      treeAdmission.tree,
+      { consumerId: 's9d5-native-thermal-source-cell-tree-shadow' }
+    );
+  } catch (error) {
+    releaseSchroederSpatialEpochGenerationConsumerLease(
+      generationConsumerLease,
+      { discardedEncoder: true }
+    );
+    throw error;
+  }
+  let batchBuffer = null;
+  let dispatchBuffer = null;
+  const bindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'storage'),
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'uniform'),
+    computeBufferBinding(7, 'uniform'),
+    computeBufferBinding(8, 'uniform'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'read-only-storage'),
+    computeBufferBinding(11, 'storage'),
+    computeBufferBinding(12, 'read-only-storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(14, 'storage')
+  ];
+  const pipelineSpecs = [
+    ['initializePipeline', 'initialize_source_cell_batch', 'initialize'],
+    ['projectionPipeline', 'materialize_source_cell_projection', 'projection'],
+    ['buildPipeline', 'build_source_cell_batch', 'build'],
+    ['finalizePipeline', 'finalize_source_cell_batch', 'finalize'],
+    ['budgetPipeline', 'budget', 'budget'],
+    ['proposalPipeline', 'propose', 'proposal']
+  ];
+  const pipelines = {};
+  try {
+    batchBuffer = createBuffer(
+      device,
+      'ulg-native-test-s9d5-thermal-source-cell-batch',
+      plan.byteLength,
+      GPU_BUFFER_USAGE.STORAGE
+        | GPU_BUFFER_USAGE.INDIRECT
+        | GPU_BUFFER_USAGE.COPY_SRC
+        | GPU_BUFFER_USAGE.COPY_DST
+    );
+    dispatchBuffer = createBuffer(
+      device,
+      'ulg-native-test-s9d5-thermal-source-cell-dispatch',
+      3 * Uint32Array.BYTES_PER_ELEMENT,
+      GPU_BUFFER_USAGE.INDIRECT
+        | GPU_BUFFER_USAGE.COPY_SRC
+        | GPU_BUFFER_USAGE.COPY_DST
+    );
+    for (const [field, entryPoint, label] of pipelineSpecs) {
+      pipelines[field] = createCachedExplicitComputePipeline(device, {
+        cacheKey: `ulg-native-test-s9d5-thermal-source-cell-${label}.${
+          observed ? 'observed' : 'unobserved'
+        }.v1.${sourceCapacity}.${cellCapacity}.${nodeCapacity}`,
+        label: `ulg-native-test-s9d5-thermal-source-cell-${label}`,
+        code,
+        entryPoint,
+        bindings
+      });
+    }
+  } catch (error) {
+    batchBuffer?.destroy?.();
+    dispatchBuffer?.destroy?.();
+    treeRuntime.releaseExecutionConsumerLease(
+      treeConsumerLease,
+      { discardedEncoder: true }
+    );
+    releaseSchroederSpatialEpochGenerationConsumerLease(
+      generationConsumerLease,
+      { discardedEncoder: true }
+    );
+    throw error;
+  }
+  const receipt = Object.freeze({
+    schema:
+      'peercompute.ulg.native-test.s9d5-thermal-source-cell-tree-shadow.v0',
+    status: 'native-test-thermal-source-cell-tree-shadow-armed',
+    nativeTestOnly: true,
+    traversal: 'immutable-canonical-exact-cell-tree-source-cell-batched',
+    sourceAuthority: 'frozen-canonical-directory-cells-and-member-ranks',
+    envelope: 'authenticated-source-leaf-aabb-plus-global-r-plus-two-d',
+    targetFilter: 'canonical-per-source-exact-cell-key-cuboid',
+    ordering: 'ascending-canonical-target-cell-and-member-rank',
+    pairPredicate: 'unchanged-current-state-thermal-pair-law',
+    fallback: null,
+    generation: record.generation,
+    generationId: record.execution.generationId,
+    supportEpoch: record.execution.supportEpoch,
+    tree: treeAdmission.tree,
+    treeBuffer: treeAdmission.treeBuffer,
+    treeArenaIndex: treeAdmission.tree.arenaIndex,
+    treeArenaGeneration: treeAdmission.tree.arenaGeneration,
+    treeConsumerLease,
+    generationConsumerLease,
+    directoryBuffer: record.execution.directoryBuffer,
+    observeTraversalCounters: observed,
+    plan,
+    batchBuffer,
+    dispatchBuffer,
+    batchWordCount: plan.wordLength,
+    batchByteLength: plan.byteLength,
+    dispatchByteOffset: plan.dispatchByteOffset,
+    initializePipeline: pipelines.initializePipeline,
+    projectionPipeline: pipelines.projectionPipeline,
+    buildPipeline: pipelines.buildPipeline,
+    finalizePipeline: pipelines.finalizePipeline,
+    diagnosticLayout: Object.freeze([
+      'magic:u32',
+      'version:u32',
+      'status:atomic<u32>',
+      'generationId:u32',
+      'supportEpoch:u32',
+      'cellCount:u32',
+      'cellCapacity:u32',
+      'sourceCapacity:u32',
+      'bitsetRowWords:u32',
+      'wordLength:u32',
+      'inverseSourceRankOffsetWords:u32',
+      'cellRowStateOffsetWords:u32',
+      'bitsetOffsetWords:u32',
+      'reserved13:u32',
+      'reserved14:u32',
+      'reserved15:u32',
+      'dispatchX:u32',
+      'dispatchY:u32',
+      'dispatchZ:u32',
+      'reserved19:u32',
+      'validatedNodeCount:atomic<u32>',
+      'invalidNodeCount:atomic<u32>',
+      'builtCellRowCount:atomic<u32>',
+      'invalidCellRowCount:atomic<u32>',
+      'projectedSourceCount:atomic<u32>',
+      'projectionFailureCount:atomic<u32>',
+      'maximumSourceCellMemberCount:atomic<u32>',
+      'sourceCellTreeWalkCount:atomic<u32>',
+      'buildNodeVisitCount:atomic<u32>',
+      'buildIntersectingLeafCount:atomic<u32>',
+      'buildCandidateCellCount:atomic<u32>',
+      'reserved31:u32',
+      'budgetSourceRowCount:atomic<u32>',
+      'budgetBitsetWordCount:atomic<u32>',
+      'budgetAcceptedCellCount:atomic<u32>',
+      'budgetTargetMemberCount:atomic<u32>',
+      'proposalSourceRowCount:atomic<u32>',
+      'proposalBitsetWordCount:atomic<u32>',
+      'proposalAcceptedCellCount:atomic<u32>',
+      'proposalTargetMemberCount:atomic<u32>'
+    ])
+  });
+  record.budgetPipeline = pipelines.budgetPipeline;
+  record.proposalPipeline = pipelines.proposalPipeline;
+  record.nativeTestSourceCellTreeShadow = receipt;
+  return receipt;
+}
+
+/**
  * Native-test-only brute-force control for S9D-4. It preserves the production
  * pair law, evidence, projection, and CSR ABI, but streams every particle
  * index instead of using directory membership or the cell tree.
@@ -7343,6 +9215,7 @@ export function armSchroederSpatialThermalExhaustiveShadowForNativeTest({
     || record.encoded
     || record.lifecycleStatus !== 'prepared'
     || record.nativeTestTreeShadow
+    || record.nativeTestSourceCellTreeShadow
     || record.nativeTestExhaustiveShadow
   ) {
     throw new Error(
@@ -7546,17 +9419,25 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
     currentThermoBuffer: thermoBuffer,
     frozenDirectoryStateBuffer: record.frozenStateBuffer,
     proposalBuffer: record.proposalBuffer,
-    proposalDispatchCount: record.candidateCsrEnabled
-      ? (localActiveProjection ? 7 : 6)
-      : (localActiveProjection ? 5 : 4),
+    proposalDispatchCount: (
+      record.candidateCsrEnabled
+        ? (localActiveProjection ? 7 : 6)
+        : (localActiveProjection ? 5 : 4)
+    ) + (record.nativeTestSourceCellTreeShadow ? 4 : 0),
     hierarchyTraversalCount: 2,
     preferredHierarchyTraversalCount: record.candidateCsrEnabled ? 1 : 2,
     maximumHierarchyTraversalCount: 2,
     thermalCandidateCsrEnabled: record.candidateCsrEnabled,
     thermalCandidateCsrFallbackMode: record.candidateCsrEnabled
-      ? 'authenticated-exact-near-directory-rewalk-on-unsealed-row-receipt'
+      ? (
+          record.nativeTestSourceCellTreeShadow
+            ? 'sealed-source-cell-bitset-rewalk-on-unsealed-row-receipt'
+            : 'authenticated-exact-near-directory-rewalk-on-unsealed-row-receipt'
+        )
       : null,
     nativeTestTreeShadow: record.nativeTestTreeShadow,
+    nativeTestSourceCellTreeShadow:
+      record.nativeTestSourceCellTreeShadow,
     nativeTestExhaustiveShadow: record.nativeTestExhaustiveShadow,
     directoryBuildCount: 0,
     fullParticleReadbackPerformed: false,
@@ -7570,6 +9451,10 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       if (
         !encoder?.clearBuffer
         || !encoder?.beginComputePass
+        || (
+          record.nativeTestSourceCellTreeShadow
+          && !encoder?.copyBufferToBuffer
+        )
       ) {
         throw new TypeError(
           'Matched-time thermal encoder stage requires clear/compute GPUCommandEncoder methods'
@@ -7597,6 +9482,13 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
             0,
             SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_DIAGNOSTIC_WORDS
               * Uint32Array.BYTES_PER_ELEMENT
+          );
+        }
+        if (record.nativeTestSourceCellTreeShadow?.batchBuffer) {
+          encoder.clearBuffer(
+            record.nativeTestSourceCellTreeShadow.batchBuffer,
+            0,
+            record.nativeTestSourceCellTreeShadow.batchByteLength
           );
         }
         if (record.candidateCsrEnabled) {
@@ -7638,53 +9530,95 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           } else if (compactActiveProjection && activeProjectionIndirect) {
             pass.dispatchWorkgroupsIndirect(record.activeDispatchBuffer, 0);
           } else if (dispatchWorkgroups != null) {
-            pass.dispatchWorkgroups(dispatchWorkgroups);
+            if (Array.isArray(dispatchWorkgroups)) {
+              pass.dispatchWorkgroups(...dispatchWorkgroups);
+            } else {
+              pass.dispatchWorkgroups(dispatchWorkgroups);
+            }
           } else {
             pass.dispatchWorkgroups(singleWorkgroup ? 1 : record.workgroups);
           }
           pass.end();
           endTimestamp(encoder, timestamp);
         };
-        const preBudgetPasses = [
-          [
-            'ulg-schroeder-spatial-thermal-derived-prepass',
-            'derived-prepass',
-            record.derivedPipeline,
-            bindGroups.derivedBindGroup,
-            false,
-            false
-          ],
-          ...(localActiveProjection
-            ? [[
-                'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
-                'active-dispatch-finalize',
-                record.activeDispatchFinalizePipeline,
-                bindGroups.activeDispatchFinalizeBindGroup,
-                false,
-                true
-              ]]
-            : []),
-          [
+        encodePass(
+          'ulg-schroeder-spatial-thermal-derived-prepass',
+          'derived-prepass',
+          record.derivedPipeline,
+          bindGroups.derivedBindGroup
+        );
+        if (localActiveProjection) {
+          encodePass(
+            'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
+            'active-dispatch-finalize',
+            record.activeDispatchFinalizePipeline,
+            bindGroups.activeDispatchFinalizeBindGroup,
+            { singleWorkgroup: true }
+          );
+        }
+        const sourceCellShadow = record.nativeTestSourceCellTreeShadow;
+        if (sourceCellShadow) {
+          encodePass(
+            'ulg-native-test-s9d5-thermal-source-cell-initialize',
+            'source-cell-initialize',
+            sourceCellShadow.initializePipeline,
+            bindGroups.sourceCellInitializeBindGroup,
+            {
+              dispatchWorkgroups:
+                sourceCellShadow.plan.initializeWorkgroups
+            }
+          );
+          encodePass(
+            'ulg-native-test-s9d5-thermal-source-cell-projection',
+            'source-cell-projection',
+            sourceCellShadow.projectionPipeline,
+            bindGroups.sourceCellProjectionBindGroup,
+            {
+              dispatchWorkgroups:
+                sourceCellShadow.plan.projectionWorkgroups
+            }
+          );
+          encodePass(
+            'ulg-native-test-s9d5-thermal-source-cell-build',
+            'source-cell-build',
+            sourceCellShadow.buildPipeline,
+            bindGroups.sourceCellBuildBindGroup,
+            {
+              dispatchWorkgroups: sourceCellShadow.plan.buildWorkgroups
+            }
+          );
+          encodePass(
+            'ulg-native-test-s9d5-thermal-source-cell-finalize',
+            'source-cell-finalize',
+            sourceCellShadow.finalizePipeline,
+            bindGroups.sourceCellFinalizeBindGroup,
+            { singleWorkgroup: true }
+          );
+          encoder.copyBufferToBuffer(
+            sourceCellShadow.batchBuffer,
+            sourceCellShadow.dispatchByteOffset,
+            sourceCellShadow.dispatchBuffer,
+            0,
+            3 * Uint32Array.BYTES_PER_ELEMENT
+          );
+          encodePass(
             'ulg-schroeder-spatial-thermal-directional-budget',
             'directional-budget',
             record.budgetPipeline,
             bindGroups.budgetBindGroup,
-            true,
-            false
-          ]
-        ];
-        for (const [
-          label,
-          timestampStage,
-          pipelineInfo,
-          bindGroup,
-          activeProjectionIndirect,
-          singleWorkgroup
-        ] of preBudgetPasses) {
-          encodePass(label, timestampStage, pipelineInfo, bindGroup, {
-            activeProjectionIndirect,
-            singleWorkgroup
-          });
+            {
+              dispatchIndirectBuffer: sourceCellShadow.dispatchBuffer,
+              dispatchIndirectOffset: 0
+            }
+          );
+        } else {
+          encodePass(
+            'ulg-schroeder-spatial-thermal-directional-budget',
+            'directional-budget',
+            record.budgetPipeline,
+            bindGroups.budgetBindGroup,
+            { activeProjectionIndirect: true }
+          );
         }
         if (record.candidateCsrEnabled) {
           encodePass(
@@ -7720,7 +9654,12 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           'reciprocal-limited-proposal',
           record.proposalPipeline,
           bindGroups.proposalBindGroup,
-          { activeProjectionIndirect: true }
+          sourceCellShadow
+            ? {
+                dispatchIndirectBuffer: sourceCellShadow.dispatchBuffer,
+                dispatchIndirectOffset: 0
+              }
+            : { activeProjectionIndirect: true }
         );
         record.encoded = true;
         record.lifecycleStatus = 'encoded';
@@ -7739,6 +9678,39 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       if (record.submissionObserved) return false;
       record.submissionObserved = true;
       record.lifecycleStatus = 'submitted';
+      const sourceCellTreeShadow =
+        record.nativeTestSourceCellTreeShadow;
+      const treeLeaseActive = Boolean(
+        sourceCellTreeShadow?.treeConsumerLease
+        && sourceCellTreeShadow.tree.ownerRuntime
+          ?.ownsExecutionConsumerLease?.(
+            sourceCellTreeShadow.treeConsumerLease,
+            sourceCellTreeShadow.tree
+          )
+      );
+      const generationLeaseActive = Boolean(
+        sourceCellTreeShadow?.generationConsumerLease
+        && ownsSchroederSpatialEpochGenerationConsumerLease(
+          sourceCellTreeShadow.generationConsumerLease,
+          record.generation
+        )
+      );
+      if (treeLeaseActive || generationLeaseActive) {
+        const submissionFence = device.queue.onSubmittedWorkDone();
+        if (treeLeaseActive) {
+          sourceCellTreeShadow.tree.ownerRuntime
+            .releaseExecutionConsumerLeaseAfter(
+              sourceCellTreeShadow.treeConsumerLease,
+              submissionFence
+            );
+        }
+        if (generationLeaseActive) {
+          releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+            sourceCellTreeShadow.generationConsumerLease,
+            submissionFence
+          );
+        }
+      }
       return true;
     },
     get encoded() { return record.encoded; },

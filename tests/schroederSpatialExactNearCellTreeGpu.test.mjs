@@ -261,6 +261,13 @@ test('exact-cell tree builds once from an owned directory and fails closed for s
   const releaseFence = new Promise((resolve) => {
     resolveReleaseFence = resolve;
   });
+  const consumerLease = runtime.acquireExecutionConsumerLease(first, {
+    consumerId: 'thermal-source-cell-native-test'
+  });
+  assert.equal(
+    runtime.ownsExecutionConsumerLease(consumerLease, first),
+    true
+  );
   const pendingRelease = runtime.releaseExecutionAfter(first, releaseFence);
   assert.equal(first.releaseScheduled, true);
   assert.equal(
@@ -271,8 +278,33 @@ test('exact-cell tree builds once from an owned directory and fails closed for s
     }).ready,
     false
   );
+  const admittedUnderLease =
+    resolveSchroederSpatialExactNearCellTreeForConsumer(first, {
+      device,
+      spatialExecution,
+      supportProfileId:
+        SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
+      consumerLease
+    });
+  assert.equal(admittedUnderLease.ready, true);
+  assert.equal(admittedUnderLease.consumerLease, consumerLease);
   resolveReleaseFence();
+  await Promise.resolve();
+  assert.equal(first.released, false);
+  let resolveConsumerFence;
+  const pendingConsumerRelease =
+    runtime.releaseExecutionConsumerLeaseAfter(
+      consumerLease,
+      new Promise((resolve) => {
+        resolveConsumerFence = resolve;
+      })
+    );
+  assert.equal(consumerLease.releaseScheduled, true);
+  assert.equal(first.released, false);
+  resolveConsumerFence();
+  assert.equal(await pendingConsumerRelease, true);
   assert.equal(await pendingRelease, true);
+  assert.equal(consumerLease.released, true);
   assert.equal(
     resolveSchroederSpatialExactNearCellTreeForConsumer(first, {
       device,

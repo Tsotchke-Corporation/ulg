@@ -113,6 +113,10 @@ export const SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_STATUS =
 const ownedSpatialEpochGenerations = new WeakSet();
 const postSubmitCleanupGenerationOrigins = new WeakMap();
 const spatialEpochGenerationRetirements = new WeakMap();
+const spatialEpochGenerationConsumerLeases = new WeakMap();
+const spatialEpochGenerationConsumerLeaseOwnership = new WeakMap();
+const spatialEpochGenerationConsumerDrainWaiters = new WeakMap();
+let spatialEpochGenerationConsumerLeaseSerial = 0;
 const deviceLossTerminalizedSpatialRuntimes = new WeakSet();
 const spatialEpochLostDevices = new WeakSet();
 const GPU_BUFFER_USAGE = {
@@ -4713,6 +4717,204 @@ function exactOwnedSpatialEpochGeneration(generation) {
   throw error;
 }
 
+function spatialEpochGenerationConsumerLeaseSet(generation) {
+  let leases = spatialEpochGenerationConsumerLeases.get(generation);
+  if (!leases) {
+    leases = new Set();
+    spatialEpochGenerationConsumerLeases.set(generation, leases);
+  }
+  return leases;
+}
+
+function resolveSpatialEpochGenerationConsumerDrain(generation) {
+  const leases = spatialEpochGenerationConsumerLeases.get(generation);
+  if (leases?.size > 0) return false;
+  const waiters = spatialEpochGenerationConsumerDrainWaiters.get(generation);
+  if (!waiters) return true;
+  spatialEpochGenerationConsumerDrainWaiters.delete(generation);
+  for (const resolve of waiters) resolve();
+  return true;
+}
+
+function waitForSpatialEpochGenerationConsumerDrain(generation) {
+  if (
+    (spatialEpochGenerationConsumerLeases.get(generation)?.size ?? 0) === 0
+  ) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let waiters = spatialEpochGenerationConsumerDrainWaiters.get(generation);
+    if (!waiters) {
+      waiters = new Set();
+      spatialEpochGenerationConsumerDrainWaiters.set(generation, waiters);
+    }
+    waiters.add(resolve);
+  });
+}
+
+function releaseOwnedSpatialEpochGenerationConsumerLease(lease, record) {
+  if (!record?.active) return false;
+  record.active = false;
+  record.releaseScheduled = false;
+  lease.status =
+    'schroeder-spatial-epoch-generation-consumer-lease-released';
+  lease.releaseScheduled = false;
+  spatialEpochGenerationConsumerLeases
+    .get(record.generation)
+    ?.delete(lease);
+  resolveSpatialEpochGenerationConsumerDrain(record.generation);
+  return true;
+}
+
+function forceReleaseSpatialEpochGenerationConsumerLeases(generation) {
+  for (
+    const lease
+    of spatialEpochGenerationConsumerLeases.get(generation) ?? []
+  ) {
+    releaseOwnedSpatialEpochGenerationConsumerLease(
+      lease,
+      spatialEpochGenerationConsumerLeaseOwnership.get(lease)
+    );
+  }
+}
+
+export function ownsSchroederSpatialEpochGenerationConsumerLease(
+  lease,
+  generation = null
+) {
+  const record = spatialEpochGenerationConsumerLeaseOwnership.get(lease);
+  if (!record || record.active !== true || record.releaseScheduled === true) {
+    return false;
+  }
+  let ownedGeneration;
+  try {
+    ownedGeneration = generation == null
+      ? record.generation
+      : exactOwnedSpatialEpochGeneration(generation);
+  } catch {
+    return false;
+  }
+  return Boolean(
+    record.generation === ownedGeneration
+    && spatialEpochGenerationConsumerLeaseSet(ownedGeneration).has(lease)
+    && lease?.generation === ownedGeneration
+    && lease?.releaseScheduled !== true
+  );
+}
+
+export function acquireSchroederSpatialEpochGenerationConsumerLease(
+  generation,
+  {
+    consumerId = 'anonymous-spatial-epoch-generation-consumer'
+  } = {}
+) {
+  const ownedGeneration = exactOwnedSpatialEpochGeneration(generation);
+  if (
+    ownedGeneration.ready !== true
+    || ownedGeneration.selected !== true
+    || ownedGeneration.releaseScheduled === true
+    || ownedGeneration.execution?.released === true
+  ) {
+    const error = new Error(
+      'spatial epoch generation consumer lease requires one live generation'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_CONSUMER_LEASE_ADMISSION';
+    throw error;
+  }
+  const lease = {
+    schema:
+      'peercompute.ulg.schroeder-spatial-epoch-generation-consumer-lease.v0',
+    status: 'schroeder-spatial-epoch-generation-consumer-lease-active',
+    generation: ownedGeneration,
+    consumerId: String(consumerId),
+    serial: ++spatialEpochGenerationConsumerLeaseSerial,
+    generationId: ownedGeneration.execution?.generationId ?? null,
+    releaseScheduled: false,
+    releasePromise: null
+  };
+  const record = {
+    generation: ownedGeneration,
+    active: true,
+    releaseScheduled: false
+  };
+  Object.defineProperty(lease, 'released', {
+    get() { return record.active !== true; },
+    enumerable: true
+  });
+  spatialEpochGenerationConsumerLeaseOwnership.set(lease, record);
+  spatialEpochGenerationConsumerLeaseSet(ownedGeneration).add(lease);
+  return lease;
+}
+
+export function releaseSchroederSpatialEpochGenerationConsumerLease(
+  lease,
+  { discardedEncoder = false } = {}
+) {
+  if (discardedEncoder !== true) {
+    throw new TypeError(
+      'releaseSchroederSpatialEpochGenerationConsumerLease requires '
+      + '{ discardedEncoder: true }'
+    );
+  }
+  const record = spatialEpochGenerationConsumerLeaseOwnership.get(lease);
+  if (!record) {
+    const error = new Error('foreign spatial epoch generation consumer lease');
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_FOREIGN_CONSUMER_LEASE';
+    throw error;
+  }
+  if (!record.active) return false;
+  if (record.releaseScheduled) {
+    const error = new Error(
+      'scheduled spatial epoch generation consumer lease requires its queue fence'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_CONSUMER_LEASE_RELEASE_SCHEDULED';
+    throw error;
+  }
+  return releaseOwnedSpatialEpochGenerationConsumerLease(lease, record);
+}
+
+export function releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+  lease,
+  submissionFence
+) {
+  if (!submissionFence?.then) {
+    throw new TypeError(
+      'releaseSchroederSpatialEpochGenerationConsumerLeaseAfter requires '
+      + 'a submission-fence thenable'
+    );
+  }
+  const record = spatialEpochGenerationConsumerLeaseOwnership.get(lease);
+  if (!record) {
+    const error = new Error('foreign spatial epoch generation consumer lease');
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_FOREIGN_CONSUMER_LEASE';
+    throw error;
+  }
+  if (!record.active) return Promise.resolve(false);
+  if (record.releaseScheduled) return lease.releasePromise;
+  record.releaseScheduled = true;
+  lease.releaseScheduled = true;
+  lease.status =
+    'schroeder-spatial-epoch-generation-consumer-lease-release-scheduled';
+  const completion = Promise.resolve(submissionFence)
+    .then(() => releaseOwnedSpatialEpochGenerationConsumerLease(lease, record))
+    .catch((error) => {
+      if (record.active) {
+        record.releaseScheduled = false;
+        lease.releaseScheduled = false;
+        lease.status =
+          'schroeder-spatial-epoch-generation-consumer-lease-release-blocked';
+      }
+      throw error;
+    });
+  lease.releasePromise = completion;
+  completion.catch(() => {});
+  return completion;
+}
+
 function mirrorGenerationRetirement(record, values) {
   for (const alias of record.aliases) Object.assign(alias, values);
 }
@@ -4984,6 +5186,7 @@ function startSpatialEpochGenerationRetirement(record, {
       operations: []
     };
     record.activeAttempt = attempt;
+    forceReleaseSpatialEpochGenerationConsumerLeases(record.generation);
     mirrorGenerationRetirement(record, {
       releaseScheduled: true,
       releaseStatus: 'spatial-epoch-generation-device-loss-quarantined',
@@ -5117,6 +5320,16 @@ function startSpatialEpochGenerationRetirement(record, {
     }
     return winner;
   });
+  const consumerDrainedRetirementWinner = retirementWinner.then(
+    async (winner) => {
+      if (winner.kind === 'device-loss') {
+        forceReleaseSpatialEpochGenerationConsumerLeases(record.generation);
+      } else {
+        await waitForSpatialEpochGenerationConsumerDrain(record.generation);
+      }
+      return winner;
+    }
+  );
   record.activeAttempt = attempt;
   const activeArtifacts = record.artifacts.filter(
     (artifact) => artifact.execution?.released !== true
@@ -5141,7 +5354,7 @@ function startSpatialEpochGenerationRetirement(record, {
     }
   }
   attempt.operations = activeArtifacts.map((artifact) => (
-    retirementWinner.then((winner) => {
+    consumerDrainedRetirementWinner.then((winner) => {
       if (winner.kind === 'device-loss') {
         attempt.deviceLossWon = true;
         spatialEpochLostDevices.add(record.device);

@@ -158,7 +158,9 @@ const CONTRACTS = [
     label: 'ulg-sph-pressure-interface-force-params',
     factory: 'createPressureInterfaceParamsArray',
     wgslStruct: 'PressureInterfaceParams',
-    bytes: 32
+    // Exact GPU gas-pressure authority adds execution/storage generation,
+    // row-capacity, and row-stride authentication words.
+    bytes: 48
   },
   {
     file: 'src/runtime/sph/sphG2pGpuKernel.js',

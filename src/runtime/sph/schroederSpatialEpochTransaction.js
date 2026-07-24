@@ -7,6 +7,7 @@ import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
   ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA
@@ -23,6 +24,9 @@ import {
 import {
   validateSchroederSpatialPhaseVolumeReceiptDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeReceipt.js';
+import {
+  validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeInterfaceProposal.js';
 import {
   SCHROEDER_SPATIAL_HIERARCHY_VIEW_DISPATCH_OFFSET_WORDS,
   SCHROEDER_SPATIAL_HIERARCHY_VIEW_FINE_DISPATCH_OFFSET_WORDS,
@@ -42,7 +46,11 @@ import {
   validateSchroederSpatialAggregateViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialAggregateView.js';
 import {
-  isFinalizedSchroederSpatialExactNearConsumerReceipt
+  validateSchroederSpatialActiveRankViewDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialActiveRankView.js';
+import {
+  isFinalizedSchroederSpatialExactNearConsumerReceipt,
+  isSchroederSpatialExactNearResidentConsumerBinding
 } from './schroederSpatialEpochGpu.js';
 import {
   isFinalizedSchroederSpatialAggregateTraversalSubmissionReceipt
@@ -75,6 +83,7 @@ export const SCHROEDER_SPATIAL_EPOCH_READER = Object.freeze({
   PRESSURE_INTERFACE: 'pressure-interface',
   PRESSURE_CONTACT_INTERFACE: 'pressure-contact-interface',
   REACTION_DISCOVERY: 'reaction-discovery',
+  REACTION_PRODUCT_PLACEMENT: 'reaction-product-placement',
   SEPARATION: 'separation',
   THERMAL_CONDUCTION: 'thermal-conduction',
   THERMAL_RADIATION: 'thermal-radiation',
@@ -87,6 +96,8 @@ export const SCHROEDER_SPATIAL_EPOCH_READER = Object.freeze({
 export const SCHROEDER_SPATIAL_EPOCH_READER_PHASE = Object.freeze({
   PRESSURE_CONTACT_PROPOSAL: 'pressure-contact-proposal',
   REACTION_DISCOVERY_PROPOSAL: 'reaction-discovery-proposal',
+  REACTION_PRODUCT_PLACEMENT_PROPOSAL:
+    'reaction-product-placement-proposal',
   SEPARATION_PROPOSAL: 'separation-proposal',
   THERMAL_CONDUCTION_PROPOSAL: 'thermal-conduction-proposal',
   THERMAL_RADIATION_PROPOSAL: 'thermal-radiation-proposal',
@@ -100,6 +111,8 @@ export const SCHROEDER_SPATIAL_EPOCH_READER_PHASE = Object.freeze({
 export const SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY = Object.freeze({
   PRESSURE_CONTACT_INTERFACE: 'spatial-exact-near-pressure-contact-interface',
   REACTION_DISCOVERY: 'spatial-exact-near-reaction-discovery',
+  REACTION_PRODUCT_PLACEMENT:
+    'spatial-exact-near-reaction-product-placement',
   SEPARATION: 'spatial-exact-near-separation',
   THERMAL_CONDUCTION: 'spatial-exact-near-thermal-conduction',
   THERMAL_RADIATION: 'spatial-exact-near-thermal-radiation',
@@ -110,6 +123,8 @@ export const SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY = Object.freeze({
 export const SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID = Object.freeze({
   PRESSURE_CONTACT_INTERFACE: SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
   REACTION_DISCOVERY: SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
+  REACTION_PRODUCT_PLACEMENT:
+    SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1,
   SEPARATION: SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1,
   THERMAL_CONDUCTION: SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
   THERMAL_RADIATION: SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1,
@@ -135,6 +150,8 @@ const READER_PHASES = Object.freeze({
     SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRESSURE_CONTACT_PROPOSAL,
   [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
     SCHROEDER_SPATIAL_EPOCH_READER_PHASE.REACTION_DISCOVERY_PROPOSAL,
+  [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT]:
+    SCHROEDER_SPATIAL_EPOCH_READER_PHASE.REACTION_PRODUCT_PLACEMENT_PROPOSAL,
   [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
     SCHROEDER_SPATIAL_EPOCH_READER_PHASE.SEPARATION_PROPOSAL,
   [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
@@ -154,6 +171,7 @@ const READER_PHASES = Object.freeze({
 const EXACT_NEAR_CONSUMER_READERS = Object.freeze([
   SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE,
   SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+  SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT,
   SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION,
   SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
   SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION,
@@ -171,6 +189,8 @@ const CONSUMER_ARTIFACT_FAMILY_BY_READER = Object.freeze({
     SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.PRESSURE_CONTACT_INTERFACE,
   [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
     SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_DISCOVERY,
+  [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT]:
+    SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_PRODUCT_PLACEMENT,
   [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
     SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.SEPARATION,
   [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
@@ -186,15 +206,24 @@ const READER_ORDER_RANK = Object.freeze({
   // exclusive alternatives at the first ordered reader slot.
   [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_INTERFACE]: 0,
   [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]: 0,
-  [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]: 1,
   [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]: 2,
   [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]: 3,
   [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]: 4,
   [SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE]: 5,
   [SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G]: 6,
   [SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P]: 7,
-  [SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE]: 8
+  [SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE]: 8,
+  // Reaction discovery must observe the exact post-thermal state while still
+  // querying the immutable E* directory. Product placement follows discovery
+  // and reaction application, so both are explicit post-reader-seal consumers.
+  [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]: 9,
+  [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT]: 10
 });
+
+const LATE_CONSUMER_READER_SET = new Set([
+  SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+  SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT
+]);
 
 const DEFAULT_REQUIRED_READERS = Object.freeze([
   SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
@@ -454,6 +483,9 @@ function resolveReadOnlyPhaseVolumeReceipt({
     || phaseVolumeReceipt.phaseVolumeMoment !== phaseVolumeMoment
     || phaseVolumeReceipt.parentPhaseVolumeMoment !== phaseVolumeMoment
     || phaseVolumeReceipt.sourceMechanicsBuffer !== sourceBuffers.mechanicsBuffer
+    || phaseVolumeReceipt.sourceBuffer !== spatialSourceBuffer
+    || phaseVolumeReceipt.sourceBuffer !== phaseVolumeMoment.sourceBuffer
+    || phaseVolumeReceipt.sourceBufferBorrowed !== true
     || phaseVolumeReceipt.mechanicsFieldView !== mechanicsFieldView
     || phaseVolumeReceipt.diagnosticOnly !== true
     || phaseVolumeReceipt.stateMutationAllowed !== false
@@ -464,6 +496,7 @@ function resolveReadOnlyPhaseVolumeReceipt({
     || !webGpuBufferMatchesDevice(phaseVolumeMoment.sourceMechanicsBuffer, device)
     || !webGpuBufferMatchesDevice(mechanicsFieldView.fieldViewBuffer, device)
     || !webGpuBufferMatchesDevice(phaseVolumeReceipt.controlBuffer, device)
+    || !webGpuBufferMatchesDevice(phaseVolumeReceipt.sourceBuffer, device)
     || !webGpuBufferMatchesDevice(phaseVolumeReceipt.partialBuffer, device)
     || !webGpuBufferMatchesDevice(phaseVolumeReceipt.paramsBuffer, device)
   ) {
@@ -477,6 +510,137 @@ function resolveReadOnlyPhaseVolumeReceipt({
     phaseVolumeMomentRuntime,
     phaseVolumeReceipt,
     phaseVolumeReceiptRuntime
+  });
+}
+
+/**
+ * S9-C is a retained topology-only artifact.  Its GPU terminal seal remains
+ * authoritative; this host-side admission only freezes exact same-device
+ * identity and forbids treating it as a force, state, or readback result.
+ */
+function resolveReadOnlyPhaseVolumeInterfaceProposal({
+  device,
+  execution,
+  epochIdentity,
+  twoLevel,
+  phaseVolumeInterfaceProposal = null,
+  phaseVolumeInterfaceProposalRuntime = null,
+  phaseVolumeInterfaceProposalEnabled = false
+}) {
+  if (phaseVolumeInterfaceProposalEnabled !== true) {
+    if (
+      phaseVolumeInterfaceProposal != null
+      || phaseVolumeInterfaceProposalRuntime != null
+    ) {
+      throw transactionError(
+        'Disabled phase-volume interface proposal authority cannot retain descriptor aliases',
+        'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
+      );
+    }
+    return Object.freeze({
+      phaseVolumeInterfaceProposal: null,
+      phaseVolumeInterfaceProposalRuntime: null
+    });
+  }
+  const fineReceipt = twoLevel?.phaseVolumeReceipts?.[0] ?? null;
+  const coarseReceipt = twoLevel?.phaseVolumeReceipts?.[1] ?? null;
+  const parentFieldView = twoLevel?.parentFieldView ?? null;
+  if (
+    !fineReceipt
+    || !coarseReceipt
+    || !parentFieldView
+    || !phaseVolumeInterfaceProposal
+    || !phaseVolumeInterfaceProposalRuntime
+  ) {
+    throw transactionError(
+      'Read-only phase-volume interface authority requires exact fine/coarse S9-B receipts, parent CSR, and one submitted proposal',
+      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
+    );
+  }
+  const expectations = {
+    generationId: execution.generationId,
+    deviceOrdinal: execution.deviceOrdinal,
+    laneOrdinal: execution.laneOrdinal,
+    leaseToken: execution.leaseToken,
+    sourceFamilyId: execution.sourceFamilyId,
+    ...epochIdentity,
+    fineFieldCapacity: fineReceipt.fieldCapacity,
+    coarseFieldCapacity: coarseReceipt.fieldCapacity,
+    fineLevel: fineReceipt.selectedLevel,
+    coarseLevel: coarseReceipt.selectedLevel,
+    fineReceiptCompletionOrdinal: fineReceipt.completionOrdinal,
+    coarseReceiptCompletionOrdinal: coarseReceipt.completionOrdinal,
+    parentFieldCompletionOrdinal: parentFieldView.completionOrdinal
+  };
+  const admission = validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor(
+    phaseVolumeInterfaceProposal,
+    expectations
+  );
+  let owned = false;
+  let submitted = false;
+  try {
+    owned = phaseVolumeInterfaceProposalRuntime.ownsExecution?.(
+      phaseVolumeInterfaceProposal
+    ) === true;
+    submitted = phaseVolumeInterfaceProposalRuntime.isExecutionSubmitted?.(
+      phaseVolumeInterfaceProposal
+    ) === true;
+  } catch {
+    owned = false;
+    submitted = false;
+  }
+  if (
+    admission.admitted !== true
+    || phaseVolumeInterfaceProposalRuntime
+      !== phaseVolumeInterfaceProposal.ownerRuntime
+    || !owned
+    || !submitted
+    || phaseVolumeInterfaceProposal.submitPerformed !== true
+    || phaseVolumeInterfaceProposal.released === true
+    || phaseVolumeInterfaceProposal.releaseScheduled === true
+    || phaseVolumeInterfaceProposal.twoLevel !== true
+    || phaseVolumeInterfaceProposal.hasParentFieldView !== true
+    || phaseVolumeInterfaceProposal.fineReceipt !== fineReceipt
+    || phaseVolumeInterfaceProposal.coarseReceipt !== coarseReceipt
+    || phaseVolumeInterfaceProposal.parentFieldView !== parentFieldView
+    || phaseVolumeInterfaceProposal.fineMechanicsFieldView
+      !== fineReceipt.mechanicsFieldView
+    || phaseVolumeInterfaceProposal.coarseMechanicsFieldView
+      !== coarseReceipt.mechanicsFieldView
+    || phaseVolumeInterfaceProposal.parentFieldViewBuffer
+      !== parentFieldView.parentFieldViewBuffer
+    || phaseVolumeInterfaceProposal.encodedDispatchCount !== 3
+    || phaseVolumeInterfaceProposal.encodedComputePassCount !== 3
+    || phaseVolumeInterfaceProposal.diagnosticOnly !== true
+    || phaseVolumeInterfaceProposal.stateMutationAllowed !== false
+    || phaseVolumeInterfaceProposal.readbackPerformed !== false
+    || phaseVolumeInterfaceProposal.fullParticleReadbackRequired !== false
+    || phaseVolumeInterfaceProposal.fullParticleReadbackPerformed !== false
+    || !webGpuBufferMatchesDevice(
+      phaseVolumeInterfaceProposal.controlBuffer,
+      device
+    )
+    || !webGpuBufferMatchesDevice(
+      phaseVolumeInterfaceProposal.localHeadBuffer,
+      device
+    )
+    || !webGpuBufferMatchesDevice(
+      phaseVolumeInterfaceProposal.refluxRouteBuffer,
+      device
+    )
+    || !webGpuBufferMatchesDevice(
+      phaseVolumeInterfaceProposal.paramsBuffer,
+      device
+    )
+  ) {
+    throw transactionError(
+      'Phase-volume interface proposal is not the exact submitted, same-device, read-only S9-C topology artifact',
+      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
+    );
+  }
+  return Object.freeze({
+    phaseVolumeInterfaceProposal,
+    phaseVolumeInterfaceProposalRuntime
   });
 }
 
@@ -834,6 +998,77 @@ function authoritativeTwoLevelGenerationMatchesSnapshot(authority, generation) {
     && current.aggregateViewRuntime === snapshot.aggregateViewRuntime;
 }
 
+function phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation) {
+  if (authority.phaseVolumeInterfaceProposalAuthoritative !== true) return true;
+  const snapshot = authority.generationSnapshot;
+  const proposal = snapshot.phaseVolumeInterfaceProposal;
+  const runtime = snapshot.phaseVolumeInterfaceProposalRuntime;
+  const twoLevel = snapshot.twoLevel;
+  const fineReceipt = twoLevel?.phaseVolumeReceipts?.[0] ?? null;
+  const coarseReceipt = twoLevel?.phaseVolumeReceipts?.[1] ?? null;
+  const parentFieldView = twoLevel?.parentFieldView ?? null;
+  if (!proposal || !runtime || !fineReceipt || !coarseReceipt || !parentFieldView) {
+    return false;
+  }
+  let admission;
+  let owned = false;
+  let submitted = false;
+  try {
+    admission = validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor(
+      proposal,
+      {
+        generationId: snapshot.generationId,
+        deviceOrdinal: snapshot.execution.deviceOrdinal,
+        laneOrdinal: snapshot.execution.laneOrdinal,
+        leaseToken: snapshot.execution.leaseToken,
+        sourceFamilyId: snapshot.execution.sourceFamilyId,
+        ...snapshot.epochIdentity,
+        fineFieldCapacity: fineReceipt.fieldCapacity,
+        coarseFieldCapacity: coarseReceipt.fieldCapacity,
+        fineLevel: fineReceipt.selectedLevel,
+        coarseLevel: coarseReceipt.selectedLevel,
+        fineReceiptCompletionOrdinal: fineReceipt.completionOrdinal,
+        coarseReceiptCompletionOrdinal: coarseReceipt.completionOrdinal,
+        parentFieldCompletionOrdinal: parentFieldView.completionOrdinal
+      }
+    );
+    owned = runtime.ownsExecution?.(proposal) === true;
+    submitted = runtime.isExecutionSubmitted?.(proposal) === true;
+  } catch {
+    return false;
+  }
+  return admission?.admitted === true
+    && generation?.phaseVolumeInterfaceProposal === proposal
+    && generation?.phaseVolumeInterfaceProposalRuntime === runtime
+    && generation?.phaseVolumeInterfaceProposalEnabled === true
+    && runtime === proposal.ownerRuntime
+    && owned
+    && submitted
+    && proposal.submitPerformed === true
+    && proposal.released !== true
+    && proposal.releaseScheduled !== true
+    && proposal.twoLevel === true
+    && proposal.fineReceipt === fineReceipt
+    && proposal.coarseReceipt === coarseReceipt
+    && proposal.parentFieldView === parentFieldView
+    && proposal.controlBuffer === snapshot.phaseVolumeInterfaceProposalControlBuffer
+    && proposal.localHeadBuffer === snapshot.phaseVolumeInterfaceProposalLocalHeadBuffer
+    && proposal.refluxRouteBuffer
+      === snapshot.phaseVolumeInterfaceProposalRefluxRouteBuffer
+    && proposal.paramsBuffer === snapshot.phaseVolumeInterfaceProposalParamsBuffer
+    && proposal.diagnosticOnly === true
+    && proposal.stateMutationAllowed === false
+    && proposal.readbackPerformed === false
+    && proposal.fullParticleReadbackRequired === false
+    && proposal.fullParticleReadbackPerformed === false
+    && proposal.encodedDispatchCount === 3
+    && proposal.encodedComputePassCount === 3
+    && webGpuBufferMatchesDevice(proposal.controlBuffer, authority.device)
+    && webGpuBufferMatchesDevice(proposal.localHeadBuffer, authority.device)
+    && webGpuBufferMatchesDevice(proposal.refluxRouteBuffer, authority.device)
+    && webGpuBufferMatchesDevice(proposal.paramsBuffer, authority.device);
+}
+
 function generationMatchesSnapshot(authority, generation) {
   const snapshot = authority.generationSnapshot;
   const source = generation?.source || null;
@@ -855,6 +1090,12 @@ function generationMatchesSnapshot(authority, generation) {
     || (source?.sourceBuffer ?? source?.activeNodeBuffer) !== snapshot.sourceBuffer
     || (execution?.sourceBuffer ?? execution?.activeNodeBuffer) !== snapshot.sourceBuffer
     || execution?.directoryBuffer !== snapshot.directoryBuffer
+    || (generation?.activeRankView ?? null) !== snapshot.activeRankView
+    || (execution?.activeRankView ?? null) !== snapshot.activeRankView
+    || (execution?.activeRankViewBuffer ?? null)
+      !== snapshot.activeRankViewBuffer
+    || (execution?.activeRankViewLayout ?? null)
+      !== snapshot.activeRankViewLayout
     || (generation?.mechanicsFieldView ?? null) !== snapshot.mechanicsFieldView
     || (generation?.mechanicsFieldViewRuntime ?? null)
       !== snapshot.mechanicsFieldViewRuntime
@@ -864,8 +1105,30 @@ function generationMatchesSnapshot(authority, generation) {
     || (generation?.phaseVolumeReceipt ?? null) !== snapshot.phaseVolumeReceipt
     || (generation?.phaseVolumeReceiptRuntime ?? null)
       !== snapshot.phaseVolumeReceiptRuntime
+    || Boolean(generation?.phaseVolumeInterfaceProposalEnabled)
+      !== snapshot.phaseVolumeInterfaceProposalEnabled
+    || (generation?.phaseVolumeInterfaceProposal ?? null)
+      !== snapshot.phaseVolumeInterfaceProposal
+    || (generation?.phaseVolumeInterfaceProposalRuntime ?? null)
+      !== snapshot.phaseVolumeInterfaceProposalRuntime
     || !webGpuBufferMatchesDevice(snapshot.sourceBuffer, authority.device)
     || !webGpuBufferMatchesDevice(snapshot.directoryBuffer, authority.device)
+    || (snapshot.activeRankView && (
+      execution?.activeRankViewBuildEncoded
+        !== snapshot.activeRankViewBuildEncoded
+      || source?.sourceCount !== snapshot.activeRankViewSourceCount
+      || execution?.sourceCount !== snapshot.activeRankViewSourceCount
+      || generation.activeRankView?.activeRankViewBuffer
+        !== snapshot.activeRankViewBuffer
+      || generation.activeRankView?.layout !== snapshot.activeRankViewLayout
+      || generation.activeRankView?.spatialExecution !== snapshot.execution
+      || generation.activeRankView?.sourceBuffer !== snapshot.sourceBuffer
+      || generation.activeRankView?.directoryBuffer !== snapshot.directoryBuffer
+      || !webGpuBufferMatchesDevice(
+        snapshot.activeRankViewBuffer,
+        authority.device
+      )
+    ))
     || (snapshot.mechanicsView && (
       generation?.mechanicsView !== snapshot.mechanicsView
       || generation?.mechanicsViewRuntime !== snapshot.mechanicsViewRuntime
@@ -921,6 +1184,9 @@ function generationMatchesSnapshot(authority, generation) {
         !== snapshot.phaseVolumeReceiptPartialBuffer
       || generation.phaseVolumeReceipt?.paramsBuffer
         !== snapshot.phaseVolumeReceiptParamsBuffer
+      || generation.phaseVolumeReceipt?.sourceBuffer
+        !== snapshot.phaseVolumeReceiptSourceBuffer
+      || generation.phaseVolumeReceipt?.sourceBufferBorrowed !== true
       || generation.phaseVolumeReceipt?.phaseVolumeMoment
         !== snapshot.phaseVolumeMoment
       || generation.phaseVolumeReceipt?.parentPhaseVolumeMoment
@@ -952,7 +1218,8 @@ function generationMatchesSnapshot(authority, generation) {
   return EPOCH_FIELDS.every((field) => (
     source?.[field] === snapshot.epochIdentity[field]
     && execution?.[field] === snapshot.epochIdentity[field]
-  )) && authoritativeTwoLevelGenerationMatchesSnapshot(authority, generation);
+  )) && authoritativeTwoLevelGenerationMatchesSnapshot(authority, generation)
+    && phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation);
 }
 
 function readerOrderSatisfied(authority, readerId) {
@@ -964,6 +1231,15 @@ function readerOrderSatisfied(authority, readerId) {
       SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G
     )
   ) return false;
+  for (const enabledReaderId of authority.enabledConsumerReaders) {
+    const enabledRank = READER_ORDER_RANK[enabledReaderId];
+    if (
+      LATE_CONSUMER_READER_SET.has(enabledReaderId)
+      && Number.isInteger(enabledRank)
+      && enabledRank < rank
+      && !authority.admittedReaders.has(enabledReaderId)
+    ) return false;
+  }
   for (const admittedReaderId of authority.admittedReaders.keys()) {
     const admittedRank = READER_ORDER_RANK[admittedReaderId];
     if (!Number.isInteger(admittedRank) || admittedRank >= rank) return false;
@@ -1001,22 +1277,23 @@ function exactReceiptU32(receipt, field) {
 function validateConsumerReceipt(authority, readerId, phase, receipt) {
   const supportProfileId = authority.consumerSupportProfileIds.get(readerId);
   const artifactFamily = CONSUMER_ARTIFACT_FAMILY_BY_READER[readerId];
+  const residentBinding =
+    isSchroederSpatialExactNearResidentConsumerBinding(receipt);
+  const finalizedResult =
+    isFinalizedSchroederSpatialExactNearConsumerReceipt(receipt);
   if (
     !receipt
     || typeof receipt !== 'object'
     || !Object.isFrozen(receipt)
     || receipt.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA
-    || receipt.status !== SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_STATUS
     || receipt.authenticated !== true
-    || receipt.gpuAuthenticated !== true
-    || receipt.submitPerformed !== true
     || receipt.generationBound !== true
     || receipt.consumerId !== readerId
     || receipt.phase !== phase
     || receipt.artifactFamily !== artifactFamily
   ) {
     throw transactionError(
-      `Spatial epoch consumer ${readerId} lacks a finalized authenticated GPU receipt`,
+      `Spatial epoch consumer ${readerId} lacks a runtime-issued result receipt or resident evidence binding`,
       'ERR_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT'
     );
   }
@@ -1073,6 +1350,70 @@ function validateConsumerReceipt(authority, readerId, phase, receipt) {
       );
     }
   }
+  if (
+    residentBinding
+      ? (
+          receipt.bindingAuthenticated !== true
+          || receipt.gpuAuthenticated !== false
+          || receipt.resultAuthenticated !== false
+          || receipt.submitPerformed !== false
+          || receipt.countersObserved !== false
+        )
+      : (
+          receipt.status !== SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_STATUS
+          || receipt.gpuAuthenticated !== true
+          || receipt.submitPerformed !== true
+        )
+  ) {
+    throw transactionError(
+      `Spatial epoch consumer ${readerId} receipt was not issued by the live generation runtime`,
+      'ERR_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT'
+    );
+  }
+  const expectedTraversalCount = exactReceiptU32(
+    receipt,
+    'expectedTraversalCount'
+  );
+  if (residentBinding) {
+    const resultFields = [
+      'traversalCount',
+      'candidateVisitCount',
+      'consumerMaskHitCount',
+      'migratedProposalCount',
+      'candidateBytesRequired',
+      'candidateBytesAdmitted',
+      'candidateBytesCapacity',
+      'candidateOverflowBytes'
+    ];
+    if (
+      expectedTraversalCount === 0
+      || resultFields.some((field) => receipt[field] !== null)
+      || receipt.privateLookupBuildCount !== 0
+      || receipt.fixedCandidateBuildCount !== 0
+      || receipt.exhaustiveTraversalCount !== 0
+      || receipt.fallbackObserved !== false
+      || receipt.fullReadbackPerformed !== false
+      || receipt.overflowed !== null
+      || receipt.partialPublication !== null
+      || receipt.residentEvidence?.resultCountersObserved !== false
+      || receipt.residentEvidence?.failClosedOnOverflow !== true
+      || receipt.residentEvidence?.partialPublicationAllowed !== false
+    ) {
+      throw transactionError(
+        `Spatial epoch consumer ${readerId} resident binding fabricated results or permits a fallback/partial path`,
+        'ERR_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT'
+      );
+    }
+    return Object.freeze({
+      ...receipt,
+      epochIdentity: Object.freeze({ ...authority.epochIdentity }),
+      expectedTraversalCount,
+      bindingAuthenticated: true,
+      submissionAuthenticated: false,
+      resultAuthenticated: false,
+      residentDeferred: true
+    });
+  }
   const counts = Object.freeze({
     traversalCount: exactReceiptU32(receipt, 'traversalCount'),
     candidateVisitCount: exactReceiptU32(receipt, 'candidateVisitCount'),
@@ -1086,9 +1427,12 @@ function validateConsumerReceipt(authority, readerId, phase, receipt) {
     fixedCandidateBuildCount: exactReceiptU32(receipt, 'fixedCandidateBuildCount'),
     exhaustiveTraversalCount: exactReceiptU32(receipt, 'exhaustiveTraversalCount')
   });
-  if (counts.traversalCount !== 1) {
+  if (
+    expectedTraversalCount === 0
+    || counts.traversalCount !== expectedTraversalCount
+  ) {
     throw transactionError(
-      `Spatial epoch consumer ${readerId} must authenticate exactly one traversal`,
+      `Spatial epoch consumer ${readerId} must authenticate its positive expected traversal count`,
       'ERR_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT'
     );
   }
@@ -1117,7 +1461,7 @@ function validateConsumerReceipt(authority, readerId, phase, receipt) {
       'ERR_SCHROEDER_SPATIAL_EPOCH_CONSUMER_OVERFLOW'
     );
   }
-  if (!isFinalizedSchroederSpatialExactNearConsumerReceipt(receipt)) {
+  if (!finalizedResult) {
     throw transactionError(
       `Spatial epoch consumer ${readerId} receipt was not issued by the live generation runtime`,
       'ERR_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT'
@@ -1137,6 +1481,7 @@ function validateConsumerReceipt(authority, readerId, phase, receipt) {
     deviceId: authority.deviceId,
     generationId: authority.generationId,
     epochIdentity: Object.freeze({ ...authority.epochIdentity }),
+    expectedTraversalCount,
     ...counts,
     overflowed: false,
     partialPublication: false,
@@ -1363,6 +1708,7 @@ export function createSchroederSpatialEpochTransaction({
   sphParticleUpload,
   mlsMpmParticleUpload,
   twoLevelAuthoritative = false,
+  phaseVolumeInterfaceProposalAuthoritative = false,
   requiredReaderIds = DEFAULT_REQUIRED_READERS,
   enabledConsumerReaderIds = [],
   consumerSupportProfileIds = {}
@@ -1466,6 +1812,68 @@ export function createSchroederSpatialEpochTransaction({
       'ERR_SCHROEDER_SPATIAL_EPOCH_IDENTITY'
     );
   }
+  const activeRankView = generation.activeRankView
+    ?? execution.activeRankView
+    ?? null;
+  if (
+    (generation.activeRankView ?? null) !== activeRankView
+    || (execution.activeRankView ?? null) !== activeRankView
+  ) {
+    throw transactionError(
+      'Spatial epoch generation and execution disagree about the active-rank view identity',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_ACTIVE_RANK_IDENTITY'
+    );
+  }
+  if (activeRankView) {
+    const activeRankAdmission = validateSchroederSpatialActiveRankViewDescriptor(
+      activeRankView,
+      {
+        spatialExecution: execution,
+        sourceBuffer: spatialSourceBuffer,
+        directoryBuffer: execution.directoryBuffer,
+        sourceCount: source.sourceCount,
+        sourceCapacity: execution.sourceCapacity,
+        sourceRowLayoutId: source.sourceRowLayoutId,
+        generationId,
+        storageGeneration: epochIdentity.storageGeneration,
+        physicsTick: epochIdentity.physicsTick,
+        physicsSubstep: epochIdentity.physicsSubstep,
+        positionEpoch: epochIdentity.positionEpoch,
+        topologyEpoch: epochIdentity.topologyEpoch,
+        chartEpoch: epochIdentity.chartEpoch,
+        levelEpoch: epochIdentity.levelEpoch,
+        supportEpoch: epochIdentity.supportEpoch,
+        buildOrdinal
+      }
+    );
+    if (
+      activeRankAdmission.admitted !== true
+      || !Object.isFrozen(activeRankView)
+      || !Object.isFrozen(activeRankView.layout)
+      || execution.activeRankViewBuffer !== activeRankView.activeRankViewBuffer
+      || execution.activeRankViewLayout !== activeRankView.layout
+      || execution.activeRankViewBuildEncoded !== true
+      || execution.sourceCount !== source.sourceCount
+      || activeRankView.spatialExecution !== execution
+      || activeRankView.sourceBuffer !== spatialSourceBuffer
+      || activeRankView.directoryBuffer !== execution.directoryBuffer
+      || !webGpuBufferMatchesDevice(activeRankView.activeRankViewBuffer, device)
+    ) {
+      throw transactionError(
+        `Spatial epoch active-rank view is not an exact live view of the frozen generation (${activeRankAdmission.status})`,
+        'ERR_SCHROEDER_SPATIAL_EPOCH_ACTIVE_RANK_IDENTITY'
+      );
+    }
+  } else if (
+    execution.activeRankView != null
+    || execution.activeRankViewBuffer != null
+    || execution.activeRankViewLayout != null
+  ) {
+    throw transactionError(
+      'Spatial epoch execution retained active-rank resources without a matching view descriptor',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_ACTIVE_RANK_IDENTITY'
+    );
+  }
   const twoLevel = twoLevelAuthoritative === true
     ? resolveAuthoritativeTwoLevelGeneration({
         device,
@@ -1476,6 +1884,27 @@ export function createSchroederSpatialEpochTransaction({
         epochIdentity
       })
     : null;
+  if (typeof phaseVolumeInterfaceProposalAuthoritative !== 'boolean') {
+    throw transactionError(
+      'phaseVolumeInterfaceProposalAuthoritative must be a boolean',
+      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
+    );
+  }
+  if (phaseVolumeInterfaceProposalAuthoritative === true && !twoLevel) {
+    throw transactionError(
+      'Read-only phase-volume interface proposal authority requires authoritative two-level mechanics',
+      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
+    );
+  }
+  if (
+    phaseVolumeInterfaceProposalAuthoritative === true
+    && generation.phaseVolumeInterfaceProposalEnabled !== true
+  ) {
+    throw transactionError(
+      'Read-only phase-volume interface proposal authority requires an explicitly enabled S9-C generation artifact',
+      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
+    );
+  }
   const directPhaseVolumeArtifacts = twoLevel
     ? Object.freeze({
         phaseVolumeMoment: twoLevel.phaseVolumeMoments[0],
@@ -1502,6 +1931,27 @@ export function createSchroederSpatialEpochTransaction({
   const phaseVolumeReceipt = directPhaseVolumeArtifacts.phaseVolumeReceipt;
   const phaseVolumeReceiptRuntime =
     directPhaseVolumeArtifacts.phaseVolumeReceiptRuntime;
+  const phaseVolumeInterfaceProposalArtifacts =
+    phaseVolumeInterfaceProposalAuthoritative === true
+      ? resolveReadOnlyPhaseVolumeInterfaceProposal({
+          device,
+          execution,
+          epochIdentity,
+          twoLevel,
+          phaseVolumeInterfaceProposal:
+            generation.phaseVolumeInterfaceProposal ?? null,
+          phaseVolumeInterfaceProposalRuntime:
+            generation.phaseVolumeInterfaceProposalRuntime ?? null,
+          phaseVolumeInterfaceProposalEnabled: true
+        })
+      : Object.freeze({
+          phaseVolumeInterfaceProposal: null,
+          phaseVolumeInterfaceProposalRuntime: null
+        });
+  const phaseVolumeInterfaceProposal =
+    phaseVolumeInterfaceProposalArtifacts.phaseVolumeInterfaceProposal;
+  const phaseVolumeInterfaceProposalRuntime =
+    phaseVolumeInterfaceProposalArtifacts.phaseVolumeInterfaceProposalRuntime;
   if (!Array.isArray(requiredReaderIds) || !Array.isArray(enabledConsumerReaderIds)) {
     throw transactionError(
       'requiredReaderIds and enabledConsumerReaderIds must be arrays',
@@ -1574,6 +2024,7 @@ export function createSchroederSpatialEpochTransaction({
     generation,
     generationId,
     twoLevelAuthoritative: twoLevel != null,
+    phaseVolumeInterfaceProposalAuthoritative,
     twoLevel,
     epochIdentity: Object.freeze(epochIdentity),
     generationSnapshot: Object.freeze({
@@ -1584,6 +2035,13 @@ export function createSchroederSpatialEpochTransaction({
       deviceId,
       sourceBuffer: spatialSourceBuffer,
       directoryBuffer: execution.directoryBuffer,
+      activeRankView,
+      activeRankViewBuffer: activeRankView?.activeRankViewBuffer ?? null,
+      activeRankViewLayout: activeRankView?.layout ?? null,
+      activeRankViewBuildEncoded: activeRankView
+        ? execution.activeRankViewBuildEncoded === true
+        : null,
+      activeRankViewSourceCount: activeRankView?.sourceCount ?? null,
       mechanicsView: generation.mechanicsView ?? null,
       mechanicsViewRuntime: generation.mechanicsViewRuntime ?? null,
       mechanicsViewBuffer: generation.mechanicsView?.mechanicsViewBuffer ?? null,
@@ -1600,6 +2058,21 @@ export function createSchroederSpatialEpochTransaction({
       phaseVolumeReceiptControlBuffer: phaseVolumeReceipt?.controlBuffer ?? null,
       phaseVolumeReceiptPartialBuffer: phaseVolumeReceipt?.partialBuffer ?? null,
       phaseVolumeReceiptParamsBuffer: phaseVolumeReceipt?.paramsBuffer ?? null,
+      phaseVolumeReceiptSourceBuffer: phaseVolumeReceipt?.sourceBuffer ?? null,
+      phaseVolumeInterfaceProposal:
+        generation.phaseVolumeInterfaceProposal ?? null,
+      phaseVolumeInterfaceProposalRuntime:
+        generation.phaseVolumeInterfaceProposalRuntime ?? null,
+      phaseVolumeInterfaceProposalEnabled:
+        generation.phaseVolumeInterfaceProposalEnabled === true,
+      phaseVolumeInterfaceProposalControlBuffer:
+        generation.phaseVolumeInterfaceProposal?.controlBuffer ?? null,
+      phaseVolumeInterfaceProposalLocalHeadBuffer:
+        generation.phaseVolumeInterfaceProposal?.localHeadBuffer ?? null,
+      phaseVolumeInterfaceProposalRefluxRouteBuffer:
+        generation.phaseVolumeInterfaceProposal?.refluxRouteBuffer ?? null,
+      phaseVolumeInterfaceProposalParamsBuffer:
+        generation.phaseVolumeInterfaceProposal?.paramsBuffer ?? null,
       twoLevel,
       generationId,
       buildOrdinal,
@@ -1612,6 +2085,7 @@ export function createSchroederSpatialEpochTransaction({
     consumerSupportProfileIds: resolvedSupportProfileIds,
     admittedReaders: new Map(),
     consumerReceipts: new Map(),
+    residentEvidenceAuthorities: new Set(),
     proposalSeal: null,
     commit: null,
     privateAdvance: null,
@@ -1639,6 +2113,8 @@ export function createSchroederSpatialEpochTransaction({
       submittedAggregateConsumerCount: 0,
       submittedAggregateTraversalCount: 0,
       resultAuthenticatedAggregateTraversalCount: 0,
+      residentDeferredConsumerCount: 0,
+      residentDeferredSharedExecutionCount: 0,
       authenticatedConsumerTraversalCount: 0,
       authenticatedCandidateVisitCount: 0,
       authenticatedConsumerMaskHitCount: 0,
@@ -1664,13 +2140,19 @@ export function createSchroederSpatialEpochTransaction({
     generation,
     generationId,
     twoLevelAuthoritative: twoLevel != null,
+    phaseVolumeInterfaceProposalAuthoritative,
     mechanicsLevelCount: twoLevel?.mechanicsLevelViews.length
       ?? (generation.mechanicsView ? 1 : 0),
     mechanicsLevels: twoLevel?.mechanicsLevels ?? null,
     hierarchyView: twoLevel?.hierarchyView ?? null,
+    activeRankView,
     phaseVolumeReceipt,
     phaseVolumeReceiptRuntime,
     phaseVolumeReceiptPolicy: 'read-only-future-law-eligibility-only',
+    phaseVolumeInterfaceProposal,
+    phaseVolumeInterfaceProposalRuntime,
+    phaseVolumeInterfaceProposalPolicy:
+      'read-only-interface-topology-future-operator-only',
     epochIdentity: authority.epochIdentity,
     sourceBuffers,
     get state() {
@@ -1681,14 +2163,14 @@ export function createSchroederSpatialEpochTransaction({
   return transaction;
 }
 
-export function admitSchroederSpatialEpochTransactionReader(transaction, {
+function admitSchroederSpatialEpochTransactionReaderInternal(transaction, {
   readerId,
   phase,
   generation,
   sphParticleUpload,
   mlsMpmParticleUpload,
   consumerReceipt = null
-} = {}) {
+} = {}, { lateConsumer = false } = {}) {
   const authority = authorityFor(transaction);
   if (
     authority.state === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.COMMITTED
@@ -1702,13 +2184,30 @@ export function admitSchroederSpatialEpochTransactionReader(transaction, {
       'ERR_SCHROEDER_SPATIAL_EPOCH_POST_COMMIT_READ'
     );
   }
-  if (
-    authority.state !== SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
-    && authority.state !== SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE
-  ) {
+  const isLateConsumer = LATE_CONSUMER_READER_SET.has(readerId);
+  if (isLateConsumer !== lateConsumer) {
     rejectReader(
       authority,
-      `Spatial epoch reader ${readerId ?? 'unknown'} attempted admission after readers were sealed`,
+      isLateConsumer
+        ? `Spatial epoch consumer ${readerId} requires explicit late-consumer admission`
+        : `Spatial epoch reader ${readerId ?? 'unknown'} is not a declared late consumer`,
+      'ERR_SCHROEDER_SPATIAL_EPOCH_READER_CONTRACT'
+    );
+  }
+  const readerStateAdmitted = lateConsumer
+    ? authority.state === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_COMPLETE
+    : (
+        authority.state
+          === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
+        || authority.state
+          === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE
+      );
+  if (!readerStateAdmitted) {
+    rejectReader(
+      authority,
+      lateConsumer
+        ? `Late spatial epoch consumer ${readerId ?? 'unknown'} was reached before early readers completed or after proposal seal`
+        : `Spatial epoch reader ${readerId ?? 'unknown'} attempted admission after readers were sealed`,
       'ERR_SCHROEDER_SPATIAL_EPOCH_STALE_READER'
     );
   }
@@ -1800,18 +2299,63 @@ export function admitSchroederSpatialEpochTransactionReader(transaction, {
       rejectConsumerReceipt(authority, readerId, error);
     }
   }
+  // Keep a compact, buffer-free receipt synopsis with the transaction record.
+  // Long-horizon/browser telemetry deliberately retains admitted readers but
+  // not the live receipt objects. This makes real same-device WebGPU receipt
+  // admission externally auditable without exposing mutable GPU resources or
+  // changing the receipt contract.
+  const receiptTelemetry = authenticatedReceipt
+    ? Object.freeze({
+        schema: 'peercompute.ulg.schroeder-spatial-consumer-receipt-telemetry.v1',
+        status: authenticatedReceipt.status ?? null,
+        backend: 'webgpu',
+        backendSelection: 'same-device-submitted-webgpu-generation',
+        fallbackIntent: 'forbidden',
+        consumerId: authenticatedReceipt.consumerId ?? readerId,
+        deviceId: authenticatedReceipt.deviceId ?? authority.deviceId,
+        generationId: authenticatedReceipt.generationId ?? authority.generationId,
+        epochIdentity: authenticatedReceipt.epochIdentity
+          ? Object.freeze({ ...authenticatedReceipt.epochIdentity })
+          : null,
+        authenticated: authenticatedReceipt.authenticated === true,
+        gpuAuthenticated: authenticatedReceipt.gpuAuthenticated === true,
+        bindingAuthenticated: authenticatedReceipt.bindingAuthenticated === true,
+        submissionAuthenticated:
+          authenticatedReceipt.submissionAuthenticated === true,
+        resultAuthenticated: authenticatedReceipt.resultAuthenticated !== false,
+        submitPerformed: authenticatedReceipt.submitPerformed === true,
+        generationBound: authenticatedReceipt.generationBound === true,
+        expectedTraversalCount:
+          authenticatedReceipt.expectedTraversalCount ?? null,
+        traversalCount: authenticatedReceipt.traversalCount ?? null,
+        overflowed: authenticatedReceipt.overflowed === true,
+        partialPublication: authenticatedReceipt.partialPublication === true,
+        fallbackObserved: authenticatedReceipt.fallbackObserved === true,
+        fullReadbackPerformed:
+          authenticatedReceipt.fullReadbackPerformed === true,
+        privateLookupBuildCount:
+          authenticatedReceipt.privateLookupBuildCount ?? null,
+        fixedCandidateBuildCount:
+          authenticatedReceipt.fixedCandidateBuildCount ?? null,
+        exhaustiveTraversalCount:
+          authenticatedReceipt.exhaustiveTraversalCount ?? null
+      })
+    : null;
   authority.admittedReaders.set(readerId, Object.freeze({
     readerId,
     phase,
     supportProfileId: authenticatedReceipt?.supportProfileId ?? null,
     artifactFamily: authenticatedReceipt?.artifactFamily ?? null,
     authenticatedReceipt: Boolean(authenticatedReceipt),
+    bindingAuthenticated:
+      authenticatedReceipt?.bindingAuthenticated === true,
     submissionAuthenticated:
       authenticatedReceipt?.submissionAuthenticated === true,
     resultAuthenticated: Boolean(
       authenticatedReceipt
       && authenticatedReceipt.resultAuthenticated !== false
-    )
+    ),
+    receiptTelemetry
   }));
   if (authenticatedReceipt) {
     authority.consumerReceipts.set(readerId, authenticatedReceipt);
@@ -1820,6 +2364,13 @@ export function admitSchroederSpatialEpochTransactionReader(transaction, {
       authority.counters.submittedAggregateConsumerCount += 1;
       authority.counters.submittedAggregateTraversalCount +=
         authenticatedReceipt.traversalCount ?? 0;
+    } else if (authenticatedReceipt.residentDeferred === true) {
+      authority.counters.residentDeferredConsumerCount += 1;
+      const evidenceAuthority = authenticatedReceipt.residentEvidence?.evidenceBuffer;
+      if (!authority.residentEvidenceAuthorities.has(evidenceAuthority)) {
+        authority.residentEvidenceAuthorities.add(evidenceAuthority);
+        authority.counters.residentDeferredSharedExecutionCount += 1;
+      }
     } else {
       authority.counters.authenticatedConsumerTraversalCount +=
         authenticatedReceipt.traversalCount ?? 0;
@@ -1838,8 +2389,36 @@ export function admitSchroederSpatialEpochTransactionReader(transaction, {
     }
   }
   authority.counters.readerAdmissionCount += 1;
-  authority.state = SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE;
+  authority.state = lateConsumer
+    ? SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_COMPLETE
+    : SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE;
   return true;
+}
+
+export function admitSchroederSpatialEpochTransactionReader(
+  transaction,
+  options = {}
+) {
+  return admitSchroederSpatialEpochTransactionReaderInternal(
+    transaction,
+    options,
+    { lateConsumer: false }
+  );
+}
+
+/**
+ * Admit an ordered post-integration exact-near family after G2P/FAR while
+ * keeping the ordinary reader set irreversibly sealed.
+ */
+export function admitSchroederSpatialEpochTransactionLateConsumer(
+  transaction,
+  options = {}
+) {
+  return admitSchroederSpatialEpochTransactionReaderInternal(
+    transaction,
+    options,
+    { lateConsumer: true }
+  );
 }
 
 export function sealSchroederSpatialEpochTransactionReaders(transaction) {
@@ -1853,7 +2432,10 @@ export function sealSchroederSpatialEpochTransactionReaders(transaction) {
     SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_COMPLETE
   );
   const missingReaders = [...authority.requiredReaders]
-    .filter((readerId) => !authority.admittedReaders.has(readerId));
+    .filter((readerId) => (
+      !LATE_CONSUMER_READER_SET.has(readerId)
+      && !authority.admittedReaders.has(readerId)
+    ));
   if (missingReaders.length > 0) {
     authority.state = SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE;
     throw transactionError(
@@ -1954,6 +2536,14 @@ export function sealSchroederSpatialEpochTransactionProposals(transaction, {
       'ERR_SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE'
     );
   }
+  const missingReaders = [...authority.requiredReaders]
+    .filter((readerId) => !authority.admittedReaders.has(readerId));
+  if (missingReaders.length > 0) {
+    throw transactionError(
+      `Spatial epoch transaction is missing required readers: ${missingReaders.join(', ')}`,
+      'ERR_SCHROEDER_SPATIAL_EPOCH_MISSING_READER'
+    );
+  }
   const authenticatedMigratedProposalCount =
     authority.counters.authenticatedMigratedProposalCount;
   const resolvedMigratedProposalCount = migratedProposalCount == null
@@ -1978,6 +2568,8 @@ export function sealSchroederSpatialEpochTransactionProposals(transaction, {
     status: status ?? (
       authority.counters.authenticatedConsumerTraversalCount > 0
         ? 'authenticated-spatial-consumer-proposals-sealed'
+        : authority.counters.residentDeferredConsumerCount > 0
+          ? 'resident-fail-closed-spatial-consumer-bindings-sealed'
         : authority.counters.submittedAggregateTraversalCount > 0
           ? 'spatial-consumer-submissions-sealed'
           : 'unmigrated-laws-quarantined'
@@ -1986,7 +2578,12 @@ export function sealSchroederSpatialEpochTransactionProposals(transaction, {
     legacyConsumerCount: resolvedLegacyConsumerCount,
     authenticatedConsumerCount:
       authority.consumerReceipts.size
-      - authority.counters.submittedAggregateConsumerCount,
+      - authority.counters.submittedAggregateConsumerCount
+      - authority.counters.residentDeferredConsumerCount,
+    residentDeferredConsumerCount:
+      authority.counters.residentDeferredConsumerCount,
+    residentDeferredSharedExecutionCount:
+      authority.counters.residentDeferredSharedExecutionCount,
     submittedAggregateConsumerCount:
       authority.counters.submittedAggregateConsumerCount,
     authenticatedTraversalCount:
@@ -1995,8 +2592,16 @@ export function sealSchroederSpatialEpochTransactionProposals(transaction, {
       authority.counters.submittedAggregateTraversalCount,
     resultAuthenticatedAggregateTraversalCount:
       authority.counters.resultAuthenticatedAggregateTraversalCount,
-    candidateVisitCount: authority.counters.authenticatedCandidateVisitCount,
-    consumerMaskHitCount: authority.counters.authenticatedConsumerMaskHitCount
+    candidateVisitCount:
+      authority.counters.residentDeferredConsumerCount > 0
+        ? null
+        : authority.counters.authenticatedCandidateVisitCount,
+    consumerMaskHitCount:
+      authority.counters.residentDeferredConsumerCount > 0
+        ? null
+        : authority.counters.authenticatedConsumerMaskHitCount,
+    resultCountersObserved:
+      authority.counters.residentDeferredConsumerCount === 0
   });
   authority.counters.proposalSealCount += 1;
   return authority.proposalSeal;
@@ -2326,6 +2931,8 @@ export function summarizeSchroederSpatialEpochTransaction(transaction) {
     generationId: authority.generationId,
     deviceId: authority.deviceId,
     twoLevelAuthoritative: authority.twoLevelAuthoritative,
+    phaseVolumeInterfaceProposalAuthoritative:
+      authority.phaseVolumeInterfaceProposalAuthoritative,
     mechanicsLevelCount: authority.twoLevel?.mechanicsLevelViews.length
       ?? (authority.generation.mechanicsView ? 1 : 0),
     mechanicsLevels: authority.twoLevel?.mechanicsLevels ?? null,
@@ -2336,6 +2943,19 @@ export function summarizeSchroederSpatialEpochTransaction(transaction) {
     phaseVolumeReceiptReadOnly:
       authority.generationSnapshot.phaseVolumeReceipt?.diagnosticOnly === true
       && authority.generationSnapshot.phaseVolumeReceipt?.stateMutationAllowed === false,
+    phaseVolumeInterfaceProposalStatus:
+      authority.generationSnapshot.phaseVolumeInterfaceProposal?.status ?? null,
+    phaseVolumeInterfaceProposalReadOnly:
+      authority.generationSnapshot.phaseVolumeInterfaceProposal?.diagnosticOnly === true
+      && authority.generationSnapshot.phaseVolumeInterfaceProposal?.stateMutationAllowed === false,
+    phaseVolumeInterfaceProposalTwoLevel:
+      authority.generationSnapshot.phaseVolumeInterfaceProposal?.twoLevel === true,
+    phaseVolumeInterfaceProposalDispatchCount:
+      authority.generationSnapshot.phaseVolumeInterfaceProposal?.encodedDispatchCount
+        ?? null,
+    phaseVolumeInterfaceProposalRetainedGpuBufferBytes:
+      authority.generationSnapshot.phaseVolumeInterfaceProposal?.retainedGpuBufferBytes
+        ?? null,
     epochIdentity: authority.epochIdentity,
     requiredReaderIds: Object.freeze([...authority.requiredReaders]),
     enabledConsumerReaderIds: Object.freeze([...authority.enabledConsumerReaders]),

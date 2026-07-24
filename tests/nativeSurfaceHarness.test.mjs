@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
+  groupedPlacedReactionEventCount,
   groupedReactionEventCount,
-  reactionLedgerEventCount
+  reactionLedgerEventCount,
+  reactionProgressEventCount
 } from '../scripts/sph-probe-reaction-evidence.mjs';
 import {
   summarizeNativeSurfaceIndirectArgsReadback
@@ -13,8 +15,12 @@ import {
   createLatestSceneRefreshRequestGate,
   createResidentGpuArtifactRetirementBarrier,
   resolveSphMaterialInterfacePreIntegrationProvenance,
-  resolveSphNativeSurfaceDiagnosticDrawPlan
+  resolveSphNativeSurfaceDiagnosticDrawPlan,
+  runSphNativeSurfaceCandidateValidationTransaction
 } from '../src/visualization/sphPhaseScene.js';
+import {
+  createBrowserConsoleCapture
+} from '../scripts/sph-long-horizon-probe.mjs';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
@@ -102,6 +108,21 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /nativeSurfaceValidation: nativeSurfaceValidationSnapshot\(\)/);
   assert.match(
     probeSource,
+    /sphNativeSurfaceCandidateValidationScheduler[\s\S]*?candidateValidationSchedulerActiveCount[\s\S]*?candidateValidationSchedulerQueuedCount/,
+    'the probe must observe detached candidate validation instead of accepting the ready prior bridge'
+  );
+  assert.match(
+    probeSource,
+    /const sourceCurrent = Boolean\([\s\S]*?sourceGenerationMatchesCurrent === true[\s\S]*?!sourceRetainedPrevious[\s\S]*?!sourceMarkedStale[\s\S]*?const ready = Boolean\(!candidateValidationPending && sourceCurrent[\s\S]*?const pending = Boolean\([\s\S]*?candidateValidationPending/,
+    'a retained or marked-stale prior bridge cannot settle the current candidate checkpoint'
+  );
+  assert.match(
+    probeSource,
+    /sph-long-horizon-probe-initial-render-refresh[\s\S]*?await waitForNativeSurfaceValidation\(0\)[\s\S]*?sampling-initial-state/,
+    'the time-zero visual checkpoint must settle detached candidate validation before sampling'
+  );
+  assert.match(
+    probeSource,
     /phase === 'initial'[\s\S]*?scene-initial-particle-upload-pair[\s\S]*?getSphGpuParticleUpload[\s\S]*?getMlsMpmGpuParticleUpload[\s\S]*?resident-steps-next-particle-upload-pair/
   );
   assert.match(
@@ -135,6 +156,16 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /validationBlockerFamily,/);
   assert.match(probeSource, /textureReadbackUnavailable,/);
   assert.match(probeSource, /gpuBufferHandoffReady,/);
+  assert.match(
+    probeSource,
+    /page\.addInitScript\([\s\S]*?addEventListener\?\.\('uncapturederror'[\s\S]*?Promise\.resolve\(device\.lost\)/,
+    'the probe must observe uncaptured errors and device loss on every device requested after page initialization'
+  );
+  assert.match(
+    probeSource,
+    /firstCriticalGpuMessage[\s\S]*?firstCriticalGpuMessagesByCategory[\s\S]*?browserConsoleFirstCriticalGpuMessage/,
+    'critical GPU messages must remain latched outside capped console arrays'
+  );
 });
 
 test('GPU stage timestamps discard only an unsubmitted encoder allocation suffix', () => {
@@ -1425,7 +1456,7 @@ test('direct resident chemistry probes match the interactive product tier and re
   );
   assert.match(
     probeSource,
-    /reactionLedgerEventCount\(evidence\)[\s\S]*?productEventActiveEventCount[\s\S]*?Math\.max\(\.\.\.counts\)/,
+    /reactionProgressEventCount\(evidence\)[\s\S]*?Math\.max\(\.\.\.counts\)/,
     'placed reaction products must retain event-count evidence after the active event row is consumed'
   );
 });
@@ -1468,6 +1499,21 @@ test('reaction evidence does not let a zero product snapshot mask placed gas eve
       records: [{ reactionIndex: 0, material: 'gas', eventCount: 9 }]
     }
   }), 9);
+});
+
+test('reaction progress groups placed product terms without double-counting one reaction', () => {
+  const records = [
+    { reactionIndex: 0, productTermIndex: 0, placedEventCount: 9 },
+    { reactionIndex: 0, productTermIndex: 1, placedEventCount: 4 },
+    { reactionIndex: 1, productTermIndex: 2, placedEventCount: 3 }
+  ];
+  assert.equal(groupedPlacedReactionEventCount(records), 12);
+  assert.equal(reactionProgressEventCount({
+    canonicalEventCount: 0,
+    productEventActiveEventCount: 0,
+    gasSpeciesLedger: { records: [] },
+    productPlacementProvenance: { records }
+  }), 12);
 });
 
 test('native WebGPU surface diagnostics distinguish opaque refraction and prove zero-submit normals', () => {
@@ -1552,8 +1598,13 @@ test('native WebGPU surface diagnostics distinguish opaque refraction and prove 
   );
   assert.match(
     sceneSource,
-    /translation\.nativeSurfaceTemperatureRows\?\.destroy\?\.\(\)/,
-    'temperature buffers must retire with their generation-owned translation'
+    /destroyNativeSurfaceTemperatureRowsOnce\(\s*temperatureRetirement\.exactTemperatureRows,\s*temperatureRetirement\.exactDestroyMethod\s*\)/,
+    'temperature buffers must retire through the privately authenticated generation-owned destroy hook'
+  );
+  assert.match(
+    sceneSource,
+    /destroyNativeSurfaceTemperatureRowsOnce\(\s*temperatureRetirement\.strayTemperatureRows\s*\)/,
+    'a replaced public temperature alias must be retired separately without substituting for the authenticated generation'
   );
 });
 
@@ -1574,6 +1625,1120 @@ test('native WebGPU resource retirement uses same-queue and liveness boundaries'
     sceneSource,
     /const nativeConsumerFence|nativeSurfaceConsumerInFlightSubmitCount = Math\.max\([\s\S]*?\) \+ 1;/,
     'the native same-queue path must not retain dead per-frame CPU fence accounting'
+  );
+});
+
+test('native successor validation discards mapped bytes on every scoped GPU error', async () => {
+  for (const injectedFilter of ['validation', 'internal', 'out-of-memory']) {
+    const pushed = [];
+    const popped = [];
+    const device = {
+      pushErrorScope(filter) {
+        pushed.push(filter);
+      },
+      async popErrorScope() {
+        const filter = pushed[pushed.length - popped.length - 1];
+        popped.push(filter);
+        return filter === injectedFilter
+          ? {
+              name: injectedFilter === 'out-of-memory'
+                ? 'GPUOutOfMemoryError'
+                : (injectedFilter === 'internal'
+                  ? 'GPUInternalError'
+                  : 'GPUValidationError'),
+              message: `injected ${injectedFilter} candidate command failure`
+            }
+          : null;
+      }
+    };
+    const stalePriorGenerationBytes = new Uint8Array([255, 255, 255, 255]);
+    let completionCount = 0;
+    let discardCount = 0;
+    const result =
+      await runSphNativeSurfaceCandidateValidationTransaction({
+        device,
+        transaction: () => ({ submitted: true }),
+        completeTransaction: async () => {
+          completionCount += 1;
+          return {
+            status: 'mapped',
+            bytes: stalePriorGenerationBytes
+          };
+        },
+        discardTransaction: () => {
+          discardCount += 1;
+        }
+      });
+
+    assert.equal(result.ok, false, injectedFilter);
+    assert.equal(
+      result.status,
+      'native-surface-candidate-validation-transaction-error'
+    );
+    assert.equal(result.transactionValue, null);
+    assert.equal(result.transactionValueDiscarded, true);
+    assert.match(result.reason, new RegExp(`injected ${injectedFilter}`));
+    assert.deepEqual(pushed, ['validation', 'internal', 'out-of-memory']);
+    assert.deepEqual(popped, ['out-of-memory', 'internal', 'validation']);
+    assert.equal(completionCount, 0, 'mapping must not start after a scoped error');
+    assert.equal(discardCount, 1, 'the submitted readback must be poisoned once');
+  }
+});
+
+test('native successor validation settles scopes after an injected submit throw', async () => {
+  const activeFilters = [];
+  const popped = [];
+  const result = await runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+      },
+      async popErrorScope() {
+        const filter = activeFilters.pop();
+        popped.push(filter);
+        return null;
+      }
+    },
+    transaction: () => {
+      throw new Error('injected synchronous queue submit failure');
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.transactionValueDiscarded, false);
+  assert.match(result.reason, /injected synchronous queue submit failure/);
+  assert.deepEqual(popped, ['out-of-memory', 'internal', 'validation']);
+});
+
+test('native successor validation fails closed when WebGPU error scopes are unavailable', async () => {
+  let submissionCount = 0;
+  let completionCount = 0;
+  let discardCount = 0;
+  const result = await runSphNativeSurfaceCandidateValidationTransaction({
+    device: {},
+    transaction: () => {
+      submissionCount += 1;
+      return { submitted: true };
+    },
+    completeTransaction: async () => {
+      completionCount += 1;
+    },
+    discardTransaction: () => {
+      discardCount += 1;
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.errorScopeSupported, false);
+  assert.equal(result.transactionValue, null);
+  assert.equal(result.transactionValueDiscarded, false);
+  assert.equal(submissionCount, 0);
+  assert.equal(completionCount, 0);
+  assert.equal(discardCount, 0);
+  assert.match(result.reason, /requires WebGPU error scope support/);
+  assert.equal(result.errors[0]?.source, 'error-scope-unsupported');
+});
+
+test('native successor validation closes GPU scopes before readback completion', async () => {
+  const order = [];
+  const activeFilters = [];
+  const result = await runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+        order.push(`push:${filter}`);
+      },
+      async popErrorScope() {
+        const filter = activeFilters.pop();
+        order.push(`pop:${filter}`);
+        return null;
+      }
+    },
+    transaction: () => {
+      order.push('submit');
+      return { readback: 'pooled-16k' };
+    },
+    completeTransaction: async (submission) => {
+      assert.equal(submission.readback, 'pooled-16k');
+      order.push('mapAsync');
+      return { status: 'mapped', bytes: new Uint8Array([1, 2, 3, 4]) };
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(Number.isFinite(result.errorScopesMs), true);
+  assert.ok(result.errorScopesMs >= 0);
+  assert.deepEqual(order, [
+    'push:validation',
+    'push:internal',
+    'push:out-of-memory',
+    'submit',
+    'pop:out-of-memory',
+    'pop:internal',
+    'pop:validation',
+    'mapAsync'
+  ]);
+});
+
+test('native successor validation may overlap a map request but never consumes it before clean scopes', async () => {
+  const order = [];
+  const activeFilters = [];
+  const pendingPops = [];
+  let resolveMap = null;
+  const resultPromise = runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+        order.push(`push:${filter}`);
+      },
+      popErrorScope() {
+        const filter = activeFilters.pop();
+        order.push(`pop:${filter}`);
+        return new Promise((resolve) => pendingPops.push({ filter, resolve }));
+      }
+    },
+    transaction: () => {
+      order.push('submit');
+      return { submitted: true };
+    },
+    startCompletion: () => {
+      const mapPromise = new Promise((resolve) => {
+        resolveMap = () => {
+          order.push('map-resolved');
+          resolve('mapped');
+        };
+      });
+      order.push('mapAsync');
+      return { mapPromise };
+    },
+    completeTransaction: async (_submission, completionStart) => {
+      order.push('readback-consume');
+      assert.equal(await completionStart.mapPromise, 'mapped');
+      return { status: 'mapped' };
+    }
+  });
+
+  assert.deepEqual(order, [
+    'push:validation',
+    'push:internal',
+    'push:out-of-memory',
+    'submit',
+    'pop:out-of-memory',
+    'pop:internal',
+    'pop:validation',
+    'mapAsync'
+  ]);
+  resolveMap();
+  await Promise.resolve();
+  assert.equal(order.includes('readback-consume'), false);
+
+  pendingPops.find(({ filter }) => filter === 'validation').resolve(null);
+  pendingPops.find(({ filter }) => filter === 'internal').resolve(null);
+  await Promise.resolve();
+  assert.equal(order.includes('readback-consume'), false);
+
+  pendingPops.find(({ filter }) => filter === 'out-of-memory').resolve(null);
+  const result = await resultPromise;
+  assert.equal(result.ok, true);
+  assert.ok(
+    order.indexOf('readback-consume') > order.indexOf('pop:validation'),
+    'a prestarted MAP_READ request must not grant access before every scope settles clean'
+  );
+});
+
+test('native successor validation preserves a timeout-first map outcome through delayed scope reports', async () => {
+  const activeFilters = [];
+  const pendingPops = [];
+  const order = [];
+  let settleMapOutcome = null;
+  let resolveLateMap = null;
+  let mappedByteAccessCount = 0;
+  const readbackBuffer = {
+    getMappedRange() {
+      mappedByteAccessCount += 1;
+      return new Uint8Array([1, 2, 3, 4]);
+    }
+  };
+  const resultPromise = runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+      },
+      popErrorScope() {
+        const filter = activeFilters.pop();
+        return new Promise((resolve) => pendingPops.push({ filter, resolve }));
+      }
+    },
+    transaction: () => ({ submitted: true }),
+    startCompletion: () => {
+      const mapOutcome = new Promise((resolve) => {
+        settleMapOutcome = resolve;
+      });
+      const mapPromise = new Promise((resolve) => {
+        resolveLateMap = resolve;
+      });
+      order.push('map-requested');
+      return { mapOutcome, mapPromise, readbackBuffer };
+    },
+    completeTransaction: async (_submission, completionStart) => {
+      order.push('completion');
+      const outcome = await completionStart.mapOutcome;
+      if (outcome.status !== 'timeout') {
+        completionStart.readbackBuffer.getMappedRange();
+      }
+      assert.equal(outcome.status, 'timeout');
+      assert.equal(mappedByteAccessCount, 0, 'a timeout-first outcome must not consume mapped bytes');
+      return {
+        status: 'not-run',
+        reason: 'candidate staged presentation color-difference proof timed out'
+      };
+    }
+  });
+
+  assert.deepEqual(order, ['map-requested']);
+  settleMapOutcome({ status: 'timeout' });
+  resolveLateMap('mapped-after-deadline');
+  await Promise.resolve();
+  assert.equal(
+    order.includes('completion'),
+    false,
+    'scope reports remain the admission gate even after a map deadline settles'
+  );
+
+  for (const { resolve } of pendingPops) resolve(null);
+  const result = await resultPromise;
+  assert.equal(result.ok, true);
+  assert.equal(result.transactionValue?.status, 'not-run');
+  assert.match(result.transactionValue?.reason || '', /timed out/);
+  assert.equal(mappedByteAccessCount, 0);
+});
+
+test('native successor validation discards a prestarted map after a scoped error without access', async () => {
+  const activeFilters = [];
+  const pendingPops = [];
+  let completionCount = 0;
+  let discardedHandle = null;
+  const resultPromise = runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+      },
+      popErrorScope() {
+        const filter = activeFilters.pop();
+        return new Promise((resolve) => pendingPops.push({ filter, resolve }));
+      }
+    },
+    transaction: () => ({ submitted: true }),
+    startCompletion: () => ({
+      mapPromise: Promise.resolve('mapped-looking-stale-prior-generation-bytes')
+    }),
+    completeTransaction: async () => {
+      completionCount += 1;
+      return { status: 'mapped' };
+    },
+    discardTransaction: (_submission, completionStart) => {
+      discardedHandle = completionStart;
+    }
+  });
+
+  pendingPops.find(({ filter }) => filter === 'out-of-memory').resolve(null);
+  pendingPops.find(({ filter }) => filter === 'internal').resolve(null);
+  pendingPops.find(({ filter }) => filter === 'validation').resolve({
+    name: 'GPUValidationError',
+    message: 'injected scope failure after MAP_READ request'
+  });
+  const result = await resultPromise;
+
+  assert.equal(result.ok, false);
+  assert.equal(result.transactionValue, null);
+  assert.equal(completionCount, 0);
+  assert.equal(
+    await discardedHandle?.mapPromise,
+    'mapped-looking-stale-prior-generation-bytes'
+  );
+  assert.match(result.reason, /scope failure after MAP_READ request/);
+});
+
+test('native successor validation never starts a map after a synchronous pop failure', async () => {
+  const activeFilters = [];
+  let startCount = 0;
+  let completionCount = 0;
+  let discardCount = 0;
+  const result = await runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+      },
+      popErrorScope() {
+        const filter = activeFilters.pop();
+        if (filter === 'out-of-memory') {
+          throw new Error('injected synchronous scope-pop failure');
+        }
+        return Promise.resolve(null);
+      }
+    },
+    transaction: () => ({ submitted: true }),
+    startCompletion: () => {
+      startCount += 1;
+      return { mapPromise: Promise.resolve('must-not-start') };
+    },
+    completeTransaction: async () => {
+      completionCount += 1;
+    },
+    discardTransaction: () => {
+      discardCount += 1;
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(startCount, 0);
+  assert.equal(completionCount, 0);
+  assert.equal(discardCount, 1);
+  assert.match(result.reason, /synchronous scope-pop failure/);
+});
+
+test('native successor validation starts every LIFO scope pop before awaiting any result', async () => {
+  const order = [];
+  const activeFilters = [];
+  const pendingPops = [];
+  let completionCount = 0;
+  const resultPromise = runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+        order.push(`push:${filter}`);
+      },
+      popErrorScope() {
+        const filter = activeFilters.pop();
+        order.push(`pop:${filter}`);
+        return new Promise((resolve) => {
+          pendingPops.push({ filter, resolve });
+        });
+      }
+    },
+    transaction: () => {
+      order.push('submit');
+      return { readback: 'pooled-16k' };
+    },
+    completeTransaction: async () => {
+      completionCount += 1;
+      order.push('mapAsync');
+      return { status: 'mapped' };
+    }
+  });
+
+  assert.deepEqual(order, [
+    'push:validation',
+    'push:internal',
+    'push:out-of-memory',
+    'submit',
+    'pop:out-of-memory',
+    'pop:internal',
+    'pop:validation'
+  ]);
+  assert.equal(completionCount, 0);
+
+  pendingPops.find(({ filter }) => filter === 'internal').resolve(null);
+  await Promise.resolve();
+  assert.equal(completionCount, 0, 'mapping waits for every scope result');
+
+  pendingPops.find(({ filter }) => filter === 'validation').resolve(null);
+  await Promise.resolve();
+  assert.equal(completionCount, 0, 'mapping waits for the final scope result');
+
+  pendingPops.find(({ filter }) => filter === 'out-of-memory').resolve(null);
+  const result = await resultPromise;
+  assert.equal(result.ok, true);
+  assert.equal(completionCount, 1);
+  assert.deepEqual(order.at(-1), 'mapAsync');
+});
+
+test('probe preserves first critical GPU faults after console and issue caps', () => {
+  const capture = createBrowserConsoleCapture();
+  for (let index = 0; index < 510; index += 1) {
+    capture.recordConsole({
+      type: () => 'warning',
+      text: () => `[Invalid Buffer] injected capped warning ${index}`,
+      location: () => ({
+        url: 'https://probe.invalid/',
+        lineNumber: index,
+        columnNumber: 0
+      })
+    });
+  }
+  capture.recordConsole({
+    type: () => 'error',
+    text: () => '[ulg-gpu-uncaptured-error:GPUOutOfMemoryError] injected oom'
+  });
+  capture.recordConsole({
+    type: () => 'error',
+    text: () => '[ulg-gpu-device-lost] reason=unknown message=injected loss'
+  });
+  capture.recordConsole({
+    type: () => 'error',
+    text: () => '[ulg-gpu-uncaptured-error:GPUValidationError] injected invalid command'
+  });
+
+  const summary = capture.summary();
+  assert.equal(summary.retainedEntryCount, 500);
+  assert.equal(summary.retainedIssueCount, 200);
+  assert.ok(summary.droppedEntryCount > 0);
+  assert.ok(summary.droppedIssueCount > 0);
+  assert.equal(summary.firstCriticalGpuMessage.category, 'out-of-memory');
+  assert.match(summary.firstCriticalGpuMessage.text, /injected oom/);
+  assert.match(
+    summary.firstCriticalGpuMessagesByCategory['device-lost'].text,
+    /injected loss/
+  );
+  assert.match(
+    summary.firstCriticalGpuMessagesByCategory['uncaptured-error'].text,
+    /injected invalid command/
+  );
+});
+
+test('native composite staging validates asynchronously before a short irreversible publication', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const lifecycleSource = readRepoFile(
+    'src/visualization/nativeSurfaceResourceLifecycle.js'
+  );
+
+  assert.match(
+    sceneSource,
+    /queue\.submit\(\[encoder\.finish\(\)\]\);\s*primaryFrameSubmitted = true;\s*if \(!stageOnly\) markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);/,
+    'only a visible normal submit may latch the transaction immediately after the primary submit returns'
+  );
+  const stagedPresenter = sceneSource.match(
+    /function presentStagedSphNativeSurfaceCandidateComposite\([\s\S]*?\n  function prepareSphNativeWebGpuSurfaceForegroundValidationGeneration/
+  )?.[0] || '';
+  assert.match(
+    stagedPresenter,
+    /encoder\.copyTextureToTexture\([\s\S]*?queue\.submit\(\[encoder\.finish\(\)\]\);\s*submitted = true;\s*markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);/,
+    'the staged route may latch only after its private composite has been copied to the visible canvas'
+  );
+  assert.match(
+    sceneSource,
+    /function snapshotStagedSphNativeSurfaceCandidatePresentationTiming\([\s\S]*?return Object\.freeze\(\{[\s\S]*?proofTotalMs: Number\.isFinite\(originAtMs\)[\s\S]*?\}\);/,
+    'candidate proof telemetry must publish an immutable CPU-wall-clock receipt only after validation settles'
+  );
+  assert.match(
+    sceneSource,
+    /const timing = \{[\s\S]*?schema: 'peercompute\.ulg\.sph-native-surface-candidate-presentation-timing\.v0',[\s\S]*?targetAllocationMs: null,[\s\S]*?stageRenderSubmitMs: null,[\s\S]*?errorScopesMs: null,[\s\S]*?mapMs: null,[\s\S]*?presentationCopySubmitMs: null,/,
+    'candidate proof telemetry must name the allocation, submit, scope, map, and final-copy phases explicitly'
+  );
+  assert.match(
+    sceneSource,
+    /const targetAllocationStartedAtMs = nowMs\(\);[\s\S]*?ensureStagedSphNativeSurfaceCandidatePresentationTargets\([\s\S]*?timing\.targetAllocationMs = Math\.max\(/,
+    'candidate proof telemetry must time the private-target allocation boundary without adding GPU synchronization'
+  );
+  assert.match(
+    sceneSource,
+    /const stageRenderSubmitStartedAtMs = nowMs\(\);[\s\S]*?renderSphResidentSurfaceDrawOverlay\([\s\S]*?\} finally \{[\s\S]*?timing\.stageRenderSubmitMs = Math\.max\(/,
+    'candidate proof telemetry must time the synchronous private-stage encode and submit path even when it throws'
+  );
+  assert.match(
+    sceneSource,
+    /const errorScopesMs = Math\.max\(0, nowMs\(\) - errorScopesStartedAtMs\);[\s\S]*?errorScopesMs,/,
+    'GPU error-scope settlement latency must remain separately observable from map latency'
+  );
+  assert.match(
+    sceneSource,
+    /const mapTiming = \{[\s\S]*?startedAtMs: null,[\s\S]*?settledAtMs: null,[\s\S]*?deadlineAtMs: null[\s\S]*?const mapRequestedAtMs = nowMs\(\);[\s\S]*?mapTiming\.startedAtMs = mapRequestedAtMs;[\s\S]*?mapTiming\.deadlineAtMs = mapRequestedAtMs[\s\S]*?mapTiming\.settledAtMs = nowMs\(\);[\s\S]*?\} finally \{[\s\S]*?timing\.mapMs = Math\.max\(/,
+    'candidate proof telemetry must time MAP_READ from its request deadline through every completion outcome in a finally path'
+  );
+  assert.match(
+    stagedPresenter,
+    /queue\.submit\(\[encoder\.finish\(\)\]\);\s*submitted = true;\s*markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);\s*const presentationCopySubmittedAtMs = nowMs\(\);[\s\S]*?presentationCopySubmitMs: Math\.max\([\s\S]*?bridge\.nativeSurfaceCandidateStagedPresentationTiming = presentationTiming;/,
+    'final-copy telemetry may be published only after the visible copy has submitted and the first-frame latch is irrevocable'
+  );
+  assert.doesNotMatch(
+    stagedPresenter,
+    /drawIndirect\(/,
+    'staged publication must not encode a second geometry draw after proof admission'
+  );
+  assert.match(
+    stagedPresenter,
+    /copyTextureToTexture\(\s*\{ texture: targets\.texture \},\s*\{ texture: canvasTexture \}/,
+    'staged publication must promote the proven private composite with a direct same-device texture copy'
+  );
+  assert.doesNotMatch(
+    stagedPresenter,
+    /renderSphResidentSurfaceDrawOverlay\(|beginRenderPass\(/,
+    'the visible staged route must not hide a second render path behind a renderer or render pass call'
+  );
+  assert.match(
+    stagedPresenter,
+    /const bridgeRecord = record\?\.renderBridgeCandidate[\s\S]*?sphNativeSurfaceRenderBridgeTransactionRecord\([\s\S]*?record\.renderBridgeCandidate[\s\S]*?bridgeRecord\.candidatePresentationTargets !== targets[\s\S]*?targets\.candidateRecord !== bridgeRecord[\s\S]*?targets\.candidateBridge !== record\.renderBridgeCandidate/,
+    'the copy admission must resolve the native-bridge transaction record instead of comparing its target ownership to the distinct resident-draw record'
+  );
+  assert.match(
+    stagedPresenter,
+    /validateSphNativeSurfaceCandidatePresentationSnapshot\([\s\S]*?record: bridgeRecord[\s\S]*?validateSphNativeSurfaceCandidatePresentationSnapshot\([\s\S]*?record: bridgeRecord/,
+    'both pre- and post-acquire freshness checks must retain the bridge-record identity captured before the private submission'
+  );
+  assert.match(
+    stagedPresenter,
+    /nativeSurfaceCandidatePresentationPostAdmissionGeometrySubmitCount = 0;/,
+    'the publication receipt must report that no geometry was submitted after proof admission'
+  );
+  const stagedBasePassIndex = sceneSource.indexOf(
+    'const basePass = encoder.beginRenderPass({'
+  );
+  const stagedOpaquePassIndex = sceneSource.indexOf(
+    'const opaquePass = encoder.beginRenderPass({',
+    stagedBasePassIndex
+  );
+  const stagedBaseBoxPassIndex = sceneSource.indexOf(
+    'const stagedBaseBoxPass = encoder.beginRenderPass({',
+    stagedOpaquePassIndex
+  );
+  assert.ok(
+    stagedBasePassIndex >= 0
+      && stagedOpaquePassIndex > stagedBasePassIndex
+      && stagedBaseBoxPassIndex > stagedOpaquePassIndex,
+    'the staged proof must initialize both proof textures, draw candidate opaque geometry once, then match baseline chrome'
+  );
+  const stagedBaseInitPass = sceneSource.slice(
+    stagedBasePassIndex,
+    stagedOpaquePassIndex
+  );
+  assert.match(
+    stagedBaseInitPass,
+    /colorAttachments: \[\{[\s\S]*?view: presentationTarget\.baseView,[\s\S]*?\}, \{[\s\S]*?view: canvasView,/,
+    'one staged pass must initialize distinct baseline and composite attachments together'
+  );
+  assert.match(
+    stagedBaseInitPass,
+    /drawSphNativeSurfaceBackgroundImage\(bridge, basePass, \{[\s\S]*?stagedMrt: true/,
+    'an active background image must sample once and write the same value to both proof textures'
+  );
+  assert.doesNotMatch(
+    stagedBaseInitPass,
+    /encoder\.copyTextureToTexture\(/,
+    'the staged proof must not copy the baseline into the composite before geometry'
+  );
+  assert.doesNotMatch(
+    stagedBaseInitPass,
+    /drawSphNativeSurfaceBoxWireframe\(/,
+    'the baseline must not paint static chrome before candidate depth exists'
+  );
+  assert.doesNotMatch(
+    stagedBaseInitPass,
+    /drawIndirect\(/,
+    'the baseline must contain background and clear only, never candidate geometry'
+  );
+  const stagedBaseBoxPass = sceneSource.slice(
+    stagedBaseBoxPassIndex,
+    sceneSource.indexOf('const refractionTargetsRequired', stagedBaseBoxPassIndex)
+  );
+  assert.match(
+    stagedBaseBoxPass,
+    /view: presentationTarget\.baseView,[\s\S]*?view: depthView,[\s\S]*?depthLoadOp: 'load',[\s\S]*?drawSphNativeSurfaceBoxWireframe\([\s\S]*?stagedBaseBoxPass/,
+    'the proof baseline must receive the static box with the candidate depth already established'
+  );
+  const stagedCandidateOpaqueSegment = sceneSource.slice(
+    stagedOpaquePassIndex,
+    stagedBaseBoxPassIndex
+  );
+  assert.equal(
+    stagedCandidateOpaqueSegment.match(/const opaquePass = encoder\.beginRenderPass\(/g)?.length,
+    1,
+    'the private stage must encode exactly one opaque candidate render pass'
+  );
+  assert.equal(
+    stagedCandidateOpaqueSegment.match(/for \(const draw of opaqueDraws\)/g)?.length,
+    1,
+    'the private stage must walk its primary opaque candidate draws once'
+  );
+  assert.equal(
+    stagedCandidateOpaqueSegment.match(/for \(const additionalDraw of additionalOpaqueDraws\)/g)?.length,
+    1,
+    'the private stage must walk its additional opaque candidate draws once'
+  );
+  assert.equal(
+    stagedCandidateOpaqueSegment.match(/opaquePass\.drawIndirect\(/g)?.length,
+    2,
+    'the one opaque pass may issue primary and additional candidate indirect draws, but no duplicate candidate pass'
+  );
+  assert.match(
+    stagedCandidateOpaqueSegment,
+    /if \(stagedStaticBoxRequired\) \{[\s\S]*?drawSphNativeSurfaceBoxWireframe\(bridge, opaquePass, viewProjection\);[\s\S]*?opaquePass\.end\(\);/,
+    'the private composite must receive its matching static box in the already-open opaque pass'
+  );
+  assert.doesNotMatch(
+    stagedCandidateOpaqueSegment,
+    /stagedCompositeBoxPass/,
+    'the staged path must not reopen a redundant composite-only chrome pass'
+  );
+  assert.doesNotMatch(
+    stagedBaseBoxPass,
+    /drawIndirect\(/,
+    'the remaining baseline chrome pass must not duplicate candidate geometry'
+  );
+  assert.match(
+    sceneSource,
+    /record\.candidatePresentationTargets = targets;[\s\S]*?sphNativeSurfaceCandidatePresentationStagingTargetSet\.add\(targets\);/,
+    'full-resolution staging targets must be candidate-owned rather than reused by an unrelated validation'
+  );
+  const stagedTargetAllocation = sceneSource.slice(
+    sceneSource.indexOf('targets.texture = device.createTexture({'),
+    sceneSource.indexOf('const diff = createStagedSphNativeSurfaceCandidatePresentationDiffPipeline(device);')
+  );
+  assert.doesNotMatch(
+    stagedTargetAllocation,
+    /GPU_TEXTURE_USAGE\.COPY_DST/,
+    'MRT initialization must not retain the old baseline-to-composite copy destination usage'
+  );
+  assert.match(
+    sceneSource,
+    /function ensureSphNativeSurfaceBackgroundRenderer\(bridge\) \{[\s\S]*?entryPoint: 'fs_staged_mrt_main',[\s\S]*?targets: \[\{ format: bridge\.format \}, \{ format: bridge\.format \}\][\s\S]*?stagedMrtPipeline/,
+    'the background renderer must own a distinct two-attachment pipeline for candidate staging'
+  );
+  assert.match(
+    sceneSource,
+    /const stagedMrtBindGroup = bridge\.device\.createBindGroup\([\s\S]*?layout: renderer\.stagedMrtPipeline\.getBindGroupLayout\(0\)[\s\S]*?renderer\.stagedMrtBindGroup = stagedMrtBindGroup/,
+    'the auto-layout MRT pipeline must receive its own compatible background bind group'
+  );
+  assert.match(
+    sceneSource,
+    /backgroundImageRendererStagedMrtBindGroup:[\s\S]*?stagedMrtBindGroup[\s\S]*?'backgroundImageRendererStagedMrtBindGroup'/,
+    'current-source snapshots must reject a changed dual-target background binding'
+  );
+  assert.match(
+    sceneSource,
+    /const backgroundMrtReady = !backgroundUrl \|\| Boolean\([\s\S]*?stagedMrtPipeline[\s\S]*?stagedMrtBindGroup[\s\S]*?const maxColorAttachments = Number\([\s\S]*?const dualColorAttachmentSupported = !Number\.isFinite\(maxColorAttachments\)[\s\S]*?&& backgroundMrtReady[\s\S]*?&& dualColorAttachmentSupported/,
+    'candidate staging must fail closed unless its exact background MRT binding and two color attachments are available'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /baseDepth(?:Texture|View)/,
+    'the baseline background pass must share the candidate depth attachment instead of allocating a redundant full-resolution depth target'
+  );
+  assert.match(
+    sceneSource,
+    /stagedPresentationBytes: width \* height \* 12/,
+    'candidate staging telemetry must account for composite color/depth plus baseline color only'
+  );
+  assert.match(
+    sceneSource.slice(stagedBasePassIndex, stagedOpaquePassIndex),
+    /depthStencilAttachment: \{[\s\S]*?view: depthView,[\s\S]*?depthLoadOp: 'clear'/,
+    'the baseline must clear the shared private depth attachment before background rendering'
+  );
+  assert.match(
+    sceneSource.slice(stagedOpaquePassIndex, stagedBaseBoxPassIndex),
+    /const opaquePass = encoder\.beginRenderPass\([\s\S]*?depthStencilAttachment: depthView[\s\S]*?view: depthView,[\s\S]*?depthLoadOp: 'clear'/,
+    'the opaque candidate pass must clear that shared depth attachment again before geometry'
+  );
+  const stagedCandidateDiffShader = sceneSource.match(
+    /function createStagedSphNativeSurfaceCandidatePresentationDiffPipeline\(device\) \{[\s\S]*?return created;\n  \}/
+  )?.[0] || '';
+  assert.match(
+    stagedCandidateDiffShader,
+    /var<workgroup> workgroup_changed_pixels: array<u32, 64>;[\s\S]*?@builtin\(local_invocation_index\) local_index: u32[\s\S]*?workgroup_changed_pixels\[local_index\] = changed;[\s\S]*?workgroupBarrier\(\);[\s\S]*?for \(var index = 0u; index < 64u; index = index \+ 1u\)[\s\S]*?atomicAdd\(&changed_pixels\.value, workgroup_changed_count\);/,
+    'the exact full-resolution foreground proof must reduce each 8x8 workgroup locally before issuing at most one global atomic add'
+  );
+  const stagedDiffCounterResetIndex = sceneSource.indexOf(
+    'encoder.clearBuffer(',
+    stagedOpaquePassIndex
+  );
+  const stagedDiffPassIndex = sceneSource.indexOf(
+    "const diffPass = encoder.beginComputePass({",
+    stagedDiffCounterResetIndex
+  );
+  assert.ok(
+    stagedDiffCounterResetIndex > stagedOpaquePassIndex
+      && stagedDiffPassIndex > stagedDiffCounterResetIndex,
+    'the exact difference counter must reset inside the staged command buffer before the compute proof dispatch'
+  );
+  assert.match(
+    sceneSource.slice(stagedDiffCounterResetIndex, stagedDiffPassIndex),
+    /encoder\.clearBuffer\(\s*presentationTarget\.diffCounterBuffer,\s*0,\s*presentationTarget\.byteLength\s*\)/,
+    'the candidate proof must use an ordered command-buffer clear rather than a separate queue write'
+  );
+  assert.doesNotMatch(
+    sceneSource.slice(stagedOpaquePassIndex, stagedDiffPassIndex),
+    /queue\.writeBuffer\(\s*presentationTarget\.diffCounterBuffer/,
+    'the counter reset must not introduce an extra queue submission boundary'
+  );
+  assert.match(
+    sceneSource,
+    /const sphNativeSurfaceCandidatePresentationDiffPipelineCache = new WeakMap\(\);[\s\S]*?function createStagedSphNativeSurfaceCandidatePresentationDiffPipeline\(device\) \{[\s\S]*?const cached = sphNativeSurfaceCandidatePresentationDiffPipelineCache\.get\(device\);[\s\S]*?if \(cached\?\.module && cached\?\.pipeline\) return cached;[\s\S]*?sphNativeSurfaceCandidatePresentationDiffPipelineCache\.set\(device, created\);/,
+    'candidate-private proof inputs may share only an immutable per-device diff pipeline cache'
+  );
+  assert.match(
+    sceneSource,
+    /function releaseStagedSphNativeSurfaceCandidatePresentationTargetsForDevice[\s\S]*?sphNativeSurfaceCandidatePresentationDiffPipelineCache\.delete\(device\);/,
+    'a lost device must evict its cached immutable proof pipeline before another candidate can be admitted'
+  );
+  assert.match(
+    sceneSource,
+    /const sphNativeSurfaceBoxWireframePipelineCache = new WeakMap\(\);[\s\S]*?function ensureSphNativeSurfaceBoxWireframe[\s\S]*?sphNativeSurfaceBoxWireframePipelineCache\.get\(device\)[\s\S]*?pipelineByFormat\.get\(bridge\.format\)[\s\S]*?pipelineByFormat\.set\(bridge\.format, pipeline\);/,
+    'the staged box may cache only its immutable device+format pipeline while retaining a candidate-owned uniform and bind group'
+  );
+  assert.match(
+    sceneSource,
+    /sphNativeSurfaceCandidatePresentationDiffPipelineCache\.delete\(device\);[\s\S]*?sphNativeSurfaceBoxWireframePipelineCache\.delete\(device\);/,
+    'device loss must evict both immutable candidate-presentation pipeline caches'
+  );
+  assert.doesNotMatch(
+    stagedCandidateDiffShader,
+    /if \(id\.x >= dimensions\.x \|\| id\.y >= dimensions\.y\) \{\s*return;/,
+    'partial edge workgroups must not return before the proof reducer barrier'
+  );
+  assert.match(
+    sceneSource,
+    /detachStagedSphNativeSurfaceCandidatePresentationReadbackBuffer\([\s\S]*?candidate-presentation-color-difference-map-timeout/,
+    'a timed-out MAP_READ buffer must be detached instead of reused by the next candidate'
+  );
+  assert.match(
+    sceneSource,
+    /async function commitStagedSphResidentSurfaceDrawCandidate[\s\S]*?suppliedForegroundValidation[\s\S]*?resolveNativeSurfaceSuccessorPromotion\([\s\S]*?if \(!successorPromotion\.promoteCandidate\)[\s\S]*?activateSphNativeSurfaceRenderBridgeCandidate/,
+    'an exact-generation nonzero foreground proof must precede bridge activation and visible publication'
+  );
+  assert.match(
+    sceneSource,
+    /scheduleStagedSphResidentSurfaceDrawCandidateValidation\([\s\S]*?native surface successor is validating while the last committed presentation remains visible/,
+    'the refresh must enqueue validation and retain the prior presentation instead of awaiting the map'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /await\s+candidateValidationRequest\.completion/,
+    'Scene must keep staged candidate validation asynchronous; mounted scheduling owns presentation backpressure'
+  );
+  assert.match(
+    sceneSource,
+    /const sphNativeSurfaceCandidateCompletionHandoffs = new Map\(\);[\s\S]*?retainSphNativeSurfaceCandidateCompletionHandoff[\s\S]*?getSphNativeSurfaceCandidateValidationCompletion/,
+    'Scene must expose only a bounded, scene-private exact candidate completion handoff rather than serializing a completion promise into render state'
+  );
+  assert.match(
+    sceneSource,
+    /function scheduleStagedSphResidentSurfaceDrawCandidateValidation[\s\S]*?const request = ensureSphNativeSurfaceCandidateValidationScheduler\(\)\.enqueue\(item\);[\s\S]*?retainSphNativeSurfaceCandidateCompletionHandoff\(\{[\s\S]*?request,[\s\S]*?preparation,[\s\S]*?residentRenderSource/,
+    'each staged candidate must register its immutable source receipt before the asynchronous scheduler can settle it'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /native-surface-candidate-validated-and-published[\s\S]{0,500}forceViewportRefreshBurst/,
+    'candidate commit already submits its exact validated surface; it must not schedule a duplicate viewport/overlay render'
+  );
+  assert.match(
+    sceneSource,
+    /item\.publicationReceipt = Object\.freeze\([\s\S]*?requestToken:[\s\S]*?candidateGeneration:[\s\S]*?residentDraw: result\.residentDraw,[\s\S]*?renderBridge: result\.renderBridge/,
+    'candidate publication must retain an exact private compare-and-swap receipt for the originating refresh tail'
+  );
+  assert.match(
+    sceneSource,
+    /const nativeCandidatePublishedDuringRefresh = Boolean\([\s\S]*?publicationReceipt\.requestToken[\s\S]*?publicationReceipt\.sourceResidentExecutionGeneration[\s\S]*?publicationReceipt\.residentDraw === sphResidentSurfaceDraw[\s\S]*?nextResidentSurfaceDraw = sphResidentSurfaceDraw;[\s\S]*?retainingPreviousResidentSurfaceDraw = false;/,
+    'a matching committed candidate must win over its refresh tail\'s stale pending placeholder'
+  );
+  assert.match(
+    sceneSource,
+    /const firstFrameAlreadyIncludesPublishedAdditionalDraws = Boolean\([\s\S]*?lastNativeSurfaceDebugMode !== 'clear-only'[\s\S]*?lastNativeSurfaceDiagnosticDrawFilterActive !== true[\s\S]*?lastNativeSurfaceDiagnosticSelectedAdditionalDrawCount[\s\S]*?additionalPlan\.draws\.length[\s\S]*?settlePublishedAdditionalNativeSurfaceDraws\([\s\S]*?firstFrameAlreadyIncludesPublishedAdditionalDraws[\s\S]*?if \(!completeCompositeAlreadySubmitted\) \{[\s\S]*?invalidateSphNativeWebGpuSurfaceFrame/,
+    'only an unfiltered, non-clear first frame that drew every additional surface may skip the redundant composite redraw'
+  );
+  assert.match(
+    mountSource,
+    /currentNativeSurfaceCandidateCompletionHandoff\(\s*execution,\s*\{\s*allowSurfaceDrawRequestFallback:\s*false\s*\}\s*\)[\s\S]*?waitForNativeSurfaceCandidateCompletionHandoff[\s\S]*?resolveSphNativeSurfaceCandidateCompletionHandoff[\s\S]*?residentPresentationIsVisible\([\s\S]*?requireCurrentSource:\s*true/,
+    'mounted playback may use only an exact scheduler handoff with no retained-draw fallback, and only after it rechecks the unchanged current-source foreground proof'
+  );
+  assert.match(
+    mountSource,
+    /native-surface-post-step-presentation-proof-pending[\s\S]*?active:\s*true[\s\S]*?waitForNativeSurfaceCandidateCompletionHandoff/,
+    'the post-step gate must become active before the candidate-completion wait begins'
+  );
+  assert.match(
+    mountSource,
+    /const scheduledScene = scene;[\s\S]*?const residentScheduleIsCurrent = \(\) => \([\s\S]*?scene === scheduledScene[\s\S]*?pendingMlsMpmResidentStepsToken[\s\S]*?await waitForNativeSurfaceCandidateCompletionHandoff[\s\S]*?if \(!residentScheduleIsCurrent\(\)\) \{[\s\S]*?discardStaleResidentPresentationContinuation\(\);[\s\S]*?return;/,
+    'a reset or superseding schedule must fail closed after a native completion await rather than publish an obsolete foreground proof'
+  );
+  assert.match(
+    mountSource,
+    /function invalidateResidentRuntimeForReset[\s\S]*?residentPostStepPresentationGate = null;[\s\S]*?__sphResidentPostStepPresentationProof = null;[\s\S]*?__sphResidentPostStepPresentationHandoff = null;/,
+    'reset must clear post-step native proof artifacts before it advances the particle generation'
+  );
+  assert.match(
+    sceneSource,
+    /function nativeSurfaceCompletionHandoffExactInteger\(value\) \{\s*return typeof value === 'number'/,
+    'scene-private handoff identities must reject coercible missing-like values'
+  );
+  assert.match(
+    mountSource,
+    /function nativeSurfaceCandidateCompletionHandoffExactInteger\(value\) \{\s*return typeof value === 'number'/,
+    'mounted handoff identities must reject coercible missing-like values'
+  );
+  assert.match(
+    mountSource,
+    /waitForNativeSurfaceCandidateCompletionHandoff[\s\S]*?timeoutMs:\s*NATIVE_SURFACE_CURRENT_PRESENTATION_WAIT_MS[\s\S]*?requireCurrentSource:\s*selectedNativeSurfaceConsumerRefresh,[\s\S]*?timeoutMs:\s*remainingProofTimeoutMs/,
+    'the mounted native scheduler must keep the same bounded exact current-source proof deadline after each forced refresh'
+  );
+  assert.match(
+    mountSource,
+    /initial-t0-resident-foreground-proof-ready[\s\S]*?requireCurrentSource:\s*nativeSurfaceConsumerRefresh,[\s\S]*?timeoutMs:\s*nativeSurfaceConsumerRefresh[\s\S]*?NATIVE_SURFACE_CURRENT_PRESENTATION_WAIT_MS/,
+    'native startup must require an exact current-source proof with the same bounded foreground deadline'
+  );
+  assert.match(
+    mountSource,
+    /residentPostStepPresentationGate\s*=\s*Object\.freeze\([\s\S]*?active:\s*!postStepPresentationVisible,[\s\S]*?scheduleContinuation = false;[\s\S]*?restartPlaybackContinuation = false;/,
+    'a failed post-step proof must hold both resident continuation paths before they can supersede its candidate'
+  );
+  const playbackTickSource = mountSource.slice(
+    mountSource.indexOf('function tick()'),
+    mountSource.indexOf("overlay.querySelector('#sph-preflight')")
+  );
+  assert.match(
+    playbackTickSource,
+    /residentPostStepPresentationGate\?\.active[\s\S]*?resident-auto-schedule-held-for-current-native-presentation[\s\S]*?window\.setTimeout/,
+    'the playback RAF must honor a failed post-step foreground gate instead of scheduling another physics batch'
+  );
+  assert.match(
+    mountSource,
+    /wait\.timeoutId\s*=\s*window\.setTimeout\(/,
+    'the mounted proof wait needs a wall-clock watchdog when requestAnimationFrame is suspended'
+  );
+  assert.match(
+    mountSource,
+    /status:\s*'resident-presentation-proof-wait-timeout'/,
+    'the mounted proof watchdog must report a bounded timeout rather than leaving the scheduler pending'
+  );
+  assert.match(
+    sceneSource,
+    /scheduleStagedSphResidentSurfaceDrawCandidateValidation\(\{[\s\S]*?residentRenderSource[\s\S]*?applyResidentRenderSourceMetadata\(residentDraw, residentRenderSource\)[\s\S]*?preparation\.renderBridgeCandidate,[\s\S]*?residentRenderSource/,
+    'the scheduled candidate and bridge must carry the exact source receipt captured by their refresh'
+  );
+  assert.match(
+    sceneSource,
+    /const result = await commitStagedSphResidentSurfaceDrawCandidate\([\s\S]*?result\.residentDraw,[\s\S]*?item\.residentRenderSource[\s\S]*?surfaceDrawSourceResidentExecutionGenerationMatchesCurrent/,
+    'async publication must replace retained-frame provenance in the public draw and render state'
+  );
+  assert.match(
+    sceneSource,
+    /visibleGpuConsumer\s*\n\s*\}\);[\s\S]*?assignResidentSurfaceVisibleGpuConsumer\(\s*nextResidentSurfaceDraw,[\s\S]*?\.record\.visibleGpuConsumer/,
+    'the pending placeholder must retain candidate input-readiness diagnostics without publishing candidate GPU resources'
+  );
+  assert.match(
+    sceneSource,
+    /nativeMarchingCubesCandidateValidationPending = true;[\s\S]*?!nativeMarchingCubesSurfaceDrawReady[\s\S]*?&& !nativeMarchingCubesCandidateValidationPending[\s\S]*?\|\| nativeMarchingCubesCandidateValidationPending/,
+    'a scheduled candidate must bypass fallback publication and artifact clearing until validation settles'
+  );
+  assert.match(
+    sceneSource,
+    /let nextResidentSurfaceDraw = null;[\s\S]{0,800}?let nativeMarchingCubesCandidateValidationPending = false;[\s\S]*?\|\| nativeMarchingCubesCandidateValidationPending/,
+    'candidate-pending state must remain in refresh-wide scope through the publication decision'
+  );
+  assert.equal(
+    sceneSource.match(/let nativeMarchingCubesCandidateValidationPending = false;/g)?.length,
+    1,
+    'candidate-pending state must have one authoritative declaration'
+  );
+  assert.match(
+    sceneSource,
+    /if \(!nativeMarchingCubesCandidateValidationPending\) \{\s*const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer\([\s\S]*?assignResidentSurfaceVisibleGpuConsumer\(nextResidentSurfaceDraw, visibleGpuConsumer\);/,
+    'generic placeholder handoff diagnostics must not erase the scheduled candidate import receipt'
+  );
+  assert.match(
+    sceneSource,
+    /surfaceDrawGpuBufferHandoffKind: gpuBufferHandoff\.handoffKind,[\s\S]*?surfaceDrawGpuBufferHandoffInputSchema:[\s\S]*?gpuBufferHandoff\.directConsumerInputSchema,[\s\S]*?surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction:[\s\S]*?gpuBufferHandoff\.requiresSurfaceExtraction/,
+    'the staged candidate must own a complete handoff receipt before scheduler ownership transfer'
+  );
+  const stagedHandoffReadyReceiptCount =
+    sceneSource.match(/surfaceDrawGpuBufferHandoffReady: gpuBufferHandoff\.ready/g)?.length ?? 0;
+  assert.equal(
+    sceneSource.match(/surfaceDrawGpuBufferHandoffKind: gpuBufferHandoff\.handoffKind/g)?.length ?? 0,
+    stagedHandoffReadyReceiptCount,
+    'every staged ready handoff receipt must retain its exact handoff kind'
+  );
+  assert.equal(
+    sceneSource.match(/surfaceDrawGpuBufferHandoffInputSchema:\s*gpuBufferHandoff\.directConsumerInputSchema/g)?.length ?? 0,
+    stagedHandoffReadyReceiptCount,
+    'every staged ready handoff receipt must retain its input schema'
+  );
+  assert.equal(
+    sceneSource.match(/surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction:\s*gpuBufferHandoff\.requiresSurfaceExtraction/g)?.length ?? 0,
+    stagedHandoffReadyReceiptCount,
+    'every staged ready handoff receipt must retain its extraction requirement'
+  );
+  assert.match(
+    lifecycleSource,
+    /createNativeSurfaceLatestValidationScheduler[\s\S]*?let active = null;[\s\S]*?let queuedLatest = null;/,
+    'foreground validation must keep exactly one active and one replaceable latest request'
+  );
+  const stagedPresentationValidation = sceneSource.match(
+    /async function validateStagedSphNativeSurfaceCandidateForegroundPresentation\([\s\S]*?\n  async function validateStagedSphNativeSurfaceCandidateForeground\(/
+  )?.[0] || '';
+  const stagedValidation = sceneSource.match(
+    /async function validateStagedSphNativeSurfaceCandidateForegroundLegacyReadback\([\s\S]*?\n  function resolveSphNativeSurfaceCandidatePresentationStagingCapability/
+  )?.[0] || '';
+  assert.match(
+    sceneSource,
+    /visibleCanvasTouched: false,[\s\S]*?currentTextureRequested: false,[\s\S]*?candidateLocal: true/,
+    'candidate validation must explicitly remain local and leave the visible canvas untouched'
+  );
+  assert.doesNotMatch(
+    stagedPresentationValidation,
+    /getCurrentTexture\(/,
+    'candidate validation must not clear or request the visible swap-chain texture'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /presentationTarget: targets,[\s\S]*?stageOnly: true,[\s\S]*?onStageInputsFrozen: \(\) => \{[\s\S]*?snapshotSphNativeSurfaceCandidatePresentation\([\s\S]*?targets\.presentationSnapshot = snapshot;[\s\S]*?return snapshot;/,
+    'the full-resolution candidate proof must freeze its exact encode inputs synchronously before the asynchronous readback begins'
+  );
+  assert.doesNotMatch(
+    stagedPresentationValidation,
+    /const presentationSnapshot = snapshotSphNativeSurfaceCandidatePresentation\(/,
+    'a mapped proof must retain the pre-submit input snapshot rather than recapturing state after mapAsync'
+  );
+  const rendererFreezeIndex = sceneSource.indexOf(
+    "if (stageOnly && typeof onStageInputsFrozen === 'function')"
+  );
+  const rendererCameraWriteIndex = sceneSource.indexOf(
+    'bridge.device.queue.writeBuffer(',
+    rendererFreezeIndex
+  );
+  const rendererStageSubmitIndex = sceneSource.indexOf(
+    'bridge.device.queue.submit([encoder.finish()]);',
+    rendererFreezeIndex
+  );
+  assert.ok(
+    rendererFreezeIndex >= 0 && rendererCameraWriteIndex > rendererFreezeIndex,
+    'the staged input snapshot must be frozen before this renderer writes its camera uniforms'
+  );
+  assert.ok(
+    rendererFreezeIndex >= 0 && rendererStageSubmitIndex > rendererFreezeIndex,
+    'the staged input snapshot must be frozen before its private command buffer is submitted'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /presentationSnapshot: stagedPresentationSnapshot[\s\S]*?startCompletion: \(submission\) => \{[\s\S]*?submittedPresentationSnapshot\s*=\s*submission\?\.presentationSnapshot[\s\S]*?submittedPresentationSnapshot !== targets\.presentationSnapshot/,
+    'the exact pre-submit snapshot identity must be retained by the prestarted-map handle'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /startCompletion: \(submission\) => \{[\s\S]*?readbackBuffer\.mapAsync[\s\S]*?completeTransaction: async \(submission, completionStart\)[\s\S]*?submittedReadbackBuffer = completionStart\?\.readbackBuffer[\s\S]*?const mapOutcome = completionStart\?\.mapOutcome[\s\S]*?const mapOutcomeResult = await mapOutcome\.promise;[\s\S]*?mapOutcomeResult\?\.status === 'timeout'[\s\S]*?submittedReadbackBuffer\.getMappedRange/,
+    'the prestarted map request must reach mapped-byte access only through the scope-gated, timeout-first completion path'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /submittedReadbackBuffer\.getMappedRange[\s\S]*?presentationSnapshot: submittedPresentationSnapshot/,
+    'the mapped proof must return the exact snapshot captured before the private submission'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /const mapOutcome = \{[\s\S]*?status: 'pending',[\s\S]*?promise: null,[\s\S]*?const settleMapOutcome = \(status, error = null\) => \{[\s\S]*?mapOutcome\.resolve\?\.\(\{ status, error \}\);[\s\S]*?const settleMapTimeout = \(\) => \{[\s\S]*?mapTiming\.settledAtMs = nowMs\(\);[\s\S]*?settleMapOutcome\('timeout'\)[\s\S]*?detachStagedSphNativeSurfaceCandidatePresentationReadbackBuffer\([\s\S]*?candidate-presentation-color-difference-map-timeout[\s\S]*?const mapRequestedAtMs = nowMs\(\);[\s\S]*?mapTiming\.deadlineAtMs = mapRequestedAtMs[\s\S]*?readbackBuffer\.mapAsync\([\s\S]*?const mapSettledAtMs = nowMs\(\);[\s\S]*?mapSettledAtMs >= mapTiming\.deadlineAtMs[\s\S]*?settleMapTimeout\(\);[\s\S]*?targets\.readbackMapPending = true;[\s\S]*?timeoutHandle = setTimeout\([\s\S]*?settleMapTimeout,[\s\S]*?mapTiming\.deadlineAtMs - nowMs\(\)[\s\S]*?mapOutcome\.timeoutHandle = timeoutHandle;[\s\S]*?return \{[\s\S]*?mapOutcome,[\s\S]*?mapStartError: null[\s\S]*?completeTransaction: async/,
+    'the map deadline must use both timer and observed settlement time, then quarantine before delayed scope reports can admit a late map'
+  );
+  assert.doesNotMatch(
+    stagedPresentationValidation,
+    /Promise\.race\(\[mapPromise,\s*timeoutPromise\]\)/,
+    'a late map must not be compared against timeout only after error scopes settle'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /discardTransaction: \(submission, completionStart\) => \{[\s\S]*?completionStart\?\.mapPromise[\s\S]*?detachStagedSphNativeSurfaceCandidatePresentationReadbackBuffer\([\s\S]*?candidate-presentation-command-or-scope-failed-after-map-start/,
+    'a scoped error after a prestarted map must quarantine the readback buffer rather than allowing it to be reused'
+  );
+  assert.match(
+    sceneSource,
+    /const result = device\.popErrorScope\(\);[\s\S]*?pendingScopePops\.push\([\s\S]*?let completionStartValue = null;[\s\S]*?scopedErrorsByFilter\.size === 0[\s\S]*?completionStartValue = startCompletion\(submissionValue\);[\s\S]*?await Promise\.all\(pendingScopePops\)[\s\S]*?completeTransaction\(submissionValue, completionStartValue\)/,
+    'a MAP_READ start hook must run only after every LIFO pop call, while mapped-byte access remains gated on all scope reports'
+  );
+  assert.match(
+    stagedValidation,
+    /additionalOpaqueDraws[\s\S]*?additionalRefractiveDraws[\s\S]*?additionalVaporDraws/,
+    'foreground admission must validate the complete primary and additional-surface composite'
+  );
+  assert.match(
+    stagedValidation,
+    /runSphNativeSurfaceCandidateValidationTransaction\([\s\S]*?transaction: \(\) =>[\s\S]*?device\.queue\.submit\(\[encoder\.finish\(\)\]\)[\s\S]*?completeTransaction: async[\s\S]*?readbackBuffer\.mapAsync/,
+    'GPU scopes must cover synchronous submission and close before readback mapping starts'
+  );
+  assert.match(
+    stagedValidation,
+    /readbackGeneration[\s\S]*?Uint8Array\.from\([\s\S]*?if \(!validationTransaction\.ok\)[\s\S]*?status: 'error'/,
+    'each pooled readback generation must reject mapped-looking bytes when a GPU error scope fails'
+  );
+  assert.match(
+    sceneSource,
+    /foreground-validation-readback-pool-[\s\S]*?foreground-validation-map-timeout[\s\S]*?replaceStagedSphNativeSurfaceCandidateForegroundReadbackBuffer/,
+    'the exact 16 KiB readback must be reused after success and replaced after timeout or failure'
+  );
+  assert.match(
+    sceneSource,
+    /resolveNativeSurfaceSubmitFailureAction\(\{\s*primaryFrameSubmitted\s*\}\)[\s\S]*?if \(failureAction\.committed\)[\s\S]*?return failureAction\.renderResult;/,
+    'post-submit failures must preserve the committed render result'
+  );
+  assert.match(
+    sceneSource,
+    /rollbackSphNativeSurfaceRenderBridgeCandidate[\s\S]*?\.rollbackAllowed\) return false;/,
+    'rollback must refuse a transaction whose first frame was submitted'
+  );
+  assert.match(
+    sceneSource,
+    /discardSphNativeSurfaceRenderBridgeCandidate[\s\S]*?\.discardAllowed\) return false;/,
+    'discard must refuse to release a transaction whose first frame was submitted'
+  );
+  assert.match(
+    lifecycleSource,
+    /createNativeSurfaceProvisionalResourceReceipt\(bridge\)[\s\S]*?newDepthTextures[\s\S]*?deferredDepthTextures[\s\S]*?newRefractionTargetSets[\s\S]*?deferredRefractionTargetSets/,
+    'depth and refraction replacements must settle through one provisional receipt'
+  );
+  assert.match(
+    lifecycleSource,
+    /newDestroyableResources: new Map\(\)[\s\S]*?deferredDestroyableResources: new Map\(\)[\s\S]*?settlementAttempts/,
+    'the same retryable receipt must own every other pre-submit destroyable allocation'
+  );
+  assert.match(
+    sceneSource,
+    /nextOpticalGpuBuffers = opticalGpuBufferUpdateRequired[\s\S]*?binding: 2, resource: \{ buffer: nextOpticalGpuBuffers\.recordsBuffer \}[\s\S]*?previousOpticalGpuBuffers: previousBridge\.opticalGpuBuffers/,
+    'bridge reuse must bind private candidate optical buffers without rewriting the live pair'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /updateUploadedOpticalGpuTable/,
+    'the native transaction must never attempt an in-place optical rollback'
+  );
+  assert.match(
+    sceneSource,
+    /candidate-box-wireframe-uniform-buffer[\s\S]*?candidate-pixel-validation-readback-buffer/,
+    'wireframe and validation allocations must be registered with the provisional receipt'
+  );
+  assert.match(
+    sceneSource,
+    /function isolateSphNativeSurfaceCandidatePresentationResources\(bridge\) \{[\s\S]*?const previousBridge = record\.kind === 'reuse'[\s\S]*?bridge\.depthTexture === previousBridge\.depthTexture[\s\S]*?deferredDepthTextures\.add\(bridge\.depthTexture\)[\s\S]*?bridge\.refractionTargetSet === previousBridge\.refractionTargetSet[\s\S]*?deferredRefractionTargetSets\.add\([\s\S]*?const boxUniformBuffer = bridge\.boxWireframe\?\.uniformBuffer \?\? null;[\s\S]*?deferredDestroyableResources\.set\([\s\S]*?superseded-box-wireframe-uniform-buffer/,
+    'reuse isolation must defer retirement of exactly inherited depth, refraction, and box-uniform resources before clearing candidate aliases'
+  );
+  assert.match(
+    sceneSource,
+    /superseded-environment-map-texture[\s\S]*?superseded-background-image-texture/,
+    'environment clearing must defer old texture retirement until the composite commits'
+  );
+  assert.match(
+    sceneSource,
+    /const failureAction = resolveNativeSurfaceSubmitFailureAction\([\s\S]*?if \(!failureAction\.committed\) \{[\s\S]*?sphResidentSurfaceDraw = previousPublishedSurfaceDraw/,
+    'the outer commit catch may restore the prior draw only after proving no submit occurred'
+  );
+  assert.match(
+    sceneSource,
+    /createNativeSurfaceCommittedFinisher\(\)[\s\S]*?'render-bridge-finalize'[\s\S]*?'resource-owner-install'[\s\S]*?'additional-surface-publication'[\s\S]*?stagedSphResidentSurfaceDrawCandidates\.delete\(residentDraw\)/,
+    'all fallible committed publication steps must run through the no-throw finisher before staging cleanup'
+  );
+  assert.match(
+    sceneSource,
+    /const bridgeOwnedAllocations = new Set\(\)[\s\S]*?trackBridgeOwnedAllocation\(opticalGpuBuffers\.recordsBuffer\)[\s\S]*?trackBridgeOwnedAllocation\(opticalGpuBuffers\.spectralSamplesBuffer\)[\s\S]*?releaseBridgeOwnedAllocations\(\);/,
+    'fresh bridge construction must retire every partial owned allocation'
+  );
+  assert.match(
+    sceneSource,
+    /retainedSharedExecutionOwners = \[\][\s\S]*?owner\.surfaceDrawExecution === activeExecution[\s\S]*?retireSphNativeWebGpuSurfaceResourceOwner/,
+    'retired owner cleanup must filter executions still shared by the active owner before destroying anything'
+  );
+});
+
+test('native pre-submit render errors preserve the last committed geometry bundle', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  assert.match(
+    sceneSource,
+    /resolveNativeSurfacePreSubmitDrawStateLiveness\(\{[\s\S]*?provisionalTransactionActive:[\s\S]*?committedDrawStateAvailable:[\s\S]*?if \(preSubmitDrawStateLiveness\.clearDrawState\) \{\s*bridge\.drawState = null;\s*\} else \{[\s\S]*?nativeSurfaceStateDirty = true;/,
+    'a transient getCurrentTexture, context, camera, or resize failure must retain and retry the exact committed draw state'
   );
 });
 
@@ -1623,6 +2788,11 @@ test('native WebGPU probe retains generation ownership and fence diagnostics', (
     'renderBridgeNativeSurfaceConsumerInFlightSubmitCount',
     'renderBridgeAdditionalSurfaceAttachStatus',
     'renderBridgeAdditionalSurfaceDrawCount',
+    'renderBridgeNativeSurfaceCandidateStageSubmissionCount',
+    'renderBridgeNativeSurfaceCandidatePresentationCopyCount',
+    'renderBridgeNativeSurfaceCandidatePresentationPostAdmissionGeometrySubmitCount',
+    'renderBridgeNativeSurfaceCandidateStagedPresentationStatus',
+    'renderBridgeNativeSurfaceCandidateStagedPresentationChangedPixelCount',
     'renderBridgeLastRefractiveDrawCount',
     'renderBridgeConfiguredAlphaMode',
     'renderBridgePackedNormalReady',
@@ -1943,18 +3113,24 @@ test('resident GPU consumers lease captured buffers before asynchronous device a
     'resident render should release after device-dependent consumption'
   );
 
-  const serializedRenderStart = sceneSource.indexOf('async function refreshSphResidentRenderState(options');
+  const serializedRenderStart = sceneSource.indexOf('let sphResidentRenderRefreshActive');
   const serializedRenderSource = sceneSource.slice(serializedRenderStart, renderStart);
   const queuedLeaseIndex = serializedRenderSource.indexOf('residentGpuArtifactRetirementBarrier.acquire()');
-  const serializationAwaitIndex = serializedRenderSource.indexOf('await previous.catch');
-  assert.ok(queuedLeaseIndex >= 0, 'serialized resident render should lease an explicitly queued source');
-  assert.ok(
-    serializationAwaitIndex > queuedLeaseIndex,
-    'serialized resident render must lease before waiting behind an older refresh'
+  assert.ok(queuedLeaseIndex >= 0, 'resident render should lease an explicitly queued source');
+  assert.match(
+    serializedRenderSource,
+    /sphResidentRenderRefreshActive[\s\S]*?sphResidentRenderRefreshQueuedLatest/,
+    'resident render scheduling must expose one active and one latest queued slot'
   );
-  assert.ok(
-    serializedRenderSource.lastIndexOf('releaseQueuedResidentArtifactLease()') > serializationAwaitIndex,
-    'serialized resident render should release its queued-source lease after the inner refresh'
+  assert.match(
+    serializedRenderSource,
+    /request\.releaseQueuedResidentArtifactLease\?\.\(\)[\s\S]*?replaced\.releaseQueuedResidentArtifactLease\?\.\(\)/,
+    'active and replaced queued sources must release their own exact leases'
+  );
+  assert.doesNotMatch(
+    serializedRenderSource,
+    /sphResidentRenderRefreshTail|await previous\.catch/,
+    'resident render scheduling must not retain an unbounded FIFO promise tail'
   );
 
   const pressureStart = sceneSource.indexOf('async function refreshSphResidentPressureInterfaceState');

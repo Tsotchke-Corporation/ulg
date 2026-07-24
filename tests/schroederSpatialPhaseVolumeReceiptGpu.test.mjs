@@ -210,7 +210,7 @@ function buildS9aMoment(device, authority) {
   return { runtime, encoder, moment };
 }
 
-test('S9-B receipt ABI fixes a separate six-storage-binding immutable conservation contract', () => {
+test('S9-B receipt ABI v2 fixes a separate seven-storage-binding selected-source conservation contract', () => {
   assert.equal(SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_LAYOUT.length, 64);
   assert.equal(SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_WORDS, 64);
   const layout = createSchroederSpatialPhaseVolumeReceiptLayout({
@@ -265,6 +265,10 @@ test('S9-B receipt ABI fixes a separate six-storage-binding immutable conservati
     createSchroederSpatialPhaseVolumeReceiptWgsl(layout),
     /@group\(0\) @binding\(3\) var<storage, read> mechanics_field/
   );
+  assert.match(
+    createSchroederSpatialPhaseVolumeReceiptWgsl(layout),
+    /@group\(0\) @binding\(7\) var<storage, read> source_assignments/
+  );
   assert.equal(
     publicGpuAbi.ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA,
     ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA
@@ -283,6 +287,7 @@ test('S9-B receipt binds only exact live S9-A evidence and never writes borrowed
   const before = {
     momentControl: phase.moment.controlBuffer,
     momentRows: phase.moment.momentBuffer,
+    sourceAssignments: authority.sourceBuffer,
     sourceMechanics: authority.sourceMechanicsBuffer,
     mechanicsField: authority.field.fieldViewBuffer
   };
@@ -291,10 +296,12 @@ test('S9-B receipt binds only exact live S9-A evidence and never writes borrowed
   assert.equal(execution.schema, ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA);
   assert.equal(execution.phaseVolumeMoment, phase.moment);
   assert.equal(execution.parentPhaseVolumeMoment, phase.moment);
+  assert.equal(execution.sourceBuffer, before.sourceAssignments);
+  assert.equal(execution.sourceBufferBorrowed, true);
   assert.equal(execution.sourceMechanicsBuffer, before.sourceMechanics);
   assert.equal(execution.mechanicsFieldView, authority.field);
   assert.equal(execution.encodedComputePassCount, 3);
-  assert.equal(execution.storageBindingCount, 6);
+  assert.equal(execution.storageBindingCount, 7);
   assert.equal(execution.readbackPerformed, false);
   assert.equal(execution.fullParticleReadbackPerformed, false);
   assert.equal(execution.diagnosticOnly, true);
@@ -311,7 +318,7 @@ test('S9-B receipt binds only exact live S9-A evidence and never writes borrowed
   assert.deepEqual(encoder.passes[2].dispatch, [1, 1, 1]);
   for (const [index, pass] of encoder.passes.entries()) {
     assert.equal(pass.ended, true);
-    assert.equal(pass.bindGroup.value.descriptor.entries.length, [7, 6, 6][index]);
+    assert.equal(pass.bindGroup.value.descriptor.entries.length, [8, 6, 6][index]);
   }
   const owned = runtime.allocationEntries().map((entry) => entry.buffer);
   for (const borrowed of Object.values(before)) assert.equal(owned.includes(borrowed), false);

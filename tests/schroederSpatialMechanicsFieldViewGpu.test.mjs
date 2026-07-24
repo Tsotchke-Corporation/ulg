@@ -768,9 +768,14 @@ test('mechanics-field build publishes complete nested GPU timestamp substage spa
   assert.deepEqual(
     begins.map(({ descriptor }) => descriptor.producerId),
     [
+      'schroeder-spatial-generation-command-encoder',
+      'schroeder-spatial-directory-prepare',
       'schroeder-spatial-key-emission',
       'webgpu-stable-radix-sort',
       'webgpu-sorted-unique',
+      'schroeder-spatial-directory-assemble-finalize',
+      'schroeder-spatial-active-rank-view-build',
+      'schroeder-spatial-exact-near-cell-tree-build',
       'schroeder-spatial-derived-view-build',
       'schroeder-spatial-mechanics-view-build',
       'schroeder-spatial-mechanics-field-view-build',
@@ -786,7 +791,23 @@ test('mechanics-field build publishes complete nested GPU timestamp substage spa
   assert.ok(ends.every(({ encoder, token }) => (
     encoder === token.encoder && begins.includes(token)
   )));
-  const fieldSubstages = begins.slice(6).map(({ descriptor }) => descriptor);
+  const fieldSubstages = begins
+    .map(({ descriptor }) => descriptor)
+    .filter(({ producerId }) => (
+      producerId.startsWith('schroeder-spatial-mechanics-field-')
+      && producerId !== 'schroeder-spatial-mechanics-field-view-build'
+    ));
+  assert.deepEqual(
+    fieldSubstages.map(({ producerId }) => producerId),
+    [
+      'schroeder-spatial-mechanics-field-candidate-emission',
+      'schroeder-spatial-mechanics-field-radix-sort',
+      'schroeder-spatial-mechanics-field-radix-unique',
+      'schroeder-spatial-mechanics-field-stencil-map',
+      'schroeder-spatial-mechanics-field-key-assembly',
+      'schroeder-spatial-mechanics-field-finalize'
+    ]
+  );
   assert.ok(fieldSubstages.every(({ generationId }) => (
     generationId === generation.execution.generationId
   )));
@@ -1196,7 +1217,10 @@ test('native mechanics field applies gravity across duplicate stencils and copie
         powerPreference: 'high-performance'
       });
       if (!adapter) return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
-      const device = await adapter.requestDevice();
+      const deviceLimits = await import('/src/runtime/webgpuDeviceLimits.js');
+      const device = await adapter.requestDevice(
+        deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter)
+      );
       const uncapturedErrors = [];
       device.addEventListener('uncapturederror', (event) => {
         uncapturedErrors.push(event.error?.message || String(event.error));
@@ -1218,6 +1242,9 @@ test('native mechanics field applies gravity across duplicate stencils and copie
       );
       const gridModule = await import(
         `/src/runtime/sph/sphGridGpuKernel.js?nativeMechanicsField=${nonce}`
+      );
+      const gridUpdateModule = await import(
+        `/src/runtime/sph/sphGridUpdateGpuKernel.js?nativeMechanicsField=${nonce}`
       );
       const stepModule = await import(
         `/src/runtime/sph/sphMlsMpmGpuStep.js?nativeMechanicsField=${nonce}`
@@ -1363,18 +1390,6 @@ test('native mechanics field applies gravity across duplicate stencils and copie
           gridSpacingM: gridSpec.gridSpacingM
         }
       });
-      const spatialMechanicalProposalRunner = async ({
-        generation: proposalGeneration
-      }) => ({
-        ready: true,
-        generation: proposalGeneration,
-        traversalCount: 0,
-        proposalBuffer: null,
-        evidence: null,
-        consumerReceipts: {},
-        encodeApply() {},
-        releaseAfterSubmittedWork() { return true; }
-      });
       const step = await stepModule.runMlsMpmResidentStepWithOptionalWebGpu({
         sphParticleState,
         mlsMpmParticleState,
@@ -1383,7 +1398,6 @@ test('native mechanics field applies gravity across duplicate stencils and copie
         schroederLevelAssignment: levelAssignment,
         schroederSelectedLevel: 0,
         schroederSpatialEpochGeneration: generation,
-        spatialMechanicalProposalRunner,
         canonicalSpatialRequired: true,
         gridSpacingM: 0.25,
         boxDimsM: [2, 2, 2],
@@ -1415,6 +1429,248 @@ test('native mechanics field applies gravity across duplicate stencils and copie
         readback.destroy();
         return values;
       };
+      const runContactCase = async ({
+        label,
+        leftPhase,
+        rightPhase,
+        leftMaterial,
+        rightMaterial,
+        leftDomain,
+        rightDomain
+      }) => {
+        const caseParticleCount = 2;
+        const caseState = new Float32Array(caseParticleCount * 8);
+        const caseThermo = new Float32Array(caseParticleCount * 12);
+        const caseIdentity = new Uint32Array([leftDomain, rightDomain]);
+        const caseMechanics = new Float32Array(caseParticleCount * 32);
+        const phases = [leftPhase, rightPhase];
+        const materials = [leftMaterial, rightMaterial];
+        const domains = [leftDomain, rightDomain];
+        for (let index = 0; index < caseParticleCount; index += 1) {
+          const phase = phases[index];
+          const fractions = [0, 0, 0, 0];
+          fractions[phase - 1] = 1;
+          caseState.set([
+            index === 0 ? 0.95 : 1.05,
+            1,
+            1,
+            1,
+            index === 0 ? 1 : -1,
+            0,
+            0,
+            100
+          ], index * 8);
+          caseThermo.set([
+            materials[index],
+            phase,
+            300,
+            phase === 1 ? 1000 : (phase === 2 ? 900 : 1),
+            ...fractions,
+            0.25,
+            1,
+            1,
+            0.1
+          ], index * 12);
+          const offset = index * 32;
+          caseMechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], offset);
+          caseMechanics[offset + 18] = 1;
+          caseMechanics[offset + 19] = 0.001;
+          caseMechanics[offset + 20] = phase === 1 ? 1 : 0;
+          caseMechanics[offset + 21] = 1;
+          caseMechanics[offset + 26] = phase >= 3 ? 2 : 1;
+          caseMechanics[offset + 27] = 1;
+          caseMechanics[offset + 31] = 1;
+        }
+        const caseSphState = {
+          ...sphParticleState,
+          particleCount: caseParticleCount,
+          identityRevision: `native-contact-${label}`,
+          renderDomainKeys: Object.fromEntries(domains.map((domain) => [
+            domain,
+            `native-contact-${label}-${domain}`
+          ])),
+          state: caseState,
+          thermo: caseThermo,
+          identity: caseIdentity
+        };
+        const caseMechanicsState = {
+          ...mlsMpmParticleState,
+          particleCount: caseParticleCount,
+          gravityMPerS2: [0, 0, 0],
+          mechanics: caseMechanics
+        };
+        const caseSphUpload = buffersModule.uploadSphGpuParticleBuffers(
+          device,
+          caseSphState
+        );
+        const caseMechanicsUpload = buffersModule.uploadMlsMpmGpuParticleBuffers(
+          device,
+          caseMechanicsState
+        );
+        caseSphUpload.slot = 0;
+        caseMechanicsUpload.slot = 0;
+        const caseLevelAssignment = await hierarchyModule.runSchroederLevelAssignmentWebGpu({
+          device,
+          sphParticleState: caseSphState,
+          mlsMpmParticleState: caseMechanicsState,
+          sphParticleUpload: caseSphUpload,
+          mlsMpmParticleUpload: caseMechanicsUpload,
+          baseGridSpacingM: 0.25,
+          minLevel: 0,
+          maxLevel: 0,
+          targetSupportCells: 1,
+          supportRadiusScale: 1,
+          chartId: 0,
+          retainAssignmentBuffer: true
+        });
+        const caseGeneration = spatialModule.runSchroederSpatialEpochGenerationWebGpu({
+          device,
+          levelAssignment: caseLevelAssignment,
+          particleCount: caseParticleCount,
+          particleIdentityBuffer: caseSphUpload.identityBuffer,
+          particleIdentityStrideWords: 1,
+          selectedLevel: 0,
+          mechanicsGrid: {
+            gridNodeCount: gridSpec.gridNodeCount,
+            gridDims: gridSpec.gridDims,
+            gridShift: gridSpec.shift,
+            gridSpacingM: gridSpec.gridSpacingM
+          }
+        });
+        const caseProjection = await gridModule.runMlsMpmP2gGridProjectionWebGpu({
+          device,
+          sphParticleState: caseSphState,
+          mlsMpmParticleState: caseMechanicsState,
+          sphParticleUpload: caseSphUpload,
+          mlsMpmParticleUpload: caseMechanicsUpload,
+          schroederSelectedLevel: 0,
+          schroederSpatialEpochGeneration: caseGeneration,
+          canonicalSpatialRequired: true,
+          mechanicsFieldMode: 'required',
+          gridSpacingM: 0.25,
+          boxDimsM: [2, 2, 2],
+          dt: 0.01,
+          internalPressureScale: 0,
+          readbackMode: 'no-full-readback'
+        });
+        await gridUpdateModule.runMlsMpmGridUpdateWebGpu({
+          device,
+          p2gGridProjection: caseProjection,
+          mechanicsFieldMode: 'required',
+          dt: 0.01,
+          gravityMPerS2: [0, 0, 0],
+          boxDimsM: [2, 2, 2],
+          cflFactor: 0.4,
+          readbackMode: 'no-full-readback'
+        });
+        const caseWords = await read(
+          caseGeneration.mechanicsFieldView.fieldViewBuffer,
+          caseGeneration.mechanicsFieldView.layout.byteLength,
+          `native-mechanics-field-contact-${label}`
+        );
+        const caseField = caseGeneration.mechanicsFieldView;
+        const output = new Float32Array(caseWords.buffer);
+        const fieldCount = caseWords[34];
+        let maximumVelocityChange = 0;
+        let totalMomentumX = 0;
+        let kineticBeforeJ = 0;
+        let kineticAfterJ = 0;
+        let contactHeatJ = 0;
+        for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
+          const key = caseField.layout.keyOffsetWords
+            + fieldIndex * caseField.layout.keyWords;
+          const stateOffset = caseField.layout.stateOffsetWords
+            + fieldIndex * caseField.layout.stateWords;
+          const accumulator = caseField.layout.accumulatorOffsetWords
+            + fieldIndex * caseField.layout.accumulatorWords;
+          const fieldPhase = caseWords[key + 1];
+          const fieldMaterial = caseWords[key + 2];
+          const fieldDomain = caseWords[key + 3];
+          const leftFieldDomain = leftPhase === 1 ? leftDomain : 0;
+          const sourceVelocity = fieldPhase === leftPhase
+              && fieldMaterial === leftMaterial
+              && fieldDomain === leftFieldDomain
+            ? 1
+            : -1;
+          const mass = output[stateOffset];
+          const velocityX = output[stateOffset + 1];
+          maximumVelocityChange = Math.max(
+            maximumVelocityChange,
+            Math.abs(velocityX - sourceVelocity)
+          );
+          totalMomentumX += mass * velocityX;
+          kineticBeforeJ += 0.5 * mass * sourceVelocity * sourceVelocity;
+          kineticAfterJ += 0.5 * mass * velocityX * velocityX;
+          contactHeatJ += output[accumulator];
+        }
+        const result = {
+          label,
+          fieldCount,
+          maximumVelocityChange,
+          totalMomentumX,
+          kineticLossJ: kineticBeforeJ - kineticAfterJ,
+          contactHeatJ
+        };
+        spatialModule.releaseSchroederSpatialEpochGenerationAfterQueue(
+          caseGeneration,
+          device
+        );
+        await caseGeneration.releasePromise;
+        caseLevelAssignment.destroyAssignmentBuffer?.();
+        buffersModule.destroySphGpuParticleBuffers(caseSphUpload);
+        buffersModule.destroyMlsMpmGpuParticleBuffers(caseMechanicsUpload);
+        return result;
+      };
+      const contactCases = [];
+      for (const specification of [
+        {
+          label: 'liquid-gas',
+          leftPhase: 2,
+          rightPhase: 3,
+          leftMaterial: 7,
+          rightMaterial: 8,
+          leftDomain: 21,
+          rightDomain: 22
+        },
+        {
+          label: 'solid-plasma',
+          leftPhase: 1,
+          rightPhase: 4,
+          leftMaterial: 7,
+          rightMaterial: 8,
+          leftDomain: 11,
+          rightDomain: 22
+        },
+        {
+          label: 'same-material-solid-liquid',
+          leftPhase: 1,
+          rightPhase: 2,
+          leftMaterial: 7,
+          rightMaterial: 7,
+          leftDomain: 11,
+          rightDomain: 22
+        },
+        {
+          label: 'different-material-liquids',
+          leftPhase: 2,
+          rightPhase: 2,
+          leftMaterial: 7,
+          rightMaterial: 8,
+          leftDomain: 21,
+          rightDomain: 22
+        },
+        {
+          label: 'same-material-solid-domains',
+          leftPhase: 1,
+          rightPhase: 1,
+          leftMaterial: 7,
+          rightMaterial: 7,
+          leftDomain: 11,
+          rightDomain: 12
+        }
+      ]) {
+        contactCases.push(await runContactCase(specification));
+      }
       const fieldWords = await read(
         fieldView.fieldViewBuffer,
         fieldView.layout.byteLength,
@@ -1468,6 +1724,7 @@ test('native mechanics field applies gravity across duplicate stencils and copie
         )),
         y: Array.from({ length: particleCount }, (_, index) => outputState[index * 8 + 1]),
         vy: Array.from({ length: particleCount }, (_, index) => outputState[index * 8 + 5]),
+        contactCases,
         validationError: validationError?.message || null,
         uncapturedErrors
       };
@@ -1532,6 +1789,33 @@ test('native mechanics field applies gravity across duplicate stencils and copie
   assert.deepEqual(native.inactiveDescriptor.slice(4, 31), new Array(27).fill(0xffff_ffff));
   assert.equal(native.validationError, null);
   assert.deepEqual(native.uncapturedErrors, []);
+  const contactCases = Object.fromEntries(
+    native.contactCases.map((entry) => [entry.label, entry])
+  );
+  for (const label of [
+    'liquid-gas',
+    'solid-plasma'
+  ]) {
+    const entry = contactCases[label];
+    assert.ok(entry.fieldCount > 0, label);
+    assert.ok(entry.maximumVelocityChange <= 2e-5, label);
+    assert.ok(Math.abs(entry.totalMomentumX) <= 2e-5, label);
+    assert.ok(Math.abs(entry.kineticLossJ) <= 2e-5, label);
+    assert.ok(Math.abs(entry.contactHeatJ) <= 2e-5, label);
+  }
+  for (const label of [
+    'same-material-solid-liquid',
+    'different-material-liquids',
+    'same-material-solid-domains'
+  ]) {
+    const entry = contactCases[label];
+    assert.ok(entry.fieldCount > 0, label);
+    assert.ok(entry.maximumVelocityChange > 1e-3, label);
+    assert.ok(Math.abs(entry.totalMomentumX) <= 2e-4, label);
+    assert.ok(entry.kineticLossJ > 0, label);
+    assert.ok(entry.contactHeatJ > 0, label);
+    assert.ok(Math.abs(entry.kineticLossJ - entry.contactHeatJ) <= 2e-4, label);
+  }
   for (const velocity of native.vy.slice(0, 4)) {
     assert.ok(Math.abs(velocity - (-9.80665 * 0.01)) <= 2e-7);
   }

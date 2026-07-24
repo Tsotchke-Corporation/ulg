@@ -358,6 +358,43 @@ function positiveParticleEdge(value, fallback = 1) {
   return Math.max(1, Math.round(Number.isFinite(Number(value)) ? Number(value) : fallback));
 }
 
+function initialBlockEdgeFromParticleSpacingM({
+  particleSpacingM,
+  particlesPerEdge,
+  fallbackParticlesPerEdge = 1
+} = {}) {
+  const spacingM = Number(particleSpacingM);
+  if (!Number.isFinite(spacingM) || spacingM <= 0) {
+    throw new RangeError('initial particle spacing must be a positive finite number');
+  }
+  return spacingM * positiveParticleEdge(
+    particlesPerEdge,
+    fallbackParticlesPerEdge
+  );
+}
+
+/**
+ * Derive the physical edge of the initial base block using the same fixed
+ * matter-quantum policy as buildSphPhaseDemoState.  This is deliberately
+ * geometry-only: callers such as benchmark setup can place a touching drop
+ * without constructing material closures or allocating particles.
+ */
+export function deriveSphPhaseInitialBaseBlockEdgeM({
+  scenario = createSphPhaseScenario(),
+  baseParticleEdge = DEFAULT_REFERENCE_BASE_PARTICLES_PER_EDGE
+} = {}) {
+  const referenceBaseEdgeM = Number(scenario?.ice?.edgeM);
+  if (!Number.isFinite(referenceBaseEdgeM) || referenceBaseEdgeM <= 0) {
+    throw new RangeError('scenario.ice.edgeM must be a positive finite number');
+  }
+  return initialBlockEdgeFromParticleSpacingM({
+    particleSpacingM:
+      referenceBaseEdgeM / DEFAULT_REFERENCE_BASE_PARTICLES_PER_EDGE,
+    particlesPerEdge: baseParticleEdge,
+    fallbackParticlesPerEdge: DEFAULT_REFERENCE_BASE_PARTICLES_PER_EDGE
+  });
+}
+
 function smoothingLengthRatioForTargetNeighborCount(targetNeighborCount) {
   const count = Math.max(1, Number(targetNeighborCount) || DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT);
   // Approximate simple-cubic neighbor count inside the cubic-spline support sphere:
@@ -465,7 +502,11 @@ function resolveInitialParticleSpacingPlan({
   };
   const resolveRole = ({ role, sizeM, densityKgPerM3, materialState, requestedParticlesPerEdge }) => {
     const uniformSpacingM = globalParticleSpacingM;
-    const blockEdgeM = uniformSpacingM * requestedParticlesPerEdge;
+    const blockEdgeM = initialBlockEdgeFromParticleSpacingM({
+      particleSpacingM: uniformSpacingM,
+      particlesPerEdge: requestedParticlesPerEdge,
+      fallbackParticlesPerEdge: role === 'base' ? 5 : 3
+    });
     const fixedRequestedRow = (status) => withSupportMetadata({
       role,
       referenceBlockEdgeM: sizeM,

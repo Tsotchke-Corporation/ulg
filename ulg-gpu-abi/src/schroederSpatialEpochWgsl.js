@@ -45,9 +45,9 @@ struct SpatialEpochParams {
   query_min_level: i32,
   query_max_level: i32,
   query_base_grid_spacing_m: f32,
-  query_pad_0: u32,
-  query_pad_1: u32,
-  query_pad_2: u32,
+  source_row_layout_id: u32,
+  logical_count_gpu_authored: u32,
+  physical_radix_count: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_rows: array<f32>;
@@ -90,6 +90,9 @@ fn exact_near_query_profile_ready() -> bool {
   if (params.query_geometry_mode == QUERY_GEOMETRY_GENERIC) {
     return true;
   }
+  if (params.logical_count_gpu_authored != 0u) {
+    return false;
+  }
   if (params.query_geometry_mode != QUERY_GEOMETRY_SINGLE_CHART_POW2) {
     return false;
   }
@@ -109,6 +112,20 @@ fn exact_near_query_profile_ready() -> bool {
     && min_spacing >= 0.000001
     && finite_f32(max_spacing)
     && max_spacing > 0.0;
+}
+
+fn count_contract_ready() -> bool {
+  return params.logical_count_gpu_authored <= 1u
+    && params.physical_radix_count <= params.source_capacity
+    && params.source_count <= params.physical_radix_count
+    && (
+      params.logical_count_gpu_authored != 0u
+      || params.source_count == params.physical_radix_count
+    );
+}
+
+fn effective_source_count() -> u32 {
+  return select(0u, params.source_count, count_contract_ready());
 }
 
 fn write_invalid_keys(source_index: u32) {
@@ -131,11 +148,19 @@ fn emit_spatial_keys(
 ) {
   let linear_group = workgroup_id.x + workgroup_id.y * params.key_dispatch_x;
   let source_index = linear_group * 64u + local_id.x;
-  if (source_index >= params.source_count) {
+  if (source_index >= params.physical_radix_count) {
+    return;
+  }
+  // A caller may copy a GPU-authored logical count into params.source_count
+  // after the host packs the capacity plan. The retained radix primitive still
+  // sorts the fixed capacity, so the inactive suffix must receive one maximal
+  // sentinel key without being counted as an invalid source.
+  if (!count_contract_ready() || source_index >= effective_source_count()) {
+    write_invalid_keys(source_index);
     return;
   }
   let row = source_index * ACTIVE_NODE_STRIDE;
-  let source_layout = params.query_pad_0;
+  let source_layout = params.source_row_layout_id;
   let level_f = source_rows[row + 0u];
   var native_spacing = 0.0;
   var source_particle_f = f32(source_index);
@@ -329,9 +354,9 @@ struct SpatialEpochParams {
   query_min_level: i32,
   query_max_level: i32,
   query_base_grid_spacing_m: f32,
-  query_pad_0: u32,
-  query_pad_1: u32,
-  query_pad_2: u32,
+  source_row_layout_id: u32,
+  logical_count_gpu_authored: u32,
+  physical_radix_count: u32,
 };
 
 @group(0) @binding(0) var<storage, read> exact_keys: array<u32>;
@@ -372,6 +397,9 @@ fn exact_near_query_profile_ready() -> bool {
   if (params.query_geometry_mode == QUERY_GEOMETRY_GENERIC) {
     return true;
   }
+  if (params.logical_count_gpu_authored != 0u) {
+    return false;
+  }
   if (params.query_geometry_mode != QUERY_GEOMETRY_SINGLE_CHART_POW2) {
     return false;
   }
@@ -393,6 +421,20 @@ fn exact_near_query_profile_ready() -> bool {
     && max_spacing > 0.0;
 }
 
+fn count_contract_ready() -> bool {
+  return params.logical_count_gpu_authored <= 1u
+    && params.physical_radix_count <= params.source_capacity
+    && params.source_count <= params.physical_radix_count
+    && (
+      params.logical_count_gpu_authored != 0u
+      || params.source_count == params.physical_radix_count
+    );
+}
+
+fn effective_source_count() -> u32 {
+  return select(0u, params.source_count, count_contract_ready());
+}
+
 fn saturating_add_u32(left: u32, right: u32) -> u32 {
   if (right > 0xffffffffu - left) {
     return 0xffffffffu;
@@ -406,6 +448,22 @@ fn low_bits_mask(bit_count: u32) -> u32 {
   return (1u << bit_count) - 1u;
 }
 
+fn admitted_unique_count(primitive_unique_count: u32) -> u32 {
+  if (!count_contract_ready() || params.source_count == 0u) {
+    return 0u;
+  }
+  if (
+    params.logical_count_gpu_authored == 0u
+    || params.source_count == params.physical_radix_count
+  ) {
+    return primitive_unique_count;
+  }
+  // Stable radix ordering places the all-ones inactive suffix after every
+  // admitted spatial key. The exclusive head prefix at the first suffix row
+  // is therefore the exact number of live unique cells.
+  return sorted_group_indices[params.source_count];
+}
+
 @compute @workgroup_size(64)
 fn assemble_directory(
   @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -413,17 +471,27 @@ fn assemble_directory(
 ) {
   let linear_group = workgroup_id.x + workgroup_id.y * params.assemble_dispatch_x;
   let sorted_position = linear_group * 64u + local_id.x;
-  let unique_count = unique_evidence[2];
-  if (sorted_position <= unique_count && sorted_position <= params.cell_capacity) {
+  let live_source_count = effective_source_count();
+  let unique_count = admitted_unique_count(unique_evidence[2]);
+  if (sorted_position < unique_count && sorted_position < params.cell_capacity) {
     directory[params.cell_offsets_offset_words + sorted_position] =
       unique_offsets[sorted_position];
+  } else if (
+    sorted_position == unique_count
+    && sorted_position <= params.cell_capacity
+  ) {
+    // The primitive's terminal offset includes the inactive sentinel suffix.
+    // Seal the logical CSR boundary explicitly, including the legitimate
+    // maximal-key case where the suffix shares the final live key group.
+    directory[params.cell_offsets_offset_words + sorted_position] =
+      live_source_count;
   }
-  if (sorted_position >= params.source_count) {
+  if (sorted_position >= live_source_count) {
     return;
   }
   let source_index = sorted_indices[sorted_position];
   var inclusive_head_count = unique_count;
-  if (sorted_position + 1u < params.source_count) {
+  if (sorted_position + 1u < live_source_count) {
     inclusive_head_count = sorted_group_indices[sorted_position + 1u];
   }
   if (inclusive_head_count == 0u) {
@@ -432,7 +500,7 @@ fn assemble_directory(
   }
   let group_index = inclusive_head_count - 1u;
   if (
-    source_index >= params.source_count
+    source_index >= live_source_count
     || group_index >= unique_count
     || group_index >= params.cell_capacity
   ) {
@@ -472,9 +540,12 @@ fn assemble_directory(
 
 @compute @workgroup_size(1)
 fn finalize_directory() {
+  let counts_ready = count_contract_ready();
+  let live_source_count = effective_source_count();
   let primitive_generation = unique_evidence[0];
   let primitive_input_count = unique_evidence[1];
   let primitive_unique_count = unique_evidence[2];
+  let logical_unique_count = admitted_unique_count(primitive_unique_count);
   let primitive_admitted = unique_evidence[3];
   let primitive_overflow = unique_evidence[4];
   let primitive_status = unique_evidence[7];
@@ -482,8 +553,8 @@ fn finalize_directory() {
     + atomicLoad(&epoch_evidence[1]);
   let assembly_overflow = atomicLoad(&epoch_evidence[3]);
   var cell_overflow = 0u;
-  if (primitive_unique_count > params.cell_capacity) {
-    cell_overflow = primitive_unique_count - params.cell_capacity;
+  if (logical_unique_count > params.cell_capacity) {
+    cell_overflow = logical_unique_count - params.cell_capacity;
   }
   let directory_capacity_ready = params.directory_capacity_words
     >= params.required_capacity_words;
@@ -509,14 +580,16 @@ fn finalize_directory() {
     && (primitive_status & PRIMITIVE_STATUS_FAIL_CLOSED) == 0u
     && primitive_overflow == 0u
     && primitive_generation == params.generation_id
-    && primitive_input_count == params.source_count
-    && primitive_unique_count <= params.source_count
+    && counts_ready
+    && primitive_input_count == params.physical_radix_count
+    && logical_unique_count <= live_source_count
+    && primitive_unique_count <= params.physical_radix_count
     && sort_mode_ready
     && unique_evidence[5] == params.sort_key_word_count
     && unique_evidence[6] == params.sort_key_word_count;
   let overflow_free = primitive_overflow == 0u
     && assembly_overflow == 0u
-    && primitive_unique_count <= params.cell_capacity
+    && logical_unique_count <= params.cell_capacity
     && directory_capacity_ready;
   let has_query_evidence =
     params.query_geometry_mode == QUERY_GEOMETRY_SINGLE_CHART_POW2;
@@ -533,43 +606,44 @@ fn finalize_directory() {
     select(0u, query_level_count - 32u, query_level_count > 32u)
   );
   let occupied_level_mask_ready = !has_query_evidence || (
-    (occupied_level_mask_low | occupied_level_mask_high) != 0u
+    (live_source_count == 0u
+      || (occupied_level_mask_low | occupied_level_mask_high) != 0u)
     && (occupied_level_mask_low & ~allowed_level_mask_low) == 0u
     && (occupied_level_mask_high & ~allowed_level_mask_high) == 0u
   );
   let admitted = primitive_ready
     && invalid_source_count == 0u
     && overflow_free
-    && emitted_count == params.source_count
+    && emitted_count == live_source_count
     && exact_near_query_profile_ready()
     && occupied_level_mask_ready;
   let live_required_words = params.header_words
-    + primitive_unique_count * EXACT_KEY_WORDS
-    + primitive_unique_count + 1u
-    + params.source_count * 2u
+    + logical_unique_count * EXACT_KEY_WORDS
+    + logical_unique_count + 1u
+    + live_source_count * 2u
     + select(0u, QUERY_EVIDENCE_WORDS, has_query_evidence);
   let query_evidence_offset_words = params.particle_to_cell_offset_words
-    + params.source_count;
+    + params.physical_radix_count;
   let live_physical_high_water_words = max(
     max(
       select(
         params.header_words,
-        params.cell_keys_offset_words + primitive_unique_count * EXACT_KEY_WORDS,
-        primitive_unique_count > 0u
+        params.cell_keys_offset_words + logical_unique_count * EXACT_KEY_WORDS,
+        logical_unique_count > 0u
       ),
-      params.cell_offsets_offset_words + primitive_unique_count + 1u
+      params.cell_offsets_offset_words + logical_unique_count + 1u
     ),
     max(
       select(
         params.header_words,
-        params.cell_members_offset_words + params.source_count,
-        params.source_count > 0u
+        params.cell_members_offset_words + live_source_count,
+        live_source_count > 0u
       ),
       max(
         select(
           params.header_words,
-          params.particle_to_cell_offset_words + params.source_count,
-          params.source_count > 0u
+          params.particle_to_cell_offset_words + live_source_count,
+          live_source_count > 0u
         ),
         select(
           params.header_words,
@@ -593,7 +667,11 @@ fn finalize_directory() {
     status = status | STATUS_CAPACITY_OVERFLOW;
   }
 
-  let admitted_cell_count = select(0u, primitive_unique_count, admitted);
+  let admitted_cell_count = select(0u, logical_unique_count, admitted);
+  if (logical_unique_count <= params.cell_capacity) {
+    directory[params.cell_offsets_offset_words + logical_unique_count] =
+      live_source_count;
+  }
   let dispatch_group_count = (admitted_cell_count + 63u) / 64u;
   let dispatch_x_limit = max(params.consumer_dispatch_x_limit, 1u);
   let has_consumer_work = admitted && admitted_cell_count > 0u;
@@ -641,7 +719,7 @@ fn finalize_directory() {
   directory[13] = params.chart_epoch;
   directory[14] = params.level_epoch;
   directory[15] = params.support_epoch;
-  directory[16] = params.source_count;
+  directory[16] = live_source_count;
   directory[17] = params.source_capacity;
   directory[18] = admitted_cell_count;
   directory[19] = params.cell_capacity;
@@ -662,8 +740,11 @@ fn finalize_directory() {
   directory[34] = params.sort_unique_ordinal;
   directory[35] = select(0u, params.build_ordinal, admitted);
   directory[36] = primitive_generation;
-  directory[37] = primitive_input_count;
-  directory[38] = primitive_unique_count;
+  // Preserve the established v1 consumer invariants. Raw physical primitive
+  // evidence remains in unique_evidence; the authoritative directory exposes
+  // the admitted logical source and cell counts.
+  directory[37] = live_source_count;
+  directory[38] = admitted_cell_count;
   directory[39] = primitive_admitted;
   directory[40] = primitive_overflow;
   directory[41] = primitive_status;

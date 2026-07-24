@@ -232,6 +232,31 @@ test('optical GPU table packs derived PBR records and spectral samples', () => {
   assert.equal(table.fullPhysicsValidation, false);
 });
 
+test('optical GPU table applies descriptor-specific Beer-Lambert path lengths', () => {
+  const short = buildOpticalGpuTable([{
+    material: 'h2o',
+    phase: 'gas',
+    pathLengthM: 0.25,
+    pathLengthSource: 'manufactured-short-body'
+  }]);
+  const long = buildOpticalGpuTable([{
+    material: 'h2o',
+    phase: 'gas',
+    pathLengthM: 1,
+    pathLengthSource: 'manufactured-long-body'
+  }]);
+  const shortRecord = short.recordMetadata[0];
+  const longRecord = long.recordMetadata[0];
+  const shortDepth = opticalRecordField(short, shortRecord, 'opticalDepth');
+  const longDepth = opticalRecordField(long, longRecord, 'opticalDepth');
+
+  assert.equal(shortRecord.pathLengthM, 0.25);
+  assert.equal(shortRecord.pathLengthSource, 'manufactured-short-body');
+  assert.equal(longRecord.pathLengthM, 1);
+  assert.equal(longRecord.pathLengthSource, 'manufactured-long-body');
+  assert.ok(Math.abs((longDepth / shortDepth) - 4) < 1e-5);
+});
+
 test('optical GPU table keeps material-bank PBR warm inputs as metadata only', () => {
   const warmInputTable = sodiumWarmInputTable();
   const table = buildOpticalGpuTable([
@@ -287,7 +312,7 @@ test('optical GPU table keeps material-bank PBR warm inputs as metadata only', (
   assert.equal(water.displayPbrSource, 'closure-derived-optical-pbr');
 });
 
-test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit when supported', async () => {
+test('requestOpticalGpuDevice asks for the canonical resident SPH storage-buffer limit when supported', async () => {
   const device = { lost: new Promise(() => {}) };
   let requestDescriptor = null;
   const result = await requestOpticalGpuDevice({
@@ -295,7 +320,7 @@ test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit whe
       async requestAdapter() {
         return {
           limits: {
-            maxStorageBuffersPerShaderStage: 10,
+            maxStorageBuffersPerShaderStage: 12,
             maxBufferSize: 512 * 1024 * 1024,
             maxStorageBufferBindingSize: 512 * 1024 * 1024
           },
@@ -312,17 +337,43 @@ test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit whe
   assert.equal(result.device, device);
   assert.deepEqual(requestDescriptor, {
     requiredLimits: {
-      maxStorageBuffersPerShaderStage: 10,
+      maxStorageBuffersPerShaderStage: 12,
       maxBufferSize: 512 * 1024 * 1024,
       maxStorageBufferBindingSize: 512 * 1024 * 1024
     }
   });
-  assert.equal(result.requiredLimits.maxStorageBuffersPerShaderStage, 10);
+  assert.equal(result.requiredLimits.maxStorageBuffersPerShaderStage, 12);
   assert.equal(result.requiredLimits.maxBufferSize, 512 * 1024 * 1024);
   assert.equal(result.requiredLimits.maxStorageBufferBindingSize, 512 * 1024 * 1024);
-  assert.equal(result.adapterLimits.maxStorageBuffersPerShaderStage, 10);
+  assert.equal(result.adapterLimits.maxStorageBuffersPerShaderStage, 12);
   assert.equal(result.adapterLimits.maxBufferSize, 512 * 1024 * 1024);
   assert.equal(result.adapterLimits.maxStorageBufferBindingSize, 512 * 1024 * 1024);
+});
+
+test('requestOpticalGpuDevice rejects an adapter below the canonical resident storage-buffer limit', async () => {
+  let requestDeviceCount = 0;
+  const result = await requestOpticalGpuDevice({
+    gpu: {
+      async requestAdapter() {
+        return {
+          limits: {
+            maxStorageBuffersPerShaderStage: 8
+          },
+          async requestDevice() {
+            requestDeviceCount += 1;
+            return { lost: new Promise(() => {}) };
+          }
+        };
+      }
+    }
+  });
+
+  assert.equal(result.status, 'blocked-webgpu-resident-storage-limit');
+  assert.match(result.reason, /requires 12 storage buffers/);
+  assert.equal(result.device, null);
+  assert.equal(result.requiredLimits.maxStorageBuffersPerShaderStage, 12);
+  assert.equal(result.adapterLimits.maxStorageBuffersPerShaderStage, 8);
+  assert.equal(requestDeviceCount, 0);
 });
 
 test('requestOpticalGpuDevice asks for adapter-scale resident buffer limits', async () => {
@@ -365,7 +416,7 @@ test('requestOpticalGpuDevice enables timestamp-query only for an explicit profi
       async requestAdapter() {
         return {
           features: new Set(['timestamp-query']),
-          limits: {},
+          limits: { maxStorageBuffersPerShaderStage: 12 },
           async requestDevice(descriptor) {
             descriptors.push(descriptor);
             return device;
@@ -380,8 +431,13 @@ test('requestOpticalGpuDevice enables timestamp-query only for an explicit profi
     timestampProfilingRequested: true
   });
 
-  assert.equal(descriptors[0], undefined);
-  assert.deepEqual(descriptors[1], { requiredFeatures: ['timestamp-query'] });
+  assert.deepEqual(descriptors[0], {
+    requiredLimits: { maxStorageBuffersPerShaderStage: 12 }
+  });
+  assert.deepEqual(descriptors[1], {
+    requiredLimits: { maxStorageBuffersPerShaderStage: 12 },
+    requiredFeatures: ['timestamp-query']
+  });
   assert.equal(ordinary.timestampProfilingRequested, false);
   assert.deepEqual(ordinary.requiredFeatures, []);
   assert.equal(profiled.timestampProfilingRequested, true);
@@ -474,6 +530,59 @@ test('optical GPU table upload binds a full spectral row when descriptors have n
   );
 });
 
+test('optical GPU table upload retires every partial allocation exactly once', () => {
+  const table = buildOpticalGpuTable([{ material: 'h2o', phase: 'liquid' }]);
+  const failureCases = [
+    { label: 'first allocation', failCreateAt: 1, failWriteAt: null },
+    { label: 'second allocation', failCreateAt: 2, failWriteAt: null },
+    { label: 'first write', failCreateAt: null, failWriteAt: 1 },
+    { label: 'second write', failCreateAt: null, failWriteAt: 2 }
+  ];
+
+  for (const failureCase of failureCases) {
+    let createCount = 0;
+    let writeCount = 0;
+    const created = [];
+    const device = {
+      createBuffer(descriptor) {
+        createCount += 1;
+        if (createCount === failureCase.failCreateAt) {
+          throw new Error(`${failureCase.label} failed`);
+        }
+        const buffer = {
+          ...descriptor,
+          destroyCount: 0,
+          destroy() {
+            this.destroyCount += 1;
+          }
+        };
+        created.push(buffer);
+        return buffer;
+      },
+      queue: {
+        writeBuffer() {
+          writeCount += 1;
+          if (writeCount === failureCase.failWriteAt) {
+            throw new Error(`${failureCase.label} failed`);
+          }
+        }
+      }
+    };
+
+    assert.throws(
+      () => uploadOpticalGpuTable(device, table),
+      new RegExp(`${failureCase.label} failed`),
+      failureCase.label
+    );
+    assert.ok(created.length <= 2, failureCase.label);
+    assert.deepEqual(
+      created.map((buffer) => buffer.destroyCount),
+      created.map(() => 1),
+      `${failureCase.label}: every created buffer must be destroyed exactly once`
+    );
+  }
+});
+
 test('optical GPU table updates compatible resident buffers in place', () => {
   const bindingId = 4321;
   const initial = buildOpticalGpuTable([{
@@ -533,6 +642,23 @@ test('optical GPU table rejects conflicting values for one shader binding tuple'
       opticalState: { temperatureK: 300, h2oPartialPressurePa: 1e6 }
     }
   ]), /conflicting optical states share GPU binding/);
+});
+
+test('optical GPU table rejects conflicting path lengths for one shader binding tuple', () => {
+  assert.throws(() => buildOpticalGpuTable([
+    {
+      material: 'h2o',
+      phase: 'gas',
+      opticalStateId: 42,
+      pathLengthM: 0.25
+    },
+    {
+      material: 'h2o',
+      phase: 'gas',
+      opticalStateId: 42,
+      pathLengthM: 1
+    }
+  ]), /conflicting optical path lengths share GPU binding/);
 });
 
 test('optical GPU table does not rewrite resident buffers with a different shape', () => {

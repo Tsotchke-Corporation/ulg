@@ -11,6 +11,20 @@ import {
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
+import {
+  acquireSchroederSpatialSuccessorSourceFamilyLease,
+  releaseSchroederSpatialSuccessorSourceFamilyLease,
+  resolveSchroederSpatialSuccessorSourceFamily
+} from './schroederSpatialSuccessorSourceFamily.js';
+import {
+  createSphRenderSurfaceTableLineageSnapshot,
+  registerSphSuccessorDerivedFieldBufferPublication,
+  releaseSphSuccessorDerivedFieldBufferPublication,
+  reserveSphSuccessorDerivedFieldBufferPublication,
+  validateSphRenderSurfaceTableLineageSnapshot,
+  validateSphSuccessorDerivedFieldBufferPublication,
+  validateSphRenderRowsSuccessorSourceLineage
+} from './sphRenderGpuKernel.js';
 
 export const SPH_MATERIAL_INTERFACE_SOURCE_LOCAL_SCHEMA =
   'peercompute.ulg.sph-material-interface-source-local-field.v0';
@@ -23,6 +37,72 @@ const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const SOURCE_LOCAL_KERNEL_SCOPE = 'sph-resident-material-interface-source-local-splat';
 const SOURCE_LOCAL_DENSITY_SCALE = 1024;
+const schroederSourceFieldLineageRecords = new WeakMap();
+
+export function validateSphMaterialInterfaceSourceFieldSuccessorLineage(
+  sourceField,
+  {
+    device,
+    sourceFamily,
+    particleCount,
+    fieldRowsBuffer = null,
+    fieldRows = null,
+    surfaceBuffer = null,
+    surfaceTable = null
+  } = {}
+) {
+  const record = schroederSourceFieldLineageRecords.get(sourceField);
+  return Boolean(
+    record
+    && record.active === true
+    && record.device === device
+    && record.sourceFamily === sourceFamily
+    && record.particleCount === particleCount
+    && sourceField?.schroederSpatialSourceFamily === record.sourceFamily
+    && sourceField?.particleCount === record.particleCount
+    && (sourceField?.fieldRowsBuffer ?? null) === record.fieldRowsBuffer
+    && sourceField?.fieldRows === record.fieldRows
+    && (sourceField?.surfaceBuffer ?? null) === record.surfaceBuffer
+    && sourceField?.surfaceTable === record.surfaceTable
+    && sourceField?.rowStrideFloats === record.rowStrideFloats
+    && sourceField?.fieldRowByteLength === record.fieldRowByteLength
+    && sourceField?.fieldRowsBufferByteLength
+      === record.fieldRowsBufferByteLength
+    && sourceField?.fieldPadding === record.fieldPadding
+    && sourceField?.refEdgeM === record.refEdgeM
+    && sourceField?.productEventCount === 0
+    && sourceField?.productEventBufferBound === false
+    && validateSphRenderSurfaceTableLineageSnapshot(
+      sourceField?.surfaceTable,
+      record.surfaceTableSnapshot
+    )
+    && (fieldRowsBuffer == null || record.fieldRowsBuffer === fieldRowsBuffer)
+    && (fieldRows == null || record.fieldRows === fieldRows)
+    && (surfaceBuffer == null || record.surfaceBuffer === surfaceBuffer)
+    && (surfaceTable == null || record.surfaceTable === surfaceTable)
+    && (
+      record.fieldRowsBuffer == null
+      || validateSphSuccessorDerivedFieldBufferPublication(
+        record.fieldRowsBuffer,
+        sourceField
+      )
+    )
+  );
+}
+
+function invalidateSphMaterialInterfaceSourceFieldSuccessorLineage(sourceField) {
+  const record = schroederSourceFieldLineageRecords.get(sourceField);
+  if (!record || record.active !== true) return;
+  record.active = false;
+  if (
+    record.fieldRowsBuffer
+  ) {
+    releaseSphSuccessorDerivedFieldBufferPublication(
+      record.fieldRowsBuffer,
+      sourceField
+    );
+  }
+}
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -375,6 +455,9 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
   device,
   renderRows,
   renderRowsBuffer = null,
+  renderRowsSource = null,
+  schroederSpatialSourceFamily =
+    renderRowsSource?.schroederSpatialSourceFamily ?? null,
   productEventRows = null,
   productEventBuffer = null,
   surfaceTable,
@@ -418,6 +501,43 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
       productEventRows?.length ? productEventRows.length / SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : 0
     ), 0))
   );
+  if (schroederSpatialSourceFamily) {
+    if (
+      renderRowsSource?.schroederSpatialSourceFamily
+        !== schroederSpatialSourceFamily
+      || renderRowsSource?.particleCount !== resolvedParticleCount
+      || renderRowsBuffer == null
+      || (
+        renderRowsBuffer
+        && renderRowsSource?.renderRowsBuffer !== renderRowsBuffer
+      )
+      || resolvedProductEventCount !== 0
+      || productEventBuffer != null
+      || productEventRows != null
+    ) {
+      throw new TypeError(
+        'source-local field requires the exact render-row artifact derived from its successor source family'
+      );
+    }
+    resolveSchroederSpatialSuccessorSourceFamily(
+      schroederSpatialSourceFamily,
+      { device, particleCount: resolvedParticleCount }
+    );
+    if (!validateSphRenderRowsSuccessorSourceLineage(
+      renderRowsSource,
+      {
+        device,
+        sourceFamily: schroederSpatialSourceFamily,
+        particleCount: resolvedParticleCount,
+        renderRowsBuffer,
+        renderRows: renderRowsBuffer ? null : renderRows
+      }
+    )) {
+      throw new TypeError(
+        'source-local field requires module-authenticated successor render rows'
+      );
+    }
+  }
   const sourceCount = resolvedParticleCount + (productEventBuffer || productEventRows ? resolvedProductEventCount : 0);
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const fieldRowByteLength = surfaceTable.totalFieldCells
@@ -433,12 +553,37 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
       0
     )))
     : 0;
-  if (targetFieldRowsBuffer && targetFieldRowsByteLength < fieldRowByteLength) {
+  const targetFieldRowsRawByteLength = targetFieldRowsBuffer
+    ? Math.max(0, Math.round(finiteNumber(
+      targetFieldRowsBuffer.size
+        ?? targetFieldRowsBuffer.byteLength
+        ?? targetFieldRowsBuffer.byteLengthBytes
+        ?? 0,
+      0
+    )))
+    : 0;
+  if (targetFieldRowsBuffer && targetFieldRowsRawByteLength <= 0) {
     throw new RangeError(
-      `targetFieldRowsBuffer is too small (${targetFieldRowsByteLength}) for source-local material-interface field (${fieldRowByteLength})`
+      'targetFieldRowsBuffer must expose its actual GPU buffer capacity'
     );
   }
-
+  if (
+    targetFieldRowsBuffer
+    && targetFieldRowsRawByteLength > 0
+    && targetFieldRowsByteLength > targetFieldRowsRawByteLength
+  ) {
+    throw new RangeError(
+      `targetFieldRowsBufferByteLength (${targetFieldRowsByteLength}) exceeds the actual GPU buffer capacity (${targetFieldRowsRawByteLength})`
+    );
+  }
+  const targetFieldRowsUsableByteLength = targetFieldRowsRawByteLength > 0
+    ? Math.min(targetFieldRowsByteLength, targetFieldRowsRawByteLength)
+    : targetFieldRowsByteLength;
+  if (targetFieldRowsBuffer && targetFieldRowsUsableByteLength < fieldRowByteLength) {
+    throw new RangeError(
+      `targetFieldRowsBuffer is too small (${targetFieldRowsUsableByteLength}) for source-local material-interface field (${fieldRowByteLength})`
+    );
+  }
   const borrowedRenderRowsBuffer = renderRowsBuffer || null;
   const borrowedProductEventBuffer = productEventBuffer || null;
   const fieldRowsBufferBorrowed = Boolean(targetFieldRowsBuffer);
@@ -559,8 +704,48 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
   let queueCompletionMethod = null;
   let fieldRows = new Float32Array();
   let deferNoFullCleanup = false;
-  if (!noFullReadback) {
+  let successorSourceFamilyLease = null;
+  if (schroederSpatialSourceFamily) {
+    successorSourceFamilyLease =
+      acquireSchroederSpatialSuccessorSourceFamilyLease(
+        schroederSpatialSourceFamily,
+        {
+          device,
+          consumerStage: 'sph-material-interface-source-field-gpu-submission'
+        }
+      );
+  }
+  try {
     device.queue.submit([encoder.finish()]);
+  } catch (error) {
+    if (successorSourceFamilyLease) {
+      releaseSchroederSpatialSuccessorSourceFamilyLease(
+        schroederSpatialSourceFamily,
+        successorSourceFamilyLease,
+        { device }
+      );
+      successorSourceFamilyLease = null;
+    }
+    throw error;
+  }
+  if (targetFieldRowsBuffer) {
+    // queue.submit is the point of no return for a pooled target. Preserve the
+    // prior publication through every fallible setup step and a rejected
+    // submit, then retire it only once replacement writes are actually queued.
+    reserveSphSuccessorDerivedFieldBufferPublication(targetFieldRowsBuffer);
+  }
+  if (successorSourceFamilyLease) {
+    const submittedLease = successorSourceFamilyLease;
+    successorSourceFamilyLease = null;
+    deferSubmittedWorkCleanup(device, () => {
+      releaseSchroederSpatialSuccessorSourceFamilyLease(
+        schroederSpatialSourceFamily,
+        submittedLease,
+        { device }
+      );
+    });
+  }
+  if (!noFullReadback) {
     queueCompletionStatus = 'queue-submitted';
     queueCompletionMethod = 'queue.submit';
     const fieldBytes = await readBuffer(
@@ -573,14 +758,12 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     queueCompletionStatus = 'readback-map-completed';
     queueCompletionMethod = 'mapAsync(readback-buffer)';
   } else if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
-    device.queue.submit([encoder.finish()]);
     queueCompletionStatus = 'queue-submitted';
     queueCompletionMethod = 'queue.submit';
     await device.queue.onSubmittedWorkDone();
     queueCompletionStatus = 'queue-work-completed';
     queueCompletionMethod = 'queue.onSubmittedWorkDone';
   } else {
-    device.queue.submit([encoder.finish()]);
     queueCompletionStatus = device.queue?.onSubmittedWorkDone
       ? 'queue-submitted-gpu-handoff-no-cpu-fence'
       : 'queue-submitted-no-explicit-completion';
@@ -618,6 +801,25 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     status: 'render-field-built',
     kernelScope: SOURCE_LOCAL_KERNEL_SCOPE,
     sourceLocalSourceField: true,
+    schroederSpatialSourceFamily,
+    schroederSpatialSourceFamilyStatus:
+      schroederSpatialSourceFamily?.status ?? null,
+    schroederSpatialSourceFamilyRole:
+      schroederSpatialSourceFamily?.sourceFamilyRole ?? null,
+    schroederSpatialSourceGenerationId:
+      schroederSpatialSourceFamily?.sourceGenerationId ?? null,
+    schroederSpatialSuccessorEpochIdentity:
+      schroederSpatialSourceFamily?.successorEpochIdentity ?? null,
+    schroederSpatialSourceFamilyAncestorGenerationId:
+      schroederSpatialSourceFamily?.ancestorSpatialGenerationId ?? null,
+    schroederSpatialSourceFamilyPositionAuthority:
+      schroederSpatialSourceFamily?.positionAuthority ?? null,
+    schroederSpatialSourceFamilySpatialQueryAuthority:
+      schroederSpatialSourceFamily?.spatialQueryAuthority ?? null,
+    schroederSpatialSourceFamilyPositionEpoch:
+      schroederSpatialSourceFamily?.positionEpoch ?? null,
+    schroederSpatialSourceFamilyTopologyEpoch:
+      schroederSpatialSourceFamily?.topologyEpoch ?? null,
     particleCount: resolvedParticleCount,
     productEventCount: borrowedProductEventBuffer || productEventRows ? resolvedProductEventCount : 0,
     productEventBufferBound: Boolean(borrowedProductEventBuffer || productEventRows),
@@ -683,11 +885,48 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
   if (retainFieldRowsBuffer) sourceRenderField.fieldRowsBuffer = fieldRowsBuffer;
   if (retainSurfaceBuffer) sourceRenderField.surfaceBuffer = surfaceBuffer;
   if (retainSourceIndexFieldBuffer) sourceRenderField.sourceIndexFieldBuffer = sourceIndexAccumBuffer;
+  if (schroederSpatialSourceFamily) {
+    schroederSourceFieldLineageRecords.set(sourceRenderField, {
+      active: true,
+      device,
+      sourceFamily: schroederSpatialSourceFamily,
+      particleCount: resolvedParticleCount,
+      fieldRowsBuffer: sourceRenderField.fieldRowsBuffer ?? null,
+      fieldRows: sourceRenderField.fieldRows,
+      surfaceBuffer: sourceRenderField.surfaceBuffer ?? null,
+      surfaceTable,
+      surfaceRecords: surfaceTable.records,
+      surfaceTableSnapshot:
+        createSphRenderSurfaceTableLineageSnapshot(surfaceTable),
+      renderRowsSource,
+      renderRowsBuffer: borrowedRenderRowsBuffer,
+      renderRows: borrowedRenderRowsBuffer ? null : renderRows,
+      productEventBuffer: null,
+      productEventRows: null,
+      productEventCount: 0,
+      fieldPadding,
+      refEdgeM,
+      rowStrideFloats: SPH_GPU_RENDER_FIELD_CELL_FLOATS,
+      fieldRowByteLength,
+      fieldRowsBufferByteLength:
+        sourceRenderField.fieldRowsBufferByteLength
+    });
+    if (sourceRenderField.fieldRowsBuffer) {
+      registerSphSuccessorDerivedFieldBufferPublication({
+        buffer: sourceRenderField.fieldRowsBuffer,
+        artifact: sourceRenderField,
+        invalidate: () => invalidateSphMaterialInterfaceSourceFieldSuccessorLineage(
+          sourceRenderField
+        )
+      });
+    }
+  }
 
   let retainedBuffersDestroyed = false;
   const destroyRetainedBuffers = () => {
     if (retainedBuffersDestroyed) return;
     retainedBuffersDestroyed = true;
+    invalidateSphMaterialInterfaceSourceFieldSuccessorLineage(sourceRenderField);
     if (!fieldRowsBufferBorrowed) fieldRowsBuffer.destroy?.();
     surfaceBuffer.destroy?.();
     sourceIndexAccumBuffer.destroy?.();
@@ -709,6 +948,25 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     sourceRenderFieldPipelineCacheStatus: sourceRenderField.pipelineCacheStatus ?? null,
     kernelScope: SOURCE_LOCAL_KERNEL_SCOPE,
     sourceLocalSourceField: true,
+    schroederSpatialSourceFamily,
+    schroederSpatialSourceFamilyStatus:
+      schroederSpatialSourceFamily?.status ?? null,
+    schroederSpatialSourceFamilyRole:
+      schroederSpatialSourceFamily?.sourceFamilyRole ?? null,
+    schroederSpatialSourceGenerationId:
+      schroederSpatialSourceFamily?.sourceGenerationId ?? null,
+    schroederSpatialSuccessorEpochIdentity:
+      schroederSpatialSourceFamily?.successorEpochIdentity ?? null,
+    schroederSpatialSourceFamilyAncestorGenerationId:
+      schroederSpatialSourceFamily?.ancestorSpatialGenerationId ?? null,
+    schroederSpatialSourceFamilyPositionAuthority:
+      schroederSpatialSourceFamily?.positionAuthority ?? null,
+    schroederSpatialSourceFamilySpatialQueryAuthority:
+      schroederSpatialSourceFamily?.spatialQueryAuthority ?? null,
+    schroederSpatialSourceFamilyPositionEpoch:
+      schroederSpatialSourceFamily?.positionEpoch ?? null,
+    schroederSpatialSourceFamilyTopologyEpoch:
+      schroederSpatialSourceFamily?.topologyEpoch ?? null,
     sourceLocalDensityScale: SOURCE_LOCAL_DENSITY_SCALE,
     sourceLocalSourceCount: sourceCount,
     sourceLocalEstimatedCellVisits: visitEstimate.estimatedCellVisits,

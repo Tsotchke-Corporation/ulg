@@ -6,6 +6,8 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
+  SPH_PHASE_COMPONENT_ACTIVATION_EPSILON,
+  SPH_PHASE_FRACTION_VALIDATION_EPSILON,
   ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA,
   ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA,
   createSphPhaseCarrierTransferWebGpuEncoderStage,
@@ -237,6 +239,16 @@ test('encoder stage binds one immutable source set and orders global preflight b
   assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.source_kinetic_energy/);
   assert.match(sphPhaseCarrierTransferWgsl, /mechanics_model_matches_target/);
   assert.match(sphPhaseCarrierTransferWgsl, /let template_index = aggregate\.template_index/);
+  assert.equal(SPH_PHASE_FRACTION_VALIDATION_EPSILON, 1e-7);
+  assert.equal(SPH_PHASE_COMPONENT_ACTIVATION_EPSILON, 0);
+  assert.match(
+    sphPhaseCarrierTransferWgsl,
+    /fraction > params\.fraction_activation_epsilon/
+  );
+  assert.match(
+    sphPhaseCarrierTransferWgsl,
+    /fraction < -params\.fraction_validation_epsilon/
+  );
 
   stage.cleanupSubmittedWork();
 });
@@ -311,7 +323,15 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
       const STATE_FLOATS = 8;
       const THERMO_FLOATS = 12;
       const MECHANICS_FLOATS = 32;
-      const fractions = [0.01, 0.49, 0.5, 0.51, 0.99, 0];
+      const fractions = [
+        0.01,
+        0.49,
+        0.5,
+        0.51,
+        0.99,
+        5.540780279034152e-8,
+        0
+      ];
 
       const planFor = (primaryCapacity) => ({
         schema: phaseModule.ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA,
@@ -479,7 +499,7 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
       packedSweep.mechanics[20] = 0;
       packedSweep.mechanics[26] = 2;
       const sweepResult = await runPacked(packedSweep, 'native-phase-sweep');
-      const sweep = fractions.slice(0, 5).map((fraction, primary) => {
+      const sweep = fractions.slice(0, -1).map((fraction, primary) => {
         const liquidLane = packedSweep.primaryCapacity + primary;
         const primaryStateBase = primary * STATE_FLOATS;
         const companionStateBase = liquidLane * STATE_FLOATS;
@@ -631,10 +651,11 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
   assert.deepEqual(native.uncapturedErrors, []);
   assert.equal(native.sweepStatus, 'phase-carrier-transfer-complete');
   assert.equal(native.sweepErrorBits, 0);
-  assert.equal(native.sweep.length, 5);
+  assert.equal(native.sweep.length, 6);
   for (const entry of native.sweep) {
     nearlyEqual(entry.primaryMass, 10 * (1 - entry.fraction));
     nearlyEqual(entry.companionMass, 10 * entry.fraction);
+    assert.ok(entry.companionMass > 0);
     assert.equal(entry.primaryPhaseId, 1);
     assert.equal(entry.companionPhaseId, 2);
     nearlyEqualVector(entry.primaryFractions, [1, 0, 0, 0]);

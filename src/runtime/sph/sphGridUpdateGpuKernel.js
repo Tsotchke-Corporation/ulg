@@ -1695,56 +1695,56 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       computeBufferBinding(2, 'uniform')
     ];
     const beginHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-begin-heat.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-begin-heat.v4',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-begin-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'begin_heat_receipt',
       bindings
     });
     const clearHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-clear-heat.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-clear-heat.v4',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-clear-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'clear_heat_rows',
       bindings
     });
     const buildHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-build-heat.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-build-heat.v4',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-build-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'begin_heat_build',
       bindings
     });
     const main = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field.v4',
       label: 'ulg-mls-mpm-grid-update-mechanics-field',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'main',
       bindings
     });
     const claim = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-claim.v3',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-claim.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-claim',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'claim_velocity_state',
       bindings
     });
     const contact = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-contact.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-contact.v4',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-contact',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'contact_fields',
       bindings
     });
     const summarizeHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-summarize-heat.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-summarize-heat.v4',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-summarize-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'summarize_heat_rows',
       bindings
     });
     const seal = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-seal-velocity.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-seal-velocity.v4',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-seal-velocity',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'seal_velocity_state',

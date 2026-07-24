@@ -138,6 +138,9 @@ function aggregateParamsData(plan, spatialExecution) {
   u32(30, SCHROEDER_SPATIAL_AGGREGATE_VIEW_DISPATCH_WORDS);
   u32(31, SCHROEDER_SPATIAL_AGGREGATE_VIEW_TOPOLOGY_MODE_MORTON_PREFIX_BINARY);
   u32(32, plan.layout.wordLength);
+  u32(33, plan.activeMemberProjection.memberOffsetWords);
+  u32(34, plan.activeMemberProjection.memberCapacity);
+  u32(35, plan.physicalWordLength);
   return data;
 }
 
@@ -211,8 +214,8 @@ export function createSchroederSpatialAggregateViewGpu(device, {
     Number.MAX_SAFE_INTEGER
   );
   if (
-    template.layout.byteLength > maxBufferSize
-    || template.layout.byteLength > maxStorageBufferBindingSize
+    template.physicalByteLength > maxBufferSize
+    || template.physicalByteLength > maxStorageBufferBindingSize
   ) {
     throw new RangeError('spatial aggregate view exceeds the WebGPU storage buffer limit');
   }
@@ -297,7 +300,7 @@ export function createSchroederSpatialAggregateViewGpu(device, {
       aggregateViewBuffer: createOwnedBuffer(
         device,
         `${arenaLabel}-view`,
-        template.layout.byteLength,
+        template.physicalByteLength,
         GPU_BUFFER_USAGE.STORAGE
           | GPU_BUFFER_USAGE.COPY_SRC
           | GPU_BUFFER_USAGE.COPY_DST
@@ -736,7 +739,7 @@ export function createSchroederSpatialAggregateViewGpu(device, {
       );
       const finalizeGroup = bindGroup(
         pipelines.finalize,
-        [aggregateEntry, paramsEntry, dispatchEntry],
+        [directoryEntry, aggregateEntry, paramsEntry, dispatchEntry],
         'finalize',
         arena.arenaIndex
       );
@@ -815,6 +818,11 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         sourceThermoBuffer: particleAuthority.thermoBuffer,
         sourceIdentityBuffer: particleAuthority.identityBuffer,
         aggregateViewBuffer: arena.aggregateViewBuffer,
+        activeMemberProjectionBuffer: arena.aggregateViewBuffer,
+        activeMemberOffsetWords: plan.activeMemberProjection.memberOffsetWords,
+        activeMemberCapacity: plan.activeMemberProjection.memberCapacity,
+        aggregatePhysicalWordLength: plan.physicalWordLength,
+        aggregatePhysicalByteLength: plan.physicalByteLength,
         indirectDispatchBuffer: arena.dispatchBuffer,
         mortonKeyBuffer: arena.mortonKeyBuffer,
         sortedIndicesBuffer: radixSort.sortedIndicesBuffer,
@@ -919,6 +927,12 @@ export function createSchroederSpatialAggregateViewGpu(device, {
       || ownership.arena.inUse !== true
       || execution.ownerRuntime !== runtime
       || execution.aggregateViewBuffer !== ownership.arena.aggregateViewBuffer
+      || execution.activeMemberProjectionBuffer
+        !== ownership.arena.aggregateViewBuffer
+      || execution.activeMemberOffsetWords !== execution.layout.wordLength
+      || execution.activeMemberCapacity !== execution.sourceCapacity
+      || execution.aggregatePhysicalWordLength
+        !== execution.layout.wordLength + execution.sourceCapacity
       || execution.indirectDispatchBuffer !== ownership.arena.dispatchBuffer
       || execution.mortonKeyBuffer !== ownership.mortonKeyBuffer
       || execution.sortedIndicesBuffer !== ownership.sortedIndicesBuffer

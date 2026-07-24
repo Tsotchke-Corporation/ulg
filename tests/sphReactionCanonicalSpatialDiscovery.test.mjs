@@ -30,6 +30,7 @@ import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
   runSchroederSpatialEpochGenerationWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 const materialProperties = {
   a: {
@@ -166,6 +167,17 @@ function createFakeEncoder(label = null) {
       events.push({ kind: 'clear', buffer: buffer.label, offset, size });
     },
     copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+      if (source.label.includes('reaction-discovery-evidence')) {
+        const words = source._writtenData.slice();
+        const particleCount = words[12];
+        words[0] = particleCount;
+        words[1] = particleCount;
+        words[3] = particleCount * 2;
+        words[4] = particleCount;
+        words[6] = Math.min(1, particleCount);
+        words[7] = particleCount;
+        destination._mappedData = words;
+      }
       events.push({
         kind: 'copy',
         source: source.label,
@@ -219,6 +231,9 @@ function createFakeDevice() {
     },
     queue: {
       writeBuffer(buffer, offset, data) {
+        if (offset === 0 && ArrayBuffer.isView(data)) {
+          buffer._writtenData = new data.constructor(data);
+        }
         device.writes.push({ buffer, offset, byteLength: data.byteLength });
       },
       submit(commandBuffers) { device.submissions.push(commandBuffers); },
@@ -229,6 +244,12 @@ function createFakeDevice() {
         ...descriptor,
         destroyed: false,
         destroyCount: 0,
+        async mapAsync() {},
+        getMappedRange() {
+          const data = this._mappedData ?? new Uint8Array(this.size);
+          return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        },
+        unmap() {},
         destroy() {
           this.destroyed = true;
           this.destroyCount += 1;
@@ -236,7 +257,7 @@ function createFakeDevice() {
       };
       device.buffers.push(buffer);
       device.createdBufferDescriptors.push(descriptor);
-      return buffer;
+      return tagWebGpuBufferDevice(buffer, device);
     },
     createShaderModule(descriptor) { return descriptor; },
     createComputePipeline(descriptor) {
@@ -267,6 +288,11 @@ function createActiveNodeList(device) {
     size: 2 * 16 * Float32Array.BYTES_PER_ELEMENT,
     usage: 128
   });
+  const sourceStateBuffer = device.createBuffer({
+    label: 'canonical-reaction-source-state',
+    size: 2 * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
   return {
     schema: 'peercompute.ulg.schroeder-active-node-list-execution.v0',
     status: 'schroeder-active-node-list-submitted',
@@ -286,6 +312,7 @@ function createActiveNodeList(device) {
     activeCandidateCount: 2,
     activeNodeStrideFloats: 16,
     activeNodeBuffer,
+    sourceStateBuffer,
     spatialEpochStorageGeneration: 11,
     spatialEpochPhysicsTick: 13,
     spatialEpochPhysicsSubstep: 0,
@@ -324,10 +351,26 @@ test('canonical reaction resolve fail-closes every post-thermal mutation precond
   assert.match(resolveSource, /pos_mass\.w <= 0\.0/);
   assert.match(resolveSource, /partner_pos_mass\.w <= 0\.0/);
   assert.match(resolveSource, /reaction_value_finite\(current_distance2\)/);
+  assert.match(resolveSource,
+    /if \(reaction_extended_stoichiometry_enabled\(\)\) \{[\s\S]*?copy_particle\(particle_index\);[\s\S]*?return;/);
+  assert.match(sphReactionStepWgsl,
+    /reaction_table_mode:\s*u32/);
+  assert.match(sphReactionStepWgsl,
+    /term0\.x\s*==\s*f32\(reaction_index\)/);
+  assert.match(sphReactionStepWgsl,
+    /reaction_product_terms_ready\(reaction_index\)/);
   const firstMutation = resolveSource.indexOf('write_product_particle(');
+  const currentSchemaFailClosed = resolveSource.indexOf(
+    'if (reaction_extended_stoichiometry_enabled())'
+  );
+  const legacyMutation = resolveSource.indexOf(
+    'var legacy_product_material_id'
+  );
   assert.ok(firstMutation > resolveSource.indexOf('partner_proposal.y != proposal.y'));
   assert.ok(firstMutation > resolveSource.indexOf('pos_mass.w <= 0.0'));
   assert.ok(firstMutation > resolveSource.indexOf('current_distance2 > contact_radius2'));
+  assert.ok(currentSchemaFailClosed > 0);
+  assert.ok(legacyMutation > currentSchemaFailClosed);
 });
 
 test('canonical reaction mode dispatches only pack, resolve, unpack and preserves borrowed artifacts', async () => {
@@ -341,11 +384,7 @@ test('canonical reaction mode dispatches only pack, resolve, unpack and preserve
     activeNodeList,
     particleCount: 2
   });
-  const sourceStateBuffer = device.createBuffer({
-    label: 'canonical-reaction-source-state',
-    size: packed.sphParticleState.state.byteLength,
-    usage: 128
-  });
+  const sourceStateBuffer = activeNodeList.sourceStateBuffer;
   const sourceThermoBuffer = device.createBuffer({
     label: 'canonical-reaction-source-thermo',
     size: packed.sphParticleState.thermo.byteLength,
@@ -356,7 +395,7 @@ test('canonical reaction mode dispatches only pack, resolve, unpack and preserve
     size: packed.mlsMpmParticleState.mechanics.byteLength,
     usage: 128
   });
-  const discovery = runSchroederSpatialReactionDiscoveryProposalWebGpu({
+  const discovery = await runSchroederSpatialReactionDiscoveryProposalWebGpu({
     device,
     generation,
     sphParticleState: packed.sphParticleState,

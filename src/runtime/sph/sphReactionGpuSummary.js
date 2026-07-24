@@ -5,6 +5,8 @@ import {
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT,
   SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
   ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
@@ -16,6 +18,8 @@ import {
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  sphReactionProductEventCompactWgsl,
+  sphReactionProductEventPlacementEnvelopeWgsl,
   sphReactionProductEventPlacementWgsl,
   sphReactionAtomResidualWgsl,
   sphReactionGasSpeciesSummaryWgsl,
@@ -25,15 +29,40 @@ import {
   sphReactionSummaryPartialsWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
+  sphReactionProductEventSpatialClassificationWgsl,
+  sphReactionProductSpareAssignWgsl,
+  sphReactionProductSpareEventMarkWgsl,
+  sphReactionProductSpareGroupScanWgsl,
+  sphReactionProductSpareParticleMarkWgsl,
+  sphReactionProductSpareScatterWgsl
+} from '../../../ulg-gpu-abi/src/sphReactionProductEventSpatialClassificationWgsl.js';
+import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  computeBufferBinding,
+  createCachedExplicitComputePipeline
+} from '../webgpuComputeLayout.js';
 import {
   tagResidentProductMassDevice,
   tagWebGpuBufferDevice,
   webGpuBufferMatchesDevice
 } from './sphGpuDeviceIdentity.js';
+import {
+  acquireSphReactionProductPlacementSegmentedArenaWebGpu,
+  discardSphReactionProductPlacementSegmentedArenaLease,
+  encodeSphReactionProductPlacementSegmentedWebGpu,
+  finalizeSchroederSpatialReactionProductPlacementAuthority,
+  observeSchroederSpatialReactionProductPlacementCompletion,
+  releaseSphReactionProductPlacementSegmentedArenaAfterQueue,
+  resolveSchroederSpatialReactionProductPlacementAuthority,
+  sealSchroederSpatialReactionProductPlacementEncoding,
+  submitSchroederSpatialReactionProductPlacementWebGpu
+} from './schroederSpatialReactionProductPlacementGpu.js';
+import {
+  resolveSphReactionWarmArenaLease
+} from './schroederSpatialReactionPlacementEpochGpu.js';
 
 export {
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
@@ -45,6 +74,7 @@ export {
   ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
   sphReactionAtomResidualWgsl,
   sphReactionGasSpeciesSummaryWgsl,
+  sphReactionProductEventCompactWgsl,
   sphReactionProductEventWgsl,
   sphReactionProductInventoryWgsl,
   sphReactionSummaryFinalizeWgsl,
@@ -97,6 +127,27 @@ const GPU_BUFFER_USAGE = {
 const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
+
+function beginReactionSummaryTimestampSpan(
+  gpuTimestampRecorder,
+  encoder,
+  descriptor
+) {
+  return gpuTimestampRecorder?.active === true
+    && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+    && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
+    ? gpuTimestampRecorder.beginEncoderSpan(encoder, descriptor)
+    : null;
+}
+
+function endReactionSummaryTimestampSpan(
+  gpuTimestampRecorder,
+  encoder,
+  token
+) {
+  if (!token) return;
+  gpuTimestampRecorder.endEncoderSpan(encoder, token);
+}
 
 function assertInputs({ sphParticleState, reactionTable }) {
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
@@ -400,21 +451,34 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     ? reactionSummary.destroyProductEventBuffer
     : null;
   let destroyed = Boolean(reactionSummary.productEventBufferDestroyed);
+  let destroyPromise = null;
+  let activeBorrowCount = 0;
+  const borrowDrainWaiters = new Set();
+  const waitForBorrowDrain = () => activeBorrowCount === 0
+    ? Promise.resolve(true)
+    : new Promise((resolve) => borrowDrainWaiters.add(resolve));
   const destroyResidentProductMassBuffers = retainedProductEventBuffer && sourceDestroy
     ? () => {
-        if (destroyed || reactionSummary.productEventBufferDestroyed) return;
+        if (destroyPromise) return destroyPromise;
+        if (destroyed || reactionSummary.productEventBufferDestroyed) {
+          return Promise.resolve(true);
+        }
         destroyed = true;
         reactionSummary.productEventBufferDestroyed = true;
-        // Honor active borrows the same way the merged-handle destroy does:
-        // concurrent refreshes pin the handle around their submits.
-        const attemptDestroy = () => {
-          if ((handle.__ulgActiveBorrowCount | 0) > 0) {
-            setTimeout(attemptDestroy, 50);
-            return;
-          }
+        // A warm product-event buffer is part of the same exact arena as the
+        // reaction destinations. Return a completion promise so the arena
+        // owner cannot recycle that buffer while an asynchronous consumer is
+        // pinned before its eventual submit.
+        if (activeBorrowCount === 0) {
           sourceDestroy();
-        };
-        attemptDestroy();
+          destroyPromise = Promise.resolve(true);
+        } else {
+          destroyPromise = waitForBorrowDrain().then(() => {
+            sourceDestroy();
+            return true;
+          });
+        }
+        return destroyPromise;
       }
     : null;
   const productPlacementProvenance = reactionSummary.productPlacementProvenance?.schema
@@ -513,6 +577,19 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     sphValidation: false,
     fullPhysicsValidation: false
   };
+  Object.defineProperty(handle, '__ulgActiveBorrowCount', {
+    configurable: false,
+    enumerable: false,
+    get() {
+      return activeBorrowCount;
+    },
+    set(value) {
+      activeBorrowCount = Math.max(0, Math.trunc(Number(value) || 0));
+      if (activeBorrowCount !== 0) return;
+      for (const resolve of borrowDrainWaiters) resolve(true);
+      borrowDrainWaiters.clear();
+    }
+  });
   return retainedProductEventBuffer
     ? tagResidentProductMassDevice(handle, reactionSummary.productEventDevice)
     : handle;
@@ -970,6 +1047,20 @@ export function decodeSphReactionProductPlacementSummaryValues(
 
   const sum = (rows, field) => rows.reduce((total, row) => total + (Number(row[field]) || 0), 0);
   const max = (rows, field) => rows.reduce((largest, row) => Math.max(largest, Number(row[field]) || 0), 0);
+  const placedReactionEventCount = (rows) => {
+    const byReaction = new Map();
+    for (const row of rows) {
+      const reactionIndex = Number(row?.reactionIndex);
+      const key = Number.isFinite(reactionIndex)
+        ? `reaction:${Math.round(reactionIndex)}`
+        : 'reaction:unknown';
+      byReaction.set(
+        key,
+        Math.max(byReaction.get(key) ?? 0, Number(row?.placedEventCount) || 0)
+      );
+    }
+    return [...byReaction.values()].reduce((total, count) => total + count, 0);
+  };
   const gasRecords = records.filter((record) => Math.round(record.routingId) === 1);
   const aggregate = (rows, prefix = '') => {
     const key = (field) => prefix
@@ -1034,6 +1125,7 @@ export function decodeSphReactionProductPlacementSummaryValues(
     ...gasTotals,
     placementCandidateEventCount: totals.placementCandidateEventCount,
     placedEventCount: sum(records, 'placedEventCount'),
+    placedReactionEventCount: placedReactionEventCount(records),
     mergedEventCount: totals.mergedEventCount,
     unplacedEventCount: totals.unplacedEventCount,
     rejectedEventCount: totals.rejectedEventCount,
@@ -1044,6 +1136,7 @@ export function decodeSphReactionProductPlacementSummaryValues(
     rejectedMassKg: totals.rejectedMassKg,
     gasPlacementCandidateEventCount: gasTotals.gasPlacementCandidateEventCount,
     gasPlacedEventCount: sum(gasRecords, 'placedEventCount'),
+    gasPlacedReactionEventCount: placedReactionEventCount(gasRecords),
     gasMergedEventCount: gasTotals.gasMergedEventCount,
     gasUnplacedEventCount: gasTotals.gasUnplacedEventCount,
     gasRejectedEventCount: gasTotals.gasRejectedEventCount,
@@ -1239,13 +1332,16 @@ export async function runSphReactionSummaryWebGpu({
   readProductEvents = false,
   retainProductEventBuffer = false,
   productPlacementAccumulatorBuffer = null,
-  readProductPlacementSummary = true,
+  readProductPlacementSummary = null,
   productPlacementReadbackCadence = 'single-step-final',
   productPlacementSourceSummaryCount = 1,
-  readCompactSummary = true,
-  readGasSpeciesSummary = true,
-  readProductInventory = true,
-  readAtomResidual = true
+  readCompactSummary = null,
+  readGasSpeciesSummary = null,
+  readProductInventory = null,
+  readAtomResidual = null,
+  gpuTimestampRecorder = null,
+  canonicalReactionProductPlacementAuthority = null,
+  reactionWarmArenaLease = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -1266,31 +1362,108 @@ export async function runSphReactionSummaryWebGpu({
   const productInventoryCount = productTermCount;
   const productInventoryByteLength = productInventoryCount * SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const productEventCount = Math.max(0, particleCount * (reactionTable.productTermCount ?? 0));
-  const useProductEventBuffer = productEventCount > 0 && (readProductEvents || retainProductEventBuffer);
+  const useProductEventBuffer = productEventCount > 0 && (
+    readProductEvents
+    || retainProductEventBuffer
+    || canonicalReactionProductPlacementAuthority != null
+  );
   const productEventWorkgroupCount = Math.max(1, Math.ceil(Math.max(1, productEventCount) / SUMMARY_WORKGROUP_SIZE));
+  const placementParticleWorkgroupCount = Math.max(
+    1,
+    Math.ceil(Math.max(1, particleCount) / SUMMARY_WORKGROUP_SIZE)
+  );
   const productEventByteLength = productEventCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const productPlacementByteLength = productTermCount
     * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
   const atomResidualCount = Math.max(0, reactionTable.atomTermCount ?? 0);
   const atomResidualByteLength = atomResidualCount * SPH_GPU_REACTION_ATOM_RESIDUAL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const shouldReadCompactSummary = readCompactSummary !== false;
-  const shouldReadGasSpeciesSummary = readGasSpeciesSummary !== false;
-  const shouldReadProductInventory = readProductInventory !== false;
-  const shouldReadAtomResidual = readAtomResidual !== false;
+  const diagnosticReadDefault = reactionWarmArenaLease ? false : true;
+  const resolveDiagnosticRead = (requested) => requested == null
+    ? diagnosticReadDefault
+    : requested !== false;
+  const shouldReadCompactSummary = resolveDiagnosticRead(readCompactSummary);
+  const shouldReadGasSpeciesSummary = resolveDiagnosticRead(
+    readGasSpeciesSummary
+  );
+  const shouldReadProductInventory = resolveDiagnosticRead(
+    readProductInventory
+  );
+  const shouldReadAtomResidual = resolveDiagnosticRead(readAtomResidual);
   const shouldRunProductInventory = productInventoryCount > 0 && shouldReadProductInventory;
   const shouldRunGasSpecies = gasSpeciesCount > 0 && shouldReadGasSpeciesSummary;
   const shouldRunAtomResidual = atomResidualCount > 0 && shouldReadAtomResidual;
   const shouldRunProductPlacement = useProductEventBuffer
     && Boolean(nextMechanicsBuffer)
     && productPlacementByteLength > 0;
+  const shouldReadProductPlacementSummary = shouldRunProductPlacement
+    && resolveDiagnosticRead(readProductPlacementSummary);
+  const canonicalSpatialPlacementRequested =
+    canonicalReactionProductPlacementAuthority != null;
+  const canonicalSpatialPlacement = canonicalSpatialPlacementRequested
+    ? resolveSchroederSpatialReactionProductPlacementAuthority(
+        canonicalReactionProductPlacementAuthority,
+        {
+          device,
+          generation: canonicalReactionProductPlacementAuthority.generation,
+          particleCount,
+          productEventCapacity: productEventCount,
+          sourceStateBuffer,
+          sourceThermoBuffer,
+          placedDestinationStateBuffer: nextStateBuffer,
+          placedDestinationThermoBuffer: nextThermoBuffer,
+          placedDestinationMechanicsBuffer: nextMechanicsBuffer
+        }
+      )
+    : null;
+  const canonicalSpatialPlacementEnabled =
+    canonicalSpatialPlacement?.admitted === true;
+  if (
+    canonicalSpatialPlacementRequested
+    && (!canonicalSpatialPlacementEnabled || !shouldRunProductPlacement)
+  ) {
+    throw new TypeError(
+      'canonical product placement requires its branded fresh source authority and complete placed destination family'
+    );
+  }
+  if (reactionWarmArenaLease && !canonicalSpatialPlacementEnabled) {
+    throw new TypeError(
+      'reaction warm arena summary execution requires canonical product placement'
+    );
+  }
+  const reactionWarmArena = reactionWarmArenaLease
+    ? resolveSphReactionWarmArenaLease(reactionWarmArenaLease, {
+        device,
+        particleCapacity: particleCount,
+        productEventCapacity: productEventCount,
+        productTermCapacity: productTermCount
+      })
+    : null;
+  const reactionWarmBuffers = reactionWarmArena?.buffers ?? null;
+  let productPlacementSegmentedArenaLease = canonicalSpatialPlacementEnabled
+    ? acquireSphReactionProductPlacementSegmentedArenaWebGpu({
+        device,
+        authority: canonicalReactionProductPlacementAuthority,
+        particleCapacity: particleCount,
+        eventCapacity: productEventCount,
+        productTermCapacity: productTermCount,
+        eventStrideVec4: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4,
+        diagnosticReadbackRequested: shouldReadProductPlacementSummary
+      })
+    : null;
+  const productPlacementSegmentedArena =
+    productPlacementSegmentedArenaLease?.arena ?? null;
+  const productPlacementWarmBuffers =
+    productPlacementSegmentedArena?.buffers ?? null;
+  let productPlacementSegmentedEncoding = null;
+  let reactionProductPlacementSubmissionArtifact = null;
+  let productPlacementArenaReleaseScheduled = false;
+  try {
   const productPlacementBoxDimsM = [0, 1, 2].map((axis) => {
     const value = Number(boxDimsM?.[axis] ?? sphParticleState?.boxDimsM?.[axis]);
     return Number.isFinite(value) && value > 0 ? value : 0;
   });
   const productPlacementBoxClampEnabled = productPlacementBoxDimsM.every((value) => value > 0);
-  const shouldReadProductPlacementSummary = shouldRunProductPlacement
-    && readProductPlacementSummary !== false;
   const borrowedProductPlacementAccumulatorBuffer = Boolean(productPlacementAccumulatorBuffer);
   if (
     borrowedProductPlacementAccumulatorBuffer
@@ -1360,23 +1533,199 @@ export async function runSphReactionSummaryWebGpu({
     size: Math.max(4, productInventoryByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
-  const productEventBuffer = useProductEventBuffer ? tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-sph-reaction-product-event-out',
-    size: Math.max(4, productEventByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  }), device) : null;
+  const productEventBuffer = useProductEventBuffer
+    ? (
+        reactionWarmBuffers?.productEvent
+        || tagWebGpuBufferDevice(device.createBuffer({
+          label: 'ulg-sph-reaction-product-event-out',
+          size: Math.max(4, productEventByteLength),
+          usage:
+            GPU_BUFFER_USAGE.STORAGE
+            | GPU_BUFFER_USAGE.COPY_SRC
+            | GPU_BUFFER_USAGE.COPY_DST
+        }), device)
+      )
+    : null;
+  const productEventEmissionBuffer = shouldRunProductPlacement
+    ? (productPlacementWarmBuffers?.denseEmission || device.createBuffer({
+        label: 'ulg-sph-reaction-product-event-dense-emission-scratch',
+        size: Math.max(4, productEventByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE
+      }))
+    : productEventBuffer;
+  const productEventCompactCountBuffer = shouldRunProductPlacement
+    ? (productPlacementWarmBuffers?.compactCount || device.createBuffer({
+        label: 'ulg-sph-reaction-product-event-placement-compact-count',
+        size: 4,
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      }))
+    : null;
+  const productEventCompactParamsBuffer = shouldRunProductPlacement
+    ? (productPlacementWarmBuffers?.compactParams || device.createBuffer({
+        label: 'ulg-sph-reaction-product-event-placement-compact-params',
+        size: 16,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      }))
+    : null;
+  const productEventCompactLocalPrefixBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.compactLocalPrefix
+    : null;
+  const productEventCompactGroupCountBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.compactGroupCount
+    : null;
+  const productEventCompactGroupOffsetBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.compactGroupOffset
+    : null;
+  const productEventPlacementDecisionBuffer = shouldRunProductPlacement
+    ? (productPlacementWarmBuffers?.decisions || tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-sph-reaction-product-event-placement-decisions',
+        size: Math.max(16, productEventCount * 4 * Float32Array.BYTES_PER_ELEMENT),
+        usage: GPU_BUFFER_USAGE.STORAGE
+      }), device))
+    : null;
+  const productEventPlacementControlBuffer = shouldRunProductPlacement
+    ? (productPlacementWarmBuffers?.control || tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-sph-reaction-product-event-placement-control',
+        size: 32,
+        usage: GPU_BUFFER_USAGE.STORAGE
+      }), device))
+    : null;
+  const productEventPlacementEnvelopePartialsBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.envelopePartials
+    : null;
+  const productPlacementSpareParticlePrefixBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareParticlePrefix
+    : null;
+  const productPlacementSpareParticleGroupCountBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareParticleGroupCount
+    : null;
+  const productPlacementSpareParticleGroupOffsetBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareParticleGroupOffset
+    : null;
+  const productPlacementSpareEventPrefixBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareEventPrefix
+    : null;
+  const productPlacementSpareEventGroupCountBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareEventGroupCount
+    : null;
+  const productPlacementSpareEventGroupOffsetBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareEventGroupOffset
+    : null;
+  const productPlacementSpareSlotsBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareSlots
+    : null;
+  const productPlacementSpareControlBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareControl
+    : null;
+  const productPlacementSpareParticleScanParamsBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareParticleScanParams
+    : null;
+  const productPlacementSpareEventScanParamsBuffer = canonicalSpatialPlacementEnabled
+    ? productPlacementWarmBuffers.spareEventScanParams
+    : null;
+  const productEventPlacementCompletionReceiptBuffer =
+    !shouldRunProductPlacement
+      ? null
+      : (
+          canonicalSpatialPlacementEnabled
+            ? canonicalSpatialPlacement.completionReceiptBuffer
+            : tagWebGpuBufferDevice(device.createBuffer({
+                label:
+                  'ulg-sph-reaction-product-event-placement-local-completion-receipt',
+                size: SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES,
+                usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+              }), device)
+        );
+  const productEventPlacementCompletionReadBuffer =
+    canonicalSpatialPlacementEnabled && shouldReadProductPlacementSummary
+      ? productPlacementWarmBuffers.completionReadback
+      : null;
+  if (
+    productEventPlacementCompletionReceiptBuffer
+    && !canonicalSpatialPlacementEnabled
+  ) {
+    device.queue.writeBuffer(
+      productEventPlacementCompletionReceiptBuffer,
+      0,
+      new Uint32Array(SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES / 4)
+    );
+  }
+  if (productEventCompactParamsBuffer) {
+    device.queue.writeBuffer(
+      productEventCompactParamsBuffer,
+      0,
+      new Uint32Array([
+        productEventCount,
+        SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4,
+        productEventWorkgroupCount,
+        0
+      ])
+    );
+  }
+  if (productPlacementSpareControlBuffer) {
+    device.queue.writeBuffer(
+      productPlacementSpareControlBuffer,
+      0,
+      new Uint32Array(4)
+    );
+  }
+  if (productPlacementSpareParticleScanParamsBuffer) {
+    device.queue.writeBuffer(
+      productPlacementSpareParticleScanParamsBuffer,
+      0,
+      new Uint32Array([
+        placementParticleWorkgroupCount,
+        0,
+        particleCount,
+        0
+      ])
+    );
+  }
+  if (productPlacementSpareEventScanParamsBuffer) {
+    device.queue.writeBuffer(
+      productPlacementSpareEventScanParamsBuffer,
+      0,
+      new Uint32Array([
+        productEventWorkgroupCount,
+        1,
+        productEventCount,
+        0
+      ])
+    );
+  }
+  const productPlacementSpatialDirectoryBuffer = canonicalSpatialPlacementEnabled
+    ? canonicalSpatialPlacement.directoryBuffer
+    : null;
+  const productPlacementSpatialExpectationBuffer = canonicalSpatialPlacementEnabled
+    ? canonicalSpatialPlacement.expectationBuffer
+    : null;
+  const productPlacementFrozenSourceStateBuffer = canonicalSpatialPlacementEnabled
+    ? canonicalSpatialPlacement.frozenSourceStateBuffer
+    : sourceStateBuffer;
+  const productPlacementDirectoryPositionAuthorityStateBuffer =
+    canonicalSpatialPlacementEnabled
+      ? canonicalSpatialPlacement.directoryPositionAuthorityStateBuffer
+      : productPlacementFrozenSourceStateBuffer;
+  const productPlacementFrozenSourceThermoBuffer = canonicalSpatialPlacementEnabled
+    ? canonicalSpatialPlacement.frozenSourceThermoBuffer
+    : sourceThermoBuffer;
   let retainedProductEventBuffer = false;
+  let reactionProductPlacementArtifact = null;
   const productEventReadBuffer = useProductEventBuffer && readProductEvents ? device.createBuffer({
     label: 'ulg-sph-reaction-product-event-readback',
     size: Math.max(4, productEventByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
   const placementAccumulatorBuffer = shouldRunProductPlacement
-    ? (productPlacementAccumulatorBuffer || tagWebGpuBufferDevice(device.createBuffer({
-        label: 'ulg-sph-reaction-product-placement-accumulator',
-        size: Math.max(4, productPlacementByteLength),
-        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-      }), device))
+    ? (
+        productPlacementAccumulatorBuffer
+        || reactionWarmBuffers?.productPlacementSummary
+        || tagWebGpuBufferDevice(device.createBuffer({
+          label: 'ulg-sph-reaction-product-placement-accumulator',
+          size: Math.max(4, productPlacementByteLength),
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+        }), device)
+      )
     : null;
   if (placementAccumulatorBuffer && !borrowedProductPlacementAccumulatorBuffer) {
     device.queue.writeBuffer(
@@ -1400,7 +1749,7 @@ export async function runSphReactionSummaryWebGpu({
     size: Math.max(4, atomResidualByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
-  const paramsBuffer = device.createBuffer({
+  const paramsBuffer = reactionWarmBuffers?.summaryParams || device.createBuffer({
     label: 'ulg-sph-reaction-summary-params',
     size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
@@ -1408,10 +1757,21 @@ export async function runSphReactionSummaryWebGpu({
   let deferLocalBufferCleanup = false;
   let localBuffersDestroyed = false;
   let productEventPlacementParamsBuffer = null;
+  const productPlacementWarmBufferSet = new Set(
+    [
+      ...Object.values(productPlacementWarmBuffers ?? {}),
+      ...Object.values(reactionWarmBuffers ?? {})
+    ].filter(Boolean)
+  );
+  const destroyLocalPlacementBuffer = (buffer) => {
+    if (buffer && !productPlacementWarmBufferSet.has(buffer)) {
+      buffer.destroy?.();
+    }
+  };
   const destroyLocalBuffers = () => {
     if (localBuffersDestroyed) return;
     localBuffersDestroyed = true;
-    productEventPlacementParamsBuffer?.destroy?.();
+    destroyLocalPlacementBuffer(productEventPlacementParamsBuffer);
     if (!borrowedReactionRecordBuffer) recordsBuffer.destroy?.();
     if (!borrowedProposalBuffer) proposalsBuffer.destroy?.();
     partialsBuffer?.destroy?.();
@@ -1421,13 +1781,51 @@ export async function runSphReactionSummaryWebGpu({
     gasSpeciesReadBuffer?.destroy?.();
     productInventoryBuffer?.destroy?.();
     productInventoryReadBuffer?.destroy?.();
-    if (!retainedProductEventBuffer) productEventBuffer?.destroy?.();
+    if (productEventEmissionBuffer !== productEventBuffer) {
+      destroyLocalPlacementBuffer(productEventEmissionBuffer);
+    }
+    destroyLocalPlacementBuffer(productEventCompactCountBuffer);
+    destroyLocalPlacementBuffer(productEventCompactParamsBuffer);
+    destroyLocalPlacementBuffer(productEventCompactLocalPrefixBuffer);
+    destroyLocalPlacementBuffer(productEventCompactGroupCountBuffer);
+    destroyLocalPlacementBuffer(productEventCompactGroupOffsetBuffer);
+    destroyLocalPlacementBuffer(productEventPlacementDecisionBuffer);
+    destroyLocalPlacementBuffer(productEventPlacementControlBuffer);
+    destroyLocalPlacementBuffer(productEventPlacementEnvelopePartialsBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareParticlePrefixBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareParticleGroupCountBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareParticleGroupOffsetBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareEventPrefixBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareEventGroupCountBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareEventGroupOffsetBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareSlotsBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareControlBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareParticleScanParamsBuffer);
+    destroyLocalPlacementBuffer(productPlacementSpareEventScanParamsBuffer);
+    if (!canonicalSpatialPlacementEnabled) {
+      productEventPlacementCompletionReceiptBuffer?.destroy?.();
+    }
+    destroyLocalPlacementBuffer(productEventPlacementCompletionReadBuffer);
+    if (
+      !retainedProductEventBuffer
+      && productEventBuffer !== reactionWarmBuffers?.productEvent
+    ) {
+      productEventBuffer?.destroy?.();
+    }
     productEventReadBuffer?.destroy?.();
-    if (!borrowedProductPlacementAccumulatorBuffer) placementAccumulatorBuffer?.destroy?.();
+    if (
+      !borrowedProductPlacementAccumulatorBuffer
+      && placementAccumulatorBuffer
+        !== reactionWarmBuffers?.productPlacementSummary
+    ) {
+      placementAccumulatorBuffer?.destroy?.();
+    }
     productPlacementReadBuffer?.destroy?.();
     atomResidualBuffer?.destroy?.();
     atomResidualReadBuffer?.destroy?.();
-    paramsBuffer.destroy?.();
+    if (paramsBuffer !== reactionWarmBuffers?.summaryParams) {
+      paramsBuffer.destroy?.();
+    }
   };
 
   try {
@@ -1566,39 +1964,288 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 3, resource: { buffer: nextThermoBuffer } },
           { binding: 4, resource: { buffer: recordsBuffer } },
           { binding: 5, resource: { buffer: proposalsBuffer } },
-          { binding: 6, resource: { buffer: productEventBuffer } },
+          { binding: 6, resource: { buffer: productEventEmissionBuffer } },
           { binding: 7, resource: { buffer: paramsBuffer } }
         ]
       });
     }
     let productEventPlacementPipeline = null;
     let productEventPlacementBindGroup = null;
+    let productEventPlacementEnvelopePipeline = null;
+    let productEventPlacementEnvelopeBindGroup = null;
+    let productEventPlacementEnvelopeFinalizePipeline = null;
+    let productEventPlacementEnvelopeFinalizeBindGroup = null;
+    let productEventPlacementClassificationPipeline = null;
+    let productEventPlacementClassificationBindGroup = null;
+    let productPlacementSpareParticleMarkPipeline = null;
+    let productPlacementSpareParticleMarkBindGroup = null;
+    let productPlacementSpareParticleScanPipeline = null;
+    let productPlacementSpareParticleScanBindGroup = null;
+    let productPlacementSpareScatterPipeline = null;
+    let productPlacementSpareScatterBindGroup = null;
+    let productPlacementSpareEventMarkPipeline = null;
+    let productPlacementSpareEventMarkBindGroup = null;
+    let productPlacementSpareEventScanPipeline = null;
+    let productPlacementSpareEventScanBindGroup = null;
+    let productPlacementSpareAssignPipeline = null;
+    let productPlacementSpareAssignBindGroup = null;
+    let productEventCompactPipeline = null;
+    let productEventCompactBindGroup = null;
+    let productEventCompactScanPipeline = null;
+    let productEventCompactScanBindGroup = null;
+    let productEventCompactScatterPipeline = null;
+    let productEventCompactScatterBindGroup = null;
     if (shouldRunProductPlacement && placementAccumulatorBuffer) {
+      const legacyCompactBindings = [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'storage'),
+          computeBufferBinding(2, 'storage'),
+          computeBufferBinding(3, 'uniform'),
+          computeBufferBinding(4, 'storage')
+      ];
+      const canonicalCompactBindings = [
+        ...legacyCompactBindings,
+        computeBufferBinding(5, 'storage'),
+        computeBufferBinding(6, 'storage'),
+        computeBufferBinding(7, 'storage')
+      ];
+      const compactEntries = [
+          { binding: 0, resource: { buffer: productEventEmissionBuffer } },
+          { binding: 1, resource: { buffer: productEventBuffer } },
+          { binding: 2, resource: { buffer: productEventCompactCountBuffer } },
+          { binding: 3, resource: { buffer: productEventCompactParamsBuffer } },
+          {
+            binding: 4,
+            resource: { buffer: productEventPlacementCompletionReceiptBuffer }
+          }
+      ];
+      if (canonicalSpatialPlacementEnabled) {
+        compactEntries.push(
+          { binding: 5, resource: { buffer: productEventCompactLocalPrefixBuffer } },
+          { binding: 6, resource: { buffer: productEventCompactGroupCountBuffer } },
+          { binding: 7, resource: { buffer: productEventCompactGroupOffsetBuffer } }
+        );
+        const compactCountInfo = createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-sph-reaction-product-event-placement-compact-count-v3',
+          label: 'ulg-sph-reaction-product-event-placement-compact-count',
+          code: sphReactionProductEventCompactWgsl,
+          entryPoint: 'count_placement_rows',
+          bindings: canonicalCompactBindings
+        });
+        const compactScanInfo = createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-sph-reaction-product-event-placement-compact-scan-v3',
+          label: 'ulg-sph-reaction-product-event-placement-compact-scan',
+          code: sphReactionProductEventCompactWgsl,
+          entryPoint: 'scan_placement_row_groups',
+          bindings: canonicalCompactBindings
+        });
+        const compactScatterInfo = createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-sph-reaction-product-event-placement-compact-scatter-v3',
+          label: 'ulg-sph-reaction-product-event-placement-compact-scatter',
+          code: sphReactionProductEventCompactWgsl,
+          entryPoint: 'scatter_placement_rows',
+          bindings: canonicalCompactBindings
+        });
+        productEventCompactPipeline = compactCountInfo.pipeline;
+        productEventCompactScanPipeline = compactScanInfo.pipeline;
+        productEventCompactScatterPipeline = compactScatterInfo.pipeline;
+        productEventCompactBindGroup = device.createBindGroup({
+          layout: compactCountInfo.bindGroupLayout,
+          entries: compactEntries
+        });
+        productEventCompactScanBindGroup = device.createBindGroup({
+          layout: compactScanInfo.bindGroupLayout,
+          entries: compactEntries
+        });
+        productEventCompactScatterBindGroup = device.createBindGroup({
+          layout: compactScatterInfo.bindGroupLayout,
+          entries: compactEntries
+        });
+      } else {
+        const compactInfo = createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-sph-reaction-product-event-placement-compact-v2',
+          label: 'ulg-sph-reaction-product-event-placement-compact',
+          code: sphReactionProductEventCompactWgsl,
+          entryPoint: 'compact_placement_rows',
+          bindings: legacyCompactBindings
+        });
+        productEventCompactPipeline = compactInfo.pipeline;
+        productEventCompactBindGroup = device.createBindGroup({
+          layout: compactInfo.bindGroupLayout,
+          entries: compactEntries
+        });
+      }
       // Placement runs in the same submit right after the event kernel:
       // unplaced product mass claims spare zero-mass particle slots and the
       // consumed events are zeroed before compaction/merge or the grid splat
       // ever see them, so ledger mass and particle mass never double-count.
-      const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-product-event-placement-v2',
-        label: 'ulg-sph-reaction-product-event-placement',
-        code: sphReactionProductEventPlacementWgsl,
-        entryPoint: 'place_product_events',
-        bindings: [
-          computeBufferBinding(0, 'storage'),
-          computeBufferBinding(1, 'storage'),
-          computeBufferBinding(2, 'storage'),
-          computeBufferBinding(3, 'storage'),
-          computeBufferBinding(4, 'uniform'),
-          computeBufferBinding(5, 'storage'),
-          computeBufferBinding(6, 'read-only-storage'),
-          computeBufferBinding(7, 'read-only-storage')
-        ]
-      });
-      const placementParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-        label: 'ulg-sph-reaction-product-event-placement-params',
-        size: 48,
-        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      }), device);
+      const spatialClassificationBindings = [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'uniform'),
+        computeBufferBinding(6, 'read-only-storage'),
+        computeBufferBinding(7, 'read-only-storage'),
+        computeBufferBinding(8, 'uniform'),
+        computeBufferBinding(9, 'read-only-storage'),
+        computeBufferBinding(10, 'storage'),
+        computeBufferBinding(11, 'read-only-storage'),
+        computeBufferBinding(12, 'storage')
+      ];
+      const placementCommitBindings = [
+        computeBufferBinding(0, 'storage'),
+        computeBufferBinding(1, 'storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(4, 'uniform'),
+        computeBufferBinding(5, 'storage'),
+        computeBufferBinding(6, 'read-only-storage'),
+        computeBufferBinding(7, 'read-only-storage'),
+        computeBufferBinding(8, 'read-only-storage'),
+        computeBufferBinding(9, 'read-only-storage'),
+        computeBufferBinding(10, 'storage')
+      ];
+      const placementEnvelopeBindings = [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'uniform'),
+        computeBufferBinding(4, 'storage'),
+        computeBufferBinding(5, 'storage'),
+        computeBufferBinding(6, 'storage')
+      ];
+      const placementEnvelopeInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spatial-envelope-reduce-v4',
+            label: 'ulg-sph-reaction-product-placement-spatial-envelope-reduce',
+            code: sphReactionProductEventPlacementEnvelopeWgsl,
+            entryPoint: 'reduce_placement_spatial_envelope',
+            bindings: placementEnvelopeBindings
+          })
+        : null;
+      const placementEnvelopeFinalizeInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spatial-envelope-finalize-v4',
+            label: 'ulg-sph-reaction-product-placement-spatial-envelope-finalize',
+            code: sphReactionProductEventPlacementEnvelopeWgsl,
+            entryPoint: 'finalize_placement_spatial_envelope',
+            bindings: placementEnvelopeBindings
+          })
+        : null;
+      const placementClassificationInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spatial-classification-v4',
+            label: 'ulg-sph-reaction-product-placement-spatial-classification',
+            code: sphReactionProductEventSpatialClassificationWgsl,
+            entryPoint: 'classify_product_events',
+            bindings: spatialClassificationBindings
+          })
+        : null;
+      const spareParticleMarkInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spare-particle-mark-v1',
+            label: 'ulg-sph-reaction-product-placement-spare-particle-mark',
+            code: sphReactionProductSpareParticleMarkWgsl,
+            entryPoint: 'mark_spare_particles',
+            bindings: [
+              computeBufferBinding(0, 'read-only-storage'),
+              computeBufferBinding(1, 'read-only-storage'),
+              computeBufferBinding(2, 'storage'),
+              computeBufferBinding(3, 'storage'),
+              computeBufferBinding(4, 'uniform'),
+              computeBufferBinding(5, 'storage')
+            ]
+          })
+        : null;
+      const spareGroupScanBindings = [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'uniform'),
+        computeBufferBinding(4, 'storage')
+      ];
+      const spareParticleScanInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spare-particle-scan-v1',
+            label: 'ulg-sph-reaction-product-placement-spare-particle-scan',
+            code: sphReactionProductSpareGroupScanWgsl,
+            entryPoint: 'scan_spare_groups',
+            bindings: spareGroupScanBindings
+          })
+        : null;
+      const spareScatterInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spare-scatter-v1',
+            label: 'ulg-sph-reaction-product-placement-spare-scatter',
+            code: sphReactionProductSpareScatterWgsl,
+            entryPoint: 'scatter_spare_particles',
+            bindings: [
+              computeBufferBinding(0, 'read-only-storage'),
+              computeBufferBinding(1, 'read-only-storage'),
+              computeBufferBinding(2, 'storage'),
+              computeBufferBinding(3, 'uniform'),
+              computeBufferBinding(4, 'storage')
+            ]
+          })
+        : null;
+      const spareEventMarkInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spare-event-mark-v1',
+            label: 'ulg-sph-reaction-product-placement-spare-event-mark',
+            code: sphReactionProductSpareEventMarkWgsl,
+            entryPoint: 'mark_spare_events',
+            bindings: [
+              computeBufferBinding(0, 'read-only-storage'),
+              computeBufferBinding(1, 'read-only-storage'),
+              computeBufferBinding(2, 'read-only-storage'),
+              computeBufferBinding(3, 'storage'),
+              computeBufferBinding(4, 'storage'),
+              computeBufferBinding(5, 'uniform'),
+              computeBufferBinding(6, 'storage')
+            ]
+          })
+        : null;
+      const spareEventScanInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spare-event-scan-v1',
+            label: 'ulg-sph-reaction-product-placement-spare-event-scan',
+            code: sphReactionProductSpareGroupScanWgsl,
+            entryPoint: 'scan_spare_groups',
+            bindings: spareGroupScanBindings
+          })
+        : null;
+      const spareAssignInfo = canonicalSpatialPlacementEnabled
+        ? createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-placement-spare-assign-v1',
+            label: 'ulg-sph-reaction-product-placement-spare-assign',
+            code: sphReactionProductSpareAssignWgsl,
+            entryPoint: 'assign_spare_events',
+            bindings: [
+              computeBufferBinding(0, 'read-only-storage'),
+              computeBufferBinding(1, 'read-only-storage'),
+              computeBufferBinding(2, 'read-only-storage'),
+              computeBufferBinding(3, 'read-only-storage'),
+              computeBufferBinding(4, 'storage'),
+              computeBufferBinding(5, 'uniform'),
+              computeBufferBinding(6, 'storage')
+            ]
+          })
+        : null;
+      const placementPipelineInfo = canonicalSpatialPlacementEnabled
+        ? null
+        : createCachedExplicitComputePipeline(device, {
+            cacheKey: 'ulg-sph-reaction-product-event-placement-commit-v6',
+            label: 'ulg-sph-reaction-product-event-placement',
+            code: sphReactionProductEventPlacementWgsl,
+            entryPoint: 'place_product_events',
+            bindings: placementCommitBindings
+          });
+      const placementParamsBuffer = canonicalSpatialPlacementEnabled
+        ? productPlacementWarmBuffers.placementParams
+        : tagWebGpuBufferDevice(device.createBuffer({
+            label: 'ulg-sph-reaction-product-event-placement-params',
+            size: 64,
+            usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+          }), device);
       productEventPlacementParamsBuffer = placementParamsBuffer;
       device.queue.writeBuffer(placementParamsBuffer, 0, new Uint32Array([
         particleCount,
@@ -1616,20 +2263,176 @@ export async function runSphReactionSummaryWebGpu({
         44,
         new Uint32Array([productPlacementBoxClampEnabled ? 1 : 0])
       );
-      productEventPlacementPipeline = pipeline;
-      productEventPlacementBindGroup = device.createBindGroup({
-        layout: bindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: productEventBuffer } },
-          { binding: 1, resource: { buffer: nextStateBuffer } },
-          { binding: 2, resource: { buffer: nextThermoBuffer } },
-          { binding: 3, resource: { buffer: nextMechanicsBuffer } },
-          { binding: 4, resource: { buffer: placementParamsBuffer } },
-          { binding: 5, resource: { buffer: placementAccumulatorBuffer } },
-          { binding: 6, resource: { buffer: sourceStateBuffer } },
-          { binding: 7, resource: { buffer: sourceThermoBuffer } }
-        ]
-      });
+      device.queue.writeBuffer(
+        placementParamsBuffer,
+        48,
+        new Uint32Array([
+          canonicalSpatialPlacementEnabled ? 1 : 0,
+          canonicalSpatialPlacement?.authority?.generationId ?? 0,
+          canonicalSpatialPlacement?.authority?.supportProfileId ?? 0,
+          SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION
+        ])
+      );
+      productEventPlacementPipeline = placementPipelineInfo?.pipeline ?? null;
+      const placementCommitEntries = [
+        { binding: 0, resource: { buffer: productEventBuffer } },
+        { binding: 1, resource: { buffer: nextStateBuffer } },
+        { binding: 2, resource: { buffer: nextThermoBuffer } },
+        { binding: 3, resource: { buffer: nextMechanicsBuffer } },
+        { binding: 4, resource: { buffer: placementParamsBuffer } },
+        { binding: 5, resource: { buffer: placementAccumulatorBuffer } },
+        { binding: 6, resource: { buffer: productPlacementFrozenSourceStateBuffer } },
+        { binding: 7, resource: { buffer: productPlacementFrozenSourceThermoBuffer } },
+        { binding: 8, resource: { buffer: productEventCompactCountBuffer } },
+        { binding: 9, resource: { buffer: productEventPlacementDecisionBuffer } },
+        {
+          binding: 10,
+          resource: {
+            buffer: productEventPlacementCompletionReceiptBuffer
+          }
+        }
+      ];
+      const spatialClassificationEntries = [
+        { binding: 0, resource: { buffer: productEventBuffer } },
+        { binding: 2, resource: { buffer: nextThermoBuffer } },
+        { binding: 3, resource: { buffer: placementParamsBuffer } },
+        { binding: 6, resource: { buffer: productEventCompactCountBuffer } },
+        { binding: 7, resource: { buffer: productPlacementSpatialDirectoryBuffer } },
+        { binding: 8, resource: { buffer: productPlacementSpatialExpectationBuffer } },
+        { binding: 9, resource: { buffer: productPlacementFrozenSourceStateBuffer } },
+        { binding: 10, resource: { buffer: productEventPlacementDecisionBuffer } },
+        { binding: 11, resource: { buffer: productEventPlacementControlBuffer } },
+        {
+          binding: 12,
+          resource: { buffer: productEventPlacementCompletionReceiptBuffer }
+        }
+      ];
+      productEventPlacementBindGroup = placementPipelineInfo
+        ? device.createBindGroup({
+            layout: placementPipelineInfo.bindGroupLayout,
+            entries: placementCommitEntries
+          })
+        : null;
+      if (
+        placementClassificationInfo
+        && placementEnvelopeInfo
+        && placementEnvelopeFinalizeInfo
+        && spareParticleMarkInfo
+        && spareParticleScanInfo
+        && spareScatterInfo
+        && spareEventMarkInfo
+        && spareEventScanInfo
+        && spareAssignInfo
+      ) {
+        productEventPlacementEnvelopePipeline = placementEnvelopeInfo.pipeline;
+        productEventPlacementEnvelopeFinalizePipeline =
+          placementEnvelopeFinalizeInfo.pipeline;
+        productEventPlacementClassificationPipeline = placementClassificationInfo.pipeline;
+        productEventPlacementClassificationBindGroup = device.createBindGroup({
+          layout: placementClassificationInfo.bindGroupLayout,
+          entries: spatialClassificationEntries
+        });
+        const placementEnvelopeEntries = [
+            { binding: 0, resource: { buffer: nextStateBuffer } },
+            { binding: 1, resource: { buffer: nextThermoBuffer } },
+            {
+              binding: 2,
+              resource: {
+                buffer:
+                  productPlacementDirectoryPositionAuthorityStateBuffer
+              }
+            },
+            { binding: 3, resource: { buffer: placementParamsBuffer } },
+            { binding: 4, resource: { buffer: productEventPlacementControlBuffer } },
+            {
+              binding: 5,
+              resource: { buffer: productEventPlacementCompletionReceiptBuffer }
+            },
+            {
+              binding: 6,
+              resource: { buffer: productEventPlacementEnvelopePartialsBuffer }
+            }
+        ];
+        productEventPlacementEnvelopeBindGroup = device.createBindGroup({
+          layout: placementEnvelopeInfo.bindGroupLayout,
+          entries: placementEnvelopeEntries
+        });
+        productEventPlacementEnvelopeFinalizeBindGroup = device.createBindGroup({
+          layout: placementEnvelopeFinalizeInfo.bindGroupLayout,
+          entries: placementEnvelopeEntries
+        });
+        productPlacementSpareParticleMarkPipeline = spareParticleMarkInfo.pipeline;
+        productPlacementSpareParticleMarkBindGroup = device.createBindGroup({
+          layout: spareParticleMarkInfo.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: nextStateBuffer } },
+            { binding: 1, resource: { buffer: nextThermoBuffer } },
+            { binding: 2, resource: { buffer: productPlacementSpareParticlePrefixBuffer } },
+            { binding: 3, resource: { buffer: productPlacementSpareParticleGroupCountBuffer } },
+            { binding: 4, resource: { buffer: placementParamsBuffer } },
+            { binding: 5, resource: { buffer: productEventPlacementCompletionReceiptBuffer } }
+          ]
+        });
+        productPlacementSpareParticleScanPipeline = spareParticleScanInfo.pipeline;
+        productPlacementSpareParticleScanBindGroup = device.createBindGroup({
+          layout: spareParticleScanInfo.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: productPlacementSpareParticleGroupCountBuffer } },
+            { binding: 1, resource: { buffer: productPlacementSpareParticleGroupOffsetBuffer } },
+            { binding: 2, resource: { buffer: productPlacementSpareControlBuffer } },
+            { binding: 3, resource: { buffer: productPlacementSpareParticleScanParamsBuffer } },
+            { binding: 4, resource: { buffer: productEventPlacementCompletionReceiptBuffer } }
+          ]
+        });
+        productPlacementSpareScatterPipeline = spareScatterInfo.pipeline;
+        productPlacementSpareScatterBindGroup = device.createBindGroup({
+          layout: spareScatterInfo.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: productPlacementSpareParticlePrefixBuffer } },
+            { binding: 1, resource: { buffer: productPlacementSpareParticleGroupOffsetBuffer } },
+            { binding: 2, resource: { buffer: productPlacementSpareSlotsBuffer } },
+            { binding: 3, resource: { buffer: placementParamsBuffer } },
+            { binding: 4, resource: { buffer: productEventPlacementCompletionReceiptBuffer } }
+          ]
+        });
+        productPlacementSpareEventMarkPipeline = spareEventMarkInfo.pipeline;
+        productPlacementSpareEventMarkBindGroup = device.createBindGroup({
+          layout: spareEventMarkInfo.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: productEventBuffer } },
+            { binding: 1, resource: { buffer: productEventCompactCountBuffer } },
+            { binding: 2, resource: { buffer: productEventPlacementDecisionBuffer } },
+            { binding: 3, resource: { buffer: productPlacementSpareEventPrefixBuffer } },
+            { binding: 4, resource: { buffer: productPlacementSpareEventGroupCountBuffer } },
+            { binding: 5, resource: { buffer: placementParamsBuffer } },
+            { binding: 6, resource: { buffer: productEventPlacementCompletionReceiptBuffer } }
+          ]
+        });
+        productPlacementSpareEventScanPipeline = spareEventScanInfo.pipeline;
+        productPlacementSpareEventScanBindGroup = device.createBindGroup({
+          layout: spareEventScanInfo.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: productPlacementSpareEventGroupCountBuffer } },
+            { binding: 1, resource: { buffer: productPlacementSpareEventGroupOffsetBuffer } },
+            { binding: 2, resource: { buffer: productPlacementSpareControlBuffer } },
+            { binding: 3, resource: { buffer: productPlacementSpareEventScanParamsBuffer } },
+            { binding: 4, resource: { buffer: productEventPlacementCompletionReceiptBuffer } }
+          ]
+        });
+        productPlacementSpareAssignPipeline = spareAssignInfo.pipeline;
+        productPlacementSpareAssignBindGroup = device.createBindGroup({
+          layout: spareAssignInfo.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: productPlacementSpareEventPrefixBuffer } },
+            { binding: 1, resource: { buffer: productPlacementSpareEventGroupOffsetBuffer } },
+            { binding: 2, resource: { buffer: productPlacementSpareSlotsBuffer } },
+            { binding: 3, resource: { buffer: productPlacementSpareControlBuffer } },
+            { binding: 4, resource: { buffer: productEventPlacementDecisionBuffer } },
+            { binding: 5, resource: { buffer: placementParamsBuffer } },
+            { binding: 6, resource: { buffer: productEventPlacementCompletionReceiptBuffer } }
+          ]
+        });
+      }
     }
     if (shouldRunAtomResidual) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
@@ -1692,38 +2495,235 @@ export async function runSphReactionSummaryWebGpu({
       });
     }
     const encoder = device.createCommandEncoder();
+    if (reactionWarmBuffers?.productEvent && useProductEventBuffer) {
+      if (typeof encoder.clearBuffer !== 'function') {
+        throw new TypeError(
+          'reaction warm product-event reuse requires commandEncoder.clearBuffer'
+        );
+      }
+      encoder.clearBuffer(
+        productEventBuffer,
+        0,
+        Math.max(4, productEventByteLength)
+      );
+    }
+    const encodeTimestampedComputePass = ({
+      producerId,
+      stage,
+      pipeline,
+      bindGroup,
+      workgroupCount
+    }) => {
+      const timestampSpan = beginReactionSummaryTimestampSpan(
+        gpuTimestampRecorder,
+        encoder,
+        {
+          producerId,
+          stage,
+          spanClass: 'same-production-command-encoder-profiled-pass',
+          summaryScope: SUMMARY_SCOPE,
+          particleCount,
+          productEventCount,
+          productTermCount
+        }
+      );
+      const pass = encoder.beginComputePass({
+        label: `ulg-sph-reaction-summary-${stage}`
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(workgroupCount);
+      pass.end();
+      endReactionSummaryTimestampSpan(
+        gpuTimestampRecorder,
+        encoder,
+        timestampSpan
+      );
+    };
     if (shouldReadCompactSummary && partialsPipeline && partialsBindGroup && finalizePipeline && finalizeBindGroup) {
-      const partialsPass = encoder.beginComputePass();
-      partialsPass.setPipeline(partialsPipeline);
-      partialsPass.setBindGroup(0, partialsBindGroup);
-      partialsPass.dispatchWorkgroups(partialCount);
-      partialsPass.end();
-      const finalizePass = encoder.beginComputePass();
-      finalizePass.setPipeline(finalizePipeline);
-      finalizePass.setBindGroup(0, finalizeBindGroup);
-      finalizePass.dispatchWorkgroups(1);
-      finalizePass.end();
+      encodeTimestampedComputePass({
+        producerId: 'sph-reaction-summary:partials',
+        stage: 'partials',
+        pipeline: partialsPipeline,
+        bindGroup: partialsBindGroup,
+        workgroupCount: partialCount
+      });
+      encodeTimestampedComputePass({
+        producerId: 'sph-reaction-summary:finalize',
+        stage: 'finalize',
+        pipeline: finalizePipeline,
+        bindGroup: finalizeBindGroup,
+        workgroupCount: 1
+      });
     }
     if (productInventoryPipeline && productInventoryBindGroup && shouldRunProductInventory) {
-      const productInventoryPass = encoder.beginComputePass();
-      productInventoryPass.setPipeline(productInventoryPipeline);
-      productInventoryPass.setBindGroup(0, productInventoryBindGroup);
-      productInventoryPass.dispatchWorkgroups(productInventoryCount);
-      productInventoryPass.end();
+      encodeTimestampedComputePass({
+        producerId: 'sph-reaction-summary:product-inventory',
+        stage: 'product-inventory',
+        pipeline: productInventoryPipeline,
+        bindGroup: productInventoryBindGroup,
+        workgroupCount: productInventoryCount
+      });
       encoder.copyBufferToBuffer(productInventoryBuffer, 0, productInventoryReadBuffer, 0, productInventoryByteLength);
     }
     if (productEventPipeline && productEventBindGroup && useProductEventBuffer) {
-      const productEventPass = encoder.beginComputePass();
-      productEventPass.setPipeline(productEventPipeline);
-      productEventPass.setBindGroup(0, productEventBindGroup);
-      productEventPass.dispatchWorkgroups(productEventWorkgroupCount);
-      productEventPass.end();
-      if (productEventPlacementPipeline && productEventPlacementBindGroup) {
-        const placementPass = encoder.beginComputePass();
-        placementPass.setPipeline(productEventPlacementPipeline);
-        placementPass.setBindGroup(0, productEventPlacementBindGroup);
-        placementPass.dispatchWorkgroups(1);
-        placementPass.end();
+      encodeTimestampedComputePass({
+        producerId: 'sph-reaction-summary:product-event-emission',
+        stage: 'product-event-emission',
+        pipeline: productEventPipeline,
+        bindGroup: productEventBindGroup,
+        workgroupCount: productEventWorkgroupCount
+      });
+      if (productEventCompactPipeline && productEventCompactBindGroup) {
+        encodeTimestampedComputePass({
+          producerId: 'sph-reaction-summary:product-event-compaction',
+          stage: 'product-event-compaction',
+          pipeline: productEventCompactPipeline,
+          bindGroup: productEventCompactBindGroup,
+          workgroupCount: canonicalSpatialPlacementEnabled
+            ? productEventWorkgroupCount
+            : 1
+        });
+      }
+      if (productEventCompactScanPipeline && productEventCompactScanBindGroup) {
+        encodeTimestampedComputePass({
+          producerId: 'sph-reaction-summary:product-event-compaction-scan',
+          stage: 'product-event-compaction-scan',
+          pipeline: productEventCompactScanPipeline,
+          bindGroup: productEventCompactScanBindGroup,
+          workgroupCount: 1
+        });
+      }
+      if (
+        productEventCompactScatterPipeline
+        && productEventCompactScatterBindGroup
+      ) {
+        encodeTimestampedComputePass({
+          producerId: 'sph-reaction-summary:product-event-compaction-scatter',
+          stage: 'product-event-compaction-scatter',
+          pipeline: productEventCompactScatterPipeline,
+          bindGroup: productEventCompactScatterBindGroup,
+          workgroupCount: productEventWorkgroupCount
+        });
+      }
+      if (
+        productEventPlacementEnvelopePipeline
+        && productEventPlacementEnvelopeBindGroup
+      ) {
+        encodeTimestampedComputePass({
+          producerId: 'sph-reaction-summary:product-event-spatial-envelope',
+          stage: 'product-event-spatial-envelope',
+          pipeline: productEventPlacementEnvelopePipeline,
+          bindGroup: productEventPlacementEnvelopeBindGroup,
+          workgroupCount: placementParticleWorkgroupCount
+        });
+      }
+      if (
+        productEventPlacementEnvelopeFinalizePipeline
+        && productEventPlacementEnvelopeFinalizeBindGroup
+      ) {
+        encodeTimestampedComputePass({
+          producerId: 'sph-reaction-summary:product-event-spatial-envelope-finalize',
+          stage: 'product-event-spatial-envelope-finalize',
+          pipeline: productEventPlacementEnvelopeFinalizePipeline,
+          bindGroup: productEventPlacementEnvelopeFinalizeBindGroup,
+          workgroupCount: 1
+        });
+      }
+      if (
+        productEventPlacementClassificationPipeline
+        && productEventPlacementClassificationBindGroup
+      ) {
+        encodeTimestampedComputePass({
+          producerId: 'sph-reaction-summary:product-event-spatial-classification',
+          stage: 'product-event-spatial-classification',
+          pipeline: productEventPlacementClassificationPipeline,
+          bindGroup: productEventPlacementClassificationBindGroup,
+          workgroupCount: productEventWorkgroupCount
+        });
+      }
+      const sparePasses = [
+        {
+          producerId: 'sph-reaction-summary:product-event-spare-particle-mark',
+          stage: 'product-event-spare-particle-mark',
+          pipeline: productPlacementSpareParticleMarkPipeline,
+          bindGroup: productPlacementSpareParticleMarkBindGroup,
+          workgroupCount: placementParticleWorkgroupCount
+        },
+        {
+          producerId: 'sph-reaction-summary:product-event-spare-particle-scan',
+          stage: 'product-event-spare-particle-scan',
+          pipeline: productPlacementSpareParticleScanPipeline,
+          bindGroup: productPlacementSpareParticleScanBindGroup,
+          workgroupCount: 1
+        },
+        {
+          producerId: 'sph-reaction-summary:product-event-spare-particle-scatter',
+          stage: 'product-event-spare-particle-scatter',
+          pipeline: productPlacementSpareScatterPipeline,
+          bindGroup: productPlacementSpareScatterBindGroup,
+          workgroupCount: placementParticleWorkgroupCount
+        },
+        {
+          producerId: 'sph-reaction-summary:product-event-spare-event-mark',
+          stage: 'product-event-spare-event-mark',
+          pipeline: productPlacementSpareEventMarkPipeline,
+          bindGroup: productPlacementSpareEventMarkBindGroup,
+          workgroupCount: productEventWorkgroupCount
+        },
+        {
+          producerId: 'sph-reaction-summary:product-event-spare-event-scan',
+          stage: 'product-event-spare-event-scan',
+          pipeline: productPlacementSpareEventScanPipeline,
+          bindGroup: productPlacementSpareEventScanBindGroup,
+          workgroupCount: 1
+        },
+        {
+          producerId: 'sph-reaction-summary:product-event-spare-assign',
+          stage: 'product-event-spare-assign',
+          pipeline: productPlacementSpareAssignPipeline,
+          bindGroup: productPlacementSpareAssignBindGroup,
+          workgroupCount: productEventWorkgroupCount
+        }
+      ];
+      for (const sparePass of sparePasses) {
+        if (sparePass.pipeline && sparePass.bindGroup) {
+          encodeTimestampedComputePass(sparePass);
+        }
+      }
+      if (canonicalSpatialPlacementEnabled) {
+        productPlacementSegmentedEncoding =
+          encodeSphReactionProductPlacementSegmentedWebGpu({
+            device,
+            encoder,
+            authority: canonicalReactionProductPlacementAuthority,
+            arenaLease: productPlacementSegmentedArenaLease,
+            productEventBuffer,
+            nextStateBuffer,
+            nextThermoBuffer,
+            nextMechanicsBuffer,
+            placementSummaryBuffer: placementAccumulatorBuffer,
+            frozenSourceStateBuffer: productPlacementFrozenSourceStateBuffer,
+            frozenSourceThermoBuffer: productPlacementFrozenSourceThermoBuffer,
+            compactCountBuffer: productEventCompactCountBuffer,
+            placementDecisionBuffer: productEventPlacementDecisionBuffer,
+            placementControlBuffer: productEventPlacementControlBuffer,
+            completionReceiptBuffer:
+              productEventPlacementCompletionReceiptBuffer,
+            productTermCount,
+            boxDimsM: productPlacementBoxDimsM,
+            gpuTimestampRecorder,
+            diagnosticReadbackRequested:
+              Boolean(productEventPlacementCompletionReadBuffer)
+          });
+      } else if (productEventPlacementPipeline && productEventPlacementBindGroup) {
+        encodeTimestampedComputePass({
+          producerId: 'sph-reaction-summary:product-event-placement',
+          stage: 'product-event-placement',
+          pipeline: productEventPlacementPipeline,
+          bindGroup: productEventPlacementBindGroup,
+          workgroupCount: 1
+        });
       }
       if (productEventReadBuffer) {
         encoder.copyBufferToBuffer(productEventBuffer, 0, productEventReadBuffer, 0, productEventByteLength);
@@ -1739,28 +2739,89 @@ export async function runSphReactionSummaryWebGpu({
       }
     }
     if (atomResidualPipeline && atomResidualBindGroup && shouldRunAtomResidual) {
-      const atomResidualPass = encoder.beginComputePass();
-      atomResidualPass.setPipeline(atomResidualPipeline);
-      atomResidualPass.setBindGroup(0, atomResidualBindGroup);
-      atomResidualPass.dispatchWorkgroups(atomResidualCount);
-      atomResidualPass.end();
+      encodeTimestampedComputePass({
+        producerId: 'sph-reaction-summary:atom-residual',
+        stage: 'atom-residual',
+        pipeline: atomResidualPipeline,
+        bindGroup: atomResidualBindGroup,
+        workgroupCount: atomResidualCount
+      });
       encoder.copyBufferToBuffer(atomResidualBuffer, 0, atomResidualReadBuffer, 0, atomResidualByteLength);
     }
     if (gasSpeciesPipeline && gasSpeciesBindGroup && shouldRunGasSpecies) {
-      const gasPass = encoder.beginComputePass();
-      gasPass.setPipeline(gasSpeciesPipeline);
-      gasPass.setBindGroup(0, gasSpeciesBindGroup);
-      gasPass.dispatchWorkgroups(gasSpeciesCount);
-      gasPass.end();
+      encodeTimestampedComputePass({
+        producerId: 'sph-reaction-summary:gas-species',
+        stage: 'gas-species',
+        pipeline: gasSpeciesPipeline,
+        bindGroup: gasSpeciesBindGroup,
+        workgroupCount: gasSpeciesCount
+      });
       encoder.copyBufferToBuffer(gasSpeciesBuffer, 0, gasSpeciesReadBuffer, 0, gasSpeciesByteLength);
     }
     if (shouldReadCompactSummary) {
       encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
     }
-    device.queue.submit([encoder.finish()]);
+    if (canonicalSpatialPlacementEnabled) {
+      const sealedPlacementEncoding =
+        sealSchroederSpatialReactionProductPlacementEncoding(
+          canonicalReactionProductPlacementAuthority,
+          {
+            segmentedEncoding: productPlacementSegmentedEncoding,
+            completionReadbackBuffer:
+              productEventPlacementCompletionReadBuffer
+          }
+        );
+      reactionProductPlacementSubmissionArtifact =
+        submitSchroederSpatialReactionProductPlacementWebGpu({
+          authority: canonicalReactionProductPlacementAuthority,
+          encoding: sealedPlacementEncoding
+        });
+    } else {
+      device.queue.submit([encoder.finish()]);
+    }
+    if (canonicalSpatialPlacementEnabled) {
+      if (productEventPlacementCompletionReadBuffer) {
+        const completionObservation =
+          await observeSchroederSpatialReactionProductPlacementCompletion(
+            canonicalReactionProductPlacementAuthority,
+            {
+              submissionArtifact:
+                reactionProductPlacementSubmissionArtifact,
+              readbackBuffer: productEventPlacementCompletionReadBuffer
+            }
+          );
+        reactionProductPlacementArtifact =
+          finalizeSchroederSpatialReactionProductPlacementAuthority(
+            canonicalReactionProductPlacementAuthority,
+            {
+              submissionArtifact:
+                reactionProductPlacementSubmissionArtifact,
+              placementDecisionBuffer: productEventPlacementDecisionBuffer,
+              placementControlBuffer: productEventPlacementControlBuffer,
+              productEventBuffer,
+              completionObservation,
+              dispatchCount: 1
+            }
+          );
+      }
+      releaseSphReactionProductPlacementSegmentedArenaAfterQueue(
+        productPlacementSegmentedArenaLease,
+        {
+          device,
+          authority: canonicalReactionProductPlacementAuthority,
+          submissionArtifact:
+            reactionProductPlacementSubmissionArtifact
+        }
+      );
+      productPlacementArenaReleaseScheduled = true;
+    }
     retainedProductEventBuffer = retainProductEventBuffer && Boolean(productEventBuffer);
     const destroyProductEventBuffer = retainedProductEventBuffer
-      ? () => productEventBuffer.destroy?.()
+      ? (
+          productEventBuffer === reactionWarmBuffers?.productEvent
+            ? () => false
+            : () => productEventBuffer.destroy?.()
+        )
       : null;
     const emptyGasSpeciesLedger = {
       schema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
@@ -1940,6 +3001,10 @@ export async function runSphReactionSummaryWebGpu({
         productEventBufferRetained: retainedProductEventBuffer,
         productEventBuffer: retainedProductEventBuffer ? productEventBuffer : null,
         destroyProductEventBuffer,
+        reactionProductPlacementSubmissionArtifact,
+        reactionProductPlacementArtifact,
+        reactionProductPlacementReceipt:
+          reactionProductPlacementArtifact?.receipt ?? null,
         productPlacementProvenance,
         productPlacementProvenanceSchema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
         productPlacementProvenanceStatus: productPlacementProvenance?.status
@@ -2047,6 +3112,10 @@ export async function runSphReactionSummaryWebGpu({
       productEventBufferRetained: retainedProductEventBuffer,
       productEventBuffer: retainedProductEventBuffer ? productEventBuffer : null,
       destroyProductEventBuffer,
+      reactionProductPlacementSubmissionArtifact,
+      reactionProductPlacementArtifact,
+      reactionProductPlacementReceipt:
+        reactionProductPlacementArtifact?.receipt ?? null,
       productPlacementProvenance,
       productPlacementProvenanceSchema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
       productPlacementProvenanceStatus: productPlacementProvenance?.status
@@ -2088,6 +3157,33 @@ export async function runSphReactionSummaryWebGpu({
       }
     } else {
       destroyLocalBuffers();
+    }
+  }
+  } finally {
+    if (
+      productPlacementSegmentedArenaLease
+      && !productPlacementArenaReleaseScheduled
+    ) {
+      if (reactionProductPlacementSubmissionArtifact) {
+        releaseSphReactionProductPlacementSegmentedArenaAfterQueue(
+          productPlacementSegmentedArenaLease,
+          {
+            device,
+            authority: canonicalReactionProductPlacementAuthority,
+            submissionArtifact:
+              reactionProductPlacementSubmissionArtifact
+          }
+        );
+      } else {
+        discardSphReactionProductPlacementSegmentedArenaLease(
+          productPlacementSegmentedArenaLease,
+          {
+            device,
+            authority: canonicalReactionProductPlacementAuthority
+          }
+        );
+      }
+      productPlacementArenaReleaseScheduled = true;
     }
   }
 }

@@ -24,6 +24,32 @@ const peercomputeRoot = siblingRoot('peercompute/peercompute');
 const webGpuMarchingCubesRoot = siblingRoot('webgpu-marching-cubes');
 const localHttpsKeyPath = fileURLToPath(new URL('./.cache/vite-https/key.pem', import.meta.url));
 const localHttpsCertPath = fileURLToPath(new URL('./.cache/vite-https/cert.pem', import.meta.url));
+// The dev server is deliberately reachable through this machine's tailnet
+// name. Vite validates WebSocket Host headers separately from normal page
+// requests; without this exact allowlist entry the initial remote HMR socket
+// gets a 400, then Vite falls back to `localhost` (the *client* device on a
+// phone), leaving that page unable to receive live fixes.
+const vpnDevHost = String(
+  process.env.ULG_VITE_VPN_HOST || 'dadbox.tail5c077c.ts.net'
+).trim().toLowerCase();
+// `server.host` controls where Vite listens, but it does not tell a remote
+// browser where its HMR socket lives.  With an HTTPS tailnet server Vite's
+// default direct-socket fallback is `localhost`, which means *the phone*, not
+// this machine.  Keep the port configurable for alternate local HTTPS runs,
+// while making the established VPN server unambiguous by default.
+const vpnHmrClientPort = Number.parseInt(
+  String(process.env.ULG_VITE_HMR_CLIENT_PORT || process.env.ULG_VITE_PORT || '5174'),
+  10
+);
+const vpnHttpsHmr = process.env.ULG_VITE_HTTPS === '1' && vpnDevHost
+  ? {
+    protocol: 'wss',
+    host: vpnDevHost,
+    clientPort: Number.isSafeInteger(vpnHmrClientPort) && vpnHmrClientPort > 0
+      ? vpnHmrClientPort
+      : 5174
+  }
+  : undefined;
 const HASHED_BUILD_ASSET_PATH = /^\/assets\/.+-[A-Za-z0-9_-]{8,}\.[^/]+$/;
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 const STABLE_ASSET_CACHE = 'public, max-age=86400, stale-while-revalidate=604800';
@@ -90,6 +116,13 @@ export default defineConfig({
   ],
   server: {
     https: resolveLocalHttpsConfig(),
+    // Keep this narrow rather than setting `allowedHosts: true`: the exact
+    // tailnet name is enough for VPN HMR while preserving Vite's DNS-rebind
+    // protection for arbitrary Host headers.
+    allowedHosts: vpnDevHost ? [vpnDevHost] : [],
+    // Explicitly publish the tailnet HMR endpoint for HTTPS development. This
+    // suppresses Vite's unusable `localhost` fallback on a remote device.
+    hmr: vpnHttpsHmr,
     // Pre-transform the heavy runtime module graphs at server start: e2e
     // gates dynamically import these mid-test, and a cold transform (or a
     // dep re-optimize storm) can 504 module fetches long enough to exhaust

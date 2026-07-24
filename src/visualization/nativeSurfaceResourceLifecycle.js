@@ -43,6 +43,621 @@ export function resolveNativeSurfaceSubmitSynchronization({
   };
 }
 
+export function resolveNativeSurfaceSubmitFailureAction({
+  primaryFrameSubmitted = false
+} = {}) {
+  const committed = primaryFrameSubmitted === true;
+  return {
+    schema: 'peercompute.ulg.native-surface-submit-failure-action.v0',
+    status: committed
+      ? 'committed-with-post-submit-error'
+      : 'pre-submit-failure-rollback-required',
+    committed,
+    rollbackAllowed: !committed,
+    discardAllowed: !committed,
+    clearDrawStateAllowed: !committed,
+    renderResult: committed,
+    reason: committed
+      ? 'the primary queue submit succeeded, so later failures are diagnostic and cannot reverse presentation'
+      : 'no primary frame was submitted, so the staged composite may be rolled back and discarded'
+  };
+}
+
+function exactNativeSurfaceGeneration(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+export function resolveNativeSurfaceSuccessorPromotion({
+  candidateGeneration = null,
+  latestCandidateGeneration = candidateGeneration,
+  foregroundValidationStatus = 'not-run',
+  foregroundValidationGeneration = null,
+  foregroundValidationNonzeroPixelCount = 0
+} = {}) {
+  const candidate = exactNativeSurfaceGeneration(candidateGeneration);
+  const latest = exactNativeSurfaceGeneration(latestCandidateGeneration);
+  const validated = exactNativeSurfaceGeneration(
+    foregroundValidationGeneration
+  );
+  const validationStatus = String(
+    foregroundValidationStatus || 'not-run'
+  ).trim().toLowerCase();
+  const nonzeroPixelCount = Number.isSafeInteger(
+    foregroundValidationNonzeroPixelCount
+  ) && foregroundValidationNonzeroPixelCount > 0
+    ? foregroundValidationNonzeroPixelCount
+    : 0;
+  const validGenerations = Boolean(
+    candidate != null
+    && latest != null
+    && validated != null
+  );
+  const candidateIsLatest = Boolean(
+    validGenerations
+    && candidate === latest
+  );
+  const validationMatchesCandidate = Boolean(
+    validGenerations
+    && validated === candidate
+  );
+  const foregroundValidated = Boolean(
+    validationStatus === 'passed'
+    && nonzeroPixelCount > 0
+  );
+  const promoteCandidate = Boolean(
+    candidateIsLatest
+    && validationMatchesCandidate
+    && foregroundValidated
+  );
+  let status = 'native-surface-successor-retained-invalid-generation';
+  let reason = 'candidate, latest, and validation generations must be exact non-negative integers';
+  if (validGenerations && !candidateIsLatest) {
+    status = 'native-surface-successor-retained-stale-candidate';
+    reason = `candidate generation ${candidate} is not latest generation ${latest}`;
+  } else if (validGenerations && !validationMatchesCandidate) {
+    status = 'native-surface-successor-retained-stale-validation';
+    reason = `foreground validation generation ${validated} does not match candidate generation ${candidate}`;
+  } else if (validGenerations && validationStatus !== 'passed') {
+    status = `native-surface-successor-retained-validation-${validationStatus || 'not-run'}`;
+    reason = `foreground validation status is ${validationStatus || 'not-run'}`;
+  } else if (validGenerations && nonzeroPixelCount === 0) {
+    status = 'native-surface-successor-retained-empty-foreground';
+    reason = 'foreground validation observed no nonzero pixels';
+  } else if (promoteCandidate) {
+    status = 'native-surface-successor-promoted';
+    reason = null;
+  }
+  return {
+    schema: 'peercompute.ulg.native-surface-successor-promotion.v0',
+    status,
+    reason,
+    promoteCandidate,
+    retainCurrentPresentation: !promoteCandidate,
+    candidateGeneration: candidate,
+    latestCandidateGeneration: latest,
+    foregroundValidationStatus: validationStatus,
+    foregroundValidationGeneration: validated,
+    foregroundValidationNonzeroPixelCount: nonzeroPixelCount,
+    candidateIsLatest,
+    validationMatchesCandidate,
+    foregroundValidated
+  };
+}
+
+export function nativeSurfacePreviousOwnerLineageMatches({
+  previousBridge = null,
+  expectedOwner = null
+} = {}) {
+  return (previousBridge?.activeSurfaceResourceOwner ?? null)
+    === (expectedOwner ?? null);
+}
+
+export function resolveNativeSurfaceResidentStepSignature({
+  finalStep = null,
+  standaloneStepSignature = null
+} = {}) {
+  return finalStep?.signature ?? standaloneStepSignature ?? null;
+}
+
+function nativeSurfaceSchedulerReason(error, fallback) {
+  if (error instanceof Error && error.message) return error.message;
+  if (error != null) return String(error);
+  return fallback;
+}
+
+/**
+ * Keep native-surface validation bounded to one active request and one
+ * replaceable latest request. A newer enqueue invalidates publication authority
+ * immediately, but never destroys an active request while its GPU completion is
+ * still settling. The active request therefore owns cleanup until settlement;
+ * a queued request can be discarded synchronously because it has not started.
+ */
+export function createNativeSurfaceLatestValidationScheduler({
+  validate,
+  publish,
+  discard,
+  onStateChange = null
+} = {}) {
+  if (typeof validate !== 'function') {
+    throw new TypeError('native surface validation scheduler requires validate');
+  }
+  if (typeof publish !== 'function') {
+    throw new TypeError('native surface validation scheduler requires publish');
+  }
+  if (typeof discard !== 'function') {
+    throw new TypeError('native surface validation scheduler requires discard');
+  }
+
+  let latestToken = 0;
+  let active = null;
+  let queuedLatest = null;
+  let disposed = false;
+  let lifecycleGeneration = 1;
+  const counters = {
+    enqueued: 0,
+    started: 0,
+    published: 0,
+    discarded: 0,
+    replaced: 0,
+    invalidated: 0,
+    failed: 0
+  };
+
+  const snapshot = (status = null, reason = null) => ({
+    schema: 'peercompute.ulg.native-surface-latest-validation-scheduler.v0',
+    status: status || (disposed
+      ? 'disposed'
+      : (active
+        ? (queuedLatest ? 'active-with-latest-queued' : 'active')
+        : 'idle')),
+    reason,
+    disposed,
+    lifecycleGeneration,
+    latestToken,
+    activeToken: active?.token ?? null,
+    queuedLatestToken: queuedLatest?.token ?? null,
+    activeCount: active ? 1 : 0,
+    queuedCount: queuedLatest ? 1 : 0,
+    ...counters
+  });
+
+  const notify = (status = null, reason = null) => {
+    const state = snapshot(status, reason);
+    try { onStateChange?.(state); } catch { /* diagnostics are best effort */ }
+    return state;
+  };
+
+  const settleRequest = (request, result) => {
+    if (request.settled) return request.result;
+    request.settled = true;
+    request.result = result;
+    request.resolve(result);
+    return result;
+  };
+
+  const discardRequest = (request, reason, status = 'discarded') => {
+    if (!request || request.discarded || request.published) return null;
+    request.discarded = true;
+    counters.discarded += 1;
+    let discardError = null;
+    try {
+      const value = discard(request.item, {
+        token: request.token,
+        reason,
+        status,
+        lifecycleGeneration: request.lifecycleGeneration
+      });
+      if (value && typeof value.then === 'function') {
+        Promise.resolve(value).catch(() => {});
+        throw new TypeError('native surface queued discard must be synchronous');
+      }
+    } catch (error) {
+      discardError = nativeSurfaceSchedulerReason(
+        error,
+        'native surface candidate discard failed'
+      );
+      counters.failed += 1;
+    }
+    return settleRequest(request, {
+      schema: 'peercompute.ulg.native-surface-validation-request-result.v0',
+      status,
+      reason: discardError || reason,
+      token: request.token,
+      published: false,
+      discarded: true,
+      discardError
+    });
+  };
+
+  const requestIsLatest = (request) => Boolean(
+    request
+    && !disposed
+    && !request.cancelled
+    && request.lifecycleGeneration === lifecycleGeneration
+    && request.token === latestToken
+  );
+
+  const startRequest = (request) => {
+    active = request;
+    request.started = true;
+    counters.started += 1;
+    notify('active', 'native surface candidate validation started');
+    void Promise.resolve().then(async () => {
+      let proof = null;
+      try {
+        proof = await validate(request.item, {
+          token: request.token,
+          lifecycleGeneration: request.lifecycleGeneration,
+          isLatest: () => requestIsLatest(request)
+        });
+        if (!requestIsLatest(request)) {
+          discardRequest(
+            request,
+            request.cancelReason || 'native surface candidate was superseded before publication',
+            'superseded'
+          );
+          return;
+        }
+        const publication = await publish(request.item, proof, {
+          token: request.token,
+          lifecycleGeneration: request.lifecycleGeneration,
+          isLatest: () => requestIsLatest(request)
+        });
+        // Publication is the commit boundary. The publisher must recheck
+        // latest-token and lifecycle authority immediately before its
+        // irreversible submit; after it resolves, a newer enqueue cannot
+        // retroactively turn an already-submitted frame into a discard.
+        request.published = true;
+        counters.published += 1;
+        settleRequest(request, {
+          schema: 'peercompute.ulg.native-surface-validation-request-result.v0',
+          status: 'published',
+          reason: null,
+          token: request.token,
+          published: true,
+          discarded: false,
+          proof,
+          publication
+        });
+      } catch (error) {
+        counters.failed += 1;
+        discardRequest(
+          request,
+          nativeSurfaceSchedulerReason(
+            error,
+            'native surface candidate validation or publication failed'
+          ),
+          'failed'
+        );
+      } finally {
+        if (active === request) active = null;
+        if (!disposed && queuedLatest) {
+          const next = queuedLatest;
+          queuedLatest = null;
+          startRequest(next);
+        } else {
+          notify();
+        }
+      }
+    });
+  };
+
+  const invalidate = (
+    reason = 'native surface validation scheduler invalidated',
+    { terminal = false } = {}
+  ) => {
+    latestToken += 1;
+    lifecycleGeneration += 1;
+    counters.invalidated += 1;
+    if (terminal) disposed = true;
+    if (active) {
+      active.cancelled = true;
+      active.cancelReason = reason;
+    }
+    if (queuedLatest) {
+      const queued = queuedLatest;
+      queuedLatest = null;
+      queued.cancelled = true;
+      queued.cancelReason = reason;
+      discardRequest(queued, reason, terminal ? 'disposed' : 'invalidated');
+    }
+    return notify(terminal ? 'disposed' : 'invalidated', reason);
+  };
+
+  return {
+    schema: 'peercompute.ulg.native-surface-latest-validation-scheduler.v0',
+    enqueue(item) {
+      if (disposed) {
+        throw new TypeError('native surface validation scheduler is disposed');
+      }
+      latestToken += 1;
+      counters.enqueued += 1;
+      let resolve = null;
+      const completion = new Promise((settle) => { resolve = settle; });
+      const request = {
+        item,
+        token: latestToken,
+        lifecycleGeneration,
+        completion,
+        resolve,
+        started: false,
+        settled: false,
+        discarded: false,
+        published: false,
+        cancelled: false,
+        cancelReason: null,
+        result: null
+      };
+      if (active) {
+        active.cancelled = true;
+        active.cancelReason =
+          'native surface candidate superseded by a newer validation request';
+        if (queuedLatest) {
+          const replaced = queuedLatest;
+          queuedLatest = null;
+          replaced.cancelled = true;
+          replaced.cancelReason =
+            'queued native surface candidate replaced by the latest request';
+          counters.replaced += 1;
+          discardRequest(replaced, replaced.cancelReason, 'replaced');
+        }
+        queuedLatest = request;
+        notify(
+          'active-with-latest-queued',
+          'latest native surface candidate queued behind active validation'
+        );
+      } else {
+        startRequest(request);
+      }
+      return {
+        schema: 'peercompute.ulg.native-surface-validation-request.v0',
+        status: request.started ? 'active' : 'queued-latest',
+        token: request.token,
+        lifecycleGeneration: request.lifecycleGeneration,
+        completion
+      };
+    },
+    invalidate(reason) {
+      return invalidate(reason, { terminal: false });
+    },
+    deviceLost(reason = 'native surface validation device lost') {
+      return invalidate(reason, { terminal: false });
+    },
+    dispose(reason = 'native surface validation scheduler disposed') {
+      return invalidate(reason, { terminal: true });
+    },
+    isLatest(token, generation = lifecycleGeneration) {
+      return Boolean(
+        !disposed
+        && token === latestToken
+        && generation === lifecycleGeneration
+      );
+    },
+    snapshot
+  };
+}
+
+export function resolveNativeSurfacePreSubmitDrawStateLiveness({
+  provisionalTransactionActive = false,
+  committedDrawStateAvailable = false
+} = {}) {
+  const retainCommittedDrawState = Boolean(
+    !provisionalTransactionActive
+    && committedDrawStateAvailable
+  );
+  return {
+    schema: 'peercompute.ulg.native-surface-pre-submit-draw-state-liveness.v0',
+    status: retainCommittedDrawState
+      ? 'retain-committed-draw-state-for-retry'
+      : (provisionalTransactionActive
+        ? 'clear-provisional-draw-state-for-rollback'
+        : 'clear-uncommitted-draw-state'),
+    provisionalTransactionActive: Boolean(provisionalTransactionActive),
+    committedDrawStateAvailable: Boolean(committedDrawStateAvailable),
+    retainCommittedDrawState,
+    clearDrawState: !retainCommittedDrawState,
+    retryRequired: retainCommittedDrawState,
+    reason: retainCommittedDrawState
+      ? 'a transient pre-submit presentation error cannot revoke the last committed geometry bundle'
+      : (provisionalTransactionActive
+        ? 'the provisional composite must clear and return to its transaction rollback snapshot'
+        : 'no committed geometry bundle is available to retain')
+  };
+}
+
+export function createNativeSurfaceCommittedFinisher() {
+  const errors = [];
+  const record = (stage, error) => {
+    errors.push({
+      stage: String(stage || 'committed-post-submit-step'),
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return null;
+  };
+  return {
+    schema: 'peercompute.ulg.native-surface-committed-finisher.v0',
+    errors,
+    record,
+    run(stage, callback) {
+      try {
+        return callback();
+      } catch (error) {
+        return record(stage, error);
+      }
+    }
+  };
+}
+
+export function createNativeSurfaceProvisionalResourceReceipt(bridge) {
+  if (!bridge || typeof bridge !== 'object') return null;
+  const snapshot = new Map();
+  for (const key of Reflect.ownKeys(bridge)) {
+    snapshot.set(key, bridge[key]);
+  }
+  return {
+    bridge,
+    snapshot,
+    newDepthTextures: new Set(),
+    deferredDepthTextures: new Set(),
+    newRefractionTargetSets: new Set(),
+    deferredRefractionTargetSets: new Set(),
+    // Resources which do not need a type-specific teardown live here. The
+    // metadata is deliberately opaque to this module; the scene uses it to
+    // preserve a useful retirement reason while this helper owns retry and
+    // exact-once bookkeeping.
+    newDestroyableResources: new Map(),
+    deferredDestroyableResources: new Map(),
+    settlementStarted: false,
+    settlementAttempts: 0,
+    snapshotRestored: false,
+    settled: false,
+    committed: false,
+    settlementErrors: [],
+    settlementErrorHistory: []
+  };
+}
+
+function nativeSurfaceProvisionalPendingCleanupCount(receipt) {
+  if (!receipt) return 0;
+  if (receipt.committed) {
+    return receipt.deferredDepthTextures.size
+      + receipt.deferredRefractionTargetSets.size
+      + receipt.deferredDestroyableResources.size;
+  }
+  return receipt.newDepthTextures.size
+    + receipt.newRefractionTargetSets.size
+    + receipt.newDestroyableResources.size;
+}
+
+export function settleNativeSurfaceProvisionalResourceReceipt(
+  receipt,
+  {
+    committed = false,
+    destroyDepthTexture = (texture) => texture?.destroy?.(),
+    retireDepthTexture = destroyDepthTexture,
+    destroyRefractionTargetSet = () => {},
+    retireRefractionTargetSet = destroyRefractionTargetSet,
+    destroyResource = (resource) => resource?.destroy?.(),
+    retireResource = destroyResource
+  } = {}
+) {
+  if (!receipt || receipt.settled) {
+    return {
+      settled: false,
+      committed: Boolean(receipt?.committed),
+      alreadySettled: Boolean(receipt?.settled),
+      pendingCleanupCount:
+        nativeSurfaceProvisionalPendingCleanupCount(receipt),
+      errors: receipt?.settlementErrors || []
+    };
+  }
+  const requestedCommitted = Boolean(committed);
+  if (
+    receipt.settlementStarted
+    && receipt.committed !== requestedCommitted
+  ) {
+    throw new TypeError(
+      'native provisional resource settlement cannot change commit outcome'
+    );
+  }
+  receipt.settlementStarted = true;
+  receipt.committed = requestedCommitted;
+  receipt.settlementAttempts += 1;
+  const errors = [];
+  const attemptSet = (kind, resources, callback) => {
+    for (const resource of [...resources]) {
+      try {
+        callback(resource);
+        resources.delete(resource);
+      } catch (error) {
+        errors.push({
+          kind,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  };
+  const attemptMap = (resources, callback) => {
+    for (const [resource, metadata] of [...resources]) {
+      const kind = metadata?.kind || 'provisional-destroyable-resource';
+      try {
+        callback(resource, metadata);
+        resources.delete(resource);
+      } catch (error) {
+        errors.push({
+          kind,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  };
+  if (receipt.committed) {
+    // Newly-created resources are now owned by the committed bridge. Only the
+    // superseded resources remain as settlement work.
+    receipt.newDepthTextures.clear();
+    receipt.newRefractionTargetSets.clear();
+    receipt.newDestroyableResources.clear();
+    attemptSet(
+      'retire-depth-texture',
+      receipt.deferredDepthTextures,
+      retireDepthTexture
+    );
+    attemptSet(
+      'retire-refraction-target-set',
+      receipt.deferredRefractionTargetSets,
+      retireRefractionTargetSet
+    );
+    attemptMap(receipt.deferredDestroyableResources, retireResource);
+  } else {
+    // Superseded resources remain owned by the restored bridge. Only private
+    // candidate allocations may be destroyed.
+    receipt.deferredDepthTextures.clear();
+    receipt.deferredRefractionTargetSets.clear();
+    receipt.deferredDestroyableResources.clear();
+    attemptSet(
+      'destroy-depth-texture',
+      receipt.newDepthTextures,
+      destroyDepthTexture
+    );
+    attemptSet(
+      'destroy-refraction-target-set',
+      receipt.newRefractionTargetSets,
+      destroyRefractionTargetSet
+    );
+    attemptMap(receipt.newDestroyableResources, destroyResource);
+    if (!receipt.snapshotRestored) {
+      const bridge = receipt.bridge;
+      if (bridge && receipt.snapshot instanceof Map) {
+        for (const key of Reflect.ownKeys(bridge)) {
+          if (!receipt.snapshot.has(key)) delete bridge[key];
+        }
+        for (const [key, value] of receipt.snapshot) {
+          bridge[key] = value;
+        }
+      }
+      receipt.snapshotRestored = true;
+    }
+  }
+  const pendingCleanupCount =
+    nativeSurfaceProvisionalPendingCleanupCount(receipt);
+  receipt.settled = pendingCleanupCount === 0;
+  receipt.settlementErrors = errors;
+  if (errors.length > 0) {
+    receipt.settlementErrorHistory.push({
+      attempt: receipt.settlementAttempts,
+      committed: receipt.committed,
+      errors
+    });
+  }
+  return {
+    settled: receipt.settled,
+    committed: receipt.committed,
+    alreadySettled: false,
+    pendingCleanupCount,
+    errors
+  };
+}
+
 export function nativeSurfaceBridgeFailureReason(renderBridge) {
   if (!renderBridge || renderBridge.rendererBridge !== NATIVE_WEBGPU_SURFACE_CONSUMER_MODE) {
     return null;
@@ -226,11 +841,44 @@ export function resolveAdditionalNativeSurfaceGenerationAttempt({
 
 export function shouldCommitAdditionalNativeSurfaceCandidate({
   inputCount = 0,
-  acceptedCount = 0
+  acceptedCount = 0,
+  requireComplete = false
 } = {}) {
   const inputs = Math.max(0, Math.round(Number(inputCount) || 0));
   const accepted = Math.max(0, Math.round(Number(acceptedCount) || 0));
+  if (requireComplete) return accepted === inputs;
   return inputs === 0 || accepted > 0;
+}
+
+export function resolveNativeSurfaceCompositeDescriptorAdmission({
+  descriptorCount = 0,
+  readyCount = 0,
+  blockedCount = 0,
+  surfaceRecordCount = descriptorCount
+} = {}) {
+  const descriptors = Math.max(0, Math.round(Number(descriptorCount) || 0));
+  const ready = Math.max(0, Math.round(Number(readyCount) || 0));
+  const blocked = Math.max(0, Math.round(Number(blockedCount) || 0));
+  const surfaces = Math.max(0, Math.round(Number(surfaceRecordCount) || 0));
+  const complete = Boolean(
+    descriptors > 0
+    && descriptors === surfaces
+    && ready === descriptors
+    && blocked === 0
+  );
+  return {
+    status: complete
+      ? 'native-surface-composite-descriptors-complete'
+      : 'native-surface-composite-descriptors-incomplete',
+    complete,
+    descriptorCount: descriptors,
+    readyCount: ready,
+    blockedCount: blocked,
+    surfaceRecordCount: surfaces,
+    reason: complete
+      ? null
+      : `complete native surface publication requires ${surfaces} ready descriptors; ${ready} of ${descriptors} are ready and ${blocked} are blocked`
+  };
 }
 
 export function createNativeSurfaceResourceOwner({

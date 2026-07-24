@@ -5,10 +5,10 @@ Date: 2026-07-01 AKDT
 This matrix reorganizes the existing flat `plan/todo` backlog around Schroeder
 Simulation.
 
-Active execution order is now owned by
-`shared-spatial-authority-refactor-plan.md`. The original Schroeder plan remains
-the architecture contract; this matrix records how adjacent plans constrain or
-consume the shared substrate.
+`shared-spatial-authority-refactor-plan.md` records completed refactor Slices
+0–8. The original Schroeder plan remains the architecture contract; this matrix
+records how adjacent plans constrain or consume the shared substrate and routes
+follow-on transport and coherent-solid work to their active owners.
 
 | Existing todo | SS routing |
 | --- | --- |

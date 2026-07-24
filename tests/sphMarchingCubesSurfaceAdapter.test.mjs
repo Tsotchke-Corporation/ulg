@@ -263,7 +263,14 @@ function assertApprox(actual, expected, epsilon = 1e-6) {
   );
 }
 
-function fakeExtensionSurfaceDevice() {
+function fakeExtensionSurfaceDevice({
+  failCreateBufferLabel = null,
+  failCreateBindGroup = false,
+  failWriteBufferLabel = null,
+  failQueueSubmit = false,
+  failSubmittedWorkDoneSync = false,
+  failMapAsyncLabel = null
+} = {}) {
   const shaderModules = [];
   const bindGroups = [];
   const dispatches = [];
@@ -274,21 +281,39 @@ function fakeExtensionSurfaceDevice() {
   const device = {
     queue: {
       writeBuffer(buffer, offset, data) {
+        if (buffer?.label === failWriteBufferLabel) {
+          throw new Error(`injected writeBuffer failure: ${buffer.label}`);
+        }
         queueWrites.push({ buffer, offset, byteLength: data?.byteLength ?? 0 });
       },
       submit(commands) {
+        if (failQueueSubmit) {
+          throw new Error('injected queue.submit failure');
+        }
         queueSubmissions.push(commands);
         this.submitted = commands;
       },
-      async onSubmittedWorkDone() {}
+      onSubmittedWorkDone() {
+        if (failSubmittedWorkDoneSync) {
+          throw new Error('injected onSubmittedWorkDone scheduling failure');
+        }
+        return Promise.resolve();
+      }
     },
     createBuffer({ label, size, usage }) {
+      if (label === failCreateBufferLabel) {
+        throw new Error(`injected createBuffer failure: ${label}`);
+      }
       const buffer = {
         label,
         size,
         usage,
         destroyed: false,
-        async mapAsync() {},
+        async mapAsync() {
+          if (label === failMapAsyncLabel) {
+            throw new Error(`injected mapAsync failure: ${label}`);
+          }
+        },
         getMappedRange() {
           return new ArrayBuffer(size);
         },
@@ -297,6 +322,7 @@ function fakeExtensionSurfaceDevice() {
         },
         destroy() {
           this.destroyed = true;
+          this.destroyCount = (this.destroyCount ?? 0) + 1;
         }
       };
       createdBuffers.push(buffer);
@@ -318,6 +344,9 @@ function fakeExtensionSurfaceDevice() {
       };
     },
     createBindGroup({ layout, entries }) {
+      if (failCreateBindGroup) {
+        throw new Error('injected createBindGroup failure');
+      }
       const bindGroup = { layout, entries };
       bindGroups.push(bindGroup);
       return bindGroup;
@@ -1256,6 +1285,118 @@ test('ULG GPU builder translates retained extension compact positions into resid
   result.destroyExtensionSurfaceBuffers();
   assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
   assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
+});
+
+test('ULG GPU builder retires every partial owned allocation on construction failure', async () => {
+  const failureCases = [
+    { failCreateBufferLabel: 'ulg-sph-extension-surface-draw' },
+    { failCreateBufferLabel: 'ulg-sph-extension-surface-draw-indirect' },
+    { failCreateBufferLabel: 'ulg-sph-extension-surface-translation-params' },
+    { failCreateBufferLabel: 'ulg-sph-extension-surface-source-vertex-count' },
+    { failCreateBufferLabel: 'ulg-sph-extension-surface-field-gradient-dummy' },
+    { failCreateBindGroup: true },
+    { failWriteBufferLabel: 'ulg-sph-extension-surface-draw' },
+    { failWriteBufferLabel: 'ulg-sph-extension-surface-translation-params' },
+    { failQueueSubmit: true },
+    { failSubmittedWorkDoneSync: true }
+  ];
+  for (const injectedFailure of failureCases) {
+    const { device, createdBuffers } = fakeExtensionSurfaceDevice(
+      injectedFailure
+    );
+    await assert.rejects(
+      buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+        device,
+        extensionExecution: extensionExecution({ vertexCount: 3 }),
+        readbackMode: 'no-full-readback',
+        waitForQueueCompletion: false
+      }),
+      /injected/
+    );
+    const ownedBuffers = createdBuffers.filter((buffer) =>
+      buffer.label?.startsWith('ulg-sph-extension-surface-'));
+    assert.ok(ownedBuffers.length > 0, JSON.stringify(injectedFailure));
+    assert.equal(
+      ownedBuffers.every((buffer) => (
+        buffer.destroyed === true
+        && buffer.destroyCount === 1
+      )),
+      true,
+      `partial allocation leaked or retired twice: ${JSON.stringify(injectedFailure)}`
+    );
+  }
+});
+
+test('ULG GPU builder retires readback staging and outer buffers after map failure', async () => {
+  const { device, createdBuffers } = fakeExtensionSurfaceDevice({
+    failMapAsyncLabel: 'ulg-sph-extension-surface-vertex-readback'
+  });
+  await assert.rejects(
+    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution: extensionExecution({ vertexCount: 3 }),
+      readbackMode: 'full-parity-readback'
+    }),
+    /injected mapAsync failure/
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  const ownedBuffers = createdBuffers.filter((buffer) =>
+    buffer.label?.startsWith('ulg-sph-extension-surface-'));
+  assert.ok(ownedBuffers.some((buffer) =>
+    buffer.label === 'ulg-sph-extension-surface-vertex-readback'));
+  assert.equal(
+    ownedBuffers.every((buffer) => (
+      buffer.destroyed === true
+      && buffer.destroyCount === 1
+    )),
+    true
+  );
+});
+
+test('ULG GPU builder never destroys extension-owned buffers on pre-submit failure', async () => {
+  const { device, createdBuffers } = fakeExtensionSurfaceDevice({
+    failWriteBufferLabel: 'ulg-sph-extension-surface-draw'
+  });
+  const extensionDrawIndirectBuffer = {
+    label: 'extension-draw-indirect',
+    size: SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length
+      * Uint32Array.BYTES_PER_ELEMENT,
+    destroyed: false,
+    destroy() { this.destroyed = true; }
+  };
+  const execution = extensionExecution({
+    vertexCount: 9,
+    includeRowMetadata: true,
+    includeOutputDescriptors: true,
+    includePackedNormals: true,
+    drawIndirectBuffer: extensionDrawIndirectBuffer
+  });
+  for (const borrowed of [execution.result.buffer, execution.result.normalBuffer]) {
+    borrowed.destroyed = false;
+    borrowed.destroy = function () { this.destroyed = true; };
+  }
+  await assert.rejects(
+    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution: execution,
+      readbackMode: 'no-full-readback',
+      translateVertexRows: false,
+      allowExtensionDrawIndirectBuffer: true,
+      waitForQueueCompletion: false
+    }),
+    /injected writeBuffer failure/
+  );
+  assert.equal(execution.result.buffer.destroyed, false);
+  assert.equal(execution.result.normalBuffer.destroyed, false);
+  assert.equal(extensionDrawIndirectBuffer.destroyed, false);
+  assert.equal(
+    createdBuffers.every((buffer) => (
+      buffer.destroyed === true
+      && buffer.destroyCount === 1
+    )),
+    true
+  );
 });
 
 test('ULG GPU builder reuses the extension surface translation pipeline on the same device', async () => {

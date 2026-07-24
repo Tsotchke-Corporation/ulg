@@ -9,6 +9,7 @@ import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_IDS,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1,
   ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA,
   ULG_SCHROEDER_SPATIAL_SUPPORT_PROFILE_SCHEMA,
@@ -150,7 +151,8 @@ test('exact-near support profiles have stable versioned IDs and a 112-byte expec
     0x0001_0003,
     0x0001_0004,
     0x0001_0005,
-    0x0001_0006
+    0x0001_0006,
+    0x0001_0007
   ]);
   const pressure = resolveSchroederSpatialSupportProfileContract(
     SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1
@@ -160,6 +162,15 @@ test('exact-near support profiles have stable versioned IDs and a 112-byte expec
   assert.equal(pressure.artifactFamily, 'spatial-exact-near-pressure-contact-interface');
   assert.equal(pressure.phase, 'pressure-contact-proposal');
   assert.equal(Object.isFrozen(pressure), true);
+  const placement = resolveSchroederSpatialSupportProfileContract(
+    SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1
+  );
+  assert.equal(placement.consumerFamily, 'reaction-product-placement');
+  assert.equal(
+    placement.artifactFamily,
+    'spatial-exact-near-reaction-product-placement'
+  );
+  assert.equal(placement.phase, 'reaction-product-placement-proposal');
 
   const descriptor = createSchroederSpatialSupportProfileDescriptor({
     supportProfileId: pressure.id,
@@ -265,7 +276,7 @@ test('law-neutral WGSL owns v1 admission, signed traversal, and fail-closed CSR 
   );
 });
 
-test('runtime authenticates one exact buffer generation and finalizes one GPU receipt', async () => {
+test('runtime defaults to one traversal and admits an authenticated two-traversal receipt', async () => {
   const device = createFakeDevice();
   const activeNodeList = createActiveNodeList(device);
   const generation = runSchroederSpatialEpochGenerationWebGpu({
@@ -292,6 +303,7 @@ test('runtime authenticates one exact buffer generation and finalizes one GPU re
   );
   assert.equal(authentication.authenticated, true);
   assert.equal(authentication.gpuAuthenticated, false);
+  assert.equal(authentication.expectedTraversalCount, 1);
   assert.equal(authentication.expectationData.byteLength, 112);
   assert.equal(authentication.expectationData[0], 2);
   assert.equal(
@@ -301,6 +313,7 @@ test('runtime authenticates one exact buffer generation and finalizes one GPU re
   assert.equal(authentication.sourceBuffer, activeNodeList.activeNodeBuffer);
   assert.equal(authentication.directoryBuffer, generation.execution.directoryBuffer);
   assert.equal(authentication.receipt.schema, ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA);
+  assert.equal(authentication.receipt.expectedTraversalCount, 1);
   assert.equal(authentication.receipt.traversalCount, 0);
 
   const foreignDevice = createFakeDevice();
@@ -350,7 +363,7 @@ test('runtime authenticates one exact buffer generation and finalizes one GPU re
       authentication,
       { ...gpuEvidence, traversalCount: 2 }
     ),
-    /exactly one traversal/
+    /expected traversal count of 1/
   );
   assert.throws(
     () => finalizeSchroederSpatialExactNearConsumerReceipt(
@@ -370,6 +383,7 @@ test('runtime authenticates one exact buffer generation and finalizes one GPU re
     gpuEvidence
   );
   assert.equal(finalized.gpuAuthenticated, true);
+  assert.equal(finalized.expectedTraversalCount, 1);
   assert.equal(finalized.traversalCount, 1);
   assert.equal(finalized.candidateVisitCount, 12);
   assert.equal(finalized.privateLookupBuildCount, 0);
@@ -387,6 +401,49 @@ test('runtime authenticates one exact buffer generation and finalizes one GPU re
     ),
     /not issued/
   );
+
+  const twoTraversalAuthentication =
+    resolveSchroederSpatialExactNearConsumerGeneration(generation, {
+      device,
+      consumerId: 'reaction-discovery-two-pass',
+      supportProfileId: SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
+      sourceBuffer: activeNodeList.activeNodeBuffer,
+      expectedTraversalCount: 2
+    });
+  assert.equal(twoTraversalAuthentication.authenticated, true);
+  assert.equal(twoTraversalAuthentication.expectedTraversalCount, 2);
+  assert.equal(twoTraversalAuthentication.receipt.expectedTraversalCount, 2);
+  const twoTraversalEvidence = {
+    ...gpuEvidence,
+    consumerId: twoTraversalAuthentication.consumerId,
+    supportProfileId: twoTraversalAuthentication.supportProfileId,
+    epochIdentity: twoTraversalAuthentication.epochIdentity,
+    traversalCount: 2
+  };
+  assert.throws(
+    () => finalizeSchroederSpatialExactNearConsumerReceipt(
+      twoTraversalAuthentication,
+      { ...twoTraversalEvidence, traversalCount: 1 }
+    ),
+    /expected traversal count of 2/
+  );
+  const twoTraversalReceipt = finalizeSchroederSpatialExactNearConsumerReceipt(
+    twoTraversalAuthentication,
+    twoTraversalEvidence
+  );
+  assert.equal(twoTraversalReceipt.expectedTraversalCount, 2);
+  assert.equal(twoTraversalReceipt.traversalCount, 2);
+  assert.equal(
+    isFinalizedSchroederSpatialExactNearConsumerReceipt(twoTraversalReceipt),
+    true
+  );
+
+  assert.equal(resolveSchroederSpatialExactNearConsumerGeneration(generation, {
+    device,
+    consumerId: 'invalid-traversal-contract',
+    supportProfileId: SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
+    expectedTraversalCount: 0
+  }).status, 'schroeder-spatial-consumer-authentication-rejected-traversal-contract');
 
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
   assert.equal(await generation.releasePromise, true);

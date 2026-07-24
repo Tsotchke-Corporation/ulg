@@ -8,6 +8,7 @@ import {
   SCHROEDER_SPATIAL_EPOCH_READER_PHASE,
   SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID,
   ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA,
+  admitSchroederSpatialEpochTransactionLateConsumer,
   admitSchroederSpatialEpochTransactionReader,
   advanceSchroederSpatialEpochTransactionPrivate,
   abortSchroederSpatialEpochTransaction,
@@ -30,6 +31,9 @@ import {
 import {
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA
 } from '../ulg-gpu-abi/src/schroederSpatialExactNear.js';
+import {
+  validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor
+} from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeInterfaceProposal.js';
 import {
   SCHROEDER_SPATIAL_AGGREGATE_CONSUMER_ARTIFACT_FAMILY,
   SCHROEDER_SPATIAL_AGGREGATE_CONSUMER_ID,
@@ -195,7 +199,8 @@ function fixture({ generationId = 7, storageGeneration = 3 } = {}) {
 
 function twoLevelFixture({
   phaseVolume = false,
-  phaseVolumeReceiptEnabled = true
+  phaseVolumeReceiptEnabled = true,
+  phaseVolumeInterfaceProposalEnabled = false
 } = {}) {
   const device = createLiveFakeDevice();
   const particleCount = 2;
@@ -291,7 +296,8 @@ function twoLevelFixture({
         }
       }
     ],
-    phaseVolumeReceiptEnabled
+    phaseVolumeReceiptEnabled,
+    phaseVolumeInterfaceProposalEnabled
   });
   return {
     device,
@@ -381,6 +387,16 @@ const consumerContract = Object.freeze({
     supportProfileId: SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.REACTION_DISCOVERY,
     artifactFamily: SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_DISCOVERY
   }),
+  [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT]: Object.freeze({
+    phase:
+      SCHROEDER_SPATIAL_EPOCH_READER_PHASE
+        .REACTION_PRODUCT_PLACEMENT_PROPOSAL,
+    supportProfileId:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.REACTION_PRODUCT_PLACEMENT,
+    artifactFamily:
+      SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY
+        .REACTION_PRODUCT_PLACEMENT
+  }),
   [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]: Object.freeze({
     phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.SEPARATION_PROPOSAL,
     supportProfileId: SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.SEPARATION,
@@ -420,6 +436,7 @@ function consumerReceipt(f, readerId, overrides = {}) {
     artifactFamily: contract.artifactFamily,
     deviceId: webGpuDeviceId(f.device),
     generationId: f.generation.execution.generationId,
+    expectedTraversalCount: 1,
     traversalCount: 1,
     candidateVisitCount: 0,
     consumerMaskHitCount: 0,
@@ -452,12 +469,17 @@ function consumerReceipt(f, readerId, overrides = {}) {
 
 function finalizedConsumerReceipt(f, readerId, overrides = {}) {
   const contract = consumerContract[readerId];
+  const {
+    expectedTraversalCount = 1,
+    ...evidenceOverrides
+  } = overrides;
   const authentication = resolveSchroederSpatialExactNearConsumerGeneration(
     f.generation,
     {
       device: f.device,
       consumerId: readerId,
       supportProfileId: contract.supportProfileId,
+      expectedTraversalCount,
       sourceBuffer: f.activeNodeList.activeNodeBuffer
     }
   );
@@ -470,7 +492,7 @@ function finalizedConsumerReceipt(f, readerId, overrides = {}) {
     supportProfileId: contract.supportProfileId,
     generationId: f.generation.execution.generationId,
     epochIdentity: authentication.epochIdentity,
-    traversalCount: 1,
+    traversalCount: expectedTraversalCount,
     candidateVisitCount: 0,
     consumerMaskHitCount: 0,
     migratedProposalCount: 0,
@@ -485,7 +507,7 @@ function finalizedConsumerReceipt(f, readerId, overrides = {}) {
     partialPublication: false,
     fallbackObserved: false,
     fullReadbackPerformed: false,
-    ...overrides,
+    ...evidenceOverrides,
     epochIdentity: authentication.epochIdentity
   });
 }
@@ -566,6 +588,8 @@ test('spatial epoch transaction enforces one immutable source family through com
     submittedAggregateConsumerCount: 0,
     submittedAggregateTraversalCount: 0,
     resultAuthenticatedAggregateTraversalCount: 0,
+    residentDeferredConsumerCount: 0,
+    residentDeferredSharedExecutionCount: 0,
     authenticatedConsumerTraversalCount: 0,
     authenticatedCandidateVisitCount: 0,
     authenticatedConsumerMaskHitCount: 0,
@@ -716,6 +740,11 @@ test('spatial epoch transaction admits one exact two-level generation only by ex
   assert.equal(transaction.mechanicsLevelCount, 2);
   assert.deepEqual(transaction.mechanicsLevels, [0, 1]);
   assert.equal(transaction.hierarchyView, f.generation.hierarchyView);
+  assert.equal(transaction.activeRankView, f.generation.activeRankView);
+  assert.equal(
+    transaction.activeRankView?.activeRankViewBuffer,
+    f.generation.execution.activeRankViewBuffer
+  );
   const summary = summarizeSchroederSpatialEpochTransaction(transaction);
   assert.equal(summary.twoLevelAuthoritative, true);
   assert.equal(summary.mechanicsLevelCount, 2);
@@ -737,6 +766,8 @@ test('two-level transaction exposes and freezes the submitted read-only phase-vo
   assert.equal(f.generation.selected, true, f.generation.reason);
   assert.ok(f.generation.phaseVolumeMoment);
   assert.ok(f.generation.phaseVolumeReceipt);
+  assert.equal(f.generation.phaseVolumeInterfaceProposalEnabled, false);
+  assert.equal(f.generation.phaseVolumeInterfaceProposal, null);
   const transaction = createSchroederSpatialEpochTransaction({
     ...f,
     twoLevelAuthoritative: true
@@ -781,6 +812,86 @@ test('two-level transaction exposes and freezes the submitted read-only phase-vo
   assert.equal(summary.phaseVolumeReceiptReadOnly, true);
 });
 
+test('two-level transaction exposes and freezes an explicitly authorized read-only S9-C interface proposal', () => {
+  const f = twoLevelFixture({
+    phaseVolume: true,
+    phaseVolumeInterfaceProposalEnabled: true
+  });
+  assert.equal(f.generation.ready, true, f.generation.reason);
+  const proposal = f.generation.phaseVolumeInterfaceProposal;
+  assert.ok(proposal);
+  assert.equal(
+    validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor(proposal, {
+      generationId: f.generation.execution.generationId,
+      fineLevel: 0,
+      coarseLevel: 1
+    }).admitted,
+    true
+  );
+
+  const hiddenTransaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: true
+  });
+  assert.equal(hiddenTransaction.phaseVolumeInterfaceProposal, null);
+
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: true,
+    phaseVolumeInterfaceProposalAuthoritative: true
+  });
+  assert.equal(transaction.phaseVolumeInterfaceProposal, proposal);
+  assert.equal(
+    transaction.phaseVolumeInterfaceProposalRuntime,
+    f.generation.phaseVolumeInterfaceProposalRuntime
+  );
+  assert.equal(
+    transaction.phaseVolumeInterfaceProposalPolicy,
+    'read-only-interface-topology-future-operator-only'
+  );
+  let summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.phaseVolumeInterfaceProposalAuthoritative, true);
+  assert.equal(
+    summary.phaseVolumeInterfaceProposalStatus,
+    'schroeder-spatial-phase-volume-interface-proposal-gpu-build-submitted'
+  );
+  assert.equal(summary.phaseVolumeInterfaceProposalReadOnly, true);
+  assert.equal(summary.phaseVolumeInterfaceProposalTwoLevel, true);
+  assert.equal(summary.phaseVolumeInterfaceProposalDispatchCount, 3);
+  assert.ok(summary.phaseVolumeInterfaceProposalRetainedGpuBufferBytes > 0);
+
+  const originalParentFieldView = proposal.parentFieldView;
+  proposal.parentFieldView = { ...originalParentFieldView };
+  assert.equal(validateSchroederSpatialEpochTransactionSourceFamily(
+    transaction,
+    {
+      generation: f.generation,
+      sphParticleUpload: f.sphParticleUpload,
+      mlsMpmParticleUpload: f.mlsMpmParticleUpload
+    }
+  ), false);
+  proposal.parentFieldView = originalParentFieldView;
+  assert.equal(validateSchroederSpatialEpochTransactionSourceFamily(
+    transaction,
+    {
+      generation: f.generation,
+      sphParticleUpload: f.sphParticleUpload,
+      mlsMpmParticleUpload: f.mlsMpmParticleUpload
+    }
+  ), true);
+  summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.phaseVolumeInterfaceProposalReadOnly, true);
+});
+
+test('two-level transaction refuses opt-in S9-C authority without its exact proposal', () => {
+  const f = twoLevelFixture({ phaseVolume: true });
+  assert.throws(() => createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: true,
+    phaseVolumeInterfaceProposalAuthoritative: true
+  }), { code: 'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY' });
+});
+
 test('two-level transaction refuses an A/B-only S9-A sidecar without its receipt', () => {
   const f = twoLevelFixture({
     phaseVolume: true,
@@ -794,6 +905,99 @@ test('two-level transaction refuses an A/B-only S9-A sidecar without its receipt
     twoLevelAuthoritative: true
   }), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_PHASE_VOLUME_RECEIPT_IDENTITY' });
 });
+
+test('two-level transaction freezes the active-rank sidecar identity', () => {
+  const f = twoLevelFixture();
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: true
+  });
+  const readerInputs = {
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  };
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    true
+  );
+  const activeRankBuildEncoded = f.generation.execution.activeRankViewBuildEncoded;
+  f.generation.execution.activeRankViewBuildEncoded = false;
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    false
+  );
+  f.generation.execution.activeRankViewBuildEncoded = activeRankBuildEncoded;
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    true
+  );
+  const sourceCount = f.generation.execution.sourceCount;
+  f.generation.execution.sourceCount = sourceCount + 1;
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    false
+  );
+  f.generation.execution.sourceCount = sourceCount;
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    true
+  );
+  f.generation.activeRankView = Object.freeze({
+    ...f.generation.activeRankView,
+    activeRankViewBuffer: f.buffer('foreign-active-rank-sidecar')
+  });
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    false
+  );
+});
+
+test('two-level transaction rejects a mutable active-rank descriptor', () => {
+  const f = twoLevelFixture();
+  const activeRankView = f.generation.activeRankView;
+  const mutableLayout = { ...activeRankView.layout };
+  const mutableExecution = {
+    ...f.generation.execution,
+    activeRankView: null,
+    activeRankViewLayout: mutableLayout
+  };
+  const mutableActiveRankView = {
+    ...activeRankView,
+    spatialExecution: mutableExecution,
+    layout: mutableLayout
+  };
+  mutableExecution.activeRankView = mutableActiveRankView;
+  const mutableGeneration = {
+    ...f.generation,
+    execution: mutableExecution,
+    activeRankView: mutableActiveRankView
+  };
+  assert.throws(() => createSchroederSpatialEpochTransaction({
+    ...f,
+    generation: mutableGeneration,
+    twoLevelAuthoritative: true
+  }), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_ACTIVE_RANK_IDENTITY' });
+});
+
 test('two-level transaction admits one exact post-mechanics far-aggregate receipt after G2P', async () => {
   const f = twoLevelFixture();
   const transaction = createSchroederSpatialEpochTransaction({
@@ -1111,7 +1315,7 @@ test('private-advance receipts bind generation and source even when two transact
       }
     ]
   });
-  assert.equal(bGeneration.selected, true);
+  assert.equal(bGeneration.selected, true, bGeneration.reason);
 
   const transactionA = createSchroederSpatialEpochTransaction({
     ...a,
@@ -1293,6 +1497,9 @@ test('spatial epoch transaction admits every enabled exact-near consumer once in
     expectedCandidateVisits += candidateVisitCount;
     expectedMaskHits += consumerMaskHitCount;
     expectedProposals += migratedProposalCount;
+    if (readerId === SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY) {
+      return;
+    }
     assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
       readerId,
       phase: consumerContract[readerId].phase,
@@ -1309,6 +1516,25 @@ test('spatial epoch transaction admits every enabled exact-near consumer once in
   });
   admitMechanicsReaders(transaction, readerInputs);
   assert.equal(sealSchroederSpatialEpochTransactionReaders(transaction), true);
+  assert.equal(admitSchroederSpatialEpochTransactionLateConsumer(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+    phase: consumerContract[
+      SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY
+    ].phase,
+    consumerReceipt: finalizedConsumerReceipt(
+      f,
+      SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+      {
+        candidateVisitCount: 21,
+        consumerMaskHitCount: 11,
+        migratedProposalCount: 1,
+        candidateBytesRequired: 64,
+        candidateBytesAdmitted: 64,
+        candidateBytesCapacity: 128
+      }
+    ),
+    ...readerInputs
+  }), true);
   const proposalSeal = sealSchroederSpatialEpochTransactionProposals(transaction);
   assert.equal(proposalSeal.status, 'authenticated-spatial-consumer-proposals-sealed');
   assert.equal(proposalSeal.authenticatedConsumerCount, consumerReaderIds.length);
@@ -1326,6 +1552,40 @@ test('spatial epoch transaction admits every enabled exact-near consumer once in
     && receipt.generationId === transaction.generationId
     && receipt.traversalCount === 1
   )));
+  const reactionReader = summary.admittedReaders.find((reader) => (
+    reader.readerId === SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY
+  ));
+  const reactionReceipt = summary.consumerReceipts.find((receipt) => (
+    receipt.consumerId === SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY
+  ));
+  assert.ok(Object.isFrozen(reactionReader.receiptTelemetry));
+  assert.equal(
+    reactionReader.receiptTelemetry.schema,
+    'peercompute.ulg.schroeder-spatial-consumer-receipt-telemetry.v1'
+  );
+  assert.equal(reactionReader.receiptTelemetry.backend, 'webgpu');
+  assert.equal(
+    reactionReader.receiptTelemetry.backendSelection,
+    'same-device-submitted-webgpu-generation'
+  );
+  assert.equal(reactionReader.receiptTelemetry.fallbackIntent, 'forbidden');
+  assert.equal(reactionReader.receiptTelemetry.consumerId, reactionReceipt.consumerId);
+  assert.equal(reactionReader.receiptTelemetry.deviceId, reactionReceipt.deviceId);
+  assert.equal(reactionReader.receiptTelemetry.generationId, reactionReceipt.generationId);
+  assert.deepEqual(reactionReader.receiptTelemetry.epochIdentity, reactionReceipt.epochIdentity);
+  assert.equal(reactionReader.receiptTelemetry.gpuAuthenticated, true);
+  assert.equal(reactionReader.receiptTelemetry.submitPerformed, true);
+  assert.equal(reactionReader.receiptTelemetry.generationBound, true);
+  assert.equal(
+    reactionReader.receiptTelemetry.expectedTraversalCount,
+    reactionReceipt.expectedTraversalCount
+  );
+  assert.equal(reactionReader.receiptTelemetry.traversalCount, reactionReceipt.traversalCount);
+  assert.equal(reactionReader.receiptTelemetry.fallbackObserved, false);
+  assert.equal(reactionReader.receiptTelemetry.fullReadbackPerformed, false);
+  assert.equal(reactionReader.receiptTelemetry.privateLookupBuildCount, 0);
+  assert.equal(reactionReader.receiptTelemetry.fixedCandidateBuildCount, 0);
+  assert.equal(reactionReader.receiptTelemetry.exhaustiveTraversalCount, 0);
   assert.equal(summary.counters.consumerReceiptAdmissionCount, consumerReaderIds.length);
   assert.equal(
     summary.counters.authenticatedConsumerTraversalCount,
@@ -1338,6 +1598,98 @@ test('spatial epoch transaction admits every enabled exact-near consumer once in
   assert.equal(summary.counters.authenticatedCandidateBytesCapacity, 128 * 6);
 });
 
+test('reaction product placement is required only through explicit late admission', () => {
+  const f = liveConsumerFixture();
+  const readerId =
+    SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT;
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    enabledConsumerReaderIds: [readerId],
+    consumerSupportProfileIds: supportProfiles([readerId])
+  });
+  const readerInputs = {
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  };
+  admitMechanicsReaders(transaction, readerInputs);
+  assert.equal(sealSchroederSpatialEpochTransactionReaders(transaction), true);
+  assert.throws(
+    () => sealSchroederSpatialEpochTransactionProposals(transaction),
+    { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_MISSING_READER' }
+  );
+  assert.throws(() => admitSchroederSpatialEpochTransactionReader(
+    transaction,
+    {
+      readerId,
+      phase: consumerContract[readerId].phase,
+      consumerReceipt: finalizedConsumerReceipt(f, readerId),
+      ...readerInputs
+    }
+  ), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_READER_CONTRACT' });
+  assert.equal(admitSchroederSpatialEpochTransactionLateConsumer(
+    transaction,
+    {
+      readerId,
+      phase: consumerContract[readerId].phase,
+      consumerReceipt: finalizedConsumerReceipt(f, readerId, {
+        migratedProposalCount: 8,
+        candidateBytesRequired: 128,
+        candidateBytesAdmitted: 128,
+        candidateBytesCapacity: 128
+      }),
+      ...readerInputs
+    }
+  ), true);
+  const seal = sealSchroederSpatialEpochTransactionProposals(transaction);
+  assert.equal(seal.authenticatedConsumerCount, 1);
+  assert.equal(seal.migratedProposalCount, 8);
+  assert.deepEqual(
+    summarizeSchroederSpatialEpochTransaction(transaction)
+      .admittedReaders.map(({ readerId: admittedReaderId }) => admittedReaderId),
+    [
+      SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+      SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+      readerId
+    ]
+  );
+});
+
+test('transaction preserves and aggregates an authenticated two-traversal receipt truthfully', () => {
+  const f = liveConsumerFixture();
+  const readerId = SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION;
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    enabledConsumerReaderIds: [readerId],
+    consumerSupportProfileIds: supportProfiles([readerId])
+  });
+  const readerInputs = {
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  };
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId,
+    phase: consumerContract[readerId].phase,
+    consumerReceipt: finalizedConsumerReceipt(f, readerId, {
+      expectedTraversalCount: 2,
+      candidateVisitCount: 17
+    }),
+    ...readerInputs
+  }), true);
+  admitMechanicsReaders(transaction, readerInputs);
+  assert.equal(sealSchroederSpatialEpochTransactionReaders(transaction), true);
+  const proposalSeal = sealSchroederSpatialEpochTransactionProposals(transaction);
+  assert.equal(proposalSeal.authenticatedConsumerCount, 1);
+  assert.equal(proposalSeal.authenticatedTraversalCount, 2);
+  const summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.consumerReceipts.length, 1);
+  assert.equal(summary.consumerReceipts[0].expectedTraversalCount, 2);
+  assert.equal(summary.consumerReceipts[0].traversalCount, 2);
+  assert.equal(summary.counters.authenticatedConsumerTraversalCount, 2);
+  assert.equal(summary.counters.authenticatedCandidateVisitCount, 17);
+});
+
 test('spatial epoch exact-near consumers fail closed on disabled, stale, fallback, overflow, and out-of-order receipts', () => {
   const readerId = SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY;
   const phase = consumerContract[readerId].phase;
@@ -1348,19 +1700,24 @@ test('spatial epoch exact-near consumers fail closed on disabled, stale, fallbac
   });
   const createEnabled = () => {
     const f = liveConsumerFixture();
+    const transaction = createSchroederSpatialEpochTransaction({
+      ...f,
+      enabledConsumerReaderIds: [readerId],
+      consumerSupportProfileIds: supportProfiles([readerId])
+    });
+    admitMechanicsReaders(transaction, readerInputs(f));
+    sealSchroederSpatialEpochTransactionReaders(transaction);
     return {
       f,
-      transaction: createSchroederSpatialEpochTransaction({
-        ...f,
-        enabledConsumerReaderIds: [readerId],
-        consumerSupportProfileIds: supportProfiles([readerId])
-      })
+      transaction
     };
   };
 
   const disabled = liveConsumerFixture();
   const disabledTransaction = createSchroederSpatialEpochTransaction(disabled);
-  assert.throws(() => admitSchroederSpatialEpochTransactionReader(
+  admitMechanicsReaders(disabledTransaction, readerInputs(disabled));
+  sealSchroederSpatialEpochTransactionReaders(disabledTransaction);
+  assert.throws(() => admitSchroederSpatialEpochTransactionLateConsumer(
     disabledTransaction,
     {
       readerId,
@@ -1381,7 +1738,7 @@ test('spatial epoch exact-near consumers fail closed on disabled, stale, fallbac
   }), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_READER_CONTRACT' });
 
   const stale = createEnabled();
-  assert.throws(() => admitSchroederSpatialEpochTransactionReader(
+  assert.throws(() => admitSchroederSpatialEpochTransactionLateConsumer(
     stale.transaction,
     {
       readerId,
@@ -1397,7 +1754,7 @@ test('spatial epoch exact-near consumers fail closed on disabled, stale, fallbac
   );
 
   const fallback = createEnabled();
-  assert.throws(() => admitSchroederSpatialEpochTransactionReader(
+  assert.throws(() => admitSchroederSpatialEpochTransactionLateConsumer(
     fallback.transaction,
     {
       readerId,
@@ -1415,7 +1772,7 @@ test('spatial epoch exact-near consumers fail closed on disabled, stale, fallbac
   );
 
   const overflow = createEnabled();
-  assert.throws(() => admitSchroederSpatialEpochTransactionReader(
+  assert.throws(() => admitSchroederSpatialEpochTransactionLateConsumer(
     overflow.transaction,
     {
       readerId,
@@ -1438,24 +1795,21 @@ test('spatial epoch exact-near consumers fail closed on disabled, stale, fallbac
   );
 
   const outOfOrder = liveConsumerFixture();
-  const pressureId = SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE;
+  const placementId =
+    SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT;
   const outOfOrderTransaction = createSchroederSpatialEpochTransaction({
     ...outOfOrder,
-    enabledConsumerReaderIds: [pressureId, readerId],
-    consumerSupportProfileIds: supportProfiles([pressureId, readerId])
+    enabledConsumerReaderIds: [readerId, placementId],
+    consumerSupportProfileIds: supportProfiles([readerId, placementId])
   });
-  assert.equal(admitSchroederSpatialEpochTransactionReader(outOfOrderTransaction, {
-    readerId,
-    phase,
-    consumerReceipt: finalizedConsumerReceipt(outOfOrder, readerId),
-    ...readerInputs(outOfOrder)
-  }), true);
-  assert.throws(() => admitSchroederSpatialEpochTransactionReader(
+  admitMechanicsReaders(outOfOrderTransaction, readerInputs(outOfOrder));
+  sealSchroederSpatialEpochTransactionReaders(outOfOrderTransaction);
+  assert.throws(() => admitSchroederSpatialEpochTransactionLateConsumer(
     outOfOrderTransaction,
     {
-      readerId: pressureId,
-      phase: consumerContract[pressureId].phase,
-      consumerReceipt: finalizedConsumerReceipt(outOfOrder, pressureId),
+      readerId: placementId,
+      phase: consumerContract[placementId].phase,
+      consumerReceipt: finalizedConsumerReceipt(outOfOrder, placementId),
       ...readerInputs(outOfOrder)
     }
   ), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_READER_ORDER' });

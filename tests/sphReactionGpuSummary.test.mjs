@@ -22,11 +22,48 @@ import {
   createResidentProductMassHandle,
   reactionStrictGateFromSummary,
   runSphReactionSummaryWebGpu,
+  sphReactionProductEventCompactWgsl,
   ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
   SPH_GPU_REACTION_SUMMARY_FLOATS
 } from '../src/runtime/sph/sphReactionGpuSummary.js';
+import {
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_LAYOUT,
+  SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS
+} from '../ulg-gpu-abi/src/sphReactionProductPlacementReceipt.js';
+import {
+  SPH_REACTION_PRODUCT_PLACEMENT_LAW,
+  sphReactionProductEventPlacementEnvelopeWgsl,
+  sphReactionProductEventPlacementWgsl,
+  sphReactionProductPlacementCaptureApplyWgsl,
+  sphReactionProductPlacementCaptureReduceWgsl,
+  sphReactionProductPlacementDirectApplyWgsl,
+  sphReactionProductPlacementDirectPlanWgsl,
+  sphReactionProductPlacementDirectReduceWgsl,
+  sphReactionProductPlacementEventApplyWgsl,
+  sphReactionProductPlacementFinalizeWgsl,
+  sphReactionProductPlacementPlanWgsl,
+  sphReactionProductPlacementPreflightWgsl,
+  sphReactionProductPlacementSummaryApplyWgsl,
+  sphReactionProductPlacementSummaryReduceWgsl,
+  sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl,
+  sphReactionProductPlacementTransactionalAuxiliaryPublishWgsl,
+  sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+  sphReactionProductPlacementTransactionalPublishWgsl,
+  sphReactionProductPlacementTransactionalTerminalWgsl
+} from '../ulg-gpu-abi/src/wgsl.js';
+import {
+  sphReactionProductEventSpatialClassificationWgsl,
+  sphReactionProductSpareAssignWgsl,
+  sphReactionProductSpareEventMarkWgsl,
+  sphReactionProductSpareGroupScanWgsl,
+  sphReactionProductSpareParticleMarkWgsl,
+  sphReactionProductSpareScatterWgsl
+} from '../ulg-gpu-abi/src/sphReactionProductEventSpatialClassificationWgsl.js';
 
 function fakeSummaryDevice(
   summaryValues,
@@ -249,6 +286,295 @@ function reactionTable() {
     ]
   };
 }
+
+function wgslEntrySource(source, entryPoint) {
+  const start = source.indexOf(`fn ${entryPoint}(`);
+  assert.ok(start >= 0, `missing WGSL entry point ${entryPoint}`);
+  const next = source.indexOf('\n@compute', start + 1);
+  return source.slice(start, next >= 0 ? next : source.length);
+}
+
+function storageBindingCount(source) {
+  return [...source.matchAll(
+    /@group\(\d+\)\s*@binding\(\d+\)\s*var<storage\b/g
+  )].length;
+}
+
+test('reaction product placement receipt v5 names exact segmented topology and terminal transaction', () => {
+  assert.equal(SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION, 5);
+  assert.equal(SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS, 78);
+  assert.deepEqual(
+    SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_LAYOUT.slice(5, 16),
+    [
+      'compactCountPassCount:u32',
+      'compactScanPassCount:u32',
+      'compactScatterPassCount:u32',
+      'activeEventCount:u32',
+      'compactionInputVisitCount:u32',
+      'compactionLiveFlagCount:u32',
+      'compactionOverflowCount:u32',
+      'envelopePartialPassCount:u32',
+      'envelopeFinalizePassCount:u32',
+      'envelopeInputVisitCount:u32',
+      'envelopeAdmitted:u32'
+    ]
+  );
+  assert.deepEqual(
+    SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_LAYOUT.slice(40, 48),
+    [
+      'serialConflictFoldPassCount:u32',
+      'serialConflictFoldEventCount:u32',
+      'maxSerialConflictFoldSize:u32',
+      'mutationConflictRetryCount:u32',
+      'privateLookupBuildCount:u32',
+      'exhaustiveTraversalCount:u32',
+      'overflowFlags:u32',
+      'status:u32'
+    ]
+  );
+  assert.deepEqual(
+    SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_LAYOUT.slice(48, 64),
+    [
+      'applyPreflightPassCount:u32',
+      'intentEmitPassCount:u32',
+      'mutationIntentCapacity:u32',
+      'mutationIntentCount:u32',
+      'destinationRadixPassCount:u32',
+      'destinationSegmentReducePassCount:u32',
+      'destinationApplyPassCount:u32',
+      'destinationIntentVisitedCount:u32',
+      'destinationMutationCount:u32',
+      'maxDestinationSegmentSize:u32',
+      'summaryRadixPassCount:u32',
+      'summarySegmentReducePassCount:u32',
+      'summaryApplyPassCount:u32',
+      'summaryContributionCount:u32',
+      'globalSerialEventFoldCount:u32',
+      'hostCompletionReadbackCount:u32'
+    ]
+  );
+  assert.deepEqual(
+    SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_LAYOUT.slice(64, 78),
+    [
+      'transactionalPublishPassCount:u32',
+      'transactionalVisitedParticleCount:u32',
+      'transactionalCommittedParticleCount:u32',
+      'transactionalFallbackParticleCount:u32',
+      'transactionalEventPublishPassCount:u32',
+      'transactionalVisitedEventRowCount:u32',
+      'transactionalCommittedEventRowCount:u32',
+      'transactionalFallbackEventRowCount:u32',
+      'transactionalSummaryPublishPassCount:u32',
+      'transactionalVisitedSummaryRowCount:u32',
+      'transactionalCommittedSummaryRowCount:u32',
+      'transactionalFallbackSummaryRowCount:u32',
+      'transactionalTerminalSealPassCount:u32',
+      'transactionalTerminalStatus:u32'
+    ]
+  );
+});
+
+test('canonical product-event compaction is stable count/scan/scatter without a dense serial row walk', () => {
+  const count = wgslEntrySource(
+    sphReactionProductEventCompactWgsl,
+    'count_placement_rows'
+  );
+  const scan = wgslEntrySource(
+    sphReactionProductEventCompactWgsl,
+    'scan_placement_row_groups'
+  );
+  const scatter = wgslEntrySource(
+    sphReactionProductEventCompactWgsl,
+    'scatter_placement_rows'
+  );
+  assert.match(count, /compact_scan_rows\[lane\]/);
+  assert.match(count, /exclusive = inclusive - live/);
+  assert.doesNotMatch(count, /for \(var row = 0u; row < params\.row_count/);
+  assert.match(scan, /group < group_count/);
+  assert.doesNotMatch(scan, /row < params\.row_count/);
+  assert.match(scatter, /compact_group_offsets\[workgroup_id\.x\]/);
+  assert.match(scatter, /packed_prefix & 0x7fffffffu/);
+});
+
+test('canonical placement envelope and SS classifier publish real parallel traversal evidence', () => {
+  const reduce = wgslEntrySource(
+    sphReactionProductEventPlacementEnvelopeWgsl,
+    'reduce_placement_spatial_envelope'
+  );
+  const finalize = wgslEntrySource(
+    sphReactionProductEventPlacementEnvelopeWgsl,
+    'finalize_placement_spatial_envelope'
+  );
+  assert.match(reduce, /@builtin\(local_invocation_id\)/);
+  assert.match(
+    sphReactionProductEventPlacementEnvelopeWgsl,
+    /envelope_radius: array<f32, 64>/
+  );
+  assert.doesNotMatch(reduce, /for \(var candidate/);
+  assert.match(finalize, /partial < partial_count/);
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /frozen_placement_source_state/
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /atomicAdd\([\s\S]*?placement_completion_receipt/g
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /ss_exact_near_source_at_member/
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /placement_classifier_finite_vec4\(row6\)/
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /product_term_f < f32\(params\.product_term_count\)/
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /row1\.w == source_index_f[\s\S]*row2\.x == partner_index_f[\s\S]*source_index_f != partner_index_f/
+  );
+});
+
+test('canonical placement uses stable segmented reductions and disjoint direct-pair hyperedges', () => {
+  assert.match(sphReactionProductSpareParticleMarkWgsl, /mark_spare_particles/);
+  assert.match(sphReactionProductSpareParticleMarkWgsl, /0x80000000u/);
+  assert.match(sphReactionProductSpareEventMarkWgsl, /mark_spare_events/);
+  assert.match(sphReactionProductSpareGroupScanWgsl, /group < group_count/);
+  assert.match(sphReactionProductSpareScatterWgsl, /spare_slots\[rank\] = particle/);
+  assert.match(sphReactionProductSpareAssignWgsl, /assigned_slot = spare_slots\[rank\]/);
+  assert.equal(
+    SPH_REACTION_PRODUCT_PLACEMENT_LAW.mutationOrder,
+    'stable-event-plan-then-conserving-capture-segment-reduction-then-disjoint-direct-pair-hyperedges'
+  );
+  const segmentedSources = [
+    sphReactionProductPlacementPreflightWgsl,
+    sphReactionProductPlacementPlanWgsl,
+    sphReactionProductPlacementEventApplyWgsl,
+    sphReactionProductPlacementCaptureReduceWgsl,
+    sphReactionProductPlacementCaptureApplyWgsl,
+    sphReactionProductPlacementDirectPlanWgsl,
+    sphReactionProductPlacementDirectReduceWgsl,
+    sphReactionProductPlacementDirectApplyWgsl,
+    sphReactionProductPlacementSummaryReduceWgsl,
+    sphReactionProductPlacementSummaryApplyWgsl,
+    sphReactionProductPlacementFinalizeWgsl,
+    sphReactionProductPlacementTransactionalPublishWgsl,
+    sphReactionProductPlacementTransactionalAuxiliaryPublishWgsl,
+    sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+    sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl
+  ];
+  const bindingBaselineSources = [
+    sphReactionProductEventSpatialClassificationWgsl,
+    sphReactionProductSpareParticleMarkWgsl,
+    sphReactionProductSpareEventMarkWgsl,
+    sphReactionProductSpareGroupScanWgsl,
+    sphReactionProductSpareScatterWgsl,
+    sphReactionProductSpareAssignWgsl,
+    sphReactionProductPlacementTransactionalTerminalWgsl,
+    ...segmentedSources
+  ];
+  for (const source of bindingBaselineSources) {
+    assert.ok(
+      storageBindingCount(source) <= 8,
+      `placement shader exceeds the WebGPU 8-storage-binding baseline: ${storageBindingCount(source)}`
+    );
+  }
+  assert.match(
+    sphReactionProductPlacementTransactionalTerminalWgsl,
+    /seal_transactional_placement_publication[\s\S]*safe_fallback/
+  );
+  assert.doesNotMatch(
+    sphReactionProductPlacementTransactionalAuxiliaryPublishWgsl,
+    /published_(?:events|summary)\[row\]\s*=/
+  );
+  assert.match(
+    sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+    new RegExp(
+      `receipt\\[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.transactionalTerminalStatus}\\][\\s\\S]*== ${SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS.SAFE_PLACED}u`
+    )
+  );
+  assert.match(
+    sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+    /destination_state\[state_base \+ row\] = frozen_state\[state_base \+ row\]/
+  );
+  assert.match(
+    sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+    /destination_thermo\[thermo_base \+ row\] = frozen_thermo\[thermo_base \+ row\]/
+  );
+  assert.match(
+    sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+    /destination_mechanics\[mechanics_base \+ row\] = frozen_mechanics\[mechanics_base \+ row\]/
+  );
+  assert.match(
+    sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl,
+    /if \(!safe_placed\) \{ return; \}[\s\S]*published_events\[row\] = candidate_events\[row\][\s\S]*published_summary\[row\] = candidate_summary\[row\]/
+  );
+  for (const source of segmentedSources) {
+    assert.doesNotMatch(source, /@workgroup_size\(1\)/);
+    assert.doesNotMatch(source, /for \(var event = 0u; event < active_event_count/);
+  }
+  assert.match(sphReactionProductPlacementPlanWgsl, /let event = global_id\.x/);
+  assert.doesNotMatch(
+    sphReactionProductPlacementPlanWgsl,
+    /var<storage, read> compact_counts/
+  );
+  assert.doesNotMatch(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /@binding\(1\) var<storage, read> next_state/
+  );
+  const plan = wgslEntrySource(
+    sphReactionProductPlacementPlanWgsl,
+    'plan_product_events'
+  );
+  assert.match(plan, /finite_vec4\(row6\)/);
+  assert.match(plan, /valid_term[\s\S]*pair_valid[\s\S]*decision_indices_valid/);
+  assert.ok(
+    plan.indexOf('let event_valid')
+      < plan.indexOf('capture_values[value_base]')
+  );
+  const uniqueApply = wgslEntrySource(
+    sphReactionProductPlacementEventApplyWgsl,
+    'apply_unique_events_and_emit_summaries'
+  );
+  assert.ok(
+    uniqueApply.indexOf('if (!valid_term || disposition == 8u)')
+      < uniqueApply.indexOf('next_state[state_base]')
+  );
+  assert.match(sphReactionProductPlacementCaptureReduceWgsl, /reduce_capture_segments/);
+  assert.match(
+    uniqueApply,
+    new RegExp(
+      `atomicAdd\\(&receipt\\[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.mutationIntentCount}\\], 1u\\)`
+    )
+  );
+  assert.match(
+    uniqueApply,
+    new RegExp(
+      `atomicAdd\\(&receipt\\[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.destinationMutationCount}\\], 1u\\)`
+    )
+  );
+  assert.match(
+    uniqueApply,
+    new RegExp(
+      `atomicMax\\(&receipt\\[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.maxDestinationSegmentSize}\\], 1u\\)`
+    )
+  );
+  assert.match(sphReactionProductPlacementDirectReduceWgsl, /keys_equal_at/);
+  assert.match(sphReactionProductPlacementDirectApplyWgsl, /atomicMin\(&endpoint_claims\[source\], priority\)/);
+  assert.match(sphReactionProductPlacementDirectApplyWgsl, /atomicMin\(&endpoint_claims\[partner\], priority\)/);
+  assert.match(sphReactionProductPlacementSummaryReduceWgsl, /reduce_summary_segments/);
+  assert.match(sphReactionProductPlacementFinalizeWgsl, /finalize_segmented_placement_receipt/);
+  assert.match(
+    sphReactionProductPlacementFinalizeWgsl,
+    new RegExp(
+      `atomicLoad\\(&receipt\\[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.globalSerialEventFoldCount}\\]\\) == 0u`
+    )
+  );
+  assert.match(sphReactionProductPlacementFinalizeWgsl, /RECEIPT_STATUS\.COMPLETE|1u, complete/);
+});
 
 function concatenateFloat32Rows(...rows) {
   const values = new Float32Array(rows.reduce((sum, row) => sum + row.length, 0));
@@ -626,6 +952,7 @@ test('SPH reaction product-placement decoder partitions all routes and gas total
   assert.equal(provenance.gasPhaseRoutedEventCount, 4);
   assert.equal(provenance.placementCandidateEventCount, 7);
   assert.equal(provenance.placedEventCount, 4);
+  assert.equal(provenance.placedReactionEventCount, 2);
   assert.equal(provenance.mergedEventCount, 3);
   assert.equal(provenance.unplacedEventCount, 2);
   assert.equal(provenance.rejectedEventCount, 1);
@@ -636,6 +963,7 @@ test('SPH reaction product-placement decoder partitions all routes and gas total
   assert.equal(provenance.rejectedMassKg, 0.5);
   assert.equal(provenance.gasPlacementCandidateEventCount, 3);
   assert.equal(provenance.gasPlacedEventCount, 2);
+  assert.equal(provenance.gasPlacedReactionEventCount, 2);
   assert.equal(provenance.gasMergedEventCount, 1);
   assert.equal(provenance.gasUnplacedEventCount, 1);
   assert.equal(provenance.gasRejectedEventCount, 1);
@@ -734,6 +1062,37 @@ test('resident product mass handle preserves positioned product-event records', 
   assert.deepEqual(handle.productEvents.records[0].positionM, [0.5, 1, 1]);
   assert.equal(handle.productEvents.records[0].supportVolumeM3, 4);
   assert.notEqual(handle.productEvents.records[0], reactionSummary.productEvents.records[0]);
+});
+
+test('resident product mass retirement waits for an active pre-submit borrow to drain', async () => {
+  let sourceDestroyCount = 0;
+  const reactionSummary = {
+    productEventBufferRetained: true,
+    productEventBuffer: { label: 'borrow-pinned-product-events' },
+    productEventBufferByteLength: 128,
+    productEventRowCount: 1,
+    productEvents: {
+      schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+      records: []
+    },
+    destroyProductEventBuffer() {
+      sourceDestroyCount += 1;
+    }
+  };
+  const handle = createResidentProductMassHandle(reactionSummary);
+  handle.__ulgActiveBorrowCount += 1;
+  const retirement = handle.destroyResidentProductMassBuffers();
+  assert.equal(typeof retirement?.then, 'function');
+  assert.equal(sourceDestroyCount, 0);
+  assert.equal(handle.destroyResidentProductMassBuffers(), retirement);
+
+  await Promise.resolve();
+  assert.equal(sourceDestroyCount, 0);
+  handle.__ulgActiveBorrowCount -= 1;
+  assert.equal(await retirement, true);
+  assert.equal(sourceDestroyCount, 1);
+  assert.equal(await handle.destroyResidentProductMassBuffers(), true);
+  assert.equal(sourceDestroyCount, 1);
 });
 
 test('resident product mass handle carries only classified strict reaction gates', () => {
@@ -1140,6 +1499,10 @@ test('SPH reaction host binds and reads the per-term placement accumulator witho
     write.label === 'ulg-sph-reaction-product-event-placement-params'
     && write.offset === 44
   ));
+  const placementCanonicalSpatialWrite = device.writes.find((write) => (
+    write.label === 'ulg-sph-reaction-product-event-placement-params'
+    && write.offset === 48
+  ));
   const placementCopy = device.copies.find(
     (copy) => copy.destination.label === 'ulg-sph-reaction-product-placement-readback'
   );
@@ -1153,7 +1516,7 @@ test('SPH reaction host binds and reads the per-term placement accumulator witho
   assert.equal(summary.productPlacementProvenanceReadbackByteLength, expectedPlacementByteLength);
   assert.equal(summary.productPlacementAccumulatorByteLength, expectedPlacementByteLength);
   assert.equal(summary.productPlacementReadbackCadence, 'resident-sequence-final');
-  assert.equal(placementBindGroup.entries.length, 8);
+  assert.equal(placementBindGroup.entries.length, 11);
   assert.equal(placementBindGroup.entries[5].binding, 5);
   assert.equal(
     placementBindGroup.entries[5].resource.buffer.label,
@@ -1163,12 +1526,31 @@ test('SPH reaction host binds and reads the per-term placement accumulator witho
   assert.equal(placementBindGroup.entries[6].resource.buffer.label, 'source-state');
   assert.equal(placementBindGroup.entries[7].binding, 7);
   assert.equal(placementBindGroup.entries[7].resource.buffer.label, 'source-thermo');
+  assert.equal(placementBindGroup.entries[8].binding, 8);
+  assert.equal(
+    placementBindGroup.entries[8].resource.buffer.label,
+    'ulg-sph-reaction-product-event-placement-compact-count'
+  );
+  assert.equal(placementBindGroup.entries[9].binding, 9);
+  assert.equal(
+    placementBindGroup.entries[9].resource.buffer.label,
+    'ulg-sph-reaction-product-event-placement-decisions'
+  );
+  assert.equal(placementBindGroup.entries[10].binding, 10);
+  assert.equal(
+    placementBindGroup.entries[10].resource.buffer.label,
+    'ulg-sph-reaction-product-event-placement-local-completion-receipt'
+  );
   assert.deepEqual(productTermCountWrite.values, [2]);
   assert.deepEqual(placementBoxWrite.values, [3, 4, 5]);
   assert.deepEqual(placementBoxClampWrite.values, [1]);
+  assert.deepEqual(
+    placementCanonicalSpatialWrite.values,
+    [0, 0, 0, SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION]
+  );
   assert.equal(placementCopy.size, expectedPlacementByteLength);
   assert.equal(placementCopy.source.label, 'ulg-sph-reaction-product-placement-accumulator');
-  assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [1, 1]);
+  assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [1, 1, 1]);
   assert.equal(device.copies.length, 1);
   assert.equal(
     device.copies.some((copy) => /(?:source|next)-(?:state|thermo|mechanics)/.test(copy.source.label)),

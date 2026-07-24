@@ -528,7 +528,7 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       const f32Bits = (value) => new Uint32Array(new Float32Array([value]).buffer)[0];
       const receipt = new Uint32Array(64);
       receipt[0] = 0x53505652;
-      receipt[1] = 1;
+      receipt[1] = 2;
       receipt[2] = admittedFlags;
       receipt[3] = generationId;
       receipt[4] = 5;
@@ -740,13 +740,53 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       localReadback.unmap();
       readback.destroy();
       localReadback.destroy();
+      // S9-C must reject a receipt which claims an impossible selected
+      // candidate subset even when its global scan counters remain valid.
+      const corruptSelectedReceipt = receipt.slice();
+      corruptSelectedReceipt[48] = 26;
+      device.queue.writeBuffer(fineReceipt, 0, corruptSelectedReceipt);
+      const rejectedEncoder = device.createCommandEncoder({
+        label: 'native-s9c-rejected-selected-candidate-count'
+      });
+      rejectedEncoder.clearBuffer(control);
+      rejectedEncoder.clearBuffer(localHeads);
+      rejectedEncoder.clearBuffer(refluxRoutes);
+      let rejectedPass = rejectedEncoder.beginComputePass();
+      rejectedPass.setPipeline(localPipeline);
+      rejectedPass.setBindGroup(0, bindGroup(localPipeline, [0, 1, 2, 3, 5, 7, 8]));
+      rejectedPass.dispatchWorkgroups(1);
+      rejectedPass.end();
+      rejectedPass = rejectedEncoder.beginComputePass();
+      rejectedPass.setPipeline(finalizePipeline);
+      rejectedPass.setBindGroup(0, bindGroup(finalizePipeline, [0, 1, 2, 3, 4, 7, 8]));
+      rejectedPass.dispatchWorkgroups(1);
+      rejectedPass.end();
+      const rejectedReadback = device.createBuffer({
+        size: layout.controlByteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      rejectedEncoder.copyBufferToBuffer(
+        control,
+        0,
+        rejectedReadback,
+        0,
+        layout.controlByteLength
+      );
+      device.queue.submit([rejectedEncoder.finish()]);
+      await rejectedReadback.mapAsync(GPUMapMode.READ);
+      const rejectedHeader = Array.from(
+        new Uint32Array(rejectedReadback.getMappedRange()).slice()
+      );
+      rejectedReadback.unmap();
+      rejectedReadback.destroy();
       const validationError = await device.popErrorScope();
       return {
         status: 'ok',
         validationError: validationError?.message || null,
         uncapturedErrors,
         header,
-        localRows
+        localRows,
+        rejectedHeader
       };
     });
     assert.notEqual(native.status, 'unsupported', native.reason);
@@ -758,6 +798,8 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
     assert.equal(native.header[20], 1);
     assert.equal(native.header[22], 0);
     assert.deepEqual(native.localRows, [0, 9, 2, 0, 1, 3, 0, 0]);
+    assert.notEqual(native.rejectedHeader[2], 3, JSON.stringify(native));
+    assert.ok(native.rejectedHeader[40] > 0, JSON.stringify(native));
   } finally {
     await browser.close();
   }

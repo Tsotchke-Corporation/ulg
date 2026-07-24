@@ -24,8 +24,11 @@ import {
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   buildSphReactionTable,
   compareSphReactionStepParity,
+  inspectSphReactionStoichiometryContract,
+  releaseSphReactionTransferredDestinationAfterSettledFences,
   resolveReactionParticleBinGrid,
   runSphReactionStepCpu,
+  runSphReactionStepWebGpu,
   runSphReactionStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphReactionGpuKernel.js';
 import { sphReactionStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
@@ -106,6 +109,83 @@ function packedThreeParticles() {
   };
 }
 
+function fakeReactionFailureDevice({ failAt = null } = {}) {
+  const createdBuffers = [];
+  let encoderFailed = false;
+  const createBuffer = ({ label = 'buffer', size = 4 } = {}) => {
+    const buffer = {
+      label,
+      size,
+      destroyed: false,
+      destroyCount: 0,
+      mapState: 'unmapped',
+      destroy() {
+        this.destroyed = true;
+        this.destroyCount += 1;
+      },
+      mapAsync() {
+        if (
+          failAt === 'map'
+          && label === 'ulg-sph-reaction-particle-bin-metadata-readback'
+        ) {
+          return Promise.reject(new Error('injected-reaction-map-failure'));
+        }
+        this.mapState = 'mapped';
+        return Promise.resolve();
+      },
+      getMappedRange() {
+        return new ArrayBuffer(size);
+      },
+      unmap() {
+        this.mapState = 'unmapped';
+      }
+    };
+    createdBuffers.push(buffer);
+    return buffer;
+  };
+  const pass = {
+    setPipeline() {},
+    setBindGroup() {},
+    dispatchWorkgroups() {},
+    end() {}
+  };
+  const device = {
+    createdBuffers,
+    limits: {
+      maxBufferSize: 1 << 28,
+      maxStorageBufferBindingSize: 1 << 28
+    },
+    queue: {
+      writeBuffer() {},
+      submit() {},
+      onSubmittedWorkDone() { return Promise.resolve(true); }
+    },
+    createBuffer,
+    createShaderModule() { return {}; },
+    createBindGroupLayout() { return {}; },
+    createPipelineLayout() { return {}; },
+    createComputePipeline() {
+      if (failAt === 'pipeline') {
+        throw new Error('injected-reaction-pipeline-failure');
+      }
+      return { getBindGroupLayout() { return {}; } };
+    },
+    createBindGroup() { return {}; },
+    createCommandEncoder() {
+      if (failAt === 'encoder' && !encoderFailed) {
+        encoderFailed = true;
+        throw new Error('injected-reaction-encoder-failure');
+      }
+      return {
+        beginComputePass() { return pass; },
+        copyBufferToBuffer() {},
+        finish() { return {}; }
+      };
+    }
+  };
+  return device;
+}
+
 function reactionTable() {
   return buildSphReactionTable([{
     a: 'a',
@@ -118,6 +198,75 @@ function reactionTable() {
     materialProperties,
     contactRadiusM: 0.1
   });
+}
+
+function productionShapedCsfFixture() {
+  const properties = {
+    F: {
+      formula: 'F2',
+      molarMassKgPerMol: 0.037996,
+      phases: [{
+        name: 'gas',
+        temperatureRange: [0, 3000],
+        cpJPerKgK: 824,
+        densityKgPerM3: 1.7,
+        bulkModulusPa: 1e5,
+        shearModulusPa: 0
+      }],
+      transitions: []
+    },
+    // This formula-key placeholder mirrors the incomplete alias mounted in
+    // production. It must not shadow the selected live F carrier above.
+    f2: { formula: 'F2' },
+    // The mounted view can retain an incomplete display-key row while its
+    // derived closure is available under a case-normalized alias. Carrier
+    // identity stays `Cs`; readiness must come from the complete same-ID row.
+    Cs: { formula: 'Cs' },
+    cs: {
+      molarMassKgPerMol: 0.13291,
+      phases: [{
+        name: 'solid',
+        temperatureRange: [0, 3000],
+        cpJPerKgK: 242,
+        densityKgPerM3: 1873,
+        bulkModulusPa: 1.6e9,
+        shearModulusPa: 0.6e9
+      }],
+      transitions: []
+    },
+    csf: {
+      formula: 'CsF',
+      molarMassKgPerMol: 0.170906,
+      phases: [{
+        name: 'solid',
+        temperatureRange: [0, 3000],
+        cpJPerKgK: 400,
+        densityKgPerM3: 4100,
+        bulkModulusPa: 2e10,
+        shearModulusPa: 8e9
+      }],
+      transitions: []
+    }
+  };
+  const reaction = {
+    a: 'Cs',
+    b: 'F',
+    product: 'csf',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      equation: '2 Cs + F2 -> 2 CsF',
+      atomBalance: { balanced: true },
+      reactants: [
+        { coefficient: 2, formula: 'Cs' },
+        { coefficient: 1, formula: 'F2' }
+      ],
+      products: [
+        { coefficient: 2, formula: 'CsF', material: 'csf' }
+      ]
+    }
+  };
+  return { properties, reaction };
 }
 
 function multiProductReactionTable() {
@@ -171,6 +320,22 @@ test('SPH reaction table packs derived reaction and product phase mechanics rows
   assert.equal(table.chemistryValidation, false);
 });
 
+test('SPH reaction table rejects ambiguous same-material binary roles', () => {
+  const table = buildSphReactionTable([{
+    a: 'a',
+    b: 'a',
+    product: 'ab',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000
+  }], {
+    materialProperties,
+    contactRadiusM: 0.1
+  });
+
+  assert.notEqual(table.records[8], 1);
+  assert.notEqual(table.metadata[0].status, 1);
+});
+
 test('SPH reaction table packs balanced reactant/product/gas term rows', () => {
   const table = buildSphReactionTable([{
     a: 'a',
@@ -220,6 +385,43 @@ test('SPH reaction table packs balanced reactant/product/gas term rows', () => {
   assert.equal(table.gasProductRecords[3], 1);
   assert.equal(table.metadata[0].productTerms.map((term) => term.material).join(','), 'ab,c2');
   assert.equal(table.metadata[0].gasProductTerms[0].material, 'c2');
+});
+
+test('SPH reaction table preserves live carrier IDs while resolving complete same-ID properties', () => {
+  const { properties, reaction } = productionShapedCsfFixture();
+  const table = buildSphReactionTable([reaction], {
+    materialProperties: properties,
+    contactRadiusM: 0.1
+  });
+  const fluorineOffset = 12;
+
+  assert.equal(table.records[0], stableOpticalMaterialId('Cs'));
+  assert.equal(table.records[1], stableOpticalMaterialId('F'));
+  assert.equal(table.reactantTermRecords[1], stableOpticalMaterialId('Cs'));
+  assert.ok(Math.abs(
+    table.reactantTermRecords[3] - properties.cs.molarMassKgPerMol
+  ) < 1e-8);
+  assert.equal(table.reactantTermRecords[10], 1);
+  assert.equal(
+    table.reactantTermRecords[fluorineOffset + 1],
+    stableOpticalMaterialId('F')
+  );
+  assert.notEqual(
+    table.reactantTermRecords[fluorineOffset + 1],
+    stableOpticalMaterialId('f2')
+  );
+  assert.ok(Math.abs(
+    table.reactantTermRecords[fluorineOffset + 3]
+      - properties.F.molarMassKgPerMol
+  ) < 1e-8);
+  assert.equal(table.reactantTermRecords[fluorineOffset + 10], 1);
+  assert.equal(table.reactantTermMetadata[1].material, 'F');
+  assert.equal(table.reactantTermMetadata[1].role, 'b');
+
+  const diagnostic = inspectSphReactionStoichiometryContract(table);
+  assert.equal(diagnostic.status, 'extended-stoichiometry-ready');
+  assert.equal(diagnostic.failClosed, false);
+  assert.equal(diagnostic.invalidReactionCount, 0);
 });
 
 test('SPH reaction table routes only gas-only or explicitly gas product terms to gas ledger', () => {
@@ -473,6 +675,65 @@ test('SPH reaction product placement receives simulation-domain dimensions, not 
   );
 });
 
+test('SPH reaction product placement borrows the canonical directory and publishes only placed destinations', () => {
+  assert.match(
+    sphReactionGpuKernelSource,
+    /createSphReactionResolvePositionInvariantCertificate\(\{[\s\S]*?ancestorGeneration:\s*schroederSpatialEpochGeneration,[\s\S]*?frozenResolvedStateBuffer:\s*outStateBuffer/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /reactionPlacementEpochRunner\(\{[\s\S]*?frozenSourceStateBuffer:\s*outStateBuffer,[\s\S]*?frozenSourceThermoBuffer:\s*outThermoBuffer,[\s\S]*?frozenSourceMechanicsBuffer:\s*outMechanicsBuffer/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /continuationStateBuffer\s*=\s*[\s\S]*?reactionPlacementSourceFamily\.placedDestinationStateBuffer/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /createSchroederSpatialReactionProductPlacementAuthorityWebGpu\(\{[\s\S]*?placementSourceFamily:\s*reactionPlacementSourceFamily/
+  );
+  assert.doesNotMatch(
+    sphReactionGpuKernelSource,
+    /createSchroederSpatialReactionProductPlacementAuthorityWebGpu\(\{[\s\S]{0,500}?generation:\s*schroederSpatialEpochGeneration/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /nextStateBuffer:\s*continuationStateBuffer,[\s\S]*?nextThermoBuffer:\s*continuationThermoBuffer,[\s\S]*?nextMechanicsBuffer:\s*continuationMechanicsBuffer/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /const\s+placementArtifact\s*=\s*reactionSummary\?\.reactionProductPlacementSubmissionArtifact\s*\?\?\s*null/
+  );
+  assert.doesNotMatch(
+    sphReactionGpuKernelSource,
+    /const\s+placementArtifact\s*=[\s\S]{0,300}?reactionProductPlacementArtifact/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue\([\s\S]*?transferSchroederSpatialReactionPlacementDestinationOwnership/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /destroyRetainedOutputParticleBuffers[\s\S]*?preserveResidentProductMass\s*=\s*false/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /residentProductMassSettlement[\s\S]*?onSubmittedWorkDone[\s\S]*?releaseSphReactionTransferredDestinationAfterSettledFences/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /if\s*\(reactionPlacementSourceFamily\)[\s\S]*?reactionPlacementDestinationOwnershipTransferred[\s\S]*?releaseSphReactionTransferredDestinationAfterSettledFences[\s\S]*?else if[\s\S]*?reactionWarmArenaLease[\s\S]*?!reactionWarmArenaReleaseOwnedByOutput[\s\S]*?reactionWarmArenaReleaseRunner/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /if\s*\(reactionPlacementSourceFamily\s*&&\s*!retainOutputParticleBuffers\)[\s\S]*?releaseSphReactionTransferredDestinationAfterSettledFences/
+  );
+  assert.doesNotMatch(
+    sphReactionGpuKernelSource,
+    /if\s*\(\s*reactionWarmArenaLease\s*&&\s*reactionPlacementSourceFamily\s*&&\s*!retainOutputParticleBuffers/
+  );
+});
+
 test('SPH reaction WGSL preserves visual particle radius while resolving product thermo rows', () => {
   assert.match(sphReactionStepWgsl, /vec4<f32>\(source_row2\.x,\s*source_row2\.y,\s*255\.0,\s*source_row2\.w\)/);
   assert.match(sphReactionStepWgsl, /vec4<f32>\(source_row2\.x,\s*source_row2\.y,\s*1\.0,\s*source_row2\.w\)/);
@@ -572,6 +833,178 @@ test('SPH reaction CPU reference preserves excess reactant and ledgers unplaced 
   assert.ok(Math.abs(result.reactionLedger.gasMassKgByMaterial.c2 - 0.375) < 1e-6);
   assert.ok(Math.abs(result.reactionLedger.unplacedProductMassKgByMaterial.c2 - 0.375) < 1e-6);
   assert.ok(Math.abs(result.reactionLedger.visibleProductMassKgByMaterial.ab - 5.625) < 1e-6);
+});
+
+test('SPH reaction unequal-mass stoichiometry retains excess reactant and conserves total mass', () => {
+  const { properties: csfProperties, reaction } =
+    productionShapedCsfFixture();
+  const packed = packedThreeParticles();
+  const fluorineMassKg = 1.579538;
+  const cesiumMassKg = 155.911697;
+  packed.sphParticleState.state[3] = cesiumMassKg;
+  packed.sphParticleState.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3] =
+    fluorineMassKg;
+  packed.sphParticleState.thermo[0] = stableOpticalMaterialId('Cs');
+  packed.sphParticleState.thermo[1] = GPU_PHASE_IDS.solid;
+  packed.sphParticleState.thermo[3] = 1873;
+  packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS] =
+    stableOpticalMaterialId('F');
+  packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 1] =
+    GPU_PHASE_IDS.gas;
+  packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 3] = 1.7;
+  const table = buildSphReactionTable([reaction], {
+    materialProperties: csfProperties,
+    contactRadiusM: 0.1
+  });
+  const result = runSphReactionStepCpu({
+    ...packed,
+    reactionTable: table,
+    thermalMaterialTable: buildSphThermalMaterialTable({
+      F: csfProperties.F,
+      Cs: csfProperties.cs,
+      csf: csfProperties.csf
+    })
+  });
+
+  const extentMol = fluorineMassKg / csfProperties.F.molarMassKgPerMol;
+  const expectedCesiumConsumedKg = extentMol
+    * 2
+    * csfProperties.cs.molarMassKgPerMol;
+  const expectedCesiumRemainingKg = cesiumMassKg - expectedCesiumConsumedKg;
+  const expectedProductMassKg = fluorineMassKg + expectedCesiumConsumedKg;
+  const initialMassKg = Array.from({ length: 3 }, (_, index) => (
+    packed.sphParticleState.state[index * SPH_GPU_PARTICLE_STATE_FLOATS + 3]
+  )).reduce((sum, value) => sum + value, 0);
+  const finalMassKg = Array.from({ length: 3 }, (_, index) => (
+    result.state[index * SPH_GPU_PARTICLE_STATE_FLOATS + 3]
+  )).reduce((sum, value) => sum + value, 0);
+
+  assert.equal(result.eventCount, 1);
+  assert.equal(result.conversionCount, 1);
+  assert.equal(result.thermo[0], stableOpticalMaterialId('Cs'));
+  assert.equal(
+    result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS],
+    stableOpticalMaterialId('csf')
+  );
+  assert.ok(Math.abs(result.state[3] - expectedCesiumRemainingKg) < 2e-5);
+  assert.ok(Math.abs(
+    result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3]
+      - expectedProductMassKg
+  ) < 2e-5);
+  assert.ok(Math.abs(finalMassKg - initialMassKg) < 2e-5);
+  assert.equal(
+    result.reactionStoichiometryDiagnosticStatus,
+    'extended-stoichiometry-ready'
+  );
+  assert.equal(result.reactionStoichiometryInvalidReactionCount, 0);
+  assert.equal(result.stoichiometryFailClosedPairCount, 0);
+});
+
+test('SPH reaction current-schema corrupt and missing terms fail closed without mutating parents', () => {
+  const source = reactionTable();
+  const cloneTable = () => ({
+    ...source,
+    records: new Float32Array(source.records),
+    productPhaseRecords: new Float32Array(source.productPhaseRecords),
+    reactionHeaders: new Float32Array(source.reactionHeaders),
+    reactantTermRecords: new Float32Array(source.reactantTermRecords),
+    productTermRecords: new Float32Array(source.productTermRecords),
+    combinedRecords: new Float32Array(source.combinedRecords)
+  });
+  const combinedHeaderOffset = source.records.length
+    + source.productPhaseRecords.length;
+  const combinedReactantOffset = combinedHeaderOffset
+    + source.reactionHeaders.length;
+  const cases = [
+    {
+      name: 'corrupt combined upload term status',
+      prepare(table) {
+        table.combinedRecords[combinedReactantOffset + 10] = 255;
+      },
+      reason: 'reactant-term-prefix-mismatch'
+    },
+    {
+      name: 'missing second reactant term in header',
+      prepare(table) {
+        table.reactionHeaders[2] = 1;
+        table.combinedRecords[combinedHeaderOffset + 2] = 1;
+      },
+      reason: 'binary-reactant-term-range-invalid'
+    }
+  ];
+
+  for (const fixture of cases) {
+    const table = cloneTable();
+    fixture.prepare(table);
+    const diagnostic = inspectSphReactionStoichiometryContract(table);
+    const packed = packedThreeParticles();
+    const result = runSphReactionStepCpu({
+      ...packed,
+      reactionTable: table,
+      thermalMaterialTable: buildSphThermalMaterialTable(materialProperties)
+    });
+
+    assert.equal(diagnostic.status,
+      'extended-stoichiometry-invalid-fail-closed', fixture.name);
+    assert.ok(diagnostic.reactions[0].reasons.includes(fixture.reason),
+      fixture.name);
+    assert.deepEqual(Array.from(result.state),
+      Array.from(packed.sphParticleState.state), fixture.name);
+    assert.deepEqual(Array.from(result.thermo),
+      Array.from(packed.sphParticleState.thermo), fixture.name);
+    assert.deepEqual(Array.from(result.mechanics),
+      Array.from(packed.mlsMpmParticleState.mechanics), fixture.name);
+    assert.equal(result.eventCount, 0, fixture.name);
+    assert.equal(result.conversionCount, 0, fixture.name);
+    assert.equal(result.reactionLedger, null, fixture.name);
+    assert.equal(result.reactionStoichiometryInvalidReactionCount, 1,
+      fixture.name);
+    assert.equal(result.stoichiometryFailClosedPairCount, 1, fixture.name);
+  }
+});
+
+test('SPH reaction whole-parent conversion remains available only for a distinguishable legacy table', () => {
+  const source = reactionTable();
+  const legacyTable = {
+    ...source,
+    reactionHeaderCount: 0,
+    reactantTermCount: 0,
+    productTermCount: 0,
+    gasProductCount: 0,
+    reactionHeaders: new Float32Array(),
+    reactantTermRecords: new Float32Array(),
+    productTermRecords: new Float32Array(),
+    gasProductRecords: new Float32Array(),
+    atomTermRecords: new Float32Array(),
+    combinedRecords: new Float32Array([
+      ...source.records,
+      ...source.productPhaseRecords
+    ])
+  };
+  legacyTable.combinedRecordCount = legacyTable.combinedRecords.length / 4;
+  const packed = packedThreeParticles();
+  const result = runSphReactionStepCpu({
+    ...packed,
+    reactionTable: legacyTable,
+    thermalMaterialTable: buildSphThermalMaterialTable(materialProperties)
+  });
+
+  assert.equal(result.reactionStoichiometryTableMode, 'legacy-whole-particle');
+  assert.equal(
+    result.reactionStoichiometryDiagnosticStatus,
+    'legacy-whole-particle-schema-admitted'
+  );
+  assert.equal(result.conversionCount, 2);
+  assert.equal(result.thermo[0], stableOpticalMaterialId('ab'));
+  assert.equal(
+    result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS],
+    stableOpticalMaterialId('ab')
+  );
+  assert.equal(result.state[3], packed.sphParticleState.state[3]);
+  assert.equal(
+    result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3],
+    packed.sphParticleState.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3]
+  );
 });
 
 test('SPH reaction CPU step resolves product phase state from thermal graph response artifacts', () => {
@@ -767,6 +1200,144 @@ test('SPH reaction optional WebGPU forwards a Schroeder law queue into the runne
   );
 });
 
+test('SPH reaction setup, encoder, and map failures drain every non-borrowed local resource', async () => {
+  for (const failAt of ['pipeline', 'encoder', 'map']) {
+    const packed = packedThreeParticles();
+    const device = fakeReactionFailureDevice({ failAt });
+    let failure = null;
+    try {
+      await runSphReactionStepWebGpu({
+        ...packed,
+        device,
+        reactionTable: reactionTable(),
+        thermalMaterialTable:
+          buildSphThermalMaterialTable(materialProperties),
+        readbackMode: 'no-full-readback',
+        reactionParticleBinMetadataReadback: failAt === 'map'
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    assert.match(
+      failure?.message || '',
+      new RegExp(`injected-reaction-${failAt}-failure`)
+    );
+    assert.equal(await failure.reactionResourceCleanupCompletion, true);
+    assert.ok(device.createdBuffers.length > 0);
+    assert.ok(
+      device.createdBuffers.every((buffer) => buffer.destroyCount === 1),
+      `${failAt} left a local reaction buffer live`
+    );
+  }
+});
+
+test('SPH reaction pipeline failure returns a warm arena lease before retry', async () => {
+  const packed = packedThreeParticles();
+  const device = fakeReactionFailureDevice({ failAt: 'pipeline' });
+  const warmBuffers = Object.fromEntries([
+    'packedSource',
+    'fallbackState',
+    'fallbackThermo',
+    'fallbackMechanics',
+    'packedOutput',
+    'resolvedState',
+    'resolvedThermo',
+    'resolvedMechanics',
+    'reactionParams',
+    'productEvent'
+  ].map((name) => [name, device.createBuffer({
+    label: `warm-${name}`,
+    size: 1 << 16
+  })]));
+  const arena = {
+    schema: 'test-reaction-warm-arena',
+    capacityKey: 'test-capacity',
+    slotIndex: 0,
+    buffers: warmBuffers
+  };
+  const borrowedReactionRecordBuffer = device.createBuffer({
+    label: 'borrowed-canonical-reaction-records',
+    size: 4096
+  });
+  const borrowedProposalBuffer = device.createBuffer({
+    label: 'borrowed-canonical-reaction-proposals',
+    size: 4096
+  });
+  let leased = false;
+  let acquireCount = 0;
+  let releaseCount = 0;
+  const acquire = async () => {
+    assert.equal(leased, false, 'warm arena was not returned before retry');
+    leased = true;
+    acquireCount += 1;
+    return { arena, warmReuse: acquireCount > 1, bufferCreationCount: 0 };
+  };
+  const release = (_lease, { completionFence }) => Promise.resolve(
+    completionFence
+  ).then(() => {
+    assert.equal(leased, true);
+    leased = false;
+    releaseCount += 1;
+    return true;
+  });
+  const canonicalResolver = () => ({
+    admitted: true,
+    status: 'canonical-spatial-reaction-discovery-admitted',
+    generationId: 'test-generation',
+    epochIdentity: { positionEpoch: 1 },
+    reactionRecordBuffer: borrowedReactionRecordBuffer,
+    proposalBuffer: borrowedProposalBuffer,
+    receipt: {
+      consumerId: 'test-consumer',
+      supportProfileId: 'test-support',
+      traversalCount: 1
+    }
+  });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let failure = null;
+    try {
+      await runSphReactionStepWebGpu({
+        ...packed,
+        device,
+        reactionTable: reactionTable(),
+        thermalMaterialTable:
+          buildSphThermalMaterialTable(materialProperties),
+        readbackMode: 'no-full-readback',
+        schroederSpatialEpochGeneration: {},
+        schroederSpatialReactionDiscoveryProposal: {},
+        canonicalReactionDiscoveryResolver: canonicalResolver,
+        reactionWarmArenaAcquireRunner: acquire,
+        reactionWarmArenaResolveRunner: () => arena,
+        reactionWarmArenaReleaseRunner: release
+      });
+    } catch (error) {
+      failure = error;
+    }
+    assert.match(
+      failure?.message || '',
+      /injected-reaction-pipeline-failure/
+    );
+    await failure.reactionResourceCleanupCompletion;
+    assert.equal(leased, false);
+  }
+
+  assert.equal(acquireCount, 2);
+  assert.equal(releaseCount, 2);
+  assert.ok(
+    device.createdBuffers
+      .filter((buffer) => !buffer.label.startsWith('warm-')
+        && !buffer.label.startsWith('borrowed-canonical-'))
+      .every((buffer) => buffer.destroyCount === 1)
+  );
+  assert.ok(Object.values(warmBuffers).every(
+    (buffer) => buffer.destroyCount === 0
+  ));
+  assert.equal(borrowedReactionRecordBuffer.destroyCount, 0);
+  assert.equal(borrowedProposalBuffer.destroyCount, 0);
+});
+
 test('SPH reaction parity rejects reaction output drift', () => {
   const packed = packedThreeParticles();
   const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
@@ -791,4 +1362,58 @@ test('SPH reaction parity rejects reaction output drift', () => {
   assert.equal(parity.status, 'fail');
   assert.ok(parity.maxThermoAbs > 0);
   assert.ok(parity.maxMechanicsAbs > 1);
+});
+
+test('SPH non-warm destination fallback waits all settled fences and retires exactly once', async () => {
+  let resolveQueue;
+  const queueFence = new Promise((resolve) => {
+    resolveQueue = resolve;
+  });
+  const destroyed = [];
+  const destination = (label) => ({
+    label,
+    destroy() { destroyed.push(label); }
+  });
+  const sourceFamily = {
+    placedDestinationStateBuffer: destination('state'),
+    placedDestinationThermoBuffer: destination('thermo'),
+    placedDestinationMechanicsBuffer: destination('mechanics')
+  };
+  let ownerReleaseCount = 0;
+  const releaseRunner = () => {
+    ownerReleaseCount += 1;
+    return Promise.reject(new Error('injected-source-release-failure'));
+  };
+  const completion =
+    releaseSphReactionTransferredDestinationAfterSettledFences({
+      device: {
+        queue: { onSubmittedWorkDone: () => queueFence }
+      },
+      sourceFamily,
+      completionFence: Promise.reject(
+        new Error('injected-downstream-release-failure')
+      ),
+      settlementFences: [queueFence],
+      releaseRunner
+    });
+  const replay =
+    releaseSphReactionTransferredDestinationAfterSettledFences({
+      device: {
+        queue: { onSubmittedWorkDone: () => Promise.resolve() }
+      },
+      sourceFamily,
+      releaseRunner
+    });
+
+  assert.equal(replay, completion);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(destroyed, []);
+  assert.equal(ownerReleaseCount, 1);
+
+  resolveQueue(true);
+  assert.equal(await completion, false);
+  assert.deepEqual(destroyed.sort(), ['mechanics', 'state', 'thermo']);
+  assert.equal(ownerReleaseCount, 1);
+  assert.equal(await replay, false);
+  assert.equal(destroyed.length, 3);
 });

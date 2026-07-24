@@ -108,6 +108,10 @@ struct PhaseVolumeReceiptParams {
 @group(0) @binding(4) var<storage, read_write> partials: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> receipt_control: array<atomic<u32>>;
 @group(0) @binding(6) var<uniform> params: PhaseVolumeReceiptParams;
+// This is the exact S9-A level-assignment parent.  S9-B scans the complete
+// source family but only sums rows which this immutable assignment and the
+// mechanics-field descriptor jointly select for the current level.
+@group(0) @binding(7) var<storage, read> source_assignments: array<f32>;
 
 const RECEIPT_MAGIC: u32 = ${u32(SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_MAGIC)};
 const RECEIPT_VERSION: u32 = ${u32(SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_VERSION)};
@@ -144,14 +148,26 @@ const MOMENT_HEADER_WORDS: u32 = 64u;
 const MOMENT_ROW_WORDS: u32 = 12u;
 const FIELD_HEADER_WORDS: u32 = 64u;
 const FIELD_KEY_WORDS: u32 = 4u;
+const FIELD_DESCRIPTOR_WORDS: u32 = 32u;
+const FIELD_DESCRIPTOR_ACTIVE_WORD: u32 = 3u;
+const FIELD_STENCIL_SIZE: u32 = 27u;
 const MECHANICS_STRIDE: u32 = 32u;
+const ASSIGNMENT_STRIDE: u32 = 16u;
 const RAW_VOLUME_RATIO_J_WORD: u32 = 18u;
 const RAW_REST_VOLUME_WORD: u32 = 19u;
 const F32_EPSILON: f32 = 0.00000011920928955078125;
 const F32_MIN_NORMAL: f32 = 0.0000000000000000000000000000000000000117549435;
+// Keep every f32-to-integer conversion inside its defined destination range.
+// The upper i32 limit is exclusive because 2147483647 cannot be represented
+// exactly as f32; its next representable value is 2147483648.
+const F32_I32_MIN: f32 = -2147483648.0;
+const F32_I32_EXCLUSIVE_MAX: f32 = 2147483648.0;
+const F32_EXACT_U24_MAX: f32 = 16777215.0;
+const F32_U8_MAX: f32 = 255.0;
 
 const CONTROL_INVALID_SOURCE: u32 = 41u;
 const CONTROL_INVALID_FIELD: u32 = 42u;
+const CONTROL_SELECTED_SOURCE_COUNT: u32 = 47u;
 const CONTROL_FIELD_CONTRIBUTIONS: u32 = 48u;
 
 var<workgroup> source_sums: array<vec4<f32>, ${SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE}>;
@@ -160,6 +176,10 @@ var<workgroup> condition_sums: array<vec4<f32>, ${SCHROEDER_SPATIAL_PHASE_VOLUME
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
+}
+
+fn integral_f32(value: f32) -> bool {
+  return finite_f32(value) && value == round(value);
 }
 
 fn group_count(count: u32) -> u32 {
@@ -237,8 +257,16 @@ fn moment_header_admitted() -> bool {
     && moment_control[37u] == 0u
     && moment_control[38u] == 0u
     && moment_control[39u] == 0u
-    && moment_control[40u] == params.candidate_count
-    && moment_control[41u] == 0u
+    // S9-A scans the full source family, but it records only the exact
+    // selected-level candidates here.  A mixed-level family therefore has a
+    // smaller valid contribution count than its global scan capacity.
+    && moment_control[40u] > 0u
+    && moment_control[40u] <= params.candidate_count
+    && moment_control[40u] % FIELD_STENCIL_SIZE == 0u
+    // The S9-A reducer dispatches its retained capacity.  Every unused
+    // field-capacity row is deliberately zeroed, so this is an expected
+    // capacity tail rather than evidence of a rejected active field.
+    && moment_control[41u] == params.field_capacity - moment_control[18u]
     && moment_control[42u] == 0u
     && moment_control[43u] == 0u
     && moment_control[44u] == 1u
@@ -402,27 +430,102 @@ fn reduce_phase_volume_receipt_sources(
   let source_index = global_id.x;
   var local_sum = vec4<f32>(0.0);
   if (source_index < params.source_count && phase_volume_headers_admitted()) {
-    let row = source_index * MECHANICS_STRIDE;
+    let mechanics_row = source_index * MECHANICS_STRIDE;
+    let assignment_row = source_index * ASSIGNMENT_STRIDE;
+    let descriptor_base = mechanics_field[24u];
     if (
-      row > arrayLength(&source_mechanics)
-      || MECHANICS_STRIDE > arrayLength(&source_mechanics) - row
+      mechanics_row > arrayLength(&source_mechanics)
+      || MECHANICS_STRIDE > arrayLength(&source_mechanics) - mechanics_row
+      || assignment_row > arrayLength(&source_assignments)
+      || ASSIGNMENT_STRIDE > arrayLength(&source_assignments) - assignment_row
+      || descriptor_base > arrayLength(&mechanics_field)
+      || FIELD_DESCRIPTOR_WORDS > arrayLength(&mechanics_field) - descriptor_base
+      || source_index >= (arrayLength(&mechanics_field) - descriptor_base) / FIELD_DESCRIPTOR_WORDS
     ) {
       atomicAdd(&receipt_control[CONTROL_INVALID_SOURCE], 1u);
     } else {
-      let volume_ratio_j = source_mechanics[row + RAW_VOLUME_RATIO_J_WORD];
-      let rest_volume = source_mechanics[row + RAW_REST_VOLUME_WORD];
-      let current_volume = rest_volume * volume_ratio_j;
+      let descriptor = descriptor_base + source_index * FIELD_DESCRIPTOR_WORDS;
+      let level = source_assignments[assignment_row + 0u];
+      let spacing = source_assignments[assignment_row + 1u];
+      let mass = source_assignments[assignment_row + 6u];
+      let family = source_assignments[assignment_row + 8u];
+      let material = source_assignments[assignment_row + 9u];
+      let source_status = source_assignments[assignment_row + 10u];
+      let descriptor_status = mechanics_field[descriptor + FIELD_DESCRIPTOR_ACTIVE_WORD];
+      let level_admitted = integral_f32(level)
+        && level >= F32_I32_MIN
+        && level < F32_I32_EXCLUSIVE_MAX;
       if (
-        !finite_f32(volume_ratio_j)
-        || !finite_f32(rest_volume)
-        || !finite_f32(current_volume)
-        || !(volume_ratio_j > 0.0)
-        || !(rest_volume > 0.0)
-        || !(current_volume > 0.0)
+        !level_admitted
+        || !finite_f32(mass)
+        || mass < 0.0
+        || (descriptor_status != 0u && descriptor_status != 1u)
       ) {
         atomicAdd(&receipt_control[CONTROL_INVALID_SOURCE], 1u);
+      } else if (i32(round(level)) != params.selected_level) {
+        // An off-level source must not have been selected by this exact
+        // mechanics field.  Its V0*J is intentionally excluded.
+        if (descriptor_status != 0u) {
+          atomicAdd(&receipt_control[44u], 1u);
+        }
+      } else if (mass == 0.0) {
+        // Fixed-capacity dormant rows are permitted only when their field
+        // descriptor agrees that they contribute no selected stencil.
+        if (descriptor_status != 0u) {
+          atomicAdd(&receipt_control[44u], 1u);
+        }
       } else {
-        local_sum.x = current_volume;
+        let family_admitted = integral_f32(family)
+          && family >= 1.0
+          && family <= F32_EXACT_U24_MAX;
+        let material_admitted = integral_f32(material)
+          && material >= 1.0
+          && material <= F32_EXACT_U24_MAX;
+        let source_status_admitted = integral_f32(source_status)
+          && source_status >= 0.0
+          && source_status <= F32_U8_MAX;
+        if (
+          !family_admitted
+          || !material_admitted
+          || !source_status_admitted
+        ) {
+          // Do not convert malformed f32 metadata to u32: WGSL does not
+          // define that conversion outside the destination range.
+          atomicAdd(&receipt_control[CONTROL_INVALID_SOURCE], 1u);
+        } else {
+          let admitted_status = u32(round(source_status));
+          let status_admitted = (admitted_status & 31u) != 0u
+            && (admitted_status & 64u) == 0u
+            && (admitted_status & 128u) == 0u;
+          if (
+            !status_admitted
+            || !finite_f32(spacing)
+            || !(spacing > 0.0)
+            || bitcast<u32>(spacing) != bitcast<u32>(params.grid_spacing_m)
+            || descriptor_status != 1u
+            || mechanics_field[descriptor + 0u] != u32(round(family))
+            || mechanics_field[descriptor + 1u] != u32(round(material))
+          ) {
+            atomicAdd(&receipt_control[44u], 1u);
+          } else {
+            let volume_ratio_j = source_mechanics[mechanics_row + RAW_VOLUME_RATIO_J_WORD];
+            let rest_volume = source_mechanics[mechanics_row + RAW_REST_VOLUME_WORD];
+            let current_volume = rest_volume * volume_ratio_j;
+            if (
+              !finite_f32(volume_ratio_j)
+              || !finite_f32(rest_volume)
+              || !finite_f32(current_volume)
+              || !(volume_ratio_j > 0.0)
+              || !(rest_volume > 0.0)
+              || !(current_volume > 0.0)
+            ) {
+              atomicAdd(&receipt_control[CONTROL_INVALID_SOURCE], 1u);
+            } else {
+              atomicAdd(&receipt_control[CONTROL_SELECTED_SOURCE_COUNT], 1u);
+              local_sum.x = current_volume;
+            }
+          }
+        }
       }
     }
   } else if (source_index < params.source_count) {
@@ -558,6 +661,7 @@ fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u3
   let gradient_norm = length(field_gradient);
   let invalid_source_count = control_load(CONTROL_INVALID_SOURCE);
   let invalid_field_count = control_load(CONTROL_INVALID_FIELD);
+  let selected_source_count = control_load(CONTROL_SELECTED_SOURCE_COUNT);
   let field_contribution_count = control_load(CONTROL_FIELD_CONTRIBUTIONS);
   let identity_mismatch_count = control_load(44u);
   let moment_ok = moment_header_admitted();
@@ -570,10 +674,17 @@ fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u3
     1u,
     (moment_status & MOMENT_CAPACITY_OVERFLOW) != 0u
   );
+  let selected_candidate_count = selected_source_count * FIELD_STENCIL_SIZE;
+  let moment_selected_candidate_count = moment_control_word(40u);
   let count_ok = source_group_count <= params.source_group_capacity
     && field_group_count <= params.field_group_capacity
     && params.field_conditioning_offset_vec4 + field_group_count <= params.partial_vec4_capacity
-    && field_contribution_count == params.candidate_count;
+    && selected_source_count > 0u
+    && selected_source_count <= params.source_count
+    && selected_source_count <= 0xffffffffu / FIELD_STENCIL_SIZE
+    && selected_candidate_count <= params.candidate_count
+    && selected_candidate_count == moment_selected_candidate_count
+    && field_contribution_count == selected_candidate_count;
   let finite_totals = finite_f32(source_total)
     && finite_f32(field_total)
     && finite_f32(volume_residual)
@@ -674,8 +785,11 @@ fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u3
   control_store(44u, identity_mismatch_count);
   control_store(45u, moment_clipped);
   control_store(46u, moment_overflow);
-  control_store(47u, select(0u, params.source_count, invalid_source_count == 0u));
-  control_store(48u, field_contribution_count);
+  // v2 keeps global scan totals at words 16/20 and seals the exact selected
+  // subset here.  This avoids reinterpreting a two-level field as though all
+  // members of its global source family had contributed to it.
+  control_store(47u, selected_source_count);
+  control_store(48u, selected_candidate_count);
   control_store(49u, MECHANICS_STRIDE);
   control_store(50u, RAW_VOLUME_RATIO_J_WORD);
   control_store(51u, RAW_REST_VOLUME_WORD);

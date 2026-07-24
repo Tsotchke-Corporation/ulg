@@ -48,11 +48,27 @@ import {
 } from './sphThermalGpuKernel.js';
 import {
   createResidentProductMassHandle,
-  runSphReactionSummaryWebGpu
+  runSphReactionSummaryWebGpu,
+  SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+  SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
 } from './sphReactionGpuSummary.js';
 import {
   resolveSchroederSpatialReactionDiscoveryProposalForConsumer
 } from './schroederSpatialReactionDiscoveryProposalGpu.js';
+import {
+  createSchroederSpatialReactionProductPlacementAuthorityWebGpu
+} from './schroederSpatialReactionProductPlacementGpu.js';
+import {
+  acquireSphReactionWarmArenaWithBackpressureWebGpu,
+  createSphReactionResolvePositionInvariantCertificate,
+  finalizeSchroederSpatialReactionPlacementPositionEpochFloor,
+  releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue,
+  releaseSphReactionWarmArenaAfterQueue,
+  releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue,
+  resolveSphReactionWarmArenaLease,
+  runSchroederSpatialReactionPlacementEpochWebGpu,
+  transferSchroederSpatialReactionPlacementDestinationOwnership
+} from './schroederSpatialReactionPlacementEpochGpu.js';
 
 export {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
@@ -84,6 +100,9 @@ const REACTION_PRODUCT_ROUTING = Object.freeze({ condensed: 0, gas: 1 });
 const REACTION_PRESSURE_ROUTING = Object.freeze({ sealedBoxGasInventory: 1 });
 const REACTION_ROLE_IDS = Object.freeze({ a: 1, b: 2, other: 3 });
 const REACTION_ATOM_TERM_KIND_IDS = Object.freeze({ reactant: 1, product: 2 });
+const REACTION_STOICHIOMETRY_DIAGNOSTIC_SCHEMA =
+  'peercompute.ulg.sph-gpu-reaction-stoichiometry-diagnostic.v1';
+const REACTION_STOICHIOMETRY_DIAGNOSTIC_CACHE = new WeakMap();
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const R_GAS = 8.314462618;
@@ -92,6 +111,80 @@ const DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S = 40;
 const DEFAULT_REACTION_PARTICLE_BIN_CAPACITY = 64;
 const REACTION_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER = 4;
 const REACTION_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES = 128 * 1024 * 1024;
+const REACTION_TRANSFERRED_DESTINATION_RELEASES = new WeakMap();
+
+/**
+ * Settle every destination-owner fence before applying the non-arena terminal
+ * fallback. The placement-family owner remains authoritative on success; raw
+ * destination destruction is used only after that owner has failed and the
+ * device queue has nevertheless reached a terminal observation point.
+ */
+export function releaseSphReactionTransferredDestinationAfterSettledFences({
+  device,
+  sourceFamily,
+  completionFence = null,
+  settlementFences = [],
+  reactionWarmArenaLease = null,
+  releaseRunner =
+    releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue
+} = {}) {
+  if (!sourceFamily || typeof sourceFamily !== 'object') {
+    throw new TypeError(
+      'Reaction destination release requires its transferred source family'
+    );
+  }
+  const replay = REACTION_TRANSFERRED_DESTINATION_RELEASES.get(sourceFamily);
+  if (replay) return replay;
+  const queueFence = typeof device?.queue?.onSubmittedWorkDone === 'function'
+    ? device.queue.onSubmittedWorkDone()
+    : null;
+  if (!queueFence?.then) {
+    throw new Error(
+      'Reaction destination release requires a queue completion fence'
+    );
+  }
+  const ownerFence = completionFence?.then ? completionFence : queueFence;
+  let ownerRelease = null;
+  try {
+    ownerRelease = releaseRunner(sourceFamily, {
+      completionFence: ownerFence
+    });
+  } catch (error) {
+    ownerRelease = Promise.reject(error);
+  }
+  const completion = Promise.allSettled([
+    Promise.resolve(ownerRelease),
+    Promise.resolve(queueFence),
+    Promise.resolve(ownerFence),
+    ...settlementFences
+      .filter((fence) => fence?.then)
+      .map((fence) => Promise.resolve(fence))
+  ]).then((settled) => {
+    const owner = settled[0];
+    const queue = settled[1];
+    const ownerConfirmed = owner.status === 'fulfilled'
+      && owner.value === true;
+    const queueSettledCleanly = queue.status === 'fulfilled';
+    if (ownerConfirmed && queueSettledCleanly) return true;
+    if (!reactionWarmArenaLease) {
+      const destinations = new Set([
+        sourceFamily.placedDestinationStateBuffer,
+        sourceFamily.placedDestinationThermoBuffer,
+        sourceFamily.placedDestinationMechanicsBuffer
+      ].filter(Boolean));
+      for (const buffer of destinations) {
+        try {
+          buffer.destroy?.();
+        } catch {
+          // All destination siblings still receive their one terminal attempt.
+        }
+      }
+    }
+    return false;
+  });
+  REACTION_TRANSFERRED_DESTINATION_RELEASES.set(sourceFamily, completion);
+  return completion;
+}
 const REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS = 64;
 const REACTION_PARTICLE_BIN_GRID_MAX_CELL_COUNT = REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS ** 3;
 const SCHROEDER_REACTION_LAW_MASK = 1;
@@ -119,6 +212,18 @@ const GPU_MAP_MODE = {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function beginReactionTimestampSpan(gpuTimestampRecorder, encoder, descriptor) {
+  return gpuTimestampRecorder?.active === true
+    && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+    ? gpuTimestampRecorder.beginEncoderSpan(encoder, descriptor)
+    : null;
+}
+
+function endReactionTimestampSpan(gpuTimestampRecorder, encoder, token) {
+  if (!token) return;
+  gpuTimestampRecorder.endEncoderSpan(encoder, token);
 }
 
 function clampPositive(value, fallback = 0) {
@@ -211,6 +316,84 @@ function materialKeyForTerm(term, materialProperties = {}, fallback = null) {
   return candidates[0] || null;
 }
 
+function reactantCarrierPropertiesScore(properties) {
+  if (!properties || typeof properties !== 'object') return -1;
+  let score = 0;
+  if (finiteNumber(properties.molarMassKgPerMol, 0) > 0) score += 16;
+  const phases = Array.isArray(properties.phases) ? properties.phases : [];
+  if (phases.length > 0) score += 8;
+  if (phases.some((phase) => finiteNumber(phase?.densityKgPerM3, 0) > 0)) {
+    score += 4;
+  }
+  if (Array.isArray(properties.transitions)) score += 2;
+  if (normalizeFormulaKey(properties.formula)) score += 1;
+  return score;
+}
+
+function propertiesForBinaryReactantCarrier(material, materialProperties = {}) {
+  if (!material || !materialProperties) return null;
+  const materialId = stableOpticalMaterialId(material);
+  const candidates = [];
+  const seen = new Set();
+  const addCandidate = (properties) => {
+    if (!properties || typeof properties !== 'object' || seen.has(properties)) {
+      return;
+    }
+    seen.add(properties);
+    candidates.push(properties);
+  };
+  addCandidate(materialProperties[material]);
+  addCandidate(materialProperties[String(material).toLowerCase()]);
+  addCandidate(materialProperties[String(material).toUpperCase()]);
+  for (const [candidateMaterial, properties] of Object.entries(materialProperties)) {
+    if (stableOpticalMaterialId(candidateMaterial) === materialId) {
+      addCandidate(properties);
+    }
+  }
+  return candidates.reduce((best, properties) => (
+    reactantCarrierPropertiesScore(properties)
+      > reactantCarrierPropertiesScore(best)
+      ? properties
+      : best
+  ), null);
+}
+
+function binaryReactantCarriers(reaction, materialProperties = {}) {
+  return [
+    { material: reaction?.a, role: 'a' },
+    { material: reaction?.b, role: 'b' }
+  ].filter((carrier) => carrier.material).map((carrier) => ({
+    ...carrier,
+    properties: propertiesForBinaryReactantCarrier(
+      carrier.material,
+      materialProperties
+    )
+  }));
+}
+
+function matchingBinaryReactantCarrier(term, carriers, claimedRoles) {
+  const termMaterialKeys = [term?.material, term?.reactant, term?.key]
+    .map(normalizeFormulaKey)
+    .filter(Boolean);
+  const termFormula = normalizeFormulaKey(term?.formula);
+  const matches = carriers
+    .filter((carrier) => !claimedRoles.has(carrier.role))
+    .map((carrier) => {
+      const carrierKey = normalizeFormulaKey(carrier.material);
+      const carrierFormula = normalizeFormulaKey(carrier.properties?.formula);
+      let score = 0;
+      if (termMaterialKeys.includes(carrierKey)) score += 8;
+      if (termFormula && termFormula === carrierFormula) score += 6;
+      if (termFormula && termFormula === carrierKey) score += 4;
+      if (carrierFormula && termMaterialKeys.includes(carrierFormula)) score += 2;
+      return { carrier, score };
+    })
+    .filter((match) => match.score > 0)
+    .sort((left, right) => right.score - left.score);
+  if (!matches.length || matches[1]?.score === matches[0].score) return null;
+  return matches[0].carrier;
+}
+
 function termCoefficient(term) {
   const coefficient = finiteNumber(term?.coefficient, 1);
   return coefficient > 0 ? coefficient : 1;
@@ -241,12 +424,27 @@ function reactantTermsForReaction(reaction, materialProperties = {}) {
     { coefficient: 1, formula: reaction?.b, material: reaction?.b, role: 'b' }
   ].filter((term) => term.material);
   const sourceTerms = reaction?.stoichiometry?.reactants?.length ? reaction.stoichiometry.reactants : fallback;
+  const carriers = binaryReactantCarriers(reaction, materialProperties);
+  const claimedCarrierRoles = new Set();
   return sourceTerms
     .map((term, index) => {
       const fallbackMaterial = index === 0 ? reaction?.a : index === 1 ? reaction?.b : null;
-      const material = materialKeyForTerm(term, materialProperties, fallbackMaterial);
+      // A stoichiometric formula names the chemical formula unit, while the
+      // live particle carries the reaction's A/B material identity. Prefer
+      // that carrier (including its derived formula) before consulting
+      // formula-key aliases in the property map. This keeps elemental
+      // molecular carriers such as a selected halogen attached to their live
+      // material ID even when an incomplete formula alias also exists.
+      const carrier = matchingBinaryReactantCarrier(
+        term,
+        carriers,
+        claimedCarrierRoles
+      );
+      if (carrier) claimedCarrierRoles.add(carrier.role);
+      const material = carrier?.material
+        ?? materialKeyForTerm(term, materialProperties, fallbackMaterial);
       const normalized = normalizeFormulaKey(term?.formula || material);
-      const role = normalized === normalizeFormulaKey(reaction?.a)
+      const role = carrier?.role ?? (normalized === normalizeFormulaKey(reaction?.a)
         ? 'a'
         : normalized === normalizeFormulaKey(reaction?.b)
           ? 'b'
@@ -254,11 +452,12 @@ function reactantTermsForReaction(reaction, materialProperties = {}) {
             ? 'a'
             : index === 1
               ? 'b'
-              : 'other';
+              : 'other');
       return {
         ...term,
         material,
         role,
+        resolvedCarrierProperties: carrier?.properties ?? null,
         coefficient: termCoefficient(term)
       };
     })
@@ -308,7 +507,8 @@ const STANDARD_ATMOSPHERE_PA = 101325;
 //    kernel then rates the reaction by the partner's pathway (or leaves the
 //    pair on the legacy availability bound when neither has one).
 function interfaceFluxKgPerM2S(term, materialProperties = {}) {
-  const properties = materialPropertiesFor(term?.material, materialProperties);
+  const properties = term?.resolvedCarrierProperties
+    ?? materialPropertiesFor(term?.material, materialProperties);
   const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
   if (!(molarMassKgPerMol > 0)) return 0;
   const temperatureK = INTERFACE_FLUX_REFERENCE_TEMPERATURE_K;
@@ -338,7 +538,8 @@ function interfaceFluxKgPerM2S(term, materialProperties = {}) {
 }
 
 function termIsGas(term, materialProperties = {}) {
-  const properties = materialPropertiesFor(term?.material, materialProperties);
+  const properties = term?.resolvedCarrierProperties
+    ?? materialPropertiesFor(term?.material, materialProperties);
   const phases = properties?.phases || [];
   const gasOnlyMaterial = phases.length > 0 && phases.every((phase) => phase?.name === 'gas');
   return gasOnlyMaterial
@@ -595,7 +796,11 @@ export function buildSphReactionTable(reactions = [], {
     const activationTemperatureK = finiteNumber(reaction?.activationTemperatureK, 0);
     const specificEnthalpyJPerKg = finiteNumber(reaction?.specificEnthalpyJPerKg, 0);
     const radius = finiteNumber(reaction?.contactRadiusM ?? contactRadiusM, 0);
-    const status = a && b && product && radius > 0
+    // Binary A+A rows have no unambiguous source/partner role in the current
+    // reaction ABI. Reject them at construction so CPU, canonical discovery,
+    // and the mutation kernel share one policy.
+    const distinctBinaryReactants = aMaterialId !== bMaterialId;
+    const status = a && b && distinctBinaryReactants && product && radius > 0
       && allProductPropertiesReady && allProductPhasePoliciesReady
       ? REACTION_STATUS.ready
       : (!productProperties?.phases?.length || !allProductPropertiesReady
@@ -622,7 +827,8 @@ export function buildSphReactionTable(reactions = [], {
     );
     for (const term of reactantTerms) {
       const materialId = stableOpticalMaterialId(term.material);
-      const properties = materialPropertiesFor(term.material, materialProperties);
+      const properties = term.resolvedCarrierProperties
+        ?? materialPropertiesFor(term.material, materialProperties);
       const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
       const termStatus = molarMassKgPerMol > 0 ? REACTION_TERM_STATUS.ready : REACTION_TERM_STATUS.missingMaterialProperties;
       const reactantTermIndex = reactantTermRecords.length / SPH_REACTION_REACTANT_TERM_FLOATS;
@@ -1254,6 +1460,251 @@ function productTermsForReactionTableRecord(table, reactionIndex) {
   }];
 }
 
+function exactNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+function typedArrayPrefixMatches(combined, offset, source, requiredLength) {
+  if (!(combined instanceof Float32Array) || !(source instanceof Float32Array)) {
+    return false;
+  }
+  if (requiredLength < 0 || source.length < requiredLength) return false;
+  if (offset < 0 || offset + requiredLength > combined.length) return false;
+  for (let index = 0; index < requiredLength; index += 1) {
+    if (!Object.is(combined[offset + index], source[index])) return false;
+  }
+  return true;
+}
+
+function reactionTableUsesExtendedStoichiometry(table) {
+  return Math.max(0, Math.round(finiteNumber(table?.reactionHeaderCount, 0))) > 0
+    || Math.max(0, Math.round(finiteNumber(table?.reactantTermCount, 0))) > 0
+    || Math.max(0, Math.round(finiteNumber(table?.productTermCount, 0))) > 0
+    || (table?.reactionHeaders instanceof Float32Array && table.reactionHeaders.length > 0)
+    || (table?.reactantTermRecords instanceof Float32Array && table.reactantTermRecords.length > 0)
+    || (table?.productTermRecords instanceof Float32Array && table.productTermRecords.length > 0);
+}
+
+/**
+ * Authenticate the exact table prefix consumed by the reaction apply shader.
+ * A v1 table with any header/term rows is the extended schema and must never
+ * fall back to whole-parent conversion when one of those rows is unavailable.
+ * Only a table with no extended rows at all is distinguishable as the legacy
+ * whole-particle format.
+ */
+export function inspectSphReactionStoichiometryContract(
+  table,
+  { refresh = false } = {}
+) {
+  if (!refresh && table && REACTION_STOICHIOMETRY_DIAGNOSTIC_CACHE.has(table)) {
+    return REACTION_STOICHIOMETRY_DIAGNOSTIC_CACHE.get(table);
+  }
+
+  const reactionCount = Math.max(
+    0,
+    Math.round(finiteNumber(table?.reactionCount, 0))
+  );
+  const extended = reactionTableUsesExtendedStoichiometry(table);
+  if (!extended) {
+    let readyReactionCount = 0;
+    for (let reactionIndex = 0; reactionIndex < reactionCount; reactionIndex += 1) {
+      if (Math.round(finiteNumber(
+        reactionRecord(table, reactionIndex).status,
+        0
+      )) === REACTION_STATUS.ready) {
+        readyReactionCount += 1;
+      }
+    }
+    const diagnostic = Object.freeze({
+      schema: REACTION_STOICHIOMETRY_DIAGNOSTIC_SCHEMA,
+      status: 'legacy-whole-particle-schema-admitted',
+      tableMode: 'legacy-whole-particle',
+      failClosed: false,
+      invalidReactionCount: 0,
+      readyReactionCount,
+      globalReasons: Object.freeze([]),
+      reactions: Object.freeze([]),
+      residentApplyObservationStatus:
+        'legacy-schema-selected-by-absence-of-all-header-and-term-rows'
+    });
+    if (table && typeof table === 'object') {
+      REACTION_STOICHIOMETRY_DIAGNOSTIC_CACHE.set(table, diagnostic);
+    }
+    return diagnostic;
+  }
+
+  const headerCount = finiteNumber(table?.reactionHeaderCount, Number.NaN);
+  const reactantTermCount = finiteNumber(table?.reactantTermCount, Number.NaN);
+  const productTermCount = finiteNumber(table?.productTermCount, Number.NaN);
+  const productPhaseCount = finiteNumber(table?.productPhaseCount, Number.NaN);
+  const globalReasons = [];
+  if (!exactNonNegativeInteger(headerCount) || headerCount !== reactionCount) {
+    globalReasons.push('reaction-header-count-mismatch');
+  }
+  if (!exactNonNegativeInteger(reactantTermCount)) {
+    globalReasons.push('reactant-term-count-invalid');
+  }
+  if (!exactNonNegativeInteger(productTermCount)) {
+    globalReasons.push('product-term-count-invalid');
+  }
+  if (!exactNonNegativeInteger(productPhaseCount)) {
+    globalReasons.push('product-phase-count-invalid');
+  }
+
+  const recordFloats = reactionCount * SPH_REACTION_RECORD_FLOATS;
+  const productPhaseFloats = exactNonNegativeInteger(productPhaseCount)
+    ? productPhaseCount * SPH_REACTION_PRODUCT_PHASE_FLOATS
+    : 0;
+  const headerFloats = exactNonNegativeInteger(headerCount)
+    ? headerCount * SPH_REACTION_HEADER_FLOATS
+    : 0;
+  const reactantFloats = exactNonNegativeInteger(reactantTermCount)
+    ? reactantTermCount * SPH_REACTION_REACTANT_TERM_FLOATS
+    : 0;
+  const productFloats = exactNonNegativeInteger(productTermCount)
+    ? productTermCount * SPH_REACTION_PRODUCT_TERM_FLOATS
+    : 0;
+  const combined = table?.combinedRecords;
+  let combinedOffset = 0;
+  const combinedSections = [
+    ['reaction-record-prefix-mismatch', table?.records, recordFloats],
+    ['product-phase-prefix-mismatch', table?.productPhaseRecords, productPhaseFloats],
+    ['reaction-header-prefix-mismatch', table?.reactionHeaders, headerFloats],
+    ['reactant-term-prefix-mismatch', table?.reactantTermRecords, reactantFloats],
+    ['product-term-prefix-mismatch', table?.productTermRecords, productFloats]
+  ];
+  for (const [reason, source, requiredLength] of combinedSections) {
+    if (!typedArrayPrefixMatches(combined, combinedOffset, source, requiredLength)) {
+      globalReasons.push(reason);
+    }
+    combinedOffset += requiredLength;
+  }
+
+  const reactions = [];
+  let readyReactionCount = 0;
+  let invalidReactionCount = 0;
+  for (let reactionIndex = 0; reactionIndex < reactionCount; reactionIndex += 1) {
+    const rx = reactionRecord(table, reactionIndex);
+    if (Math.round(finiteNumber(rx.status, 0)) !== REACTION_STATUS.ready) {
+      reactions.push(Object.freeze({
+        reactionIndex,
+        status: 'inactive-reaction-record',
+        failClosed: false,
+        reasons: Object.freeze([])
+      }));
+      continue;
+    }
+    readyReactionCount += 1;
+    const reasons = [...globalReasons];
+    const header = reactionHeaderRecord(table, reactionIndex);
+    const headerReactionIndex = finiteNumber(header.reactionIndex, Number.NaN);
+    const reactantOffset = finiteNumber(header.reactantTermOffset, Number.NaN);
+    const reactantCount = finiteNumber(header.reactantTermCount, Number.NaN);
+    const productOffset = finiteNumber(header.productTermOffset, Number.NaN);
+    const productCount = finiteNumber(header.productTermCount, Number.NaN);
+    if (!exactNonNegativeInteger(headerReactionIndex)
+      || headerReactionIndex !== reactionIndex) {
+      reasons.push('reaction-header-index-mismatch');
+    }
+    if (Math.round(finiteNumber(header.status, 0)) !== REACTION_STATUS.ready) {
+      reasons.push('reaction-header-not-ready');
+    }
+    if (!exactNonNegativeInteger(reactantOffset)
+      || !exactNonNegativeInteger(reactantCount)
+      || reactantCount !== 2
+      || reactantOffset + reactantCount > reactantTermCount) {
+      reasons.push('binary-reactant-term-range-invalid');
+    }
+    if (!exactNonNegativeInteger(productOffset)
+      || !exactNonNegativeInteger(productCount)
+      || productCount < 1
+      || productOffset + productCount > productTermCount) {
+      reasons.push('product-term-range-invalid');
+    }
+
+    const reactantMaterialIds = [];
+    if (exactNonNegativeInteger(reactantOffset)
+      && exactNonNegativeInteger(reactantCount)
+      && exactNonNegativeInteger(reactantTermCount)
+      && reactantOffset + reactantCount <= reactantTermCount) {
+      for (let local = 0; local < reactantCount; local += 1) {
+        const term = reactantTermRecord(table, reactantOffset + local);
+        if (!term
+          || term.reactionIndex !== reactionIndex
+          || Math.round(finiteNumber(term.status, 0)) !== REACTION_TERM_STATUS.ready
+          || !(finiteNumber(term.materialId, 0) > 0)
+          || !(finiteNumber(term.coefficient, 0) > 0)
+          || !(finiteNumber(term.molarMassKgPerMol, 0) > 0)) {
+          reasons.push(`reactant-term-${local}-invalid`);
+          continue;
+        }
+        reactantMaterialIds.push(term.materialId);
+      }
+    }
+    const expectedReactantIds = [rx.aMaterialId, rx.bMaterialId]
+      .sort((left, right) => left - right);
+    const actualReactantIds = [...new Set(reactantMaterialIds)]
+      .sort((left, right) => left - right);
+    if (actualReactantIds.length !== 2
+      || actualReactantIds[0] !== expectedReactantIds[0]
+      || actualReactantIds[1] !== expectedReactantIds[1]) {
+      reasons.push('reactant-material-coverage-invalid');
+    }
+
+    if (exactNonNegativeInteger(productOffset)
+      && exactNonNegativeInteger(productCount)
+      && exactNonNegativeInteger(productTermCount)
+      && productOffset + productCount <= productTermCount) {
+      for (let local = 0; local < productCount; local += 1) {
+        const term = productTermRecord(table, productOffset + local);
+        if (!term
+          || term.reactionIndex !== reactionIndex
+          || Math.round(finiteNumber(term.status, 0)) !== REACTION_TERM_STATUS.ready
+          || !(finiteNumber(term.materialId, 0) > 0)
+          || !(finiteNumber(term.coefficient, 0) > 0)
+          || !(finiteNumber(term.molarMassKgPerMol, 0) > 0)
+          || !(finiteNumber(term.targetPhasePolicyId, 0)
+            > GPU_PHASE_IDS.unknown)
+          || ![REACTION_PRODUCT_ROUTING.condensed, REACTION_PRODUCT_ROUTING.gas]
+            .includes(Math.round(finiteNumber(term.routingId, -1)))) {
+          reasons.push(`product-term-${local}-invalid`);
+        }
+      }
+    }
+
+    const distinctReasons = [...new Set(reasons)];
+    const failClosed = distinctReasons.length > 0;
+    if (failClosed) invalidReactionCount += 1;
+    reactions.push(Object.freeze({
+      reactionIndex,
+      status: failClosed
+        ? 'extended-stoichiometry-invalid-fail-closed'
+        : 'extended-stoichiometry-ready',
+      failClosed,
+      reasons: Object.freeze(distinctReasons)
+    }));
+  }
+
+  const diagnostic = Object.freeze({
+    schema: REACTION_STOICHIOMETRY_DIAGNOSTIC_SCHEMA,
+    status: invalidReactionCount > 0
+      ? 'extended-stoichiometry-invalid-fail-closed'
+      : 'extended-stoichiometry-ready',
+    tableMode: 'extended-stoichiometric-v1',
+    failClosed: invalidReactionCount > 0,
+    invalidReactionCount,
+    readyReactionCount,
+    globalReasons: Object.freeze([...new Set(globalReasons)]),
+    reactions: Object.freeze(reactions),
+    residentApplyObservationStatus:
+      'host-table-and-combined-upload-contract-validated-gpu-term-rejection-count-unobserved'
+  });
+  if (table && typeof table === 'object') {
+    REACTION_STOICHIOMETRY_DIAGNOSTIC_CACHE.set(table, diagnostic);
+  }
+  return diagnostic;
+}
+
 function termMetadataFor(table, kind, term) {
   const list = kind === 'product' ? table.productTermMetadata : table.reactantTermMetadata;
   return (list || []).find((item) => (
@@ -1645,6 +2096,9 @@ function outputEnvelope({
   eventCount,
   conversionCount,
   reactionLedger = null,
+  reactionStoichiometryDiagnostic =
+    inspectSphReactionStoichiometryContract(reactionTable),
+  stoichiometryFailClosedPairCount = null,
   reactionSummary = null,
   residentProductMass = createResidentProductMassHandle(reactionSummary),
   stateBuffer = null,
@@ -1667,7 +2121,15 @@ function outputEnvelope({
   queueCompletionStatus = null,
   queueCompletionMethod = null,
   scratchBufferCleanupStatus = null,
-  canonicalReactionDiscovery = null
+  canonicalReactionDiscovery = null,
+  reactionPlacementSourceFamily = null,
+  reactionPlacementPositionEpochFloorReceipt = null,
+  reactionPlacementDestinationOwnershipTransferred = false,
+  reactionPlacementDestinationReturnScheduled = false,
+  automaticDestinationReturnCompletion = null,
+  reactionWarmArenaLease = null,
+  reactionWarmArena = null,
+  gpuTimestampInstrumentation = null
 }) {
   const canonicalReactionReceipt = canonicalReactionDiscovery?.admitted === true
     ? canonicalReactionDiscovery.receipt
@@ -1753,6 +2215,19 @@ function outputEnvelope({
         : null
         )
     ),
+    reactionStoichiometryDiagnostic: Object.freeze({
+      ...reactionStoichiometryDiagnostic,
+      residentApplyObservationStatus: backend === 'cpu-reference'
+        ? 'cpu-plan-fail-closed-policy-observed'
+        : reactionStoichiometryDiagnostic.residentApplyObservationStatus
+    }),
+    reactionStoichiometryDiagnosticStatus:
+      reactionStoichiometryDiagnostic.status,
+    reactionStoichiometryTableMode:
+      reactionStoichiometryDiagnostic.tableMode,
+    reactionStoichiometryInvalidReactionCount:
+      reactionStoichiometryDiagnostic.invalidReactionCount,
+    stoichiometryFailClosedPairCount,
     reactionSummary,
     reactionSummaryStatus: reactionSummary?.status ?? null,
     residentProductMass,
@@ -1776,6 +2251,14 @@ function outputEnvelope({
     queueCompletionStatus,
     queueCompletionMethod,
     scratchBufferCleanupStatus,
+    reactionWarmArenaUsed: Boolean(reactionWarmArenaLease),
+    reactionWarmArenaSchema: reactionWarmArena?.schema ?? null,
+    reactionWarmArenaCapacityKey: reactionWarmArena?.capacityKey ?? null,
+    reactionWarmArenaSlotIndex: reactionWarmArena?.slotIndex ?? null,
+    reactionWarmArenaWarmReuse: reactionWarmArenaLease?.warmReuse === true,
+    reactionWarmArenaBufferCreationCount:
+      reactionWarmArenaLease?.bufferCreationCount ?? 0,
+    gpuTimestampInstrumentation,
     readbackMode,
     sourceParticlePackMode,
     reactionProposalNeighborMode,
@@ -1790,6 +2273,39 @@ function outputEnvelope({
     canonicalSpatialReactionDiscoveryEpochIdentity:
       canonicalReactionDiscovery?.epochIdentity ?? null,
     canonicalSpatialReactionDiscoveryReceipt: canonicalReactionReceipt,
+    canonicalReactionPlacementSourceFamily:
+      reactionPlacementSourceFamily?.ready === true,
+    canonicalReactionPlacementSourceFamilyStatus:
+      reactionPlacementSourceFamily?.status ?? null,
+    canonicalReactionPlacementStageIdentity:
+      reactionPlacementSourceFamily?.stageIdentity ?? null,
+    canonicalReactionPlacementGenerationId:
+      reactionPlacementSourceFamily?.generationId ?? null,
+    canonicalReactionPlacementEpochIdentity:
+      reactionPlacementSourceFamily?.epochIdentity ?? null,
+    canonicalReactionPlacementAncestorGenerationId:
+      reactionPlacementSourceFamily?.ancestorPublicGenerationId ?? null,
+    canonicalReactionPlacementDirectoryBuildCount:
+      reactionPlacementSourceFamily?.directoryBuildCount ?? 0,
+    canonicalReactionPlacementPrivateLookupBuildCount:
+      reactionPlacementSourceFamily?.privateLookupBuildCount ?? 0,
+    reactionPlacementPositionEpochFloorReceipt,
+    reactionPlacementDestinationOwnershipTransferred:
+      reactionPlacementDestinationOwnershipTransferred === true,
+    reactionPlacementDestinationReturnScheduled:
+      reactionPlacementDestinationReturnScheduled === true,
+    automaticDestinationReturnCompletion,
+    canonicalReactionPlacementPositionMutationObserved:
+      reactionPlacementPositionEpochFloorReceipt?.positionMutationObserved
+        === true,
+    canonicalReactionPlacementPositionMayHaveChanged:
+      reactionPlacementPositionEpochFloorReceipt?.positionMayHaveChanged
+        === true,
+    canonicalReactionPlacementPositionEpochAdvanceRequired:
+      reactionPlacementPositionEpochFloorReceipt?.positionEpochAdvanceRequired
+        === true,
+    canonicalReactionPlacementPositionEpochFloor:
+      reactionPlacementPositionEpochFloorReceipt?.positionEpochFloor ?? null,
     canonicalSpatialReactionDiscoveryProvenance: canonicalReactionProvenance,
     canonicalSpatialReactionDiscoveryProposalBufferOwnership:
       canonicalReactionProvenance?.proposalBufferOwnership ?? null,
@@ -1873,6 +2389,8 @@ export function runSphReactionStepCpu({
   thermalPhaseResponseTable = null
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
+  const reactionStoichiometryDiagnostic =
+    inspectSphReactionStoichiometryContract(reactionTable);
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
@@ -1882,6 +2400,7 @@ export function runSphReactionStepCpu({
   const mechanics = new Float32Array(mlsMpmParticleState.mechanics);
   const proposals = new Float32Array(sphParticleState.particleCount * 4);
   const reactionLedger = createReactionLedger();
+  let stoichiometryFailClosedPairCount = 0;
   let conversionCount = 0;
 
   for (let index = 0; index < sphParticleState.particleCount; index += 1) {
@@ -1898,6 +2417,14 @@ export function runSphReactionStepCpu({
     if (index > partnerIndex) continue;
     const partnerOffset = partnerIndex * 4;
     if (Math.round(proposals[partnerOffset]) !== index || proposals[partnerOffset + 1] !== reactionIndex) continue;
+    const stoichiometryReactionDiagnostic =
+      reactionStoichiometryDiagnostic.reactions[Math.round(reactionIndex)]
+      ?? null;
+    if (reactionStoichiometryDiagnostic.tableMode === 'extended-stoichiometric-v1'
+      && stoichiometryReactionDiagnostic?.failClosed !== false) {
+      stoichiometryFailClosedPairCount += 1;
+      continue;
+    }
     const rx = reactionRecord(reactionTable, Math.round(reactionIndex));
     const sourceIndices = [index, partnerIndex];
     const fixedBufferPlan = planStoichiometricFixedBufferEvent({
@@ -1944,6 +2471,13 @@ export function runSphReactionStepCpu({
         conversionCount += 1;
       }
       appendReactionLedgerEvent(reactionLedger, fixedBufferPlan.event);
+      continue;
+    }
+    // An extended table is never eligible for the legacy whole-parent path.
+    // If live source state cannot satisfy its otherwise valid terms, the
+    // reaction is a no-op and both parents remain bit-for-bit unchanged.
+    if (reactionStoichiometryDiagnostic.tableMode === 'extended-stoichiometric-v1') {
+      stoichiometryFailClosedPairCount += 1;
       continue;
     }
     const productTerms = productTermsForReactionTableRecord(reactionTable, Math.round(reactionIndex));
@@ -2005,7 +2539,9 @@ export function runSphReactionStepCpu({
     proposals,
     conversionCount,
     eventCount: reactionLedger.eventCount || conversionCount / 2,
-    reactionLedger: reactionLedger.eventCount > 0 ? reactionLedger : null
+    reactionLedger: reactionLedger.eventCount > 0 ? reactionLedger : null,
+    reactionStoichiometryDiagnostic,
+    stoichiometryFailClosedPairCount
   });
 }
 
@@ -2454,6 +2990,7 @@ function createParamsArray({
   materialCount,
   segmentCount,
   resetMechanics,
+  reactionTableMode = 0,
   dtSeconds = 0
 }) {
   const buffer = new ArrayBuffer(48);
@@ -2470,7 +3007,7 @@ function createParamsArray({
   // Interface-flux extent law substep duration (f32 in the _pad0 lane);
   // 0 keeps the legacy availability-only extent bound.
   view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
-  view.setUint32(40, 0, true);
+  view.setUint32(40, reactionTableMode === 1 ? 1 : 0, true);
   view.setUint32(44, 0, true);
   return buffer;
 }
@@ -2515,26 +3052,60 @@ export async function runSphReactionStepWebGpu({
   // legacy availability-only extent so callers without a dt stay well-defined.
   dtSeconds = 0,
   readbackMode = FULL_READBACK_MODE,
-  readCompactReactionSummary = true,
-  readReactionGasSpeciesSummary = true,
-  readReactionProductInventory = true,
-  readReactionAtomResidual = true,
+  readCompactReactionSummary = null,
+  readReactionGasSpeciesSummary = null,
+  readReactionProductInventory = null,
+  readReactionAtomResidual = null,
   productPlacementAccumulatorBuffer = null,
-  readReactionProductPlacementSummary = true,
+  readReactionProductPlacementSummary = null,
   reactionProductPlacementReadbackCadence = 'single-step-final',
   reactionProductPlacementSourceSummaryCount = 1,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
   schroederSpatialEpochGeneration = null,
-  schroederSpatialReactionDiscoveryProposal = null
+  schroederSpatialReactionDiscoveryProposal = null,
+  gpuTimestampRecorder = null,
+  reactionPlacementEpochRunner =
+    runSchroederSpatialReactionPlacementEpochWebGpu,
+  canonicalReactionDiscoveryResolver =
+    resolveSchroederSpatialReactionDiscoveryProposalForConsumer,
+  reactionWarmArenaAcquireRunner =
+    acquireSphReactionWarmArenaWithBackpressureWebGpu,
+  reactionWarmArenaResolveRunner = resolveSphReactionWarmArenaLease,
+  reactionWarmArenaReleaseRunner = releaseSphReactionWarmArenaAfterQueue
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
+  const reactionStoichiometryDiagnostic =
+    inspectSphReactionStoichiometryContract(reactionTable);
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
   assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionStepWebGpu requires a WebGPU-like device');
   }
+  if (typeof reactionPlacementEpochRunner !== 'function') {
+    throw new TypeError(
+      'runSphReactionStepWebGpu requires a reaction placement epoch runner'
+    );
+  }
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const resolveDiagnosticRead = (requested) => requested == null
+    ? !noFullReadback
+    : requested !== false;
+  const shouldReadCompactReactionSummary = resolveDiagnosticRead(
+    readCompactReactionSummary
+  );
+  const shouldReadReactionGasSpeciesSummary = resolveDiagnosticRead(
+    readReactionGasSpeciesSummary
+  );
+  const shouldReadReactionProductInventory = resolveDiagnosticRead(
+    readReactionProductInventory
+  );
+  const shouldReadReactionAtomResidual = resolveDiagnosticRead(
+    readReactionAtomResidual
+  );
+  const shouldReadReactionProductPlacementSummary = resolveDiagnosticRead(
+    readReactionProductPlacementSummary
+  );
   if (
     Boolean(schroederSpatialEpochGeneration)
     !== Boolean(schroederSpatialReactionDiscoveryProposal)
@@ -2544,13 +3115,18 @@ export async function runSphReactionStepWebGpu({
     );
   }
   const canonicalReactionDiscovery = schroederSpatialReactionDiscoveryProposal
-    ? resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
+    ? canonicalReactionDiscoveryResolver(
         schroederSpatialReactionDiscoveryProposal,
         {
           device,
           generation: schroederSpatialEpochGeneration,
           particleCount: sphParticleState.particleCount,
-          reactionCount: reactionTable.reactionCount
+          reactionCount: reactionTable.reactionCount,
+          reactionTable,
+          sourceStateBuffer:
+            sourceStateBuffer || sphParticleUpload?.stateBuffer || null,
+          sourceThermoBuffer:
+            sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null
         }
       )
     : null;
@@ -2565,23 +3141,141 @@ export async function runSphReactionStepWebGpu({
   }
   const canonicalReactionDiscoveryEnabled =
     canonicalReactionDiscovery?.admitted === true;
+  let reactionWarmArenaLease = null;
+  let reactionWarmArena = null;
+  let reactionWarmBuffers = null;
+  let reactionWarmBufferSet = new Set();
+  let reactionPlacementSourceFamily = null;
+  let reactionPlacementDestinationOwnershipTransferred = false;
+  let reactionPlacementDestinationReturnScheduled = false;
+  let reactionWarmArenaReleaseOwnedByOutput = false;
+  const reactionOwnedBufferRegistry = new Set();
+  let localResponseGraphUpload = null;
+  let reactionPrimarySubmissionObserved = false;
+  let reactionResourceRegistryDrainCompletion = null;
+  const registerReactionOwnedBuffer = (buffer) => {
+    if (buffer && !reactionWarmBufferSet.has(buffer)) {
+      reactionOwnedBufferRegistry.add(buffer);
+    }
+    return buffer;
+  };
+  const registerReactionOwnedBuffers = (buffers) => {
+    for (const buffer of buffers || []) registerReactionOwnedBuffer(buffer);
+  };
+  const destroyReactionOwnedBuffer = (buffer) => {
+    if (!buffer || !reactionOwnedBufferRegistry.delete(buffer)) return false;
+    try {
+      if (buffer.mapState === 'mapped') buffer.unmap?.();
+    } catch {
+      // A lost or failed map may already be terminal.
+    }
+    try { buffer.destroy?.(); } catch { /* continue registry drain */ }
+    return true;
+  };
+  const destroyLocalResponseGraphUpload = () => {
+    if (!localResponseGraphUpload) return false;
+    const ownedUpload = localResponseGraphUpload;
+    localResponseGraphUpload = null;
+    try {
+      destroySphThermalResponseGraphBuffers(ownedUpload);
+    } catch {
+      // The remaining registry entries must still receive retirement.
+    }
+    return true;
+  };
+  const drainReactionResourceRegistry = () => {
+    for (const buffer of [...reactionOwnedBufferRegistry]) {
+      destroyReactionOwnedBuffer(buffer);
+    }
+    destroyLocalResponseGraphUpload();
+    return true;
+  };
+  const scheduleReactionResourceRegistryDrain = () => {
+    if (reactionResourceRegistryDrainCompletion) {
+      return reactionResourceRegistryDrainCompletion;
+    }
+    const queueFence = reactionPrimarySubmissionObserved
+      && typeof device.queue?.onSubmittedWorkDone === 'function'
+      ? device.queue.onSubmittedWorkDone()
+      : null;
+    reactionResourceRegistryDrainCompletion = queueFence?.then
+      ? Promise.resolve(queueFence).then(
+          drainReactionResourceRegistry,
+          drainReactionResourceRegistry
+        )
+      : Promise.resolve(drainReactionResourceRegistry());
+    return reactionResourceRegistryDrainCompletion;
+  };
+  try {
+  reactionWarmArenaLease = (
+    canonicalReactionDiscoveryEnabled
+    && noFullReadback
+    && (reactionTable.productTermCount ?? 0) > 0
+  )
+    ? await reactionWarmArenaAcquireRunner({
+        device,
+        particleCapacity: sphParticleState.particleCount,
+        productEventCapacity:
+          sphParticleState.particleCount * reactionTable.productTermCount,
+        productTermCapacity: reactionTable.productTermCount,
+        packedParticleStrideFloats: SPH_REACTION_PACKED_PARTICLE_FLOATS,
+        productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+        productPlacementSummaryStrideFloats:
+          SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+      })
+    : null;
+  reactionWarmArena = reactionWarmArenaLease
+    ? reactionWarmArenaResolveRunner(reactionWarmArenaLease, {
+        device,
+        particleCapacity: sphParticleState.particleCount,
+        productEventCapacity:
+          sphParticleState.particleCount * reactionTable.productTermCount,
+        productTermCapacity: reactionTable.productTermCount
+      })
+    : null;
+  reactionWarmBuffers = reactionWarmArena?.buffers ?? null;
+  reactionWarmBufferSet = new Set(
+    Object.values(reactionWarmBuffers ?? {}).filter(Boolean)
+  );
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const borrowedMechanicsBuffer = sourceMechanicsBuffer || mlsMpmParticleUpload?.mechanicsBuffer || null;
   const sourceUsesBorrowedGpuBuffers = Boolean(borrowedStateBuffer || borrowedThermoBuffer || borrowedMechanicsBuffer);
-  const packedParticleRecords = sourceUsesBorrowedGpuBuffers
-    ? new Float32Array(sphParticleState.particleCount * SPH_REACTION_PACKED_PARTICLE_FLOATS)
-    : packReactionParticleRecords(sphParticleState, mlsMpmParticleState);
-  const packedParticleRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-packed-source-particles', packedParticleRecords);
+  const packedParticleFloatCount = sphParticleState.particleCount
+    * SPH_REACTION_PACKED_PARTICLE_FLOATS;
+  const packedParticleRecords = reactionWarmBuffers
+    ? null
+    : (sourceUsesBorrowedGpuBuffers
+      ? new Float32Array(packedParticleFloatCount)
+      : packReactionParticleRecords(sphParticleState, mlsMpmParticleState));
+  const packedParticleRecordBuffer = reactionWarmBuffers?.packedSource
+    || registerReactionOwnedBuffer(writeStorageBuffer(
+      device,
+      'ulg-sph-reaction-packed-source-particles',
+      packedParticleRecords
+    ));
   const localSourceStateBuffer = sourceUsesBorrowedGpuBuffers && !borrowedStateBuffer
-    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-state-fallback', sphParticleState.state)
+    ? (reactionWarmBuffers?.fallbackState || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-state-fallback', sphParticleState.state)))
     : null;
   const localSourceThermoBuffer = sourceUsesBorrowedGpuBuffers && !borrowedThermoBuffer
-    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-thermo-fallback', sphParticleState.thermo)
+    ? (reactionWarmBuffers?.fallbackThermo || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-thermo-fallback', sphParticleState.thermo)))
     : null;
   const localSourceMechanicsBuffer = sourceUsesBorrowedGpuBuffers && !borrowedMechanicsBuffer
-    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-mechanics-fallback', mlsMpmParticleState.mechanics)
+    ? (reactionWarmBuffers?.fallbackMechanics || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-mechanics-fallback', mlsMpmParticleState.mechanics)))
     : null;
+  if (localSourceStateBuffer === reactionWarmBuffers?.fallbackState) {
+    device.queue.writeBuffer(localSourceStateBuffer, 0, sphParticleState.state);
+  }
+  if (localSourceThermoBuffer === reactionWarmBuffers?.fallbackThermo) {
+    device.queue.writeBuffer(localSourceThermoBuffer, 0, sphParticleState.thermo);
+  }
+  if (localSourceMechanicsBuffer === reactionWarmBuffers?.fallbackMechanics) {
+    device.queue.writeBuffer(
+      localSourceMechanicsBuffer,
+      0,
+      mlsMpmParticleState.mechanics
+    );
+  }
   const packSourceStateBuffer = borrowedStateBuffer || localSourceStateBuffer;
   const packSourceThermoBuffer = borrowedThermoBuffer || localSourceThermoBuffer;
   const packSourceMechanicsBuffer = borrowedMechanicsBuffer || localSourceMechanicsBuffer;
@@ -2591,7 +3285,7 @@ export async function runSphReactionStepWebGpu({
   const borrowedResponseGraphUpload = thermalResponseGraphUpload?.status === 'webgpu-uploaded'
     ? { ...thermalResponseGraphUpload, borrowed: true }
     : null;
-  const localResponseGraphUpload = borrowedResponseGraphUpload
+  localResponseGraphUpload = borrowedResponseGraphUpload
     ? null
     : uploadSphThermalResponseGraphBuffers(device, {
       thermalMaterialTable,
@@ -2602,7 +3296,7 @@ export async function runSphReactionStepWebGpu({
   const responseGraphUpload = borrowedResponseGraphUpload || localResponseGraphUpload;
   const localReactionRecordBuffer = canonicalReactionDiscoveryEnabled
     ? null
-    : writeStorageBuffer(
+    : registerReactionOwnedBuffer(writeStorageBuffer(
         device,
         'ulg-sph-reaction-records-and-product-phases',
         reactionTable.combinedRecords
@@ -2610,7 +3304,7 @@ export async function runSphReactionStepWebGpu({
             ...reactionTable.records,
             ...reactionTable.productPhaseRecords
           ])
-      );
+      ));
   const reactionRecordBuffer = canonicalReactionDiscovery?.reactionRecordBuffer
     || localReactionRecordBuffer;
   const phaseResponseRecordBuffer = responseGraphUpload.responseRecordBuffer;
@@ -2627,6 +3321,7 @@ export async function runSphReactionStepWebGpu({
         binCapacity: reactionParticleBinCapacity,
         readbackMetadata: reactionParticleBinMetadataReadback
       });
+  registerReactionOwnedBuffers(reactionParticleBins.cleanupBuffers);
   const schroederReactionLawQueue = resolveSchroederReactionLawQueue(
     canonicalReactionDiscoveryEnabled ? null : schroederLawQueue,
     {
@@ -2642,20 +3337,20 @@ export async function runSphReactionStepWebGpu({
   const localSchroederLawQueueBuffer = canonicalReactionDiscoveryEnabled
     || borrowedSchroederLawQueueBuffer
     ? null
-    : writeStorageBuffer(
+    : registerReactionOwnedBuffer(writeStorageBuffer(
       device,
       'ulg-sph-reaction-schroeder-law-queue-disabled',
       new Float32Array(SCHROEDER_REACTION_LAW_QUEUE_FLOATS)
-    );
+    ));
   const schroederReactionLawQueueBuffer = borrowedSchroederLawQueueBuffer
     || localSchroederLawQueueBuffer;
   const schroederReactionLawQueueParamsBuffer = canonicalReactionDiscoveryEnabled
     ? null
-    : device.createBuffer({
+    : registerReactionOwnedBuffer(device.createBuffer({
         label: 'ulg-sph-reaction-schroeder-law-queue-params',
         size: 16,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      });
+      }));
   if (schroederReactionLawQueueParamsBuffer) {
     device.queue.writeBuffer(
       schroederReactionLawQueueParamsBuffer,
@@ -2669,11 +3364,11 @@ export async function runSphReactionStepWebGpu({
   const localSchroederLawNeighborCandidateBuffer = canonicalReactionDiscoveryEnabled
     || borrowedSchroederLawNeighborCandidateBuffer
     ? null
-    : writeStorageBuffer(
+    : registerReactionOwnedBuffer(writeStorageBuffer(
       device,
       'ulg-sph-reaction-schroeder-law-neighbor-candidates-disabled',
       new Float32Array(SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS)
-    );
+    ));
   const schroederReactionLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
     || localSchroederLawNeighborCandidateBuffer;
   const borrowedSchroederLawNeighborSourceSpanBuffer = schroederReactionLawNeighborCandidates.sourceCandidateSpanBufferConsumed
@@ -2682,21 +3377,21 @@ export async function runSphReactionStepWebGpu({
   const localSchroederLawNeighborSourceSpanBuffer = canonicalReactionDiscoveryEnabled
     || borrowedSchroederLawNeighborSourceSpanBuffer
     ? null
-    : writeStorageBuffer(
+    : registerReactionOwnedBuffer(writeStorageBuffer(
       device,
       'ulg-sph-reaction-schroeder-law-neighbor-source-spans-disabled',
       new Float32Array(SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS)
-    );
+    ));
   const schroederReactionLawNeighborSourceSpanBuffer = borrowedSchroederLawNeighborSourceSpanBuffer
     || localSchroederLawNeighborSourceSpanBuffer;
   const schroederReactionLawNeighborCandidateParamsBuffer =
     canonicalReactionDiscoveryEnabled
       ? null
-      : device.createBuffer({
+      : registerReactionOwnedBuffer(device.createBuffer({
           label: 'ulg-sph-reaction-schroeder-law-neighbor-candidates-params',
           size: 32,
           usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-        });
+        }));
   if (schroederReactionLawNeighborCandidateParamsBuffer) {
     device.queue.writeBuffer(
       schroederReactionLawNeighborCandidateParamsBuffer,
@@ -2708,39 +3403,40 @@ export async function runSphReactionStepWebGpu({
   }
   const localProposalBuffer = canonicalReactionDiscoveryEnabled
     ? null
-    : writeStorageBuffer(
+    : registerReactionOwnedBuffer(writeStorageBuffer(
         device,
         'ulg-sph-reaction-proposals',
         new Float32Array(sphParticleState.particleCount * 4),
         GPU_BUFFER_USAGE.COPY_SRC
-      );
+      ));
   const proposalBuffer = canonicalReactionDiscovery?.proposalBuffer
     || localProposalBuffer;
-  const outPackedParticleRecordBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-reaction-packed-output-particles',
-    new Float32Array(packedParticleRecords.length),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  const outPackedParticleRecordBuffer = reactionWarmBuffers?.packedOutput
+    || registerReactionOwnedBuffer(writeStorageBuffer(
+      device,
+      'ulg-sph-reaction-packed-output-particles',
+      new Float32Array(packedParticleFloatCount),
+      GPU_BUFFER_USAGE.COPY_SRC
+    ));
   // Never size GPU outputs from the CPU arrays alone: under GPU-resident
   // continuation the CPU copies can be stale or detached (length 0).
-  const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(Math.max(
+  const outStateBuffer = reactionWarmBuffers?.resolvedState || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(Math.max(
     sphParticleState.state.length,
     sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC);
-  const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(Math.max(
+  )), GPU_BUFFER_USAGE.COPY_SRC));
+  const outThermoBuffer = reactionWarmBuffers?.resolvedThermo || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(Math.max(
     sphParticleState.thermo.length,
     sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC);
-  const outMechanicsBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(Math.max(
+  )), GPU_BUFFER_USAGE.COPY_SRC));
+  const outMechanicsBuffer = reactionWarmBuffers?.resolvedMechanics || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(Math.max(
     mlsMpmParticleState.mechanics.length,
     mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC);
-  const paramsBuffer = device.createBuffer({
+  )), GPU_BUFFER_USAGE.COPY_SRC));
+  const paramsBuffer = reactionWarmBuffers?.reactionParams || registerReactionOwnedBuffer(device.createBuffer({
     label: 'ulg-sph-reaction-params',
     size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
+  }));
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     reactionCount: reactionTable.reactionCount,
@@ -2751,6 +3447,10 @@ export async function runSphReactionStepWebGpu({
     materialCount: resolvedPhaseResponseTable.materialCount,
     segmentCount: resolvedPhaseResponseTable.responseCount,
     resetMechanics,
+    reactionTableMode:
+      reactionStoichiometryDiagnostic.tableMode === 'extended-stoichiometric-v1'
+        ? 1
+        : 0,
     dtSeconds
   }));
 
@@ -2914,33 +3614,60 @@ export async function runSphReactionStepWebGpu({
   const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
   const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
   const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
+  const particleWorkgroups = Math.max(
+    1,
+    Math.ceil(sphParticleState.particleCount / 64)
+  );
+  const timestampProfilingActive = gpuTimestampRecorder?.active === true
+    && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+    && typeof gpuTimestampRecorder.endEncoderSpan === 'function';
+  const applyTimestampSpan = beginReactionTimestampSpan(
+    gpuTimestampRecorder,
+    encoder,
+    {
+      producerId: 'sph-reaction-apply:grouped-kernel',
+      stage: 'grouped-kernel',
+      spanClass: 'same-production-command-encoder-profiled-pass',
+      particleCount: sphParticleState.particleCount,
+      canonicalReactionDiscoveryEnabled,
+      productionPassGroupingPreserved: true
+    }
+  );
+  const pass = encoder.beginComputePass({
+    label: 'ulg-sph-reaction-grouped-kernel'
+  });
   if (packPipelineInfo && packBindGroup) {
     pass.setPipeline(packPipelineInfo.pipeline);
     pass.setBindGroup(0, packBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+    pass.dispatchWorkgroups(particleWorkgroups);
   }
   if (reactionParticleBinPipelineInfo && reactionParticleBinBindGroup) {
     pass.setPipeline(reactionParticleBinPipelineInfo.pipeline);
     pass.setBindGroup(0, reactionParticleBinBindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
+    pass.dispatchWorkgroups(particleWorkgroups);
   }
   if (proposePipelineInfo && proposeBindGroup) {
     pass.setPipeline(proposePipelineInfo.pipeline);
     pass.setBindGroup(0, proposeBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+    pass.dispatchWorkgroups(particleWorkgroups);
   }
   pass.setPipeline(resolvePipeline);
   pass.setBindGroup(0, resolveBindGroup);
-  pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  pass.dispatchWorkgroups(particleWorkgroups);
   pass.setPipeline(unpackPipeline);
   pass.setBindGroup(0, unpackBindGroup);
-  pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  pass.dispatchWorkgroups(particleWorkgroups);
   pass.end();
+  endReactionTimestampSpan(
+    gpuTimestampRecorder,
+    encoder,
+    applyTimestampSpan
+  );
   if (reactionParticleBins.metadataReadbackBuffer) {
     encoder.copyBufferToBuffer(reactionParticleBins.metadataBuffer, 0, reactionParticleBins.metadataReadbackBuffer, 0, 16);
   }
   device.queue.submit([encoder.finish()]);
+  reactionPrimarySubmissionObserved = true;
 
   let reactionParticleBinOverflowStatus = reactionParticleBins.overflowMetadataStatus ?? null;
   let reactionParticleBinOverflowCount = null;
@@ -2953,24 +3680,86 @@ export async function runSphReactionStepWebGpu({
   }
 
   let reactionSummary = null;
+  let reactionPlacementPositionEpochFloorReceipt = null;
+  let continuationStateBuffer = outStateBuffer;
+  let continuationThermoBuffer = outThermoBuffer;
+  let continuationMechanicsBuffer = outMechanicsBuffer;
   const temporarySummaryBuffers = [];
+  const scheduleCanonicalFailureScratchCleanup =
+    scheduleReactionResourceRegistryDrain;
   if (noFullReadback && reactionTable.productTermCount > 0) {
     try {
       const summarySourceStateBuffer = packSourceStateBuffer
-        || writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-state', sphParticleState.state);
+        || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-state', sphParticleState.state));
       const summarySourceThermoBuffer = packSourceThermoBuffer
-        || writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-thermo', sphParticleState.thermo);
+        || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-thermo', sphParticleState.thermo));
       if (!packSourceStateBuffer) temporarySummaryBuffers.push(summarySourceStateBuffer);
       if (!packSourceThermoBuffer) temporarySummaryBuffers.push(summarySourceThermoBuffer);
+      if (canonicalReactionDiscoveryEnabled) {
+        const positionInvariantCertificate =
+          createSphReactionResolvePositionInvariantCertificate({
+            device,
+            ancestorGeneration: schroederSpatialEpochGeneration,
+            reactionInputStateBuffer: summarySourceStateBuffer,
+            reactionInputThermoBuffer: summarySourceThermoBuffer,
+            frozenResolvedStateBuffer: outStateBuffer,
+            particleCount: sphParticleState.particleCount,
+            reactionDiscoveryProposal:
+              schroederSpatialReactionDiscoveryProposal,
+            reactionTable
+          });
+        reactionPlacementSourceFamily = await reactionPlacementEpochRunner({
+          device,
+          ancestorPublicGeneration: schroederSpatialEpochGeneration,
+          sphParticleState,
+          mlsMpmParticleState,
+          sphParticleUpload,
+          frozenSourceStateBuffer: outStateBuffer,
+          frozenSourceThermoBuffer: outThermoBuffer,
+          frozenSourceMechanicsBuffer: outMechanicsBuffer,
+          stableIdentityBuffer: sphParticleUpload?.identityBuffer ?? null,
+          positionInvariantCertificate,
+          reactionWarmArenaLease,
+          gpuTimestampRecorder
+        });
+        if (
+          reactionPlacementSourceFamily?.ready !== true
+          || reactionPlacementSourceFamily?.authenticated !== true
+          || reactionPlacementSourceFamily?.stageIdentity
+            !== 'post-reaction-pre-placement'
+        ) {
+          throw new Error(
+            'reaction placement epoch did not publish an authenticated shared-directory source family'
+          );
+        }
+        continuationStateBuffer =
+          reactionPlacementSourceFamily.placedDestinationStateBuffer;
+        continuationThermoBuffer =
+          reactionPlacementSourceFamily.placedDestinationThermoBuffer;
+        continuationMechanicsBuffer =
+          reactionPlacementSourceFamily.placedDestinationMechanicsBuffer;
+      }
+      const canonicalReactionProductPlacementAuthority =
+        canonicalReactionDiscoveryEnabled
+          ? createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
+              device,
+              placementSourceFamily: reactionPlacementSourceFamily,
+              particleCount: sphParticleState.particleCount,
+              productEventCapacity:
+                sphParticleState.particleCount * reactionTable.productTermCount,
+              sourceStateBuffer: summarySourceStateBuffer,
+              sourceThermoBuffer: summarySourceThermoBuffer
+            })
+          : null;
       reactionSummary = await runSphReactionSummaryWebGpu({
         device,
         sphParticleState,
         reactionTable,
         sourceStateBuffer: summarySourceStateBuffer,
         sourceThermoBuffer: summarySourceThermoBuffer,
-        nextStateBuffer: outStateBuffer,
-        nextThermoBuffer: outThermoBuffer,
-        nextMechanicsBuffer: outMechanicsBuffer,
+        nextStateBuffer: continuationStateBuffer,
+        nextThermoBuffer: continuationThermoBuffer,
+        nextMechanicsBuffer: continuationMechanicsBuffer,
         reactionRecordBuffer,
         proposalBuffer,
         // Only forward the simulation-domain dimensions. Particle-bin bounds
@@ -2980,16 +3769,87 @@ export async function runSphReactionStepWebGpu({
         readProductEvents: false,
         retainProductEventBuffer: retainOutputParticleBuffers,
         productPlacementAccumulatorBuffer,
-        readProductPlacementSummary: readReactionProductPlacementSummary,
+        readProductPlacementSummary:
+          shouldReadReactionProductPlacementSummary,
         productPlacementReadbackCadence: reactionProductPlacementReadbackCadence,
         productPlacementSourceSummaryCount: reactionProductPlacementSourceSummaryCount,
-        readCompactSummary: readCompactReactionSummary,
-        readGasSpeciesSummary: readReactionGasSpeciesSummary,
-        readProductInventory: readReactionProductInventory,
-        readAtomResidual: readReactionAtomResidual,
-        dtSeconds
+        readCompactSummary: shouldReadCompactReactionSummary,
+        readGasSpeciesSummary: shouldReadReactionGasSpeciesSummary,
+        readProductInventory: shouldReadReactionProductInventory,
+        readAtomResidual: shouldReadReactionAtomResidual,
+        dtSeconds,
+        gpuTimestampRecorder,
+        canonicalReactionProductPlacementAuthority,
+        reactionWarmArenaLease
       });
+      if (reactionPlacementSourceFamily) {
+        // The shared-directory one-shot submission establishes only an
+        // ancestor-bound epoch floor. Observed/readback placement artifacts
+        // remain diagnostics and cannot upgrade it into a transition.
+        const placementArtifact =
+          reactionSummary?.reactionProductPlacementSubmissionArtifact
+          ?? null;
+        reactionPlacementPositionEpochFloorReceipt =
+          await finalizeSchroederSpatialReactionPlacementPositionEpochFloor(
+            reactionPlacementSourceFamily,
+            { placementArtifact }
+          );
+        const releaseScheduled =
+          releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
+            reactionPlacementSourceFamily,
+            {
+              placementArtifact
+            }
+          );
+        if (releaseScheduled !== true) {
+          throw new Error(
+            'reaction placement source family could not schedule exact-owner retirement'
+          );
+        }
+        const destinationOwnershipTransferred =
+          transferSchroederSpatialReactionPlacementDestinationOwnership(
+            reactionPlacementSourceFamily
+          );
+        if (destinationOwnershipTransferred !== true) {
+          throw new Error(
+            'reaction placement destination ownership was not transferred exactly once'
+          );
+        }
+        reactionPlacementDestinationOwnershipTransferred = true;
+      }
     } catch (error) {
+      if (canonicalReactionDiscoveryEnabled) {
+        if (reactionPlacementSourceFamily) {
+          try {
+            if (reactionPlacementDestinationOwnershipTransferred) {
+              const destinationReturn =
+                releaseSphReactionTransferredDestinationAfterSettledFences({
+                  device,
+                  sourceFamily: reactionPlacementSourceFamily,
+                  reactionWarmArenaLease
+                });
+              reactionPlacementDestinationReturnScheduled = Boolean(
+                destinationReturn?.then
+              );
+            } else {
+              releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
+                reactionPlacementSourceFamily,
+                { abandon: true }
+              );
+            }
+          } catch (releaseError) {
+            if (
+              releaseError?.code
+                !== 'ERR_SCHROEDER_SPATIAL_REACTION_PLACEMENT_EPOCH_RETIRED'
+            ) {
+              // Preserve the canonical failure while the generation's own
+              // device-loss observer remains armed as a terminal fallback.
+            }
+          }
+        }
+        scheduleCanonicalFailureScratchCleanup();
+        throw error;
+      }
       reactionSummary = {
         schema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
         backend: 'webgpu',
@@ -3004,7 +3864,25 @@ export async function runSphReactionStepWebGpu({
         fullPhysicsValidation: false
       };
     } finally {
-      for (const buffer of temporarySummaryBuffers) buffer?.destroy?.();
+      const destroyTemporarySummaryBuffers = () => {
+        for (const buffer of temporarySummaryBuffers) {
+          if (!reactionWarmBufferSet.has(buffer)) {
+            destroyReactionOwnedBuffer(buffer);
+          }
+        }
+      };
+      if (temporarySummaryBuffers.length > 0) {
+        const summaryFence = device.queue?.onSubmittedWorkDone?.();
+        if (summaryFence?.then) {
+          Promise.resolve(summaryFence).then(
+            destroyTemporarySummaryBuffers,
+            destroyTemporarySummaryBuffers
+          );
+        }
+        // A WebGPU production queue always exposes onSubmittedWorkDone. If a
+        // test double does not, retain rather than destroy buffers that may
+        // still be referenced by submitted placement work.
+      }
     }
   }
 
@@ -3032,7 +3910,11 @@ export async function runSphReactionStepWebGpu({
 
   const nonRetainedOutputBuffers = retainOutputParticleBuffers
     ? []
-    : [outStateBuffer, outThermoBuffer, outMechanicsBuffer];
+    : [
+        continuationStateBuffer,
+        continuationThermoBuffer,
+        continuationMechanicsBuffer
+      ];
   const scratchBuffers = [
     packedParticleRecordBuffer,
     outPackedParticleRecordBuffer,
@@ -3048,14 +3930,22 @@ export async function runSphReactionStepWebGpu({
     localSourceStateBuffer,
     localSourceThermoBuffer,
     localSourceMechanicsBuffer,
-    ...(noFullReadback ? nonRetainedOutputBuffers : [])
+    ...(
+      noFullReadback && !reactionPlacementSourceFamily
+        ? nonRetainedOutputBuffers
+        : []
+    )
   ];
   let scratchBuffersDestroyed = false;
   const destroyScratchBuffers = () => {
     if (scratchBuffersDestroyed) return;
     scratchBuffersDestroyed = true;
-    for (const buffer of scratchBuffers) buffer?.destroy?.();
-    if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
+    for (const buffer of scratchBuffers) {
+      if (!reactionWarmBufferSet.has(buffer)) {
+        destroyReactionOwnedBuffer(buffer);
+      }
+    }
+    destroyLocalResponseGraphUpload();
   };
   if (noFullReadback) {
     const cleanupFence = typeof device.queue?.onSubmittedWorkDone === 'function'
@@ -3075,25 +3965,139 @@ export async function runSphReactionStepWebGpu({
     destroyScratchBuffers();
     scratchBufferCleanupStatus = 'destroyed-after-readback';
   }
-  if (!retainOutputParticleBuffers && !noFullReadback) {
-    outStateBuffer.destroy?.();
-    outThermoBuffer.destroy?.();
-    outMechanicsBuffer.destroy?.();
+  if (
+    !retainOutputParticleBuffers
+    && !noFullReadback
+    && !reactionPlacementSourceFamily
+  ) {
+    destroyReactionOwnedBuffer(outStateBuffer);
+    destroyReactionOwnedBuffer(outThermoBuffer);
+    destroyReactionOwnedBuffer(outMechanicsBuffer);
   }
 
-	  const residentProductMass = createResidentProductMassHandle(reactionSummary);
-	  let outputParticleBuffersDestroyed = false;
-	  const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
-	    ? () => {
-	      if (outputParticleBuffersDestroyed) return;
-	      outputParticleBuffersDestroyed = true;
-	      outStateBuffer.destroy?.();
-	      outThermoBuffer.destroy?.();
-	      outMechanicsBuffer.destroy?.();
-	      residentProductMass?.destroyResidentProductMassBuffers?.();
-	    }
-	    : null;
-	  return outputEnvelope({
+  const residentProductMass = createResidentProductMassHandle(reactionSummary);
+  const destroyRetainedResidentProductMassBuffers =
+    typeof residentProductMass?.destroyResidentProductMassBuffers === 'function'
+      ? residentProductMass.destroyResidentProductMassBuffers.bind(
+          residentProductMass
+        )
+      : null;
+  let outputParticleBuffersReleaseConfirmed = false;
+  let outputParticleBuffersReleasePromise = null;
+  let automaticDestinationReturnCompletion = null;
+  const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
+    ? ({ preserveResidentProductMass = false } = {}) => {
+      if (outputParticleBuffersReleaseConfirmed) return true;
+      if (outputParticleBuffersReleasePromise) {
+        return outputParticleBuffersReleasePromise;
+      }
+      if (
+        preserveResidentProductMass === true
+        && reactionWarmArenaLease
+        && residentProductMass?.productEventBuffer
+          === reactionWarmBuffers?.productEvent
+      ) {
+        // The retained handle points into this exact arena. Recycling the
+        // slot while preserving that handle would be a use-after-reuse.
+        return false;
+      }
+      const residentProductMassRelease = preserveResidentProductMass === true
+        ? Promise.resolve(true)
+        : (
+            destroyRetainedResidentProductMassBuffers?.()
+            ?? Promise.resolve(true)
+          );
+      let scheduledRelease = null;
+      if (reactionPlacementSourceFamily) {
+        const residentProductMassSettlement = Promise.resolve(
+          residentProductMassRelease
+        );
+        const queueFence = device.queue?.onSubmittedWorkDone?.();
+        if (!queueFence?.then) {
+          return false;
+        }
+        const downstreamCompletionFence = Promise.all([
+          residentProductMassSettlement,
+          queueFence
+        ]).then(([released]) => {
+          if (released !== true) {
+            throw new Error(
+              'resident product-event ownership did not drain before reaction destination return'
+            );
+          }
+          return true;
+        });
+        scheduledRelease =
+          releaseSphReactionTransferredDestinationAfterSettledFences({
+            device,
+            sourceFamily: reactionPlacementSourceFamily,
+            completionFence: downstreamCompletionFence,
+            settlementFences: [residentProductMassSettlement, queueFence],
+            reactionWarmArenaLease
+          });
+        if (!scheduledRelease?.then) return false;
+        reactionPlacementDestinationReturnScheduled = true;
+      } else {
+        destroyReactionOwnedBuffer(continuationStateBuffer);
+        destroyReactionOwnedBuffer(continuationThermoBuffer);
+        destroyReactionOwnedBuffer(continuationMechanicsBuffer);
+        scheduledRelease = residentProductMassRelease;
+      }
+      outputParticleBuffersReleasePromise = Promise.resolve(
+        scheduledRelease
+      ).then((released) => {
+        if (released !== true) {
+          throw new Error(
+            'reaction output owner did not confirm exact destination release'
+          );
+        }
+        outputParticleBuffersReleaseConfirmed = true;
+        return true;
+      });
+      return outputParticleBuffersReleasePromise;
+    }
+    : null;
+  if (
+    residentProductMass
+    && typeof destroyRetainedOutputParticleBuffers === 'function'
+  ) {
+    // The product-event handle can outlive the step that created the reaction
+    // destination family. Carry the exact family owner with that handle so
+    // eventual history consumption returns every pooled sibling together.
+    residentProductMass.destroyResidentProductMassBuffers =
+      destroyRetainedOutputParticleBuffers;
+  }
+  if (reactionPlacementSourceFamily && !retainOutputParticleBuffers) {
+    const destinationReturn =
+      releaseSphReactionTransferredDestinationAfterSettledFences({
+        device,
+        sourceFamily: reactionPlacementSourceFamily,
+        reactionWarmArenaLease
+      });
+    if (!destinationReturn?.then) {
+      throw new Error(
+        'reaction placement destination owner did not schedule non-retained release'
+      );
+    }
+    reactionPlacementDestinationReturnScheduled = true;
+    // Automatic non-retained cleanup has no downstream caller to observe a
+    // rejection. Keep the completion evidence on the result while converting
+    // failure into a truthful value rather than an unhandled rejection.
+    automaticDestinationReturnCompletion = Promise.resolve(
+      destinationReturn
+    ).then(
+      (released) => released === true,
+      () => false
+    );
+  }
+  reactionWarmArenaReleaseOwnedByOutput = Boolean(
+    reactionPlacementSourceFamily
+    && (
+      retainOutputParticleBuffers
+      || reactionPlacementDestinationReturnScheduled
+    )
+  );
+  return outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
     mlsMpmParticleState,
@@ -3110,20 +4114,48 @@ export async function runSphReactionStepWebGpu({
     eventCount: null,
     conversionCount: null,
     reactionSummary,
+    reactionStoichiometryDiagnostic,
     residentProductMass,
-    stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
-    thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
-    mechanicsBuffer: retainOutputParticleBuffers ? outMechanicsBuffer : null,
-    stateBufferByteLength: sphParticleState.state.byteLength,
-    thermoBufferByteLength: sphParticleState.thermo.byteLength,
-    mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
+    stateBuffer: retainOutputParticleBuffers ? continuationStateBuffer : null,
+    thermoBuffer: retainOutputParticleBuffers ? continuationThermoBuffer : null,
+    mechanicsBuffer: retainOutputParticleBuffers
+      ? continuationMechanicsBuffer
+      : null,
+    stateBufferByteLength: Math.max(
+      sphParticleState.state.byteLength,
+      sphParticleState.particleCount
+        * SPH_GPU_PARTICLE_STATE_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    ),
+    thermoBufferByteLength: Math.max(
+      sphParticleState.thermo.byteLength,
+      sphParticleState.particleCount
+        * SPH_GPU_PARTICLE_THERMO_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    ),
+    mechanicsBufferByteLength: Math.max(
+      mlsMpmParticleState.mechanics.byteLength,
+      mlsMpmParticleState.particleCount
+        * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    ),
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
-	    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
+    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
     queueCompletionStatus,
     queueCompletionMethod,
     scratchBufferCleanupStatus,
+    reactionPlacementSourceFamily,
+    reactionPlacementPositionEpochFloorReceipt,
+    reactionPlacementDestinationOwnershipTransferred,
+    reactionPlacementDestinationReturnScheduled,
+    automaticDestinationReturnCompletion,
+    reactionWarmArenaLease,
+    reactionWarmArena,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
+    gpuTimestampInstrumentation: timestampProfilingActive
+      ? 'same-command-encoder-profiled-grouped-production-compute-pass'
+      : 'disabled-grouped-production-compute-pass',
     reactionProposalNeighborMode: canonicalReactionDiscoveryEnabled
       ? 'canonical-spatial-reaction-discovery-proposals'
       : [
@@ -3150,6 +4182,74 @@ export async function runSphReactionStepWebGpu({
     reactionParticleBinOverflowCount,
     canonicalReactionDiscovery
   });
+  } catch (error) {
+    const cleanupCompletions = [scheduleReactionResourceRegistryDrain()];
+    try {
+      if (reactionPlacementSourceFamily) {
+        if (
+          reactionPlacementDestinationOwnershipTransferred
+          && !reactionPlacementDestinationReturnScheduled
+        ) {
+          const destinationReturn =
+            releaseSphReactionTransferredDestinationAfterSettledFences({
+              device,
+              sourceFamily: reactionPlacementSourceFamily,
+              reactionWarmArenaLease
+            });
+          reactionPlacementDestinationReturnScheduled = Boolean(
+            destinationReturn?.then
+          );
+          if (destinationReturn?.then) {
+            cleanupCompletions.push(destinationReturn);
+          }
+        } else if (!reactionPlacementDestinationOwnershipTransferred) {
+          const sourceReturn =
+            releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
+              reactionPlacementSourceFamily,
+              { abandon: true }
+            );
+          if (sourceReturn?.then) {
+            cleanupCompletions.push(sourceReturn);
+          }
+        }
+      } else if (
+        reactionWarmArenaLease
+        && !reactionWarmArenaReleaseOwnedByOutput
+      ) {
+        const completionFence = typeof device.queue?.onSubmittedWorkDone === 'function'
+          ? device.queue.onSubmittedWorkDone()
+          : null;
+        if (completionFence?.then) {
+          const warmArenaReturn = reactionWarmArenaReleaseRunner(
+            reactionWarmArenaLease,
+            {
+            device,
+            completionFence,
+            abandon: true
+            }
+          );
+          if (warmArenaReturn?.then) {
+            cleanupCompletions.push(warmArenaReturn);
+          }
+        }
+      }
+    } catch {
+      // A deeper placement failure may already own exact arena rollback.
+    }
+    const reactionResourceCleanupCompletion = Promise.allSettled(
+      cleanupCompletions.map((completion) => Promise.resolve(completion))
+    ).then((settled) => settled.every(
+      (result) => result.status === 'fulfilled'
+    ));
+    if (error && (typeof error === 'object' || typeof error === 'function')) {
+      Object.defineProperty(error, 'reactionResourceCleanupCompletion', {
+        value: reactionResourceCleanupCompletion,
+        enumerable: false,
+        configurable: true
+      });
+    }
+    throw error;
+  }
 }
 
 function createNoFullReadbackParityReport(tolerance = 2e-3) {

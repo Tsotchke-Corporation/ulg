@@ -50,6 +50,7 @@ import {
   cpuMarchingCubesRadiusFloorM,
   createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches,
+  opticalPathLengthMForSurfaceBatch,
   createProductEventSurfaceBatches,
   createSchroederRenderSourceMetadata,
   createSchroederRenderProxyDescriptorPlan,
@@ -60,6 +61,7 @@ import {
   createSchroederRenderProxyNativeCameraUniformPayload,
   createSchroederRenderProxyNativeWebGpuExecutor,
   createResidentRenderSourceMetadata,
+  schroederRenderContinuationRequiresSourceFamily,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
   buildSchroederSourceKeyReplayDiagnostics,
@@ -71,27 +73,35 @@ import {
   resolveSphSceneLightingProfile,
   emissiveAuthorityValueForSurface,
   nativeSurfaceBackgroundCoverScale,
+  nativeSurfaceTemperatureDestroyMethodIsAuthenticated,
+  nativeSurfaceTemperatureAttachmentIsRequired,
   normalizeSphRendererBackend,
   resolveThreeWebGpuPresentationPolicy,
   createThreeWebGpuExternalInterleavedBufferAttribute,
   createThreeWebGpuExternalIndirectBufferAttribute,
   resolveExtensionSurfaceRenderBridgePlan,
   resolveSphSurfaceDrawDiagnosticPresentationMode,
+  resolveSphSurfaceDrawRefreshContinuityMode,
+  resolveSphNativeSurfaceExtractionDeferralPolicy,
   resolveThreeWebGpuRendererRequiredLimits,
   resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
   resolveResidentExtensionSurfaceRendererCapability,
   resolveResidentSurfaceBufferHandoff,
   resolveResidentSurfaceVisibleGpuConsumer,
+  resolveNativeSurfaceTemperatureRetirement,
   resolveSphNativeWebGpuSurfaceValidationCadence,
+  resolveSchroederNativeSurfaceAdmissionMode,
   summarizeThreeWebGpuDeviceLimits,
   buildSchroederPressureInterfaceGasCellFieldImportPublicationFromResidentExecution,
   selectSchroederPressureInterfaceGasCellFieldImportFromResidentExecution,
+  pressureInterfaceGasCellFieldImportReadyForScene,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
   submitSceneGasCellEosProducerStageForPressureInterface,
   residentSurfaceBatchIdentitySignature,
   residentSurfaceBatchOpticalSignature,
   opticalGpuTableBindingLayoutSignature,
+  opticalGpuTableBufferContentsEqual,
   residentRenderGasPressureSummary,
   residentRenderFieldReadbackModeForSurfaceOverlay,
   selectPressureInterfaceGridForceAdmissionForExecutionMode,
@@ -393,7 +403,7 @@ test('SPH scene dark-lab lighting suppresses incident light while preserving emi
   assert.doesNotMatch(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /emissive\s*\*\s*(?:ambient|direct|environment)/);
 });
 
-test('native WebGPU background image uses opaque cover rendering', () => {
+test('native WebGPU background image uses opaque cover rendering and an exact staged MRT variant', () => {
   assert.deepEqual(nativeSurfaceBackgroundCoverScale({
     imageWidth: 200,
     imageHeight: 100,
@@ -408,6 +418,11 @@ test('native WebGPU background image uses opaque cover rendering', () => {
   }), [1, 0.25]);
   assert.match(SPH_NATIVE_WEBGPU_BACKGROUND_WGSL, /textureSample\(background_image/);
   assert.match(SPH_NATIVE_WEBGPU_BACKGROUND_WGSL, /vec4<f32>\([^;]*, 1\.0\)/);
+  assert.match(
+    SPH_NATIVE_WEBGPU_BACKGROUND_WGSL,
+    /struct BackgroundMrtOutput[\s\S]*?@location\(0\) base:[\s\S]*?@location\(1\) composite:[\s\S]*?fn fs_staged_mrt_main[\s\S]*?output\.base = color;[\s\S]*?output\.composite = color;/,
+    'the private proof path must initialize baseline and composite from one sampled background color'
+  );
 });
 
 test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-to-steam status', () => {
@@ -1166,6 +1181,74 @@ test('SPH surface draw presentation blocks compact tetrahedral geometry by defau
   assert.equal(webgpuRows.compactVertexPresentationBlocked, false);
 });
 
+test('SPH auto surface refresh retains a committed visible native presenter', () => {
+  const retained = resolveSphSurfaceDrawRefreshContinuityMode({
+    requestedMode: 'auto',
+    previousVisibleRendererBridge: 'native-webgpu-surface-consumer',
+    previousBridgeVisible: true
+  });
+  assert.equal(retained.status, 'surface-draw-auto-retained-visible-native-consumer');
+  assert.equal(retained.effectiveMode, 'native-webgpu-surface-consumer');
+  assert.equal(retained.retainedPreviousNativeSurfaceConsumer, true);
+
+  const uncommitted = resolveSphSurfaceDrawRefreshContinuityMode({
+    requestedMode: 'auto',
+    previousVisibleRendererBridge: 'native-webgpu-surface-consumer',
+    previousBridgeVisible: false
+  });
+  assert.equal(uncommitted.effectiveMode, 'auto');
+  assert.equal(uncommitted.retainedPreviousNativeSurfaceConsumer, false);
+
+  const explicitReplacement = resolveSphSurfaceDrawRefreshContinuityMode({
+    requestedMode: 'three-render-row-spheres',
+    previousVisibleRendererBridge: 'native-webgpu-surface-consumer',
+    previousBridgeVisible: true
+  });
+  assert.equal(explicitReplacement.effectiveMode, 'three-render-row-spheres');
+  assert.equal(explicitReplacement.retainedPreviousNativeSurfaceConsumer, false);
+});
+
+test('native deferred extraction never replaces a visible presenter with a zero-geometry handoff', () => {
+  const retained = resolveSphNativeSurfaceExtractionDeferralPolicy({
+    nativeSurfaceConsumerRequested: true,
+    nativeSurfaceExtractionAllowed: false,
+    previousNativeSurfaceVisible: true,
+    deferredRenderFieldHandoff: true
+  });
+  assert.equal(
+    retained.status,
+    'native-surface-extraction-deferred-retaining-previous-presentation'
+  );
+  assert.equal(retained.nativeSurfaceExtractionEffectiveAllowed, false);
+  assert.equal(retained.retainPreviousNativeSurface, true);
+  assert.equal(retained.releaseDeferredRenderFieldHandoff, true);
+  assert.match(retained.reason, /zero-geometry render-field handoff/);
+  assert.equal(Object.isFrozen(retained), true);
+
+  const firstPresentation = resolveSphNativeSurfaceExtractionDeferralPolicy({
+    nativeSurfaceConsumerRequested: true,
+    nativeSurfaceExtractionAllowed: false,
+    previousNativeSurfaceVisible: false,
+    deferredRenderFieldHandoff: false
+  });
+  assert.equal(
+    firstPresentation.status,
+    'native-surface-extraction-forced-for-first-visible-presentation'
+  );
+  assert.equal(firstPresentation.nativeSurfaceExtractionEffectiveAllowed, true);
+  assert.equal(firstPresentation.nativeSurfaceExtractionForcedForFirstVisiblePresentation, true);
+  assert.equal(firstPresentation.retainPreviousNativeSurface, false);
+
+  const nonNative = resolveSphNativeSurfaceExtractionDeferralPolicy({
+    nativeSurfaceConsumerRequested: false,
+    nativeSurfaceExtractionAllowed: false,
+    previousNativeSurfaceVisible: true,
+    deferredRenderFieldHandoff: true
+  });
+  assert.equal(nonNative.status, 'native-surface-extraction-deferral-not-applicable');
+  assert.equal(nonNative.retainPreviousNativeSurface, false);
+});
+
 test('SPH extension surface bridge planner keeps no-full resident buffers by default', () => {
   const webglCapability = resolveResidentExtensionSurfaceRendererCapability({
     renderer: { isWebGLRenderer: true, domElement: {} },
@@ -1694,6 +1777,50 @@ test('SPH resident material seed surfaces preserve domains without CPU geometry'
   assert.equal(drop.smoothingLengthM, 0.3);
 });
 
+test('SPH resident optical paths use the body mean chord without material opacity floors', () => {
+  const positionsM = [];
+  const materials = [];
+  for (const x of [0.1, 0.9]) {
+    for (const y of [0.1, 0.9]) {
+      for (const z of [0.1, 0.9]) {
+        positionsM.push(x, y, z);
+        materials.push({
+          material: 'F',
+          phase: 'gas',
+          renderKey: 'F',
+          renderDomainId: 1,
+          renderDomainKey: 'base'
+        });
+      }
+    }
+  }
+  const [batch] = createResidentMaterialSeedSurfaceBatches({
+    materials,
+    positionsM: Float32Array.from(positionsM),
+    particleRadiiM: Float32Array.from({ length: 8 }, () => 0.1),
+    smoothingLengthM: 0.2
+  });
+
+  assert.equal(batch.positionsM.length, 0, 'resident seed does not retain CPU geometry');
+  assert.deepEqual(
+    batch.bounds.min.map((value) => Number(value.toFixed(3))),
+    [0.1, 0.1, 0.1]
+  );
+  assert.deepEqual(
+    batch.bounds.max.map((value) => Number(value.toFixed(3))),
+    [0.9, 0.9, 0.9]
+  );
+  const pathLengthM = opticalPathLengthMForSurfaceBatch(batch);
+  assert.ok(Math.abs(pathLengthM - (2 / 3)) < 1e-6);
+
+  const table = createOpticalGpuTableForSurfaceBatches([batch]);
+  assert.ok(Math.abs(table.recordMetadata[0].pathLengthM - (2 / 3)) < 1e-6);
+  assert.equal(
+    table.recordMetadata[0].pathLengthSource,
+    'surface-body-cauchy-mean-chord'
+  );
+});
+
 test('SPH resident material seeds exclude zero-mass spare product rows', () => {
   const batches = createResidentMaterialSeedSurfaceBatches({
     materials: [
@@ -1765,6 +1892,10 @@ test('SPH resident render fields merge same-material domains into one visible ma
     smoothingLengthM: 0.248
   });
 
+  const expectedOpticalPathLengthM = batches.reduce(
+    (sum, batch) => sum + opticalPathLengthMForSurfaceBatch(batch) * batch.count,
+    0
+  ) / batches.reduce((sum, batch) => sum + batch.count, 0);
   const [merged] = mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches);
 
   assert.equal(merged.surfaceKey, 'h2o|h2o|liquid');
@@ -1775,6 +1906,11 @@ test('SPH resident render fields merge same-material domains into one visible ma
   assert.equal(merged.normalizedPositions.length, 12);
   assert.equal(Number(merged.representativeParticleRadiusM.toFixed(3)), 0.13);
   assert.equal(merged.smoothingLengthM, 0.248);
+  assert.ok(Math.abs(merged.opticalPathLengthM - expectedOpticalPathLengthM) < 1e-12);
+  assert.equal(
+    merged.opticalPathLengthSource,
+    'component-count-weighted-cauchy-mean-chord'
+  );
   assert.deepEqual(
     merged.mergedRenderDomains.map((domain) => [domain.renderDomainId, domain.renderDomainKey, domain.count]),
     [
@@ -2208,6 +2344,19 @@ test('SPH phase renderer keeps optical binding layout stable while live values c
   assert.equal(
     opticalGpuTableBindingLayoutSignature(clearTable),
     opticalGpuTableBindingLayoutSignature(denseTable)
+  );
+  assert.equal(
+    opticalGpuTableBufferContentsEqual(
+      clearTable,
+      createOpticalGpuTableForSurfaceBatches(clear)
+    ),
+    true,
+    'identical rebuilt tables keep the resident optical buffer pair'
+  );
+  assert.equal(
+    opticalGpuTableBufferContentsEqual(clearTable, denseTable),
+    false,
+    'live optical changes use a private replacement buffer pair'
   );
   assert.notDeepEqual(Array.from(clearTable.records), Array.from(denseTable.records));
 });
@@ -3914,6 +4063,15 @@ test('SPH resident render source metadata keeps stale retained surfaces visible'
   assert.equal(currentSurfaceDraw.sourceResidentExecutionGeneration, 7);
   assert.equal(currentSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent, true);
   assert.equal(currentSurfaceDraw.sourceResidentRetainedPrevious, false);
+  assert.equal(currentSurfaceDraw.residentRenderSourceStaleAfterPublish, false);
+
+  currentSurfaceDraw.residentRenderSourceStaleAfterPublish = true;
+  currentSurfaceDraw.residentRenderSourceStaleReason = 'retained prior frame';
+  currentSurfaceDraw.residentRenderSourceStaleAgainst = { generation: 8 };
+  applyResidentRenderSourceMetadata(currentSurfaceDraw, metadata);
+  assert.equal(currentSurfaceDraw.residentRenderSourceStaleAfterPublish, false);
+  assert.equal(currentSurfaceDraw.residentRenderSourceStaleReason, null);
+  assert.equal(currentSurfaceDraw.residentRenderSourceStaleAgainst, null);
 
   const staleMetadata = createResidentRenderSourceMetadata({
     residentSteps: {
@@ -3933,7 +4091,194 @@ test('SPH resident render source metadata keeps stale retained surfaces visible'
   assert.equal(retainedSurfaceDraw.sourceResidentCurrentExecutionGeneration, 7);
   assert.equal(retainedSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent, false);
   assert.equal(retainedSurfaceDraw.sourceResidentRetainedPrevious, true);
+  assert.equal(retainedSurfaceDraw.residentRenderSourceStaleAfterPublish, undefined);
+  assert.notEqual(
+    retainedSurfaceDraw.sourceResidentExecutionGeneration,
+    retainedSurfaceDraw.sourceResidentCurrentExecutionGeneration
+  );
   assert.match(retainedSurfaceDraw.sourceResidentRetentionReason, /previous native surface/);
+});
+
+test('SPH successor source-family enforcement is scoped to Schroeder continuations', () => {
+  const genericUploads = {
+    sphParticleUpload: {
+      particleCount: 4,
+      stateBuffer: { label: 'generic-final-state' },
+      thermoBuffer: { label: 'generic-final-thermo' },
+      identityBuffer: { label: 'generic-final-identity' }
+    },
+    mlsMpmParticleUpload: {
+      particleCount: 4,
+      mechanicsBuffer: { label: 'generic-final-mechanics' }
+    }
+  };
+  assert.equal(
+    schroederRenderContinuationRequiresSourceFamily({
+      sourceStep: { nextParticleUploads: genericUploads },
+      residentExecution: {
+        residentExecutionPolicy: { schroederSimulation: false },
+        nextParticleUploads: genericUploads
+      },
+      uploads: genericUploads
+    }),
+    false
+  );
+  assert.equal(
+    schroederRenderContinuationRequiresSourceFamily({
+      sourceStep: {
+        schroederSimulation: true,
+        nextParticleUploads: genericUploads
+      },
+      uploads: genericUploads
+    }),
+    true
+  );
+  assert.equal(
+    schroederRenderContinuationRequiresSourceFamily({
+      residentExecution: {
+        residentExecutionPolicy: { schroederSimulation: true }
+      },
+      uploads: genericUploads
+    }),
+    true
+  );
+  assert.equal(
+    schroederRenderContinuationRequiresSourceFamily({
+      uploads: {
+        ...genericUploads,
+        schroederSpatialSuccessorSourceFamily: Object.freeze({})
+      }
+    }),
+    true
+  );
+});
+
+test('SPH scene blocks stale pre-integration proxies when a final continuation lacks successor lineage', () => {
+  const portableSummary = schroederPortableSummaryFixture();
+  portableSummary.retainedRefs = portableSummary.retainedRefs.map((ref) => ({
+    ...ref,
+    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    positionAuthority: 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority: false
+  }));
+  const nextParticleUploads = {
+    sphParticleUpload: {
+      particleCount: 4,
+      stateBuffer: { label: 'final-state' },
+      thermoBuffer: { label: 'final-thermo' },
+      identityBuffer: { label: 'final-identity' }
+    },
+    mlsMpmParticleUpload: {
+      particleCount: 4,
+      mechanicsBuffer: { label: 'final-mechanics' }
+    }
+  };
+
+  const source = createSchroederRenderSourceMetadata({
+    finalStep: {
+      portableSummary,
+      nextParticleUploads
+    }
+  });
+
+  assert.equal(source.status, 'blocked-schroeder-render-source');
+  assert.equal(
+    source.blocker,
+    'schroeder-render-final-successor-lineage-missing'
+  );
+  assert.equal(source.renderLodPresentationReady, false);
+  assert.equal(source.finalCommittedSuccessorExists, true);
+  assert.equal(
+    source.finalCommittedSuccessorEvidence,
+    'source-step-next-particle-uploads'
+  );
+  assert.equal(source.finalCommittedSuccessorParticleCount, 4);
+  assert.equal(source.finalParticleSourceLineage, null);
+  assert.equal(source.finalParticleSourceLineageValid, false);
+  assert.equal(source.finalParticleSourceLineageMissing, true);
+  assert.equal(source.staleFinalContinuationProxyBlocked, true);
+
+  const proxyPlan = createSchroederRenderProxyDescriptorPlan({
+    schroederRenderSource: source
+  });
+  assert.equal(proxyPlan.status, 'blocked-schroeder-render-proxy-descriptors');
+  assert.equal(proxyPlan.blocker, source.blocker);
+  assert.equal(proxyPlan.renderSourcePresentationReady, false);
+});
+
+test('SPH current-state rendering remains noncanonical when successor lineage branding is invalid', () => {
+  const portableSummary = schroederPortableSummaryFixture();
+  portableSummary.retainedRefs = portableSummary.retainedRefs.map((ref) => ({
+    ...ref,
+    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    positionAuthority: 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority: false
+  }));
+  const invalidSourceFamily = Object.freeze({
+    schema: 'peercompute.ulg.schroeder-committed-successor-source-family.v1',
+    status: 'schroeder-committed-successor-source-family-authenticated',
+    ready: true,
+    authenticated: true,
+    sourceFamilyRole: 'committed-successor-x-n-plus-1'
+  });
+  const nextParticleUploads = {
+    sphParticleUpload: {
+      particleCount: 3,
+      stateBuffer: { label: 'invalid-lineage-final-state' },
+      thermoBuffer: { label: 'invalid-lineage-final-thermo' },
+      identityBuffer: { label: 'invalid-lineage-final-identity' }
+    },
+    mlsMpmParticleUpload: {
+      particleCount: 3,
+      mechanicsBuffer: { label: 'invalid-lineage-final-mechanics' }
+    },
+    schroederSpatialSuccessorSourceFamily: invalidSourceFamily
+  };
+  const finalStep = {
+    portableSummary,
+    nextParticleUploads,
+    schroederSpatialSuccessorSourceFamily: invalidSourceFamily,
+    particlePingPong: {
+      sourceStep: 8,
+      nextStep: 9,
+      sourceTime: 0.04,
+      nextTime: 0.045
+    }
+  };
+
+  const metadata = createResidentRenderSourceMetadata({
+    residentSteps: {
+      residentExecutionGeneration: 12,
+      currentResidentExecutionGeneration: 12,
+      nextSphParticleState: {
+        particleCount: 3,
+        step: 9,
+        time: 0.045
+      }
+    },
+    finalStep
+  });
+
+  assert.equal(metadata.status, 'resident-render-source-current');
+  assert.equal(metadata.residentExecutionGenerationMatchesCurrent, true);
+  assert.equal(metadata.nextStep, 9);
+  assert.equal(metadata.particleCount, 3);
+  assert.equal(metadata.schroederRenderSource.status, 'blocked-schroeder-render-source');
+  assert.equal(
+    metadata.schroederRenderSource.blocker,
+    'schroeder-render-final-successor-lineage-missing'
+  );
+  assert.equal(metadata.schroederRenderSource.finalCommittedSuccessorExists, true);
+  assert.equal(metadata.schroederRenderSource.finalParticleSourceLineageValid, false);
+  assert.equal(metadata.schroederRenderSource.finalParticleSourceLineageMissing, true);
+  assert.equal(
+    metadata.schroederRenderProxyDescriptorPlan.status,
+    'blocked-schroeder-render-proxy-descriptors'
+  );
+  assert.equal(
+    metadata.schroederRenderProxyDrawSource.status,
+    'blocked-schroeder-render-proxy-draw-source'
+  );
 });
 
 test('SPH scene materializes admitted Schroeder render LOD summaries as render source metadata', () => {
@@ -4002,7 +4347,7 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(proxyPlan.aggregateProxySourceRefAvailable, true);
 
   const activeLeaf = proxyPlan.descriptors.find((descriptor) => descriptor.proxyClass === 'active-leaf');
-  const aggregate = proxyPlan.descriptors.find((descriptor) => descriptor.proxyClass === 'coherent-aggregate');
+  const aggregate = proxyPlan.descriptors.find((descriptor) => descriptor.proxyClass === 'spatial-aggregate');
   const lawQueue = proxyPlan.descriptors.find((descriptor) => descriptor.proxyClass === 'law-queue');
   assert.equal(activeLeaf.schema, ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_SCHEMA);
   assert.equal(activeLeaf.drawableProxy, true);
@@ -4945,10 +5290,13 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
     pixelValidationStatus: 'not-run'
   });
-  assert.equal(nativeReadbackPassedFallback.ready, true);
-  assert.equal(nativeReadbackPassedFallback.status, 'resident-surface-visible-gpu-consumer-ready');
-  assert.equal(nativeReadbackPassedFallback.pixelValidationRequired, false);
-  assert.equal(nativeReadbackPassedFallback.nativeReadbackFallbackValidated, true);
+  assert.equal(nativeReadbackPassedFallback.ready, false);
+  assert.equal(
+    nativeReadbackPassedFallback.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(nativeReadbackPassedFallback.pixelValidationRequired, true);
+  assert.equal(nativeReadbackPassedFallback.nativeReadbackFallbackValidated, false);
 
   const nativeReadbackUnavailableBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
@@ -5073,14 +5421,77 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
     pixelValidationStatus: 'passed'
   });
-  assert.equal(nativeValidated.ready, true);
-  assert.equal(nativeValidated.status, 'resident-surface-visible-gpu-consumer-ready');
+  assert.equal(nativeValidated.ready, false);
+  assert.equal(
+    nativeValidated.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
   assert.equal(nativeValidated.pixelValidated, true);
   assert.equal(nativeValidated.sameDeviceMainThreadImportSelected, true);
   assert.equal(
     nativeValidated.sameDeviceMainThreadImportStatus,
+    'same-device-main-thread-import-awaiting-pixel-validation'
+  );
+
+  const nativeForegroundValidated = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerActiveResourceGeneration: 7,
+      nativeSurfaceConsumerOffscreenValidationStatus: 'passed',
+      nativeSurfaceConsumerOffscreenValidationNonzeroPixelCount: 96,
+      nativeSurfaceConsumerOffscreenValidationResourceGeneration: 7
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(nativeForegroundValidated.ready, true);
+  assert.equal(
+    nativeForegroundValidated.status,
+    'resident-surface-visible-gpu-consumer-ready'
+  );
+  assert.equal(nativeForegroundValidated.offscreenForegroundValidated, true);
+  assert.equal(nativeForegroundValidated.nativeReadbackFallbackValidated, true);
+  assert.equal(
+    nativeForegroundValidated.sameDeviceMainThreadImportStatus,
     'same-device-main-thread-import-ready'
   );
+
+  for (const rendererCapability of [
+    {
+      nativeSurfaceConsumerActiveResourceGeneration: 7,
+      nativeSurfaceConsumerOffscreenValidationStatus: 'passed',
+      nativeSurfaceConsumerOffscreenValidationNonzeroPixelCount: 0,
+      nativeSurfaceConsumerOffscreenValidationResourceGeneration: 7
+    },
+    {
+      nativeSurfaceConsumerActiveResourceGeneration: 7,
+      nativeSurfaceConsumerOffscreenValidationStatus: 'passed',
+      nativeSurfaceConsumerOffscreenValidationNonzeroPixelCount: 96,
+      nativeSurfaceConsumerOffscreenValidationResourceGeneration: 6
+    }
+  ]) {
+    const blockedForeground = resolveResidentSurfaceVisibleGpuConsumer({
+      handoff,
+      rendererCapability: {
+        status: 'native-webgpu-surface-consumer-supported',
+        rendererBackend: 'native-webgpu',
+        visibleNoReadbackSupported: true,
+        nativeSurfaceConsumerSupported: true,
+        ...rendererCapability
+      },
+      renderBridgeMode: 'native-webgpu-surface-consumer',
+      renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+      pixelValidationStatus: 'not-run'
+    });
+    assert.equal(blockedForeground.ready, false);
+    assert.equal(blockedForeground.offscreenForegroundValidated, false);
+  }
 
   const renderFieldBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff: resolveResidentSurfaceBufferHandoff({
@@ -5111,7 +5522,11 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
 
 test('SPH native WebGPU surface validation cadence stops after pass or retry exhaustion', () => {
   const initial = resolveSphNativeWebGpuSurfaceValidationCadence({
-    rendererBridge: 'native-webgpu-surface-consumer',
+    bridge: {
+      rendererBridge: 'native-webgpu-surface-consumer',
+      format: 'bgra8unorm',
+      offscreenValidationTargetResourceGeneration: 1
+    },
     submittedDrawCount: 4,
     bridgeFormat: 'bgra8unorm',
     readbackSmokeValidationStatus: 'not-run',
@@ -5132,27 +5547,25 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
       format: 'bgra8unorm',
       enableRuntimePixelReadback: false,
       readbackSmokeValidationStatus: 'not-run',
-      offscreenValidationStatus: 'not-run'
+      offscreenValidationStatus: 'not-run',
+      offscreenValidationTargetResourceGeneration: 2
     },
     submittedDrawCount: 4
   });
-  assert.equal(browserFrameValidation.validationEncoderRequired, false);
+  assert.equal(browserFrameValidation.validationEncoderRequired, true);
   assert.equal(browserFrameValidation.sameDeviceReadbackValidationEnabled, false);
   assert.equal(browserFrameValidation.readbackSmokeValidationNeeded, false);
-  assert.equal(browserFrameValidation.offscreenValidationNeeded, false);
+  assert.equal(browserFrameValidation.offscreenValidationNeeded, true);
   assert.equal(browserFrameValidation.offscreenValidationEligible, true);
   assert.equal(
     browserFrameValidation.status,
-    'native-webgpu-surface-validation-browser-frame-required'
+    'native-webgpu-surface-validation-needed'
   );
   assert.match(
     browserFrameValidation.reason,
-    /browser harness composited-frame analysis owns visible-output validation/
+    /validation stages still need GPU work/
   );
-  assert.match(
-    browserFrameValidation.offscreenValidationSkippedReason,
-    /same-device validation readback is disabled/
-  );
+  assert.equal(browserFrameValidation.offscreenValidationSkippedReason, null);
 
   const debugClearOnly = resolveSphNativeWebGpuSurfaceValidationCadence({
     rendererBridge: 'native-webgpu-surface-consumer',
@@ -5212,7 +5625,13 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(noSurfaceDraws.status, 'native-webgpu-surface-validation-no-surface-draws');
 
   const passed = resolveSphNativeWebGpuSurfaceValidationCadence({
-    rendererBridge: 'native-webgpu-surface-consumer',
+    bridge: {
+      rendererBridge: 'native-webgpu-surface-consumer',
+      format: 'bgra8unorm',
+      offscreenValidationTargetResourceGeneration: 3,
+      offscreenValidationResourceGeneration: 3,
+      offscreenValidationAttemptResourceGeneration: 3
+    },
     submittedDrawCount: 4,
     bridgeFormat: 'bgra8unorm',
     readbackSmokeValidationStatus: 'passed',
@@ -5225,8 +5644,32 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(passed.offscreenValidationNeeded, false);
   assert.equal(passed.status, 'native-webgpu-surface-validation-passed');
 
+  const stalePassed = resolveSphNativeWebGpuSurfaceValidationCadence({
+    bridge: {
+      rendererBridge: 'native-webgpu-surface-consumer',
+      format: 'bgra8unorm',
+      enableRuntimePixelReadback: false,
+      offscreenValidationTargetResourceGeneration: 4,
+      offscreenValidationResourceGeneration: 3,
+      offscreenValidationAttemptResourceGeneration: 3,
+      offscreenValidationStatus: 'passed',
+      offscreenValidationTextureFormat: 'bgra8unorm',
+      offscreenValidationAttemptCount: 3
+    },
+    submittedDrawCount: 4
+  });
+  assert.equal(stalePassed.validationEncoderRequired, true);
+  assert.equal(stalePassed.offscreenValidationNeeded, true);
+  assert.equal(stalePassed.offscreenValidationAttemptCount, 0);
+  assert.equal(stalePassed.offscreenValidationPassedCurrentFormat, false);
+
   const exhausted = resolveSphNativeWebGpuSurfaceValidationCadence({
-    rendererBridge: 'native-webgpu-surface-consumer',
+    bridge: {
+      rendererBridge: 'native-webgpu-surface-consumer',
+      format: 'bgra8unorm',
+      offscreenValidationTargetResourceGeneration: 5,
+      offscreenValidationAttemptResourceGeneration: 5
+    },
     submittedDrawCount: 4,
     bridgeFormat: 'bgra8unorm',
     readbackSmokeValidationStatus: 'not-run',
@@ -5240,7 +5683,12 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(exhausted.status, 'native-webgpu-surface-validation-attempts-exhausted');
 
   const pending = resolveSphNativeWebGpuSurfaceValidationCadence({
-    rendererBridge: 'native-webgpu-surface-consumer',
+    bridge: {
+      rendererBridge: 'native-webgpu-surface-consumer',
+      format: 'bgra8unorm',
+      offscreenValidationTargetResourceGeneration: 6,
+      offscreenValidationAttemptResourceGeneration: 6
+    },
     submittedDrawCount: 4,
     bridgeFormat: 'bgra8unorm',
     readbackSmokeValidationStatus: 'pending',
@@ -5521,6 +5969,117 @@ test('SPH scene builds SS source-key replay diagnostics from production through 
   assert.equal(state.schroederSourceKeyReplayReady, true);
   assert.equal(state.schroederSourceKeyReplayPressureConsumerConsumed, true);
   assert.equal(state.schroederSourceKeyReplayDiagnostics.rawGpuBufferSerialized, false);
+});
+
+test('SPH scene admits only exact live same-device retained gas-cell generations', () => {
+  const gasPressureCellsBuffer = { label: 'exact-scene-gas-pressure-cells-buffer' };
+  const epochIdentity = {
+    storageGeneration: 7,
+    physicsTick: 11,
+    physicsSubstep: 0,
+    positionEpoch: 11,
+    topologyEpoch: 3,
+    chartEpoch: 2,
+    levelEpoch: 11,
+    supportEpoch: 11
+  };
+  const retainedSource = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    status: 'retained-gas-cell-eos-source-submitted',
+    ready: true,
+    deviceId: 'device:test-exact-scene-gas',
+    stateKey: 'state:test-exact-scene-gas',
+    sourceTaskId: 'task:test-exact-scene-gas:eos',
+    gasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellsBuffer: gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellRowCount: 2,
+    pressureInterfaceGasPressureCellRowStrideFloats: 12,
+    pressureInterfaceGasPressureCellRowByteLength: 96,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    localPressureGradientReady: true,
+    sourceSpatialGasLedgerGenerationId: 'gas-generation:test:11',
+    sourceSpatialGasLedger: {
+      spatialEpochGenerationId: 'gas-generation:test:11',
+      epochIdentity
+    }
+  };
+  const admission = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    retainedGasCellFieldSource: retainedSource
+  };
+  const importDescriptor = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    stateKey: 'state:test-exact-scene-gas',
+    sourceTaskId: 'task:test-exact-scene-gas:eos',
+    deviceId: 'device:test-exact-scene-gas',
+    sameDevice: true,
+    gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellRowCount: 2,
+    pressureInterfaceGasPressureCellRowStrideFloats: 12,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    retainedGasCellFieldSource: retainedSource,
+    pressureInterfaceGasCellFieldAdmission: admission
+  };
+  const expected = {
+    expectedStateKey: importDescriptor.stateKey,
+    expectedSourceTaskId: importDescriptor.sourceTaskId,
+    expectedDeviceId: importDescriptor.deviceId,
+    expectedSpatialGasLedgerGenerationId: 'gas-generation:test:11',
+    expectedEpochIdentity: epochIdentity
+  };
+
+  assert.equal(
+    pressureInterfaceGasCellFieldImportReadyForScene(importDescriptor, expected),
+    true
+  );
+  assert.equal(
+    pressureInterfaceGasCellFieldImportReadyForScene(importDescriptor, {
+      ...expected,
+      expectedStateKey: 'state:test-stale'
+    }),
+    false
+  );
+  assert.equal(
+    pressureInterfaceGasCellFieldImportReadyForScene(importDescriptor, {
+      ...expected,
+      expectedSpatialGasLedgerGenerationId: 'gas-generation:test:10'
+    }),
+    false
+  );
+  assert.equal(
+    pressureInterfaceGasCellFieldImportReadyForScene(importDescriptor, {
+      ...expected,
+      expectedEpochIdentity: { ...epochIdentity, positionEpoch: 10 }
+    }),
+    false
+  );
+  assert.equal(
+    pressureInterfaceGasCellFieldImportReadyForScene({
+      ...importDescriptor,
+      gasPressureCellsBuffer: {
+        schema: 'peercompute.ulg.worker-retained-buffer-ref.v0',
+        ref: 'worker:gas-pressure-cells'
+      },
+      retainedGasCellFieldSource: {
+        ...retainedSource,
+        gasPressureCellsBuffer: null,
+        retainedGasPressureCellsBuffer: null,
+        pressureInterfaceGasPressureCellsBuffer: null
+      }
+    }, expected),
+    false
+  );
+  assert.equal(
+    pressureInterfaceGasCellFieldImportReadyForScene({
+      ...importDescriptor,
+      releaseScheduled: true
+    }, expected),
+    false
+  );
 });
 
 test('SPH scene requests resident authority publication for admitted gas-cell field imports', () => {
@@ -6459,4 +7018,125 @@ test('GGX latlong prefilter: identity base, constant invariance, monotone lobe s
     assert.ok(peaks[l] <= peaks[l - 1] + 1, `peak must not grow with roughness (mip ${l}: ${peaks[l]} vs ${peaks[l - 1]})`);
   }
   assert.ok(peaks[4] < peaks[1] * 0.7, `broad lobe must dilute the point source (mip4 ${peaks[4]} vs mip1 ${peaks[1]})`);
+});
+
+test('mounted successor surface admission cannot downgrade through mutable public echoes', () => {
+  const fullClaim = {
+    schroederSpatialSourceFamily: { sourceGenerationId: 19 },
+    schroederSpatialSourceFamilyStatus: 'finalized-successor-source-family',
+    schroederSpatialSourceGenerationId: 19
+  };
+  assert.equal(
+    resolveSchroederNativeSurfaceAdmissionMode({ artifact: {} }),
+    'legacy'
+  );
+  assert.equal(
+    resolveSchroederNativeSurfaceAdmissionMode({
+      hasPrivateAdmission: true,
+      artifact: fullClaim
+    }),
+    'successor'
+  );
+  assert.equal(
+    resolveSchroederNativeSurfaceAdmissionMode({
+      hasPrivateAdmission: true,
+      artifact: {}
+    }),
+    'invalid-partial-or-downgraded-successor-lineage'
+  );
+  assert.equal(
+    resolveSchroederNativeSurfaceAdmissionMode({
+      artifact: { schroederSpatialSourceGenerationId: 19 }
+    }),
+    'invalid-partial-or-downgraded-successor-lineage'
+  );
+  assert.equal(
+    resolveSchroederNativeSurfaceAdmissionMode({ artifact: fullClaim }),
+    'invalid-partial-or-downgraded-successor-lineage'
+  );
+});
+
+test('mounted successor temperature retirement authenticates the exact destroy hook', () => {
+  const destroyMethod = () => {};
+  const temperatureRows = { destroy: destroyMethod };
+  assert.equal(
+    nativeSurfaceTemperatureDestroyMethodIsAuthenticated(
+      temperatureRows,
+      destroyMethod
+    ),
+    true
+  );
+  temperatureRows.destroy = () => {};
+  assert.equal(
+    nativeSurfaceTemperatureDestroyMethodIsAuthenticated(
+      temperatureRows,
+      destroyMethod
+    ),
+    false
+  );
+  assert.equal(
+    nativeSurfaceTemperatureDestroyMethodIsAuthenticated({}, destroyMethod),
+    false
+  );
+  assert.equal(
+    nativeSurfaceTemperatureDestroyMethodIsAuthenticated(
+      { destroy: destroyMethod.bind(null) },
+      destroyMethod
+    ),
+    false
+  );
+  assert.equal(
+    nativeSurfaceTemperatureDestroyMethodIsAuthenticated(
+      { destroy: destroyMethod },
+      null
+    ),
+    false
+  );
+  assert.equal(
+    nativeSurfaceTemperatureDestroyMethodIsAuthenticated(
+      { destroy: destroyMethod },
+      'not-a-function'
+    ),
+    false
+  );
+  assert.equal(
+    nativeSurfaceTemperatureAttachmentIsRequired({}, false),
+    false
+  );
+  assert.equal(
+    nativeSurfaceTemperatureAttachmentIsRequired({}, true),
+    true,
+    'deleting the public buffer cannot hide a private attachment'
+  );
+  const exactTemperatureRows = { destroy() {} };
+  const strayTemperatureRows = { destroy() {} };
+  const exactDestroyMethod = () => {};
+  const temperatureRecord = {
+    temperatureRows: exactTemperatureRows,
+    destroyMethod: exactDestroyMethod
+  };
+  assert.deepEqual(
+    resolveNativeSurfaceTemperatureRetirement({
+      translation: {},
+      temperatureRecord
+    }),
+    {
+      exactTemperatureRows,
+      exactDestroyMethod,
+      strayTemperatureRows: null
+    },
+    'deleting the public alias must retain the private retirement target'
+  );
+  assert.deepEqual(
+    resolveNativeSurfaceTemperatureRetirement({
+      translation: { nativeSurfaceTemperatureRows: strayTemperatureRows },
+      temperatureRecord
+    }),
+    {
+      exactTemperatureRows,
+      exactDestroyMethod,
+      strayTemperatureRows
+    },
+    'a substituted public alias must not replace the private retirement target'
+  );
 });

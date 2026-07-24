@@ -1,52 +1,95 @@
 # Implementation Status
 
-## Current Focus - 2026-07-18 AKDT
+## Current Focus - 2026-07-24 AKDT
 
-Branch `ss-spatial-authority-refactor` has completed Slice 7 implementation and
-precommit release verification as one staged implementation unit. ICC plan
-items M0 through M5 are verified: authenticated
-sparse-v2 fine/coarse mechanics-field admission, exact fine reflux, terminal
-coarse reflux, fused `r=1..4` production orchestration with device-loss/replay
-closure, and the Morton-prefix aggregate hierarchy plus shared post-mechanics
-publication path are complete. The immutable commit and remote-ref receipts are
-recorded out of band after the snapshot containing this document is committed.
+Slice S9D-3 is at its commit boundary. The canonical GPU-resident exact-cell
+reaction tree remains the only production reaction traversal; nine
+diagnostic-only hot counters now accumulate per source invocation and flush
+once, while control, certificate, rejection, and overflow atomics remain
+immediate. A native-test-only legacy global-atomic control proves exact
+proposal and all-27-word evidence parity. Default production combined-route
+ratios are `0.6154x` dense, `0.7483x` sparse, and `0.7179x` clustered across
+four warmups and nine alternating AB/BA samples.
 
-The current tree passes the complete unit suite at `1628` total, `1617` passed,
-`11` expected opt-in skips, and zero failures. The definitive Playwright run is
-green at `66` passed, two intentional capture-only skips, and zero failures.
-The product-event compaction gate now runs in its own fresh WebGPU browser
-process so accumulated Dawn/Chromium device lifetime cannot invalidate an
-otherwise bounded compaction receipt; condensed-product visibility remains a
-separate preceding chemistry assertion. Production build and material-property
-validation both pass.
+The closure campaign also repaired native presentation liveness around real
+camera interaction and delayed candidate publication. Exact structured
+terminal receipts, current-latest scheduler identity, source lineage,
+foreground proof, epoch guards, and gate object identity are revalidated before
+physics is released. Real Chromium/Vulkan tests pass both recovery cases
+together and prove actual compute workers plus typed fail-closed startup when
+workers are disabled.
 
-Fresh desktop and 390 x 844 DPR-3 mobile standard matrices each cover all four
-presets and three deterministic random pairs. Every one of the seven scenarios
-reports renderer and analysis status `good`, nonblank frames, and zero browser
-console, WebGPU, or visual-surface issues. Direct frame review retains opaque,
-refraction-led water, iron/ice contact and deformation, reactive sodium/water,
-visible dynamic fluorine with CsF product, and stable random-pair geometry.
-These are structural/rendering results, not a claim of complete gas transport:
-water-cycle steam still fails rise and condensation, and sodium/water hydrogen
-still fails its rise expectation. Those explicit post-Slice-7 phase-volume and
-gas-interface transport frontiers remain open.
+Final verification reports:
 
-M5 performance is now closed. Grouping the unchanged 27-dispatch
-mechanics-field graph into one production compute pass and one post-G2P pass
-reduces the final three-run historical non-target median regression to
-`3.303618%`, below the five-percent gate; the independent medians are
-effectively flat. The final native target characterization has complete
-timestamp/stage/migrated-law coverage and identifies post-mechanics reaction
-work (`364..369 ms` p50) as the dominant Slice 8 optimization target. Pages
-build and static asset/browser smoke also pass. Before Slice 7 can be called
-released, only the one full-slice commit and non-force branch/Pages pushes
-remain. The staged 87-path secret/conflict/whitespace review is clean outside
-generated-bundle whitespace; ICC completion is `2/2`, scoped readiness is
-`100`, guard-diff passes without generated Pages assets, and the scoped
-production audit has no high-severity or blocking risk. After Git transport,
-the architecture queue advances to Slice 8 source-family adapters and cleanup;
-it does not reopen the verified two-level hierarchy to hide the steam/hydrogen
-transport debt.
+- full Node suite: `1945` tests, `1924` passed, `21` expected skips, zero
+  failures;
+- physics atomics: `11/11` required checks passed, three opt-in long-horizon
+  skips;
+- browser camera/late-publication: `2/2` passed;
+- browser worker/WebGPU prerequisites: `4/4` passed;
+- production build and `git diff --check`: passed;
+- seven-scenario standard/random visual matrix: all `58` temporal captures
+  nonblank and current, zero stale-source, console, or visual-surface issues.
+
+The unchanged steam-rise, condensation, hydrogen-rise, gas-cloud appearance,
+and material-spectrum separation deficits remain explicit follow-ons. ICC
+artifacts are fresh, scoped guard diffs pass, both completion oracles are
+complete, and both readiness reports score `100`. The next action is the one
+authorized all-dirty slice commit/push, followed by a separately leased
+hierarchy consumer slice.
+
+## Previous Focus - 2026-07-21 AKDT
+
+Branch `ss-spatial-authority-refactor` has completed Slice 8 implementation and
+all non-performance precommit verification. The staged snapshot now carries
+authenticated reaction placement and topology-transition successor families,
+matched-time reciprocal thermal proposal/apply, compact spatial gas-ledger EOS,
+exact-v2 host/worker continuation provenance, retained submit fences, and
+successor-bound render/source-field/surface publication. These are adapters over
+the one SS spatial epoch; they do not create a second law-specific tree or claim
+that aggregate render proxies are coherent-solid body authority.
+
+The complete unit suite reports `1863` tests, `1848` passed, `15` expected
+opt-in skips, and zero failures. Material-property validation and the production
+build remain required final precommit commands after this documentation update.
+Focused native-surface lifecycle, harness, and renderer coverage reports
+`205/205` after the final presentation-provenance repair.
+
+The first Slice 8 desktop closeout matrix had nonblank, visibly advancing
+geometry but reported seven `resident-render-source-stale` failures. A clean
+Slice 7 control at immutable head
+`6c20c32b814a0e4cb66ff973fb4cc225659f3f25` did not reproduce that diagnostic
+result. The cause was twofold: the probe accepted the already-ready retained
+bridge while detached candidate validation was active, and an asynchronously
+promoted candidate did not carry the immutable execution-generation receipt
+captured by its refresh. The repair keeps last-good presentation visible,
+treats active/queued validation as pending at diagnostic checkpoints, publishes
+exact source metadata with the accepted candidate, and makes a successful GPU
+submit terminal rather than retroactively discardable.
+
+Final desktop and 390 x 844 mobile matrices are
+`/tmp/ulg-visual-sanity-matrix/slice8-closeout-desktop-r2/summary.json` and
+`/tmp/ulg-visual-sanity-matrix/slice8-closeout-mobile-r2/summary.json`. Each
+covers four standard presets and three deterministic random pairs. All seven
+scenarios per viewport report renderer and structural analysis `good`, zero
+stale-source samples, nonblank captures, and zero browser-console, WebGPU, or
+visual-surface issues. Direct review confirms opaque/refraction-led moving
+water, iron/ice contact and breakup, reactive sodium/water, visible dynamic
+fluorine and CsF product, and stable random-pair geometry.
+
+These results do not relabel inherited transport debt. Steam rise, steam
+condensation, and hydrogen rise remain owned by the phase-volume/gas-interface
+follow-on. The opt-in long-liquid gate also fails bit-for-bit on this candidate
+and the clean Slice 7 control: bulk velocity is
+`0.46572056445613097 m/s` and resident volume ratio reaches
+`0.9833418130874634`. No threshold was relaxed.
+
+The remaining code gate is the frozen-source paired performance audit:
+`/tmp/ulg-slice8-reaction-step-historical-final.json` compares the shared-view
+reaction route with immutable Slice 7, and
+`/tmp/ulg-slice8-nontarget-physics-throughput-final.json` protects unrelated
+single-level throughput. After those reports, only ICC freshness/release gates,
+the one full-slice commit, Pages build, and non-force pushes remain.
 
 Updated: 2026-06-20 native marching-cubes vertex-row budget, GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 

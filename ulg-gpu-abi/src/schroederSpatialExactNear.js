@@ -8,6 +8,8 @@ export const ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-consumer-receipt.v0';
 export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA =
   'peercompute.ulg.schroeder-spatial-exact-near-gpu-evidence.v1';
+export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-exact-near-resident-binding.v1';
 
 export const SCHROEDER_SPATIAL_SUPPORT_PROFILE_VERSION = 1;
 
@@ -21,6 +23,8 @@ export const SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1 = 0x0001_00
 export const SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1 = 0x0001_0005;
 export const SCHROEDER_SPATIAL_SUPPORT_PROFILE_MATERIAL_INTERFACE_LOCAL_V1 =
   0x0001_0006;
+export const SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1 =
+  0x0001_0007;
 
 function supportProfile({
   id,
@@ -99,6 +103,15 @@ const SUPPORT_PROFILE_LIST = Object.freeze([
     artifactFamily: 'spatial-exact-near-local-material-interface',
     phase: 'local-material-interface-proposal',
     exactFilter: 'law-declared-local-radius-and-interface-policy'
+  }),
+  supportProfile({
+    id: SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1,
+    name: 'reaction-product-placement-v1',
+    consumerFamily: 'reaction-product-placement',
+    artifactFamily: 'spatial-exact-near-reaction-product-placement',
+    phase: 'reaction-product-placement-proposal',
+    exactFilter:
+      'current-live-product-material-and-resolved-phase-euclidean-capture-distance-slot-tie-break'
   })
 ]);
 

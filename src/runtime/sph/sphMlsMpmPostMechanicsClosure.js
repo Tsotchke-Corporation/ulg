@@ -10,6 +10,9 @@ import { deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   validateSchroederSpatialEpochTransactionSourceFamily
 } from './schroederSpatialEpochTransaction.js';
+import {
+  releasePostSeparationThermalBinAuthorityAfterQueue
+} from './sphPostSeparationThermalBinAuthority.js';
 
 export const ULG_MLS_MPM_POST_MECHANICS_CLOSURE_SCHEMA =
   'peercompute.ulg.mls-mpm-post-mechanics-closure.v1';
@@ -17,6 +20,7 @@ export const ULG_MLS_MPM_POST_MECHANICS_CLOSURE_SCHEMA =
 export const MLS_MPM_POST_MECHANICS_CLOSURE_STAGE_ORDER = Object.freeze([
   'schroeder-far-force-delta-fusion',
   'thermal-phase',
+  'reaction-discovery',
   'reaction-product',
   'mechanics-constitutive-refresh',
   'phase-carrier-transfer-v2'
@@ -74,6 +78,8 @@ export function retainedG2pOutputBuffers(g2pReconstruction) {
     destroyOutputParticleBuffers: source?.destroyOutputParticleBuffers || null,
     destroyOutputParticleBufferComponents:
       source?.destroyOutputParticleBufferComponents || null,
+    postSeparationThermalBinAuthority:
+      source?.postSeparationThermalBinAuthority || null,
     ...componentOwnershipFields(source, ['state', 'mechanics'])
   };
 }
@@ -239,6 +245,124 @@ function sameResidentProductMass(left, right) {
   );
 }
 
+function postMechanicsOwnedOutputFamilies({
+  schroederFarForceDeltaFusion,
+  thermalStep,
+  reactionStep,
+  mechanicsRefreshStep,
+  phaseCarrierTransferStep,
+  preservedBuffers = new Set()
+}) {
+  const far = retainedSchroederFarForceDeltaFusionOutputBuffers(
+    schroederFarForceDeltaFusion
+  );
+  const thermal = retainedThermalOutputBuffers(thermalStep);
+  const reaction = retainedReactionOutputBuffers(reactionStep);
+  const mechanics = retainedMechanicsRefreshOutputBuffers(
+    mechanicsRefreshStep
+  );
+  const phase = retainedPhaseCarrierTransferOutputBuffers(
+    phaseCarrierTransferStep
+  );
+  const phaseSource = retainedStageSource(phaseCarrierTransferStep);
+  const candidates = [
+    {
+      stage: 'schroeder-far-force-delta-fusion',
+      output: far,
+      components: [
+        ['state', far.stateBuffer, far.ownsStateBuffer]
+      ]
+    },
+    {
+      stage: 'thermal-phase',
+      output: thermal,
+      components: [
+        ['state', thermal.stateBuffer, thermal.ownsStateBuffer],
+        ['thermo', thermal.thermoBuffer, thermal.ownsThermoBuffer]
+      ]
+    },
+    {
+      stage: 'reaction-product',
+      output: reaction,
+      residentProductMass: reaction.residentProductMass,
+      components: [
+        ['state', reaction.stateBuffer, reaction.ownsStateBuffer],
+        ['thermo', reaction.thermoBuffer, reaction.ownsThermoBuffer],
+        ['mechanics', reaction.mechanicsBuffer,
+          reaction.ownsMechanicsBuffer]
+      ]
+    },
+    {
+      stage: 'mechanics-constitutive-refresh',
+      output: mechanics,
+      components: [
+        ['mechanics', mechanics.mechanicsBuffer,
+          mechanics.ownsMechanicsBuffer]
+      ]
+    },
+    {
+      stage: 'phase-carrier-transfer-v2',
+      output: {
+        ...phase,
+        destroyOutputParticleBuffers:
+          phaseSource?.destroyOutputParticleBuffers || null
+      },
+      components: [
+        ['state', phase.stateBuffer,
+          componentOwnershipValue(phaseSource, 'state', phase.stateBuffer)],
+        ['thermo', phase.thermoBuffer,
+          componentOwnershipValue(phaseSource, 'thermo', phase.thermoBuffer)],
+        ['mechanics', phase.mechanicsBuffer,
+          componentOwnershipValue(
+            phaseSource,
+            'mechanics',
+            phase.mechanicsBuffer
+          )]
+      ]
+    }
+  ];
+  return candidates.flatMap((candidate) => {
+    const destroyOutputParticleBuffers =
+      candidate.output?.destroyOutputParticleBuffers;
+    const destroyOutputParticleBufferComponents =
+      candidate.output?.destroyOutputParticleBufferComponents;
+    if (
+      typeof destroyOutputParticleBuffers !== 'function'
+      && typeof destroyOutputParticleBufferComponents !== 'function'
+    ) return [];
+    const ownedComponents = candidate.components.filter(
+      ([, buffer, owned]) => buffer && owned === true
+    );
+    const managedComponents = ownedComponents.filter(
+      ([, buffer]) => !preservedBuffers.has(buffer)
+    );
+    const managedBuffers = [...new Set(managedComponents.map(([, buffer]) => buffer))];
+    if (managedBuffers.length === 0) return [];
+    const externallyPreservedComponents = ownedComponents.filter(
+      ([, buffer]) => preservedBuffers.has(buffer)
+    );
+    return [Object.freeze({
+      stage: candidate.stage,
+      output: candidate.output,
+      destroyOutputParticleBuffers,
+      destroyOutputParticleBufferComponents,
+      residentProductMass: candidate.residentProductMass || null,
+      managedComponents: Object.freeze(managedComponents.map(
+        ([component, buffer]) => Object.freeze({ component, buffer })
+      )),
+      managedBuffers: Object.freeze(managedBuffers),
+      externallyPreservedComponents: Object.freeze(
+        externallyPreservedComponents.map(
+          ([component, buffer]) => Object.freeze({ component, buffer })
+        )
+      ),
+      externallyPreservedBuffers: Object.freeze([...new Set(
+        externallyPreservedComponents.map(([, buffer]) => buffer)
+      )])
+    })];
+  });
+}
+
 function destroyFailedPostMechanicsStageOutputs({
   postMechanicsParticleBuffers,
   sphParticleUpload,
@@ -250,6 +374,20 @@ function destroyFailedPostMechanicsStageOutputs({
   phaseCarrierTransferStep,
   inputResidentProductMass
 }) {
+  const cleanupReceipt = {
+    schema: 'peercompute.ulg.mls-mpm-post-mechanics-failure-cleanup.v1',
+    status: 'post-mechanics-failure-cleanup-running',
+    releasedOwnerFamilyCount: 0,
+    releasedComponentCount: 0,
+    rawDestroyedBufferCount: 0,
+    blockers: []
+  };
+  const pendingCompletions = [];
+  const addBlocker = (blocker) => {
+    if (!cleanupReceipt.blockers.includes(blocker)) {
+      cleanupReceipt.blockers.push(blocker);
+    }
+  };
   const preserved = new Set([
     postMechanicsParticleBuffers?.stateBuffer,
     postMechanicsParticleBuffers?.mechanicsBuffer,
@@ -270,6 +408,113 @@ function destroyFailedPostMechanicsStageOutputs({
     phaseCarrierTransferStep
   );
   const phaseSource = retainedStageSource(phaseCarrierTransferStep);
+  const ownerFamilies = postMechanicsOwnedOutputFamilies({
+    schroederFarForceDeltaFusion,
+    thermalStep,
+    reactionStep,
+    mechanicsRefreshStep,
+    phaseCarrierTransferStep,
+    preservedBuffers: preserved
+  });
+  const familyManagedBuffers = new Set(ownerFamilies.flatMap(
+    (family) => family.managedBuffers
+  ));
+  for (const family of ownerFamilies) {
+    if (family.externallyPreservedBuffers.length > 0) {
+      // A whole-family destroyer may own both a borrowed input alias and a
+      // newly produced sibling. Retire only the unpreserved siblings through
+      // an explicit component owner; raw destruction would bypass a pooled or
+      // arena owner. If no component surface exists, publish a durable blocker
+      // on the thrown failure instead of silently reporting cleanup success.
+      if (typeof family.destroyOutputParticleBufferComponents !== 'function') {
+        addBlocker(
+          `preserved-alias-owner-lacks-component-retirement:${family.stage}`
+        );
+        continue;
+      }
+      const selection = Object.fromEntries(
+        family.managedComponents.map(({ component }) => [component, true])
+      );
+      try {
+        const release = family.destroyOutputParticleBufferComponents.call(
+          family.output,
+          selection
+        );
+        if (release?.then) {
+          pendingCompletions.push(Promise.resolve(release).then(
+            (confirmed) => {
+              if (confirmed !== true) {
+                addBlocker(
+                  `component-owner-release-unconfirmed:${family.stage}`
+                );
+                return false;
+              }
+              cleanupReceipt.releasedComponentCount +=
+                family.managedBuffers.length;
+              return true;
+            },
+            (error) => {
+              addBlocker(
+                `component-owner-release-failed:${family.stage}:${error instanceof Error ? error.message : String(error)}`
+              );
+              return false;
+            }
+          ));
+        } else if (release === false) {
+          addBlocker(`component-owner-release-refused:${family.stage}`);
+        } else {
+          cleanupReceipt.releasedComponentCount += family.managedBuffers.length;
+        }
+      } catch (error) {
+        addBlocker(
+          `component-owner-release-failed:${family.stage}:${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      continue;
+    }
+    try {
+      const preserveResidentProductMass = Boolean(
+        family.residentProductMass
+        && sameResidentProductMass(
+          family.residentProductMass,
+          inputResidentProductMass
+        )
+      );
+      const release = family.destroyOutputParticleBuffers.call(
+        family.output,
+        { preserveResidentProductMass }
+      );
+      if (release?.then) {
+        pendingCompletions.push(Promise.resolve(release).then(
+          (confirmed) => {
+            if (confirmed === false) {
+              addBlocker(`owner-family-release-refused:${family.stage}`);
+              return false;
+            }
+            cleanupReceipt.releasedOwnerFamilyCount += 1;
+            return true;
+          },
+          (error) => {
+            addBlocker(
+              `owner-family-release-failed:${family.stage}:${error instanceof Error ? error.message : String(error)}`
+            );
+            return false;
+          }
+        ));
+      } else if (release === false) {
+        addBlocker(`owner-family-release-refused:${family.stage}`);
+      } else {
+        cleanupReceipt.releasedOwnerFamilyCount += 1;
+      }
+    } catch (error) {
+      // An owner-family failure must never fall through to raw member
+      // destruction: bounded arenas and pooled outputs retain authority over
+      // every member even when their release callback rejects cleanup.
+      addBlocker(
+        `owner-family-release-failed:${family.stage}:${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
   const outputs = new Set([
     far.ownsStateBuffer && far.stateBuffer,
     thermal.ownsStateBuffer && thermal.stateBuffer,
@@ -284,25 +529,77 @@ function destroyFailedPostMechanicsStageOutputs({
       && phase.thermoBuffer,
     componentOwnershipValue(phaseSource, 'mechanics', phase.mechanicsBuffer)
       && phase.mechanicsBuffer
-  ].filter((buffer) => buffer && !preserved.has(buffer)));
+  ].filter((buffer) => (
+    buffer
+    && !preserved.has(buffer)
+    && !familyManagedBuffers.has(buffer)
+  )));
   for (const buffer of outputs) {
-    try { buffer.destroy?.(); } catch { /* continue per retained buffer */ }
+    try {
+      buffer.destroy?.();
+      cleanupReceipt.rawDestroyedBufferCount += 1;
+    } catch (error) {
+      addBlocker(
+        `raw-buffer-retirement-failed:${buffer?.label || 'unlabelled'}:${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
   const emittedResidentProductMass = reaction.residentProductMass;
   if (
     emittedResidentProductMass
+    && !ownerFamilies.some((family) => (
+      family.residentProductMass
+      && sameResidentProductMass(
+        family.residentProductMass,
+        emittedResidentProductMass
+      )
+    ))
     && !sameResidentProductMass(
       emittedResidentProductMass,
       inputResidentProductMass
     )
   ) {
     try {
-      emittedResidentProductMass.destroyResidentProductMassBuffers?.();
-    } catch {
+      const productRelease =
+        emittedResidentProductMass.destroyResidentProductMassBuffers?.();
+      if (productRelease?.then) {
+        pendingCompletions.push(Promise.resolve(productRelease).then(
+          (confirmed) => {
+            if (confirmed !== true) {
+              addBlocker('resident-product-mass-release-unconfirmed');
+              return false;
+            }
+            return true;
+          },
+          (error) => {
+            addBlocker(
+              `resident-product-mass-release-failed:${error instanceof Error ? error.message : String(error)}`
+            );
+            return false;
+          }
+        ));
+      }
+    } catch (error) {
       // A product-mass cleanup failure must not strand later output buffers.
+      addBlocker(
+        `resident-product-mass-release-failed:${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
-  return outputs.size;
+  const finish = () => {
+    cleanupReceipt.status = cleanupReceipt.blockers.length > 0
+      ? 'post-mechanics-failure-cleanup-blocked'
+      : 'post-mechanics-failure-cleanup-complete';
+    return cleanupReceipt;
+  };
+  const completion = pendingCompletions.length > 0
+    ? Promise.all(pendingCompletions).then(finish)
+    : Promise.resolve(finish());
+  Object.defineProperty(cleanupReceipt, 'completion', {
+    value: completion,
+    enumerable: false
+  });
+  return cleanupReceipt;
 }
 
 function retainedGenerationMetadata({
@@ -693,12 +990,25 @@ function registerPostMechanicsClosureAuthority(closure, {
     if (!ownedBuffers.has(entry.buffer)) ownedBuffers.set(entry.buffer, []);
     ownedBuffers.get(entry.buffer).push(entry);
   }
+  const ownedFamilies = postMechanicsOwnedOutputFamilies({
+    schroederFarForceDeltaFusion:
+      closure.schroederFarForceDeltaFusion,
+    thermalStep: closure.thermalStep,
+    reactionStep: closure.reactionStep,
+    mechanicsRefreshStep: closure.mechanicsRefreshStep,
+    phaseCarrierTransferStep: closure.phaseCarrierTransferStep,
+    preservedBuffers
+  });
   const authority = {
     device,
     closure,
     ownedBuffers,
+    ownedFamilies,
     destroyedBuffers: new Set(),
+    releasedFamilies: new Set(),
+    retiredFamilyBuffers: new Map(),
     claimReceipt: null,
+    retirementMode: null,
     retirementPromise: null,
     retirementReceipt: null,
     retirementFailureReason: null
@@ -833,6 +1143,16 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
   } = {}
 ) {
   const authority = closureAuthorityFor(closure);
+  const requestedAbandon = abandon === true;
+  if (
+    authority.retirementMode
+    && authority.retirementMode.abandon !== requestedAbandon
+  ) {
+    throw postMechanicsClosureError(
+      'Post-mechanics output retirement cannot change abandon/preserve mode across retries',
+      'ERR_MLS_MPM_POST_MECHANICS_RETIREMENT_MODE'
+    );
+  }
   if (authority.retirementReceipt) return Promise.resolve(
     authority.retirementReceipt
   );
@@ -844,21 +1164,28 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
       TypeError
     );
   }
-  if (!authority.claimReceipt && abandon !== true) {
+  if (!authority.claimReceipt && !requestedAbandon) {
     throw postMechanicsClosureError(
       'Post-mechanics output retirement requires a positive continuation claim or explicit abandonment',
       'ERR_MLS_MPM_POST_MECHANICS_RETIREMENT_AUTHORITY'
     );
   }
-  const preserved = abandon === true
-    ? new Set()
-    : new Set([
-        authority.claimReceipt.stateBuffer,
-        authority.claimReceipt.thermoBuffer,
-        authority.claimReceipt.mechanicsBuffer
-      ]);
+  if (!authority.retirementMode) {
+    authority.retirementMode = Object.freeze({
+      abandon: requestedAbandon,
+      preserved: Object.freeze(requestedAbandon
+        ? []
+        : [
+            authority.claimReceipt.stateBuffer,
+            authority.claimReceipt.thermoBuffer,
+            authority.claimReceipt.mechanicsBuffer
+          ].filter(Boolean))
+    });
+  }
+  const retirementMode = authority.retirementMode;
+  const preserved = new Set(retirementMode.preserved);
   authority.retirementFailureReason = null;
-  const attempt = Promise.resolve(after).then((confirmed) => {
+  const attempt = Promise.resolve(after).then(async (confirmed) => {
     if (confirmed !== true) {
       throw postMechanicsClosureError(
         'Post-mechanics output owner fence was not confirmed',
@@ -866,8 +1193,111 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
       );
     }
     const failures = [];
+    const familyManagedBuffers = new Set();
+    const familyPreservedBuffers = new Set();
+    for (const family of authority.ownedFamilies) {
+      for (const buffer of family.managedBuffers) {
+        familyManagedBuffers.add(buffer);
+      }
+      if (authority.releasedFamilies.has(family)) continue;
+      let retiredFamilyBuffers = authority.retiredFamilyBuffers.get(family);
+      if (!retiredFamilyBuffers) {
+        retiredFamilyBuffers = new Set();
+        authority.retiredFamilyBuffers.set(family, retiredFamilyBuffers);
+      }
+      const pendingManagedComponents = family.managedComponents.filter(
+        ({ buffer }) => !retiredFamilyBuffers.has(buffer)
+      );
+      const preservedManagedComponents = pendingManagedComponents.filter(
+        ({ buffer }) => preserved.has(buffer)
+      );
+      const preservesResidentProductMass = Boolean(
+        retirementMode.abandon !== true
+        && family.residentProductMass
+        && sameResidentProductMass(
+          family.residentProductMass,
+          closure.continuation?.residentProductMass
+        )
+      );
+      if (preservesResidentProductMass) {
+        for (const { buffer } of pendingManagedComponents) {
+          familyPreservedBuffers.add(buffer);
+        }
+        continue;
+      }
+      const requiresComponentRetirement =
+        family.externallyPreservedBuffers.length > 0
+        || preservedManagedComponents.length > 0;
+      if (requiresComponentRetirement) {
+        for (const buffer of family.externallyPreservedBuffers) {
+          familyPreservedBuffers.add(buffer);
+        }
+        for (const { buffer } of preservedManagedComponents) {
+          familyPreservedBuffers.add(buffer);
+        }
+        const retirableComponents = pendingManagedComponents.filter(
+          ({ buffer }) => !preserved.has(buffer)
+        );
+        if (retirableComponents.length === 0) continue;
+        if (
+          typeof family.destroyOutputParticleBufferComponents !== 'function'
+        ) {
+          failures.push(postMechanicsClosureError(
+            `Post-mechanics ${family.stage} owner cannot retire unpreserved siblings beside a preserved alias`,
+            'ERR_MLS_MPM_POST_MECHANICS_COMPONENT_RETIREMENT'
+          ));
+          continue;
+        }
+        try {
+          const selection = Object.fromEntries(
+            retirableComponents.map(({ component }) => [component, true])
+          );
+          const released = await Promise.resolve(
+            family.destroyOutputParticleBufferComponents.call(
+              family.output,
+              selection
+            )
+          );
+          if (released !== true) {
+            throw postMechanicsClosureError(
+              `Post-mechanics ${family.stage} owner refused component retirement`,
+              'ERR_MLS_MPM_POST_MECHANICS_COMPONENT_RETIREMENT'
+            );
+          }
+          for (const { buffer } of retirableComponents) {
+            retiredFamilyBuffers.add(buffer);
+            authority.destroyedBuffers.add(buffer);
+          }
+        } catch (error) {
+          failures.push(error);
+        }
+        continue;
+      }
+      try {
+        const released = await Promise.resolve(
+          family.destroyOutputParticleBuffers.call(family.output)
+        );
+        if (released === false) {
+          throw postMechanicsClosureError(
+            `Post-mechanics ${family.stage} owner refused family retirement`,
+            'ERR_MLS_MPM_POST_MECHANICS_FAMILY_RETIREMENT'
+          );
+        }
+        for (const buffer of family.managedBuffers) {
+          authority.destroyedBuffers.add(buffer);
+          retiredFamilyBuffers.add(buffer);
+        }
+        authority.releasedFamilies.add(family);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
     for (const buffer of authority.ownedBuffers.keys()) {
-      if (preserved.has(buffer) || authority.destroyedBuffers.has(buffer)) {
+      if (
+        preserved.has(buffer)
+        || familyManagedBuffers.has(buffer)
+        || authority.destroyedBuffers.has(buffer)
+      ) {
         continue;
       }
       try {
@@ -887,14 +1317,19 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
     }
     authority.retirementReceipt = Object.freeze({
       schema: 'peercompute.ulg.mls-mpm-post-mechanics-retirement.v1',
-      status: abandon === true
+      status: retirementMode.abandon === true
         ? 'post-mechanics-closure-abandoned'
         : 'post-mechanics-superseded-components-retired',
       closure,
       claimReceipt: authority.claimReceipt,
-      abandoned: abandon === true,
+      abandoned: retirementMode.abandon === true,
       destroyedBufferCount: authority.destroyedBuffers.size,
-      preservedBufferCount: preserved.size
+      preservedBufferCount: new Set([
+        ...preserved,
+        ...familyPreservedBuffers
+      ]).size,
+      ownerFamilyCount: authority.ownedFamilies.length,
+      preservedOwnerFamilyBufferCount: familyPreservedBuffers.size
     });
     return authority.retirementReceipt;
   }).then(
@@ -952,13 +1387,16 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   expectedEpochIdentity = null,
   schroederSpatialThermalProposal = null,
   schroederSpatialReactionDiscoveryProposal = null,
+  spatialReactionDiscoveryProposalRunner = null,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
   reactionLawInputsQuarantined = false,
   inputResidentProductMass = null,
   residentProductMassMergeRunner = null,
+  gpuTimestampRecorder = null,
   timedStage = async (_stage, runStage) => runStage(),
   afterThermalStep = null,
+  afterReactionDiscoveryProposal = null,
   beforeReactionStep = null,
   afterReactionStep = null
 } = {}) {
@@ -979,14 +1417,35 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       expectedEpochIdentity
     });
   }
+  if (schroederSpatialReactionDiscoveryProposal != null) {
+    throw new TypeError(
+      'Post-mechanics closure rejects prebuilt reaction discovery; canonical discovery must be issued after the thermal stage'
+    );
+  }
   const stageEligible = postMechanicsBackend === 'webgpu'
     && sphParticleUpload?.status === 'webgpu-uploaded';
   const executedStageOrder = [];
   let schroederFarForceDeltaFusion = null;
   let thermalStep = null;
+  let resolvedSchroederSpatialReactionDiscoveryProposal = null;
   let reactionStep = null;
   let mechanicsRefreshStep = null;
   let phaseCarrierTransferStep = null;
+  const postSeparationThermalBinAuthority =
+    postMechanicsParticleBuffers.postSeparationThermalBinAuthority ?? null;
+  let postSeparationThermalBinReleaseScheduled = false;
+  const releasePostSeparationThermalBins = () => {
+    if (
+      !postSeparationThermalBinAuthority
+      || postSeparationThermalBinReleaseScheduled
+    ) return false;
+    postSeparationThermalBinReleaseScheduled =
+      releasePostSeparationThermalBinAuthorityAfterQueue(
+        postSeparationThermalBinAuthority,
+        { device }
+      ) === true;
+    return postSeparationThermalBinReleaseScheduled;
+  };
   try {
   if (
     schroederFarAggregateForceApplication
@@ -1020,17 +1479,22 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     && thermalSourceStateBuffer
   ) {
     thermalStep = await timedStage('thermalStep', () => thermalStepRunner({
+      ...thermalStepOptions,
       device,
       sphParticleState,
       thermalMaterialTable,
       sphParticleUpload,
+      proposalStateBuffer: thermalSourceStateBuffer,
+      proposalThermoBuffer: sphParticleUpload?.thermoBuffer,
       sourceStateBuffer: thermalSourceStateBuffer,
       sourceThermoBuffer: sphParticleUpload?.thermoBuffer,
       boxDimsM,
       dtS: dtSeconds,
       retainOutputParticleBuffers: true,
       readbackMode,
-      ...thermalStepOptions,
+      neighborBins: farForceOutput.stateBuffer
+        ? null
+        : postSeparationThermalBinAuthority,
       thermalResponseGraphUpload:
         thermalResponseGraphUpload
         || thermalStepOptions.thermalResponseGraphUpload
@@ -1039,16 +1503,76 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         schroederSpatialThermalProposal
           ? schroederSpatialEpochGeneration
           : null,
-      schroederSpatialThermalProposal
+      schroederSpatialThermalProposal,
+      gpuTimestampRecorder:
+        thermalStepOptions.gpuTimestampRecorder || gpuTimestampRecorder
     }));
     executedStageOrder.push('thermal-phase');
   }
+  releasePostSeparationThermalBins();
   if (typeof afterThermalStep === 'function') {
-    await afterThermalStep({ thermalStep });
+    await afterThermalStep({
+      thermalStep,
+      thermalSourceStateBuffer,
+      thermalSourceThermoBuffer: sphParticleUpload?.thermoBuffer ?? null
+    });
+  }
+
+  const thermalOutput = retainedThermalOutputBuffers(thermalStep);
+  const reactionSourceStateBuffer = thermalOutput.stateBuffer
+    || farForceOutput.stateBuffer
+    || postMechanicsParticleBuffers.stateBuffer;
+  const reactionSourceThermoBuffer = thermalOutput.thermoBuffer
+    || sphParticleUpload?.thermoBuffer;
+  const reactionStageEligible = Boolean(
+    reactionTable?.reactionCount > 0
+    && thermalMaterialTable
+    && stageEligible
+    && reactionSourceStateBuffer
+    && reactionSourceThermoBuffer
+  );
+  if (
+    reactionStageEligible
+    && schroederSpatialEpochGeneration
+    && !resolvedSchroederSpatialReactionDiscoveryProposal
+    && typeof spatialReactionDiscoveryProposalRunner === 'function'
+  ) {
+    resolvedSchroederSpatialReactionDiscoveryProposal = await timedStage(
+      'spatialReactionDiscoveryProposal',
+      () => spatialReactionDiscoveryProposalRunner({
+        device,
+        generation: schroederSpatialEpochGeneration,
+        sphParticleState,
+        sphParticleUpload,
+        reactionTable,
+        sourceStateBuffer: reactionSourceStateBuffer,
+        sourceThermoBuffer: reactionSourceThermoBuffer,
+        gpuTimestampRecorder
+      })
+    );
+    if (resolvedSchroederSpatialReactionDiscoveryProposal?.ready !== true) {
+      throw new Error(
+        'Canonical post-thermal reaction discovery did not publish a complete authenticated stage'
+      );
+    }
+    executedStageOrder.push('reaction-discovery');
+  }
+  if (typeof afterReactionDiscoveryProposal === 'function') {
+    await afterReactionDiscoveryProposal({
+      spatialReactionDiscoveryProposal:
+        resolvedSchroederSpatialReactionDiscoveryProposal,
+      thermalStep,
+      sourceStateBuffer: reactionSourceStateBuffer,
+      sourceThermoBuffer: reactionSourceThermoBuffer
+    });
   }
 
   const reactionStageInputs = typeof beforeReactionStep === 'function'
-    ? (await beforeReactionStep({ thermalStep })) || {}
+    ? (await beforeReactionStep({
+        thermalStep,
+        spatialReactionDiscoveryProposal:
+          resolvedSchroederSpatialReactionDiscoveryProposal
+      })) || {}
     : {};
   const effectiveSchroederLawQueue = Object.hasOwn(
     reactionStageInputs,
@@ -1069,26 +1593,18 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     ? reactionStageInputs.reactionLawInputsQuarantined === true
     : reactionLawInputsQuarantined;
 
-  const thermalOutput = retainedThermalOutputBuffers(thermalStep);
-  const reactionSourceStateBuffer = thermalOutput.stateBuffer
-    || farForceOutput.stateBuffer
-    || postMechanicsParticleBuffers.stateBuffer;
-  const reactionSourceThermoBuffer = thermalOutput.thermoBuffer
-    || sphParticleUpload?.thermoBuffer;
   if (
-    reactionTable?.reactionCount > 0
-    && thermalMaterialTable
+    reactionStageEligible
     && typeof reactionStepRunner === 'function'
-    && stageEligible
-    && reactionSourceStateBuffer
-    && reactionSourceThermoBuffer
     && postMechanicsParticleBuffers.mechanicsBuffer
   ) {
     const noFullReactionSummaryDefaults = readbackMode === NO_FULL_READBACK_MODE
       ? {
           readCompactReactionSummary: false,
-          readReactionGasSpeciesSummary:
-            (reactionTable?.gasProductCount ?? 0) > 0,
+          // Gas/product state remains resident. Host species summaries are
+          // diagnostics and must be requested explicitly (for example only on
+          // the final step of a resident sequence), never inferred per tick.
+          readReactionGasSpeciesSummary: false,
           readReactionProductInventory: false,
           readReactionAtomResidual: false
         }
@@ -1113,15 +1629,18 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         effectiveSchroederLawNeighborCandidates,
       ...noFullReactionSummaryDefaults,
       ...reactionStepOptions,
+      gpuTimestampRecorder:
+        reactionStepOptions.gpuTimestampRecorder || gpuTimestampRecorder,
       thermalResponseGraphUpload:
         thermalResponseGraphUpload
         || reactionStepOptions.thermalResponseGraphUpload
         || null,
       schroederSpatialEpochGeneration:
-        schroederSpatialReactionDiscoveryProposal
+        resolvedSchroederSpatialReactionDiscoveryProposal
           ? schroederSpatialEpochGeneration
           : null,
-      schroederSpatialReactionDiscoveryProposal,
+      schroederSpatialReactionDiscoveryProposal:
+        resolvedSchroederSpatialReactionDiscoveryProposal,
       ...(effectiveReactionLawInputsQuarantined ? {
         schroederLawQueue: null,
         schroederLawNeighborCandidates: null
@@ -1133,7 +1652,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     executedStageOrder.push('reaction-product');
   }
   if (typeof afterReactionStep === 'function') {
-    await afterReactionStep({ reactionStep });
+    await afterReactionStep({
+      reactionStep,
+      spatialReactionDiscoveryProposal:
+        resolvedSchroederSpatialReactionDiscoveryProposal
+    });
   }
 
   const reactionComponentMutations =
@@ -1238,6 +1761,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     sourceThermoBuffer: sphParticleUpload?.thermoBuffer || null,
     schroederFarForceDeltaFusion,
     thermalStep,
+    schroederSpatialReactionDiscoveryProposal:
+      resolvedSchroederSpatialReactionDiscoveryProposal,
     reactionStep,
     mechanicsRefreshStep,
     phaseCarrierTransferStep,
@@ -1296,8 +1821,38 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   });
   return closure;
   } catch (error) {
+    releasePostSeparationThermalBins();
+    resolvedSchroederSpatialReactionDiscoveryProposal?.destroy?.();
+    let resolveFailureCleanup = null;
+    const failureCleanupReceipt = {
+      schema: 'peercompute.ulg.mls-mpm-post-mechanics-failure-cleanup.v1',
+      status: 'post-mechanics-failure-cleanup-pending-owner-fence',
+      releasedOwnerFamilyCount: 0,
+      releasedComponentCount: 0,
+      rawDestroyedBufferCount: 0,
+      blockers: []
+    };
+    const failureCleanupCompletion = new Promise((resolve) => {
+      resolveFailureCleanup = resolve;
+    });
+    Object.defineProperty(failureCleanupReceipt, 'completion', {
+      value: failureCleanupCompletion,
+      enumerable: false
+    });
+    if (error && (typeof error === 'object' || typeof error === 'function')) {
+      Object.defineProperty(error, 'postMechanicsCleanupReceipt', {
+        value: failureCleanupReceipt,
+        enumerable: false,
+        configurable: true
+      });
+      Object.defineProperty(error, 'postMechanicsCleanupCompletion', {
+        value: failureCleanupCompletion,
+        enumerable: false,
+        configurable: true
+      });
+    }
     deferSubmittedWorkCleanup(device, () => {
-      destroyFailedPostMechanicsStageOutputs({
+      const cleanup = destroyFailedPostMechanicsStageOutputs({
         postMechanicsParticleBuffers,
         sphParticleUpload,
         mlsMpmParticleUpload,
@@ -1307,6 +1862,17 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         mechanicsRefreshStep,
         phaseCarrierTransferStep,
         inputResidentProductMass
+      });
+      Object.assign(failureCleanupReceipt, {
+        ...cleanup,
+        blockers: [...(cleanup.blockers || [])]
+      });
+      Promise.resolve(cleanup.completion).then((settled) => {
+        Object.assign(failureCleanupReceipt, {
+          ...settled,
+          blockers: [...(settled.blockers || [])]
+        });
+        resolveFailureCleanup(failureCleanupReceipt);
       });
     });
     throw error;

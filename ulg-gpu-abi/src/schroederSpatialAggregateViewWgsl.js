@@ -33,9 +33,9 @@ struct AggregateParams {
   dispatch_words: u32,
   topology_mode: u32,
   cleared_words: u32,
-  pad00: u32,
-  pad01: u32,
-  pad02: u32,
+  active_member_offset_words: u32,
+  active_member_capacity: u32,
+  physical_capacity_words: u32,
   pad03: u32,
   pad04: u32,
   pad05: u32,
@@ -81,9 +81,11 @@ struct AggregateRecord {
   phase_mask: u32,
   homogeneous_material: u32,
   homogeneous_phase: u32,
+  homogeneous_domain: u32,
   status: u32,
   begin: u32,
   end: u32,
+  source_member_count: u32,
 };
 
 @group(0) @binding(0) var<storage, read> spatial_directory: array<u32>;
@@ -111,6 +113,7 @@ const SPATIAL_KEY_WORDS: u32 = 5u;
 const SPATIAL_SORT_BOUNDED_ATLAS_U32: u32 = 1u;
 const SPATIAL_SORT_LEXICOGRAPHIC_U32X5: u32 = 2u;
 const SOURCE_LAYOUT_LEVEL_ASSIGNMENT: u32 = 1u;
+const SOURCE_LAYOUT_ACTIVE_NODE: u32 = 2u;
 
 const AGGREGATE_MAGIC: u32 = 0x53414731u;
 const AGGREGATE_VERSION: u32 = 2u;
@@ -123,6 +126,12 @@ const AGGREGATE_STATUS_NONFINITE: u32 = 32u;
 const AGGREGATE_STATUS_IDENTITY_MISMATCH: u32 = 64u;
 const AGGREGATE_STATUS_MALFORMED_TOPOLOGY: u32 = 128u;
 const AGGREGATE_STATUS_TRAVERSAL_READY: u32 = 256u;
+const ACTIVE_MEMBER_MAGIC: u32 = 0x53414d31u;
+const ACTIVE_MEMBER_VERSION: u32 = 1u;
+const ACTIVE_MEMBER_STATUS_READY: u32 = 1u;
+const ACTIVE_MEMBER_STATUS_ADMITTED: u32 = 2u;
+const ACTIVE_MEMBER_STATUS_FAIL_CLOSED: u32 = 4u;
+const ACTIVE_MEMBER_CONSTRUCTION_CELL_PREFIX: u32 = 1u;
 const RECORD_STATUS_VALID: u32 = 1u;
 const RECORD_STATUS_LEAF: u32 = 2u;
 const RECORD_STATUS_INTERNAL: u32 = 4u;
@@ -130,6 +139,7 @@ const RECORD_STATUS_ROOT: u32 = 8u;
 const RECORD_STATUS_MIXED_MATERIAL: u32 = 16u;
 const RECORD_STATUS_MIXED_PHASE: u32 = 32u;
 const RECORD_STATUS_TOPOLOGY_AUTHENTICATED: u32 = 64u;
+const RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT: u32 = 128u;
 const INVALID_U32: u32 = 0xffffffffu;
 const MAX_EXACT_F32_INTEGER: f32 = 16777215.0;
 const MAX_F32: f32 = 3.402823e38;
@@ -189,6 +199,26 @@ const H_ROPE_COUNT: u32 = 76u;
 const H_AUTHENTICATED_RECORD_COUNT: u32 = 77u;
 const H_AUTHENTICATED_ROOT_COUNT: u32 = 78u;
 const H_DUPLICATE_KEY_COUNT: u32 = 79u;
+const H_ACTIVE_MEMBER_MAGIC: u32 = 91u;
+const H_ACTIVE_MEMBER_VERSION: u32 = 92u;
+const H_ACTIVE_MEMBER_STATUS: u32 = 93u;
+const H_ACTIVE_MEMBER_OFFSET: u32 = 94u;
+const H_ACTIVE_MEMBER_CAPACITY: u32 = 95u;
+const H_ACTIVE_MEMBER_COUNT: u32 = 96u;
+const H_ACTIVE_MEMBER_SOURCE_COUNT: u32 = 97u;
+const H_ACTIVE_MEMBER_CELL_COUNT: u32 = 98u;
+const H_ACTIVE_MEMBER_GENERATION_ID: u32 = 99u;
+const H_ACTIVE_MEMBER_COMPLETION_ORDINAL: u32 = 100u;
+const H_ACTIVE_MEMBER_REPLAY_TOKEN: u32 = 101u;
+const H_ACTIVE_MEMBER_SOURCE_ADAPTER_ID: u32 = 102u;
+const H_ACTIVE_MEMBER_DIRECTORY_OFFSET: u32 = 103u;
+const H_ACTIVE_MEMBER_REDUCED_CELL_COUNT: u32 = 104u;
+const H_ACTIVE_MEMBER_INVALID_COUNT: u32 = 105u;
+const H_ACTIVE_MEMBER_CONSTRUCTION_MODE: u32 = 106u;
+const H_ACTIVE_MEMBER_PHYSICAL_CAPACITY: u32 = 107u;
+const H_ACTIVE_MEMBER_SOURCE_LAYOUT: u32 = 108u;
+const H_ACTIVE_MEMBER_STORAGE_GENERATION: u32 = 109u;
+const H_ACTIVE_MEMBER_FINGERPRINT: u32 = 110u;
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= MAX_F32;
@@ -265,6 +295,15 @@ fn directory_admitted() -> bool {
     || params.state_stride_floats != 8u
     || params.thermo_stride_floats != 12u
     || params.identity_stride_words != 1u
+    || params.active_member_offset_words != params.view_capacity_words
+    || params.active_member_capacity != params.source_capacity
+    || params.physical_capacity_words
+      != params.active_member_offset_words + params.active_member_capacity
+    || params.physical_capacity_words > arrayLength(&aggregate_view)
+    || (
+      params.source_row_layout_id != SOURCE_LAYOUT_LEVEL_ASSIGNMENT
+      && params.source_row_layout_id != SOURCE_LAYOUT_ACTIVE_NODE
+    )
     || arrayLength(&aggregate_dispatch) < params.dispatch_words
   ) {
     return false;
@@ -379,11 +418,32 @@ fn replay_guard_token(cell_count: u32) -> u32 {
   return fold_fingerprint(token, params.completion_ordinal);
 }
 
+fn active_member_projection_fingerprint(active_member_count: u32) -> u32 {
+  var value = fold_fingerprint(
+    load_word(H_ACTIVE_MEMBER_REPLAY_TOKEN),
+    ACTIVE_MEMBER_MAGIC
+  );
+  value = fold_fingerprint(value, params.active_member_offset_words);
+  value = fold_fingerprint(value, params.active_member_capacity);
+  value = fold_fingerprint(value, params.source_count);
+  value = fold_fingerprint(value, load_word(H_CELL_COUNT));
+  value = fold_fingerprint(value, active_member_count);
+  value = fold_fingerprint(value, params.generation_id);
+  value = fold_fingerprint(value, params.storage_generation);
+  return fold_fingerprint(value, params.completion_ordinal);
+}
+
 fn fail_initialization(status: u32) {
   if (arrayLength(&aggregate_view) >= 3u) {
     store_word(0u, AGGREGATE_MAGIC);
     store_word(1u, AGGREGATE_VERSION);
     store_word(H_STATUS, AGGREGATE_STATUS_FAIL_CLOSED | status);
+  }
+  if (arrayLength(&aggregate_view) > H_ACTIVE_MEMBER_FINGERPRINT) {
+    store_word(H_ACTIVE_MEMBER_MAGIC, ACTIVE_MEMBER_MAGIC);
+    store_word(H_ACTIVE_MEMBER_VERSION, ACTIVE_MEMBER_VERSION);
+    store_word(H_ACTIVE_MEMBER_STATUS, ACTIVE_MEMBER_STATUS_FAIL_CLOSED);
+    store_word(H_ACTIVE_MEMBER_FINGERPRINT, 0u);
   }
   zero_dispatches();
 }
@@ -492,6 +552,30 @@ fn initialize_aggregate_view() {
   store_word(88u, spatial_directory[30u]);
   store_word(89u, spatial_directory[31u]);
   store_word(90u, spatial_directory[32u]);
+  store_word(H_ACTIVE_MEMBER_MAGIC, ACTIVE_MEMBER_MAGIC);
+  store_word(H_ACTIVE_MEMBER_VERSION, ACTIVE_MEMBER_VERSION);
+  store_word(H_ACTIVE_MEMBER_STATUS, 0u);
+  store_word(H_ACTIVE_MEMBER_OFFSET, params.active_member_offset_words);
+  store_word(H_ACTIVE_MEMBER_CAPACITY, params.active_member_capacity);
+  store_word(H_ACTIVE_MEMBER_COUNT, 0u);
+  store_word(H_ACTIVE_MEMBER_SOURCE_COUNT, params.source_count);
+  store_word(H_ACTIVE_MEMBER_CELL_COUNT, cell_count);
+  store_word(H_ACTIVE_MEMBER_GENERATION_ID, params.generation_id);
+  store_word(H_ACTIVE_MEMBER_COMPLETION_ORDINAL, 0u);
+  store_word(H_ACTIVE_MEMBER_REPLAY_TOKEN, replay_token);
+  store_word(H_ACTIVE_MEMBER_SOURCE_ADAPTER_ID, params.source_adapter_id);
+  store_word(H_ACTIVE_MEMBER_DIRECTORY_OFFSET, spatial_directory[31u]);
+  store_word(H_ACTIVE_MEMBER_REDUCED_CELL_COUNT, 0u);
+  store_word(H_ACTIVE_MEMBER_INVALID_COUNT, 0u);
+  store_word(
+    H_ACTIVE_MEMBER_CONSTRUCTION_MODE,
+    ACTIVE_MEMBER_CONSTRUCTION_CELL_PREFIX
+  );
+  store_word(H_ACTIVE_MEMBER_PHYSICAL_CAPACITY, params.physical_capacity_words);
+  store_word(H_ACTIVE_MEMBER_SOURCE_LAYOUT, params.source_row_layout_id);
+  store_word(H_ACTIVE_MEMBER_STORAGE_GENERATION, params.storage_generation);
+  store_word(H_ACTIVE_MEMBER_FINGERPRINT, 0u);
+  store_word(111u, 0u);
   dispatch_store(
     DISPATCH_SLOT_CELLS,
     (cell_count + params.workgroup_size - 1u) / params.workgroup_size
@@ -579,6 +663,9 @@ fn source_row_particle_index(source_index: u32) -> u32 {
   if (params.source_row_layout_id == SOURCE_LAYOUT_LEVEL_ASSIGNMENT) {
     return source_index;
   }
+  if (params.source_row_layout_id != SOURCE_LAYOUT_ACTIVE_NODE) {
+    return INVALID_U32;
+  }
   let source_f = spatial_source_rows[source_index * 16u + 10u];
   if (!integral_f32(source_f) || source_f < 0.0 || source_f > MAX_EXACT_F32_INTEGER) {
     return INVALID_U32;
@@ -614,19 +701,49 @@ fn empty_record(kind: u32, begin: u32, end: u32) -> AggregateRecord {
     0u,
     INVALID_U32,
     INVALID_U32,
+    INVALID_U32,
     kind,
     begin,
-    end
+    end,
+    0u
   );
 }
 
 fn record_finite(record: AggregateRecord) -> bool {
-  return finite_f32(record.mass)
+  let mixed_material = (
+    record.status & RECORD_STATUS_MIXED_MATERIAL
+  ) != 0u;
+  let mixed_phase = (record.status & RECORD_STATUS_MIXED_PHASE) != 0u;
+  let active_summary = record.particle_count > 0u
     && record.mass > 0.0
+    && any(record.material_mask != vec4<u32>(0u))
+    && record.phase_mask != 0u
+    && mixed_material == (record.homogeneous_material == INVALID_U32)
+    && mixed_phase == (record.homogeneous_phase == INVALID_U32);
+  let dormant_summary = record.particle_count == 0u
+    && record.mass == 0.0
+    && all(record.first_moment == vec3<f32>(0.0))
+    && all(record.momentum == vec3<f32>(0.0))
+    && all(record.angular_momentum == vec3<f32>(0.0))
+    && record.internal_energy == 0.0
+    && record.kinetic_energy == 0.0
+    && all(record.aabb_min == vec3<f32>(0.0))
+    && all(record.aabb_max == vec3<f32>(0.0))
+    && record.radius == 0.0
+    && all(record.material_mask == vec4<u32>(0u))
+    && record.phase_mask == 0u
+    && record.homogeneous_material == INVALID_U32
+    && record.homogeneous_phase == INVALID_U32
+    && record.homogeneous_domain == INVALID_U32
+    && !mixed_material
+    && !mixed_phase;
+  return finite_f32(record.mass)
+    && record.mass >= 0.0
     && finite_vec3(record.first_moment)
     && finite_vec3(record.momentum)
     && finite_vec3(record.angular_momentum)
     && finite_f32(record.internal_energy)
+    && record.internal_energy >= 0.0
     && finite_f32(record.kinetic_energy)
     && record.kinetic_energy >= 0.0
     && finite_vec3(record.aabb_min)
@@ -634,10 +751,36 @@ fn record_finite(record: AggregateRecord) -> bool {
     && all(record.aabb_min <= record.aabb_max)
     && finite_f32(record.radius)
     && record.radius >= 0.0
-    && record.particle_count > 0u;
+    && record.source_member_count > 0u
+    && record.source_member_count >= record.particle_count
+    && (active_summary || dormant_summary);
+}
+
+fn canonicalize_empty_record(record: ptr<function, AggregateRecord>) {
+  (*record).mass = 0.0;
+  (*record).first_moment = vec3<f32>(0.0);
+  (*record).momentum = vec3<f32>(0.0);
+  (*record).angular_momentum = vec3<f32>(0.0);
+  (*record).internal_energy = 0.0;
+  (*record).kinetic_energy = 0.0;
+  (*record).aabb_min = vec3<f32>(0.0);
+  (*record).aabb_max = vec3<f32>(0.0);
+  (*record).radius = 0.0;
+  (*record).particle_count = 0u;
+  (*record).material_mask = vec4<u32>(0u);
+  (*record).phase_mask = 0u;
+  (*record).homogeneous_material = INVALID_U32;
+  (*record).homogeneous_phase = INVALID_U32;
+  (*record).homogeneous_domain = INVALID_U32;
+  (*record).status = (*record).status & ~(
+    RECORD_STATUS_MIXED_MATERIAL | RECORD_STATUS_MIXED_PHASE
+  );
 }
 
 fn merge_child(parent: ptr<function, AggregateRecord>, child: AggregateRecord) {
+  (*parent).source_member_count =
+    (*parent).source_member_count + child.source_member_count;
+  if (child.particle_count == 0u) { return; }
   let was_empty = (*parent).particle_count == 0u;
   (*parent).mass = (*parent).mass + child.mass;
   (*parent).first_moment = (*parent).first_moment + child.first_moment;
@@ -653,12 +796,16 @@ fn merge_child(parent: ptr<function, AggregateRecord>, child: AggregateRecord) {
   if (was_empty) {
     (*parent).homogeneous_material = child.homogeneous_material;
     (*parent).homogeneous_phase = child.homogeneous_phase;
+    (*parent).homogeneous_domain = child.homogeneous_domain;
   } else {
     if ((*parent).homogeneous_material != child.homogeneous_material) {
       (*parent).homogeneous_material = INVALID_U32;
     }
     if ((*parent).homogeneous_phase != child.homogeneous_phase) {
       (*parent).homogeneous_phase = INVALID_U32;
+    }
+    if ((*parent).homogeneous_domain != child.homogeneous_domain) {
+      (*parent).homogeneous_domain = INVALID_U32;
     }
   }
 }
@@ -692,6 +839,8 @@ fn write_payload(base: u32, record: AggregateRecord) {
   store_word(base + 25u, record.homogeneous_material);
   store_word(base + 26u, record.homogeneous_phase);
   store_word(base + 27u, record.status);
+  store_word(base + 42u, record.homogeneous_domain);
+  store_word(base + 43u, record.source_member_count);
 }
 
 fn write_topology(
@@ -716,8 +865,6 @@ fn write_topology(
   store_word(base + 38u, rank_begin);
   store_word(base + 39u, rank_end);
   store_word(base + 40u, prefix_bits);
-  store_word(base + 42u, 0u);
-  store_word(base + 43u, 0u);
 }
 
 fn read_record(base: u32) -> AggregateRecord {
@@ -761,9 +908,11 @@ fn read_record(base: u32) -> AggregateRecord {
     load_word(base + 24u),
     load_word(base + 25u),
     load_word(base + 26u),
+    load_word(base + 42u),
     load_word(base + 27u),
     load_word(base + 33u),
-    load_word(base + 34u)
+    load_word(base + 34u),
+    load_word(base + 43u)
   );
 }
 
@@ -826,6 +975,74 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
       spatial_source_rows[source_base + 14u]
     );
     let mass = particle_state[state_base + 3u];
+    if (
+      !finite_vec3(position)
+      || !finite_vec3(source_position)
+      || !finite_f32(mass)
+    ) {
+      nonfinite = true;
+      continue;
+    }
+    if (any(bitcast<vec3<u32>>(position) != bitcast<vec3<u32>>(source_position))) {
+      identity_mismatch = true;
+      continue;
+    }
+    if (mass < 0.0) {
+      invalid = true;
+      continue;
+    }
+    var mechanically_active = false;
+    var mechanically_dormant = false;
+    if (params.source_row_layout_id == SOURCE_LAYOUT_LEVEL_ASSIGNMENT) {
+      let support_radius = spatial_source_rows[source_base + 2u];
+      let represented_volume = spatial_source_rows[source_base + 3u];
+      let rest_volume = spatial_source_rows[source_base + 4u];
+      let current_volume = spatial_source_rows[source_base + 5u];
+      let source_mass = spatial_source_rows[source_base + 6u];
+      let source_mechanics_finite = finite_f32(support_radius)
+        && finite_f32(represented_volume)
+        && finite_f32(rest_volume)
+        && finite_f32(current_volume)
+        && finite_f32(source_mass);
+      if (!source_mechanics_finite) {
+        nonfinite = true;
+        continue;
+      }
+      mechanically_dormant = bitcast<u32>(mass) == 0u
+        && bitcast<u32>(support_radius) == 0u
+        && bitcast<u32>(represented_volume) == 0u
+        && bitcast<u32>(rest_volume) == 0u
+        && bitcast<u32>(current_volume) == 0u
+        && bitcast<u32>(source_mass) == 0u;
+      mechanically_active = mass > 0.0
+        && support_radius >= 0.0
+        && represented_volume >= 0.0
+        && rest_volume > 0.0
+        && current_volume >= 0.0
+        && bitcast<u32>(source_mass) == bitcast<u32>(mass);
+    } else if (params.source_row_layout_id == SOURCE_LAYOUT_ACTIVE_NODE) {
+      let support_radius = spatial_source_rows[source_base + 9u];
+      if (!finite_f32(support_radius)) {
+        nonfinite = true;
+        continue;
+      }
+      // Active-node rows do not carry mass or volume authority. A canonical
+      // zero-mass particle row is therefore the complete dormant contract;
+      // its retained support metadata may remain populated until the next
+      // topology transition compacts the source family.
+      mechanically_dormant = bitcast<u32>(mass) == 0u
+        && support_radius >= 0.0;
+      mechanically_active = mass > 0.0 && support_radius >= 0.0;
+    } else {
+      identity_mismatch = true;
+      continue;
+    }
+    if (!mechanically_active && !mechanically_dormant) {
+      identity_mismatch = true;
+      continue;
+    }
+    record.source_member_count = record.source_member_count + 1u;
+    if (mechanically_dormant) { continue; }
     let velocity = vec3<f32>(
       particle_state[state_base + 4u],
       particle_state[state_base + 5u],
@@ -843,10 +1060,7 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
       phases_bounded = phases_bounded && fraction >= 0.0 && fraction <= 1.0;
     }
     if (
-      !finite_vec3(position)
-      || !finite_vec3(source_position)
-      || !finite_f32(mass)
-      || !finite_vec3(velocity)
+      !finite_vec3(velocity)
       || !finite_f32(specific_internal_energy)
       || !finite_f32(material_f)
       || !finite_f32(phase_f)
@@ -857,8 +1071,7 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
       continue;
     }
     if (
-      any(bitcast<vec3<u32>>(position) != bitcast<vec3<u32>>(source_position))
-      || !integral_f32(material_f)
+      !integral_f32(material_f)
       || material_f < 0.0
       || material_f > MAX_EXACT_F32_INTEGER
       || !integral_f32(phase_f)
@@ -869,13 +1082,15 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
       identity_mismatch = true;
       continue;
     }
-    if (!(mass > 0.0) || visual_radius < 0.0) {
+    if (visual_radius < 0.0) {
       invalid = true;
       continue;
     }
     let render_domain_id = particle_identity[identity_base];
     let material_id = u32(round(material_f));
     let phase_id = u32(round(phase_f));
+    record.aabb_min = min(record.aabb_min, position - vec3<f32>(visual_radius));
+    record.aabb_max = max(record.aabb_max, position + vec3<f32>(visual_radius));
     let momentum = mass * velocity;
     let first_moment = mass * position;
     let angular = cross(position, momentum);
@@ -891,6 +1106,22 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
       nonfinite = true;
       continue;
     }
+    let active_ordinal = record.particle_count;
+    let active_member_word = params.active_member_offset_words
+      + begin + active_ordinal;
+    if (
+      active_ordinal >= end - begin
+      || active_member_word >= params.physical_capacity_words
+      || active_member_word >= arrayLength(&aggregate_view)
+    ) {
+      invalid = true;
+      atomicAdd(&aggregate_view[H_ACTIVE_MEMBER_INVALID_COUNT], 1u);
+      continue;
+    }
+    // Each leaf invocation owns one disjoint canonical directory range. The
+    // active prefix therefore needs no atomics and preserves member order.
+    store_word(active_member_word, particle_index);
+    atomicAdd(&aggregate_view[H_ACTIVE_MEMBER_COUNT], 1u);
     let was_empty = record.particle_count == 0u;
     record.mass = record.mass + mass;
     record.first_moment = record.first_moment + first_moment;
@@ -898,20 +1129,22 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
     record.angular_momentum = record.angular_momentum + angular;
     record.internal_energy = record.internal_energy + internal_energy;
     record.kinetic_energy = record.kinetic_energy + kinetic_energy;
-    record.aabb_min = min(record.aabb_min, position - vec3<f32>(visual_radius));
-    record.aabb_max = max(record.aabb_max, position + vec3<f32>(visual_radius));
     record.particle_count = record.particle_count + 1u;
     record.material_mask = record.material_mask | material_mask(material_id);
     record.phase_mask = record.phase_mask | (1u << phase_id);
     if (was_empty) {
       record.homogeneous_material = material_id;
       record.homogeneous_phase = phase_id;
+      record.homogeneous_domain = render_domain_id;
     } else {
       if (record.homogeneous_material != material_id) {
         record.homogeneous_material = INVALID_U32;
       }
       if (record.homogeneous_phase != phase_id) {
         record.homogeneous_phase = INVALID_U32;
+      }
+      if (record.homogeneous_domain != render_domain_id) {
+        record.homogeneous_domain = INVALID_U32;
       }
     }
     if (render_domain_id == INVALID_U32 && params.identity_stride_words == 0u) {
@@ -921,17 +1154,37 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (nonfinite) { atomicAdd(&aggregate_view[H_NONFINITE_SOURCE_COUNT], 1u); }
   if (identity_mismatch) { atomicAdd(&aggregate_view[H_IDENTITY_MISMATCH_COUNT], 1u); }
   if (invalid) { atomicAdd(&aggregate_view[H_INVALID_SOURCE_COUNT], 1u); }
-  if (nonfinite || identity_mismatch || invalid || record.particle_count != end - begin) {
+  if (
+    nonfinite
+    || identity_mismatch
+    || invalid
+    || record.source_member_count != end - begin
+  ) {
     return;
   }
-  if (!record_finite(record)) {
-    atomicAdd(&aggregate_view[H_NONFINITE_SOURCE_COUNT], 1u);
-    return;
+  if (record.particle_count == 0u) {
+    canonicalize_empty_record(&record);
+  } else {
+    if (record.homogeneous_material == INVALID_U32) {
+      record.status = record.status | RECORD_STATUS_MIXED_MATERIAL;
+    }
+    if (record.homogeneous_phase == INVALID_U32) {
+      record.status = record.status | RECORD_STATUS_MIXED_PHASE;
+    }
   }
-  let center = record.first_moment / record.mass;
+  var center = vec3<f32>(0.0);
+  if (record.particle_count > 0u) {
+    center = record.first_moment / record.mass;
+  }
   var radius = 0.0;
-  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
-    let particle_index = spatial_directory[cell_members + cursor];
+  for (
+    var active_ordinal = 0u;
+    active_ordinal < record.particle_count;
+    active_ordinal = active_ordinal + 1u
+  ) {
+    let particle_index = load_word(
+      params.active_member_offset_words + begin + active_ordinal
+    );
     let state_base = particle_index * params.state_stride_floats;
     let thermo_base = particle_index * params.thermo_stride_floats;
     let position = vec3<f32>(
@@ -945,13 +1198,13 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
   }
   record.radius = radius;
-  if (record.homogeneous_material == INVALID_U32) {
-    record.status = record.status | RECORD_STATUS_MIXED_MATERIAL;
+  if (!record_finite(record)) {
+    atomicAdd(&aggregate_view[H_NONFINITE_SOURCE_COUNT], 1u);
+    return;
   }
-  if (record.homogeneous_phase == INVALID_U32) {
-    record.status = record.status | RECORD_STATUS_MIXED_PHASE;
-  }
-  record.status = record.status | RECORD_STATUS_VALID;
+  record.status = record.status
+    | RECORD_STATUS_VALID
+    | RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT;
   let base = record_base(cell_index);
   write_payload(base, record);
   write_topology(
@@ -964,8 +1217,12 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
     rank + 1u,
     PREFIX_BIT_COUNT
   );
-  atomicAdd(&aggregate_view[H_REDUCED_SOURCE_COUNT], record.particle_count);
+  atomicAdd(
+    &aggregate_view[H_REDUCED_SOURCE_COUNT],
+    record.source_member_count
+  );
   atomicAdd(&aggregate_view[H_REDUCED_LEAF_COUNT], 1u);
+  atomicAdd(&aggregate_view[H_ACTIVE_MEMBER_REDUCED_CELL_COUNT], 1u);
 }
 
 fn sorted_cell(rank: i32) -> u32 {
@@ -1268,27 +1525,42 @@ fn reduce_aggregate_internals(
     }
     merge_child(&record, leaf);
   }
-  if (malformed || !record_finite(record)) {
+  if (record.particle_count == 0u) {
+    canonicalize_empty_record(&record);
+  } else {
+    if (record.homogeneous_material == INVALID_U32) {
+      record.status = record.status | RECORD_STATUS_MIXED_MATERIAL;
+    }
+    if (record.homogeneous_phase == INVALID_U32) {
+      record.status = record.status | RECORD_STATUS_MIXED_PHASE;
+    }
+  }
+  if (malformed) {
     atomicAdd(&aggregate_view[H_MALFORMED_TOPOLOGY_COUNT], 1u);
     return;
   }
-  let center = record.first_moment / record.mass;
+  var center = vec3<f32>(0.0);
+  if (record.particle_count > 0u) {
+    center = record.first_moment / record.mass;
+  }
   var radius = 0.0;
   for (var rank = rank_begin; rank < rank_end; rank = rank + 1u) {
     let leaf = read_record(record_base(sorted_indices[rank]));
+    if (leaf.particle_count == 0u) { continue; }
+    let leaf_center = leaf.first_moment / leaf.mass;
     radius = max(
       radius,
-      distance(leaf.first_moment / leaf.mass, center) + leaf.radius
+      distance(leaf_center, center) + leaf.radius
     );
   }
   record.radius = radius;
-  if (record.homogeneous_material == INVALID_U32) {
-    record.status = record.status | RECORD_STATUS_MIXED_MATERIAL;
+  if (!record_finite(record)) {
+    atomicAdd(&aggregate_view[H_MALFORMED_TOPOLOGY_COUNT], 1u);
+    return;
   }
-  if (record.homogeneous_phase == INVALID_U32) {
-    record.status = record.status | RECORD_STATUS_MIXED_PHASE;
-  }
-  record.status = record.status | RECORD_STATUS_VALID;
+  record.status = record.status
+    | RECORD_STATUS_VALID
+    | RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT;
   write_payload(base, record);
   atomicAdd(&aggregate_view[H_REDUCED_INTERNAL_COUNT], 1u);
 }
@@ -1332,7 +1604,13 @@ fn authenticate_aggregate_topology(
   let rank_end = load_word(base + 39u);
   let prefix_bits = load_word(base + 40u);
   let root_index = load_word(H_ROOT_RECORD_INDEX);
-  var valid = (status & RECORD_STATUS_VALID) != 0u
+  var valid = (status & (
+    RECORD_STATUS_VALID
+      | RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT
+  )) == (
+    RECORD_STATUS_VALID
+      | RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT
+  )
     && is_leaf != is_internal
     && record_finite(read_record(base))
     && rank_begin < rank_end
@@ -1364,6 +1642,7 @@ fn authenticate_aggregate_topology(
       && source_begin == spatial_directory[offsets + record_index]
       && source_end == spatial_directory[offsets + record_index + 1u]
       && source_begin < source_end
+      && load_word(base + 43u) == source_end - source_begin
       && record_key_matches(base, record_index);
   } else if (valid) {
     let left_child = load_word(base + 33u);
@@ -1395,7 +1674,10 @@ fn authenticate_aggregate_topology(
       if (valid) {
         let expected_particle_count = load_word(left_base + 19u)
           + load_word(right_base + 19u);
-        valid = load_word(base + 19u) == expected_particle_count;
+        let expected_source_member_count = load_word(left_base + 43u)
+          + load_word(right_base + 43u);
+        valid = load_word(base + 19u) == expected_particle_count
+          && load_word(base + 43u) == expected_source_member_count;
       }
     }
   }
@@ -1453,6 +1735,35 @@ fn finalize_aggregate_view() {
   let total_record_count = load_word(H_TOTAL_RECORD_COUNT);
   let root_index = load_word(H_ROOT_RECORD_INDEX);
   let root_status = load_word(record_base(root_index) + 27u);
+  let root_source_member_count = load_word(record_base(root_index) + 43u);
+  let root_active_member_count = load_word(record_base(root_index) + 19u);
+  let active_member_count = load_word(H_ACTIVE_MEMBER_COUNT);
+  let active_projection_complete =
+    load_word(H_ACTIVE_MEMBER_MAGIC) == ACTIVE_MEMBER_MAGIC
+    && load_word(H_ACTIVE_MEMBER_VERSION) == ACTIVE_MEMBER_VERSION
+    && load_word(H_ACTIVE_MEMBER_STATUS) == 0u
+    && load_word(H_ACTIVE_MEMBER_OFFSET) == params.active_member_offset_words
+    && load_word(H_ACTIVE_MEMBER_CAPACITY) == params.active_member_capacity
+    && load_word(H_ACTIVE_MEMBER_SOURCE_COUNT) == params.source_count
+    && load_word(H_ACTIVE_MEMBER_CELL_COUNT) == cell_count
+    && load_word(H_ACTIVE_MEMBER_GENERATION_ID) == params.generation_id
+    && load_word(H_ACTIVE_MEMBER_COMPLETION_ORDINAL) == 0u
+    && load_word(H_ACTIVE_MEMBER_REPLAY_TOKEN)
+      == load_word(H_REPLAY_GUARD_TOKEN)
+    && load_word(H_ACTIVE_MEMBER_SOURCE_ADAPTER_ID) == params.source_adapter_id
+    && load_word(H_ACTIVE_MEMBER_DIRECTORY_OFFSET) == spatial_directory[31u]
+    && load_word(H_ACTIVE_MEMBER_REDUCED_CELL_COUNT) == cell_count
+    && load_word(H_ACTIVE_MEMBER_INVALID_COUNT) == 0u
+    && load_word(H_ACTIVE_MEMBER_CONSTRUCTION_MODE)
+      == ACTIVE_MEMBER_CONSTRUCTION_CELL_PREFIX
+    && load_word(H_ACTIVE_MEMBER_PHYSICAL_CAPACITY)
+      == params.physical_capacity_words
+    && load_word(H_ACTIVE_MEMBER_SOURCE_LAYOUT) == params.source_row_layout_id
+    && load_word(H_ACTIVE_MEMBER_STORAGE_GENERATION)
+      == params.storage_generation
+    && load_word(H_ACTIVE_MEMBER_FINGERPRINT) == 0u
+    && active_member_count == root_active_member_count
+    && active_member_count <= params.source_count;
   if (
     load_word(H_EMITTED_KEY_COUNT) != cell_count
     || load_word(H_INITIALIZED_RECORD_COUNT) != total_record_count
@@ -1466,19 +1777,25 @@ fn finalize_aggregate_view() {
     || load_word(H_AUTHENTICATED_RECORD_COUNT) != total_record_count
     || load_word(H_AUTHENTICATED_ROOT_COUNT) != 1u
     || load_word(H_TRAVERSAL_LEAF_COVERAGE) != cell_count
+    || root_source_member_count != params.source_count
+    || !active_projection_complete
     || (root_status & (
       RECORD_STATUS_VALID
       | RECORD_STATUS_ROOT
       | RECORD_STATUS_TOPOLOGY_AUTHENTICATED
+      | RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT
     )) != (
       RECORD_STATUS_VALID
       | RECORD_STATUS_ROOT
       | RECORD_STATUS_TOPOLOGY_AUTHENTICATED
+      | RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT
     )
   ) {
     failure = failure | AGGREGATE_STATUS_INVALID_SOURCE;
   }
   if (failure != 0u) {
+    store_word(H_ACTIVE_MEMBER_STATUS, ACTIVE_MEMBER_STATUS_FAIL_CLOSED);
+    store_word(H_ACTIVE_MEMBER_FINGERPRINT, 0u);
     store_word(H_STATUS, failure | AGGREGATE_STATUS_FAIL_CLOSED);
     store_word(H_TRAVERSAL_STATUS, AGGREGATE_STATUS_FAIL_CLOSED);
     zero_dispatches();
@@ -1493,6 +1810,15 @@ fn finalize_aggregate_view() {
   }
   store_word(H_TOPOLOGY_FINGERPRINT, sealed_topology_fingerprint);
   store_word(H_COMPLETION_ORDINAL, params.completion_ordinal);
+  store_word(H_ACTIVE_MEMBER_COMPLETION_ORDINAL, params.completion_ordinal);
+  store_word(
+    H_ACTIVE_MEMBER_FINGERPRINT,
+    active_member_projection_fingerprint(active_member_count)
+  );
+  store_word(
+    H_ACTIVE_MEMBER_STATUS,
+    ACTIVE_MEMBER_STATUS_READY | ACTIVE_MEMBER_STATUS_ADMITTED
+  );
   store_word(
     H_TRAVERSAL_STATUS,
     AGGREGATE_STATUS_READY
@@ -1668,6 +1994,7 @@ fn fail_summary(base: u32, query_index: u32, status: u32) {
 fn aggregate_admitted() -> bool {
   let total_record_count = aggregate_view[54u];
   let root_record_index = aggregate_view[53u];
+  let root_record_base = record_base(root_record_index);
   let replay_token = replay_guard_token(aggregate_view[18u]);
   return arrayLength(&aggregate_view) >= HEADER_WORDS
     && params.aggregate_capacity_words <= arrayLength(&aggregate_view)
@@ -1698,6 +2025,9 @@ fn aggregate_admitted() -> bool {
     && aggregate_view[51u] == TOPOLOGY_MODE
     && aggregate_view[52u] == PREFIX_BIT_COUNT
     && root_record_index < total_record_count
+    && root_record_base + 43u < params.aggregate_capacity_words
+    && aggregate_view[root_record_base + 43u] == params.expected_source_count
+    && aggregate_view[root_record_base + 19u] <= params.expected_source_count
     && aggregate_view[55u] + aggregate_view[23u] == total_record_count
     && (
       params.expected_topology_fingerprint == 0u
@@ -1828,6 +2158,8 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
     let escape_index = aggregate_view[base + 37u];
     let rank_begin = aggregate_view[base + 38u];
     let rank_end = aggregate_view[base + 39u];
+    let particle_count = aggregate_view[base + 19u];
+    let source_member_count = aggregate_view[base + 43u];
     let is_leaf = (status & RECORD_STATUS_LEAF) != 0u;
     let is_internal = (status & RECORD_STATUS_INTERNAL) != 0u;
     let is_root = (status & RECORD_STATUS_ROOT) != 0u;
@@ -1839,11 +2171,51 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
       || is_root != (record_index == aggregate_view[53u])
       || rank_begin >= rank_end
       || rank_end > leaf_count
+      || source_member_count == 0u
+      || source_member_count > params.expected_source_count
+      || particle_count > source_member_count
       || aggregate_view[base + 41u] != topology_fingerprint(record_index)
       || (escape_index != INVALID_U32 && escape_index >= total_record_count)
     ) {
       malformed = true;
       break;
+    }
+    if (is_leaf) {
+      let source_begin = aggregate_view[base + 33u];
+      let source_end = aggregate_view[base + 34u];
+      if (
+        source_begin >= source_end
+        || source_member_count != source_end - source_begin
+      ) {
+        malformed = true;
+        break;
+      }
+    } else {
+      let left_index = aggregate_view[base + 33u];
+      let right_index = aggregate_view[base + 34u];
+      if (
+        left_index >= total_record_count
+        || right_index >= total_record_count
+        || left_index == right_index
+      ) {
+        malformed = true;
+        break;
+      }
+      let left_base = record_base(left_index);
+      let right_base = record_base(right_index);
+      let left_source_count = aggregate_view[left_base + 43u];
+      let right_source_count = aggregate_view[right_base + 43u];
+      let left_particle_count = aggregate_view[left_base + 19u];
+      let right_particle_count = aggregate_view[right_base + 19u];
+      if (
+        left_source_count > source_member_count
+        || right_source_count != source_member_count - left_source_count
+        || left_particle_count > particle_count
+        || right_particle_count != particle_count - left_particle_count
+      ) {
+        malformed = true;
+        break;
+      }
     }
     let mass = bitcast<f32>(aggregate_view[base]);
     let first_moment = vec3<f32>(
@@ -1851,7 +2223,6 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
       bitcast<f32>(aggregate_view[base + 2u]),
       bitcast<f32>(aggregate_view[base + 3u])
     );
-    let center = first_moment / mass;
     let minimum = vec3<f32>(
       bitcast<f32>(aggregate_view[base + 12u]),
       bitcast<f32>(aggregate_view[base + 13u]),
@@ -1863,6 +2234,70 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
       bitcast<f32>(aggregate_view[base + 17u])
     );
     let radius = bitcast<f32>(aggregate_view[base + 18u]);
+    let momentum = vec3<f32>(
+      bitcast<f32>(aggregate_view[base + 4u]),
+      bitcast<f32>(aggregate_view[base + 5u]),
+      bitcast<f32>(aggregate_view[base + 6u])
+    );
+    let angular_momentum = vec3<f32>(
+      bitcast<f32>(aggregate_view[base + 7u]),
+      bitcast<f32>(aggregate_view[base + 8u]),
+      bitcast<f32>(aggregate_view[base + 9u])
+    );
+    let internal_energy = bitcast<f32>(aggregate_view[base + 10u]);
+    let kinetic_energy = bitcast<f32>(aggregate_view[base + 11u]);
+    if (particle_count == 0u) {
+      let canonical_empty = aggregate_view[base] == 0u
+        && aggregate_view[base + 1u] == 0u
+        && aggregate_view[base + 2u] == 0u
+        && aggregate_view[base + 3u] == 0u
+        && aggregate_view[base + 4u] == 0u
+        && aggregate_view[base + 5u] == 0u
+        && aggregate_view[base + 6u] == 0u
+        && aggregate_view[base + 7u] == 0u
+        && aggregate_view[base + 8u] == 0u
+        && aggregate_view[base + 9u] == 0u
+        && aggregate_view[base + 10u] == 0u
+        && aggregate_view[base + 11u] == 0u
+        && all(minimum == vec3<f32>(0.0))
+        && all(maximum == vec3<f32>(0.0))
+        && aggregate_view[base + 18u] == 0u
+        && aggregate_view[base + 20u] == 0u
+        && aggregate_view[base + 21u] == 0u
+        && aggregate_view[base + 22u] == 0u
+        && aggregate_view[base + 23u] == 0u
+        && aggregate_view[base + 24u] == 0u
+        && aggregate_view[base + 25u] == INVALID_U32
+        && aggregate_view[base + 26u] == INVALID_U32
+        && aggregate_view[base + 42u] == INVALID_U32;
+      if (!canonical_empty) {
+        malformed = true;
+        break;
+      }
+      covered_leaf_count = covered_leaf_count + rank_end - rank_begin;
+      record_index = escape_index;
+      continue;
+    }
+    if (
+      !finite_f32(mass)
+      || mass <= 0.0
+      || !finite_vec3(first_moment)
+      || !finite_vec3(momentum)
+      || !finite_vec3(angular_momentum)
+      || !finite_f32(internal_energy)
+      || internal_energy < 0.0
+      || !finite_f32(kinetic_energy)
+      || kinetic_energy < 0.0
+      || !finite_vec3(minimum)
+      || !finite_vec3(maximum)
+      || any(minimum > maximum)
+      || !finite_f32(radius)
+      || radius < 0.0
+    ) {
+      malformed = true;
+      break;
+    }
+    let center = first_moment / mass;
     let separation = center - query_position;
     let distance = max(length(separation), 0.000001);
     let node_size = max(
@@ -1890,18 +2325,10 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
       covered_leaf_count = covered_leaf_count + rank_end - rank_begin;
       far_mass = far_mass + mass;
       far_first_moment = far_first_moment + first_moment;
-      far_momentum = far_momentum + vec3<f32>(
-        bitcast<f32>(aggregate_view[base + 4u]),
-        bitcast<f32>(aggregate_view[base + 5u]),
-        bitcast<f32>(aggregate_view[base + 6u])
-      );
-      far_angular = far_angular + vec3<f32>(
-        bitcast<f32>(aggregate_view[base + 7u]),
-        bitcast<f32>(aggregate_view[base + 8u]),
-        bitcast<f32>(aggregate_view[base + 9u])
-      );
-      far_internal = far_internal + bitcast<f32>(aggregate_view[base + 10u]);
-      far_kinetic = far_kinetic + bitcast<f32>(aggregate_view[base + 11u]);
+      far_momentum = far_momentum + momentum;
+      far_angular = far_angular + angular_momentum;
+      far_internal = far_internal + internal_energy;
+      far_kinetic = far_kinetic + kinetic_energy;
       let softened_r2 = dot(separation, separation)
         + params.softening_length_m * params.softening_length_m;
       let inverse_r3 = inverseSqrt(softened_r2 * softened_r2 * softened_r2);

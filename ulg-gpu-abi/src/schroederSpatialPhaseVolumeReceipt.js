@@ -11,10 +11,10 @@ import {
  * pressure, drag, P2G, G2P, or rendering authority.
  */
 export const ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-phase-volume-receipt.v1';
+  'peercompute.ulg.schroeder-spatial-phase-volume-receipt.v2';
 
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_MAGIC = 0x53505652;
-export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_VERSION = 1;
+export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_VERSION = 2;
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_WORDS = 64;
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_PARAMS_BYTES = 128;
@@ -47,11 +47,11 @@ export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_LAYOUT = Object.freez
   'chartEpoch:u32',
   'levelEpoch:u32',
   'supportEpoch:u32',
-  'sourceCount:u32',
-  'sourceCapacity:u32',
+  'globalScanSourceCount:u32',
+  'globalScanSourceCapacity:u32',
   'fieldCount:u32',
   'fieldCapacity:u32',
-  'candidateCount:u32',
+  'globalScanCandidateCount:u32',
   'selectedLevel:i32-bits',
   'gridNodeCount:u32',
   'gridSpacingM:f32-bits',
@@ -78,8 +78,8 @@ export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_LAYOUT = Object.freez
   'identityMismatchCount:u32',
   'clippedStencilCount:u32',
   'overflowCount:u32',
-  'sourceContributionCount:u32',
-  'fieldContributionCount:u32',
+  'selectedSourceCount:u32',
+  'selectedCandidateCount:u32',
   'sourceMechanicsStrideFloats:u32',
   'rawVolumeRatioJMechanicsWord:u32',
   'rawRestVolumeMechanicsWord:u32',
@@ -104,9 +104,9 @@ export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_ABI = Object.freeze({
   headerWords: SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_WORDS,
   headerLayout: SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_LAYOUT,
   sourceAuthority:
-    'same-device-same-generation-s9a-finite-positive-restVolumeM3-word-19-times-volumeRatioJ-word-18-only',
+    'same-device-same-generation-s9a-exact-level-assignment-and-active-field-descriptor-selected-finite-positive-restVolumeM3-word-19-times-volumeRatioJ-word-18-only',
   fieldAuthority: 'same-s9a-v1-moment-rows-and-exact-mechanics-field-u32x4-key-only',
-  conservation: 'selected-source-volume-equals-unclipped-phase-field-volume;stencil-gradient-sum-zero',
+  conservation: 'exact-level-selected-source-volume-equals-unclipped-phase-field-volume;stencil-gradient-sum-zero',
   fallbackPolicy: 'fail-closed-no-density-render-radius-or-represented-volume-fallback',
   mutationPolicy:
     'diagnostic-only;no-p2g-grid-g2p-reflux-particle-thermo-reaction-phase-or-render-mutation',
@@ -312,15 +312,22 @@ export function createSchroederSpatialPhaseVolumeReceiptPlan({
     schema: ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA,
     status: 'schroeder-spatial-phase-volume-receipt-plan-ready',
     ...identity,
+    // These aliases preserve the v1 host plan shape.  The sealed v2 GPU
+    // header makes their global scan meaning explicit so it cannot be
+    // confused with the selected source subset for one mechanics level.
     sourceCount: resolvedSourceCount,
     sourceCapacity: layout.sourceCapacity,
+    globalScanSourceCount: resolvedSourceCount,
+    globalScanSourceCapacity: layout.sourceCapacity,
     fieldCapacity: layout.fieldCapacity,
     candidateCount,
+    globalScanCandidateCount: candidateCount,
     sourceGroupCount: groupCount(resolvedSourceCount),
     selectedLevel: integer(selectedLevel, 'selectedLevel', -0x8000_0000, 0x7fff_ffff),
     gridNodeCount: integer(gridNodeCount, 'gridNodeCount', 1),
     gridSpacingM: finitePositive(gridSpacingM, 'gridSpacingM'),
     sourceMechanicsStrideFloats: 32,
+    sourceAssignmentStrideFloats: 16,
     rawVolumeRatioJMechanicsWord: 18,
     rawRestVolumeMechanicsWord: 19,
     layout,
@@ -441,6 +448,9 @@ export function validateSchroederSpatialPhaseVolumeReceiptDescriptor(
     || moment?.diagnosticOnly !== true
     || moment?.stateMutationAllowed !== false
     || moment?.sourceMechanicsBufferBorrowed !== true
+    || !descriptor.sourceBuffer
+    || descriptor.sourceBufferBorrowed !== true
+    || descriptor.sourceBuffer !== moment?.sourceBuffer
     || !descriptor.controlBuffer
     || !descriptor.partialBuffer
     || !descriptor.paramsBuffer
@@ -459,6 +469,7 @@ export function validateSchroederSpatialPhaseVolumeReceiptDescriptor(
     descriptor.candidateCount !== descriptor.sourceCount * SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STENCIL_SIZE
     || descriptor.sourceGroupCount !== groupCount(descriptor.sourceCount)
     || descriptor.sourceMechanicsStrideFloats !== 32
+    || descriptor.sourceAssignmentStrideFloats !== 16
     || descriptor.rawVolumeRatioJMechanicsWord !== 18
     || descriptor.rawRestVolumeMechanicsWord !== 19
     || !sameIdentity(descriptor, moment)
@@ -493,6 +504,10 @@ export function validateSchroederSpatialPhaseVolumeReceiptDescriptor(
     [
       descriptor.sourceMechanicsBuffer,
       descriptor.sourceCount * descriptor.sourceMechanicsStrideFloats * Float32Array.BYTES_PER_ELEMENT
+    ],
+    [
+      descriptor.sourceBuffer,
+      descriptor.sourceCount * descriptor.sourceAssignmentStrideFloats * Float32Array.BYTES_PER_ELEMENT
     ],
     [moment.controlBuffer, SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_HEADER_WORDS * Uint32Array.BYTES_PER_ELEMENT],
     [moment.momentBuffer, descriptor.fieldCapacity * SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_ROW_WORDS * Uint32Array.BYTES_PER_ELEMENT]

@@ -19,12 +19,14 @@ Required coherent-solid correction:
   mostly-solid and mixed solid-liquid scenes from human to planetary scale.
   Use GPU-native invariant/metamorphic validation; do not build a CPU mirror.
 
-Active execution plan (2026-07-18):
+Completed refactor execution record (2026-07-21):
 
 - `shared-spatial-authority-refactor-plan.md` — build one canonical
   GPU-resident cell/hierarchy generation per immutable spatial epoch and derive
   mechanics, exact-near, cross-level, aggregate-far, solid-proxy, and render
-  views without independent law grids or maximal pair storage.
+  views without independent law grids or maximal pair storage. Slices 0–8 are
+  implemented; follow-on transport and coherent-solid work retain separate
+  ownership below.
 
 Historical July 2 Fable handoff/queue documents are preserved under
 `plan/moot/SS/`; their landed checkpoints remain evidence, not active order.
@@ -324,22 +326,16 @@ Historical implementation queue (superseded 2026-07-13 by
 
 Current implementation queue:
 
-1. Transport the verified Slice 7 snapshot: its paired non-target and
-   GPU-timestamp performance receipts, Pages build/static smoke, 87-path staged
-   secret/conflict audit, ICC completion oracle, readiness, and production
-   audit are recorded. Make the one requested full-slice commit, then non-force
-   push the branch and the same Pages-bearing commit to `main`; record the
-   immutable SHA/ref receipts in ICC and the final handoff.
-2. Start Slice 8 by adapting product/gas, coherent-solid proxy, sparse-render,
-   source-field, and surface routes where their coordinates and ownership match
-   the canonical spatial epoch. Delete duplicate bins, independent sorts,
-   fixed candidate queues, exhaustive fallbacks, and host feedback only as
-   their authoritative replacement is proved. Start with the measured
-   post-mechanics reaction hotspot (`364..369 ms` p50 in the Slice 7 target
-   characterization), not an unmeasured rewrite.
-3. Keep phase-resolved represented-current-volume and volume-gradient moments,
-   shared local/reflux pressure and drag, hydrostatic ambient or resolved air,
-   and conserved phase/reaction birth volume as an explicit gas-interface and
-   phase-volume transport follow-on. Steam rise/condensation and hydrogen rise
-   remain failed expectations until that work is verified; do not hide them by
-   relaxing the standard visual matrix.
+1. Close the Slice 8 transport receipt: run the frozen-source paired reaction
+   and non-target performance gates, refresh ICC, make the one full-slice
+   commit, build Pages, and non-force push the branch/Pages refs.
+2. Continue phase-resolved represented-current-volume and volume-gradient
+   moments, shared local/reflux pressure and drag, hydrostatic ambient or
+   resolved air, and conserved phase/reaction birth volume in the explicit
+   gas-interface/phase-volume follow-on. Steam rise/condensation and hydrogen
+   rise remain failed expectations until that work is verified.
+3. Re-derive long-liquid viscosity, contact, and heat-transfer behavior under
+   `../surface-contact-transport-phase-closure-plan.md`; do not hide inherited
+   failures by relaxing the long-horizon or standard visual gates.
+4. Continue coherent-solid body/material frame, member, inertia, connectivity,
+   contact-proxy, and rest/material-space work under `../sol-critic.md`.

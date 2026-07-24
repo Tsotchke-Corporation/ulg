@@ -303,10 +303,20 @@ never `particleCount * fixedBudget`.
 
 ### Slice 8 - Other source families and final cleanup
 
+- Status: implementation and non-performance precommit verification are
+  complete in the staged Slice 8 snapshot. The frozen-source paired performance
+  campaigns, ICC release gates, and immutable Git/ref receipts close the slice.
 - Adapt product/gas, coherent-solid proxy, sparse render, source-field, and
   surface routes where coordinates and ownership align.
 - Delete fixed SS candidate queues, duplicate bins, independent sorts over the
   same particle source, implicit exhaustive fallbacks, and host feedback paths.
+- Product placement/topology transition, compact gas authority, matched-time
+  thermal transfer, successor render/source-field/surface routes, and
+  host/worker continuation now use authenticated source families wherever an
+  authoritative replacement exists.
+- A far-render carrier is a spatial aggregate proxy, not coherent-solid body
+  authority. Body/material frame, member, inertia, connectivity, and
+  rest/material-space work remains owned by `plan/todo/sol-critic.md`.
 
 ## Correctness Gates
 
@@ -1712,6 +1722,57 @@ Its remaining warnings are the reviewed forward-replacement shape, explicitly
 justified temporary GPU integration boundaries, pre-existing portfolio task
 state, and the expected precommit dirty-tree receipt.
 
+## Slice 8 source-family and final-cleanup checkpoint - 2026-07-21
+
+Slice 8 closes the remaining authenticated source-family boundaries without
+creating a second spatial authority. Reaction discovery now feeds an
+authenticated product-placement/topology-transition successor family; thermal
+proposal and apply share one matched-time reciprocal receipt; compact gas-ledger
+EOS remains GPU-resident through exact-v2 host/worker continuation; retained
+fences authenticate reuse and cleanup; and successor render, source-field, and
+native-surface routes publish exact generation lineage. The aggregate render
+carrier remains a presentation proxy rather than coherent-solid body authority.
+
+The complete unit suite reports `1863` total, `1848` passed, `15` expected
+opt-in skips, and zero failures. Focused native-surface lifecycle, harness, and
+renderer coverage reports `205/205`. Final desktop and mobile visual artifacts
+are
+`/tmp/ulg-visual-sanity-matrix/slice8-closeout-desktop-r2/summary.json` and
+`/tmp/ulg-visual-sanity-matrix/slice8-closeout-mobile-r2/summary.json`: all
+seven scenarios per viewport have structural analysis `good`, zero stale-source
+samples, nonblank frames, and no browser-console, WebGPU, or visual-surface
+issues. Direct review covers moving opaque/refraction-led water, iron/ice
+contact, reactive sodium/water, visible dynamic fluorine/CsF, and all random
+pairs.
+
+The first desktop closeout artifact at
+`/tmp/ulg-visual-sanity-matrix/slice8-closeout-desktop` exposed stale published
+render-source evidence while every frame remained nonblank. The clean Slice 7
+control at
+`/tmp/ulg-visual-sanity-matrix/slice7-compare-sodium-csf` did not reproduce the
+stale-source result. Candidate validation stays nonblocking and last-good
+presentation stays visible, but diagnostic checkpoints now wait for the
+one-active/one-latest scheduler to quiesce and the promoted candidate publishes
+the exact immutable refresh receipt. A successful first submit is terminal and
+cannot be mislabeled as a later discard.
+
+Steam rise, steam condensation, and hydrogen rise remain the explicit
+transport frontier in “Follow-on - phase-resolved volume and gas-interface
+transport.” The opt-in long-liquid gate reproduces its two failures bit-for-bit
+on the clean `6c20c32` baseline: `0.46572056445613097 m/s` retained bulk motion
+and resident `minJ=0.9833418130874634`. These are inherited solver debts, not
+Slice 8 regressions, and no acceptance threshold was weakened.
+
+The final matched performance receipts are written to
+`/tmp/ulg-slice8-reaction-step-historical-final.json` and
+`/tmp/ulg-slice8-nontarget-physics-throughput-final.json`. The former uses three
+alternating `AB/BA/AB` runs, four warmups, nine one-step samples, exact native
+timestamps, and a five-percent p50/p95 ceiling against immutable Slice 7. The
+latter uses three alternating runs and one measured 16-step batch per arm, with
+both paired and independent median throughput ratios required to remain at
+least `0.95`. Machine-readable gate values and source fingerprints live in
+those reports and the final ICC attempt.
+
 ## Slice 9A strict raw-volume moment sidecar checkpoint - 2026-07-23
 
 Slice 9A begins the phase-resolved volume/transport follow-on without quietly
@@ -1770,6 +1831,232 @@ Artifacts are
 ### Post-commit transport receipt
 
 The one full-slice commit, branch push, and Pages-bearing `main` fast-forward
-are the only remaining transport operations. Their immutable SHA/ref results
-are recorded in ICC and the final handoff rather than by creating a second
-source commit solely to self-reference the first.
+are the final transport operations. Their immutable SHA/ref results are
+recorded in ICC and the final handoff rather than by creating a second source
+commit solely to self-reference the first.
+
+## Slice 9D shared exact-near traversal view - planned 2026-07-23
+
+The next performance slice shares the exact local spatial traversal that is
+currently rebuilt by each law. The canonical SS directory and M4 hierarchy are
+both retained, but their responsibilities stay distinct: M4 remains an
+aggregate-admissible far-field accelerator; reactions, thermal conduction, and
+pressure/contact keep exact local pair predicates. No local chemistry or
+contact path may be approximated through a far-tree aggregate.
+
+### Why this is next
+
+The authenticated M4 hierarchy is real, but normal mounted SS does not use it
+as a universal local-law accelerator. The measured target-path bottleneck is
+post-mechanics reaction discovery (roughly `364..369 ms` p50), not hierarchy
+construction. Reaction discovery currently re-derives level, x, y, and z
+directory ranges from the same canonical epoch for every source. That repeats
+binary/range lookup work that can be shared without materializing an unbounded
+pair list or changing any reaction predicate.
+
+### Scope
+
+1. Build one immutable GPU-resident **canonical exact-cell hierarchy** per
+   authenticated epoch. It is a complete, power-of-two binary hierarchy over
+   the already canonical directory cells: leaves point back to the directory's
+   existing cell/member spans and carry conservative physical cell AABBs;
+   internal nodes carry only unions of those AABBs. Its retained footprint is
+   `O(cellCapacity)`, its build is `O(cellCapacity * log2(cellCapacity))` with
+   fixed bottom-up levels, and it contains no query-cell-to-neighbour-cell CSR,
+   pair rows, candidate budget, private sort, or duplicated particle authority.
+   A consumer support profile supplies only its query envelope; the hierarchy
+   itself is law-neutral and reusable.
+2. Bind exact generation, device, lane, lease, source family, storage,
+   position/topology/chart/level/support epochs, directory offsets/capacities,
+   tree capacity/depth, and the reaction support-profile identity. Any stale,
+   foreign, malformed, overflowed, or released parent fails closed before
+   dispatch. Cell bounds are derived only from the frozen canonical directory
+   keys and level spacing, never from render radius, density, or mechanics
+   aggregates.
+3. Migrate canonical reaction discovery first. It consumes the view and keeps
+   its current material-pair rule lookup and exact distance/reaction predicates.
+   It cannot gain a fixed candidate budget, full CPU readback, or a fallback
+   private directory/range build. The initial current-source traversal retains
+   its existing `maximumContactRadius + D` certificate envelope. A later
+   source-cell-batched traversal must instead expand its frozen source-cell
+   AABB by `maximumContactRadius + 2 * D`, where `D` is the existing GPU
+   displacement certificate. Every accepted pair still passes the current-state
+   exact predicate; the hierarchy may only reject provably non-overlapping
+   canonical cells.
+4. Preserve the view as read-only and law-neutral. Thermal and
+   pressure/interface consumers may adopt matching support profiles in later
+   slices; phase-volume interface work, P2G, G2P, reflux, phase transfer,
+   reaction placement, EOS, and rendering are out of scope here.
+5. M4 is deliberately **not** made mandatory by this slice. Its authenticated
+   Morton aggregate tree remains correct for aggregate-admissible far-field
+   work and may be observed when it already exists, but its current producer
+   requires particle/render-mechanics admission and a full source-count Morton
+   sort. It is neither a canonical cell-AABB hierarchy nor a safe replacement
+   for exact chemistry. The new hierarchy may model M4's lifecycle discipline,
+   but does not alias its records or theta/far-summary traversal.
+6. Block the classic thermal exhaustive fallback from the intended canonical
+   hot path with explicit telemetry before migrating it. Do not silently claim
+   that an opt-in hierarchy route has replaced exact-near local traversal.
+
+### Required proof
+
+- Manufactured/permuted directories prove the hierarchy's leaf traversal
+  reaches exactly the same admitted local cell members as the current reaction
+  traversal: no missed, duplicate, self, out-of-support, or stale-source pair
+  is admitted. Sparse, dense, multilevel, negative-coordinate, boundary, and
+  current-source large-displacement cases exercise the current `R + D`
+  envelope. The later source-cell-batched traversal must add its own `R + 2D`
+  large-displacement proof before it is admitted.
+- All corrupted identity, support-profile, header, capacity, offset, source,
+  device, lifecycle, and parent-submission cases yield zero consumer dispatch
+  and no fallback traversal.
+- Reaction output, state, thermo, mechanics, reaction placement, and render
+  receipts remain bitwise/no-op equivalent except for the view's diagnostic
+  evidence; all buffers stay same-device and GPU-resident.
+- Native Vulkan evidence covers arena reuse, queue/fence ownership, device
+  loss, and no WebGPU validation errors. GPU timestamps report view-build and
+  reaction-consumer spans separately.
+- Use alternating AB/BA three-run medians against the current canonical
+  reaction path. The target must reduce repeated lookup work, and non-target
+  physics plus visual presentation must remain within the existing five-percent
+  regression ceiling. Steam/condensation/hydrogen transport failures remain
+  explicit phase-interface frontier checks rather than being waived.
+
+### S9D-1 native-only comparator checkpoint
+
+Before a second law adopts the tree, preserve the production tree-only route
+and construct a native-test-only direct canonical-directory shadow. It must
+bind the same generation identity, frozen directory, current-state source,
+material-pair rule-index upload, and `R + D` certificate as the production
+reaction traversal. The shadow is neither a runtime fallback nor a browser
+switch: it exists only to establish proposal/fail-closed parity and a
+same-device timing receipt.
+
+- Record direct range-lookup, cell, and member visits separately from the
+  tree's node, leaf, and member counters.
+- Run four warmups and nine measured alternating `tree/direct`,
+  `direct/tree`, `tree/direct` native samples; report tree-build,
+  tree-candidate, direct-candidate, and combined tree-route medians.
+- Do not call a candidate-only win an end-to-end win: the tree-build span is
+  part of the route until a retained/reusable epoch proves otherwise.
+- If the combined route is not faster, use the receipt to choose the next
+  tree-layout/build optimization rather than migrating thermal or pressure
+  prematurely.
+
+### S9D-2 rejected tree-build scheduling experiments - 2026-07-24
+
+Two GPU-resident build-scheduling candidates were implemented only long enough
+to obtain a real native Vulkan receipt, full canonical-tree parity, and
+arena/fence validation. Neither is retained in production.
+
+- GPU-authored indirect dispatch rows for leaves and each complete-tree level
+  preserved the fixed ABI and produced exact trees, but the `C=1`, `L=8192`
+  capacity-slack receipt measured `0.078336 ms` median versus `0.035136 ms`
+  for the former direct complete-tree schedule (`2.23x` slower). Per-level
+  indirect dispatch overhead outweighed skipped invocations.
+- Keeping direct dispatches while guarding reducers outside the live leaf
+  prefix also preserved exact output, but measured `0.032 ms` versus
+  `0.029152 ms` for the exhaustive reducer (`1.098x` slower). The additional
+  per-invocation active-prefix calculation outweighed the avoided inactive
+  unions on this backend.
+
+Both variants were removed after the receipt. The production builder remains
+the fixed direct complete-tree schedule, including full clear/fail-closed
+semantics, and no consumer migration or performance claim follows from either
+experiment.
+
+### S9D-3 reaction-tree hot-counter aggregation - native checkpoint
+
+This optimization targets the measured hot path rather than hierarchy
+construction. Before this slice, live post-mechanics reaction discovery did
+not request observed GPU evidence, yet the tree traversal still atomically
+incremented global diagnostic counters for every node, leaf, member, candidate,
+material-pair lookup, and rule visit. These counters are diagnostics only; they
+do not determine proposals, admission, candidate budgets, or fallback behavior.
+
+1. Keep the immutable canonical directory, fixed tree ABI, tree-only
+   production traversal, reaction predicates, proposal rows, and 27-word
+   evidence ABI unchanged.
+2. Accumulate the nine hot diagnostic counters per source invocation and flush
+   only nonzero totals once per source. Retain immediate global atomics for all
+   fail-closed/control state: source/admission/seal counts, certificate state,
+   malformed/source-identity rejection, maximum displacement, and overflow.
+3. Add a native-test-only legacy unaggregated shader control. Prove exact
+   proposal-row and all evidence-word parity across sparse, dense, multilevel,
+   boundary, current-source `R + D`, corrupt-header, arena-reuse, and device
+   loss coverage.
+4. On dense one-cell and clustered multi-cell fixtures, run four warmups plus
+   nine alternating AB/BA samples with evidence readback outside timed spans.
+   Report build, displacement, candidate traversal, seal, and combined tree
+   reaction-route medians. Require a combined-route win on dense contention and
+   no material sparse/clustered regression before claiming success.
+5. Do not add a runtime toggle, alternate directory, CPU readback, CSR,
+   candidate materialization/budget, direct fallback, or second-law migration.
+   After native proof, run the focused suite, production build, and visual
+   matrix; inherited gas transport gates remain explicit rather than waived.
+
+The 2026-07-24 native Vulkan checkpoint now proves the implementation boundary
+without conflating diagnostic and production modes:
+
+- Explicit observed mode retains bitwise proposal rows and every word of the
+  fixed 27-word evidence ABI against the native-test-only legacy global-atomic
+  shader. The six correctness fixtures cover sparse, dense, multilevel,
+  negative/boundary, and current-source `R + D` cases. The control upload is
+  byte-compared with the exact production rule-index upload and checked against
+  its production payload fingerprint. A separate full-scan control exercises
+  nonzero evidence word 19 and retains exact proposal/all-word parity. Its
+  per-sample combined-route median ratios are `0.6255x` dense, `0.7867x`
+  sparse, and `0.7024x` clustered.
+- Default production mode requests neither diagnostic collection nor internal
+  readback. Its nine diagnostic words remain zero, while proposal rows and all
+  control/certificate evidence words match the historical always-atomic
+  control. Four warmups and nine alternating AB/BA measurements per fixture
+  put all test readback outside the timestamped spans.
+- Dense contention in default production mode measures `0.261344 ms` combined
+  tree route versus `0.424672 ms` historical global-atomic control (`0.6154x`).
+  Sparse many-cell measures `0.068512 ms` versus `0.091552 ms` (`0.7483x`),
+  and clustered multi-cell measures `0.116064 ms` versus `0.161664 ms`
+  (`0.7179x`). Combined values are medians of each sample's build-plus-reaction
+  total rather than sums of independently computed medians.
+- A test-only runner compiles the unmodified production aggregation WGSL,
+  seeds the tree-node destination at `UINT32_MAX`, and proves a real flush
+  overflow publishes the overflow bit, marks traversal malformed, and causes
+  the seal dispatch to invalidate every proposal row.
+- The same production/legacy shader pair retains exact proposal and all-word
+  parity on a safely reused tree arena, a corrupt tree header, and the exact
+  generation subsequently quarantined on device loss. The production pipeline
+  cache version is now explicitly `v4-s9d-hot-counter-aggregation`, preventing
+  a long-lived HMR WebGPU device from retaining the pre-aggregation module.
+
+The 2026-07-24 closure campaign completes the remaining S9D-3 release gates:
+
+- The production build and `git diff --check` pass. The full Node suite reports
+  `1945` tests, `1924` passed, `21` expected skips, and zero failures. The
+  isolated physics-behavior gate reports `11/11` required checks passed with
+  only its three explicitly opt-in long-horizon cases skipped.
+- A real Chromium/Vulkan run passes both native-presentation liveness cases
+  together: real pointer rotation holds the exact post-step gate until a
+  structured camera-stale retry foreground-proves the same resident source,
+  and a deliberately delayed successful candidate is admitted after the
+  bounded handoff wait without releasing a stale gate. Physics advances after
+  both recoveries.
+- Four browser prerequisite checks prove a real compute-worker pool, a
+  worker-retained mechanics lane, normal native presentation, and typed
+  fail-closed startup for `residentWorkers=0`; no mounted path falls back to
+  inline execution.
+- The seven-scenario standard/random visual matrix completes with all `58`
+  temporal captures nonblank and current, zero stale-source samples, zero
+  browser-console issues, and zero visual-surface issues. Direct early/mid/late
+  review confirms flowing water, iron/ice contact and deformation, visible
+  sodium/water, dynamic reactive cesium/fluorine, and all random pairs. The
+  unchanged steam-rise, steam-condensation, and hydrogen-rise failures remain
+  the documented gas-interface transport frontier; they are identical to the
+  recent matched baselines and are not waived.
+- ICC reports fresh index, memory, architecture, and Git-history artifacts;
+  scoped guard diffs pass; both the S9D-3 and camera-liveness completion oracles
+  are complete; and both readiness reports score `100` with no contract,
+  liveness, stub, or runtime-check blockers.
+
+S9D-3 is therefore closed by the slice commit containing this checkpoint. The
+next hierarchy work must start as a separately leased, bounded consumer slice;
+it may not reopen the diagnostic-atomic control as a production fallback.

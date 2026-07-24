@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   buildSphPhaseDemoState,
   createSphPhaseDemo,
+  deriveSphPhaseInitialBaseBlockEdgeM,
   gasPressureFeedbackSummary,
   deriveLocalGasCellPressureFieldFromSpatialGasLedger,
   gasPressureInterfaceForcePreview,
@@ -267,6 +268,27 @@ test('demo initial particle spacing preserves requested edges and derives materi
   assert.equal(demo.counts.drop, 3 ** 3);
   assert.equal(demo.counts.base, 5 ** 3);
   near(demo.state.smoothingLengthM, spacing.smoothingLengthM);
+});
+
+test('base block edge derivation shares the fixed matter-quantum geometry policy', () => {
+  assert.equal(
+    deriveSphPhaseInitialBaseBlockEdgeM({ baseParticleEdge: 8 }),
+    1.6
+  );
+  near(
+    deriveSphPhaseInitialBaseBlockEdgeM({
+      scenario: createSphPhaseScenario({ iceEdgeM: 2.5 }),
+      baseParticleEdge: 7
+    }),
+    3.5
+  );
+  assert.throws(
+    () => deriveSphPhaseInitialBaseBlockEdgeM({
+      scenario: { ice: { edgeM: 0 } },
+      baseParticleEdge: 8
+    }),
+    /scenario\.ice\.edgeM must be a positive finite number/
+  );
 });
 
 test('demo initial particle spacing carries default material bank warm inputs', async () => {

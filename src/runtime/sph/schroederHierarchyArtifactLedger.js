@@ -236,6 +236,10 @@ const FAMILY_BUFFER_SPECS = Object.freeze({
       'reactionDiscoveryProposalBuffer',
       'reactionProposalBuffer'
     ]),
+  // Placement decisions/control/completion staging are verification scratch,
+  // destroyed by their producer. The durable result is an immutable branded
+  // CPU receipt, so this family intentionally publishes no resident buffers.
+  [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_PRODUCT_PLACEMENT]: [],
   [SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.SEPARATION]:
     exactNearConsumerArtifactSpecs([
       'separationProposalBuffer',
@@ -892,6 +896,14 @@ export function registerSchroederHierarchyArtifactFamily(ledger, {
   const specs = FAMILY_BUFFER_SPECS[normalizedFamily];
   if (!specs) throw new Error(`Unknown Schroeder hierarchy artifact family: ${normalizedFamily || 'missing'}`);
   if (!artifact || typeof artifact !== 'object') return [];
+  // Generation authority is a family-level contract, including receipt-only
+  // families that deliberately publish no resident buffers. Validating only
+  // inside the buffer loop lets an empty-spec family bypass epoch identity.
+  resolveArtifactSpatialEpochGenerationId(
+    ledger,
+    normalizedFamily,
+    spatialEpochGenerationId
+  );
   const registered = [];
   for (const spec of specs) {
     const populatedFields = spec.fields.filter((field) => artifact[field]);

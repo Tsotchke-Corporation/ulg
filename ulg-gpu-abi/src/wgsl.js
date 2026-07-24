@@ -1,7 +1,42 @@
+import {
+  schroederSpatialExactNearTraversalV1Wgsl
+} from './schroederSpatialExactNearTraversalWgsl.js';
+import {
+  SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_MAGIC,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION,
+  SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS
+} from './sphReactionProductPlacementReceipt.js';
+
 export {
   schroederSpatialAggregateStacklessTraversalWgsl,
   schroederSpatialAggregateViewWgsl
 } from './schroederSpatialAggregateViewWgsl.js';
+export {
+  SPH_REACTION_PRODUCT_PLACEMENT_CAPTURE_VALUE_ROWS,
+  SPH_REACTION_PRODUCT_PLACEMENT_DIRECT_VALUE_ROWS,
+  SPH_REACTION_PRODUCT_PLACEMENT_EVENT_PLAN_ROWS,
+  SPH_REACTION_PRODUCT_PLACEMENT_LAW,
+  SPH_REACTION_PRODUCT_PLACEMENT_SUMMARY_VALUE_ROWS,
+  sphReactionProductPlacementCaptureApplyWgsl,
+  sphReactionProductPlacementCaptureReduceWgsl,
+  sphReactionProductPlacementDirectApplyWgsl,
+  sphReactionProductPlacementDirectPlanWgsl,
+  sphReactionProductPlacementDirectReduceWgsl,
+  sphReactionProductPlacementEventApplyWgsl,
+  sphReactionProductPlacementFinalizeWgsl,
+  sphReactionProductPlacementPlanWgsl,
+  sphReactionProductPlacementPreflightWgsl,
+  sphReactionProductPlacementSummaryApplyWgsl,
+  sphReactionProductPlacementSummaryReduceWgsl,
+  sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl,
+  sphReactionProductPlacementTransactionalAuxiliaryPublishWgsl,
+  sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+  sphReactionProductPlacementTransactionalPublishWgsl,
+  sphReactionProductPlacementTransactionalTerminalWgsl
+} from './sphReactionProductPlacementSegmentedWgsl.js';
 
 export const commonWgsl = `
 struct TensorDescriptor {
@@ -648,7 +683,43 @@ fn temperature_slope_from_graph(graph_index: u32, specific_internal_energy: f32)
   return (right.y - left.y) / (right.x - left.x);
 }
 
-fn thermal_temperature_slope(material_id: f32, specific_internal_energy: f32) -> f32 {
+fn thermal_carrier_phase_classification(
+  phase_id: f32,
+  phase_fractions: vec4<f32>
+) -> vec2<u32> {
+  let epsilon = 1.0e-6;
+  let fraction_sum = phase_fractions.x + phase_fractions.y
+    + phase_fractions.z + phase_fractions.w;
+  let valid = all(phase_fractions >= vec4<f32>(0.0))
+    && all(phase_fractions <= vec4<f32>(1.0 + epsilon))
+    && abs(fraction_sum - 1.0) <= epsilon;
+  var positive_count = 0u;
+  if (phase_fractions.x > 0.0) { positive_count = positive_count + 1u; }
+  if (phase_fractions.y > 0.0) { positive_count = positive_count + 1u; }
+  if (phase_fractions.z > 0.0) { positive_count = positive_count + 1u; }
+  if (phase_fractions.w > 0.0) { positive_count = positive_count + 1u; }
+  let carrier_phase = u32(clamp(round(phase_id), 0.0, 4.0));
+  var pure_phase = 0u;
+  if (valid && positive_count == 1u) {
+    if (carrier_phase == 1u && abs(phase_fractions.x - 1.0) <= epsilon) {
+      pure_phase = 1u;
+    } else if (carrier_phase == 2u && abs(phase_fractions.y - 1.0) <= epsilon) {
+      pure_phase = 2u;
+    } else if (carrier_phase == 3u && abs(phase_fractions.z - 1.0) <= epsilon) {
+      pure_phase = 3u;
+    } else if (carrier_phase == 4u && abs(phase_fractions.w - 1.0) <= epsilon) {
+      pure_phase = 4u;
+    }
+  }
+  return vec2<u32>(pure_phase, select(0u, 1u, valid && positive_count >= 2u));
+}
+
+fn thermal_temperature_slope(
+  material_id: f32,
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
+) -> f32 {
   var material_response_offset = 0u;
   var material_response_count = 0u;
   var found_material = false;
@@ -666,21 +737,138 @@ fn thermal_temperature_slope(material_id: f32, specific_internal_energy: f32) ->
     return 0.0;
   }
 
-  var selected = material_response_offset;
+  let classification = thermal_carrier_phase_classification(phase_id, phase_fractions);
+  var fallback = material_response_offset;
+  var fallback_found = false;
+  var containing = 0xffffffffu;
+  var mixed_plateau = 0xffffffffu;
+  var pure_phase_response = 0xffffffffu;
   for (var local = 0u; local < material_response_count; local = local + 1u) {
     let candidate = material_response_offset + local;
+    if (candidate >= params.response_count) { return 0.0; }
+    let row0 = response_row0(candidate);
     let row1 = response_row1(candidate);
-    selected = candidate;
-    if (specific_internal_energy <= row1.y || local + 1u == material_response_count) {
-      break;
+    if (!fallback_found) {
+      fallback = candidate;
+      if (specific_internal_energy <= row1.y || local + 1u == material_response_count) {
+        fallback_found = true;
+      }
+    }
+    if (specific_internal_energy >= row1.x && specific_internal_energy <= row1.y) {
+      if (containing == 0xffffffffu) { containing = candidate; }
+      let phase_from = u32(clamp(round(row1.z), 0.0, 4.0));
+      let phase_to = u32(clamp(round(row1.w), 0.0, 4.0));
+      if (
+        classification.x != 0u
+        && phase_from == classification.x
+        && phase_to == classification.x
+      ) {
+        pure_phase_response = candidate;
+      }
+      if (classification.y == 1u && abs(row0.y - 2.0) < 0.5) {
+        mixed_plateau = candidate;
+      }
     }
   }
 
+  var selected = fallback;
+  if (containing != 0xffffffffu) { selected = containing; }
+  if (mixed_plateau != 0xffffffffu) { selected = mixed_plateau; }
+  if (pure_phase_response != 0xffffffffu) { selected = pure_phase_response; }
   let response0 = response_row0(selected);
   if (response0.w != 1.0 || response0.z < 0.0) {
     return 0.0;
   }
   return temperature_slope_from_graph(u32(response0.z), specific_internal_energy);
+}
+
+fn thermal_value_finite(value: f32) -> bool {
+  return value == value && abs(value) <= 3.402823466e+38;
+}
+
+// Resolve the finite response-energy interval that contains the live carrier.
+// At an exact shared knot every adjacent containing interval participates, so
+// the carrier can move in either physically valid direction without a
+// phase-label-dependent deadlock. Missing or malformed response data fails
+// closed with status 0.
+fn thermal_carrier_energy_domain(
+  material_id: f32,
+  specific_internal_energy: f32
+) -> vec4<f32> {
+  if (!thermal_value_finite(specific_internal_energy)) {
+    return vec4<f32>(0.0);
+  }
+  var material_response_offset = 0u;
+  var material_response_count = 0u;
+  var found_material = false;
+  for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
+    let record = phase_response_records[record_index * 2u];
+    if (record.x == material_id) {
+      if (record.w != 1.0 || record.y < 0.0 || record.z <= 0.0) {
+        return vec4<f32>(specific_internal_energy, specific_internal_energy, 0.0, 0.0);
+      }
+      material_response_offset = u32(record.y);
+      material_response_count = u32(record.z);
+      found_material = true;
+      break;
+    }
+  }
+  if (!found_material || material_response_count == 0u) {
+    return vec4<f32>(specific_internal_energy, specific_internal_energy, 0.0, 0.0);
+  }
+
+  var energy_lo = 3.402823466e+38;
+  var energy_hi = -3.402823466e+38;
+  var containing_count = 0u;
+  for (var local = 0u; local < material_response_count; local = local + 1u) {
+    let candidate = material_response_offset + local;
+    if (candidate >= params.response_count) {
+      return vec4<f32>(specific_internal_energy, specific_internal_energy, 0.0, 0.0);
+    }
+    let response0 = response_row0(candidate);
+    let response1 = response_row1(candidate);
+    if (
+      response0.x != material_id
+      || response0.w != 1.0
+      || !thermal_value_finite(response1.x)
+      || !thermal_value_finite(response1.y)
+      || response1.x > response1.y
+    ) {
+      return vec4<f32>(specific_internal_energy, specific_internal_energy, 0.0, 0.0);
+    }
+    if (
+      specific_internal_energy >= response1.x
+      && specific_internal_energy <= response1.y
+    ) {
+      energy_lo = min(energy_lo, response1.x);
+      energy_hi = max(energy_hi, response1.y);
+      containing_count = containing_count + 1u;
+    }
+  }
+  if (containing_count == 0u || energy_lo > energy_hi) {
+    return vec4<f32>(specific_internal_energy, specific_internal_energy, 0.0, 0.0);
+  }
+  return vec4<f32>(energy_lo, energy_hi, 1.0, f32(containing_count));
+}
+
+fn clamp_du_to_energy_domain(
+  d_u_specific: f32,
+  current_u: f32,
+  energy_lo: f32,
+  energy_hi: f32
+) -> f32 {
+  if (
+    !thermal_value_finite(d_u_specific)
+    || !thermal_value_finite(current_u)
+    || !thermal_value_finite(energy_lo)
+    || !thermal_value_finite(energy_hi)
+    || energy_lo > current_u
+    || energy_hi < current_u
+    || energy_lo > energy_hi
+  ) {
+    return 0.0;
+  }
+  return clamp(d_u_specific, energy_lo - current_u, energy_hi - current_u);
 }
 
 fn material_bank_warm_input_anchor() -> f32 {
@@ -922,7 +1110,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let position = vec3<f32>(pos_mass.x, pos_mass.y, pos_mass.z);
   let mass = max(pos_mass.w, 1.0e-30);
   let temperature = row0.z;
-	  let temperature_slope = thermal_temperature_slope(row0.x, vel_u.w);
+	  let carrier_domain = thermal_carrier_energy_domain(row0.x, vel_u.w);
+	  let carrier_domain_ready = carrier_domain.z == 1.0;
+	  var carrier_u_lo = vel_u.w;
+	  var carrier_u_hi = vel_u.w;
+	  if (carrier_domain_ready) {
+	    carrier_u_lo = carrier_domain.x;
+	    carrier_u_hi = carrier_domain.y;
+	  }
+	  let temperature_slope = thermal_temperature_slope(row0.x, vel_u.w, row0.y, row1);
 	  let support = 2.0 * params.smoothing_length_m;
 	  let self_nominal_radius_m = particle_nominal_radius_m(mass, row0.w);
 	  let self_emissivity = thermal_emissivity(row0.x);
@@ -966,6 +1162,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	            let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	            let distance = length(delta);
 	            let other_row0 = thermo_row0(other);
+	            let other_row1 = thermo_row1(other);
 	            let other_nominal_radius_m = particle_nominal_radius_m(other_pos_mass.w, other_row0.w);
 	            let pair_radii_m = self_nominal_radius_m + other_nominal_radius_m;
 	            let pair_support = max(support, pair_radii_m);
@@ -975,7 +1172,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	              let other_temperature = other_row0.z;
 	              neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	              neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
-	              let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
+	              let other_temperature_slope = thermal_temperature_slope(
+	                other_row0.x,
+	                other_vel_u.w,
+	                other_row0.y,
+	                other_row1
+	              );
 	              if (distance < pair_support) {
 	                let weight = 1.0 - distance / pair_support;
 	                let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
@@ -1027,6 +1229,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	    let distance = length(delta);
 	    let other_row0 = thermo_row0(other);
+	    let other_row1 = thermo_row1(other);
 	    let other_nominal_radius_m = particle_nominal_radius_m(other_pos_mass.w, other_row0.w);
 	    let pair_radii_m = self_nominal_radius_m + other_nominal_radius_m;
 	    let pair_support = max(support, pair_radii_m);
@@ -1036,7 +1239,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	      let other_temperature = other_row0.z;
 	      neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	      neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
-	      let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
+	      let other_temperature_slope = thermal_temperature_slope(
+	        other_row0.x,
+	        other_vel_u.w,
+	        other_row0.y,
+	        other_row1
+	      );
 	      if (distance < pair_support) {
 	        let weight = 1.0 - distance / pair_support;
 	        let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
@@ -1089,9 +1297,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    if (distance < params.wall_layer_m) {
 	      let weight = 1.0 - distance / params.wall_layer_m;
 	      let face_wall_temperature = wall_temperature(face);
+	      let current_u = vel_u.w + du;
 	      let current_temperature = temperature + du * temperature_slope;
 	      let raw_du_specific = params.wall_rate * (face_wall_temperature - current_temperature) * weight * params.dt / mass;
-	      du = du + clamp_wall_du_specific(raw_du_specific, current_temperature, face_wall_temperature, temperature_slope);
+	      let equilibrium_limited_du = clamp_wall_du_specific(
+	        raw_du_specific,
+	        current_temperature,
+	        face_wall_temperature,
+	        temperature_slope
+	      );
+	      du = du + clamp_du_to_energy_domain(
+	        equilibrium_limited_du,
+	        current_u,
+	        carrier_u_lo,
+	        carrier_u_hi
+	      );
 	    }
 	  }
 
@@ -1102,14 +1322,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  // clamp guarantees a substep never overshoots past ambient equilibrium.
 	  if (self_emissivity > 0.0 && self_nominal_radius_m > 0.0 && params.ambient_temperature_k > 0.0) {
 	    let surface_area_m2 = 4.0 * 3.14159265359 * self_nominal_radius_m * self_nominal_radius_m;
+	    let current_u = vel_u.w + du;
 	    let current_temperature = temperature + du * temperature_slope;
 	    let raw_ambient_dE = self_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4
 	      * (pow4(params.ambient_temperature_k) - pow4(current_temperature))
 	      * surface_area_m2 * params.dt;
-	    du = du + clamp_wall_du_specific(raw_ambient_dE / mass, current_temperature, params.ambient_temperature_k, temperature_slope);
+	    let equilibrium_limited_du = clamp_wall_du_specific(
+	      raw_ambient_dE / mass,
+	      current_temperature,
+	      params.ambient_temperature_k,
+	      temperature_slope
+	    );
+	    du = du + clamp_du_to_energy_domain(
+	      equilibrium_limited_du,
+	      current_u,
+	      carrier_u_lo,
+	      carrier_u_hi
+	    );
 	  }
 
-  let next_u = vel_u.w + du;
+  var next_u = select(0.0, vel_u.w, thermal_value_finite(vel_u.w));
+  let candidate_next_u = vel_u.w + du;
+  if (carrier_domain_ready) {
+    next_u = clamp(
+      select(vel_u.w, candidate_next_u, thermal_value_finite(candidate_next_u)),
+      carrier_u_lo,
+      carrier_u_hi
+    );
+  }
   out_sph_state[particle_index * 2u] = pos_mass;
   out_sph_state[particle_index * 2u + 1u] = vec4<f32>(vel_u.x, vel_u.y, vel_u.z, next_u);
   write_thermal_state(particle_index, row0.x, next_u, row1, row2);
@@ -1130,7 +1370,9 @@ struct ReactionParams {
   // Substep duration for the interface-flux extent law; 0 disables the cap
   // (legacy whole-particle consumption) so stale packers stay well-defined.
   dt_s: f32,
-  _pad1: u32,
+  // 1 when the host authenticated header/reactant/product rows. Only 0 with
+  // every extended section absent is the distinguishable legacy schema.
+  reaction_table_mode: u32,
   _pad2: u32,
 };
 
@@ -1620,19 +1862,100 @@ fn interface_flux_extent_cap_mol(
 
 
 
-fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+fn reaction_extended_stoichiometry_enabled() -> bool {
+  return params.reaction_table_mode == 1u;
+}
+
+fn reaction_stoichiometry_header_ready(reaction_index: u32) -> bool {
+  if (!reaction_extended_stoichiometry_enabled()) {
+    return false;
+  }
   let header0 = reaction_header_row0(reaction_index);
-  let reactant_term_offset = u32(max(header0.y, 0.0));
-  let reactant_term_count = u32(max(header0.z, 0.0));
+  let header1 = reaction_header_row1(reaction_index);
+  let header2 = reaction_header_row2(reaction_index);
+  if (
+    !all(vec4<bool>(
+      reaction_value_finite(header0.x),
+      reaction_value_finite(header0.y),
+      reaction_value_finite(header0.z),
+      reaction_value_finite(header0.w)
+    ))
+    || !reaction_value_finite(header1.x)
+    || header0.x != f32(reaction_index)
+    || header0.y < 0.0
+    || header0.y != floor(header0.y)
+    || header0.z != 2.0
+    || header0.w < 0.0
+    || header0.w != floor(header0.w)
+    || header1.x < 1.0
+    || header1.x != floor(header1.x)
+    || header2.z != 1.0
+  ) {
+    return false;
+  }
+  let reactant_term_offset = u32(header0.y);
+  let reactant_term_count = u32(header0.z);
+  let product_term_offset = u32(header0.w);
+  let product_term_count = u32(header1.x);
+  return reactant_term_offset <= params.reactant_term_count
+    && reactant_term_count <= params.reactant_term_count - reactant_term_offset
+    && product_term_offset <= params.product_term_count
+    && product_term_count <= params.product_term_count - product_term_offset;
+}
+
+fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+  if (!reaction_stoichiometry_header_ready(reaction_index)) {
+    return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+  }
+  let header0 = reaction_header_row0(reaction_index);
+  let reactant_term_offset = u32(header0.y);
+  let reactant_term_count = u32(header0.z);
   for (var local = 0u; local < reactant_term_count; local = local + 1u) {
     let term_index = reactant_term_offset + local;
     let term0 = reactant_term_row0(term_index);
     let term2 = reactant_term_row2(term_index);
-    if (term0.y == material_id && term2.z == 1.0) {
+    if (
+      term0.x == f32(reaction_index)
+      && term0.y == material_id
+      && reaction_value_finite(term0.z)
+      && reaction_value_finite(term0.w)
+      && term0.z > 0.0
+      && term0.w > 0.0
+      && term2.z == 1.0
+    ) {
       return ReactantTerm(term0.y, term0.z, term0.w, term2.z, term2.w);
     }
   }
   return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+fn reaction_product_terms_ready(reaction_index: u32) -> bool {
+  if (!reaction_stoichiometry_header_ready(reaction_index)) {
+    return false;
+  }
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(header0.w);
+  let product_term_count = u32(header1.x);
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (
+      term0.x != f32(reaction_index)
+      || !reaction_value_finite(term0.y)
+      || !reaction_value_finite(term0.z)
+      || !reaction_value_finite(term0.w)
+      || term0.y <= 0.0
+      || term0.z <= 0.0
+      || term0.w <= 0.0
+      || (term1.y != 0.0 && term1.y != 1.0)
+      || term1.z <= 0.0
+      || term1.w != 1.0
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 fn product_term_for_local_slot(reaction_index: u32, local_slot: u32) -> ProductTerm {
@@ -2272,9 +2595,18 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     && partner_term.coefficient > 0.0
     && self_term.molar_mass > 0.0
     && partner_term.molar_mass > 0.0
-    && product_term_count > 0u;
+    && product_term_count > 0u
+    && reaction_product_terms_ready(reaction_index);
 
   if (!has_stoichiometry) {
+    if (reaction_extended_stoichiometry_enabled()) {
+      // A current-schema row with a missing, corrupt, cross-reaction, or
+      // out-of-range term is a deterministic no-op. Falling through to the
+      // old whole-parent conversion here destroys excess unequal-mass
+      // reactant and mints product mass.
+      copy_particle(particle_index);
+      return;
+    }
     var legacy_product_material_id = rx0.z;
     var legacy_next_mass = pos_mass.w;
     let legacy_next_u = vel_u.w - rx1.x;
@@ -2410,7 +2742,7 @@ export const sphReactionProductEventCompactWgsl = `
 struct ProductEventCompactParams {
   row_count: u32,
   row_stride_vec4: u32,
-  _pad0: u32,
+  group_count: u32,
   _pad1: u32,
 };
 
@@ -2418,6 +2750,12 @@ struct ProductEventCompactParams {
 @group(0) @binding(1) var<storage, read_write> compact_events: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> compact_counts: array<u32>;
 @group(0) @binding(3) var<uniform> params: ProductEventCompactParams;
+@group(0) @binding(4) var<storage, read_write> placement_completion_receipt: array<u32>;
+@group(0) @binding(5) var<storage, read_write> compact_local_prefix_flags: array<u32>;
+@group(0) @binding(6) var<storage, read_write> compact_group_counts: array<u32>;
+@group(0) @binding(7) var<storage, read_write> compact_group_offsets: array<u32>;
+
+var<workgroup> compact_scan_rows: array<u32, 64>;
 
 // Single-invocation loop keeps compacted row order identical to source order so
 // downstream f32 accumulations over events stay deterministic across runs.
@@ -2458,6 +2796,143 @@ fn compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   compact_counts[0] = live_rows;
 }
+
+// Compatibility-only compactor for callers without canonical placement
+// authority. The authenticated Slice 8 route never creates this pipeline.
+@compute @workgroup_size(1)
+fn compact_placement_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x != 0u) { return; }
+  let stride = params.row_stride_vec4;
+  if (stride < 8u) {
+    compact_counts[0] = 0u;
+    return;
+  }
+  var live_rows = 0u;
+  for (var row = 0u; row < params.row_count; row = row + 1u) {
+    let base = row * stride;
+    let product_mass_kg = max(source_events[base].w, 0.0);
+    let unplaced_mass_kg = max(source_events[base + 3u].y, 0.0);
+    if (!(product_mass_kg > 0.0 || unplaced_mass_kg > 0.0)) { continue; }
+    let out_base = live_rows * stride;
+    for (var component = 0u; component < stride; component = component + 1u) {
+      compact_events[out_base + component] = source_events[base + component];
+    }
+    live_rows = live_rows + 1u;
+  }
+  compact_counts[0] = live_rows;
+}
+
+// Count live placement rows and compute an exclusive stable prefix inside each
+// 64-row group. This replaces the old single invocation N x product-term
+// compaction scan. The high bit stores liveness; the remaining bits store the
+// group-local exclusive prefix.
+@compute @workgroup_size(64)
+fn count_placement_rows(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let row = global_id.x;
+  let lane = local_id.x;
+  var live = 0u;
+  let stride = params.row_stride_vec4;
+  if (row < params.row_count && stride >= 8u) {
+    let base = row * stride;
+    let product_mass_kg = max(source_events[base].w, 0.0);
+    let unplaced_mass_kg = max(source_events[base + 3u].y, 0.0);
+    live = select(0u, 1u, product_mass_kg > 0.0 || unplaced_mass_kg > 0.0);
+  }
+  compact_scan_rows[lane] = live;
+  workgroupBarrier();
+  var offset = 1u;
+  loop {
+    if (offset >= 64u) { break; }
+    var preceding = 0u;
+    if (lane >= offset) {
+      preceding = compact_scan_rows[lane - offset];
+    }
+    workgroupBarrier();
+    let current = compact_scan_rows[lane];
+    workgroupBarrier();
+    compact_scan_rows[lane] = current + preceding;
+    workgroupBarrier();
+    offset = offset * 2u;
+  }
+  if (row < params.row_count && row < arrayLength(&compact_local_prefix_flags)) {
+    let inclusive = compact_scan_rows[lane];
+    let exclusive = inclusive - live;
+    compact_local_prefix_flags[row] = exclusive | select(0u, 0x80000000u, live != 0u);
+  }
+  if (lane == 63u && workgroup_id.x < arrayLength(&compact_group_counts)) {
+    compact_group_counts[workgroup_id.x] = compact_scan_rows[63u];
+  }
+  if (
+    row == 0u
+    && arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u
+  ) {
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactCountPassCount}] = 1u;
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionInputVisitCount}] = params.row_count;
+  }
+}
+
+// Scan only the group totals (ceil(N/64)), never the dense event capacity.
+@compute @workgroup_size(1)
+fn scan_placement_row_groups(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x != 0u) { return; }
+  var total = 0u;
+  var overflow = 0u;
+  let group_count = min(params.group_count, arrayLength(&compact_group_counts));
+  for (var group = 0u; group < group_count; group = group + 1u) {
+    if (group >= arrayLength(&compact_group_offsets)) {
+      overflow = overflow + 1u;
+      continue;
+    }
+    compact_group_offsets[group] = total;
+    let next_total = total + compact_group_counts[group];
+    if (next_total < total || next_total > params.row_count) {
+      overflow = overflow + 1u;
+    }
+    total = min(next_total, params.row_count);
+  }
+  compact_counts[0] = select(total, 0u, overflow != 0u);
+  if (arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScanPassCount}] = 1u;
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.activeEventCount}] = compact_counts[0];
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionLiveFlagCount}] = total;
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionOverflowCount}] = overflow;
+  }
+}
+
+// Scatter every live row independently. group offset + local exclusive prefix
+// is the stable source-order destination index.
+@compute @workgroup_size(64)
+fn scatter_placement_rows(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let row = global_id.x;
+  if (row == 0u && arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScatterPassCount}] = 1u;
+  }
+  if (
+    row >= params.row_count
+    || row >= arrayLength(&compact_local_prefix_flags)
+    || workgroup_id.x >= arrayLength(&compact_group_offsets)
+  ) {
+    return;
+  }
+  let packed_prefix = compact_local_prefix_flags[row];
+  if ((packed_prefix & 0x80000000u) == 0u) { return; }
+  let destination = compact_group_offsets[workgroup_id.x]
+    + (packed_prefix & 0x7fffffffu);
+  if (destination >= compact_counts[0]) { return; }
+  let stride = params.row_stride_vec4;
+  let source_base = row * stride;
+  let destination_base = destination * stride;
+  for (var component = 0u; component < stride; component = component + 1u) {
+    compact_events[destination_base + component] = source_events[source_base + component];
+  }
+}
 `;
 
 // Places unplaced product-event mass into spare (zero-mass) particle slots so
@@ -2469,7 +2944,7 @@ fn compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // rest density, and mechanics; placing it moves those amounts verbatim from
 // the event ledger onto one particle and zeroes the event, so the event
 // splat and the particle P2G never both see the same mass.
-export const sphReactionProductEventPlacementWgsl = `
+const sphReactionProductEventPlacementCombinedWgsl = `
 struct ProductEventPlacementParams {
   particle_count: u32,
   event_row_count: u32,
@@ -2483,6 +2958,10 @@ struct ProductEventPlacementParams {
   box_y_m: f32,
   box_z_m: f32,
   box_clamp_enabled: u32,
+  canonical_spatial_enabled: u32,
+  generation_id: u32,
+  support_profile_id: u32,
+  receipt_version: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> product_events: array<vec4<f32>>;
@@ -2493,6 +2972,17 @@ struct ProductEventPlacementParams {
 @group(0) @binding(5) var<storage, read_write> placement_summary: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> source_state: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> compact_counts: array<u32>;
+// ULG_PRODUCT_PLACEMENT_SPATIAL_BINDINGS_BEGIN
+@group(0) @binding(9) var<storage, read> spatial_directory: array<u32>;
+@group(0) @binding(10) var<uniform> spatial_expectation: SchroederSpatialExactNearExpectationV1;
+@group(0) @binding(11) var<storage, read> frozen_placement_source_state: array<vec4<f32>>;
+@group(0) @binding(12) var<storage, read_write> placement_decisions: array<vec4<f32>>;
+@group(0) @binding(13) var<storage, read_write> placement_control: array<vec4<f32>>;
+@group(0) @binding(14) var<storage, read_write> placement_completion_receipt: array<u32>;
+
+${schroederSpatialExactNearTraversalV1Wgsl}
+// ULG_PRODUCT_PLACEMENT_SPATIAL_BINDINGS_END
 
 const PHASE_COMPANION_RESERVED_STATUS: f32 = 254.0;
 
@@ -2810,6 +3300,418 @@ fn placement_particle_rest_volume_m3(particle_index: u32) -> f32 {
   return 0.0;
 }
 
+// ULG_PRODUCT_PLACEMENT_SPATIAL_CLASSIFICATION_BEGIN
+// LEGACY TEMPLATE-ONLY CLASSIFICATION BODY. The exported commit module removes
+// this entire marked region before shader compilation. Slice 8 production uses
+// sphReactionProductEventSpatialClassificationWgsl plus the parallel envelope
+// module; no runtime pipeline can select the serial helper below.
+struct PlacementCaptureResult {
+  slot: u32,
+  malformed: u32,
+  distance_m: f32,
+  _pad0: f32,
+};
+
+// The canonical directory indexes immutable fresh post-reaction placement
+// positions, while placement observes its separately initialized destination.
+// A radius/displacement envelope keeps lookup complete before exact filtering.
+// ULG_PRODUCT_PLACEMENT_ENVELOPE_HELPER_BEGIN
+fn placement_live_radius_and_displacement_envelope() -> vec2<f32> {
+  var maximum_radius_m = 0.0;
+  var maximum_displacement_m = 0.0;
+  for (var candidate = 0u; candidate < params.particle_count; candidate = candidate + 1u) {
+    let authority_state0 = frozen_placement_source_state[candidate * params.state_stride_vec4];
+    let state0 = next_state[candidate * params.state_stride_vec4];
+    let thermo0 = next_thermo[candidate * params.thermo_stride_vec4];
+    // Fixed-capacity generations contain zero-mass spare rows. An activated
+    // spare belongs to the placed destination, never to this frozen query.
+    if (authority_state0.w <= 0.0 || state0.w <= 0.0 || thermo0.w <= 0.0) {
+      continue;
+    }
+    let radius_m = pow(
+      max(3.0 * state0.w / (12.5663706 * thermo0.w), 1.0e-30),
+      1.0 / 3.0
+    );
+    maximum_radius_m = max(maximum_radius_m, radius_m);
+    maximum_displacement_m = max(
+      maximum_displacement_m,
+      length(state0.xyz - authority_state0.xyz)
+    );
+  }
+  return vec2<f32>(maximum_radius_m, maximum_displacement_m);
+}
+// ULG_PRODUCT_PLACEMENT_ENVELOPE_HELPER_END
+
+fn placement_consider_capture_candidate(
+  candidate: u32,
+  event_position: vec3<f32>,
+  event_material_id: f32,
+  event_phase_id: f32,
+  event_support_radius_m: f32,
+  current: PlacementCaptureResult
+) -> PlacementCaptureResult {
+  if (candidate >= params.particle_count) {
+    return current;
+  }
+  let authority_state0 = frozen_placement_source_state[candidate * params.state_stride_vec4];
+  let candidate_state = next_state[candidate * params.state_stride_vec4];
+  if (authority_state0.w <= 0.0 || candidate_state.w <= 0.0) {
+    return current;
+  }
+  let candidate_row0 = next_thermo[candidate * params.thermo_stride_vec4];
+  if (
+    candidate_row0.x != event_material_id
+    || candidate_row0.y != event_phase_id
+    || !(candidate_row0.w > 0.0)
+  ) {
+    return current;
+  }
+  let candidate_radius_m = pow(
+    max(3.0 * candidate_state.w / (12.5663706 * candidate_row0.w), 1.0e-30),
+    1.0 / 3.0
+  );
+  let capture_radius_m = 4.0 * (event_support_radius_m + candidate_radius_m);
+  let delta = event_position - candidate_state.xyz;
+  let distance_m = length(delta);
+  if (
+    distance_m <= capture_radius_m
+    && (
+      distance_m < current.distance_m
+      || (distance_m == current.distance_m && candidate < current.slot)
+    )
+  ) {
+    return PlacementCaptureResult(candidate, current.malformed, distance_m, 0.0);
+  }
+  return current;
+}
+
+// Query the fresh frozen placement source by its authenticated exact-near
+// directory. The source-to-destination displacement envelope ensures the
+// per-carrier capture law cannot omit a valid pre-existing carrier.
+fn placement_find_capture_ss(
+  event_position: vec3<f32>,
+  event_material_id: f32,
+  event_phase_id: f32,
+  event_support_radius_m: f32,
+  maximum_live_radius_m: f32,
+  maximum_live_displacement_m: f32
+) -> PlacementCaptureResult {
+  var result = PlacementCaptureResult(
+    params.particle_count,
+    0u,
+    3.0e38,
+    0.0
+  );
+  if (
+    params.canonical_spatial_enabled == 0u
+    || spatial_expectation.source_count != params.particle_count
+    || !ss_exact_near_directory_admitted(spatial_expectation)
+  ) {
+    result.malformed = select(0u, 1u, params.canonical_spatial_enabled != 0u);
+    return result;
+  }
+  let search_radius_m = 4.0 * (
+    max(event_support_radius_m, 0.0) + max(maximum_live_radius_m, 0.0)
+  ) + max(maximum_live_displacement_m, 0.0);
+  if (!ss_exact_near_finite(search_radius_m)) {
+    result.malformed = 1u;
+    return result;
+  }
+
+  var malformed = false;
+  for (
+    var level_ordinal = 0u;
+    level_ordinal < spatial_expectation.level_count;
+    level_ordinal = level_ordinal + 1u
+  ) {
+    if (!ss_exact_near_level_occupied(spatial_expectation, level_ordinal)) {
+      continue;
+    }
+    let level = spatial_expectation.min_level + i32(level_ordinal);
+    let spacing_m = spatial_expectation.base_grid_spacing_m * exp2(f32(level));
+    if (!ss_exact_near_finite(spacing_m) || spacing_m <= 0.0) {
+      malformed = true;
+      break;
+    }
+    let center_cell = vec3<i32>(floor(event_position / spacing_m));
+    let radius_cells = max(0, i32(min(
+      ceil(search_radius_m / spacing_m),
+      2147483520.0
+    )));
+    let minimum_cell = vec3<i32>(
+      ss_exact_near_saturating_sub_radius(center_cell.x, radius_cells),
+      ss_exact_near_saturating_sub_radius(center_cell.y, radius_cells),
+      ss_exact_near_saturating_sub_radius(center_cell.z, radius_cells)
+    );
+    let maximum_cell = vec3<i32>(
+      ss_exact_near_saturating_add_radius(center_cell.x, radius_cells),
+      ss_exact_near_saturating_add_radius(center_cell.y, radius_cells),
+      ss_exact_near_saturating_add_radius(center_cell.z, radius_cells)
+    );
+    let level_order = ss_exact_near_signed_order_key(level);
+    let minimum_order = vec3<u32>(
+      ss_exact_near_signed_order_key(minimum_cell.x),
+      ss_exact_near_signed_order_key(minimum_cell.y),
+      ss_exact_near_signed_order_key(minimum_cell.z)
+    );
+    let maximum_order = vec3<u32>(
+      ss_exact_near_signed_order_key(maximum_cell.x),
+      ss_exact_near_signed_order_key(maximum_cell.y),
+      ss_exact_near_signed_order_key(maximum_cell.z)
+    );
+    let level_begin = ss_exact_near_lower_bound_cell_key(
+      spatial_expectation,
+      spatial_expectation.chart_id,
+      level_order,
+      vec3<u32>(0u)
+    );
+    let level_end = ss_exact_near_upper_bound_cell_key(
+      spatial_expectation,
+      spatial_expectation.chart_id,
+      level_order,
+      vec3<u32>(0xffffffffu)
+    );
+    var x_cursor = ss_exact_near_lower_bound_cell_key_range(
+      spatial_expectation,
+      spatial_expectation.chart_id,
+      level_order,
+      vec3<u32>(minimum_order.x, 0u, 0u),
+      level_begin,
+      level_end
+    );
+    for (
+      var x_iteration = 0u;
+      x_iteration < spatial_expectation.source_count && x_cursor < level_end;
+      x_iteration = x_iteration + 1u
+    ) {
+      let x_order = ss_exact_near_cell_key_word(spatial_expectation, x_cursor, 2u);
+      if (x_order > maximum_order.x) {
+        x_cursor = level_end;
+        continue;
+      }
+      let x_end = ss_exact_near_upper_bound_cell_key_range(
+        spatial_expectation,
+        spatial_expectation.chart_id,
+        level_order,
+        vec3<u32>(x_order, 0xffffffffu, 0xffffffffu),
+        x_cursor,
+        level_end
+      );
+      if (x_end <= x_cursor) {
+        malformed = true;
+        break;
+      }
+      var y_cursor = ss_exact_near_lower_bound_cell_key_range(
+        spatial_expectation,
+        spatial_expectation.chart_id,
+        level_order,
+        vec3<u32>(x_order, minimum_order.y, 0u),
+        x_cursor,
+        x_end
+      );
+      for (
+        var y_iteration = 0u;
+        y_iteration < spatial_expectation.source_count && y_cursor < x_end;
+        y_iteration = y_iteration + 1u
+      ) {
+        let y_order = ss_exact_near_cell_key_word(spatial_expectation, y_cursor, 3u);
+        if (y_order > maximum_order.y) {
+          y_cursor = x_end;
+          continue;
+        }
+        let y_end = ss_exact_near_upper_bound_cell_key_range(
+          spatial_expectation,
+          spatial_expectation.chart_id,
+          level_order,
+          vec3<u32>(x_order, y_order, 0xffffffffu),
+          y_cursor,
+          x_end
+        );
+        if (y_end <= y_cursor) {
+          malformed = true;
+          break;
+        }
+        let z_begin = ss_exact_near_lower_bound_cell_key_range(
+          spatial_expectation,
+          spatial_expectation.chart_id,
+          level_order,
+          vec3<u32>(x_order, y_order, minimum_order.z),
+          y_cursor,
+          y_end
+        );
+        let z_end = ss_exact_near_upper_bound_cell_key_range(
+          spatial_expectation,
+          spatial_expectation.chart_id,
+          level_order,
+          vec3<u32>(x_order, y_order, maximum_order.z),
+          z_begin,
+          y_end
+        );
+        for (var cell_index = z_begin; cell_index < z_end; cell_index = cell_index + 1u) {
+          let member_range = ss_exact_near_cell_member_range(
+            spatial_expectation,
+            cell_index
+          );
+          if (member_range.admitted == 0u) {
+            malformed = true;
+            break;
+          }
+          for (
+            var member_offset = member_range.begin;
+            member_offset < member_range.end;
+            member_offset = member_offset + 1u
+          ) {
+            let lookup = ss_exact_near_source_at_member(
+              spatial_expectation,
+              member_offset
+            );
+            if (lookup.admitted == 0u) {
+              malformed = true;
+              break;
+            }
+            result = placement_consider_capture_candidate(
+              lookup.source_index,
+              event_position,
+              event_material_id,
+              event_phase_id,
+              event_support_radius_m,
+              result
+            );
+          }
+          if (malformed) {
+            break;
+          }
+        }
+        if (malformed) {
+          break;
+        }
+        y_cursor = y_end;
+      }
+      if (malformed || y_cursor < x_end) {
+        malformed = true;
+        break;
+      }
+      x_cursor = x_end;
+    }
+    if (malformed || x_cursor < level_end) {
+      malformed = true;
+      break;
+    }
+  }
+  result.malformed = select(0u, 1u, malformed);
+  return result;
+}
+
+// Build one immutable envelope for the parallel event classifier. This is a
+// source-family pass once per reaction step, rather than once per event.
+// ULG_PRODUCT_PLACEMENT_ENVELOPE_ENTRY_BEGIN
+@compute @workgroup_size(1)
+fn prepare_placement_spatial_envelope(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (global_id.x != 0u || arrayLength(&placement_control) == 0u) {
+    return;
+  }
+  placement_control[0] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  if (params.canonical_spatial_enabled == 0u) {
+    return;
+  }
+  let envelope = placement_live_radius_and_displacement_envelope();
+  placement_control[0] = vec4<f32>(envelope, 1.0, 0.0);
+}
+// ULG_PRODUCT_PLACEMENT_ENVELOPE_ENTRY_END
+
+// Resolve the expensive exact-near capture query independently for every
+// compact event. The following single-lane commit pass consumes these stable
+// decisions in ascending event order, preserving deterministic reductions
+// without serializing the spatial traversal itself.
+@compute @workgroup_size(64)
+fn classify_product_events(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let event = global_id.x;
+  let active_event_count = min(compact_counts[0], params.event_row_count);
+  if (event >= active_event_count || event >= arrayLength(&placement_decisions)) {
+    return;
+  }
+  placement_decisions[event] = vec4<f32>(
+    f32(params.particle_count),
+    3.0e38,
+    0.0,
+    0.0
+  );
+  let stride = params.event_stride_vec4;
+  if (
+    params.canonical_spatial_enabled == 0u
+    || stride < 8u
+    || arrayLength(&placement_control) == 0u
+    || placement_control[0].z != 1.0
+  ) {
+    placement_decisions[event].z = 2.0;
+    return;
+  }
+  let base = event * stride;
+  let row0 = product_events[base];
+  let row1 = product_events[base + 1u];
+  let row2 = product_events[base + 2u];
+  let row3 = product_events[base + 3u];
+  let row4 = product_events[base + 4u];
+  let row5 = product_events[base + 5u];
+  let row7 = product_events[base + 7u];
+  let event_valid = row4.z == 1.0
+    && row7.z == 1.0
+    && row2.w > 0.0
+    && row4.y > 0.0;
+  let unplaced_mass_kg = max(row3.y, 0.0);
+  if (!event_valid || unplaced_mass_kg <= params.min_placed_mass_kg) {
+    // Valid direct-only and subthreshold events need no capture query. The
+    // commit pass still handles their provenance and disposition.
+    placement_decisions[event].z = select(2.0, 1.0, event_valid);
+    return;
+  }
+  var support_radius_m = 0.05;
+  if (row5.w > 0.0) {
+    support_radius_m = pow(row5.w * 0.238732414637843, 1.0 / 3.0);
+  }
+  var event_position = row0.xyz;
+  if (placement_phase_is_gas(row2.w) && row0.w > 0.0) {
+    let source_index_f = round(row1.w);
+    let partner_index_f = round(row2.x);
+    let pair_indices_valid = source_index_f >= 0.0
+      && partner_index_f >= 0.0
+      && source_index_f < f32(params.particle_count)
+      && partner_index_f < f32(params.particle_count);
+    if (pair_indices_valid) {
+      let gas_target = placement_gas_target(
+        u32(source_index_f),
+        u32(partner_index_f),
+        event_position,
+        support_radius_m
+      );
+      if (gas_target.w > 0.0) {
+        event_position = gas_target.xyz;
+      }
+    }
+  }
+  let capture = placement_find_capture_ss(
+    event_position,
+    row1.x,
+    row2.w,
+    support_radius_m,
+    placement_control[0].x,
+    placement_control[0].y
+  );
+  placement_decisions[event] = vec4<f32>(
+    f32(capture.slot),
+    capture.distance_m,
+    select(1.0, 2.0, capture.malformed != 0u),
+    0.0
+  );
+}
+
+// ULG_PRODUCT_PLACEMENT_SPATIAL_CLASSIFICATION_END
+
+// ULG_PRODUCT_PLACEMENT_COMMIT_BEGIN
 fn placement_direct_carrier_matches(
   particle_index: u32,
   material_id: f32,
@@ -2921,20 +3823,84 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (global_id.x != 0u) {
     return;
   }
-  let stride = params.event_stride_vec4;
-  if (stride < 8u) {
+  if (arrayLength(&placement_completion_receipt) < ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
     return;
   }
-  // Mark every product-term accumulator row as executed without touching its
-  // accumulated counts/masses. Identity is written only by non-empty events
-  // below; dense empty event rows must not overwrite a real term identity.
+  placement_completion_receipt[0] = ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_MAGIC}u;
+  placement_completion_receipt[1] = ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION}u;
+  placement_completion_receipt[2] = params.generation_id;
+  placement_completion_receipt[3] = params.support_profile_id;
+  placement_completion_receipt[4] = params.event_row_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.status}] = ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.PENDING}u;
+  let stride = params.event_stride_vec4;
+  if (stride < 8u) {
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.status}] = ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.CONTRACT_REJECTED}u;
+    return;
+  }
+  var cursor = 0u;
+  let active_event_count = min(compact_counts[0], params.event_row_count);
+  let classifier_ready_count = placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierReadyCount}];
+  let classifier_rejected_count = placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierRejectedCount}];
+  let classifier_unknown_count = placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierUnknownCount}];
+  if (params.canonical_spatial_enabled != 0u) {
+    // Seal the complete parallel decision set before the first destination
+    // mutation. Status 2 is reserved for missing/malformed canonical spatial
+    // authority; one such row rejects placement for the whole batch rather
+    // than publishing a partially applied prefix.
+    if (
+      params.receipt_version != ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION}u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactCountPassCount}] != 1u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScanPassCount}] != 1u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScatterPassCount}] != 1u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.activeEventCount}] != active_event_count
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionOverflowCount}] != 0u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopePartialPassCount}] != 1u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeFinalizePassCount}] != 1u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeAdmitted}] != 1u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierPassCount}] != 1u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.spareFlagPassCount}] != 2u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.spareScanPassCount}] != 2u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.spareAssignPassCount}] != 2u
+      || placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}] != 0u
+      || active_event_count > arrayLength(&placement_decisions)
+    ) {
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.status}] = ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.CONTRACT_REJECTED}u;
+      return;
+    }
+    if (
+      classifier_ready_count + classifier_rejected_count
+        + classifier_unknown_count != active_event_count
+      || classifier_unknown_count != 0u
+    ) {
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.status}] = ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.CANONICAL_DECISION_REJECTED}u;
+      return;
+    }
+  }
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.applyPassCount}] = 1u;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.serialConflictFoldPassCount}] = select(0u, 1u, active_event_count > 0u);
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.serialConflictFoldEventCount}] = active_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.maxSerialConflictFoldSize}] = active_event_count;
+  // Mark every product-term accumulator row as executed only after the full
+  // canonical decision set is sealed. Identity is written only by non-empty
+  // events below; dense empty event rows must not overwrite a real term
+  // identity. Keeping this after preflight makes rejection all-or-nothing for
+  // both particle state and placement provenance.
   for (var product_term_index = 0u; product_term_index < params.product_term_count; product_term_index = product_term_index + 1u) {
     let summary_base = placement_summary_base(product_term_index);
     let header = placement_summary[summary_base + 1u];
     placement_summary[summary_base + 1u] = vec4<f32>(header.x, 1.0, header.z, header.w);
   }
-  var cursor = 0u;
-  for (var event = 0u; event < params.event_row_count; event = event + 1u) {
+  var processed_event_count = 0u;
+  var capture_merge_event_count = 0u;
+  var spare_placement_event_count = 0u;
+  var direct_only_event_count = 0u;
+  var fallback_event_count = 0u;
+  var subthreshold_event_count = 0u;
+  var no_carrier_event_count = 0u;
+  var rejected_event_count = 0u;
+  var unknown_disposition_count = 0u;
+  for (var event = 0u; event < active_event_count; event = event + 1u) {
+    processed_event_count = processed_event_count + 1u;
     let base = event * stride;
     let event_row0_header = product_events[base];
     let event_row1_header = product_events[base + 1u];
@@ -2945,6 +3911,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let event_row7_header = product_events[base + 7u];
     let product_term_index = u32(max(event_row1_header.y, 0.0));
     if (product_term_index >= params.product_term_count) {
+      rejected_event_count = rejected_event_count + 1u;
       continue;
     }
     let summary_base = placement_summary_base(product_term_index);
@@ -2961,6 +3928,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       || !(row4.y > 0.0)
     );
     if (!event_valid) {
+      rejected_event_count = rejected_event_count + 1u;
       // Reject the whole non-empty event, including a direct-only event whose
       // unplaced lane is zero. Using only unplaced mass here made an invalid
       // direct placement disappear from the accumulator while the term still
@@ -3024,6 +3992,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
     }
     if (unplaced_mass_kg <= 0.0) {
+      direct_only_event_count = direct_only_event_count + 1u;
       if (event_phase_route_complete) {
         record_phase_routed_event(summary_base);
       }
@@ -3033,6 +4002,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     record_placement_candidate(summary_base);
     if (unplaced_mass_kg <= params.min_placed_mass_kg) {
+      subthreshold_event_count = subthreshold_event_count + 1u;
       record_unplaced(summary_base, unplaced_mass_kg, true);
       if (event_phase_route_complete) {
         record_phase_routed_event(summary_base);
@@ -3058,42 +4028,55 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var merge_distance = 3.0e38;
     var nearest_slot = params.particle_count;
     var nearest_distance = 3.0e38;
-    for (var candidate = 0u; candidate < params.particle_count; candidate = candidate + 1u) {
-      let candidate_state = next_state[candidate * params.state_stride_vec4];
-      if (candidate_state.w <= 0.0) {
+    if (params.canonical_spatial_enabled != 0u) {
+      let decision = placement_decisions[event];
+      if (decision.z != 1.0) {
+        // A malformed canonical traversal may not fall through to private
+        // search or mutate destination particles. Retain the event mass for the
+        // existing product sidecar/grid consumer and make the miss explicit.
+        record_unplaced(summary_base, unplaced_mass_kg, false);
+        no_carrier_event_count = no_carrier_event_count + 1u;
+        product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 7.0);
         continue;
       }
-      let candidate_row0 = next_thermo[candidate * params.thermo_stride_vec4];
-      if (candidate_row0.x != event_material_id) {
-        continue;
+      if (decision.x >= 0.0 && decision.x < f32(params.particle_count)) {
+        merge_slot = u32(round(decision.x));
+        merge_distance = decision.y;
       }
-      let candidate_rest_density = max(candidate_row0.w, 1.0e-6);
-      let candidate_radius = pow(
-        max(3.0 * candidate_state.w / (12.5663706 * candidate_rest_density), 1.0e-30),
-        1.0 / 3.0
-      );
-      let capture_radius = 4.0 * (event_support_radius_m + candidate_radius);
-      let delta = event_position - candidate_state.xyz;
-      let distance = length(delta);
-      // Radius-limited merge requires the phase to match too (a gas puff must
-      // not fold into a solid crust at range).
-      if (candidate_row0.y == event_phase_id && distance <= capture_radius && distance < merge_distance) {
-        merge_distance = distance;
-        merge_slot = candidate;
-      }
-      // Track the nearest same-MATERIAL particle regardless of phase: when
-      // the radius merge misses AND no spare slot is available, folding the
-      // (tiny per-substep) event mass into the nearest carrier is the
-      // bounded, conserving terminal fallback -- the merged temperature and
-      // energy are exact, and the thermal solver re-derives the phase. The
-      // alternative is an unbounded live-event flood re-splatting the grid
-      // every substep (the frozen-event disease at high rate).
-      if (distance < nearest_distance) {
-        nearest_distance = distance;
-        nearest_slot = candidate;
+    } else {
+      for (var candidate = 0u; candidate < params.particle_count; candidate = candidate + 1u) {
+        let candidate_state = next_state[candidate * params.state_stride_vec4];
+        if (candidate_state.w <= 0.0) {
+          continue;
+        }
+        let candidate_row0 = next_thermo[candidate * params.thermo_stride_vec4];
+        if (candidate_row0.x != event_material_id) {
+          continue;
+        }
+        let candidate_rest_density = max(candidate_row0.w, 1.0e-6);
+        let candidate_radius = pow(
+          max(3.0 * candidate_state.w / (12.5663706 * candidate_rest_density), 1.0e-30),
+          1.0 / 3.0
+        );
+        let capture_radius = 4.0 * (event_support_radius_m + candidate_radius);
+        let delta = event_position - candidate_state.xyz;
+        let distance = length(delta);
+        if (
+          candidate_row0.y == event_phase_id
+          && distance <= capture_radius
+          && distance < merge_distance
+        ) {
+          merge_distance = distance;
+          merge_slot = candidate;
+        }
+        if (distance < nearest_distance) {
+          nearest_distance = distance;
+          nearest_slot = candidate;
+        }
       }
     }
     if (merge_slot < params.particle_count) {
+      capture_merge_event_count = capture_merge_event_count + 1u;
       let state_base = merge_slot * params.state_stride_vec4;
       let particle_pos_mass = next_state[state_base];
       let particle_vel_u = next_state[state_base + 1u];
@@ -3142,23 +4125,68 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 4.0);
       continue;
     }
-    // Claim the first spare slot at or after the cursor. Spare slots are
-    // zero-mass particles reserved at demo build; every kernel in the
-    // pipeline skips mass <= 0, so claiming one only ever adds matter.
+    // Canonical placement receives an ascending, prefix-scanned spare slot in
+    // decision.w. The legacy route retains its cursor scan; it is unreachable
+    // once fresh authenticated SS placement authority is selected.
     var slot = params.particle_count;
-    for (var candidate = cursor; candidate < params.particle_count; candidate = candidate + 1u) {
-      let candidate_thermo_base = candidate * params.thermo_stride_vec4;
-      let candidate_reserved_for_phase =
-        abs(next_thermo[candidate_thermo_base + 2u].z - PHASE_COMPANION_RESERVED_STATUS) < 0.5;
-      if (
-        next_state[candidate * params.state_stride_vec4].w <= 0.0
-        && !candidate_reserved_for_phase
-      ) {
-        slot = candidate;
-        break;
+    if (params.canonical_spatial_enabled != 0u) {
+      let assigned_spare = placement_decisions[event].w;
+      if (assigned_spare >= 0.0 && assigned_spare < f32(params.particle_count)) {
+        slot = u32(round(assigned_spare));
+      }
+    } else {
+      for (var candidate = cursor; candidate < params.particle_count; candidate = candidate + 1u) {
+        let candidate_thermo_base = candidate * params.thermo_stride_vec4;
+        let candidate_reserved_for_phase =
+          abs(next_thermo[candidate_thermo_base + 2u].z - PHASE_COMPANION_RESERVED_STATUS) < 0.5;
+        if (
+          next_state[candidate * params.state_stride_vec4].w <= 0.0
+          && !candidate_reserved_for_phase
+        ) {
+          slot = candidate;
+          break;
+        }
       }
     }
     if (slot >= params.particle_count) {
+      // No later event can make an occupied or phase-reserved row available in
+      // this commit. Latch exhaustion so the fixed-capacity phase-companion
+      // reserve is scanned once, not once per remaining product event.
+      cursor = params.particle_count;
+      if (params.canonical_spatial_enabled != 0u) {
+        // The canonical route never drops into an unauthenticated all-particle
+        // fallback. Keep the mass resident in the event sidecar until a later
+        // epoch supplies capacity or a hierarchy-authenticated fallback view.
+        record_unplaced(summary_base, unplaced_mass_kg, false);
+        no_carrier_event_count = no_carrier_event_count + 1u;
+        if (event_phase_route_complete) {
+          record_phase_routed_event(summary_base);
+        }
+        product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 7.0);
+        continue;
+      }
+      // Global nearest-material fallback is only needed after deterministic
+      // spare exhaustion. Keep it out of the normal per-event hot path.
+      if (nearest_slot >= params.particle_count) {
+        for (var candidate = 0u; candidate < params.particle_count; candidate = candidate + 1u) {
+          let candidate_state = next_state[candidate * params.state_stride_vec4];
+          if (candidate_state.w <= 0.0) {
+            continue;
+          }
+          let candidate_row0 = next_thermo[candidate * params.thermo_stride_vec4];
+          if (candidate_row0.x != event_material_id) {
+            continue;
+          }
+          let distance = length(event_position - candidate_state.xyz);
+          if (
+            distance < nearest_distance
+            || (distance == nearest_distance && candidate < nearest_slot)
+          ) {
+            nearest_distance = distance;
+            nearest_slot = candidate;
+          }
+        }
+      }
       if (nearest_slot < params.particle_count) {
         // No spare capacity but a same-material carrier exists somewhere:
         // terminal fallback merge (see nearest_slot rationale above).
@@ -3207,6 +4235,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
         next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
         next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
         record_fallback_merge(summary_base, unplaced_mass_kg, merged_mass, nearest_distance);
+        fallback_event_count = fallback_event_count + 1u;
         if (event_phase_route_complete) {
           record_phase_routed_event(summary_base);
         }
@@ -3219,13 +4248,16 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // stays live and keeps feeding the grid splat ledger, so no mass is
       // lost either way.
       record_unplaced(summary_base, unplaced_mass_kg, false);
+      no_carrier_event_count = no_carrier_event_count + 1u;
       if (event_phase_route_complete) {
         record_phase_routed_event(summary_base);
       }
       product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 7.0);
       continue;
     }
-    cursor = slot + 1u;
+    if (params.canonical_spatial_enabled == 0u) {
+      cursor = slot + 1u;
+    }
     let row0 = product_events[base];
     let row1 = product_events[base + 1u];
     let row2 = product_events[base + 2u];
@@ -3274,6 +4306,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     next_mechanics[mechanics_base + 6u] = vec4<f32>(row6.z, row6.w, row7.x, row7.z);
     next_mechanics[mechanics_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     record_spare_placement(summary_base, unplaced_mass_kg, support_radius_m);
+    spare_placement_event_count = spare_placement_event_count + 1u;
     if (event_phase_route_complete) {
       record_phase_routed_event(summary_base);
     }
@@ -3283,8 +4316,237 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
     product_events[base + 7u] = vec4<f32>(event_row7_header.xyz, 3.0);
   }
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.applyVisitedCount}] = processed_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.directOnlyEventCount}] = direct_only_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.sparePlacementEventCount}] = spare_placement_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.captureMergeEventCount}] = capture_merge_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.fallbackEventCount}] = fallback_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.subthresholdEventCount}] = subthreshold_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.noCarrierEventCount}] = no_carrier_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.rejectedEventCount}] = rejected_event_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.unknownDispositionCount}] = unknown_disposition_count;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.privateLookupBuildCount}] = 0u;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.exhaustiveTraversalCount}] = 0u;
+  placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.status}] = ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.COMPLETE}u;
+}
+// ULG_PRODUCT_PLACEMENT_COMMIT_END
+`;
+
+const PRODUCT_PLACEMENT_SPATIAL_BINDINGS_PATTERN =
+  /\/\/ ULG_PRODUCT_PLACEMENT_SPATIAL_BINDINGS_BEGIN[\s\S]*?\/\/ ULG_PRODUCT_PLACEMENT_SPATIAL_BINDINGS_END\n/;
+const PRODUCT_PLACEMENT_SPATIAL_CLASSIFICATION_PATTERN =
+  /\/\/ ULG_PRODUCT_PLACEMENT_SPATIAL_CLASSIFICATION_BEGIN[\s\S]*?\/\/ ULG_PRODUCT_PLACEMENT_SPATIAL_CLASSIFICATION_END\n/;
+
+// Native WebGPU drivers compile each pipeline entry point independently.
+// Keep the exact-near classifier and deterministic commit in separate WGSL
+// modules so the large traversal is validated once and never recompiled for
+// the commit-only pipeline.
+export const sphReactionProductEventPlacementEnvelopeWgsl = `
+struct ProductEventPlacementParams {
+  particle_count: u32,
+  event_row_count: u32,
+  event_stride_vec4: u32,
+  state_stride_vec4: u32,
+  thermo_stride_vec4: u32,
+  mechanics_stride_vec4: u32,
+  min_placed_mass_kg: f32,
+  product_term_count: u32,
+  box_x_m: f32,
+  box_y_m: f32,
+  box_z_m: f32,
+  box_clamp_enabled: u32,
+  canonical_spatial_enabled: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> next_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> next_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> frozen_placement_source_state: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: ProductEventPlacementParams;
+@group(0) @binding(4) var<storage, read_write> placement_control: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> placement_completion_receipt: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> envelope_partials: array<vec4<f32>>;
+
+var<workgroup> envelope_radius: array<f32, 64>;
+var<workgroup> envelope_displacement: array<f32, 64>;
+var<workgroup> envelope_admitted_count: array<u32, 64>;
+
+fn placement_envelope_finite_scalar(value: f32) -> bool {
+  return value == value && abs(value) < 3.0e38;
+}
+
+fn placement_envelope_finite_vec4(value: vec4<f32>) -> bool {
+  return all(value == value) && all(abs(value) < vec4<f32>(3.0e38));
+}
+
+fn placement_envelope_reject_motion_bound() {
+  atomicOr(
+    &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+    ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.MOTION_BOUND_REJECTED}u
+  );
+}
+
+fn placement_envelope_record_visit() {
+  let previous = atomicAdd(
+    &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeInputVisitCount}],
+    1u
+  );
+  if (previous == 0xffffffffu) {
+    atomicOr(
+      &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+      ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.ATOMIC_COUNTER}u
+    );
+  }
+}
+
+@compute @workgroup_size(64)
+fn reduce_placement_spatial_envelope(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let candidate = global_id.x;
+  let lane = local_id.x;
+  var radius_m = 0.0;
+  var displacement_m = 0.0;
+  var admitted = 0u;
+  if (candidate < params.particle_count) {
+    placement_envelope_record_visit();
+    let authority_state0 = frozen_placement_source_state[
+      candidate * params.state_stride_vec4
+    ];
+    let state0 = next_state[candidate * params.state_stride_vec4];
+    let thermo0 = next_thermo[candidate * params.thermo_stride_vec4];
+    let finite_inputs = placement_envelope_finite_vec4(authority_state0)
+      && placement_envelope_finite_vec4(state0)
+      && placement_envelope_finite_vec4(thermo0);
+    let nonnegative_inputs = authority_state0.w >= 0.0
+      && state0.w >= 0.0
+      && thermo0.w >= 0.0;
+    let authority_active = authority_state0.w > 0.0;
+    let current_active = state0.w > 0.0;
+    if (
+      params.canonical_spatial_enabled == 0u
+      || !finite_inputs
+      || !nonnegative_inputs
+      || (current_active && (!authority_active || !(thermo0.w > 0.0)))
+    ) {
+      placement_envelope_reject_motion_bound();
+    } else if (current_active) {
+      admitted = 1u;
+      radius_m = pow(
+        max(3.0 * state0.w / (12.5663706 * thermo0.w), 1.0e-30),
+        1.0 / 3.0
+      );
+      displacement_m = length(state0.xyz - authority_state0.xyz);
+      if (
+        !placement_envelope_finite_scalar(radius_m)
+        || !placement_envelope_finite_scalar(displacement_m)
+        || radius_m < 0.0
+        || displacement_m < 0.0
+      ) {
+        radius_m = 0.0;
+        displacement_m = 0.0;
+        admitted = 0u;
+        placement_envelope_reject_motion_bound();
+      }
+    }
+  }
+  envelope_radius[lane] = radius_m;
+  envelope_displacement[lane] = displacement_m;
+  envelope_admitted_count[lane] = admitted;
+  workgroupBarrier();
+  var width = 32u;
+  loop {
+    if (width == 0u) { break; }
+    if (lane < width) {
+      envelope_radius[lane] = max(
+        envelope_radius[lane],
+        envelope_radius[lane + width]
+      );
+      envelope_displacement[lane] = max(
+        envelope_displacement[lane],
+        envelope_displacement[lane + width]
+      );
+      envelope_admitted_count[lane] = envelope_admitted_count[lane]
+        + envelope_admitted_count[lane + width];
+    }
+    workgroupBarrier();
+    width = width / 2u;
+  }
+  if (lane == 0u && workgroup_id.x < arrayLength(&envelope_partials)) {
+    envelope_partials[workgroup_id.x] = vec4<f32>(
+      envelope_radius[0],
+      envelope_displacement[0],
+      f32(envelope_admitted_count[0]),
+      1.0
+    );
+  }
+  if (candidate == 0u) {
+    atomicStore(
+      &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopePartialPassCount}],
+      1u
+    );
+  }
+}
+
+@compute @workgroup_size(1)
+fn finalize_placement_spatial_envelope(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (global_id.x != 0u || arrayLength(&placement_control) == 0u) { return; }
+  placement_control[0] = vec4<f32>(0.0);
+  var maximum_radius_m = 0.0;
+  var maximum_displacement_m = 0.0;
+  var admitted_count = 0u;
+  let partial_count = min(
+    (params.particle_count + 63u) / 64u,
+    arrayLength(&envelope_partials)
+  );
+  for (var partial = 0u; partial < partial_count; partial = partial + 1u) {
+    let row = envelope_partials[partial];
+    maximum_radius_m = max(maximum_radius_m, row.x);
+    maximum_displacement_m = max(maximum_displacement_m, row.y);
+    admitted_count = admitted_count + u32(max(row.z, 0.0));
+  }
+  let admitted = params.canonical_spatial_enabled != 0u
+    && partial_count == (params.particle_count + 63u) / 64u
+    && atomicLoad(
+      &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeInputVisitCount}]
+    ) == params.particle_count
+    && (
+      atomicLoad(
+        &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}]
+      ) & ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.MOTION_BOUND_REJECTED}u
+    ) == 0u;
+  placement_control[0] = vec4<f32>(
+    maximum_radius_m,
+    maximum_displacement_m,
+    select(0.0, 1.0, admitted),
+    f32(admitted_count)
+  );
+  atomicStore(
+    &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeFinalizePassCount}],
+    1u
+  );
+  atomicStore(
+    &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeAdmitted}],
+    select(0u, 1u, admitted)
+  );
 }
 `;
+
+export const sphReactionProductEventPlacementWgsl =
+  sphReactionProductEventPlacementCombinedWgsl
+    .replace(
+      PRODUCT_PLACEMENT_SPATIAL_BINDINGS_PATTERN,
+      '@group(0) @binding(9) var<storage, read> placement_decisions: array<vec4<f32>>;\n@group(0) @binding(10) var<storage, read_write> placement_completion_receipt: array<u32>;\n'
+    )
+    .replace(PRODUCT_PLACEMENT_SPATIAL_CLASSIFICATION_PATTERN, '')
+    .replaceAll('// ULG_PRODUCT_PLACEMENT_COMMIT_BEGIN\n', '')
+    .replaceAll('// ULG_PRODUCT_PLACEMENT_COMMIT_END\n', '');
 
 export const sphReactionSummaryPartialsWgsl = `
 struct ReactionSummaryParams {
@@ -7916,6 +9178,10 @@ struct PressureInterfaceParams {
   contact_response_scale: f32,
   contact_max_pressure_pa: f32,
   contact_pair_response_enabled: f32,
+  gas_authority_execution_generation: u32,
+  gas_authority_storage_generation: u32,
+  gas_pressure_cell_capacity: u32,
+  gas_pressure_cell_stride_floats: u32,
 };
 
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
@@ -7924,27 +9190,108 @@ struct PressureInterfaceParams {
 @group(0) @binding(3) var<storage, read> gas_pressure_cells: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> contact_policy_rows: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> contact_kinematics_rows: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> gas_authority_control: array<u32>;
 
-fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
-  if (params.pressure_model_id != 1u || params.gas_pressure_cell_count == 0u) {
-    return params.pressure_pa;
+const GAS_AUTHORITY_MAGIC: u32 = 0x53474132u;
+const GAS_AUTHORITY_VERSION: u32 = 2u;
+const GAS_AUTHORITY_REQUIRED_READY: u32 = 31u;
+const GAS_AUTHORITY_EMPTY: u32 = 32u;
+const GAS_AUTHORITY_FAILED: u32 = 0x80000000u;
+const GAS_AUTHORITY_UNKNOWN_STATUS_MASK: u32 = 0x7fffffc0u;
+const GAS_AUTHORITY_INVALID_COUNT: u32 = 0xffffffffu;
+const GAS_AUTHORITY_F32_MAX: f32 = 3.402823466e38;
+
+fn authenticated_gas_pressure_cell_count() -> u32 {
+  if (
+    params.pressure_model_id != 2u
+    || arrayLength(&gas_authority_control) < 32u
+    || gas_authority_control[0u] != GAS_AUTHORITY_MAGIC
+    || gas_authority_control[1u] != GAS_AUTHORITY_VERSION
+    || (gas_authority_control[2u] & GAS_AUTHORITY_REQUIRED_READY)
+      != GAS_AUTHORITY_REQUIRED_READY
+    || (gas_authority_control[2u] & GAS_AUTHORITY_FAILED) != 0u
+    || (gas_authority_control[2u] & GAS_AUTHORITY_UNKNOWN_STATUS_MASK) != 0u
+    || gas_authority_control[3u] != 0u
+    || gas_authority_control[4u] != params.gas_authority_execution_generation
+    || gas_authority_control[5u] != params.gas_authority_execution_generation
+    || gas_authority_control[6u] != params.gas_authority_storage_generation
+    || gas_authority_control[7u] != params.gas_pressure_cell_capacity
+    || gas_authority_control[30u] != params.gas_pressure_cell_stride_floats
+    || gas_authority_control[31u] != 0u
+    || params.gas_pressure_cell_stride_floats != 12u
+    || params.gas_pressure_cell_capacity > 0x55555555u
+    || arrayLength(&gas_pressure_cells) < params.gas_pressure_cell_capacity * 3u
+  ) {
+    return GAS_AUTHORITY_INVALID_COUNT;
   }
-  var best_pressure = params.pressure_pa;
+  let live_count = gas_authority_control[8u];
+  let directory_generation = gas_authority_control[9u];
+  let directory_cell_count = gas_authority_control[10u];
+  let ready_pressure_count = gas_authority_control[11u];
+  let empty = (gas_authority_control[2u] & GAS_AUTHORITY_EMPTY) != 0u;
+  if (
+    live_count > params.gas_pressure_cell_capacity
+    || directory_generation == 0u
+    || directory_cell_count > live_count
+    || ready_pressure_count != directory_cell_count
+    || (empty && (live_count != 0u || directory_cell_count != 0u))
+    || (!empty && (live_count == 0u || directory_cell_count == 0u))
+  ) {
+    return GAS_AUTHORITY_INVALID_COUNT;
+  }
+  return ready_pressure_count;
+}
+
+fn pressure_for_centroid(centroid: vec3<f32>) -> vec2<f32> {
+  if (params.pressure_model_id == 0u) {
+    return vec2<f32>(params.pressure_pa, 1.0);
+  }
+  var pressure_cell_count = params.gas_pressure_cell_count;
+  if (params.pressure_model_id == 2u) {
+    pressure_cell_count = authenticated_gas_pressure_cell_count();
+    if (pressure_cell_count == GAS_AUTHORITY_INVALID_COUNT) {
+      return vec2<f32>(0.0, 0.0);
+    }
+  } else if (params.pressure_model_id != 1u) {
+    return vec2<f32>(params.pressure_pa, 1.0);
+  }
+  if (pressure_cell_count == 0u) {
+    return vec2<f32>(
+      select(params.pressure_pa, 0.0, params.pressure_model_id == 2u),
+      1.0
+    );
+  }
+  var best_pressure = select(
+    params.pressure_pa,
+    0.0,
+    params.pressure_model_id == 2u
+  );
   var best_distance2 = 1.0e30;
-  for (var cell_index = 0u; cell_index < params.gas_pressure_cell_count; cell_index = cell_index + 1u) {
+  var usable_pressure_cell_count = 0u;
+  for (var cell_index = 0u; cell_index < pressure_cell_count; cell_index = cell_index + 1u) {
     let row0 = gas_pressure_cells[cell_index * 3u];
     let row1 = gas_pressure_cells[cell_index * 3u + 1u];
     let row2 = gas_pressure_cells[cell_index * 3u + 2u];
-    if (row0.w > 0.0 && row1.w >= 0.0) {
+    let finite_row = all(abs(row1) <= vec4<f32>(GAS_AUTHORITY_F32_MAX))
+      && all(abs(row2.xyz) <= vec3<f32>(GAS_AUTHORITY_F32_MAX));
+    if (row0.w > 0.0 && row1.w >= 0.0 && finite_row) {
       let delta = centroid - row1.xyz;
       let distance2 = dot(delta, delta);
-      if (distance2 < best_distance2) {
+      let local_pressure = row1.w + dot(row2.xyz, delta);
+      let finite_sample = abs(distance2) <= GAS_AUTHORITY_F32_MAX
+        && abs(local_pressure) <= GAS_AUTHORITY_F32_MAX;
+      if (finite_sample) {
+        usable_pressure_cell_count = usable_pressure_cell_count + 1u;
+      }
+      if (finite_sample && distance2 < best_distance2) {
         best_distance2 = distance2;
-        best_pressure = max(0.0, row1.w + dot(row2.xyz, delta));
+        best_pressure = max(0.0, local_pressure);
       }
     }
   }
-  return best_pressure;
+  let pressure_sample_valid = params.pressure_model_id != 2u
+    || usable_pressure_cell_count > 0u;
+  return vec2<f32>(best_pressure, select(0.0, 1.0, pressure_sample_valid));
 }
 
 fn contact_policy_element_side(row_index: u32, material_id: f32, phase_id: f32) -> u32 {
@@ -8141,8 +9488,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // stress. Feeding it back as traction on their own extracted surface would
   // double-count the same pressure, with a catastrophic area/mass ratio for
   // newly produced gas particles.
+  let gas_pressure_sample = pressure_for_centroid(centroid);
   let gas_pressure_pa = select(
-    pressure_for_centroid(centroid),
+    gas_pressure_sample.x,
     0.0,
     row0.z == 3.0 || row0.z == 4.0
   );
@@ -8160,7 +9508,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (dot(normal_area, normal_area) <= 1.0e-24) {
     normal_area = row2.xyz * area;
   }
-  let ready = select(0.0, 1.0, status > 0.0 && area > 0.0 && pressure_pa >= 0.0);
+  let gas_authority_or_contact_ready = params.pressure_model_id != 2u
+    || gas_pressure_sample.y > 0.0
+    || contact_pressure_pa > 0.0;
+  let ready = select(
+    0.0,
+    1.0,
+    status > 0.0
+      && area > 0.0
+      && pressure_pa >= 0.0
+      && gas_authority_or_contact_ready
+  );
   let material_force = -pressure_pa * normal_area * ready;
   let gas_reaction_force = -material_force;
 
@@ -9836,26 +11194,30 @@ fn main(
     let thermo_row0 = next_sph_thermo[thermo_base];
     let thermo_row1 = next_sph_thermo[thermo_base + 1u];
     let thermo_row2 = next_sph_thermo[thermo_base + 2u];
+    // Phase-lane storage deliberately preserves state while its mass is zero.
+    // Every next-state diagnostic must therefore use live mass as its
+    // admission predicate instead of interpreting dormant payload values.
+    let next_particle_live = next_pos_mass.w > 0.0;
 
     source_mass = source_mass + source_pos_mass.w;
     next_mass = next_mass + next_pos_mass.w;
-    source_momentum = source_momentum + source_pos_mass.w * source_vel_u.xyz;
-    next_momentum = next_momentum + next_pos_mass.w * next_vel_u.xyz;
     if (source_pos_mass.w > 0.0) {
+      source_momentum = source_momentum + source_pos_mass.w * source_vel_u.xyz;
       source_position_mass = source_position_mass + source_pos_mass.w * source_pos_mass.xyz;
       source_min = min(source_min, source_pos_mass.xyz);
       source_max = max(source_max, source_pos_mass.xyz);
       source_bounds_status = 1.0;
     }
-    if (next_pos_mass.w > 0.0) {
+    if (next_particle_live) {
+      next_momentum = next_momentum + next_pos_mass.w * next_vel_u.xyz;
       next_position_mass = next_position_mass + next_pos_mass.w * next_pos_mass.xyz;
       next_min = min(next_min, next_pos_mass.xyz);
       next_max = max(next_max, next_pos_mass.xyz);
       next_bounds_status = 1.0;
+      max_speed2 = max(max_speed2, dot(next_vel_u.xyz, next_vel_u.xyz));
+      let displacement = next_pos_mass.xyz - source_pos_mass.xyz;
+      max_displacement2 = max(max_displacement2, dot(displacement, displacement));
     }
-    max_speed2 = max(max_speed2, dot(next_vel_u.xyz, next_vel_u.xyz));
-    let displacement = next_pos_mass.xyz - source_pos_mass.xyz;
-    max_displacement2 = max(max_displacement2, dot(displacement, displacement));
     let particle_speed2 = dot(next_vel_u.xyz, next_vel_u.xyz);
     let phase_lineage_v2 = params.phase_lineage_capacity > 0u
       && params.phase_lane_count == 4u
@@ -9869,7 +11231,7 @@ fn main(
       && cohort_index < params.base_end_index;
     let in_drop_cohort = cohort_index >= params.drop_start_index
       && cohort_index < params.drop_end_index;
-    if (in_base_cohort && next_pos_mass.w > 0.0) {
+    if (in_base_cohort && next_particle_live) {
       base_cohort_mass = base_cohort_mass + next_pos_mass.w;
       base_cohort_position_mass = base_cohort_position_mass + next_pos_mass.w * next_pos_mass.xyz;
       base_cohort_min = min(base_cohort_min, next_pos_mass.xyz);
@@ -9877,7 +11239,7 @@ fn main(
       base_cohort_max_speed2 = max(base_cohort_max_speed2, particle_speed2);
       base_cohort_status = 1.0;
     }
-    if (in_drop_cohort && next_pos_mass.w > 0.0) {
+    if (in_drop_cohort && next_particle_live) {
       drop_cohort_mass = drop_cohort_mass + next_pos_mass.w;
       drop_cohort_position_mass = drop_cohort_position_mass + next_pos_mass.w * next_pos_mass.xyz;
       drop_cohort_min = min(drop_cohort_min, next_pos_mass.xyz);
@@ -9887,39 +11249,43 @@ fn main(
     }
 
     let next_j = next_mls_mechanics[mechanics_base + 4u].z;
-    min_volume_ratio_j = min(min_volume_ratio_j, next_j);
-    max_volume_ratio_j = max(max_volume_ratio_j, next_j);
+    if (next_particle_live) {
+      min_volume_ratio_j = min(min_volume_ratio_j, next_j);
+      max_volume_ratio_j = max(max_volume_ratio_j, next_j);
 
-    let particle_mass = max(next_pos_mass.w, 0.0);
-    let phase_fractions = max(thermo_row1, vec4<f32>(0.0));
-    phase_mass_solid = phase_mass_solid + particle_mass * phase_fractions.x;
-    phase_mass_liquid = phase_mass_liquid + particle_mass * phase_fractions.y;
-    phase_mass_gas = phase_mass_gas + particle_mass * phase_fractions.z;
-    phase_mass_plasma = phase_mass_plasma + particle_mass * phase_fractions.w;
-    phase_mass_total = phase_mass_total + particle_mass * (
-      phase_fractions.x + phase_fractions.y + phase_fractions.z + phase_fractions.w
-    );
+      let particle_mass = next_pos_mass.w;
+      let phase_fractions = max(thermo_row1, vec4<f32>(0.0));
+      phase_mass_solid = phase_mass_solid + particle_mass * phase_fractions.x;
+      phase_mass_liquid = phase_mass_liquid + particle_mass * phase_fractions.y;
+      phase_mass_gas = phase_mass_gas + particle_mass * phase_fractions.z;
+      phase_mass_plasma = phase_mass_plasma + particle_mass * phase_fractions.w;
+      phase_mass_total = phase_mass_total + particle_mass * (
+        phase_fractions.x + phase_fractions.y + phase_fractions.z + phase_fractions.w
+      );
 
-    let temperature_k = thermo_row0.z;
-    let particle_h2o_gas_mass = particle_mass * phase_fractions.z;
-    if (u32(round(thermo_row0.x)) == params.h2o_material_id && particle_h2o_gas_mass > 0.0) {
-      h2o_gas_mass = h2o_gas_mass + particle_h2o_gas_mass;
-      h2o_gas_phase_weight = h2o_gas_phase_weight + phase_fractions.z;
-      if (temperature_k > 0.0) {
-        h2o_gas_temperature_mass_sum = h2o_gas_temperature_mass_sum
-          + particle_h2o_gas_mass * temperature_k;
+      let temperature_k = thermo_row0.z;
+      let particle_h2o_gas_mass = particle_mass * phase_fractions.z;
+      if (u32(round(thermo_row0.x)) == params.h2o_material_id && particle_h2o_gas_mass > 0.0) {
+        h2o_gas_mass = h2o_gas_mass + particle_h2o_gas_mass;
+        h2o_gas_phase_weight = h2o_gas_phase_weight + phase_fractions.z;
+        if (temperature_k >= 0.0 && temperature_k <= 3.4028234663852886e38) {
+          h2o_gas_temperature_mass_sum = h2o_gas_temperature_mass_sum
+            + particle_h2o_gas_mass * temperature_k;
+        }
       }
-    }
-    if (temperature_k > 0.0) {
-      temperature_mass_sum = temperature_mass_sum + particle_mass * temperature_k;
-      min_temperature_k = min(min_temperature_k, temperature_k);
-      max_temperature_k = max(max_temperature_k, temperature_k);
-      finite_temperature_count = finite_temperature_count + 1.0;
-    }
-    if (thermo_row2.z == 1.0) {
-      thermal_ready_count = thermal_ready_count + 1.0;
-    } else {
-      thermal_problem_count = thermal_problem_count + 1.0;
+      let finite_nonnegative_temperature = temperature_k >= 0.0
+        && temperature_k <= 3.4028234663852886e38;
+      if (finite_nonnegative_temperature) {
+        temperature_mass_sum = temperature_mass_sum + particle_mass * temperature_k;
+        min_temperature_k = min(min_temperature_k, temperature_k);
+        max_temperature_k = max(max_temperature_k, temperature_k);
+        finite_temperature_count = finite_temperature_count + 1.0;
+      }
+      if (thermo_row2.z == 1.0) {
+        thermal_ready_count = thermal_ready_count + 1.0;
+      } else {
+        thermal_problem_count = thermal_problem_count + 1.0;
+      }
     }
   }
 
@@ -10366,8 +11732,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     h2o_gas_summary_status = max(h2o_gas_summary_status, row21.w);
   }
 
-  if (params.particle_count == 0u) {
+  if (next_bounds_status == 0.0) {
     min_volume_ratio_j = 0.0;
+    max_volume_ratio_j = 0.0;
   }
   if (finite_temperature_count == 0.0) {
     min_temperature_k = 0.0;

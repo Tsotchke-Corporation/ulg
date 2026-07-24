@@ -29,3 +29,37 @@ export function reactionLedgerEventCount(evidence = null) {
   ].filter((count) => count != null);
   return counts.length ? Math.max(...counts) : null;
 }
+
+export function groupedPlacedReactionEventCount(records = []) {
+  if (!Array.isArray(records) || records.length === 0) return null;
+  const byReaction = new Map();
+  for (const record of records) {
+    const eventCount = finiteEventCount(record?.placedEventCount);
+    if (eventCount == null) continue;
+    const reactionIndex = Number(record?.reactionIndex);
+    // Product terms are duplicate observations of one chemical event stream.
+    // Take the strongest term per reaction, then add independent reactions.
+    const key = Number.isFinite(reactionIndex)
+      ? `reaction:${Math.round(reactionIndex)}`
+      : 'reaction:unknown';
+    byReaction.set(key, Math.max(byReaction.get(key) ?? 0, eventCount));
+  }
+  if (byReaction.size === 0) return null;
+  return [...byReaction.values()].reduce((sum, count) => sum + count, 0);
+}
+
+export function reactionProgressEventCount(evidence = null) {
+  const counts = [
+    finiteEventCount(evidence?.canonicalEventCount),
+    finiteEventCount(evidence?.productEventActiveEventCount),
+    finiteEventCount(evidence?.placedReactionEventCount),
+    finiteEventCount(
+      evidence?.productPlacementProvenance?.placedReactionEventCount
+    ),
+    groupedPlacedReactionEventCount(
+      evidence?.productPlacementProvenance?.records
+    ),
+    reactionLedgerEventCount(evidence)
+  ].filter((count) => count != null);
+  return counts.length ? Math.max(...counts) : null;
+}

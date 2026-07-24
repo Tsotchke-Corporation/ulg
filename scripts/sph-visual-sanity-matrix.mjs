@@ -7,6 +7,11 @@ import {
   SPH_PHASE_SCENARIO_PRESETS,
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
+import {
+  condensedLaunchEvidence,
+  generatedCohortTrajectoryEvidence,
+  phaseAwareVolumeRatioEvidence
+} from './sph-visual-phase-acceptance.mjs';
 
 const DEFAULT_BASE_PORT = 5310;
 const DEFAULT_OUTPUT_DIR = '/tmp/ulg-visual-sanity-matrix';
@@ -14,6 +19,42 @@ const DEFAULT_BATCHES = 4;
 const DEFAULT_BATCH_STEPS = 24;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_FRAME_MAX = 16;
+const DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION = 1e-6;
+
+const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
+  'water-cycle': Object.freeze({
+    generatedGas: Object.freeze({
+      selector: Object.freeze({ materials: Object.freeze(['h2o']), phases: Object.freeze(['gas']) }),
+      interfaceSelector: Object.freeze({ materials: Object.freeze(['h2o']), excludePhases: Object.freeze(['gas']) }),
+      minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
+      minimumSustainedRiseM: 0.05,
+      tailSampleCount: 2
+    })
+  }),
+  'iron-ice-quench': Object.freeze({
+    generatedGas: Object.freeze({
+      selector: Object.freeze({ materials: Object.freeze(['h2o']), phases: Object.freeze(['gas']) }),
+      interfaceSelector: Object.freeze({ materials: Object.freeze(['h2o']), excludePhases: Object.freeze(['gas']) }),
+      minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
+      minimumSustainedRiseM: 0.05,
+      tailSampleCount: 2
+    }),
+    condensedLaunch: Object.freeze({
+      selector: Object.freeze({ excludePhases: Object.freeze(['gas']) }),
+      maxUpwardExcursionM: 0.35,
+      minimumSampleCount: 4
+    })
+  }),
+  'sodium-water': Object.freeze({
+    generatedGas: Object.freeze({
+      selector: Object.freeze({ materials: Object.freeze(['h2']), phases: Object.freeze(['gas']) }),
+      interfaceSelector: Object.freeze({ excludePhases: Object.freeze(['gas']) }),
+      minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
+      minimumSustainedRiseM: 0.05,
+      tailSampleCount: 2
+    })
+  })
+});
 
 const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
   label: `standard-${entry.id}`,
@@ -34,6 +75,7 @@ const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
   }),
   visualRendererMode: 'native-webgpu-surface-consumer',
   ...entry.validation,
+  phaseAwareAcceptance: STANDARD_PHASE_ACCEPTANCE_BY_PRESET[entry.id] || null,
   expectedCheckpoints: entry.validation.checkpoints,
   standardEnabled: true,
   defaultEnabled: false
@@ -60,8 +102,9 @@ const LEGACY_SCENARIOS = [
   },
   {
     label: 'liquid-liquid-h2o-mlsmpm-flow-smoke',
-    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=4&boxx=5&boxy=5&boxz=5&mech=mlsmpm',
+    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=4&boxx=5&boxy=5&boxz=5&mech=mlsmpm&renderer=native-webgpu&renderOwnership=main-thread-renderer&surfaceDraw=native-webgpu-surface-consumer',
     expectedMechanics: 'mlsmpm',
+    visualRendererMode: 'native-webgpu-surface-consumer',
     expectedH2oVisibleSurfaceCount: 1,
     expectLiquidFreeSurface: true,
     liquidFreeSurfaceMinTimeS: 0.8,
@@ -559,12 +602,29 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
   const massMax = masses.length ? Math.max(...masses) : null;
   const massScale = masses.length ? Math.max(Math.abs(masses[0]), 1e-9) : null;
   const massRelativeSpan = massScale == null ? null : (massMax - massMin) / massScale;
+  const phaseAwareConfig = scenario.phaseAwareAcceptance || {};
+  const volumeRatioEvidence = phaseAwareVolumeRatioEvidence(
+    checkpoints,
+    phaseAwareConfig.volumeRatio || {}
+  );
+  const generatedGasEvidence = phaseAwareConfig.generatedGas
+    ? generatedCohortTrajectoryEvidence(checkpoints, phaseAwareConfig.generatedGas)
+    : null;
+  const launchEvidence = phaseAwareConfig.condensedLaunch
+    ? condensedLaunchEvidence(checkpoints, phaseAwareConfig.condensedLaunch)
+    : null;
   const checks = [behaviorCheck(
     'particle-mass-bounded',
     'checkpoint particle mass stays conserved within 0.1%',
     Number.isFinite(massRelativeSpan) && massRelativeSpan <= 1e-3,
     { massMinKg: massMin, massMaxKg: massMax, relativeSpan: massRelativeSpan },
     { inconclusive: !Number.isFinite(massRelativeSpan) }
+  ), behaviorCheck(
+    'phase-volume-ratios-bounded',
+    'condensed and gas mechanics remain inside their phase-appropriate volume-ratio domains',
+    volumeRatioEvidence.status === 'pass',
+    volumeRatioEvidence,
+    { inconclusive: volumeRatioEvidence.status === 'inconclusive' }
   )];
   if (scenario.presetId) {
     checks.push(behaviorCheck(
@@ -579,12 +639,22 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
       { inconclusive: capturedInitial == null }
     ));
   }
+  if (launchEvidence) {
+    checks.push(behaviorCheck(
+      'condensed-motion-non-explosive',
+      'the mass-weighted condensed population does not launch upward after settling',
+      launchEvidence.status === 'pass',
+      launchEvidence,
+      { inconclusive: launchEvidence.status === 'inconclusive' }
+    ));
+  }
 
   if (scenario.presetId === 'water-cycle') {
     const gasMasses = checkpoints.map((checkpoint) => checkpointMass(checkpoint, 'h2o', 'gas'));
-    const gasY = checkpoints.map((checkpoint) => checkpointYCenter(checkpoint, 'h2o', 'gas'));
-    const positiveGasY = gasY.filter(Number.isFinite);
-    const peakGasMass = Math.max(...gasMasses);
+    const significantGasMasses = gasMasses.map((massKg) => (
+      massKg >= (generatedGasEvidence?.minimumMassKg ?? 0) ? massKg : 0
+    ));
+    const peakGasMass = Math.max(...significantGasMasses);
     checks.push(
       behaviorCheck('liquid-flow', 'liquid water changes position over the sequence', (
         Math.abs((checkpointYCenter(last, 'h2o', 'liquid') || 0) - (checkpointYCenter(first, 'h2o', 'liquid') || 0)) > 0.02
@@ -592,13 +662,19 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
         initialYCenterM: checkpointYCenter(first, 'h2o', 'liquid'),
         finalYCenterM: checkpointYCenter(last, 'h2o', 'liquid')
       }),
-      behaviorCheck('steam-forms', 'the 400 K floor creates water vapor', peakGasMass > 0, { peakGasMassKg: peakGasMass }),
-      behaviorCheck('steam-rises', 'water vapor rises through the headspace', (
-        positiveGasY.length > 1 && Math.max(...positiveGasY) - positiveGasY[0] > 0.05
-      ), { gasYCentersM: gasY }),
+      behaviorCheck('steam-forms', 'the 400 K floor creates water vapor', (
+        generatedGasEvidence?.formed === true
+      ), { peakGasMassKg: peakGasMass, trajectory: generatedGasEvidence }),
+      behaviorCheck('steam-rises', 'water vapor sustains an upward trajectory through the headspace', (
+        generatedGasEvidence?.status === 'pass'
+      ), generatedGasEvidence, { inconclusive: generatedGasEvidence?.formed !== true }),
       behaviorCheck('steam-condenses', 'cold-ceiling vapor later condenses', (
-        peakGasMass > 0 && gasMasses.at(-1) < peakGasMass * 0.98
-      ), { gasMassesKg: gasMasses })
+        peakGasMass > 0 && significantGasMasses.at(-1) < peakGasMass * 0.98
+      ), {
+        gasMassesKg: gasMasses,
+        significantGasMassesKg: significantGasMasses,
+        minimumSignificantMassKg: generatedGasEvidence?.minimumMassKg ?? null
+      }, { inconclusive: generatedGasEvidence?.formed !== true })
     );
   } else if (scenario.presetId === 'iron-ice-quench') {
     const initialFeLiquid = checkpointMass(first, 'fe', 'liquid');
@@ -607,15 +683,14 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
     const finalFeSolid = checkpointMass(last, 'fe', 'solid');
     const initialFeTemperature = checkpointMaxTemperature(first, 'fe');
     const finalFeTemperature = checkpointMaxTemperature(last, 'fe');
-    const steamY = checkpoints.map((checkpoint) => checkpointYCenter(checkpoint, 'h2o', 'gas'));
-    const positiveSteamY = steamY.filter(Number.isFinite);
     checks.push(
       behaviorCheck('iron-starts-molten', 'the falling iron begins liquid', initialFeLiquid > 0, { initialFeLiquidKg: initialFeLiquid }),
       behaviorCheck('ice-melts', 'solid water creates a liquid-water population', checkpointMass(last, 'h2o', 'liquid') > 0, {
         finalWaterLiquidKg: checkpointMass(last, 'h2o', 'liquid')
       }),
-      behaviorCheck('steam-forms', 'iron quench creates water vapor', checkpointMass(last, 'h2o', 'gas') > 0, {
-        finalSteamMassKg: checkpointMass(last, 'h2o', 'gas')
+      behaviorCheck('steam-forms', 'iron quench creates a material water-vapor population', generatedGasEvidence?.formed === true, {
+        finalSteamMassKg: checkpointMass(last, 'h2o', 'gas'),
+        trajectory: generatedGasEvidence
       }),
       behaviorCheck('iron-solidifies', 'liquid iron decreases while solid iron grows', (
         finalFeLiquid < initialFeLiquid && finalFeSolid > initialFeSolid
@@ -624,9 +699,9 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
         Number.isFinite(initialFeTemperature) && Number.isFinite(finalFeTemperature)
         && finalFeTemperature <= initialFeTemperature - 10
       ), { initialMaxTemperatureK: initialFeTemperature, finalMaxTemperatureK: finalFeTemperature }),
-      behaviorCheck('steam-rises', 'quench steam rises into the container headspace', (
-        positiveSteamY.length > 1 && Math.max(...positiveSteamY) - positiveSteamY[0] > 0.05
-      ), { steamYCentersM: steamY })
+      behaviorCheck('steam-rises', 'quench steam sustains an upward trajectory into the container headspace', (
+        generatedGasEvidence?.status === 'pass'
+      ), generatedGasEvidence, { inconclusive: generatedGasEvidence?.formed !== true })
     );
   } else if (scenario.presetId === 'sodium-water') {
     const initialNaMass = checkpointMass(first, 'Na');
@@ -634,8 +709,6 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
     const maxTemperatures = checkpoints.map((checkpoint) => checkpointMaxTemperature(checkpoint)).filter(Number.isFinite);
     const initialMaxTemperature = finiteOrNull(scenario.initialMaxTemperatureK);
     const minimumTemperatureRise = finiteOrNull(scenario.minimumReactionTemperatureRiseK) ?? 50;
-    const hydrogenY = checkpoints.map((checkpoint) => checkpointYCenter(checkpoint, 'h2'));
-    const positiveHydrogenY = hydrogenY.filter(Number.isFinite);
     const minimumHydrogenRise = finiteOrNull(scenario.minimumHydrogenRiseM) ?? 0.05;
     checks.push(
       behaviorCheck('sodium-consumed', 'sodium mass decreases across the captured interval', finalNaMass < initialNaMass, {
@@ -654,13 +727,10 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
         requiredRiseK: minimumTemperatureRise,
         maxTemperaturesK: maxTemperatures
       }, { inconclusive: !Number.isFinite(initialMaxTemperature) || maxTemperatures.length === 0 }),
-      behaviorCheck('hydrogen-rises', 'hydrogen products move upward', (
-        positiveHydrogenY.length > 1
-        && Math.max(...positiveHydrogenY) - positiveHydrogenY[0] > minimumHydrogenRise
-      ), {
-        hydrogenYCentersM: hydrogenY,
-        requiredRiseM: minimumHydrogenRise
-      })
+      behaviorCheck('hydrogen-rises', 'hydrogen products sustain upward motion after formation', (
+        generatedGasEvidence?.status === 'pass'
+        && generatedGasEvidence.minimumSustainedRiseM >= minimumHydrogenRise
+      ), generatedGasEvidence, { inconclusive: generatedGasEvidence?.formed !== true })
     );
   } else if (scenario.presetId === 'cesium-fluorine') {
     const initialFluorineMass = checkpointMass(first, 'F');
@@ -719,6 +789,11 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
     presetId: scenario.presetId || null,
     checkpointCount: checkpoints.length,
     checkpoints,
+    phaseAwareEvidence: {
+      volumeRatio: volumeRatioEvidence,
+      generatedGas: generatedGasEvidence,
+      condensedLaunch: launchEvidence
+    },
     checks
   };
 }
@@ -795,6 +870,7 @@ function scenarioEnv({
   batchSteps,
   timeoutMs
 }) {
+  const captureFrames = envFlagEnabled(process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES, true);
   const env = {
     ...process.env,
     ULG_PROBE_URL: scenario.url,
@@ -811,13 +887,20 @@ function scenarioEnv({
     env.ULG_PROBE_VIEWPORT_HEIGHT = process.env.ULG_VISUAL_MATRIX_VIEWPORT_HEIGHT || '800';
     env.ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS =
       process.env.ULG_VISUAL_MATRIX_NATIVE_SURFACE_VALIDATION_WAIT_MS || '1500';
+    // The probe-level guard admits the complete phase domain. The matrix then
+    // applies tighter condensed bounds without misclassifying legal sparse-gas
+    // expansion at J=0.1 as a condensed collapse.
+    env.ULG_PROBE_MIN_J = '0.1';
+    env.ULG_PROBE_MAX_J = '1000';
   }
   if (scenario.visualRendererMode === 'native-webgpu-surface-consumer') {
     env.ULG_PROBE_READBACK_MODE = 'no-full-readback';
     env.ULG_PROBE_RENDER_READBACK_MODE = 'no-full-readback';
     env.ULG_PROBE_RENDER_ROWS_READBACK_MODE = 'no-full-readback';
-    env.ULG_PROBE_COMPACT_SUMMARY_MODE = 'none';
+    env.ULG_PROBE_COMPACT_SUMMARY_MODE = 'final-only';
     env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE = 'native-webgpu-surface-consumer';
+    env.ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS =
+      process.env.ULG_VISUAL_MATRIX_NATIVE_SURFACE_VALIDATION_WAIT_MS || '1500';
   }
   if (!scenario.standardEnabled && scenario.expectedH2oVisibleSurfaceCount != null) {
     env.ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT = String(scenario.expectedH2oVisibleSurfaceCount);
@@ -834,10 +917,10 @@ function scenarioEnv({
   if (scenario.maxSpeedMPerS != null) {
     env.ULG_PROBE_MAX_SPEED = String(scenario.maxSpeedMPerS);
   }
-  if (scenario.minVolumeRatioJ != null) {
+  if (!scenario.standardEnabled && scenario.minVolumeRatioJ != null) {
     env.ULG_PROBE_MIN_J = String(scenario.minVolumeRatioJ);
   }
-  if (scenario.maxVolumeRatioJ != null) {
+  if (!scenario.standardEnabled && scenario.maxVolumeRatioJ != null) {
     env.ULG_PROBE_MAX_J = String(scenario.maxVolumeRatioJ);
   }
   if (scenario.expectStatic === true) {
@@ -879,7 +962,7 @@ function scenarioEnv({
   if (scenario.liquidFreeSurfaceMaxHeightM != null) {
     env.ULG_PROBE_LIQUID_FREE_SURFACE_MAX_HEIGHT_M = String(scenario.liquidFreeSurfaceMaxHeightM);
   }
-  if (scenario.minVisualFrameTimeSpanS != null) {
+  if (captureFrames && scenario.minVisualFrameTimeSpanS != null) {
     env.ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S = String(scenario.minVisualFrameTimeSpanS);
   }
   if (scenario.visualOnly === true) {
@@ -890,7 +973,7 @@ function scenarioEnv({
     env.ULG_PROBE_FRAME_DIR = frameDir;
     env.ULG_PROBE_FRAME_EVERY = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_EVERY, 1));
     env.ULG_PROBE_FRAME_MAX = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_MAX, DEFAULT_FRAME_MAX));
-  } else if (envFlagEnabled(process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES, true)) {
+  } else if (captureFrames) {
     env.ULG_PROBE_CAPTURE_FRAMES = '1';
     env.ULG_PROBE_FRAME_DIR = frameDir;
     env.ULG_PROBE_FRAME_EVERY = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_EVERY, 1));

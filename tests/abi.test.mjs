@@ -1399,6 +1399,10 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read_write> partial_summaries/);
   assert.match(mlsMpmResidentSummaryWgsl, /wg_phase_mass_solid/);
   assert.match(mlsMpmResidentSummaryWgsl, /wg_temperature_mass_sum/);
+  assert.match(mlsMpmResidentSummaryWgsl, /let next_particle_live = next_pos_mass\.w > 0\.0/);
+  assert.match(mlsMpmResidentSummaryWgsl, /if \(next_particle_live\) \{\n\s+min_volume_ratio_j/);
+  assert.match(mlsMpmResidentSummaryWgsl, /let finite_nonnegative_temperature = temperature_k >= 0\.0/);
+  assert.match(mlsMpmResidentSummaryFinalizeWgsl, /if \(next_bounds_status == 0\.0\)/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<workgroup> wg_active_grid_nodes/);
   assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(32\)/);
   assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read> partial_summaries/);

@@ -27,6 +27,13 @@ function resourceActiveLeases(ledger, resourceKey) {
   return ledger.leases.filter((lease) => lease.resourceKey === resourceKey && lease.status === 'active');
 }
 
+function clearDestroyOwnerBlockers(ledger, resourceKey) {
+  ledger.blockers = ledger.blockers.filter(
+    (blocker) => blocker !== `destroy-owner-refused:${resourceKey}`
+      && !blocker.startsWith(`destroy-owner-failed:${resourceKey}:`)
+  );
+}
+
 function refreshResidentBufferLeaseLedger(ledger) {
   for (const resource of Object.values(ledger.resources)) {
     resource.activeLeaseCount = resourceActiveLeases(ledger, resource.resourceKey).length;
@@ -35,15 +42,20 @@ function refreshResidentBufferLeaseLedger(ledger) {
   ledger.activeLeaseCount = ledger.leases.filter((lease) => lease.status === 'active').length;
   ledger.destroyedResourceCount = Object.values(ledger.resources).filter((resource) => resource.destroyed).length;
   ledger.skippedDestroyCount = ledger.events.filter((event) => event.status === 'destroy-skipped-active-lease').length;
+  ledger.pendingDestroyCount = ledger.events.filter(
+    (event) => event.status === 'destroy-scheduled-owner-pending'
+  ).length;
   ledger.warnings = uniqueList(ledger.warnings);
   ledger.blockers = uniqueList(ledger.blockers);
   ledger.status = ledger.blockers.length > 0
     ? 'resident-buffer-lease-ledger-blocked'
     : (ledger.activeLeaseCount > 0
       ? 'resident-buffer-lease-ledger-active'
-      : (ledger.destroyedResourceCount > 0
-        ? 'resident-buffer-lease-ledger-cleaned'
-        : (ledger.resourceCount > 0 ? 'resident-buffer-lease-ledger-ready' : 'resident-buffer-lease-ledger-empty')));
+      : (ledger.pendingDestroyCount > 0
+        ? 'resident-buffer-lease-ledger-cleanup-pending'
+        : (ledger.destroyedResourceCount > 0
+          ? 'resident-buffer-lease-ledger-cleaned'
+          : (ledger.resourceCount > 0 ? 'resident-buffer-lease-ledger-ready' : 'resident-buffer-lease-ledger-empty'))));
   return ledger;
 }
 
@@ -73,6 +85,7 @@ export function createResidentBufferLeaseLedger({
     activeLeaseCount: 0,
     destroyedResourceCount: 0,
     skippedDestroyCount: 0,
+    pendingDestroyCount: 0,
     status: 'resident-buffer-lease-ledger-empty'
   };
   for (const resource of resources) {
@@ -208,6 +221,13 @@ export function destroyResidentBufferWithLease(ledger, resourceKey, destroyFn, {
     refreshResidentBufferLeaseLedger(ledger);
     return event;
   }
+  // An asynchronous owner handoff is itself the exclusive destruction lease.
+  // Replaying cleanup while that handoff is unresolved must observe the exact
+  // same event/promise instead of invoking the owner a second time.
+  if (resource.pendingDestroyEvent) return resource.pendingDestroyEvent;
+  if (resource.destroyed && resource.completedDestroyEvent) {
+    return resource.completedDestroyEvent;
+  }
   if (!decision.canDestroy && !force) {
     const event = {
       resourceKey,
@@ -223,11 +243,83 @@ export function destroyResidentBufferWithLease(ledger, resourceKey, destroyFn, {
     return event;
   }
   if (typeof destroyFn === 'function') {
-    destroyFn();
+    const destroyResult = destroyFn();
+    if (destroyResult?.then) {
+      resource.destroyStatus = 'destroy-scheduled-owner-pending';
+      const event = {
+        resourceKey,
+        status: resource.destroyStatus,
+        reason: cleanString(reason, 'cleanup'),
+        activeLeaseCount: decision.activeLeaseCount
+      };
+      ledger.events.push(event);
+      Object.defineProperty(resource, 'pendingDestroyEvent', {
+        value: event,
+        writable: true,
+        configurable: true,
+        enumerable: false
+      });
+      refreshResidentBufferLeaseLedger(ledger);
+      const completion = Promise.resolve(destroyResult).then(
+        (released) => {
+          resource.pendingDestroyEvent = null;
+          if (released !== true) {
+            resource.destroyStatus = 'destroy-owner-refused';
+            event.status = resource.destroyStatus;
+            ledger.blockers.push(`destroy-owner-refused:${resourceKey}`);
+          } else {
+            resource.destroyed = true;
+            resource.destroyStatus = force && decision.activeLeaseCount > 0
+              ? 'destroyed-force-active-lease'
+              : 'destroyed';
+            event.status = resource.destroyStatus;
+            Object.defineProperty(resource, 'completedDestroyEvent', {
+              value: event,
+              writable: true,
+              configurable: true,
+              enumerable: false
+            });
+            clearDestroyOwnerBlockers(ledger, resourceKey);
+          }
+          refreshResidentBufferLeaseLedger(ledger);
+          return event;
+        },
+        (error) => {
+          resource.pendingDestroyEvent = null;
+          resource.destroyStatus = 'destroy-owner-failed';
+          event.status = resource.destroyStatus;
+          event.error = cleanString(error?.message, String(error));
+          ledger.blockers.push(
+            `destroy-owner-failed:${resourceKey}:${event.error}`
+          );
+          refreshResidentBufferLeaseLedger(ledger);
+          return event;
+        }
+      );
+      Object.defineProperty(event, 'completion', {
+        value: completion,
+        enumerable: false
+      });
+      return event;
+    }
+    if (destroyResult === false) {
+      resource.destroyStatus = 'destroy-owner-refused';
+      const event = {
+        resourceKey,
+        status: resource.destroyStatus,
+        reason: cleanString(reason, 'cleanup'),
+        activeLeaseCount: decision.activeLeaseCount
+      };
+      ledger.events.push(event);
+      ledger.blockers.push(`destroy-owner-refused:${resourceKey}`);
+      refreshResidentBufferLeaseLedger(ledger);
+      return event;
+    }
     resource.destroyed = true;
     resource.destroyStatus = force && decision.activeLeaseCount > 0
       ? 'destroyed-force-active-lease'
       : 'destroyed';
+    clearDestroyOwnerBlockers(ledger, resourceKey);
   } else {
     resource.destroyStatus = 'destroy-noop-no-destroy-fn';
   }
@@ -238,6 +330,14 @@ export function destroyResidentBufferWithLease(ledger, resourceKey, destroyFn, {
     activeLeaseCount: decision.activeLeaseCount
   };
   ledger.events.push(event);
+  if (resource.destroyed) {
+    Object.defineProperty(resource, 'completedDestroyEvent', {
+      value: event,
+      writable: true,
+      configurable: true,
+      enumerable: false
+    });
+  }
   refreshResidentBufferLeaseLedger(ledger);
   return event;
 }
@@ -259,6 +359,7 @@ export function summarizeResidentBufferLeaseLedger(ledger) {
     activeLeaseCount: ledger.activeLeaseCount,
     destroyedResourceCount: ledger.destroyedResourceCount,
     skippedDestroyCount: ledger.skippedDestroyCount,
+    pendingDestroyCount: ledger.pendingDestroyCount,
     resources: Object.fromEntries(
       Object.entries(ledger.resources).map(([key, resource]) => [key, {
         resourceKey: resource.resourceKey,

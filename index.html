@@ -5,8 +5,103 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2315212d'/%3E%3Cpath d='M16 16v22c0 13 32 13 32 0V16' fill='none' stroke='%236ee7e7' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E" />
     <title>ULG Triad</title>
+    <style>
+      #sph-bootstrap-presentation[hidden] { display: none; }
+      #sph-bootstrap-presentation {
+        position: fixed;
+        inset: 0;
+        z-index: 45;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        box-sizing: border-box;
+        padding: 24px;
+        background: #101d26;
+        color: #bfe9d8;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      #sph-bootstrap-presentation::before,
+      #sph-bootstrap-presentation::after {
+        content: '';
+        position: absolute;
+        width: min(52vw, 340px);
+        aspect-ratio: 1;
+        border: 1px solid rgba(29, 139, 109, .55);
+        transform: rotate(30deg) skew(-5deg);
+      }
+      #sph-bootstrap-presentation::after {
+        transform: rotate(60deg) skew(5deg) scale(.72);
+        opacity: .55;
+      }
+      .sph-bootstrap-card {
+        position: relative;
+        z-index: 1;
+        width: min(520px, 86vw);
+        box-sizing: border-box;
+        border: 1px solid #1d8b6d;
+        padding: 16px 18px;
+        background: rgba(4, 12, 14, .94);
+        box-shadow: 0 18px 60px rgba(0, 0, 0, .44);
+        text-align: center;
+      }
+      .sph-bootstrap-title {
+        color: #75f7b4;
+        font-weight: 800;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+      }
+      .sph-bootstrap-detail {
+        display: block;
+        margin-top: 8px;
+        color: #75c7f7;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .sph-bootstrap-progress {
+        height: 2px;
+        margin-top: 14px;
+        overflow: hidden;
+        background: #14342c;
+      }
+      .sph-bootstrap-progress::after {
+        content: '';
+        display: block;
+        width: 42%;
+        height: 100%;
+        background: #75f7b4;
+        animation: sph-bootstrap-scan 1.25s ease-in-out infinite alternate;
+      }
+      @keyframes sph-bootstrap-scan {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(238%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .sph-bootstrap-progress::after { animation: none; width: 100%; opacity: .55; }
+      }
+    </style>
   </head>
   <body>
+    <div id="sph-bootstrap-presentation" role="status" aria-live="polite" aria-busy="true" hidden>
+      <div class="sph-bootstrap-card">
+        <strong class="sph-bootstrap-title">initializing simulation</strong>
+        <span class="sph-bootstrap-detail">Loading the control plane, acquiring the GPU, and deriving material closures…</span>
+        <div class="sph-bootstrap-progress" aria-hidden="true"></div>
+      </div>
+    </div>
+    <script>
+      (() => {
+        const sphRouteKeys = new Set([
+          'scenario', 'ss', 'mech', 'renderer', 'surfaceDraw', 'renderOwnership',
+          'drop', 'base', 'bodies', 'lawmech', 'lawg', 'laweos', 'lawp', 'lawt',
+          'lawr', 'lawv', 'lawst'
+        ]);
+        const query = new URLSearchParams(window.location.search);
+        const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+        if ([...sphRouteKeys].some((key) => query.has(key) || hash.has(key))) {
+          document.querySelector('#sph-bootstrap-presentation').hidden = false;
+        }
+      })();
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
   </body>

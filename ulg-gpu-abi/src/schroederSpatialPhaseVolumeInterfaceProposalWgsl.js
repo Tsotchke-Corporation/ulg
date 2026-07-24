@@ -299,17 +299,24 @@ fn receipt_admitted(
 ) -> bool {
   if (arrayLength(receipt) < RECEIPT_HEADER_WORDS) { return false; }
   let status = (*receipt)[2u];
-  let source_count = (*receipt)[16u];
-  let source_capacity = (*receipt)[17u];
+  let global_source_count = (*receipt)[16u];
+  let global_source_capacity = (*receipt)[17u];
   let field_count = (*receipt)[18u];
-  let candidate_count = (*receipt)[20u];
-  let source_groups = group_count(source_count);
+  let global_candidate_count = (*receipt)[20u];
+  let selected_source_count = (*receipt)[47u];
+  let selected_candidate_count = (*receipt)[48u];
+  let source_groups = group_count(global_source_count);
   let field_groups = group_count(field_count);
   if (
-    source_count == 0u
-    || source_capacity == 0u
-    || source_count > source_capacity
-    || source_count > 0xffffffffu / STENCIL_SIZE
+    global_source_count == 0u
+    || global_source_capacity == 0u
+    || global_source_count > global_source_capacity
+    || global_source_count > 0xffffffffu / STENCIL_SIZE
+    || selected_source_count == 0u
+    || selected_source_count > global_source_count
+    || selected_source_count > 0xffffffffu / STENCIL_SIZE
+    || selected_candidate_count != selected_source_count * STENCIL_SIZE
+    || selected_candidate_count > global_candidate_count
     || field_count == 0u
     || field_count > field_capacity
     || field_groups > (0xffffffffu - source_groups) / 2u
@@ -331,7 +338,7 @@ fn receipt_admitted(
     && status == RECEIPT_READY_ADMITTED
     && identity_matches(receipt)
     && (*receipt)[19u] == field_capacity
-    && candidate_count == source_count * STENCIL_SIZE
+    && global_candidate_count == global_source_count * STENCIL_SIZE
     && (*receipt)[21u] == bitcast<u32>(level)
     && (*receipt)[22u] > 0u
     && finite_f32(bitcast<f32>((*receipt)[23u]))
@@ -368,8 +375,8 @@ fn receipt_admitted(
     && (*receipt)[44u] == 0u
     && (*receipt)[45u] == 0u
     && (*receipt)[46u] == 0u
-    && (*receipt)[47u] == source_count
-    && (*receipt)[48u] == candidate_count
+    && (*receipt)[47u] == selected_source_count
+    && (*receipt)[48u] == selected_candidate_count
     && (*receipt)[49u] == MECHANICS_STRIDE
     && (*receipt)[50u] == RAW_VOLUME_RATIO_J_WORD
     && (*receipt)[51u] == RAW_REST_VOLUME_WORD

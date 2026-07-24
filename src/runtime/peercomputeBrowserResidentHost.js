@@ -40,6 +40,12 @@ import {
   uploadSphGpuParticleBuffers
 } from './sph/sphGpuBuffers.js';
 import {
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
+  describeSphSpatialGasPressureAuthority,
+  isExactSphSpatialGasPressureAuthoritySource
+} from './sph/sphSpatialGasLedgerEosGpu.js';
+import {
   ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
@@ -206,9 +212,18 @@ function firstNonEmptyStringList(...candidates) {
   return [];
 }
 
+function retainedGasCellFieldSourceSchemaAccepted(candidate = null) {
+  return candidate?.schema === ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
+    || candidate?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1
+    || (
+      candidate?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+      && isExactSphSpatialGasPressureAuthoritySource(candidate)
+    );
+}
+
 function retainedGasCellFieldSourceFrom(value = null) {
   if (!value || typeof value !== 'object') return null;
-  const candidate = value.schema === ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
+  const candidate = retainedGasCellFieldSourceSchemaAccepted(value)
     ? value
     : (value.retainedGasCellFieldSource
         || value.pressureInterfaceRetainedGasCellFieldSource
@@ -217,12 +232,235 @@ function retainedGasCellFieldSourceFrom(value = null) {
         || value.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
         || null);
   if (
-    candidate?.schema === ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
-    && candidate?.status === 'pressure-interface-retained-gas-cell-field-source-ready'
+    retainedGasCellFieldSourceSchemaAccepted(candidate)
+    && (
+      candidate?.status === 'pressure-interface-retained-gas-cell-field-source-ready'
+      || (
+        candidate?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1
+        && candidate?.status === 'retained-gas-cell-eos-source-submitted'
+        && candidate?.ready === true
+      )
+      || (
+        candidate?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+        && isExactSphSpatialGasPressureAuthoritySource(candidate)
+        && candidate?.status === 'retained-gas-cell-eos-source-submitted'
+        && candidate?.ready === true
+      )
+    )
   ) {
     return candidate;
   }
   return null;
+}
+
+function workerRetainedBufferRefDescriptor(value = null) {
+  return value?.schema === 'peercompute.ulg.worker-retained-buffer-ref.v0'
+    && typeof value?.ref === 'string'
+    && value.ref.length > 0;
+}
+
+function retainedGasCellFieldSourceBuffer(source = null) {
+  return source?.gasPressureCellsBuffer
+    || source?.retainedGasPressureCellsBuffer
+    || source?.pressureInterfaceGasPressureCellsBuffer
+    || null;
+}
+
+function retainedGasCellFieldSourceReady(source = null) {
+  const buffer = retainedGasCellFieldSourceBuffer(source);
+  const rowCount = Math.max(0, Math.trunc(finiteSeedNumber(
+    source?.pressureInterfaceGasPressureCellRowCount,
+    0
+  )));
+  const strideFloats = Math.max(0, Math.trunc(finiteSeedNumber(
+    source?.pressureInterfaceGasPressureCellRowStrideFloats,
+    0
+  )));
+  if (
+    source?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+    && isExactSphSpatialGasPressureAuthoritySource(source)
+  ) {
+    const rowCapacity = Math.max(0, Math.trunc(finiteSeedNumber(
+      source?.pressureInterfaceGasPressureCellRowCapacity
+        ?? source?.gasPressureCellRowCapacity,
+      0
+    )));
+    return Boolean(
+      buffer
+      && buffer === source.gasPressureCellsBuffer
+      && source.gasAuthorityControlBuffer
+      && rowCapacity > 0
+      && strideFloats === 12
+      && source.pressureInterfaceGasPressureCellRowsBufferRetained === true
+      && source.gasPressureAuthorityConsumerBorrowed !== true
+      && source.gasPressureAuthorityConsumerSubmitted !== true
+      && source.releaseScheduled !== true
+      && source.released !== true
+      && source.terminal !== true
+    );
+  }
+  return Boolean(
+    retainedGasCellFieldSourceSchemaAccepted(source)
+    && buffer
+    && !workerRetainedBufferRefDescriptor(buffer)
+    && rowCount > 0
+    && strideFloats === 12
+    && source?.pressureInterfaceGasPressureCellRowsBufferRetained === true
+    && source?.localPressureGradientReady === true
+  );
+}
+
+function exactRetainedGasCellFieldSourceIdentity(source = null) {
+  return source?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+    && isExactSphSpatialGasPressureAuthoritySource(source);
+}
+
+function exactRetainedGasCellFieldSourceReady(source = null) {
+  return exactRetainedGasCellFieldSourceIdentity(source)
+    && retainedGasCellFieldSourceReady(source);
+}
+
+function assertExactRetainedGasCellFieldSourceAliases(sourceObject, source) {
+  if (!exactRetainedGasCellFieldSourceIdentity(source)) return;
+  const expectedBuffer = source.gasPressureCellsBuffer;
+  const bufferAliases = [
+    ['gasPressureCellsBuffer', sourceObject?.gasPressureCellsBuffer],
+    ['retainedGasPressureCellsBuffer', sourceObject?.retainedGasPressureCellsBuffer],
+    ['pressureInterfaceGasPressureCellsBuffer', sourceObject?.pressureInterfaceGasPressureCellsBuffer],
+    ['gasAuthorityControlBuffer', sourceObject?.gasAuthorityControlBuffer]
+  ];
+  for (const [label, candidate] of bufferAliases) {
+    if (candidate == null) continue;
+    const expected = label === 'gasAuthorityControlBuffer'
+      ? source.gasAuthorityControlBuffer
+      : expectedBuffer;
+    if (candidate !== expected) {
+      throw new TypeError(
+        `exact v2 gas-pressure authority rejects mismatched ${label}`
+      );
+    }
+  }
+  const expectedRowCount = Math.max(0, Math.trunc(finiteSeedNumber(
+    source.pressureInterfaceGasPressureCellRowCount,
+    0
+  )));
+  const expectedRowCapacity = Math.max(0, Math.trunc(finiteSeedNumber(
+    source.pressureInterfaceGasPressureCellRowCapacity
+      ?? source.gasPressureCellRowCapacity,
+    0
+  )));
+  const expectedStrideFloats = Math.max(0, Math.trunc(finiteSeedNumber(
+    source.pressureInterfaceGasPressureCellRowStrideFloats,
+    0
+  )));
+  const expectedByteLength = Math.max(0, Math.trunc(finiteSeedNumber(
+    source.pressureInterfaceGasPressureCellRowByteLength,
+    0
+  )));
+  const numericAliases = [
+    ['pressureInterfaceGasPressureCellRowCount', sourceObject?.pressureInterfaceGasPressureCellRowCount, expectedRowCount],
+    ['gasPressureCellRowCount', sourceObject?.gasPressureCellRowCount, expectedRowCount],
+    ['pressureInterfaceGasPressureCellRowCapacity', sourceObject?.pressureInterfaceGasPressureCellRowCapacity, expectedRowCapacity],
+    ['gasPressureCellRowCapacity', sourceObject?.gasPressureCellRowCapacity, expectedRowCapacity],
+    ['pressureInterfaceGasPressureCellRowStrideFloats', sourceObject?.pressureInterfaceGasPressureCellRowStrideFloats, expectedStrideFloats],
+    ['gasPressureCellRowStrideFloats', sourceObject?.gasPressureCellRowStrideFloats, expectedStrideFloats],
+    ['pressureInterfaceGasPressureCellRowByteLength', sourceObject?.pressureInterfaceGasPressureCellRowByteLength, expectedByteLength],
+    ['gasPressureCellRowByteLength', sourceObject?.gasPressureCellRowByteLength, expectedByteLength]
+  ];
+  for (const [label, candidate, expected] of numericAliases) {
+    if (candidate == null) continue;
+    if (Number(candidate) !== expected) {
+      throw new TypeError(
+        `exact v2 gas-pressure authority rejects mismatched ${label}`
+      );
+    }
+  }
+  const releaseAlias = sourceObject?.releaseAfterFinalConsumerQueue;
+  if (
+    releaseAlias != null
+    && releaseAlias !== source.releaseAfterFinalConsumerQueue
+  ) {
+    throw new TypeError(
+      'exact v2 gas-pressure authority rejects mismatched final-consumer release callback'
+    );
+  }
+}
+
+function retainedGasCellFieldWorkerLocalSourceReady(source = null) {
+  const buffer = retainedGasCellFieldSourceBuffer(source);
+  const rowCount = Math.max(0, Math.trunc(finiteSeedNumber(
+    source?.pressureInterfaceGasPressureCellRowCount,
+    0
+  )));
+  const strideFloats = Math.max(0, Math.trunc(finiteSeedNumber(
+    source?.pressureInterfaceGasPressureCellRowStrideFloats,
+    0
+  )));
+  return Boolean(
+    retainedGasCellFieldSourceSchemaAccepted(source)
+    && workerRetainedBufferRefDescriptor(buffer)
+    && uniqueStringList(source?.workerRetainedGasPressureBufferRefs || []).length > 0
+    && rowCount > 0
+    && strideFloats === 12
+    && source?.pressureInterfaceGasPressureCellRowsBufferRetained === true
+    && source?.localPressureGradientReady === true
+  );
+}
+
+// StateManager hot storage may retain same-thread GPU handles, while warm
+// deltas must remain serializable. Keep the live source in the hot record
+// and publish only its immutable identity/layout metadata in the delta.
+function retainedGasCellFieldSourceTransportDescriptor(source = null) {
+  if (!source) return null;
+  if (
+    source.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+    && isExactSphSpatialGasPressureAuthoritySource(source)
+  ) {
+    return describeSphSpatialGasPressureAuthority(source);
+  }
+  const spatialSource = source.sourceSpatialGasLedger || null;
+  const buffer = retainedGasCellFieldSourceBuffer(source);
+  return {
+    schema: source.schema || null,
+    status: source.status || null,
+    ready: source.ready === true,
+    deviceId: source.deviceId || null,
+    sameDevice: Boolean(buffer) && !workerRetainedBufferRefDescriptor(buffer),
+    workerLocal: workerRetainedBufferRefDescriptor(buffer),
+    sourceHotBufferKey: source.sourceHotBufferKey || null,
+    retainedGasPressureBufferRefs: uniqueStringList(
+      source.retainedGasPressureBufferRefs || []
+    ),
+    workerRetainedGasPressureBufferRefs: uniqueStringList(
+      source.workerRetainedGasPressureBufferRefs || []
+    ),
+    pressureInterfaceGasPressureCellRowCount:
+      source.pressureInterfaceGasPressureCellRowCount ?? 0,
+    pressureInterfaceGasPressureCellRowStrideFloats:
+      source.pressureInterfaceGasPressureCellRowStrideFloats ?? 0,
+    pressureInterfaceGasPressureCellRowByteLength:
+      source.pressureInterfaceGasPressureCellRowByteLength ?? 0,
+    pressureInterfaceGasPressureCellRowsBufferRetained:
+      source.pressureInterfaceGasPressureCellRowsBufferRetained === true,
+    pressureFieldMode: source.pressureFieldMode || null,
+    pressureFieldResolution: source.pressureFieldResolution || null,
+    localPressureGradientReady: source.localPressureGradientReady === true,
+    localPressureGradientStatus: source.localPressureGradientStatus || null,
+    sourceSpatialGasLedgerSchema: spatialSource?.schema || null,
+    sourceSpatialGasLedgerStatus: spatialSource?.status || null,
+    sourceSpatialGasLedgerGenerationId:
+      source.sourceSpatialGasLedgerGenerationId
+      ?? spatialSource?.spatialEpochGenerationId
+      ?? null,
+    epochIdentity: spatialSource?.epochIdentity
+      ? cloneSerializableValue(spatialSource.epochIdentity)
+      : null,
+    consumerAccessProtocol: source.consumerAccessProtocol || null,
+    finalConsumerReleaseRequired: source.finalConsumerReleaseRequired === true,
+    scientificValidation: source.scientificValidation === true,
+    gasValidation: source.gasValidation === true,
+    fullPhysicsValidation: source.fullPhysicsValidation === true
+  };
 }
 
 function cloneSerializableValue(value) {
@@ -2157,8 +2395,52 @@ export function publishUlgSphMlsMpmSameDeviceHotBufferSource({
   };
 }
 
+function resolveWorkerRetainedPublicationLaneState({
+  laneId = null,
+  stateKey = null,
+  candidate = null,
+  lease = null
+} = {}) {
+  const resolveConsistent = (label, values) => {
+    const normalized = values
+      .map((value) => normalizeString(value, null))
+      .filter(Boolean);
+    const distinct = [...new Set(normalized)];
+    if (distinct.length > 1) {
+      throw new TypeError(
+        `worker-retained publication rejects conflicting ${label}: ${distinct.join(' != ')}`
+      );
+    }
+    return distinct[0] || null;
+  };
+  return {
+    laneId: resolveConsistent('laneId', [
+      laneId,
+      candidate?.laneId,
+      lease?.laneId
+    ]),
+    stateKey: resolveConsistent('stateKey', [
+      stateKey,
+      candidate?.stateKey,
+      lease?.stateKey
+    ])
+  };
+}
+
+function workerRunnerExecutionIdentity(workerRunner = null) {
+  if (!workerRunner) return null;
+  if (
+    typeof workerRunner === 'object'
+    && 'worker' in workerRunner
+  ) {
+    return workerRunner.worker || null;
+  }
+  return workerRunner;
+}
+
 function buildWorkerRetainedPortableMaterializationContract({
   cacheKey = null,
+  laneId = null,
   stateKey = null,
   sourceHotBufferKey = null,
   sourceMode = 'worker-retained-buffer-refs',
@@ -2180,6 +2462,7 @@ function buildWorkerRetainedPortableMaterializationContract({
     status: 'blocked-portable-compact-buffer-snapshot-required',
     reason: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
     cacheKey,
+    laneId,
     stateKey,
     sourceHotBufferKey,
     sourceMode,
@@ -2212,6 +2495,7 @@ function buildWorkerRetainedPortableMaterializationContract({
 
 function buildWorkerRetainedAccessContract({
   cacheKey = null,
+  laneId = null,
   stateKey = null,
   hotBufferKey = null,
   sourceMode = 'worker-retained-buffer-refs',
@@ -2250,6 +2534,7 @@ function buildWorkerRetainedAccessContract({
   ]);
   const portableMaterializationContract = buildWorkerRetainedPortableMaterializationContract({
     cacheKey,
+    laneId,
     stateKey,
     sourceHotBufferKey: hotBufferKey,
     sourceMode,
@@ -2271,6 +2556,7 @@ function buildWorkerRetainedAccessContract({
       ? 'publication-carries-main-thread-addressable-gpu-handles'
       : 'worker-retained-gpu-handles-stay-private-to-the-worker-lane',
     cacheKey,
+    laneId,
     stateKey,
     sourceHotBufferKey: hotBufferKey,
     sourceMode,
@@ -2328,11 +2614,18 @@ function workerRetainedSourceRecordFrom({
   source = null,
   hotBufferKey = null
 } = {}) {
-  if (source && typeof source === 'object') return source;
-  const key = normalizeString(hotBufferKey, null);
+  const key = normalizeString(
+    hotBufferKey,
+    source?.hotBufferKey
+      || source?.sourceHotBufferKey
+      || source?.payload?.hotBufferKey
+      || source?.payload?.sourceHotBufferKey
+      || null
+  );
   if (key && typeof stateManager?.getHotBuffer === 'function') {
     return stateManager.getHotBuffer(key) || null;
   }
+  if (source && typeof source === 'object') return source;
   return null;
 }
 
@@ -2366,15 +2659,83 @@ export function planWorkerRetainedContinuationFromAccessContract({
   requireWorkerRunner = true
 } = {}) {
   const sourceRecord = workerRetainedSourceRecordFrom({ stateManager, source, hotBufferKey });
-  const contract = workerRetainedAccessContract
-    || workerRetainedAccessContractFrom(sourceRecord)
-    || null;
+  const sourceContract = workerRetainedAccessContractFrom(sourceRecord);
+  const contract = workerRetainedAccessContract || sourceContract || null;
+  const requestedHotBufferKey = normalizeString(hotBufferKey, null);
+  const sourceRecordHotBufferKey = normalizeString(
+    sourceRecord?.hotBufferKey || sourceRecord?.payload?.hotBufferKey,
+    null
+  );
   const resolvedHotBufferKey = normalizeString(
-    hotBufferKey,
-    sourceRecord?.hotBufferKey
-      || sourceRecord?.payload?.hotBufferKey
+    sourceRecordHotBufferKey,
+    requestedHotBufferKey
       || contract?.sourceHotBufferKey
       || null
+  );
+  const suppliedSourceHotBufferKey = normalizeString(
+    source?.hotBufferKey
+      || source?.sourceHotBufferKey
+      || source?.payload?.hotBufferKey
+      || source?.payload?.sourceHotBufferKey,
+    null
+  );
+  const sourceLaneId = normalizeString(
+    contract?.laneId,
+    sourceRecord?.laneId
+      || sourceRecord?.payload?.laneId
+      || sourceRecord?.workerRetainedBufferImport?.laneId
+      || sourceRecord?.payload?.workerRetainedBufferImport?.laneId
+      || null
+  );
+  const sourceStateKey = normalizeString(
+    contract?.stateKey,
+    sourceRecord?.stateKey
+      || sourceRecord?.payload?.stateKey
+      || sourceRecord?.workerRetainedBufferImport?.stateKey
+      || sourceRecord?.payload?.workerRetainedBufferImport?.stateKey
+      || null
+  );
+  const normalizedRequestedLaneId = normalizeString(requestedLaneId, null);
+  const normalizedRequestedStateKey = normalizeString(requestedStateKey, null);
+  const explicitContractIdentityMismatch = Boolean(
+    workerRetainedAccessContract
+    && sourceContract
+    && (
+      (
+        normalizeString(workerRetainedAccessContract.sourceHotBufferKey, null)
+        && normalizeString(sourceContract.sourceHotBufferKey, null)
+        && normalizeString(workerRetainedAccessContract.sourceHotBufferKey, null)
+          !== normalizeString(sourceContract.sourceHotBufferKey, null)
+      )
+      || (
+        normalizeString(workerRetainedAccessContract.laneId, null)
+        && normalizeString(sourceContract.laneId, null)
+        && normalizeString(workerRetainedAccessContract.laneId, null)
+          !== normalizeString(sourceContract.laneId, null)
+      )
+      || (
+        normalizeString(workerRetainedAccessContract.stateKey, null)
+        && normalizeString(sourceContract.stateKey, null)
+        && normalizeString(workerRetainedAccessContract.stateKey, null)
+          !== normalizeString(sourceContract.stateKey, null)
+      )
+    )
+  );
+  const suppliedSourceIdentityMismatch = Boolean(
+    source
+    && source !== sourceRecord
+    && (
+      (suppliedSourceHotBufferKey && resolvedHotBufferKey
+        && suppliedSourceHotBufferKey !== resolvedHotBufferKey)
+      || (normalizeString(source?.laneId || source?.payload?.laneId, null)
+        && sourceLaneId
+        && normalizeString(source?.laneId || source?.payload?.laneId, null)
+          !== sourceLaneId)
+      || (normalizeString(source?.stateKey || source?.payload?.stateKey, null)
+        && sourceStateKey
+        && normalizeString(source?.stateKey || source?.payload?.stateKey, null)
+          !== sourceStateKey)
+    )
   );
   const requiredFamilies = uniqueStringList(requiredOutputFamilies);
   const outputFamilies = uniqueStringList(
@@ -2399,25 +2760,76 @@ export function planWorkerRetainedContinuationFromAccessContract({
       || sourceRecord?.payload?.localBufferRefs
       || []
   );
-  const resolvedWorkerRunner = workerRunner || sourceRecord?.workerRunner || sourceRecord?.workerBackend || null;
+  const sourceWorkerRunner = sourceRecord?.workerRunner
+    || sourceRecord?.workerBackend
+    || null;
+  const sourceWorkerExecutionIdentity = sourceRecord?.workerExecutionIdentity || null;
+  const consumerWorkerExecutionIdentity = workerRunnerExecutionIdentity(workerRunner);
+  const presentationPromotionCandidate = sourceRecord?.compactPublicationCandidate
+    || sourceRecord?.payload?.compactPublicationCandidate
+    || null;
+  const runnerlessPresentationContinuation = Boolean(
+    requireWorkerRunner === false
+    && presentationPromotionCandidate?.schema
+      === ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA
+    && presentationPromotionCandidate?.sameWorkerGpuHandoff === true
+  );
   const sameWorkerModeAccepted = acceptedConsumerModes.includes('same-worker-lane-retained-buffer-ref')
     || contract?.workerContinuationProtocol === 'same-worker-lane-retained-buffer-ref'
     || contract?.consumerAccessProtocol === 'same-worker-lane-retained-buffer-ref';
-  const blocker = !contract
-    ? 'worker-retained-access-contract-missing'
-    : (contract.schema !== ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA
+  const blocker = !sourceRecord
+    ? 'worker-retained-source-hot-record-missing'
+    : (!contract
+      ? 'worker-retained-access-contract-missing'
+      : (contract.schema !== ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA
       ? 'worker-retained-access-contract-schema-mismatch'
-      : (missingOutputFamilies.length > 0
-        ? 'worker-retained-continuation-output-family-mismatch'
-        : (!sameWorkerModeAccepted
-          ? 'same-worker-retained-ref-consumer-mode-not-accepted'
-          : (workerRetainedBufferRefs.length === 0
-            ? 'worker-retained-buffer-refs-missing'
-            : (contract.workerLocal === false
-              ? 'worker-retained-source-not-worker-local'
-              : (requireWorkerRunner !== false && !resolvedWorkerRunner
-                ? 'worker-retained-source-worker-runner-missing'
-                : null))))));
+      : (requestedHotBufferKey && sourceRecordHotBufferKey
+        && requestedHotBufferKey !== sourceRecordHotBufferKey
+        ? 'worker-retained-source-hot-buffer-key-mismatch'
+        : (contract?.sourceHotBufferKey && sourceRecordHotBufferKey
+          && contract.sourceHotBufferKey !== sourceRecordHotBufferKey
+          ? 'worker-retained-access-contract-hot-buffer-key-mismatch'
+          : (explicitContractIdentityMismatch
+            ? 'worker-retained-access-contract-identity-mismatch'
+            : (suppliedSourceIdentityMismatch
+              ? 'worker-retained-source-identity-mismatch'
+              : (missingOutputFamilies.length > 0
+                ? 'worker-retained-continuation-output-family-mismatch'
+                : (!sameWorkerModeAccepted
+                  ? 'same-worker-retained-ref-consumer-mode-not-accepted'
+                  : (workerRetainedBufferRefs.length === 0
+                    ? 'worker-retained-buffer-refs-missing'
+                    : (contract.workerLocal === false
+                      ? 'worker-retained-source-not-worker-local'
+                      : (!sourceLaneId
+                        ? 'worker-retained-source-lane-id-missing'
+                        : (!normalizedRequestedLaneId
+                          ? 'worker-retained-continuation-lane-id-missing'
+                          : (normalizedRequestedLaneId !== sourceLaneId
+                            ? 'worker-retained-continuation-lane-id-mismatch'
+                            : (!sourceStateKey
+                              ? 'worker-retained-source-state-key-missing'
+                              : (!normalizedRequestedStateKey
+                                ? 'worker-retained-continuation-state-key-missing'
+                                : (normalizedRequestedStateKey !== sourceStateKey
+                                  ? 'worker-retained-continuation-state-key-mismatch'
+                                  : (requireWorkerRunner === false
+                                    && !runnerlessPresentationContinuation
+                                    ? 'worker-retained-runnerless-continuation-not-presentation-owned'
+                                    : (!runnerlessPresentationContinuation
+                                      && !sourceWorkerExecutionIdentity
+                                      ? 'worker-retained-source-worker-identity-missing'
+                                      : (!runnerlessPresentationContinuation
+                                        && !workerRunner
+                                        ? 'worker-retained-continuation-worker-runner-missing'
+                                        : (!runnerlessPresentationContinuation
+                                          && !consumerWorkerExecutionIdentity
+                                          ? 'worker-retained-continuation-worker-identity-missing'
+                                          : (!runnerlessPresentationContinuation
+                                            && consumerWorkerExecutionIdentity
+                                              !== sourceWorkerExecutionIdentity
+                                            ? 'worker-retained-continuation-worker-identity-mismatch'
+                                            : null)))))))))))))))))))));
   const ready = !blocker;
   return {
     schema: ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA,
@@ -2429,10 +2841,11 @@ export function planWorkerRetainedContinuationFromAccessContract({
     consumerMode: ready ? 'same-worker-lane-retained-buffer-ref' : null,
     consumerStageId: normalizeString(consumerStageId, null),
     consumerLawNodeId: normalizeString(consumerLawNodeId, null),
-    requestedLaneId: normalizeString(requestedLaneId, null),
-    requestedStateKey: normalizeString(requestedStateKey, null),
+    requestedLaneId: normalizedRequestedLaneId,
+    requestedStateKey: normalizedRequestedStateKey,
     cacheKey: contract?.cacheKey || sourceRecord?.cacheKey || sourceRecord?.payload?.cacheKey || null,
-    stateKey: contract?.stateKey || sourceRecord?.stateKey || sourceRecord?.payload?.stateKey || null,
+    laneId: sourceLaneId,
+    stateKey: sourceStateKey,
     sourceHotBufferKey: resolvedHotBufferKey,
     sourceStage: contract?.sourceStage || sourceRecord?.sourceStage || sourceRecord?.payload?.sourceStage || null,
     sourceNodeId: contract?.sourceNodeId || sourceRecord?.sourceNodeId || sourceRecord?.payload?.sourceNodeId || null,
@@ -2467,7 +2880,16 @@ export function planWorkerRetainedContinuationFromAccessContract({
     workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
     localBufferRefs,
     localBufferRefCount: localBufferRefs.length,
-    workerRunnerAvailable: Boolean(resolvedWorkerRunner),
+    workerRunnerAvailable: Boolean(workerRunner || sourceWorkerRunner),
+    sourceWorkerExecutionIdentityAvailable: Boolean(sourceWorkerExecutionIdentity),
+    consumerWorkerExecutionIdentityAvailable: Boolean(consumerWorkerExecutionIdentity),
+    workerExecutionIdentityMatched: runnerlessPresentationContinuation
+      ? true
+      : Boolean(
+          sourceWorkerExecutionIdentity
+          && consumerWorkerExecutionIdentity === sourceWorkerExecutionIdentity
+        ),
+    runnerlessPresentationContinuation,
     sourceRecordStatus: sourceRecord?.status || sourceRecord?.payload?.status || null,
     sourceRecordSchema: sourceRecord?.schema || sourceRecord?.payload?.schema || null,
     accessContractStatus: contract?.status || null,
@@ -2483,6 +2905,7 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
   stateManager = null,
   nodeKernel = null,
   cacheKey = null,
+  laneId = null,
   stateKey = null,
   hotBufferKey = null,
   hotBufferKeyPrefix = null,
@@ -2511,8 +2934,15 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
   if (workerRetainedBufferRefs.length === 0) {
     throw new TypeError('worker retained hot-buffer publication requires worker-retained buffer refs');
   }
-  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || candidate.laneId || null);
-  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const publicationIdentity = resolveWorkerRetainedPublicationLaneState({
+    laneId,
+    stateKey,
+    candidate,
+    lease
+  });
+  const resolvedLaneId = publicationIdentity.laneId;
+  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || resolvedLaneId || null);
+  const resolvedStateKey = publicationIdentity.stateKey;
   const resolvedHotBufferKey = makeHotBufferKey({
     hotBufferKey,
     hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:mechanics-worker-retained-hot-buffer-source',
@@ -2530,10 +2960,12 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
   );
   const sameDeviceRetainedBufferImportAvailable = Boolean(normalizedSameDeviceRetainedBufferImport);
   const committedAt = Date.now();
+  const workerExecutionIdentity = workerRunnerExecutionIdentity(workerRunner);
   const workerRetainedBufferImport = {
     schema: ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
     status: 'worker-retained-buffer-source-ready',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     sourceHotBufferKey: resolvedHotBufferKey,
     sameDevice: false,
@@ -2557,6 +2989,7 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
   const outputFamilies = uniqueStringList(candidate.outputFamilies || ['sph-particle-state', 'mls-mpm-mechanics']);
   const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceMode: workerRetainedBufferImport.sourceMode,
@@ -2585,6 +3018,7 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     schema: ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-hot-buffer-source-stored',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceSchema: candidate.schema || null,
@@ -2598,6 +3032,7 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     workerRunner,
     workerBackend: workerRunner,
+    workerExecutionIdentity,
     workerRetainedBufferRefs,
     retainedBufferRefs: workerRetainedBufferRefs,
     localBufferRefs: [],
@@ -2628,6 +3063,7 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     nodeKernelPresent: Boolean(nodeKernel),
     nodeId: nodeKernel?.nodeId || null,
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     committedAt,
@@ -2638,6 +3074,7 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     sourceNodeId,
     sourceStage,
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    workerExecutionIdentityAvailable: Boolean(workerExecutionIdentity),
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
     localBufferRefs: [],
@@ -2799,6 +3236,7 @@ export function admitPresentationWorkerRetainedStatePromotionCandidate({
     stateManager,
     nodeKernel,
     cacheKey: resolvedCacheKey,
+    laneId: candidate.laneId || null,
     stateKey: resolvedStateKey,
     hotBufferKey,
     hotBufferKeyPrefix:
@@ -4890,6 +5328,7 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
   stateManager = null,
   nodeKernel = null,
   cacheKey = null,
+  laneId = null,
   stateKey = null,
   hotBufferKey = null,
   hotBufferKeyPrefix = null,
@@ -4919,8 +5358,15 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
   if (workerRetainedBufferRefs.length === 0) {
     throw new TypeError('thermal phase worker retained publication requires worker-retained thermal buffer refs');
   }
-  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || candidate.laneId || null);
-  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const publicationIdentity = resolveWorkerRetainedPublicationLaneState({
+    laneId,
+    stateKey,
+    candidate,
+    lease
+  });
+  const resolvedLaneId = publicationIdentity.laneId;
+  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || resolvedLaneId || null);
+  const resolvedStateKey = publicationIdentity.stateKey;
   const resolvedHotBufferKey = makeHotBufferKey({
     hotBufferKey,
     hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:thermal-phase-worker-retained-hot-buffer-source',
@@ -4929,10 +5375,12 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     lease
   });
   const committedAt = Date.now();
+  const workerExecutionIdentity = workerRunnerExecutionIdentity(workerRunner);
   const workerRetainedBufferImport = {
     schema: ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
     status: 'thermal-phase-worker-retained-buffer-source-ready',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     sourceHotBufferKey: resolvedHotBufferKey,
     sameDevice: false,
@@ -4952,6 +5400,7 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
   const outputFamilies = uniqueStringList(candidate.outputFamilies || ['sph-thermo-phase']);
   const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceMode: workerRetainedBufferImport.sourceMode,
@@ -4969,6 +5418,7 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     schema: ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-thermal-phase-hot-buffer-source-stored',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceSchema: candidate.schema || null,
@@ -4982,6 +5432,7 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     workerRunner,
     workerBackend: workerRunner,
+    workerExecutionIdentity,
     workerRetainedBufferRefs,
     retainedBufferRefs: workerRetainedBufferRefs,
     localBufferRefs: [],
@@ -5002,6 +5453,7 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     nodeKernelPresent: Boolean(nodeKernel),
     nodeId: nodeKernel?.nodeId || null,
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     committedAt,
@@ -5012,6 +5464,7 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     sourceNodeId,
     sourceStage,
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    workerExecutionIdentityAvailable: Boolean(workerExecutionIdentity),
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
     localBufferRefs: [],
@@ -5076,11 +5529,53 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
   const retainedGasCellFieldSource = retainedGasCellFieldSourceFrom(sourceObject)
     || retainedGasCellFieldSourceFrom(resolvedAdmission)
     || null;
+  const retainedSourceReady = retainedGasCellFieldSourceReady(
+    retainedGasCellFieldSource
+  );
+  const exactV2RetainedSourceIdentity =
+    exactRetainedGasCellFieldSourceIdentity(retainedGasCellFieldSource);
+  const exactV2RetainedSourceReady =
+    exactRetainedGasCellFieldSourceReady(retainedGasCellFieldSource);
+  if (exactV2RetainedSourceIdentity && !exactV2RetainedSourceReady) {
+    throw new TypeError(
+      'pressure/interface gas-cell field import rejects unavailable exact v2 authority lifecycle'
+    );
+  }
+  if (exactV2RetainedSourceIdentity) {
+    assertExactRetainedGasCellFieldSourceAliases(
+      sourceObject,
+      retainedGasCellFieldSource
+    );
+  }
+  const workerLocalRetainedSourceReady = retainedGasCellFieldWorkerLocalSourceReady(
+    retainedGasCellFieldSource
+  );
+  const resolvedGasPressureCellsBufferCandidate = exactV2RetainedSourceReady
+    ? retainedGasCellFieldSource.gasPressureCellsBuffer
+    : (sourceObject.gasPressureCellsBuffer
+      || sourceObject.retainedGasPressureCellsBuffer
+      || sourceObject.pressureInterfaceGasPressureCellsBuffer
+      || retainedGasCellFieldSource?.gasPressureCellsBuffer
+      || retainedGasCellFieldSource?.retainedGasPressureCellsBuffer
+      || retainedGasCellFieldSource?.pressureInterfaceGasPressureCellsBuffer
+      || null);
+  const resolvedGasPressureCellsBuffer = workerRetainedBufferRefDescriptor(
+    resolvedGasPressureCellsBufferCandidate
+  ) ? null : resolvedGasPressureCellsBufferCandidate;
   const admissionApproved = resolvedAdmission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
     && resolvedAdmission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
     && resolvedAdmission?.gasCellFieldConsumptionApproved === true;
   if (!admissionApproved) {
     throw new TypeError('pressure/interface gas-cell field import requires admitted field-consumption evidence');
+  }
+  if (
+    exactV2RetainedSourceReady
+    && resolvedAdmission.retainedGasCellFieldSource
+      !== retainedGasCellFieldSource
+  ) {
+    throw new TypeError(
+      'exact v2 gas-pressure import requires admission for the same producer-issued source identity'
+    );
   }
   const resolvedRetainedGasPressureBufferRefs = retainedGasPressureBufferRefs.length > 0
     ? uniqueStringList(retainedGasPressureBufferRefs)
@@ -5098,15 +5593,22 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
         resolvedAdmission.workerRetainedGasPressureBufferRefs,
         retainedGasCellFieldSource?.workerRetainedGasPressureBufferRefs
       );
-  if (resolvedRetainedGasPressureBufferRefs.length === 0 && resolvedWorkerRetainedGasPressureBufferRefs.length === 0) {
+  if (
+    !exactV2RetainedSourceReady
+    && resolvedRetainedGasPressureBufferRefs.length === 0
+    && resolvedWorkerRetainedGasPressureBufferRefs.length === 0
+  ) {
     throw new TypeError('pressure/interface gas-cell field import requires retained gas-cell buffer refs');
   }
-  if (
-    resolvedGasCellFieldSnapshot?.localPressureGradientReady !== true
-    || !Array.isArray(resolvedGasCellFieldSnapshot?.cells)
-    || resolvedGasCellFieldSnapshot.cells.length === 0
-  ) {
-    throw new TypeError('pressure/interface gas-cell field import requires a ready local gas-cell snapshot');
+  const snapshotReady = Boolean(
+    resolvedGasCellFieldSnapshot?.localPressureGradientReady === true
+    && Array.isArray(resolvedGasCellFieldSnapshot?.cells)
+    && resolvedGasCellFieldSnapshot.cells.length > 0
+  );
+  if (!snapshotReady && !retainedSourceReady && !workerLocalRetainedSourceReady) {
+    throw new TypeError(
+      'pressure/interface gas-cell field import requires a ready local snapshot, retained same-device source, or worker-local retained source'
+    );
   }
   const resolvedCacheKey = normalizeString(cacheKey, sourceObject.cacheKey || sourceObject.laneId || null);
   const resolvedStateKey = normalizeString(stateKey, sourceObject.stateKey || null);
@@ -5117,31 +5619,118 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     stateKey: resolvedStateKey,
     lease
   });
-  const gasPressureCellRowCount = Math.max(
-    0,
-    Math.trunc(finiteSeedNumber(
-      sourceObject.pressureInterfaceGasPressureCellRowCount
-        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowCount,
-      resolvedGasCellFieldSnapshot.cells.length
-    ))
-  );
-  const gasPressureCellRowStrideFloats = Math.max(
-    0,
-    Math.trunc(finiteSeedNumber(
-      sourceObject.pressureInterfaceGasPressureCellRowStrideFloats
-        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowStrideFloats,
-      12
-    ))
-  );
-  const gasPressureCellRowByteLength = Math.max(
-    0,
-    Math.trunc(finiteSeedNumber(
-      sourceObject.pressureInterfaceGasPressureCellRowByteLength
-        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowByteLength,
-      gasPressureCellRowCount * gasPressureCellRowStrideFloats * Float32Array.BYTES_PER_ELEMENT
-    ))
-  );
-  const pressureInterfaceGasCellFieldImport = {
+  const gasPressureCellRowCount = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowCount,
+        0
+      )))
+    : Math.max(
+        0,
+        Math.trunc(finiteSeedNumber(
+          sourceObject.pressureInterfaceGasPressureCellRowCount
+            ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowCount,
+          resolvedGasCellFieldSnapshot?.cells?.length ?? 0
+        ))
+      );
+  const gasPressureCellRowCapacity = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowCapacity
+          ?? retainedGasCellFieldSource.gasPressureCellRowCapacity,
+        0
+      )))
+    : Math.max(
+        0,
+        Math.trunc(finiteSeedNumber(
+          sourceObject.pressureInterfaceGasPressureCellRowCapacity
+            ?? sourceObject.gasPressureCellRowCapacity
+            ?? retainedGasCellFieldSource
+              ?.pressureInterfaceGasPressureCellRowCapacity
+            ?? retainedGasCellFieldSource?.gasPressureCellRowCapacity,
+          gasPressureCellRowCount
+        ))
+      );
+  const gasPressureCellRowStrideFloats = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowStrideFloats,
+        0
+      )))
+    : Math.max(
+        0,
+        Math.trunc(finiteSeedNumber(
+          sourceObject.pressureInterfaceGasPressureCellRowStrideFloats
+            ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowStrideFloats,
+          12
+        ))
+      );
+  const gasPressureCellRowByteLength = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowByteLength,
+        gasPressureCellRowCapacity
+          * gasPressureCellRowStrideFloats
+          * Float32Array.BYTES_PER_ELEMENT
+      )))
+    : Math.max(
+        0,
+        Math.trunc(finiteSeedNumber(
+          sourceObject.pressureInterfaceGasPressureCellRowByteLength
+            ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowByteLength,
+          gasPressureCellRowCount
+            * gasPressureCellRowStrideFloats
+            * Float32Array.BYTES_PER_ELEMENT
+        ))
+      );
+  const retainedSourceReleaseAfterFinalConsumerQueue =
+    exactV2RetainedSourceReady
+      ? retainedGasCellFieldSource.releaseAfterFinalConsumerQueue
+      : (sourceObject.releaseAfterFinalConsumerQueue
+        || retainedGasCellFieldSource?.releaseAfterFinalConsumerQueue
+        || null);
+  let hotBufferRecord = null;
+  let pressureInterfaceGasCellFieldImport = null;
+  let releaseScheduled = false;
+  const releaseAfterFinalConsumerQueue =
+    typeof retainedSourceReleaseAfterFinalConsumerQueue === 'function'
+      ? () => {
+          if (releaseScheduled) return false;
+          const scheduled = retainedSourceReleaseAfterFinalConsumerQueue() === true;
+          if (!scheduled) return false;
+          releaseScheduled = true;
+          pressureInterfaceGasCellFieldImport.lifecycleStatus =
+            'retained-gas-cell-final-consumer-release-scheduled';
+          pressureInterfaceGasCellFieldImport.releaseScheduled = true;
+          if (hotBufferRecord) {
+            hotBufferRecord.status =
+              'pressure-interface-gas-cell-field-import-final-consumer-release-scheduled';
+            hotBufferRecord.lifecycleStatus =
+              pressureInterfaceGasCellFieldImport.lifecycleStatus;
+            hotBufferRecord.releaseScheduled = true;
+          }
+          const releasePromise = exactV2RetainedSourceReady
+            ? retainedGasCellFieldSource.releasePromise
+            : (sourceObject.releasePromise
+              || retainedGasCellFieldSource?.releasePromise
+              || sourceObject.spatialGasLedgerEosExecution?.releasePromise
+              || retainedGasCellFieldSource?.spatialGasLedgerEosExecution?.releasePromise
+              || null);
+          if (typeof releasePromise?.then === 'function') {
+            Promise.resolve(releasePromise).then((released) => {
+              if (released !== true) return;
+              pressureInterfaceGasCellFieldImport.lifecycleStatus =
+                'retained-gas-cell-final-consumer-released';
+              pressureInterfaceGasCellFieldImport.released = true;
+              if (hotBufferRecord) {
+                hotBufferRecord.status =
+                  'pressure-interface-gas-cell-field-import-final-consumer-released';
+                hotBufferRecord.lifecycleStatus =
+                  pressureInterfaceGasCellFieldImport.lifecycleStatus;
+                hotBufferRecord.released = true;
+              }
+            });
+          }
+          return true;
+        }
+      : null;
+  pressureInterfaceGasCellFieldImport = {
     schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
     status: 'pressure-interface-gas-cell-field-import-ready',
     cacheKey: resolvedCacheKey,
@@ -5154,16 +5743,57 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowCapacity: gasPressureCellRowCapacity,
+    gasPressureCellLogicalCountGpuAuthored: exactV2RetainedSourceReady,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
-    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
-    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
+    pressureInterfaceGasCellFieldAdmission: resolvedAdmission,
+    retainedGasCellFieldSource,
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
+    gasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellRowsBufferRetained:
+      retainedSourceReady || workerLocalRetainedSourceReady,
+    sameDevice: retainedSourceReady,
+    workerLocal: workerLocalRetainedSourceReady,
+    deviceId: retainedGasCellFieldSource?.deviceId || null,
+    lifecycleStatus: 'retained-gas-cell-final-consumer-available',
+    releaseScheduled: false,
+    released: false,
+    releaseAfterFinalConsumerQueue,
     stateManagerAdmissionRequired: true,
     authoritativeStateMutation: false
   };
+  const retainedGasCellFieldSourceTransport =
+    retainedGasCellFieldSourceTransportDescriptor(retainedGasCellFieldSource);
+  const pressureInterfaceGasCellFieldAdmissionTransport = {
+    ...cloneSerializableValue({
+      ...resolvedAdmission,
+      retainedGasCellFieldSource: null
+    }),
+    retainedGasCellFieldSource: retainedGasCellFieldSourceTransport
+  };
+  const pressureInterfaceGasCellFieldImportTransport = {
+    ...cloneSerializableValue({
+      ...pressureInterfaceGasCellFieldImport,
+      retainedGasCellFieldSource: null,
+      pressureInterfaceGasCellFieldAdmission: null,
+      gasPressureCellsBuffer: null,
+      retainedGasPressureCellsBuffer: null,
+      pressureInterfaceGasPressureCellsBuffer: null,
+      releaseAfterFinalConsumerQueue: null
+    }),
+    retainedGasCellFieldSource: retainedGasCellFieldSourceTransport,
+    pressureInterfaceGasCellFieldAdmission:
+      pressureInterfaceGasCellFieldAdmissionTransport
+  };
+  delete pressureInterfaceGasCellFieldImportTransport.gasPressureCellsBuffer;
+  delete pressureInterfaceGasCellFieldImportTransport.retainedGasPressureCellsBuffer;
+  delete pressureInterfaceGasCellFieldImportTransport.pressureInterfaceGasPressureCellsBuffer;
+  delete pressureInterfaceGasCellFieldImportTransport.releaseAfterFinalConsumerQueue;
   const committedAt = Date.now();
-  const hotBufferRecord = {
+  hotBufferRecord = {
     schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'pressure-interface-gas-cell-field-import-hot-buffer-source-stored',
     cacheKey: resolvedCacheKey,
@@ -5177,12 +5807,22 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowCapacity: gasPressureCellRowCapacity,
+    gasPressureCellLogicalCountGpuAuthored: exactV2RetainedSourceReady,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
-    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
-    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
+    pressureInterfaceGasCellFieldAdmission: resolvedAdmission,
+    retainedGasCellFieldSource,
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
-    pressureInterfaceGasCellFieldImport
+    gasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    pressureInterfaceGasCellFieldImport,
+    sameDevice: retainedSourceReady,
+    workerLocal: workerLocalRetainedSourceReady,
+    lifecycleStatus: pressureInterfaceGasCellFieldImport.lifecycleStatus,
+    releaseScheduled: false,
+    released: false
   };
   stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-pressure-interface-gas-cell-field-imports');
@@ -5207,12 +5847,15 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowCapacity: gasPressureCellRowCapacity,
+    gasPressureCellLogicalCountGpuAuthored: exactV2RetainedSourceReady,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
-    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
-    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
+    pressureInterfaceGasCellFieldAdmission:
+      pressureInterfaceGasCellFieldAdmissionTransport,
+    retainedGasCellFieldSource: retainedGasCellFieldSourceTransport,
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
-    pressureInterfaceGasCellFieldImport
+    pressureInterfaceGasCellFieldImport: pressureInterfaceGasCellFieldImportTransport
   };
   const commitDelta = {
     taskId: deltaTaskId,
@@ -5229,7 +5872,13 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
     commitDeltaScope: deltaScope,
-    commitDeltaTimestamp: committedAt
+    commitDeltaTimestamp: committedAt,
+    pressureInterfaceGasCellFieldAdmission: resolvedAdmission,
+    retainedGasCellFieldSource,
+    gasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellsBuffer: resolvedGasPressureCellsBuffer,
+    pressureInterfaceGasCellFieldImport
   };
 }
 
@@ -5262,12 +5911,36 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     || sourceObject.gasCellField
     || sourceObject.pressureFeedback?.gasCellField
     || null;
-  if (
-    resolvedGasCellFieldSnapshot?.localPressureGradientReady !== true
-    || !Array.isArray(resolvedGasCellFieldSnapshot?.cells)
-    || resolvedGasCellFieldSnapshot.cells.length === 0
-  ) {
-    throw new TypeError('pressure/interface gas-cell field admission requires a ready local gas-cell snapshot');
+  const retainedSourceReady = retainedGasCellFieldSourceReady(
+    retainedGasCellFieldSource
+  );
+  const exactV2RetainedSourceIdentity =
+    exactRetainedGasCellFieldSourceIdentity(retainedGasCellFieldSource);
+  const exactV2RetainedSourceReady =
+    exactRetainedGasCellFieldSourceReady(retainedGasCellFieldSource);
+  if (exactV2RetainedSourceIdentity && !exactV2RetainedSourceReady) {
+    throw new TypeError(
+      'pressure/interface gas-cell field admission rejects unavailable exact v2 authority lifecycle'
+    );
+  }
+  if (exactV2RetainedSourceIdentity) {
+    assertExactRetainedGasCellFieldSourceAliases(
+      sourceObject,
+      retainedGasCellFieldSource
+    );
+  }
+  const workerLocalRetainedSourceReady = retainedGasCellFieldWorkerLocalSourceReady(
+    retainedGasCellFieldSource
+  );
+  const snapshotReady = Boolean(
+    resolvedGasCellFieldSnapshot?.localPressureGradientReady === true
+    && Array.isArray(resolvedGasCellFieldSnapshot?.cells)
+    && resolvedGasCellFieldSnapshot.cells.length > 0
+  );
+  if (!snapshotReady && !retainedSourceReady && !workerLocalRetainedSourceReady) {
+    throw new TypeError(
+      'pressure/interface gas-cell field admission requires a ready local snapshot, retained same-device source, or worker-local retained source'
+    );
   }
   const resolvedRetainedGasPressureBufferRefs = retainedGasPressureBufferRefs.length > 0
     ? uniqueStringList(retainedGasPressureBufferRefs)
@@ -5281,7 +5954,11 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
         sourceObject.workerRetainedGasPressureBufferRefs,
         retainedGasCellFieldSource?.workerRetainedGasPressureBufferRefs
       );
-  if (resolvedRetainedGasPressureBufferRefs.length === 0 && resolvedWorkerRetainedGasPressureBufferRefs.length === 0) {
+  if (
+    !exactV2RetainedSourceReady
+    && resolvedRetainedGasPressureBufferRefs.length === 0
+    && resolvedWorkerRetainedGasPressureBufferRefs.length === 0
+  ) {
     throw new TypeError('pressure/interface gas-cell field admission requires retained gas-cell buffer refs');
   }
   const resolvedCacheKey = normalizeString(cacheKey, sourceObject.cacheKey || sourceObject.laneId || null);
@@ -5293,24 +5970,57 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     stateKey: resolvedStateKey,
     lease
   });
-  const gasPressureCellRowCount = Math.max(0, Math.trunc(finiteSeedNumber(
-    sourceObject.pressureInterfaceGasPressureCellRowCount
-      ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowCount,
-    resolvedGasCellFieldSnapshot.cells.length
-  )));
-  const gasPressureCellRowStrideFloats = Math.max(
-    0,
-    Math.trunc(finiteSeedNumber(
-      sourceObject.pressureInterfaceGasPressureCellRowStrideFloats
-        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowStrideFloats,
-      12
-    ))
-  );
-  const gasPressureCellRowByteLength = Math.max(0, Math.trunc(finiteSeedNumber(
-    sourceObject.pressureInterfaceGasPressureCellRowByteLength
-      ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowByteLength,
-    gasPressureCellRowCount * gasPressureCellRowStrideFloats * Float32Array.BYTES_PER_ELEMENT
-  )));
+  const gasPressureCellRowCount = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowCount,
+        0
+      )))
+    : Math.max(0, Math.trunc(finiteSeedNumber(
+        sourceObject.pressureInterfaceGasPressureCellRowCount
+          ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowCount,
+        resolvedGasCellFieldSnapshot?.cells?.length ?? 0
+      )));
+  const gasPressureCellRowCapacity = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowCapacity
+          ?? retainedGasCellFieldSource.gasPressureCellRowCapacity,
+        0
+      )))
+    : Math.max(0, Math.trunc(finiteSeedNumber(
+        sourceObject.pressureInterfaceGasPressureCellRowCapacity
+          ?? sourceObject.gasPressureCellRowCapacity
+          ?? retainedGasCellFieldSource
+            ?.pressureInterfaceGasPressureCellRowCapacity
+          ?? retainedGasCellFieldSource?.gasPressureCellRowCapacity,
+        gasPressureCellRowCount
+      )));
+  const gasPressureCellRowStrideFloats = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowStrideFloats,
+        0
+      )))
+    : Math.max(
+        0,
+        Math.trunc(finiteSeedNumber(
+          sourceObject.pressureInterfaceGasPressureCellRowStrideFloats
+            ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowStrideFloats,
+          12
+        ))
+      );
+  const gasPressureCellRowByteLength = exactV2RetainedSourceReady
+    ? Math.max(0, Math.trunc(finiteSeedNumber(
+        retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowByteLength,
+        gasPressureCellRowCapacity
+          * gasPressureCellRowStrideFloats
+          * Float32Array.BYTES_PER_ELEMENT
+      )))
+    : Math.max(0, Math.trunc(finiteSeedNumber(
+        sourceObject.pressureInterfaceGasPressureCellRowByteLength
+          ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowByteLength,
+        gasPressureCellRowCount
+          * gasPressureCellRowStrideFloats
+          * Float32Array.BYTES_PER_ELEMENT
+      )));
   const pressureInterfaceGasCellFieldAdmission = {
     schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
     status: 'pressure-interface-gas-cell-field-consumption-approved',
@@ -5324,23 +6034,43 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     sourceStage,
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
-    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
+    retainedGasCellFieldSource,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowCapacity: gasPressureCellRowCapacity,
+    gasPressureCellLogicalCountGpuAuthored: exactV2RetainedSourceReady,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     spatialGasSpeciesLedgerSchema: sourceObject.spatialGasSpeciesLedgerSchema
-      || resolvedGasCellFieldSnapshot.spatialGasSpeciesLedgerSchema
+      || resolvedGasCellFieldSnapshot?.spatialGasSpeciesLedgerSchema
       || null,
     spatialGasSpeciesLedgerStatus: sourceObject.spatialGasSpeciesLedgerStatus
-      || resolvedGasCellFieldSnapshot.spatialGasSpeciesLedgerStatus
+      || resolvedGasCellFieldSnapshot?.spatialGasSpeciesLedgerStatus
       || null,
     residentSpatialGasSpeciesLedgerStatus: sourceObject.residentSpatialGasSpeciesLedgerStatus
-      || resolvedGasCellFieldSnapshot.residentSpatialGasSpeciesLedgerStatus
+      || resolvedGasCellFieldSnapshot?.residentSpatialGasSpeciesLedgerStatus
       || null,
-    pressureFieldMode: resolvedGasCellFieldSnapshot.pressureFieldMode || null,
-    pressureFieldResolution: resolvedGasCellFieldSnapshot.pressureFieldResolution || null,
+    pressureFieldMode: resolvedGasCellFieldSnapshot?.pressureFieldMode
+      || retainedGasCellFieldSource?.pressureFieldMode
+      || null,
+    pressureFieldResolution: resolvedGasCellFieldSnapshot?.pressureFieldResolution
+      || retainedGasCellFieldSource?.pressureFieldResolution
+      || null,
+    retainedSameDeviceGasCellFieldSourceReady: retainedSourceReady,
+    retainedWorkerLocalGasCellFieldSourceReady: workerLocalRetainedSourceReady,
+    sameDevice: retainedSourceReady,
+    workerLocal: workerLocalRetainedSourceReady,
+    deviceId: retainedGasCellFieldSource?.deviceId || null,
     authoritativeStateMutation: false,
     stateManagerAdmitted: true
+  };
+  const retainedGasCellFieldSourceTransport =
+    retainedGasCellFieldSourceTransportDescriptor(retainedGasCellFieldSource);
+  const pressureInterfaceGasCellFieldAdmissionTransport = {
+    ...cloneSerializableValue({
+      ...pressureInterfaceGasCellFieldAdmission,
+      retainedGasCellFieldSource: null
+    }),
+    retainedGasCellFieldSource: retainedGasCellFieldSourceTransport
   };
   const committedAt = Date.now();
   const hotBufferRecord = {
@@ -5356,11 +6086,13 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     sourceStage,
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
-    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
+    retainedGasCellFieldSource,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowCapacity: gasPressureCellRowCapacity,
+    gasPressureCellLogicalCountGpuAuthored: exactV2RetainedSourceReady,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
-    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(pressureInterfaceGasCellFieldAdmission),
+    pressureInterfaceGasCellFieldAdmission,
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot)
   };
   stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
@@ -5385,11 +6117,14 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     sourceStage,
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
-    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
+    retainedGasCellFieldSource: retainedGasCellFieldSourceTransport,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowCapacity: gasPressureCellRowCapacity,
+    gasPressureCellLogicalCountGpuAuthored: exactV2RetainedSourceReady,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
-    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(pressureInterfaceGasCellFieldAdmission),
+    pressureInterfaceGasCellFieldAdmission:
+      pressureInterfaceGasCellFieldAdmissionTransport,
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot)
   };
   const commitDelta = {
@@ -5407,7 +6142,9 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
     commitDeltaScope: deltaScope,
-    commitDeltaTimestamp: committedAt
+    commitDeltaTimestamp: committedAt,
+    retainedGasCellFieldSource,
+    pressureInterfaceGasCellFieldAdmission
   };
 }
 
@@ -5415,6 +6152,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
   stateManager = null,
   nodeKernel = null,
   cacheKey = null,
+  laneId = null,
   stateKey = null,
   hotBufferKey = null,
   hotBufferKeyPrefix = null,
@@ -5461,8 +6199,15 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
   if (workerRetainedBufferRefs.length === 0 && retainedPressureBufferRefs.length === 0) {
     throw new TypeError('pressure/interface worker retained publication requires pressure force-row refs');
   }
-  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || candidate.laneId || null);
-  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const publicationIdentity = resolveWorkerRetainedPublicationLaneState({
+    laneId,
+    stateKey,
+    candidate,
+    lease
+  });
+  const resolvedLaneId = publicationIdentity.laneId;
+  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || resolvedLaneId || null);
+  const resolvedStateKey = publicationIdentity.stateKey;
   const resolvedHotBufferKey = makeHotBufferKey({
     hotBufferKey,
     hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:pressure-interface-worker-retained-hot-buffer-source',
@@ -5541,6 +6286,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     throw new TypeError('pressure/interface local gas-cell publication requires admitted gas-cell field consumption evidence');
   }
   const committedAt = Date.now();
+  const workerExecutionIdentity = workerRunnerExecutionIdentity(workerRunner);
   const retainedGasCellFieldSourceReady = localPressureGradientReady
     && gasPressureCellRowsBufferRetained
     && gasPressureCellRowCount > 0
@@ -5551,6 +6297,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
         schema: ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
         status: 'pressure-interface-retained-gas-cell-field-source-ready',
         cacheKey: resolvedCacheKey,
+        laneId: resolvedLaneId,
         stateKey: resolvedStateKey,
         sourceHotBufferKey: resolvedHotBufferKey,
         sourceMode: 'worker-retained-pressure-interface-gas-cell-field-source',
@@ -5593,6 +6340,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
     status: 'pressure-interface-worker-retained-buffer-source-ready',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     sourceHotBufferKey: resolvedHotBufferKey,
     sameDevice: candidate.sameDeviceMainThreadHandlesAvailable === true,
@@ -5644,6 +6392,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
   const outputFamilies = uniqueStringList(candidate.outputFamilies || ['pressure-interface-force-rows']);
   const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceMode: workerRetainedBufferImport.sourceMode,
@@ -5665,6 +6414,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-pressure-interface-hot-buffer-source-stored',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceSchema: candidate.schema || null,
@@ -5678,6 +6428,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     workerRunner,
     workerBackend: workerRunner,
+    workerExecutionIdentity,
     workerRetainedBufferRefs,
     workerRetainedPressureBufferRefs: workerRetainedBufferImport.workerRetainedPressureBufferRefs,
     retainedPressureBufferRefs,
@@ -5727,6 +6478,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     nodeKernelPresent: Boolean(nodeKernel),
     nodeId: nodeKernel?.nodeId || null,
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     committedAt,
@@ -5737,6 +6489,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     sourceNodeId,
     sourceStage,
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    workerExecutionIdentityAvailable: Boolean(workerExecutionIdentity),
     retainedBufferRefs: workerRetainedBufferImport.retainedBufferRefs,
     workerRetainedBufferRefs,
     workerRetainedPressureBufferRefs: workerRetainedBufferImport.workerRetainedPressureBufferRefs,
@@ -5798,6 +6551,7 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
   stateManager = null,
   nodeKernel = null,
   cacheKey = null,
+  laneId = null,
   stateKey = null,
   hotBufferKey = null,
   hotBufferKeyPrefix = null,
@@ -5826,8 +6580,15 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
   if (workerRetainedBufferRefs.length === 0) {
     throw new TypeError('reaction/product worker retained publication requires worker-retained buffer refs');
   }
-  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || candidate.laneId || null);
-  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const publicationIdentity = resolveWorkerRetainedPublicationLaneState({
+    laneId,
+    stateKey,
+    candidate,
+    lease
+  });
+  const resolvedLaneId = publicationIdentity.laneId;
+  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || resolvedLaneId || null);
+  const resolvedStateKey = publicationIdentity.stateKey;
   const resolvedHotBufferKey = makeHotBufferKey({
     hotBufferKey,
     hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:reaction-product-worker-retained-hot-buffer-source',
@@ -5836,10 +6597,12 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     lease
   });
   const committedAt = Date.now();
+  const workerExecutionIdentity = workerRunnerExecutionIdentity(workerRunner);
   const workerRetainedBufferImport = {
     schema: ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
     status: 'reaction-product-worker-retained-buffer-source-ready',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     sourceHotBufferKey: resolvedHotBufferKey,
     sameDevice: false,
@@ -5864,6 +6627,7 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
   ]);
   const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceMode: workerRetainedBufferImport.sourceMode,
@@ -5881,6 +6645,7 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     schema: ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-reaction-product-hot-buffer-source-stored',
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     sourceSchema: candidate.schema || null,
@@ -5894,6 +6659,7 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     workerRunner,
     workerBackend: workerRunner,
+    workerExecutionIdentity,
     workerRetainedBufferRefs,
     retainedBufferRefs: workerRetainedBufferRefs,
     localBufferRefs: [],
@@ -5914,6 +6680,7 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     nodeKernelPresent: Boolean(nodeKernel),
     nodeId: nodeKernel?.nodeId || null,
     cacheKey: resolvedCacheKey,
+    laneId: resolvedLaneId,
     stateKey: resolvedStateKey,
     hotBufferKey: resolvedHotBufferKey,
     committedAt,
@@ -5924,6 +6691,7 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     sourceNodeId,
     sourceStage,
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    workerExecutionIdentityAvailable: Boolean(workerExecutionIdentity),
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
     localBufferRefs: [],
@@ -6354,6 +7122,8 @@ function createDefaultNodeKernelConfig({
   disableNetworkProvider,
   disableBroadcast,
   enableWorkers,
+  requireWorkers,
+  workerBootstrapTimeoutMs,
   enableWebGPU,
   nodeKernelConfig = {}
 }) {
@@ -6367,6 +7137,8 @@ function createDefaultNodeKernelConfig({
     storageMode: 'local',
     enableWebGPU,
     enableWorkers,
+    requireWorkers: requireWorkers === true,
+    workerBootstrapTimeoutMs,
     enableGPUHub: true,
     enablePersistence,
     disableStateNetworkProvider: disableNetworkProvider,
@@ -7823,7 +8595,23 @@ function summarizeWorkerCapability({
   const capabilities = computeManager?.getCapabilities?.() || null;
   const nodeKernelStatus = nodeKernel?.getStatus?.() || null;
   const effectiveEnableWorkers = computeManager?.config?.enableWorkers ?? enableWorkers;
-  const supported = workerConstructorAvailable && effectiveEnableWorkers !== false;
+  const workerRequirement = capabilities?.workerRequirement || stats?.workerRequirement || null;
+  const workerCount = stats?.workerCount ?? capabilities?.workers ?? null;
+  const readyWorkerCount = workerRequirement?.readyWorkerCount
+    ?? (Number.isFinite(Number(workerCount)) ? Number(workerCount) : 0);
+  const workerBootstrapReady = workerRequirement?.required === true
+    ? workerRequirement?.status === 'ready' && readyWorkerCount > 0
+    : readyWorkerCount > 0;
+  const supported = workerConstructorAvailable
+    && effectiveEnableWorkers !== false
+    && workerBootstrapReady;
+  const blocker = !workerConstructorAvailable
+    ? 'worker-constructor-unavailable'
+    : effectiveEnableWorkers === false
+      ? 'enable-workers-false'
+      : workerRequirement?.status === 'blocked'
+        ? (workerRequirement.reason || 'worker-bootstrap-blocked')
+        : 'worker-bootstrap-empty';
   return {
     schema: 'peercompute.ulg.browser-worker-capability.v0',
     status: supported ? 'worker-capability-ready' : 'worker-capability-blocked',
@@ -7837,15 +8625,24 @@ function summarizeWorkerCapability({
       : 'window-or-node',
     crossOriginIsolated: globalThis.crossOriginIsolated === true,
     workerPolicy,
-    workerCount: stats?.workerCount ?? capabilities?.workers ?? null,
+    workerCount,
+    readyWorkerCount,
+    workerBootstrapStatus: workerRequirement?.status || null,
+    workerBootstrapReady,
+    workerRequirement,
     targetWorkers: stats?.targetWorkers ?? capabilities?.targetWorkers ?? workerPolicy?.targetWorkers ?? null,
     workerTasksCompleted: stats?.workerTasksCompleted ?? null,
     inlineTasksCompleted: stats?.inlineTasksCompleted ?? null,
     nodeKernelComputeWorkers: nodeKernelStatus?.compute?.stats?.workerCount ?? null,
-    blocker: supported
-      ? null
-      : (!workerConstructorAvailable ? 'worker-constructor-unavailable' : 'enable-workers-false')
+    blocker: supported ? null : blocker
   };
+}
+
+function createRequiredBrowserWorkerError(reason) {
+  const error = new Error(`ULG browser resident authority requires WebGPU and a bootstrapped browser worker: ${reason}`);
+  error.name = 'UlgRequiredBrowserWorkerError';
+  error.code = 'ERR_ULG_REQUIRED_BROWSER_WORKER_UNAVAILABLE';
+  return error;
 }
 
 export async function createPeerComputeResidentAuthorityHost({
@@ -7867,6 +8664,8 @@ export async function createPeerComputeResidentAuthorityHost({
   disableNetworkProvider = true,
   disableBroadcast = true,
   enableWorkers = true,
+  requireWorkers = false,
+  workerBootstrapTimeoutMs = null,
   enableWebGPU = true,
   gpuDeviceId = 'gpu-device:ulg-browser-resident-host',
   acceptedScopes = ['ulg-sph-resident-pass-dag'],
@@ -7875,6 +8674,12 @@ export async function createPeerComputeResidentAuthorityHost({
   initialState = null,
   onAdmission = null
 } = {}) {
+  if (requireWorkers && enableWorkers === false) {
+    throw createRequiredBrowserWorkerError('workers were disabled by configuration');
+  }
+  if (requireWorkers && typeof globalThis.Worker !== 'function') {
+    throw createRequiredBrowserWorkerError('the browser Worker constructor is unavailable');
+  }
   const {
     NodeKernel,
     ComputeManager,
@@ -7919,6 +8724,8 @@ export async function createPeerComputeResidentAuthorityHost({
         disableNetworkProvider,
         disableBroadcast,
         enableWorkers,
+        requireWorkers,
+        workerBootstrapTimeoutMs,
         enableWebGPU,
         nodeKernelConfig
       }));
@@ -7957,6 +8764,8 @@ export async function createPeerComputeResidentAuthorityHost({
     });
     computeManager = new ComputeManager({
       enableWorkers,
+      requireWorkers,
+      workerBootstrapTimeoutMs: workerBootstrapTimeoutMs ?? undefined,
       enableWebGPU,
       gpuDeviceId,
       gpuHub
@@ -7985,6 +8794,17 @@ export async function createPeerComputeResidentAuthorityHost({
         nodeKernelInitializationError
       }
     });
+  }
+
+  const requiredWorkerCapability = summarizeWorkerCapability({
+    computeManager,
+    nodeKernel,
+    enableWorkers
+  });
+  if (requireWorkers && requiredWorkerCapability.status !== 'worker-capability-ready') {
+    throw createRequiredBrowserWorkerError(
+      requiredWorkerCapability.blocker || 'worker bootstrap did not complete'
+    );
   }
 
   computeManager.ulgResidentComputeTaskModulePath = computeTaskModulePath;
@@ -8167,7 +8987,7 @@ export async function createPeerComputeResidentAuthorityHost({
   }
   const initialRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy: renderOwnershipPolicy,
-    workerCapability: summarizeWorkerCapability({ computeManager, nodeKernel, enableWorkers }),
+    workerCapability: requiredWorkerCapability,
     source: 'peercompute-browser-resident-authority-host'
   });
   const host = {
@@ -8186,7 +9006,7 @@ export async function createPeerComputeResidentAuthorityHost({
     peercomputeResidentStageWorkerBridgeAvailable: typeof createResidentStageWorkerBackend === 'function',
     createUlgMechanicsResidentStageWorkerRunner,
     ulgMechanicsResidentStageWorkerModulePath: resolvedMechanicsResidentStageWorkerModuleUrl,
-    workerCapability: summarizeWorkerCapability({ computeManager, nodeKernel, enableWorkers }),
+    workerCapability: requiredWorkerCapability,
     renderOwnershipPolicy: initialRenderOwnershipPolicy,
     nodeKernelMode,
     nodeKernelAuthority: summarizeNodeKernelAuthority({
@@ -9240,7 +10060,17 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
 }
 
 export async function ensurePeerComputeResidentAuthorityHost(options = {}) {
-  if (sharedHost?.status === 'ready') return sharedHost;
+  if (sharedHost?.status === 'ready') {
+    if (
+      options.requireWorkers === true
+      && sharedHost?.workerCapability?.status !== 'worker-capability-ready'
+    ) {
+      throw createRequiredBrowserWorkerError(
+        sharedHost?.workerCapability?.blocker || 'the shared host lacks a bootstrapped worker'
+      );
+    }
+    return sharedHost;
+  }
   if (!sharedHostPromise) {
     sharedHostPromise = createPeerComputeResidentAuthorityHost(options)
       .then((host) => {

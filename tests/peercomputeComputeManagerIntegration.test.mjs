@@ -1720,6 +1720,20 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gpuResidentLaneId: 'ulg:test:mechanics-stage-gpuhub-worker-thermal',
     gpuResidentLaneStateKey: 'ulg:test:mechanics-stage-gpuhub-worker-thermal-state',
     gpuHubResidentStageWorkerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    residentAuthorityHost: {
+      planWorkerRetainedContinuation(args) {
+        assert.equal(
+          args.hotBufferKey,
+          testWorkerRetainedContinuationPlan.sourceHotBufferKey
+        );
+        assert.ok(args.workerRunner);
+        return {
+          ...testWorkerRetainedContinuationPlan,
+          requestedLaneId: args.requestedLaneId,
+          requestedStateKey: args.requestedStateKey
+        };
+      }
+    },
     gpuHubResidentStageWorkerRetainedContinuationPlan: testWorkerRetainedContinuationPlan,
     gpuHubResidentPressureInterfaceStageWorkerOutputPublisher(payload) {
       pressureInterfaceStagePublicationPayloads.push(payload);
@@ -4239,6 +4253,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     schema: 'peercompute.ulg.mechanics-worker-compact-publication-candidate.v0',
     candidateStatus: 'worker-retained-compact-publication-candidate-ready',
     cacheKey: 'ulg:test:mechanics-publication-cache',
+    laneId: 'ulg:test:mechanics-publication-lane',
     stateKey: 'ulg:test:mechanics-publication-state',
     workerRetainedBufferRefs: [
       'ulg-worker:test:g2p:state',
@@ -4259,6 +4274,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(publication.status, 'worker-retained-mechanics-output-published');
   assert.equal(publication.committed, true);
   assert.equal(publication.sourceStage, 'g2p');
+  assert.equal(publication.laneId, candidate.laneId);
   assert.deepEqual(publication.outputFamilies, candidate.outputFamilies);
   assert.deepEqual(publication.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
   assert.deepEqual(publication.localBufferRefs, []);
@@ -4312,6 +4328,8 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(hotRecord.schema, ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
   assert.equal(hotRecord.status, 'worker-retained-hot-buffer-source-stored');
   assert.equal(hotRecord.workerRunner, workerRunner);
+  assert.equal(hotRecord.workerExecutionIdentity, workerRunner);
+  assert.equal(hotRecord.laneId, candidate.laneId);
   assert.equal(hotRecord.sourceStage, 'g2p');
   assert.deepEqual(hotRecord.localBufferRefs, []);
   assert.deepEqual(hotRecord.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
@@ -4325,6 +4343,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(warmDelta.payload.schema, ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
   assert.equal(warmDelta.payload.status, 'worker-retained-mechanics-output-admitted');
   assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
+  assert.equal(warmDelta.payload.laneId, candidate.laneId);
   assert.equal(warmDelta.payload.workerLocal, true);
   assert.equal(warmDelta.payload.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
   assert.equal(warmDelta.payload.workerRetainedAccessContract.workerContinuationRequired, true);
@@ -4430,12 +4449,14 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     hotBufferKey: promotionAdmission.hotBufferKey,
     requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
     consumerStageId: 'p2g',
-    requestedLaneId: 'ulg:test:presentation-worker-promotion-continuation-lane',
-    requestedStateKey: 'ulg:test:presentation-worker-promotion-continuation-state'
+    requestedLaneId: promotionCandidate.laneId,
+    requestedStateKey: promotionCandidate.stateKey,
+    requireWorkerRunner: false
   });
   assert.equal(promotionContinuationPlan.status, 'same-worker-retained-continuation-ready');
   assert.equal(promotionContinuationPlan.sourceHotBufferKey, promotionAdmission.hotBufferKey);
   assert.equal(promotionContinuationPlan.workerRunnerAvailable, true);
+  assert.equal(promotionContinuationPlan.runnerlessPresentationContinuation, true);
   assert.equal(promotionContinuationPlan.portableSnapshotRequired, true);
   assert.equal(promotionContinuationPlan.portableSnapshotAvailable, false);
   assert.equal(
@@ -4464,7 +4485,8 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     consumerStageId: 'p2g',
     consumerLawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
     requestedLaneId: 'ulg:test:mechanics-publication-lane',
-    requestedStateKey: 'ulg:test:mechanics-publication-state'
+    requestedStateKey: 'ulg:test:mechanics-publication-state',
+    workerRunner
   });
   assert.equal(continuationPlan.schema, ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA);
   assert.equal(continuationPlan.status, 'same-worker-retained-continuation-ready');
@@ -4475,10 +4497,127 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(continuationPlan.workerContinuationRequired, true);
   assert.equal(continuationPlan.mainThreadGpuHandlesAvailable, false);
   assert.equal(continuationPlan.workerRunnerAvailable, true);
+  assert.equal(continuationPlan.workerExecutionIdentityMatched, true);
   assert.deepEqual(continuationPlan.requiredOutputFamilies, ['sph-particle-state', 'mls-mpm-mechanics']);
   assert.deepEqual(continuationPlan.outputFamilies, candidate.outputFamilies);
   assert.deepEqual(continuationPlan.missingOutputFamilies, []);
   assert.deepEqual(continuationPlan.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
+
+  const wrongRunnerContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: candidate.laneId,
+    requestedStateKey: candidate.stateKey,
+    workerRunner: { id: 'wrong-worker-runner' }
+  });
+  assert.equal(
+    wrongRunnerContinuationPlan.blocker,
+    'worker-retained-continuation-worker-identity-mismatch'
+  );
+  const wrongLaneContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: `${candidate.laneId}:wrong`,
+    requestedStateKey: candidate.stateKey,
+    workerRunner
+  });
+  assert.equal(
+    wrongLaneContinuationPlan.blocker,
+    'worker-retained-continuation-lane-id-mismatch'
+  );
+  const wrongStateContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: candidate.laneId,
+    requestedStateKey: `${candidate.stateKey}:wrong`,
+    workerRunner
+  });
+  assert.equal(
+    wrongStateContinuationPlan.blocker,
+    'worker-retained-continuation-state-key-mismatch'
+  );
+  const missingLaneContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedStateKey: candidate.stateKey,
+    workerRunner
+  });
+  assert.equal(
+    missingLaneContinuationPlan.blocker,
+    'worker-retained-continuation-lane-id-missing'
+  );
+  const runnerlessNonPresentationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: candidate.laneId,
+    requestedStateKey: candidate.stateKey,
+    requireWorkerRunner: false
+  });
+  assert.equal(
+    runnerlessNonPresentationPlan.blocker,
+    'worker-retained-runnerless-continuation-not-presentation-owned'
+  );
+  const mismatchedContractPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    workerRetainedAccessContract: {
+      ...publication.workerRetainedAccessContract,
+      laneId: `${candidate.laneId}:forged`
+    },
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: candidate.laneId,
+    requestedStateKey: candidate.stateKey,
+    workerRunner
+  });
+  assert.equal(
+    mismatchedContractPlan.blocker,
+    'worker-retained-access-contract-identity-mismatch'
+  );
+  assert.throws(
+    () => host.publishWorkerRetainedMechanicsStageOutput({
+      candidate,
+      laneId: `${candidate.laneId}:conflict`,
+      workerRunner,
+      sourceStage: 'g2p'
+    }),
+    /rejects conflicting laneId/
+  );
+
+  const originalWorkerIdentity = { id: 'worker-instance-a' };
+  const replacementWorkerIdentity = { id: 'worker-instance-b' };
+  const replaceableWorkerRunner = {
+    worker: originalWorkerIdentity,
+    async runStage() {}
+  };
+  const replacementCandidate = {
+    ...candidate,
+    cacheKey: 'ulg:test:mechanics-publication-replaced-worker-cache',
+    laneId: 'ulg:test:mechanics-publication-replaced-worker-lane',
+    stateKey: 'ulg:test:mechanics-publication-replaced-worker-state'
+  };
+  const replacementPublication = host.publishWorkerRetainedMechanicsStageOutput({
+    candidate: replacementCandidate,
+    workerRunner: replaceableWorkerRunner,
+    sourceStage: 'g2p'
+  });
+  replaceableWorkerRunner.worker = replacementWorkerIdentity;
+  const replacedWorkerContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: replacementPublication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: replacementCandidate.laneId,
+    requestedStateKey: replacementCandidate.stateKey,
+    workerRunner: replaceableWorkerRunner
+  });
+  assert.equal(
+    replacedWorkerContinuationPlan.blocker,
+    'worker-retained-continuation-worker-identity-mismatch'
+  );
 
   const blockedContinuationPlan = host.planWorkerRetainedContinuation({
     hotBufferKey: publication.hotBufferKey,
@@ -4529,6 +4668,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   const sameDeviceCandidate = {
     ...candidate,
     cacheKey: 'ulg:test:mechanics-publication-same-device-cache',
+    laneId: 'ulg:test:mechanics-publication-same-device-lane',
     stateKey: 'ulg:test:mechanics-publication-same-device-state',
     sameDeviceRetainedBufferImport
   };
@@ -4614,8 +4754,9 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     hotBufferKey: sameDevicePublication.hotBufferKey,
     requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
     consumerStageId: 'p2g',
-    requestedLaneId: 'ulg:test:mechanics-publication-lane:same-device',
-    requestedStateKey: 'ulg:test:mechanics-publication-state:same-device'
+    requestedLaneId: sameDeviceCandidate.laneId,
+    requestedStateKey: sameDeviceCandidate.stateKey,
+    workerRunner
   });
   assert.equal(sameDeviceContinuationPlan.status, 'same-worker-retained-continuation-ready');
   assert.equal(sameDeviceContinuationPlan.sameDeviceRetainedBufferImportAvailable, true);
@@ -4875,6 +5016,213 @@ test('ULG resident authority host publishes admitted pressure/interface gas-cell
   assert.equal(admissionWarmDelta.payload.hotBufferKey, admissionPublication.hotBufferKey);
   assert.equal(admissionWarmDelta.payload.retainedGasCellFieldSource.schema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
   assert.equal(warmDelta.payload.pressureInterfaceGasCellFieldImport.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+
+  const retainedV1PressureBuffer = {
+    label: 'ulg-test-retained-v1-gas-pressure-cells',
+    size: 96,
+    usage: 128 | 4,
+    destroy() {}
+  };
+  let retainedV1ReleaseCount = 0;
+  const releaseAfterFinalConsumerQueue = () => {
+    retainedV1ReleaseCount += 1;
+    return true;
+  };
+  const retainedV1GasCellFieldSource = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    status: 'retained-gas-cell-eos-source-submitted',
+    ready: true,
+    deviceId: 'ulg-webgpu-device:test-v1',
+    gasPressureCellsBuffer: retainedV1PressureBuffer,
+    retainedGasPressureCellsBuffer: retainedV1PressureBuffer,
+    pressureInterfaceGasPressureCellsBuffer: retainedV1PressureBuffer,
+    pressureInterfaceGasPressureCellRowCount: 2,
+    pressureInterfaceGasPressureCellRowStrideFloats: 12,
+    pressureInterfaceGasPressureCellRowByteLength: 96,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    localPressureGradientReady: true,
+    localPressureGradientStatus: 'gpu-sealed-local-pressure-gradient-field-submitted',
+    pressureFieldMode: 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: 'schroeder-spatial-directory-cells',
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+    workerRetainedGasPressureBufferRefs: [],
+    sourceSpatialGasLedgerGenerationId: 17,
+    sourceSpatialGasLedger: {
+      schema: 'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v1',
+      status: 'retained-spatial-gas-ledger-source-submitted',
+      ready: true,
+      spatialEpochGenerationId: 17,
+      epochIdentity: {
+        storageGeneration: 3,
+        physicsTick: 8,
+        physicsSubstep: 1,
+        positionEpoch: 8,
+        topologyEpoch: 3,
+        chartEpoch: 0,
+        levelEpoch: 0,
+        supportEpoch: 8
+      }
+    },
+    finalConsumerReleaseRequired: true,
+    releaseAfterFinalConsumerQueue
+  };
+  const retainedV1ProducerResult = {
+    schema: 'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v1',
+    status: 'spatial-gas-ledger-eos-gpu-submitted',
+    retainedGasCellFieldSourceReady: true,
+    retainedGasCellFieldSource: retainedV1GasCellFieldSource,
+    gasPressureCellsBuffer: retainedV1PressureBuffer,
+    retainedGasPressureCellsBuffer: retainedV1PressureBuffer,
+    pressureInterfaceGasPressureCellRowCount: 2,
+    pressureInterfaceGasPressureCellRowStrideFloats: 12,
+    pressureInterfaceGasPressureCellRowByteLength: 96,
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+    workerRetainedGasPressureBufferRefs: [],
+    gasCellFieldSnapshot: null,
+    releaseAfterFinalConsumerQueue
+  };
+  const retainedV1AdmissionPublication =
+    host.publishPressureInterfaceGasCellFieldAdmission({
+      cacheKey: 'ulg:test:v1-gas-cell-admission-cache',
+      stateKey: 'ulg:test:v1-gas-cell-admission-state',
+      sourceTaskId: 'ulg:test:v1-gas-cell-eos',
+      sourceStage: 'gasCellEosProducer',
+      source: retainedV1ProducerResult,
+      gasCellFieldSnapshot: null
+    });
+  const retainedV1Admission =
+    retainedV1AdmissionPublication.pressureInterfaceGasCellFieldAdmission;
+  assert.equal(retainedV1Admission.retainedSameDeviceGasCellFieldSourceReady, true);
+  assert.equal(retainedV1Admission.retainedGasCellFieldSource, retainedV1GasCellFieldSource);
+  assert.equal(retainedV1Admission.pressureInterfaceGasPressureCellRowByteLength, 96);
+
+  const retainedV1ImportPublication =
+    host.publishPressureInterfaceGasCellFieldImportSource({
+      cacheKey: 'ulg:test:v1-gas-cell-import-cache',
+      stateKey: 'ulg:test:v1-gas-cell-import-state',
+      sourceTaskId: 'ulg:test:v1-gas-cell-eos',
+      sourceStage: 'gasCellEosProducer',
+      source: retainedV1ProducerResult,
+      gasCellFieldSnapshot: null,
+      pressureInterfaceGasCellFieldAdmission: retainedV1Admission
+    });
+  const retainedV1Import =
+    retainedV1ImportPublication.pressureInterfaceGasCellFieldImport;
+  assert.equal(retainedV1Import.retainedGasCellFieldSource, retainedV1GasCellFieldSource);
+  assert.equal(retainedV1Import.gasPressureCellsBuffer, retainedV1PressureBuffer);
+  assert.equal(retainedV1Import.retainedGasPressureCellsBuffer, retainedV1PressureBuffer);
+  assert.equal(retainedV1Import.pressureInterfaceGasPressureCellRowsBufferRetained, true);
+  assert.equal(retainedV1Import.gasCellFieldSnapshot, null);
+  assert.equal(typeof retainedV1Import.releaseAfterFinalConsumerQueue, 'function');
+  assert.equal(retainedV1Import.lifecycleStatus, 'retained-gas-cell-final-consumer-available');
+  assert.equal(retainedV1Import.releaseAfterFinalConsumerQueue(), true);
+  assert.equal(retainedV1Import.releaseAfterFinalConsumerQueue(), false);
+  assert.equal(retainedV1Import.releaseScheduled, true);
+  assert.equal(
+    retainedV1Import.lifecycleStatus,
+    'retained-gas-cell-final-consumer-release-scheduled'
+  );
+  assert.equal(retainedV1ReleaseCount, 1);
+  const retainedV1HotRecord = host.stateManager.getHotBuffer(
+    retainedV1ImportPublication.hotBufferKey
+  );
+  assert.equal(retainedV1HotRecord.gasPressureCellsBuffer, retainedV1PressureBuffer);
+  assert.equal(retainedV1HotRecord.releaseScheduled, true);
+  assert.equal(
+    retainedV1HotRecord.status,
+    'pressure-interface-gas-cell-field-import-final-consumer-release-scheduled'
+  );
+  const retainedV1WarmDelta = host.stateManager.getWarmDeltas(
+    'ulg-pressure-interface-gas-cell-field-imports'
+  )[retainedV1ImportPublication.commitDeltaTaskId];
+  assert.equal(
+    retainedV1WarmDelta.payload.retainedGasCellFieldSource.schema,
+    'peercompute.ulg.sph-retained-gas-cell-eos-source.v1'
+  );
+  assert.equal(
+    Object.hasOwn(
+      retainedV1WarmDelta.payload.pressureInterfaceGasCellFieldImport,
+      'gasPressureCellsBuffer'
+    ),
+    false
+  );
+
+  const workerGasPressureBufferRef = {
+    schema: 'peercompute.ulg.worker-retained-buffer-ref.v0',
+    ref: 'ulg-worker:test-lane:gasCellEosProducer:gasPressureCellsBuffer:1'
+  };
+  const workerLocalRetainedSource = {
+    ...retainedV1GasCellFieldSource,
+    deviceId: 'ulg-worker-device:test-v1',
+    gasPressureCellsBuffer: workerGasPressureBufferRef,
+    retainedGasPressureCellsBuffer: workerGasPressureBufferRef,
+    pressureInterfaceGasPressureCellsBuffer: workerGasPressureBufferRef,
+    retainedGasPressureBufferRefs: [],
+    workerRetainedGasPressureBufferRefs: [workerGasPressureBufferRef.ref],
+    releaseAfterFinalConsumerQueue: null
+  };
+  const workerLocalProducerResult = {
+    ...retainedV1ProducerResult,
+    retainedGasCellFieldSource: workerLocalRetainedSource,
+    gasPressureCellsBuffer: workerGasPressureBufferRef,
+    retainedGasPressureCellsBuffer: workerGasPressureBufferRef,
+    retainedGasPressureBufferRefs: [],
+    workerRetainedGasPressureBufferRefs: [workerGasPressureBufferRef.ref],
+    releaseAfterFinalConsumerQueue: null
+  };
+  const workerLocalAdmissionPublication =
+    host.publishPressureInterfaceGasCellFieldAdmission({
+      cacheKey: 'ulg:test:worker-local-v1-gas-cell-admission-cache',
+      stateKey: 'ulg:test:worker-local-v1-gas-cell-state',
+      sourceTaskId: 'ulg:test:worker-local-v1-gas-cell-eos',
+      sourceStage: 'gasCellEosProducer',
+      source: workerLocalProducerResult,
+      gasCellFieldSnapshot: null
+    });
+  const workerLocalAdmission =
+    workerLocalAdmissionPublication.pressureInterfaceGasCellFieldAdmission;
+  assert.equal(workerLocalAdmission.retainedSameDeviceGasCellFieldSourceReady, false);
+  assert.equal(workerLocalAdmission.retainedWorkerLocalGasCellFieldSourceReady, true);
+  assert.equal(workerLocalAdmission.sameDevice, false);
+  assert.equal(workerLocalAdmission.workerLocal, true);
+  const workerLocalImportPublication =
+    host.publishPressureInterfaceGasCellFieldImportSource({
+      cacheKey: 'ulg:test:worker-local-v1-gas-cell-import-cache',
+      stateKey: 'ulg:test:worker-local-v1-gas-cell-state',
+      sourceTaskId: 'ulg:test:worker-local-v1-gas-cell-eos',
+      sourceStage: 'gasCellEosProducer',
+      source: workerLocalProducerResult,
+      gasCellFieldSnapshot: null,
+      pressureInterfaceGasCellFieldAdmission: workerLocalAdmission
+    });
+  const workerLocalImport =
+    workerLocalImportPublication.pressureInterfaceGasCellFieldImport;
+  assert.equal(workerLocalImport.gasPressureCellsBuffer, null);
+  assert.equal(workerLocalImport.retainedGasPressureCellsBuffer, null);
+  assert.equal(workerLocalImport.pressureInterfaceGasPressureCellsBuffer, null);
+  assert.equal(workerLocalImport.sameDevice, false);
+  assert.equal(workerLocalImport.workerLocal, true);
+  assert.deepEqual(
+    workerLocalImport.workerRetainedGasPressureBufferRefs,
+    [workerGasPressureBufferRef.ref]
+  );
+  const workerLocalHotRecord = host.stateManager.getHotBuffer(
+    workerLocalImportPublication.hotBufferKey
+  );
+  assert.equal(workerLocalHotRecord.gasPressureCellsBuffer, null);
+  assert.equal(workerLocalHotRecord.sameDevice, false);
+  assert.equal(workerLocalHotRecord.workerLocal, true);
+  const workerLocalWarmDelta = host.stateManager.getWarmDeltas(
+    'ulg-pressure-interface-gas-cell-field-imports'
+  )[workerLocalImportPublication.commitDeltaTaskId];
+  assert.equal(workerLocalWarmDelta.payload.retainedGasCellFieldSource.workerLocal, true);
+  assert.equal(
+    Object.hasOwn(
+      workerLocalWarmDelta.payload.pressureInterfaceGasCellFieldImport,
+      'gasPressureCellsBuffer'
+    ),
+    false
+  );
 
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',

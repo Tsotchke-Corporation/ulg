@@ -54,6 +54,13 @@ import {
   runSphPressureInterfaceForceRowsWebGpu
 } from '../src/runtime/sph/sphPressureInterfaceGpuKernel.js';
 import {
+  ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA,
+  isExactSphSpatialGasPressureAuthoritySource,
+  releaseSphSpatialGasLedgerEosAfterQueue,
+  runSphSpatialGasLedgerEosRetainedWebGpu
+} from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
+import {
+  tagResidentProductMassDevice,
   tagWebGpuBufferDevice,
   webGpuDeviceId
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
@@ -82,6 +89,41 @@ test('gas pressure traction targets condensed interfaces and never the source ga
   assert.equal(gasPressureTractionEligibleForElement({ phase: 'gas', phaseId: 3 }), false);
   assert.equal(gasPressureTractionEligibleForElement({ phase: 'plasma', phaseId: 4 }), false);
   assert.match(sphPressureInterfaceForceRowsWgsl, /row0\.z == 3\.0 \|\| row0\.z == 4\.0/);
+});
+
+test('pressure/interface model 2 authenticates the GPU-authored gas pressure prefix', () => {
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /@group\(0\) @binding\(6\) var<storage, read> gas_authority_control: array<u32>/
+  );
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /fn authenticated_gas_pressure_cell_count\(\) -> u32/
+  );
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /gas_authority_control\[11u\]/
+  );
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /ready_pressure_count != directory_cell_count/
+  );
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /arrayLength\(&gas_pressure_cells\) < params\.gas_pressure_cell_capacity \* 3u/
+  );
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /pressure_cell_count == GAS_AUTHORITY_INVALID_COUNT/
+  );
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /gas_authority_or_contact_ready/
+  );
+  assert.match(
+    sphPressureInterfaceForceRowsWgsl,
+    /usable_pressure_cell_count > 0u/
+  );
 });
 
 function interfaceFieldFixture() {
@@ -140,6 +182,7 @@ function fakePressureDevice() {
   const submissions = [];
   const copies = [];
   return {
+    lost: new Promise(() => {}),
     createdBuffers,
     writes,
     bindGroups,
@@ -702,23 +745,31 @@ test('pressure/interface WebGPU producer packs material interface element rows',
   const params = createPressureInterfaceParamsArray({
     elementCount: 2,
     pressurePa: 120000,
-    gasPressureCellCount: 1,
-    pressureModelId: 1,
+    gasPressureCellCount: 0,
+    pressureModelId: 2,
     contactPolicyRowCount: 1,
     algorithmContactPairResponseScale: 1e-4,
     algorithmContactMaxPressurePa: 500000,
-    algorithmContactPairResponseEnabled: true
+    algorithmContactPairResponseEnabled: true,
+    gasAuthorityExecutionGeneration: 7,
+    gasAuthorityStorageGeneration: 11,
+    gasPressureCellCapacity: 64,
+    gasPressureCellStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS
   });
   const view = new DataView(params);
-  assert.equal(params.byteLength, 32);
+  assert.equal(params.byteLength, 48);
   assert.equal(view.getUint32(0, true), 2);
   assert.equal(view.getFloat32(4, true), 120000);
-  assert.equal(view.getUint32(8, true), 1);
-  assert.equal(view.getUint32(12, true), 1);
+  assert.equal(view.getUint32(8, true), 0);
+  assert.equal(view.getUint32(12, true), 2);
   assert.equal(view.getUint32(16, true), 1);
   assert.ok(Math.abs(view.getFloat32(20, true) - 1e-4) < 1e-8);
   assert.equal(view.getFloat32(24, true), 500000);
   assert.equal(view.getFloat32(28, true), 1);
+  assert.equal(view.getUint32(32, true), 7);
+  assert.equal(view.getUint32(36, true), 11);
+  assert.equal(view.getUint32(40, true), 64);
+  assert.equal(view.getUint32(44, true), SPH_GAS_PRESSURE_CELL_FLOATS);
 });
 
 test('pressure/interface contact-kinematics WGSL can gate candidates from a Schroeder law queue', () => {
@@ -1355,7 +1406,11 @@ test('pressure/interface WebGPU producer dispatches no-full retained force-row b
   const emptyGasCellsBuffer = device.createdBuffers.find((entry) => entry.label === 'ulg-sph-pressure-interface-gas-cells-in');
   assert.equal(emptyGasCellsBuffer?.size, 16);
   assert.ok(device.writes.some((entry) => entry.label === 'ulg-sph-pressure-interface-force-params'));
-  assert.equal(device.bindGroups[0].entries.length, 6);
+  assert.equal(device.bindGroups[0].entries.length, 7);
+  assert.equal(
+    device.bindGroups[0].entries[6].resource.buffer.label,
+    'ulg-sph-pressure-interface-gas-authority-control-sentinel'
+  );
   assert.ok(device.createdBuffers.some((entry) => entry.label === 'ulg-sph-pressure-interface-contact-policy-rows'));
   assert.ok(device.createdBuffers.some((entry) => entry.label === 'ulg-sph-pressure-interface-contact-kinematics-rows'));
   assert.equal(result.pressureInterfaceForceSolver.conservationStatus, 'pairwise-equal-opposite-force-conservative');
@@ -2593,6 +2648,7 @@ test('pressure/interface propagates borrowed exact-near pipeline failure without
     runSphPressureInterfaceForceRowsWebGpu(args),
     /synthetic canonical pressure\/contact pipeline failure/
   );
+  await new Promise((resolve) => setImmediate(resolve));
   const labels = device.createdBuffers.map((buffer) => buffer.label);
   assert.equal(labels.some((label) => /pressure-spatial-epoch/.test(label)), false);
   assert.equal(labels.includes('ulg-sph-pressure-interface-particle-bin-counts'), false);
@@ -2602,6 +2658,17 @@ test('pressure/interface propagates borrowed exact-near pipeline failure without
     (module) => module.code === sphPressureInterfaceContactKinematicsWgsl
   ), false);
   assert.equal(device.submissions.length, 0);
+  for (const label of [
+    'ulg-sph-pressure-interface-elements-in',
+    'ulg-sph-pressure-interface-gas-cells-in',
+    'ulg-sph-pressure-interface-contact-policy-rows'
+  ]) {
+    assert.equal(
+      device.createdBuffers.find((buffer) => buffer.label === label)?.destroyed,
+      true,
+      `${label} must be destroyed after pre-submit setup failure`
+    );
+  }
   assert.equal(shared.releaseCalls.length, 0);
   assert.equal(shared.generation.releaseScheduled, false);
   assert.equal(shared.execution.released, false);
@@ -2804,4 +2871,539 @@ test('pressure/interface WebGPU producer accepts local gas-cell pressure rows', 
   assert.equal(result.gasPressureCellsBuffer?.label, 'ulg-sph-pressure-interface-gas-cells-in');
   assert.equal(result.gasPressureCellRowsBufferByteLength, 2 * SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT);
   assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
+});
+
+function retainedV1GasPressureFixture(device, {
+  buffer = null,
+  rowCount = 2,
+  rowStrideFloats = SPH_GAS_PRESSURE_CELL_FLOATS,
+  sourceOverrides = {},
+  importOverrides = {}
+} = {}) {
+  const rowByteLength = rowCount > 0
+    ? rowCount * rowStrideFloats * Float32Array.BYTES_PER_ELEMENT
+    : 0;
+  const gasPressureCellsBuffer = buffer || tagWebGpuBufferDevice(device.createBuffer({
+    label: 'test-retained-v1-gas-pressure-rows',
+    size: Math.max(
+      SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+      rowByteLength
+    ),
+    usage: 128
+  }), device);
+  const deviceId = webGpuDeviceId(device);
+  const retainedGasCellFieldSource = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    status: 'retained-gas-cell-eos-source-submitted',
+    ready: true,
+    deviceId,
+    gasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellsBuffer: gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellRowCount: rowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: rowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: rowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    pressureFieldMode: 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: 'schroeder-spatial-directory-cells',
+    localPressureGradientReady: true,
+    localPressureGradientStatus: 'gpu-sealed-local-pressure-gradient-field-submitted',
+    finalConsumerReleaseRequired: true,
+    sourceSpatialGasLedger: {
+      schema: 'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v1',
+      status: 'retained-spatial-gas-ledger-source-submitted',
+      ready: true,
+      deviceId
+    },
+    ...sourceOverrides
+  };
+  const retainedGasPressureCellImport = {
+    schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import.v0',
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    importReady: true,
+    sameDevice: true,
+    deviceId,
+    lifecycleStatus: 'retained-gas-cell-final-consumer-available',
+    released: false,
+    releaseScheduled: false,
+    gasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellsBuffer: gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellRowCount: rowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: rowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: rowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    retainedGasCellFieldSource,
+    ...importOverrides
+  };
+  return {
+    buffer: gasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: gasPressureCellsBuffer,
+    retainedGasPressureCellRowCount: rowCount,
+    retainedGasPressureCellRowStrideFloats: rowStrideFloats,
+    retainedGasPressureCellRowByteLength: rowByteLength,
+    retainedGasPressureCellImport
+  };
+}
+
+function retainedV2ProductEventSource(device, rowCount = 3) {
+  const productEventBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: `test-pressure-v2-product-events-${rowCount}`,
+    size: rowCount * 32 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128 | 4 | 8
+  }), device);
+  const values = new Float32Array(rowCount * 32);
+  for (let row = 0; row < rowCount; row += 1) {
+    const offset = row * 32;
+    const massKg = 0.1;
+    const supportVolumeM3 = 0.5;
+    values.set([0.25 + row * 0.05, 0.25, 0.25], offset);
+    values[offset + 3] = massKg;
+    values[offset + 4] = 9;
+    values[offset + 5] = row;
+    values[offset + 9] = 1;
+    values[offset + 10] = 1;
+    values[offset + 12] = 0;
+    values[offset + 13] = massKg;
+    values[offset + 16] = 300 + row * 25;
+    values[offset + 17] = massKg / supportVolumeM3;
+    values[offset + 18] = 1;
+    values[offset + 23] = supportVolumeM3;
+  }
+  device.queue.writeBuffer(productEventBuffer, 0, values);
+  let activeBorrowCount = 0;
+  const source = {
+    schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+    status: 'resident-product-mass-buffer-retained',
+    productEventBuffer,
+    productEventBufferRetained: true,
+    productEventBufferByteLength: productEventBuffer.size,
+    productEventRowCount: rowCount,
+    productEventStrideFloats: 32,
+    productEventDevice: device
+  };
+  Object.defineProperty(source, '__ulgActiveBorrowCount', {
+    configurable: false,
+    enumerable: false,
+    get() { return activeBorrowCount; },
+    set(value) { activeBorrowCount = Math.max(0, Number(value) | 0); }
+  });
+  return tagResidentProductMassDevice(source, device);
+}
+
+async function retainedV2GasPressureFixture(device, {
+  rowCount = 3,
+  storageGeneration = 71
+} = {}) {
+  const residentProductMass = retainedV2ProductEventSource(device, rowCount);
+  const execution = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    residentProductMass,
+    epochIdentity: {
+      storageGeneration,
+      physicsTick: 73,
+      physicsSubstep: 0,
+      positionEpoch: 79,
+      topologyEpoch: 83,
+      chartEpoch: 89,
+      levelEpoch: 97,
+      supportEpoch: 101
+    },
+    spatialGasCellSizeM: 0.25,
+    spatialGasSupportVolumeFallbackM3: 0.015625
+  });
+  assert.equal(execution.ready, true, execution.reason);
+  assert.equal(
+    isExactSphSpatialGasPressureAuthoritySource(
+      execution.retainedGasCellFieldSource
+    ),
+    true
+  );
+  return { execution, residentProductMass };
+}
+
+function retainedGasPressureRunArgs(device, fixture) {
+  return {
+    device,
+    pressureFeedback: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-feedback.v0',
+      status: 'wall-pressure-ledger-ready',
+      totalPressurePa: 120000,
+      gasCellField: {
+        status: 'gas-cell-pressure-field-ready',
+        uniformPressurePa: 120000,
+        pressureFieldMode: 'uniform-single-cell-sealed-gas',
+        pressureFieldResolution: 'lumped-sealed-box',
+        gradientStatus: 'uniform-sealed-gas-pressure-zero-gradient'
+      }
+    },
+    pressureInterfaceCoupling: {
+      schema: 'peercompute.ulg.sph-pressure-interface-coupling.v0',
+      status: 'pressure-interface-coupling-ready-for-solver',
+      forceCouplingStatus: 'pressure-interface-coupling-ready'
+    },
+    materialInterfaceField: interfaceFieldFixture(),
+    retainForceRowsBuffer: true,
+    readbackMode: 'no-full-readback',
+    retainedGasPressureCellsBuffer: fixture.retainedGasPressureCellsBuffer,
+    retainedGasPressureCellRowCount: fixture.retainedGasPressureCellRowCount,
+    retainedGasPressureCellRowStrideFloats: fixture.retainedGasPressureCellRowStrideFloats,
+    retainedGasPressureCellRowByteLength: fixture.retainedGasPressureCellRowByteLength,
+    retainedGasPressureCellImport: fixture.retainedGasPressureCellImport
+  };
+}
+
+test('pressure/interface admits and binds one exact same-device retained v1 gas pressure buffer', async () => {
+  const device = fakePressureDevice();
+  const fixture = retainedV1GasPressureFixture(device);
+
+  const result = await runSphPressureInterfaceForceRowsWebGpu(
+    retainedGasPressureRunArgs(device, fixture)
+  );
+
+  assert.equal(result.status, 'pressure-interface-stage-solver-ready');
+  assert.equal(result.gasPressureCellRowsBufferBorrowed, true);
+  assert.equal(
+    result.retainedGasPressureRowsStatus,
+    'retained-gas-pressure-rows-admitted-same-device'
+  );
+  assert.equal(result.retainedGasPressureRowsReason, null);
+  assert.equal(result.retainedGasPressureRowsSourceDeviceId, webGpuDeviceId(device));
+  assert.equal(result.retainedGasPressureRowsConsumerDeviceId, webGpuDeviceId(device));
+  assert.equal(result.gasPressureCellsBuffer, fixture.buffer);
+  assert.equal(device.bindGroups[0].entries[3].resource.buffer, fixture.buffer);
+  assert.equal(
+    device.createdBuffers.some((buffer) => (
+      buffer.label === 'ulg-sph-pressure-interface-gas-cells-in'
+    )),
+    false
+  );
+});
+
+test('pressure/interface consumes one producer-issued v2 authority without republishing its capability', async () => {
+  const device = fakePressureDevice();
+  const { execution, residentProductMass } =
+    await retainedV2GasPressureFixture(device);
+  const source = execution.retainedGasCellFieldSource;
+  const args = retainedGasPressureRunArgs(device, {
+    retainedGasPressureCellsBuffer: null,
+    retainedGasPressureCellRowCount: 0,
+    retainedGasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+    retainedGasPressureCellRowByteLength: 0,
+    retainedGasPressureCellImport: source
+  });
+
+  const result = await runSphPressureInterfaceForceRowsWebGpu(args);
+
+  assert.equal(result.status, 'pressure-interface-stage-solver-ready');
+  assert.equal(result.pressureInterfaceForceSolver.pressureModelId, 2);
+  assert.equal(result.pressureInterfaceForceSolver.gasInterfacePressurePa, null);
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, false);
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientValidation, false);
+  assert.equal(
+    result.pressureInterfaceForceSolver.localPressureGradientGpuAuthenticationEnforced,
+    true
+  );
+  assert.equal(
+    result.pressureInterfaceForceSolver.localPressureGradientGpuAuthenticationObserved,
+    false
+  );
+  assert.equal(result.pressureInterfaceForceSolver.forceAggregateSummaryObserved, false);
+  assert.equal(result.gasPressureCellRowCount, 0);
+  assert.equal(result.gasPressureCellRowCapacity, execution.arenaCapacity);
+  assert.equal(result.gasPressureCellLogicalCountGpuAuthored, true);
+  assert.equal(result.gasPressureCellRowsBufferBorrowed, true);
+  assert.equal(result.gasPressureCellRowsBufferRetained, false);
+  assert.equal(result.gasPressureAuthorityConsumerSubmitted, true);
+  assert.equal(
+    result.gasPressureAuthorityConsumerStatus,
+    'gas-pressure-authority-consumer-submitted'
+  );
+  assert.equal(source.gasPressureAuthorityConsumerSubmitted, true);
+  assert.equal(source.gasPressureAuthorityConsumerBorrowed, false);
+  assert.equal('gasPressureCellsBuffer' in result, false);
+
+  const pressureBindGroup = device.bindGroups.find((bindGroup) => (
+    bindGroup.entries?.some((entry) => (
+      entry.binding === 6
+      && entry.resource?.buffer === execution.gasAuthorityControlBuffer
+    ))
+  ));
+  assert.ok(pressureBindGroup);
+  assert.equal(
+    pressureBindGroup.entries.find((entry) => entry.binding === 3).resource.buffer,
+    execution.gasPressureCellsBuffer
+  );
+  const paramsWrite = device.writes.findLast((entry) => (
+    entry.label === 'ulg-sph-pressure-interface-force-params'
+  ));
+  const paramsView = new DataView(paramsWrite.snapshot);
+  assert.equal(paramsView.byteLength, 48);
+  assert.equal(paramsView.getUint32(8, true), 0);
+  assert.equal(paramsView.getUint32(12, true), 2);
+  assert.equal(paramsView.getUint32(32, true), execution.executionGeneration);
+  assert.equal(paramsView.getUint32(36, true), execution.storageGeneration);
+  assert.equal(paramsView.getUint32(40, true), execution.arenaCapacity);
+  assert.equal(paramsView.getUint32(44, true), SPH_GAS_PRESSURE_CELL_FLOATS);
+
+  assert.equal(await releaseSphSpatialGasLedgerEosAfterQueue(execution), true);
+  assert.equal(await source.releasePromise, true);
+  assert.equal(source.released, true);
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 0);
+});
+
+test('pressure/interface rejects cloned, released, and cross-device v2 authority identities', async () => {
+  {
+    const device = fakePressureDevice();
+    const { execution } = await retainedV2GasPressureFixture(device);
+    const source = execution.retainedGasCellFieldSource;
+    const clone = { ...source };
+    assert.equal(isExactSphSpatialGasPressureAuthoritySource(clone), false);
+    const result = await runSphPressureInterfaceForceRowsWebGpu(
+      retainedGasPressureRunArgs(device, {
+        retainedGasPressureCellImport: clone
+      })
+    );
+    assert.equal(result.pressureInterfaceForceSolver.pressureModelId, 0);
+    assert.equal(
+      result.retainedGasPressureRowsStatus,
+      'retained-gas-pressure-rows-rejected-v2-unbranded-source'
+    );
+    assert.equal(source.gasPressureAuthorityConsumerBorrowed, false);
+    assert.equal(source.gasPressureAuthorityConsumerSubmitted, false);
+    assert.equal(await releaseSphSpatialGasLedgerEosAfterQueue(execution), true);
+    assert.equal(await source.releasePromise, true);
+  }
+
+  {
+    const device = fakePressureDevice();
+    const { execution } = await retainedV2GasPressureFixture(device, {
+      storageGeneration: 103
+    });
+    const source = execution.retainedGasCellFieldSource;
+    assert.equal(await releaseSphSpatialGasLedgerEosAfterQueue(execution), true);
+    assert.equal(await source.releasePromise, true);
+    const result = await runSphPressureInterfaceForceRowsWebGpu(
+      retainedGasPressureRunArgs(device, {
+        retainedGasPressureCellImport: source
+      })
+    );
+    assert.equal(result.pressureInterfaceForceSolver.pressureModelId, 0);
+    assert.equal(
+      result.retainedGasPressureRowsStatus,
+      'retained-gas-pressure-rows-rejected-lifecycle'
+    );
+  }
+
+  {
+    const ownerDevice = fakePressureDevice();
+    const consumerDevice = fakePressureDevice();
+    const { execution } = await retainedV2GasPressureFixture(ownerDevice, {
+      storageGeneration: 107
+    });
+    const source = execution.retainedGasCellFieldSource;
+    await assert.rejects(
+      runSphPressureInterfaceForceRowsWebGpu(
+        retainedGasPressureRunArgs(consumerDevice, {
+          retainedGasPressureCellImport: source
+        })
+      ),
+      (error) => error?.code === 'ERR_SPH_GAS_PRESSURE_AUTHORITY_DEVICE_MISMATCH'
+    );
+    assert.equal(source.gasPressureAuthorityConsumerBorrowed, false);
+    assert.equal(source.gasPressureAuthorityConsumerSubmitted, false);
+    assert.equal(await releaseSphSpatialGasLedgerEosAfterQueue(execution), true);
+    assert.equal(await source.releasePromise, true);
+  }
+});
+
+test('pressure/interface abandons a v2 receipt on pre-submit failure and permits one retry', async () => {
+  const device = fakePressureDevice();
+  const { execution } = await retainedV2GasPressureFixture(device, {
+    storageGeneration: 109
+  });
+  const source = execution.retainedGasCellFieldSource;
+  const originalCreateBindGroup = device.createBindGroup.bind(device);
+  let injectPressureBindFailure = true;
+  device.createBindGroup = (descriptor) => {
+    if (
+      injectPressureBindFailure
+      && descriptor.entries?.some((entry) => (
+        entry.binding === 6
+        && entry.resource?.buffer === execution.gasAuthorityControlBuffer
+      ))
+    ) {
+      injectPressureBindFailure = false;
+      throw new Error('injected pressure bind-group failure');
+    }
+    return originalCreateBindGroup(descriptor);
+  };
+  const args = retainedGasPressureRunArgs(device, {
+    retainedGasPressureCellImport: source
+  });
+
+  await assert.rejects(
+    runSphPressureInterfaceForceRowsWebGpu(args),
+    /injected pressure bind-group failure/
+  );
+  assert.equal(source.gasPressureAuthorityConsumerBorrowed, false);
+  assert.equal(source.gasPressureAuthorityConsumerSubmitted, false);
+
+  const retry = await runSphPressureInterfaceForceRowsWebGpu(args);
+  assert.equal(retry.pressureInterfaceForceSolver.pressureModelId, 2);
+  assert.equal(retry.gasPressureAuthorityConsumerSubmitted, true);
+  assert.equal(source.gasPressureAuthorityConsumerBorrowed, false);
+  assert.equal(source.gasPressureAuthorityConsumerSubmitted, true);
+  assert.equal(await releaseSphSpatialGasLedgerEosAfterQueue(execution), true);
+  assert.equal(await source.releasePromise, true);
+});
+
+test('pressure/interface rejects unbindable, stale, foreign, and malformed retained gas imports before bind', async () => {
+  const cases = [
+    {
+      name: 'telemetry schema disguised as a retained source',
+      expected: 'retained-gas-pressure-rows-rejected-telemetry-only',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          sourceOverrides: {
+            schema: ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA
+          }
+        });
+      }
+    },
+    {
+      name: 'explicitly non-bindable import',
+      expected: 'retained-gas-pressure-rows-rejected-telemetry-only',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          importOverrides: { bindable: false }
+        });
+      }
+    },
+    {
+      name: 'worker transport reference',
+      expected: 'retained-gas-pressure-rows-rejected-worker-buffer-ref',
+      create(device) {
+        const workerRef = {
+          schema: 'peercompute.ulg.worker-retained-buffer-ref.v0',
+          ref: 'ulg-worker:test:gasCellEosProducer:gasPressureCellsBuffer:1'
+        };
+        return retainedV1GasPressureFixture(device, { buffer: workerRef });
+      }
+    },
+    {
+      name: 'cross-device GPUBuffer',
+      expected: 'retained-gas-pressure-rows-rejected-cross-device',
+      create(device) {
+        const otherDevice = fakePressureDevice();
+        const foreignBuffer = tagWebGpuBufferDevice(otherDevice.createBuffer({
+          label: 'test-foreign-retained-v1-gas-pressure-rows',
+          size: 2 * SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          usage: 128
+        }), otherDevice);
+        return retainedV1GasPressureFixture(device, {
+          buffer: foreignBuffer,
+          sourceOverrides: {
+            deviceId: webGpuDeviceId(otherDevice),
+            sourceSpatialGasLedger: {
+              schema: 'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v1',
+              status: 'retained-spatial-gas-ledger-source-submitted',
+              ready: true,
+              deviceId: webGpuDeviceId(otherDevice)
+            }
+          },
+          importOverrides: { deviceId: webGpuDeviceId(otherDevice) }
+        });
+      }
+    },
+    {
+      name: 'released import',
+      expected: 'retained-gas-pressure-rows-rejected-lifecycle',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          importOverrides: {
+            released: true,
+            lifecycleStatus: 'retained-gas-cell-final-consumer-released'
+          }
+        });
+      }
+    },
+    {
+      name: 'consumed source',
+      expected: 'retained-gas-pressure-rows-rejected-lifecycle',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          sourceOverrides: { consumed: true }
+        });
+      }
+    },
+    {
+      name: 'release already scheduled',
+      expected: 'retained-gas-pressure-rows-rejected-lifecycle',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          importOverrides: {
+            releaseScheduled: true,
+            lifecycleStatus: 'retained-gas-cell-final-consumer-release-scheduled'
+          }
+        });
+      }
+    },
+    {
+      name: 'wrong row stride',
+      expected: 'retained-gas-pressure-rows-rejected-row-layout',
+      create(device) {
+        return retainedV1GasPressureFixture(device, { rowStrideFloats: 8 });
+      }
+    },
+    {
+      name: 'zero row count',
+      expected: 'retained-gas-pressure-rows-rejected-row-layout',
+      create(device) {
+        return retainedV1GasPressureFixture(device, { rowCount: 0 });
+      }
+    },
+    {
+      name: 'inconsistent row count',
+      expected: 'retained-gas-pressure-rows-rejected-row-layout',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          sourceOverrides: { pressureInterfaceGasPressureCellRowCount: 3 }
+        });
+      }
+    },
+    {
+      name: 'inconsistent deviceId',
+      expected: 'retained-gas-pressure-rows-rejected-device-identity',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          importOverrides: { deviceId: 'ulg-webgpu-device:foreign-metadata' }
+        });
+      }
+    }
+  ];
+
+  for (const fixtureCase of cases) {
+    const device = fakePressureDevice();
+    const fixture = fixtureCase.create(device);
+    const result = await runSphPressureInterfaceForceRowsWebGpu(
+      retainedGasPressureRunArgs(device, fixture)
+    );
+
+    assert.equal(result.status, 'pressure-interface-stage-solver-ready', fixtureCase.name);
+    assert.equal(result.gasPressureCellRowsBufferBorrowed, false, fixtureCase.name);
+    assert.equal(result.retainedGasPressureRowsStatus, fixtureCase.expected, fixtureCase.name);
+    assert.equal(
+      device.bindGroups.some((bindGroup) => bindGroup.entries.some((entry) => (
+        entry.resource?.buffer === fixture.buffer
+      ))),
+      false,
+      fixtureCase.name
+    );
+    assert.equal(
+      device.bindGroups[0].entries[3].resource.buffer.label,
+      'ulg-sph-pressure-interface-gas-cells-in',
+      fixtureCase.name
+    );
+  }
 });

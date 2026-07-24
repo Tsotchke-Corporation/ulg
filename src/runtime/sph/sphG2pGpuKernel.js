@@ -10,6 +10,7 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
@@ -51,6 +52,13 @@ import {
   webGpuDeviceId,
   webGpuDeviceMismatchInfo
 } from './sphGpuDeviceIdentity.js';
+import {
+  isSchroederSpatialExactNearResidentConsumerBinding
+} from './schroederSpatialEpochGpu.js';
+import {
+  issuePostSeparationThermalBinAuthority,
+  releasePostSeparationThermalBinAuthorityAfterQueue
+} from './sphPostSeparationThermalBinAuthority.js';
 import {
   MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
   MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
@@ -126,6 +134,14 @@ const SEPARATION_BIN_MAX_CELLS = 262144;
 const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.v1';
 const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
+const SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT = 1;
+const SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS = 4;
+const SCHROEDER_MECHANICAL_PROPOSAL_V2_STATUS =
+  'schroeder-spatial-mechanical-contact-graph-prepared';
+const SCHROEDER_MECHANICAL_PROPOSAL_V2_MODE =
+  'proposal-deferred-to-post-mechanics';
+const SCHROEDER_MECHANICAL_PROPOSAL_V2_SOURCE_POSITION_AUTHORITY =
+  'post-g2p-state-with-swept-pre-integration-ss-directory';
 const refluxDummyBuffers = new WeakMap();
 const fusedG2pClaims = new WeakMap();
 const fusedG2pOrigins = new WeakMap();
@@ -2126,15 +2142,26 @@ function canonicalMechanicalProposalAdmitted({
   return Boolean(
     proposal
     && Object.isFrozen(proposal)
-    && proposal.schema === 'peercompute.ulg.schroeder-spatial-mechanical-proposal.v1'
-    && proposal.status === 'schroeder-spatial-mechanical-proposal-submitted'
+    && proposal.schema === 'peercompute.ulg.schroeder-spatial-mechanical-proposal.v3'
+    && proposal.status === SCHROEDER_MECHANICAL_PROPOSAL_V2_STATUS
     && proposal.ready === true
+    && proposal.proposalMode === SCHROEDER_MECHANICAL_PROPOSAL_V2_MODE
+    && proposal.sourcePositionAuthority
+      === SCHROEDER_MECHANICAL_PROPOSAL_V2_SOURCE_POSITION_AUTHORITY
+    && proposal.encodePolicy === 'single-use-immutable-selected-level'
+    && (
+      proposal.lifecycleStatus === 'prepared'
+      || proposal.lifecycleStatus === 'encoded'
+    )
     && proposal.releaseScheduled !== true
     && proposal.released !== true
     && proposal.generation === generation
     && proposal.generationId === spatialAuthority?.generationId
     && proposal.supportEpoch === spatialAuthority?.supportEpoch
-    && proposal.traversalCount === 1
+    && proposal.traversalCount
+      === SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT
+    && proposal.solverIterationCount
+      === SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS
     && proposal.privateBuildCount === 0
     && proposal.fixedCandidateBuildCount === 0
     && proposal.exhaustiveTraversalCount === 0
@@ -2144,14 +2171,81 @@ function canonicalMechanicalProposalAdmitted({
     && webGpuDeviceMismatchInfo({ buffer: proposal.proposalBuffer, device }).mismatch === false
     && proposal.evidence?.buffer
     && webGpuDeviceMismatchInfo({ buffer: proposal.evidence.buffer, device }).mismatch === false
+    && proposal.evidence?.traversalCount
+      === SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT
+    && proposal.evidence?.traversalBuffers?.length
+      === SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT
+    && proposal.evidence.traversalBuffers[0] === proposal.evidence.buffer
+    && proposal.evidence.traversalBuffers.every((buffer) => (
+      webGpuDeviceMismatchInfo({ buffer, device }).mismatch === false
+    ))
+    && proposal.contactGraph?.schema
+      === ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA
+    && proposal.contactGraph.status
+      === 'schroeder-spatial-mechanical-pair-graph-prepared'
+    && proposal.contactGraph.selectedLevel === proposal.selectedLevel
+    && proposal.contactGraph.controlBuffer === proposal.graphControlBuffer
+    && proposal.contactGraph.indirectDispatchBuffer
+      === proposal.indirectDispatchBuffer
+    && proposal.contactGraph.sourceCountBuffer === proposal.sourceCountBuffer
+    && proposal.contactGraph.sourceOffsetBuffer === proposal.sourceOffsetBuffer
+    && proposal.contactGraph.appendStagingBuffer === proposal.appendStagingBuffer
+    && proposal.contactGraph.directedPeerBuffer === proposal.directedPeerBuffer
+    && proposal.contactGraph.scratchStateABuffer === proposal.scratchStateABuffer
+    && proposal.contactGraph.scratchStateBBuffer === proposal.scratchStateBBuffer
+    && proposal.contactGraph.scaleBuffer === proposal.scaleBuffer
+    && proposal.contactGraph.energyLedgerBuffer === proposal.energyLedgerBuffer
+    && proposal.energyLedgerBuffer === proposal.proposalBuffer
+    && proposal.energyLedgerAliasedToProposalRows === true
+    && proposal.energyLedgerByteOffset === proposal.proposalRowByteOffset
+    && proposal.energyLedgerAliasLifetime
+      === 'solver-scratch-until-proposal-publication'
+    && proposal.contactGraph.energyLedgerAliasedToProposalRows === true
+    && proposal.contactGraph.energyLedgerByteOffset
+      === proposal.proposalRowByteOffset
+    && proposal.contactGraph.energyLedgerAliasLifetime
+      === 'solver-scratch-until-proposal-publication'
+    && proposal.scaleBuffer
+    && proposal.energyLedgerBuffer
+    && [
+      proposal.graphControlBuffer,
+      proposal.indirectDispatchBuffer,
+      proposal.sourceCountBuffer,
+      proposal.sourceOffsetBuffer,
+      proposal.appendStagingBuffer,
+      proposal.directedPeerBuffer,
+      proposal.scratchStateABuffer,
+      proposal.scratchStateBBuffer,
+      proposal.energyLedgerBuffer
+    ].every((buffer) => buffer && webGpuDeviceMismatchInfo({
+      buffer,
+      device
+    }).mismatch === false)
+    && webGpuDeviceMismatchInfo({
+      buffer: proposal.scaleBuffer,
+      device
+    }).mismatch === false
     && separationReceipt
     && Object.isFrozen(separationReceipt)
-    && separationReceipt.status === 'schroeder-spatial-epoch-consumer-receipt-finalized'
-    && separationReceipt.gpuAuthenticated === true
+    && isSchroederSpatialExactNearResidentConsumerBinding(separationReceipt)
+    && separationReceipt.gpuAuthenticated === false
+    && separationReceipt.resultAuthenticated === false
     && separationReceipt.consumerId === 'separation'
     && separationReceipt.supportProfileId === SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1
     && separationReceipt.generationId === spatialAuthority?.generationId
-    && separationReceipt.traversalCount === 1
+    && separationReceipt.traversalCount === null
+    && separationReceipt.expectedTraversalCount
+      === SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT
+    && separationReceipt.residentEvidence?.evidenceBuffer
+      === proposal.evidence.buffer
+    && separationReceipt.residentEvidence?.controlBuffer
+      === proposal.graphControlBuffer
+    && separationReceipt.residentEvidence?.pairGraphSchema
+      === ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA
+    && separationReceipt.residentEvidence?.evidenceWordCount
+      === proposal.evidence.wordCount
+    && separationReceipt.residentEvidence?.failClosedOnOverflow === true
+    && separationReceipt.residentEvidence?.partialPublicationAllowed === false
     && separationReceipt.privateLookupBuildCount === 0
     && separationReceipt.fixedCandidateBuildCount === 0
     && separationReceipt.exhaustiveTraversalCount === 0
@@ -2312,6 +2406,8 @@ function separationBinPlan({ boxDimsM, maxPairRestDistanceM, minCellSizeM = 0 })
  * neighborhood from the frozen state and writes per-particle corrections
  * (race-free: each thread writes only its own rows), pass 3 applies the
  * corrections to the state buffer in place and re-clamps to the sealed box.
+ * A final clear/refill after separation apply can be promoted by the G2P
+ * submitter into a retained, runtime-branded thermal lookup authority.
  * Pass `scratch` (from a previous call on the same encoder sequence) to
  * reuse the bin/corrections/params buffers across fused substeps.
  * Returns transient buffers the caller must destroy after submission.
@@ -2370,7 +2466,11 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   let activeScratch = scratch;
   if (!activeScratch
     || activeScratch.particleCount !== particleCount
-    || activeScratch.cellCount !== binPlan.cellCount) {
+    || activeScratch.cellCount !== binPlan.cellCount
+    || activeScratch.nx !== binPlan.nx
+    || activeScratch.ny !== binPlan.ny
+    || activeScratch.nz !== binPlan.nz
+    || activeScratch.cellSizeM !== binPlan.cellSizeM) {
     const paramsBuffer = device.createBuffer({
       label: 'ulg-mls-mpm-separation-params',
       size: SEPARATION_PARAMS_BYTES,
@@ -2408,20 +2508,14 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     activeScratch = {
       particleCount,
       cellCount: binPlan.cellCount,
+      capacity: SEPARATION_BIN_CAPACITY,
+      nx: binPlan.nx,
+      ny: binPlan.ny,
+      nz: binPlan.nz,
+      cellSizeM: binPlan.cellSizeM,
       paramsBuffer,
       correctionsBuffer,
       binsBuffer,
-      // Shared neighbor-bin contract for sibling consumers (thermal pair
-      // conduction) encoded in the same submission after the bin fill.
-      neighborBins: {
-        binsBuffer,
-        capacity: SEPARATION_BIN_CAPACITY,
-        nx: binPlan.nx,
-        ny: binPlan.ny,
-        nz: binPlan.nz,
-        cellSizeM: binPlan.cellSizeM,
-        cellCount: binPlan.cellCount
-      },
       transientBuffers: [paramsBuffer, correctionsBuffer, binsBuffer]
     };
   }
@@ -2553,10 +2647,38 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   applyPass.setBindGroup(0, applyBindGroup);
   applyPass.dispatchWorkgroups(workgroups);
   applyPass.end();
+  // Refill against the exact post-apply state. This pass is deliberately in
+  // the same command buffer so G2P can mint authority only after submission.
+  encoder.clearBuffer(
+    activeScratch.binsBuffer,
+    0,
+    Math.max(4, activeScratch.cellCount * Uint32Array.BYTES_PER_ELEMENT)
+  );
+  const postApplyBinFillPass = encoder.beginComputePass({
+    label: 'ulg-mls-mpm-particle-separation-post-apply-bin-refill'
+  });
+  postApplyBinFillPass.setPipeline(binFillPipelineInfo.pipeline);
+  postApplyBinFillPass.setBindGroup(0, binFillBindGroup);
+  postApplyBinFillPass.dispatchWorkgroups(workgroups);
+  postApplyBinFillPass.end();
+  const postSeparationThermalBinCandidate = Object.freeze({
+    stateBuffer,
+    binsBuffer: activeScratch.binsBuffer,
+    particleCount,
+    capacity: activeScratch.capacity,
+    nx: activeScratch.nx,
+    ny: activeScratch.ny,
+    nz: activeScratch.nz,
+    cellCount: activeScratch.cellCount,
+    cellSizeM: activeScratch.cellSizeM
+  });
   return {
     enabled: true,
     transientBuffers: activeScratch.transientBuffers,
     scratch: activeScratch,
+    postSeparationThermalBinCandidate,
+    neighborBinsPublished: false,
+    neighborBinsRefreshedAfterSeparation: true,
     canonicalSpatialAuthorityGate: canonicalSpatialAuthority,
     canonicalAuthorityRestoreFolded: canonicalSpatialAuthority,
     canonicalSpatialAuthorityEvidenceObserved: canonicalSpatialAuthorityObserved
@@ -2820,6 +2942,9 @@ export async function runMlsMpmG2pWebGpu({
   let fusedG2pCommitted = false;
   let fusedG2pArtifact = null;
   let fusedG2pArtifactLifecycleDelegated = false;
+  let postSeparationThermalBinAuthority = null;
+  let postSeparationThermalBinAuthorityDelegated = false;
+  let postSeparationThermalBinsBuffer = null;
   let outputParticleBuffersDestroyed = false;
   let outputStateBufferDestroyed = false;
   let outputMechanicsBufferDestroyed = false;
@@ -3283,7 +3408,7 @@ export async function runMlsMpmG2pWebGpu({
         })
         ) {
           throw new Error(
-            'Canonical G2P requires one authenticated pre-integration contact/separation proposal'
+            'Canonical G2P requires an authenticated deferred post-G2P contact/separation residual solver'
           );
         }
         schroederSpatialMechanicalProposal.encodeApply(encoder, {
@@ -3299,7 +3424,13 @@ export async function runMlsMpmG2pWebGpu({
           canonicalAuthorityRestoreFolded: false,
           canonicalSpatialAuthorityEvidenceObserved:
             observeCanonicalSpatialAuthority === true,
-          canonicalProposalSource: 'pre-integration-ss-spatial-epoch.v1',
+          canonicalProposalSource:
+            SCHROEDER_MECHANICAL_PROPOSAL_V2_SOURCE_POSITION_AUTHORITY,
+          canonicalProposalMode: SCHROEDER_MECHANICAL_PROPOSAL_V2_MODE,
+          canonicalProposalTraversalCount:
+            SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT,
+          canonicalProposalSolverIterationCount:
+            SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS,
           privateBinBuildCount: 0,
           fixedCandidateBuildCount: 0,
           exhaustiveParticleScanCount: 0
@@ -3372,6 +3503,22 @@ export async function runMlsMpmG2pWebGpu({
     }
     device.queue.submit([commandBuffer]);
     fusedG2pQueueSubmitted = true;
+    if (
+      retainOutputParticleBuffers
+      && separation.postSeparationThermalBinCandidate
+    ) {
+      const candidate = separation.postSeparationThermalBinCandidate;
+      postSeparationThermalBinAuthority =
+        issuePostSeparationThermalBinAuthority({
+          device,
+          ...candidate,
+          producerSubmission: Object.freeze({ commandBuffer })
+        });
+      postSeparationThermalBinsBuffer = candidate.binsBuffer;
+      // Ownership moves from the G2P transient ledger to the authority. The
+      // consumer schedules its destruction after the later thermal submit.
+      allocationLedger.delete(postSeparationThermalBinsBuffer);
+    }
     if (fusedG2p) {
       if (fusedTransactionMode === 'coarse-terminal') {
         markSchroederFusedCoarseTerminalStageSubmissionObserved(
@@ -3428,6 +3575,8 @@ export async function runMlsMpmG2pWebGpu({
         separation.canonicalSpatialAuthorityGate === true
     });
     reconstruction.mechanicsFieldMode = mechanicsFieldMode;
+    reconstruction.postSeparationThermalBinAuthority =
+      postSeparationThermalBinAuthority;
     if (retainOutputParticleBuffers) {
       reconstruction.stateBuffer = outStateBuffer;
       reconstruction.mechanicsBuffer = outMechanicsBuffer;
@@ -3674,6 +3823,8 @@ export async function runMlsMpmG2pWebGpu({
         throw error;
       }
     }
+    postSeparationThermalBinAuthorityDelegated =
+      postSeparationThermalBinAuthority != null;
     return reconstruction;
   } finally {
     if (fusedG2p && fusedG2pClaim && !fusedG2pCommitted) {
@@ -3724,6 +3875,16 @@ export async function runMlsMpmG2pWebGpu({
       }
     }
     const cleanup = () => {
+      if (
+        postSeparationThermalBinAuthority
+        && !postSeparationThermalBinAuthorityDelegated
+      ) {
+        releasePostSeparationThermalBinAuthorityAfterQueue(
+          postSeparationThermalBinAuthority,
+          { device }
+        );
+        allocationLedger.delete(postSeparationThermalBinsBuffer);
+      }
       if (!borrowedStateBuffer) destroyOwnedAllocation(stateBuffer);
       if (!borrowedThermoBuffer) destroyOwnedAllocation(thermoBuffer);
       if (!borrowedMechanicsBuffer) destroyOwnedAllocation(mechanicsBuffer);
@@ -3890,6 +4051,8 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
     destroyOutputParticleBuffers: reconstruction?.destroyOutputParticleBuffers ?? null,
     destroyOutputParticleBufferComponents:
       reconstruction?.destroyOutputParticleBufferComponents ?? null,
+    postSeparationThermalBinAuthority:
+      reconstruction?.postSeparationThermalBinAuthority ?? null,
     readbackMode: reconstruction?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: reconstruction?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: reconstruction?.normalHotLoopReadbackFree ?? false,

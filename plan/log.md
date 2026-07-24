@@ -41785,3 +41785,69 @@ Validation and review:
   post-document transport operations. Their immutable SHA/ref receipts are
   recorded in ICC and the final handoff because this commit cannot contain its
   own stable SHA.
+
+## 2026-07-21 AKDT - Slice 8 source-family closeout
+
+- Completed authenticated reaction product-placement/topology successor
+  publication, compact spatial gas-ledger EOS, matched-time reciprocal thermal
+  proposal/apply, exact-v2 host/worker continuation, retained submit fences,
+  and successor-bound render/source-field/native-surface routes without adding
+  another spatial authority.
+- The definitive complete unit run reports `1863` total, `1848` passed, `15`
+  expected opt-in skips, and zero failures. Focused native-surface lifecycle,
+  harness, and renderer coverage passes `205/205`.
+- The first desktop closeout matrix exposed a real Slice 8 presentation
+  provenance regression: nonblank moving frames were sampled from the retained
+  prior bridge while a detached candidate was active, and accepted candidates
+  lacked the immutable refresh source receipt. A clean `6c20c32` control did
+  not reproduce it. Probes now wait for active/queued validation at settled
+  checkpoints; accepted draw/bridge/render state publishes exact current
+  metadata; and a completed GPU submit cannot be retroactively discarded.
+- Final desktop and 390 x 844 mobile matrices are
+  `/tmp/ulg-visual-sanity-matrix/slice8-closeout-desktop-r2/summary.json` and
+  `/tmp/ulg-visual-sanity-matrix/slice8-closeout-mobile-r2/summary.json`. Every
+  one of seven scenarios per viewport has structural analysis `good`, zero
+  stale-source and blank-frame samples, and no browser-console, WebGPU, or
+  visual-surface issue. Steam rise/condensation and hydrogen rise remain
+  explicit inherited transport debt. The opt-in liquid failures reproduce
+  bit-for-bit on candidate and clean Slice 7 (`0.46572056445613097 m/s`,
+  `minJ=0.9833418130874634`); no gate was weakened.
+- Final paired performance receipts are
+  `/tmp/ulg-slice8-reaction-step-historical-final.json` and
+  `/tmp/ulg-slice8-nontarget-physics-throughput-final.json`. They freeze exact
+  source fingerprints around three alternating `AB/BA/AB` runs and compare
+  against immutable Slice 7. ICC freshness, audit, Git, Pages, and remote-ref
+  receipts follow after the measured gates.
+
+## 2026-07-24 AKDT - S9D-3 hot-counter and camera-liveness closeout
+
+- Replaced per-visit global atomics for the nine reaction-tree diagnostic hot
+  counters with per-source accumulation and one nonzero flush per source. The
+  immutable canonical directory, fixed exact-cell tree, production tree-only
+  route, reaction semantics, fail-closed controls, and 27-word evidence ABI are
+  unchanged.
+- Native Vulkan production-versus-legacy receipts preserve bitwise proposals
+  and all evidence words in observed mode, preserve default no-readback
+  semantics, and pass arena-reuse, corrupt-header, full-rule-scan, overflow,
+  and device-loss negatives. Default combined-route ratios are `0.6154x`
+  dense, `0.7483x` sparse, and `0.7179x` clustered.
+- Repaired resident physics freezes after camera rotation and after successful
+  native candidates that publish beyond the bounded handoff wait. Recovery now
+  uses structured terminal failure/success receipts, exact latest
+  request/candidate/lifecycle identity, exact resident source lineage,
+  interaction/damping settlement, current-source foreground proof, and
+  epoch/object-identity compare-and-swap gate release.
+- PASS: combined real-browser camera drag and delayed-publication tests `2/2`.
+- PASS: real worker-backed startup, native cold startup, worker-retained stage
+  lane, and explicit worker-disable fail-closed tests `4/4`.
+- PASS: full suite `1924/1945`, zero failures, `21` expected skips.
+- PASS: physics atomics `11/14`, zero failures, three opt-in skips.
+- PASS: production build and `git diff --check`.
+- Presentation PASS: seven standard/random visual scenarios, `58` unique
+  nonblank current-source captures, zero stale samples, browser-console issues,
+  or visual-surface issues. The matrix remains behavior-red only for the same
+  documented steam-rise/condensation and hydrogen-rise transport deficits.
+- ICC: fresh index/memory/architecture/history; both scoped guard diffs pass;
+  S9D-3 and camera-liveness completion oracles are complete; both readiness
+  reports score `100`. Production-audit warnings are limited to the inherited
+  uncommitted slice diff and the intentionally unfinished task portfolio.

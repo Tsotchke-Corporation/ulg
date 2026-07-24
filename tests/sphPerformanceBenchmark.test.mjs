@@ -3,18 +3,66 @@ import assert from 'node:assert/strict';
 
 import {
   aggregateSchroederResidentBatchEvidence,
+  buildSchroederReactionReceiptIccTrace,
   createSchroederBenchmarkScenarioParams,
+  currentResidentSurfaceDrawEvidence,
+  scenarioUrlForCount,
   scenarioPerformanceGate,
+  summarizePairedGpuStageProducerRuns,
   summarizePairedGpuTimestampRuns,
+  summarizePairedSpatialArenaDepthThroughputRuns,
   summarizePairedPhysicsThroughputRuns,
   summarizeResidentGpuStageTimestampEvidence,
   summarizeResidentGpuTimestampEvidence
 } from '../scripts/sph-performance-benchmark.mjs';
 
+function finalizedReactionReceiptTelemetry(overrides = {}) {
+  return {
+    schema: 'peercompute.ulg.schroeder-spatial-consumer-receipt-telemetry.v1',
+    status: 'schroeder-spatial-epoch-consumer-receipt-finalized',
+    backend: 'webgpu',
+    backendSelection: 'same-device-submitted-webgpu-generation',
+    fallbackIntent: 'forbidden',
+    consumerId: 'reaction-discovery',
+    deviceId: 'test-webgpu-device',
+    generationId: 41,
+    epochIdentity: {
+      storageGeneration: 1,
+      physicsTick: 10,
+      physicsSubstep: 0,
+      positionEpoch: 20,
+      topologyEpoch: 30,
+      chartEpoch: 40,
+      levelEpoch: 50,
+      supportEpoch: 60
+    },
+    authenticated: true,
+    gpuAuthenticated: true,
+    bindingAuthenticated: false,
+    submissionAuthenticated: false,
+    resultAuthenticated: true,
+    submitPerformed: true,
+    generationBound: true,
+    expectedTraversalCount: 1,
+    traversalCount: 1,
+    overflowed: false,
+    partialPublication: false,
+    fallbackObserved: false,
+    fullReadbackPerformed: false,
+    privateLookupBuildCount: 0,
+    fixedCandidateBuildCount: 0,
+    exhaustiveTraversalCount: 0,
+    ...overrides
+  };
+}
+
 function transaction({
   generationId,
   physicsTick,
   positionEpoch,
+  deviceId = null,
+  epochIdentity = null,
+  successorEpochEvidence = null,
   legacyPrivate = 0,
   legacyExhaustive = 0,
   privateAdvance = 0,
@@ -23,7 +71,8 @@ function transaction({
   return {
     state: 'released',
     generationId,
-    epochIdentity: {
+    deviceId,
+    epochIdentity: epochIdentity ?? {
       physicsTick,
       positionEpoch
     },
@@ -42,7 +91,61 @@ function transaction({
       staleLawInputForwardCount: 0,
       legacyPrivateLookupBuildCount: legacyPrivate,
       legacyExhaustiveTraversalCount: legacyExhaustive
-    }
+    },
+    ...(successorEpochEvidence == null ? {} : { successorEpochEvidence })
+  };
+}
+
+function fullEpochIdentity({
+  storageGeneration,
+  physicsTick,
+  physicsSubstep = 0,
+  positionEpoch,
+  topologyEpoch,
+  chartEpoch,
+  levelEpoch,
+  supportEpoch
+}) {
+  return {
+    storageGeneration,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch
+  };
+}
+
+function authenticatedPlacementSuccessorEpochEvidence({
+  previous,
+  next,
+  deviceId = 'test-webgpu-device'
+}) {
+  return {
+    schema: 'peercompute.ulg.schroeder-committed-successor-source-family.v1',
+    status: 'schroeder-committed-successor-source-family-authenticated',
+    ready: true,
+    admitted: true,
+    authenticated: true,
+    deviceId,
+    sourceFamily: 'hot-particle-successor',
+    sourceFamilyRole: 'committed-successor-x-n-plus-1',
+    publicationAuthority: 'spatial-epoch-transaction-preflight-and-commit',
+    exactBufferFamilyAuthenticated: true,
+    storageAllocationAuthenticated: true,
+    topologyTransitionAuthenticated: true,
+    sourceGenerationId: previous.generationId,
+    ancestorSpatialGenerationId: previous.generationId,
+    positionAuthority:
+      'authenticated-transactional-placement-epoch-floor-with-conservative-final-family',
+    positionEpochFloorAuthenticated: true,
+    positionEpochFloor: next.epochIdentity.positionEpoch,
+    positionTransitionAuthenticated: false,
+    positionChanged: true,
+    sourceEpochIdentity: { ...previous.epochIdentity },
+    successorEpochIdentity: { ...next.epochIdentity }
   };
 }
 
@@ -142,6 +245,34 @@ function aggregate(metrics) {
     requestedBatchStepCount: 2,
     schroederSimulationRequested: true
   });
+}
+
+function sameLevelReactionPlacementFloorMetrics() {
+  const metrics = completeMetrics();
+  const transactions = metrics
+    .filter((metric) => metric.phase === 'resident-batch')
+    .flatMap((metric) => metric.residentSteps.schroederSpatialEpochTransactionSummaries);
+  for (let index = 0; index < transactions.length; index += 1) {
+    const transactionSummary = transactions[index];
+    transactionSummary.deviceId = 'test-webgpu-device';
+    transactionSummary.epochIdentity = fullEpochIdentity({
+      storageGeneration: 100 + index,
+      physicsTick: 10 + index,
+      positionEpoch: 20 + index * 2,
+      topologyEpoch: 30 + index,
+      chartEpoch: 40 + index,
+      levelEpoch: 50 + index,
+      supportEpoch: 60 + index
+    });
+  }
+  for (let index = 0; index < transactions.length - 1; index += 1) {
+    transactions[index].successorEpochEvidence =
+      authenticatedPlacementSuccessorEpochEvidence({
+        previous: transactions[index],
+        next: transactions[index + 1]
+      });
+  }
+  return metrics;
 }
 
 function authoritativeTwoLevelMetrics() {
@@ -359,6 +490,77 @@ function pairedThroughputCampaignRuns({
   }));
 }
 
+function pairedSpatialArenaDepthCampaignRuns({
+  comparisonScale = 1.05,
+  orders = ['AB', 'BA', 'AB']
+} = {}) {
+  const commonConfigSignature = 'c'.repeat(64);
+  const referenceArmConfigSignature = '3'.repeat(64);
+  const comparisonArmConfigSignature = '8'.repeat(64);
+  const provenance = (armConfigSignature) => ({
+    gitHead: 'e'.repeat(40),
+    sourceFingerprintBefore: 'a'.repeat(64),
+    sourceFingerprintAfter: 'a'.repeat(64),
+    worktreeDirtyBefore: true,
+    worktreeDirtyAfter: true,
+    worktreeStatusHashBefore: '1'.repeat(64),
+    worktreeStatusHashAfter: '1'.repeat(64),
+    trackedAndUntrackedFileCountBefore: 100,
+    trackedAndUntrackedFileCountAfter: 100,
+    commonConfigSignature,
+    armConfigSignature
+  });
+  const scenario = ({ physicsStepsPerSecond, arenaCount, backpressureWaitCount }) => ({
+    status: 'good',
+    probeMode: 'scene',
+    scenarioUrl: `https://benchmark.invalid/?ss=1&schroederLevel=0&schroederMaxLevel=0&schroederCrossLevelCoupling=0&schroederSpatialArenaCount=${arenaCount}`,
+    batches: 7,
+    batchSteps: 16,
+    completedStepCount: 16,
+    physicsStepsPerSecond,
+    physicsStepsPerSecondSource: 'complete-engine-batch',
+    schroederSimulationConfiguredRequested: true,
+    schroederSimulationActive: true,
+    schroederTransactionCoverageComplete: true,
+    schroederTwoLevelMechanicsConfiguredRequested: false,
+    schroederTwoLevelMechanicsRequestedObserved: false,
+    schroederSpatialArenaCountRequested: arenaCount,
+    schroederSpatialArenaCountsObserved: [arenaCount],
+    schroederSpatialArenaCountCoverageComplete: true,
+    schroederBackpressureWaitCount: backpressureWaitCount,
+    schroederBackpressureWaitMs: backpressureWaitCount * 0.5,
+    probeIssues: []
+  });
+  return [100, 110, 90].map((referenceFps, index) => ({
+    runId: `arena-depth-pair-${index + 1}`,
+    order: orders[index],
+    baseline: {
+      process: { exitCode: 0 },
+      reportStatus: 'complete',
+      reportPerformanceGateStatus: 'pass',
+      scenarioStatus: 'good',
+      scenario: scenario({
+        physicsStepsPerSecond: referenceFps,
+        arenaCount: 3,
+        backpressureWaitCount: 16
+      }),
+      sourceProvenance: provenance(referenceArmConfigSignature)
+    },
+    candidate: {
+      process: { exitCode: 0 },
+      reportStatus: 'complete',
+      reportPerformanceGateStatus: 'pass',
+      scenarioStatus: 'good',
+      scenario: scenario({
+        physicsStepsPerSecond: referenceFps * comparisonScale,
+        arenaCount: 8,
+        backpressureWaitCount: 2
+      }),
+      sourceProvenance: provenance(comparisonArmConfigSignature)
+    }
+  }));
+}
+
 function gpuStageTimestampMetric({
   batchIndex = 1,
   generationCount = 4,
@@ -438,11 +640,213 @@ function gpuStageTimestampMetric({
   };
 }
 
+function reactionStageEvidence({
+  targetDurationMs,
+  segmentedPlacement
+}) {
+  const metrics = Array.from({ length: 13 }, (_, index) => {
+    const metric = gpuStageTimestampMetric({
+      batchIndex: index + 1,
+      generationCount: 4,
+      traversalCount: 1,
+      additionalProducerIds: [
+        'schroeder-hierarchy:two-level-post-mechanics-reaction-discovery-proposal',
+        'schroeder-hierarchy:two-level-post-mechanics-thermal-proposal',
+        'schroeder-hierarchy:two-level-post-mechanics-reactionStep',
+        segmentedPlacement
+          ? 'sph-reaction-summary:product-event-placement:capture-radix'
+          : 'sph-reaction-summary:product-event-placement'
+      ]
+    });
+    const targetSpan = metric.probeResidentBatchTiming.gpuStageTimestamps
+      .spans.find((span) => (
+        span.producerId
+          === 'schroeder-hierarchy:two-level-post-mechanics-reactionStep'
+      ));
+    const durationNs = Math.round(targetDurationMs * 1e6);
+    targetSpan.endTimestampNs = String(
+      BigInt(targetSpan.startTimestampNs) + BigInt(durationNs)
+    );
+    targetSpan.durationNs = durationNs;
+    targetSpan.durationMs = durationNs / 1e6;
+    return metric;
+  });
+  return summarizeResidentGpuStageTimestampEvidence({
+    metrics,
+    requested: true,
+    requestedBatchCount: 13,
+    requestedBatchStepCount: 1,
+    warmupBatchCount: 4,
+    twoLevelAuthoritative: true,
+    twoLevelFineSubstepCount: 2,
+    requireMigratedLawCoverage: true,
+    lawThermalEnabled: true,
+    lawReactionsEnabled: true
+  });
+}
+
+function completeGpuIntervalEvidence() {
+  return {
+    schema: 'peercompute.ulg.sph-performance-gpu-queue-interval-evidence.v0',
+    status: 'complete',
+    requested: true,
+    warmupBatchCount: 4,
+    measuredSampleCount: 9,
+    batchCoverageComplete: true,
+    measurementCoverageComplete: true,
+    percentileEstimator: 'nearest-rank-ceil-nq',
+    p50Ms: 500,
+    p95Ms: 550
+  };
+}
+
+function reactionHistoricalScenario(gpuStageTimestampEvidence) {
+  return {
+    status: 'good',
+    exitCode: 0,
+    probeMode: 'scene',
+    targetParticleCount: 1000,
+    actualParticleCount: 1024,
+    effectiveParticleCount: 1024,
+    batches: 13,
+    batchSteps: 1,
+    completedStepCount: 1,
+    scenarioUrl:
+      '/?drop=na&base=h2o&dropt=300&baset=300&dropn=8&basen=8&mech=mlsmpm&ss=1&schroederLevel=0&schroederMaxLevel=1&schroederCrossLevelCoupling=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2&residentGpuTimestampProfile=1&lawr=1',
+    schroederSimulationConfiguredRequested: true,
+    schroederSimulationRequestedObserved: true,
+    schroederSimulationActive: true,
+    schroederTransactionCoverageComplete: true,
+    schroederSelectedLevel: 0,
+    schroederTwoLevelMechanicsConfiguredRequested: true,
+    schroederTwoLevelMechanicsRequestedObserved: true,
+    schroederTwoLevelMechanicsCoverageComplete: true,
+    schroederTwoLevelMechanicsAuthorityRequested: 'authoritative',
+    schroederTwoLevelMechanicsAuthorityObserved: 'authoritative',
+    schroederTwoLevelFineSubstepCountRequested: 2,
+    schroederTwoLevelFineSubstepCountObserved: 2,
+    schroederTwoLevelMechanicsStepStatus:
+      'schroeder-two-level-authoritative-step-executed',
+    schroederTwoLevelAuthoritativeCommitVerified: true,
+    performanceGate: {
+      status: 'pass',
+      blockers: []
+    },
+    gpuTimestampIntervalEvidence: completeGpuIntervalEvidence(),
+    gpuStageTimestampEvidence
+  };
+}
+
+function pairedReactionStageProducerCampaignRuns({
+  candidateScale = 1.04,
+  orders = ['AB', 'BA', 'AB'],
+  candidateSerialPlacement = false
+} = {}) {
+  const expectedBaselineGitHead =
+    '6c20c32b814a0e4cb66ff973fb4cc225659f3f25';
+  const commonConfigSignature = '1'.repeat(64);
+  const armConfigSignature = '2'.repeat(64);
+  const provenance = ({ baseline }) => ({
+    gitHead: baseline ? expectedBaselineGitHead : 'f'.repeat(40),
+    sourceFingerprintBefore: baseline ? 'a'.repeat(64) : 'b'.repeat(64),
+    sourceFingerprintAfter: baseline ? 'a'.repeat(64) : 'b'.repeat(64),
+    worktreeDirtyBefore: !baseline,
+    worktreeDirtyAfter: !baseline,
+    worktreeStatusHashBefore: baseline ? '3'.repeat(64) : '4'.repeat(64),
+    worktreeStatusHashAfter: baseline ? '3'.repeat(64) : '4'.repeat(64),
+    trackedAndUntrackedFileCountBefore: baseline ? 500 : 525,
+    trackedAndUntrackedFileCountAfter: baseline ? 500 : 525,
+    commonConfigSignature,
+    armConfigSignature
+  });
+  const arm = ({ baseline, targetDurationMs }) => {
+    const stageEvidence = reactionStageEvidence({
+      targetDurationMs,
+      segmentedPlacement: baseline || candidateSerialPlacement
+        ? false
+        : true
+    });
+    return {
+      process: { exitCode: 0 },
+      reportStatus: 'complete',
+      reportPerformanceGateStatus: 'pass',
+      scenarioStatus: 'good',
+      gpuTimestampIntervalEvidence: completeGpuIntervalEvidence(),
+      gpuStageTimestampEvidence: stageEvidence,
+      scenario: reactionHistoricalScenario(stageEvidence),
+      sourceProvenance: provenance({ baseline })
+    };
+  };
+  return [340, 345, 350].map((baselineP50Ms, index) => ({
+    runId: `reaction-stage-pair-${index + 1}`,
+    order: orders[index],
+    baseline: arm({ baseline: true, targetDurationMs: baselineP50Ms }),
+    candidate: arm({
+      baseline: false,
+      targetDurationMs: baselineP50Ms * candidateScale
+    })
+  }));
+}
+
+test('SS benchmark preserves only buffer-free admitted receipt telemetry', () => {
+  const metrics = completeMetrics();
+  const receiptTelemetry = finalizedReactionReceiptTelemetry();
+  metrics[1].residentSteps.schroederSpatialEpochTransactionSummaries[0]
+    .admittedReaders = [{ receiptTelemetry }];
+
+  const evidence = aggregate(metrics);
+  assert.deepEqual(evidence.admittedConsumerReceiptTelemetry, [receiptTelemetry]);
+  assert.equal(
+    'proposalBuffer' in evidence.admittedConsumerReceiptTelemetry[0],
+    false
+  );
+  assert.equal(
+    'evidenceBuffer' in evidence.admittedConsumerReceiptTelemetry[0],
+    false
+  );
+});
+
+test('SS benchmark emits ICC receipt proof only for a finalized no-fallback WebGPU reaction receipt', () => {
+  const receiptTelemetry = finalizedReactionReceiptTelemetry();
+  const events = buildSchroederReactionReceiptIccTrace({
+    scenarios: [{
+      targetParticleCount: 1024,
+      schroederSimulationActive: true,
+      schroederTransactionCoverageComplete: true,
+      schroederAdmittedConsumerReceiptTelemetry: [receiptTelemetry]
+    }],
+    reportPath: '/tmp/ulg-reaction-receipt.json'
+  });
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0].kind, 'function_called');
+  assert.equal(
+    events[0].name,
+    'finalizeSchroederSpatialExactNearConsumerReceipt'
+  );
+  assert.equal(events[1].kind, 'test_result');
+  assert.equal(events[1].status, 'PASS');
+  assert.equal(events[1].value.backend, 'webgpu');
+  assert.equal(events[1].value.fallbackIntent, 'forbidden');
+  assert.equal(events[1].value.receiptCount, 1);
+
+  assert.deepEqual(buildSchroederReactionReceiptIccTrace({
+    scenarios: [{
+      schroederSimulationActive: true,
+      schroederTransactionCoverageComplete: true,
+      schroederAdmittedConsumerReceiptTelemetry: [
+        finalizedReactionReceiptTelemetry({ fallbackObserved: true })
+      ]
+    }]
+  }), []);
+});
+
 test('benchmark scenario params explicitly mount authoritative two-level mechanics', () => {
   const params = createSchroederBenchmarkScenarioParams({
     simulationRequested: true,
     selectedLevel: 3,
     maxLevel: 3,
+    spatialArenaCount: 8,
     crossLevelCouplingRequested: true,
     twoLevelMechanicsRequested: true,
     twoLevelMechanicsAuthority: 'authoritative',
@@ -452,11 +856,86 @@ test('benchmark scenario params explicitly mount authoritative two-level mechani
   assert.equal(params.ss, '1');
   assert.equal(params.schroederLevel, '3');
   assert.equal(params.schroederMaxLevel, '4');
+  assert.equal(params.schroederSpatialArenaCount, '8');
   assert.equal(params.schroederCrossLevelCoupling, '1');
   assert.equal(params.schroederTwoLevel, '1');
   assert.equal(params.schroederTwoLevelAuthority, 'authoritative');
   assert.equal(params.schroederTwoLevelSubsteps, '4');
   assert.deepEqual(createSchroederBenchmarkScenarioParams(), {});
+});
+
+test('benchmark scene geometry derives a touching base height from its particle edge', () => {
+  const scenario = scenarioUrlForCount(1024);
+  const params = new URL(`https://benchmark.invalid${scenario.url}`).searchParams;
+
+  assert.equal(scenario.edge, 8);
+  assert.equal(scenario.actualParticleCount, 1024);
+  assert.equal(scenario.iceBaseHeightM, 0);
+  assert.equal(scenario.baseBlockEdgeM, 1.6);
+  assert.equal(scenario.ironBaseHeightM, 1.6);
+  assert.equal(scenario.ironBaseHeightSource, 'derived-touching-base-block-edge');
+  assert.equal(params.get('iceh'), '0');
+  assert.equal(params.get('ironh'), '1.6');
+  assert.equal(params.get('basen'), '8');
+  assert.equal(params.get('dropn'), '8');
+});
+
+test('current resident surface telemetry outranks a stale render-state snapshot', () => {
+  const current = currentResidentSurfaceDrawEvidence({
+    surfaceDraw: {
+      status: 'resident-extension-surface-draw-buffers-retained',
+      visibleRendererBridge: 'native-webgpu-surface-consumer',
+      gpuBufferHandoffReady: true,
+      gpuBufferHandoffKind: 'surface-draw-buffers',
+      gpuBufferHandoffUpperBoundVertexCount: 18,
+      drawIndirectRowsBufferByteLength: 16,
+      compactPositionRowsBufferByteLength: 288,
+      visibleRenderSource: 'resident-surface-draw-native-webgpu-consumer'
+    },
+    renderState: {
+      surfaceDrawStatus: 'resident-surface-draw-unavailable',
+      surfaceDrawVisibleRendererBridge: 'pending-three-webgpu-binding',
+      surfaceDrawGpuBufferHandoffReady: false,
+      surfaceDrawGpuBufferHandoffKind: null,
+      surfaceDrawGpuBufferHandoffUpperBoundVertexCount: 0,
+      surfaceDrawIndirectRowsBufferByteLength: 0,
+      surfaceDrawCompactPositionRowsBufferByteLength: 0,
+      surfaceDrawVisibleRenderSource: 'three-marching-cubes-fallback'
+    }
+  });
+
+  assert.equal(current.status, 'resident-extension-surface-draw-buffers-retained');
+  assert.equal(current.bridge, 'native-webgpu-surface-consumer');
+  assert.equal(current.gpuBufferHandoffReady, true);
+  assert.equal(current.gpuBufferHandoffKind, 'surface-draw-buffers');
+  assert.equal(current.gpuBufferHandoffUpperBoundVertexCount, 18);
+  assert.equal(current.indirectRowsBufferByteLength, 16);
+  assert.equal(current.compactPositionRowsBufferByteLength, 288);
+  assert.equal(current.source, 'resident-surface-draw-native-webgpu-consumer');
+
+  const directFailure = currentResidentSurfaceDrawEvidence({
+    surfaceDraw: {
+      gpuBufferHandoffReady: false,
+      drawIndirectRowsBufferByteLength: 0
+    },
+    renderState: {
+      surfaceDrawGpuBufferHandoffReady: true,
+      surfaceDrawIndirectRowsBufferByteLength: 16
+    }
+  });
+  assert.equal(directFailure.gpuBufferHandoffReady, false);
+  assert.equal(directFailure.indirectRowsBufferByteLength, 0);
+
+  const fallback = currentResidentSurfaceDrawEvidence({
+    renderState: {
+      surfaceDrawStatus: 'resident-surface-draw-snapshot-only',
+      surfaceDrawGpuBufferHandoffReady: true,
+      surfaceDrawIndirectRowsBufferByteLength: 16
+    }
+  });
+  assert.equal(fallback.status, 'resident-surface-draw-snapshot-only');
+  assert.equal(fallback.gpuBufferHandoffReady, true);
+  assert.equal(fallback.indirectRowsBufferByteLength, 16);
 });
 
 test('benchmark SS control params leave two-level mechanics absent', () => {
@@ -507,6 +986,38 @@ test('SS performance evidence aggregates every requested batch and all released 
   assert.equal(evidence.transactionCounterTotals.legacyExhaustiveTraversalCount, 1);
   assert.equal(evidence.backpressureWaitCount, 2);
   assert.equal(evidence.backpressureWaitMs, 0.5);
+});
+
+test('SS performance evidence proves the requested direct spatial arena depth', () => {
+  const metrics = completeMetrics();
+  for (const metric of metrics.filter((entry) => entry.phase === 'resident-batch')) {
+    for (const summary of metric.residentSteps
+      .schroederSpatialEpochGenerationSummaries) {
+      summary.directArenaCount = 8;
+      summary.arenaCapacity = 8;
+    }
+  }
+  const evidence = aggregateSchroederResidentBatchEvidence({
+    metrics,
+    requestedBatchCount: 2,
+    requestedBatchStepCount: 2,
+    schroederSimulationRequested: true,
+    schroederSpatialArenaCount: 8
+  });
+
+  assert.equal(evidence.requestedSpatialArenaCount, 8);
+  assert.deepEqual(evidence.observedSpatialArenaCounts, [8]);
+  assert.equal(evidence.spatialArenaCountCoverageComplete, true);
+
+  metrics[1].residentSteps.schroederSpatialEpochGenerationSummaries[0]
+    .arenaCapacity = 3;
+  assert.equal(aggregateSchroederResidentBatchEvidence({
+    metrics,
+    requestedBatchCount: 2,
+    requestedBatchStepCount: 2,
+    schroederSimulationRequested: true,
+    schroederSpatialArenaCount: 8
+  }).spatialArenaCountCoverageComplete, false);
 });
 
 test('SS performance evidence requires every batch to publish complete release-hook settlement', () => {
@@ -581,6 +1092,23 @@ test('SS performance gate cannot downgrade an explicit SS request from false tel
   assert.ok(evidence.blockers.includes('schroeder-spatial-transaction-coverage-incomplete'));
 });
 
+test('SS performance gate fails closed when a requested arena depth is not observed', () => {
+  const evidence = scenarioPerformanceGate({
+    estimatedReadbackBytesPerStep: 0,
+    schroederSimulationRequested: true,
+    schroederSimulationRequestedObserved: true,
+    schroederSimulationActive: true,
+    schroederTransactionCoverageComplete: true,
+    schroederSpatialArenaCountRequested: 8,
+    schroederSpatialArenaCountCoverageComplete: false
+  });
+
+  assert.equal(evidence.status, 'fail');
+  assert.ok(evidence.blockers.includes(
+    'schroeder-spatial-arena-count-coverage-incomplete'
+  ));
+});
+
 test('authoritative two-level performance evidence covers every step in every batch', () => {
   const evidence = aggregateAuthoritativeTwoLevel(authoritativeTwoLevelMetrics());
 
@@ -648,6 +1176,55 @@ test('authoritative private substeps may consume generation and position ordinal
   assert.equal(sameLevel.transactionPositionEpochSequence.contiguous, false);
   assert.equal(sameLevel.stepIdentityCoverageComplete, false);
   assert.equal(sameLevel.transactionCoverageComplete, false);
+});
+
+test('same-level reaction placement epoch floors require an exact authenticated successor chain', () => {
+  const valid = aggregate(sameLevelReactionPlacementFloorMetrics());
+  assert.equal(valid.transactionPositionEpochSequence.contiguous, false);
+  assert.equal(valid.transactionPositionEpochSequence.complete, true);
+  assert.equal(
+    valid.transactionPositionEpochTransitionEvidence.authenticatedPlacementTransitionCount,
+    3
+  );
+  assert.equal(
+    valid.transactionPositionEpochTransitionEvidence.rejectedTransitionCount,
+    0
+  );
+  assert.equal(valid.stepIdentityCoverageComplete, true);
+  assert.equal(valid.transactionCoverageComplete, true);
+
+  const missing = sameLevelReactionPlacementFloorMetrics();
+  delete missing[1].residentSteps.schroederSpatialEpochTransactionSummaries[0]
+    .successorEpochEvidence;
+  assert.equal(aggregate(missing).transactionCoverageComplete, false);
+
+  const mismatched = sameLevelReactionPlacementFloorMetrics();
+  mismatched[1].residentSteps.schroederSpatialEpochTransactionSummaries[0]
+    .successorEpochEvidence.successorEpochIdentity.positionEpoch += 1;
+  assert.equal(aggregate(mismatched).transactionCoverageComplete, false);
+
+  const unauthenticated = sameLevelReactionPlacementFloorMetrics();
+  unauthenticated[1].residentSteps.schroederSpatialEpochTransactionSummaries[0]
+    .successorEpochEvidence.authenticated = false;
+  assert.equal(aggregate(unauthenticated).transactionCoverageComplete, false);
+
+  const unsupportedGap = sameLevelReactionPlacementFloorMetrics();
+  const gapTarget = unsupportedGap[1]
+    .residentSteps.schroederSpatialEpochTransactionSummaries[1];
+  gapTarget.epochIdentity.positionEpoch += 1;
+  assert.equal(aggregate(unsupportedGap).transactionCoverageComplete, false);
+
+  const contradictoryContiguousProof = sameLevelReactionPlacementFloorMetrics();
+  const contiguousTransactions = contradictoryContiguousProof
+    .filter((metric) => metric.phase === 'resident-batch')
+    .flatMap((metric) => metric.residentSteps.schroederSpatialEpochTransactionSummaries);
+  for (let index = 0; index < contiguousTransactions.length; index += 1) {
+    contiguousTransactions[index].epochIdentity.positionEpoch = 20 + index;
+  }
+  assert.equal(
+    aggregate(contradictoryContiguousProof).transactionCoverageComplete,
+    false
+  );
 });
 
 test('performance gate fails closed when authoritative two-level proof is incomplete', () => {
@@ -999,6 +1576,129 @@ test('target-path paired GPU timestamp campaign can report cost without misapply
   );
 });
 
+test('paired historical reaction-step stage campaign accepts exact authoritative segmented evidence', () => {
+  const evidence = summarizePairedGpuStageProducerRuns({
+    runs: pairedReactionStageProducerCampaignRuns({ candidateScale: 1.04 }),
+    expectedBaselineGitHead:
+      '6c20c32b814a0e4cb66ff973fb4cc225659f3f25'
+  });
+
+  assert.equal(evidence.status, 'pass');
+  assert.equal(
+    evidence.method.producerId,
+    'schroeder-hierarchy:two-level-post-mechanics-reactionStep'
+  );
+  assert.deepEqual(evidence.method.expectedRunOrders, ['AB', 'BA', 'AB']);
+  assert.equal(evidence.method.requiredWarmupBatchCount, 4);
+  assert.equal(evidence.method.requiredMeasuredSampleCount, 9);
+  assert.ok(Math.abs(evidence.paired.medianP50Ratio - 1.04) < 1e-12);
+  assert.ok(Math.abs(evidence.paired.medianP95Ratio - 1.04) < 1e-12);
+  assert.equal(evidence.paired.p50WithinThreshold, true);
+  assert.equal(evidence.paired.p95WithinThreshold, true);
+  assert.equal(
+    evidence.independentMedianCrossCheck.p50WithinThreshold,
+    true
+  );
+  assert.equal(
+    evidence.independentMedianCrossCheck.p95WithinThreshold,
+    true
+  );
+  assert.equal(evidence.absoluteCandidateCeiling.withinCeiling, true);
+  assert.match(
+    evidence.absoluteCandidateCeiling.provenance,
+    /best-accepted-historical/
+  );
+  assert.equal(
+    evidence.runs.every((run) => (
+      run.candidate.segmentedPlacementAttributionComplete
+      && run.candidate.serialPlacementSummaryCount === 0
+      && run.baseline.historicalDiscoveryIdentityComplete
+      && run.candidate.historicalDiscoveryIdentityComplete
+    )),
+    true
+  );
+});
+
+test('paired historical reaction-step stage campaign fails closed on provenance, route, and sparse raw spans', () => {
+  const runs = pairedReactionStageProducerCampaignRuns({
+    orders: ['AB', 'AB', 'BA']
+  });
+  runs[1].runId = runs[0].runId;
+  runs[0].candidate.sourceProvenance.sourceFingerprintAfter = '9'.repeat(64);
+  runs[1].candidate.sourceProvenance.commonConfigSignature = '8'.repeat(64);
+  runs[1].candidate.scenario.scenarioUrl = runs[1].candidate.scenario
+    .scenarioUrl.replace('schroederMaxLevel=1', 'schroederMaxLevel=0');
+  const sparseBatch = runs[2].candidate.gpuStageTimestampEvidence.batches[4];
+  sparseBatch.spans = sparseBatch.spans.filter((span) => (
+    span.producerId
+      !== 'schroeder-hierarchy:two-level-post-mechanics-reactionStep'
+  ));
+
+  const evidence = summarizePairedGpuStageProducerRuns({
+    runs,
+    expectedBaselineGitHead: '0'.repeat(40)
+  });
+
+  assert.equal(evidence.status, 'fail');
+  assert.ok(evidence.blockers.includes(
+    'run-identities-missing-or-duplicated'
+  ));
+  assert.ok(evidence.blockers.includes('run-order-not-ab-ba-alternating'));
+  assert.ok(evidence.blockers.includes(
+    'candidate-source-provenance-incomplete'
+  ));
+  assert.ok(evidence.blockers.includes('common-config-signature-mismatch'));
+  assert.ok(evidence.blockers.includes(
+    'candidate-authoritative-route-incomplete'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'candidate-stage-producer-evidence-incomplete'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'historical-baseline-git-head-mismatch'
+  ));
+  assert.equal(
+    evidence.runs[2].candidate.targetSpanCoverageComplete,
+    false,
+    'the campaign recomputes target coverage from raw measured batch spans'
+  );
+});
+
+test('paired historical reaction-step stage campaign rejects serial placement and all regression gates independently', () => {
+  const runs = pairedReactionStageProducerCampaignRuns({
+    candidateScale: 1.06,
+    candidateSerialPlacement: true
+  });
+  const evidence = summarizePairedGpuStageProducerRuns({
+    runs,
+    expectedBaselineGitHead:
+      '6c20c32b814a0e4cb66ff973fb4cc225659f3f25'
+  });
+
+  assert.equal(evidence.status, 'fail');
+  assert.ok(evidence.blockers.includes(
+    'candidate-segmented-placement-attribution-incomplete'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'candidate-serial-placement-producer-present'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'paired-stage-producer-p50-regression-exceeds-threshold'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'paired-stage-producer-p95-regression-exceeds-threshold'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'independent-median-stage-producer-p50-regression-exceeds-threshold'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'independent-median-stage-producer-p95-regression-exceeds-threshold'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'candidate-stage-producer-p50-exceeds-absolute-ceiling'
+  ));
+});
+
 test('paired historical physics throughput campaign passes a four-percent regression', () => {
   const evidence = summarizePairedPhysicsThroughputRuns({
     runs: pairedThroughputCampaignRuns({ candidateScale: 0.96 }),
@@ -1058,6 +1758,39 @@ test('paired historical physics throughput campaign fails closed on contaminatio
   ));
   assert.ok(evidence.blockers.includes(
     'independent-median-physics-throughput-regression-exceeds-threshold'
+  ));
+});
+
+test('paired spatial arena-depth characterization proves same-source 3-versus-8 evidence', () => {
+  const evidence = summarizePairedSpatialArenaDepthThroughputRuns({
+    runs: pairedSpatialArenaDepthCampaignRuns()
+  });
+
+  assert.equal(evidence.status, 'pass');
+  assert.equal(evidence.method.referenceRole, 'arena-3-reference');
+  assert.equal(evidence.method.comparisonRole, 'arena-8-comparison');
+  assert.equal(evidence.method.performanceGate,
+    'diagnostic-only-no-throughput-threshold');
+  assert.ok(Math.abs(
+    evidence.paired.medianPhysicsStepsPerSecondRatio - 1.05
+  ) < 1e-12);
+  assert.equal(evidence.paired.medianBackpressureWaitCountDelta, -14);
+  assert.equal(evidence.paired.medianBackpressureWaitMsDelta, -7);
+});
+
+test('paired spatial arena-depth characterization rejects a miswired depth and source drift', () => {
+  const runs = pairedSpatialArenaDepthCampaignRuns();
+  runs[1].candidate.scenario.schroederSpatialArenaCountsObserved = [3];
+  runs[2].candidate.sourceProvenance.worktreeStatusHashBefore = '2'.repeat(64);
+  runs[2].candidate.sourceProvenance.worktreeStatusHashAfter = '2'.repeat(64);
+  const evidence = summarizePairedSpatialArenaDepthThroughputRuns({ runs });
+
+  assert.equal(evidence.status, 'fail');
+  assert.ok(evidence.blockers.includes(
+    'comparison-arena-depth-evidence-incomplete'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'arena-depth-arms-do-not-share-exact-source'
   ));
 });
 

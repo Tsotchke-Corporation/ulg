@@ -230,6 +230,55 @@ function oneParticlePerCellFixture(cellCount) {
   return { cellKeys, cellOffsets, cellMembers, state, thermo, identity };
 }
 
+function allDormantLevelAssignmentFixture(sourceCount = 2) {
+  const cellKeys = new Uint32Array(sourceCount * 5);
+  const cellOffsets = new Uint32Array(sourceCount + 1);
+  const cellMembers = new Uint32Array(sourceCount);
+  const sourceRows = new Float32Array(sourceCount * 16);
+  const state = new Float32Array(sourceCount * 8);
+  const thermo = new Float32Array(sourceCount * 12);
+  const identity = new Uint32Array(sourceCount);
+  thermo.fill(Number.NaN);
+  for (let index = 0; index < sourceCount; index += 1) {
+    cellKeys.set([
+      0,
+      0x8000_0000,
+      (0x8000_0000 + index) >>> 0,
+      0x8000_0000,
+      0x8000_0000
+    ], index * 5);
+    cellOffsets[index] = index;
+    cellMembers[index] = index;
+    state.set([
+      index,
+      0,
+      0,
+      0,
+      Number.NaN,
+      Number.NaN,
+      Number.NaN,
+      Number.NaN
+    ], index * 8);
+    sourceRows.set([
+      0, 1, 0, 0, 0, 0, 0, 0,
+      index + 1, 26, 1, 0,
+      index, 0, 0, 0
+    ], index * 16);
+  }
+  cellOffsets[sourceCount] = sourceCount;
+  return {
+    cellKeys,
+    cellOffsets,
+    cellMembers,
+    sourceRows,
+    sourceRowLayoutId: 1,
+    sourceCount,
+    state,
+    thermo,
+    identity
+  };
+}
+
 function signedOrderKey(value) {
   return ((Number(value) >>> 0) ^ 0x8000_0000) >>> 0;
 }
@@ -405,6 +454,183 @@ test('CPU aggregate oracle conserves mass, moments, momentum, angular momentum, 
   assert.equal(result.root.phaseMask, 0b110);
   assert.ok(result.root.boundingRadiusM > 1.62);
   assert.ok(result.root.boundingRadiusM < 1.63);
+});
+
+test('CPU aggregate oracle authenticates dormant phase lanes without adding them to physical summaries', () => {
+  const lineageCapacity = 3;
+  const phaseLaneCount = 4;
+  const sourceCount = lineageCapacity * phaseLaneCount;
+  const state = new Float32Array(sourceCount * 8);
+  const thermo = new Float32Array(sourceCount * 12);
+  const identity = new Uint32Array(sourceCount);
+  const sourceRows = new Float32Array(sourceCount * 16);
+  for (let index = 0; index < sourceCount; index += 1) {
+    const phaseLane = Math.floor(index / lineageCapacity);
+    const lineage = index % lineageCapacity;
+    const active = index === 0 || index === lineageCapacity + 1;
+    const massKg = index === 0 ? 2 : index === lineageCapacity + 1 ? 3 : 0;
+    const position = [lineage * 2, 0, 0];
+    state.set([
+      ...position,
+      massKg,
+      active ? (index === 0 ? 3 : 0) : Number.NaN,
+      active ? (index === 0 ? 0 : 2) : Number.NaN,
+      active ? 0 : Number.NaN,
+      active ? (index === 0 ? 10 : 20) : Number.NaN
+    ], index * 8);
+    if (active) {
+      thermo.set([
+        26,
+        phaseLane + 1,
+        300,
+        7800,
+        phaseLane === 0 ? 1 : 0,
+        phaseLane === 1 ? 1 : 0,
+        phaseLane === 2 ? 1 : 0,
+        phaseLane === 3 ? 1 : 0,
+        0.1,
+        1,
+        1,
+        0.1
+      ], index * 12);
+    } else {
+      thermo.fill(Number.NaN, index * 12, index * 12 + 12);
+    }
+    sourceRows.set([
+      0,
+      1,
+      active ? 0.1 : 0,
+      active ? 0.001 : 0,
+      active ? 0.001 : 0,
+      active ? 0.001 : 0,
+      massKg,
+      active ? 7800 : 0,
+      phaseLane + 1,
+      26,
+      1,
+      0,
+      ...position,
+      0
+    ], index * 16);
+    identity[index] = lineage + 1;
+  }
+  const cellMembers = new Uint32Array([
+    0, 3, 6, 9,
+    1, 4, 7, 10,
+    2, 5, 8, 11
+  ]);
+  const result = reduceSchroederSpatialAggregateCpuOracle({
+    cellKeys: new Uint32Array([
+      0, 0x80000000, 0x80000000, 0x80000000, 0x80000000,
+      0, 0x80000000, 0x80000001, 0x80000000, 0x80000000,
+      0, 0x80000000, 0x80000002, 0x80000000, 0x80000000
+    ]),
+    cellOffsets: new Uint32Array([0, 4, 8, 12]),
+    cellMembers,
+    sourceRows,
+    sourceRowLayoutId: 1,
+    sourceCount,
+    state,
+    thermo,
+    identity
+  });
+  assert.equal(result.sourceCount, 12);
+  assert.equal(result.activeParticleCount, 2);
+  assert.equal(result.dormantSourceCount, 10);
+  assert.equal(result.root.sourceMemberCount, 12);
+  assert.equal(result.root.particleCount, 2);
+  assert.equal(result.root.massKg, 5);
+  assert.equal(result.root.internalEnergyJ, 80);
+  assert.equal(result.root.kineticEnergyJ, 15);
+  assert.equal(result.root.phaseMask, 0b110);
+  assert.equal(result.root.homogeneousMaterialId, 26);
+  assert.equal(result.root.homogeneousPhaseId, 0xffff_ffff);
+  const activeRadius = thermo[11];
+  assert.deepEqual(result.root.aabbMinM, [
+    -activeRadius,
+    -activeRadius,
+    -activeRadius
+  ]);
+  assert.deepEqual(result.root.aabbMaxM, [
+    2 + activeRadius,
+    activeRadius,
+    activeRadius
+  ]);
+  assert.equal(result.leaves[0].sourceMemberCount, 4);
+  assert.equal(result.leaves[0].particleCount, 1);
+  assert.equal(result.leaves[1].sourceMemberCount, 4);
+  assert.equal(result.leaves[1].particleCount, 1);
+  assert.equal(result.leaves[2].sourceMemberCount, 4);
+  assert.equal(result.leaves[2].particleCount, 0);
+  assert.equal(result.leaves[2].massKg, 0);
+  assert.deepEqual(result.leaves[2].aabbMinM, [0, 0, 0]);
+  assert.deepEqual(result.leaves[2].aabbMaxM, [0, 0, 0]);
+  assert.deepEqual(result.leaves[2].centerOfMassM, [0, 0, 0]);
+  assert.equal(result.leaves[2].boundingRadiusM, 0);
+  assert.deepEqual(result.leaves[2].materialBloomMask, [0, 0, 0, 0]);
+  assert.equal(result.leaves[2].phaseMask, 0);
+  assert.deepEqual(
+    Array.from(cellMembers.slice(0, 4)),
+    Array.from({ length: phaseLaneCount }, (_, lane) => lane * lineageCapacity)
+  );
+});
+
+test('CPU aggregate oracle fails closed on malformed dormant authority and traverses all-empty trees finitely', () => {
+  const fixture = allDormantLevelAssignmentFixture(2);
+  const aggregate = reduceSchroederSpatialAggregateCpuOracle(fixture);
+  assert.equal(aggregate.root.sourceMemberCount, 2);
+  assert.equal(aggregate.root.particleCount, 0);
+  for (const record of aggregate.records) {
+    assert.deepEqual(record.aabbMinM, [0, 0, 0]);
+    assert.deepEqual(record.aabbMaxM, [0, 0, 0]);
+    assert.deepEqual(record.centerOfMassM, [0, 0, 0]);
+    assert.equal(record.boundingRadiusM, 0);
+  }
+  const traversal = traverseSchroederSpatialAggregateCpuOracle({
+    aggregate,
+    queryPositionM: [100, 0, 0],
+    nearFieldRadiusM: 1,
+    openingTheta: 0.5
+  });
+  assert.equal(traversal.coveredLeafCount, 2);
+  assert.equal(traversal.emptyNodes.length, 1);
+  assert.equal(traversal.emptyAggregate.sourceMemberCount, 2);
+  assert.deepEqual(traversal.emptyAggregate.aabbMinM, [0, 0, 0]);
+  assert.deepEqual(traversal.farAggregate.aabbMinM, [0, 0, 0]);
+  assert.deepEqual(traversal.nearAggregate.aabbMinM, [0, 0, 0]);
+
+  const nonzeroDormantExtent = {
+    ...fixture,
+    sourceRows: fixture.sourceRows.slice()
+  };
+  nonzeroDormantExtent.sourceRows[2] = 0.1;
+  assert.throws(
+    () => reduceSchroederSpatialAggregateCpuOracle(nonzeroDormantExtent),
+    /source mechanical authority mismatched state/
+  );
+
+  const missingDormantMember = {
+    ...fixture,
+    cellOffsets: new Uint32Array([0, 1]),
+    cellMembers: new Uint32Array([0]),
+    cellKeys: fixture.cellKeys.slice(0, 5)
+  };
+  assert.throws(
+    () => reduceSchroederSpatialAggregateCpuOracle(missingDormantMember),
+    /exactly cover the declared source count/
+  );
+
+  const activeNodeWithoutMassAuthority = {
+    ...fixture,
+    sourceRows: fixture.sourceRows.slice(),
+    sourceRowLayoutId: 2
+  };
+  activeNodeWithoutMassAuthority.sourceRows[10] = 0;
+  activeNodeWithoutMassAuthority.sourceRows[9] = 0.1;
+  assert.throws(
+    () => reduceSchroederSpatialAggregateCpuOracle(activeNodeWithoutMassAuthority),
+    /source mechanical authority mismatched state/
+  );
 });
 
 test('CPU aggregate oracle builds one compressed spatial-prefix tree above 4096 leaves', () => {
@@ -614,6 +840,49 @@ test('CPU oracle and traversal reject malformed source replay and topology repla
     openingTheta: 0.5
   }), /malformed topology authority/);
 
+  const sourceMemberCorruption = reduceSchroederSpatialAggregateCpuOracle(
+    oneParticlePerCellFixture(3)
+  );
+  sourceMemberCorruption.records[0].sourceMemberCount += 1;
+  assert.throws(() => traverseSchroederSpatialAggregateCpuOracle({
+    aggregate: sourceMemberCorruption,
+    queryPositionM: [0, 0, 0],
+    nearFieldRadiusM: 1,
+    openingTheta: 0.5
+  }), /malformed topology authority/);
+
+  const negativeKineticEnergy = reduceSchroederSpatialAggregateCpuOracle(
+    oneParticlePerCellFixture(3)
+  );
+  negativeKineticEnergy.records[0].kineticEnergyJ = -1;
+  assert.throws(() => traverseSchroederSpatialAggregateCpuOracle({
+    aggregate: negativeKineticEnergy,
+    queryPositionM: [0, 0, 0],
+    nearFieldRadiusM: 1,
+    openingTheta: 0.5
+  }), /malformed topology authority/);
+
+  const rootSourceCountCorruption = reduceSchroederSpatialAggregateCpuOracle(
+    oneParticlePerCellFixture(3)
+  );
+  const corruptedRoot = {
+    ...rootSourceCountCorruption.root,
+    sourceMemberCount: rootSourceCountCorruption.root.sourceMemberCount - 1
+  };
+  const corruptedRecords = [...rootSourceCountCorruption.records];
+  corruptedRecords[rootSourceCountCorruption.shape.rootRecordIndex] = corruptedRoot;
+  const corruptedRootAggregate = {
+    ...rootSourceCountCorruption,
+    root: corruptedRoot,
+    records: corruptedRecords
+  };
+  assert.throws(() => traverseSchroederSpatialAggregateCpuOracle({
+    aggregate: corruptedRootAggregate,
+    queryPositionM: [0, 0, 0],
+    nearFieldRadiusM: 1,
+    openingTheta: 0.5
+  }), /malformed topology authority|malformed source-member authority/);
+
   const shiftedKeys = oneParticlePerCellFixture(3);
   for (let cellIndex = 0; cellIndex < 3; cellIndex += 1) {
     shiftedKeys.cellKeys[cellIndex * 5 + 2] += 17;
@@ -689,6 +958,30 @@ test('WGSL builds an authenticated Morton-prefix tree and exposes a budget-free 
     schroederSpatialAggregateStacklessTraversalWgsl,
     /aggregate_view\[base \+ 41u\] != topology_fingerprint\(record_index\)/
   );
+  assert.match(
+    schroederSpatialAggregateStacklessTraversalWgsl,
+    /right_source_count != source_member_count - left_source_count/
+  );
+  assert.match(
+    schroederSpatialAggregateStacklessTraversalWgsl,
+    /right_particle_count != particle_count - left_particle_count/
+  );
+  assert.match(
+    schroederSpatialAggregateViewWgsl,
+    /record\.internal_energy >= 0\.0/
+  );
+  assert.match(
+    schroederSpatialAggregateViewWgsl,
+    /SOURCE_LAYOUT_ACTIVE_NODE[\s\S]*mechanically_dormant = bitcast<u32>\(mass\) == 0u[\s\S]*support_radius >= 0\.0/
+  );
+  assert.match(
+    schroederSpatialAggregateStacklessTraversalWgsl,
+    /!finite_vec3\(momentum\)/
+  );
+  assert.match(
+    schroederSpatialAggregateStacklessTraversalWgsl,
+    /!finite_f32\(internal_energy\)[\s\S]*internal_energy < 0\.0/
+  );
   assert.match(schroederSpatialAggregateStacklessTraversalWgsl, /near_intersects/);
   assert.match(
     schroederSpatialAggregateStacklessTraversalWgsl,
@@ -750,6 +1043,14 @@ test('runtime retains Morton radix arenas and uses separate cell/internal/record
     .filter((pass) => pass.indirect?.buffer === execution.indirectDispatchBuffer)
     .map((pass) => pass.indirect.offset);
   assert.deepEqual(aggregateIndirectOffsets, [24, 0, 12, 24, 12, 24]);
+  const finalizeBindings = tracker.bindGroups.find(
+    ({ descriptor }) => descriptor.label.endsWith('-finalize-bindings')
+  );
+  assert.ok(finalizeBindings);
+  assert.deepEqual(
+    finalizeBindings.descriptor.entries.map(({ binding }) => binding),
+    [0, 5, 6, 7]
+  );
   assert.equal(
     execution.authIndirectDispatchOffsetBytes,
     SCHROEDER_SPATIAL_AGGREGATE_VIEW_AUTH_DISPATCH_SLOT * 3 * 4

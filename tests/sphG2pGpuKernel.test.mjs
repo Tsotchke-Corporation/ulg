@@ -39,6 +39,11 @@ import {
 } from '../src/runtime/sph/sphG2pGpuKernel.js';
 import { MLS_MPM_GPU_GRID_VELOCITY_FLOATS } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  postSeparationThermalBinAuthorityLiveness,
+  releasePostSeparationThermalBinAuthorityAfterQueue,
+  resolvePostSeparationThermalBinAuthority
+} from '../src/runtime/sph/sphPostSeparationThermalBinAuthority.js';
 
 function nearlyEqual(actual, expected, tolerance = 1e-5) {
   assert.ok(
@@ -218,11 +223,36 @@ function canonicalMechanicalProposalFixture(device, generation, applyCalls = nul
     size: 128,
     usage: 128
   }), device);
-  const evidenceBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'retained-schroeder-spatial-mechanical-evidence',
-    size: 80,
+  const evidenceBuffers = Array.from({ length: 1 }, (_, iteration) => (
+    tagWebGpuBufferDevice(device.createBuffer({
+      label: `retained-schroeder-spatial-mechanical-evidence-${iteration}`,
+      size: 48 * Uint32Array.BYTES_PER_ELEMENT,
+      usage: 128
+    }), device)
+  ));
+  const evidenceBuffer = evidenceBuffers.at(-1);
+  const makeGraphBuffer = (label, size = 64) => tagWebGpuBufferDevice(device.createBuffer({
+    label,
+    size,
     usage: 128
   }), device);
+  const scaleBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'retained-schroeder-spatial-mechanical-barrier-scales',
+    size: 64,
+    usage: 128
+  }), device);
+  const graphControlBuffer = makeGraphBuffer(
+    'retained-contact-graph-control',
+    40 * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const indirectDispatchBuffer = makeGraphBuffer('retained-contact-graph-indirect');
+  const sourceCountBuffer = makeGraphBuffer('retained-contact-graph-counts');
+  const sourceOffsetBuffer = makeGraphBuffer('retained-contact-graph-offsets');
+  const appendStagingBuffer = makeGraphBuffer('retained-contact-graph-staging');
+  const directedPeerBuffer = makeGraphBuffer('retained-contact-graph-peers');
+  const scratchStateABuffer = makeGraphBuffer('retained-contact-graph-scratch-a');
+  const scratchStateBBuffer = makeGraphBuffer('retained-contact-graph-scratch-b');
+  const energyLedgerBuffer = proposalBuffer;
   const separationReceipt = Object.freeze({
     status: 'schroeder-spatial-epoch-consumer-receipt-finalized',
     gpuAuthenticated: true,
@@ -230,18 +260,26 @@ function canonicalMechanicalProposalFixture(device, generation, applyCalls = nul
     supportProfileId: SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1,
     generationId: generation.execution.generationId,
     traversalCount: 1,
+    expectedTraversalCount: 1,
     privateLookupBuildCount: 0,
     fixedCandidateBuildCount: 0,
     exhaustiveTraversalCount: 0
   });
   return Object.freeze({
-    schema: 'peercompute.ulg.schroeder-spatial-mechanical-proposal.v1',
-    status: 'schroeder-spatial-mechanical-proposal-submitted',
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-proposal.v3',
+    status: 'schroeder-spatial-mechanical-contact-graph-prepared',
     ready: true,
+    lifecycleStatus: 'prepared',
+    encodePolicy: 'single-use-immutable-selected-level',
+    selectedLevel: 0,
+    proposalMode: 'proposal-deferred-to-post-mechanics',
+    sourcePositionAuthority:
+      'post-g2p-state-with-swept-pre-integration-ss-directory',
     generation,
     generationId: generation.execution.generationId,
     supportEpoch: generation.execution.supportEpoch,
     traversalCount: 1,
+    solverIterationCount: 4,
     privateBuildCount: 0,
     fixedCandidateBuildCount: 0,
     exhaustiveTraversalCount: 0,
@@ -249,7 +287,56 @@ function canonicalMechanicalProposalFixture(device, generation, applyCalls = nul
     releaseScheduled: false,
     released: false,
     proposalBuffer,
-    evidence: Object.freeze({ buffer: evidenceBuffer }),
+    proposalRowByteOffset: 64,
+    proposalRowWords: 8,
+    proposalRowStrideFloats: 8,
+    graphControlBuffer,
+    indirectDispatchBuffer,
+    sourceCountBuffer,
+    sourceOffsetBuffer,
+    appendStagingBuffer,
+    directedPeerBuffer,
+    scratchStateABuffer,
+    scratchStateBBuffer,
+    scaleBuffer,
+    energyLedgerBuffer,
+    energyLedgerAliasedToProposalRows: true,
+    energyLedgerByteOffset: 64,
+    energyLedgerAliasLifetime: 'solver-scratch-until-proposal-publication',
+    energyLedgerRowStrideFloats: 8,
+    directedPairCapacity: 4,
+    contactGraph: Object.freeze({
+      schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v3',
+      status: 'schroeder-spatial-mechanical-pair-graph-prepared',
+      selectedLevel: 0,
+      directedPairCapacity: 4,
+      controlBuffer: graphControlBuffer,
+      indirectDispatchBuffer,
+      sourceCountBuffer,
+      sourceOffsetBuffer,
+      appendStagingBuffer,
+      directedPeerBuffer,
+      scratchStateABuffer,
+      scratchStateBBuffer,
+      scaleBuffer,
+      energyLedgerBuffer,
+      energyLedgerAliasedToProposalRows: true,
+      energyLedgerByteOffset: 64,
+      energyLedgerAliasLifetime: 'solver-scratch-until-proposal-publication',
+      layout: Object.freeze({
+        readbackRequired: false,
+        energyLedgerAliasedToProposalRows: true,
+        energyLedgerAliasByteOffset: 64
+      })
+    }),
+    evidence: Object.freeze({
+      buffer: evidenceBuffer,
+      traversalCount: 1,
+      traversalBuffers: Object.freeze(evidenceBuffers),
+      scaleMeasurementBuffer: scaleBuffer,
+      graphControlBuffer,
+      wordCount: 48
+    }),
     consumerReceipt(consumerId) {
       return consumerId === 'separation' ? separationReceipt : null;
     },
@@ -551,6 +638,96 @@ test('WebGPU MLS-MPM G2P params buffer fits the full uniform payload', async () 
   assert.equal(paramsBuffer.size, 80);
   assert.equal(paramsWrite.byteLength, 80);
   assert.equal(device.submissions.length, 1);
+});
+
+test('excluded-volume separation refills one retained bin directory after position apply', () => {
+  const device = fakeG2pDevice();
+  const stateBuffer = device.createBuffer({
+    label: 'post-apply-refill-state',
+    size: 2 * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const mechanicsBuffer = device.createBuffer({
+    label: 'post-apply-refill-mechanics',
+    size: 2 * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const encoded = encodeMlsMpmParticleSeparationPasses(
+    device,
+    device.createCommandEncoder(),
+    {
+      stateBuffer,
+      mechanicsBuffer,
+      particleCount: 2,
+      boxDimsM: [3, 3, 3],
+      relaxation: 0.5,
+      normalVelocityDamping: 0,
+      maxPairRestDistanceM: 1,
+      gridSpacingM: 1
+    }
+  );
+
+  assert.equal(encoded.enabled, true);
+  assert.equal(encoded.neighborBinsPublished, false);
+  assert.equal(encoded.neighborBinsRefreshedAfterSeparation, true);
+  assert.equal(encoded.postSeparationThermalBinCandidate.stateBuffer, stateBuffer);
+  assert.equal(
+    encoded.postSeparationThermalBinCandidate.binsBuffer,
+    encoded.scratch.binsBuffer
+  );
+  assert.deepEqual(device.dispatches.map(({ pipeline }) => pipeline.label), [
+    'ulg-mls-mpm-particle-separation-bin-fill',
+    'ulg-mls-mpm-particle-separation-compute',
+    'ulg-mls-mpm-particle-separation-apply',
+    'ulg-mls-mpm-particle-separation-bin-fill'
+  ]);
+  assert.equal(device.clears.length, 2);
+  assert.ok(device.clears.every(({ buffer }) => (
+    buffer === encoded.postSeparationThermalBinCandidate.binsBuffer
+  )));
+});
+
+test('retained G2P publishes one live post-separation thermal-bin authority', async () => {
+  const device = fakeG2pDevice();
+  const result = await runMlsMpmG2pWebGpu({
+    ...twoParticleFixture(),
+    device,
+    boxDimsM: [3, 3, 3],
+    particleSeparationRelaxation: 0.5,
+    particleSeparationVelocityDamping: 0,
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  });
+  const authority = result.postSeparationThermalBinAuthority;
+  const resolved = resolvePostSeparationThermalBinAuthority(authority, {
+    device,
+    stateBuffer: result.stateBuffer,
+    particleCount: result.particleCount
+  });
+
+  assert.ok(authority);
+  assert.ok(resolved);
+  assert.equal(resolved.positionAuthority, 'post-separation-g2p-output-state');
+  assert.equal(resolved.binsBuffer.label, 'ulg-mls-mpm-separation-bins');
+  assert.equal(resolved.binsBuffer.destroyed, false);
+  assert.equal(
+    device.dispatches.filter(({ pipeline }) => (
+      pipeline.label === 'ulg-mls-mpm-particle-separation-bin-fill'
+    )).length,
+    2
+  );
+  assert.equal(
+    postSeparationThermalBinAuthorityLiveness(authority).releaseScheduled,
+    false
+  );
+  assert.equal(releasePostSeparationThermalBinAuthorityAfterQueue(authority, {
+    device
+  }), true);
+  await postSeparationThermalBinAuthorityLiveness(authority).releasePromise;
+  assert.equal(resolved.binsBuffer.destroyed, true);
+  assert.equal(postSeparationThermalBinAuthorityLiveness(authority).destroyCount, 1);
+  assert.equal(result.destroyOutputParticleBuffers(), true);
 });
 
 test('CPU MLS-MPM G2P renormalizes clipped active grid support for constant flow', () => {
@@ -921,14 +1098,9 @@ test('MLS-MPM G2P parity report is explicit and non-scientific', () => {
   assert.equal(parity.fullPhysicsValidation, false);
 });
 
-test('WebGPU MLS-MPM G2P applies one authenticated resident proposal under the selected epoch', async () => {
+test('WebGPU MLS-MPM G2P rejects a freehand finalized receipt that lacks a runtime-issued resident binding', async () => {
   const device = fakeG2pDevice();
-  const {
-    generation,
-    directoryBuffer,
-    evidenceBuffer,
-    exactNearQueryProfile
-  } = canonicalSpatialGenerationFixture(device);
+  const { generation } = canonicalSpatialGenerationFixture(device);
   let legacyAssignmentPropertyReads = 0;
   const contradictoryMalformedAssignment = new Proxy({
     particleCount: -99,
@@ -949,126 +1121,23 @@ test('WebGPU MLS-MPM G2P applies one authenticated resident proposal under the s
     proposalApplyCalls
   );
 
-  const result = await runMlsMpmG2pWebGpu({
-    ...twoParticleFixture(),
-    device,
-    boxDimsM: [3, 3, 3],
-    readbackMode: 'no-full-readback',
-    schroederLevelAssignment: contradictoryMalformedAssignment,
-    schroederSelectedLevel: 2,
-    schroederSpatialEpochGeneration: generation,
-    schroederSpatialMechanicalProposal: mechanicalProposal,
-    canonicalSpatialRequired: true,
-    observeCanonicalSpatialAuthority: true
-  });
-
+  await assert.rejects(runMlsMpmG2pWebGpu({
+      ...twoParticleFixture(),
+      device,
+      boxDimsM: [3, 3, 3],
+      readbackMode: 'no-full-readback',
+      schroederLevelAssignment: contradictoryMalformedAssignment,
+      schroederSelectedLevel: 2,
+      schroederSpatialEpochGeneration: generation,
+      schroederSpatialMechanicalProposal: mechanicalProposal,
+      canonicalSpatialRequired: true,
+      observeCanonicalSpatialAuthority: true
+    }),
+    /requires an authenticated deferred post-G2P contact\/separation residual solver/
+  );
   assert.equal(legacyAssignmentPropertyReads, 0);
-  assert.equal(evidenceBuffer.size, 80);
-  assert.equal(generation.execution.sourceAdapterId, SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY);
-  assert.equal(generation.execution.exactNearQueryProfile, exactNearQueryProfile);
-  assert.equal(generation.execution.queryGeometryEvidence, exactNearQueryProfile);
-  assert.equal(result.backend, 'webgpu');
-  assert.equal(result.schroederSpatialAuthorityEnabled, true);
-  assert.equal(
-    result.schroederSpatialAuthorityStatus,
-    'canonical-spatial-directory-bound-for-g2p-level-admission'
-  );
-  assert.equal(result.schroederAuthorityBindingMode, 'canonical-spatial-epoch');
-  assert.equal(result.oldLevelAssignmentLookupRemoved, true);
-  assert.equal(result.schroederLevelFilter.authorityBindingMode, 'canonical-spatial-epoch');
-  assert.equal(result.schroederLevelFilter.oldLevelAssignmentLookupRemoved, true);
-  assert.equal(result.schroederLevelFilter.assignmentBufferSource, null);
-  assert.equal(proposalApplyCalls.length, 1);
-  assert.equal(proposalApplyCalls[0].selectedLevel, 2);
-  assert.equal(result.schroederLevelFilter.retainedAssignmentBuffer, false);
-  assert.equal(result.separationCanonicalSpatialAuthorityGate, true);
-  assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 3);
-  assert.equal(
-    device.createdBuffers.some((buffer) => String(buffer.label).includes('level-assignments')),
-    false
-  );
-
-  const g2pDispatch = device.dispatches.find(
-    (dispatch) => dispatch.pipeline?.label === 'ulg-mls-mpm-g2p-reconstruct'
-  );
-  assert.ok(g2pDispatch);
-  const g2pShader = g2pDispatch.pipeline.compute.module.code;
-  assert.match(
-    g2pShader,
-    /@group\(0\) @binding\(7\) var<storage, read_write> schroeder_spatial_authority_evidence/
-  );
-  assert.match(
-    g2pShader,
-    /@group\(0\) @binding\(8\) var<storage, read> schroeder_spatial_directory/
-  );
-  assert.doesNotMatch(g2pShader, /schroeder_level_assignments/);
-  const g2pLayoutEntries = g2pDispatch.pipeline.layout.bindGroupLayouts[0].entries;
-  assert.equal(
-    g2pLayoutEntries.find((entry) => entry.binding === 7)?.buffer?.type,
-    'storage'
-  );
-  assert.equal(
-    g2pLayoutEntries.find((entry) => entry.binding === 8)?.buffer?.type,
-    'read-only-storage'
-  );
-  assert.equal(
-    g2pDispatch.bindGroup.entries.find((entry) => entry.binding === 7)?.resource?.buffer,
-    evidenceBuffer
-  );
-  assert.equal(
-    g2pDispatch.bindGroup.entries.find((entry) => entry.binding === 8)?.resource?.buffer,
-    directoryBuffer
-  );
-  const g2pFinalizeDispatch = device.dispatches.find(
-    (dispatch) => dispatch.pipeline?.label === 'ulg-mls-mpm-g2p-finalize-spatial-authority'
-  );
-  assert.ok(g2pFinalizeDispatch);
-  assert.match(
-    g2pShader,
-    /g2p_spatial_authority_rejected\(\)[\s\S]*finalize_canonical_spatial_authority/
-  );
-
-  const privateSeparationDispatches = device.dispatches.filter(
-    (dispatch) => String(dispatch.pipeline?.label).startsWith('ulg-mls-mpm-particle-separation-')
-  );
-  assert.equal(privateSeparationDispatches.length, 0);
-  const proposalApply = device.dispatches.find(
-    (dispatch) => dispatch.pipeline?.label
-      === 'ulg-schroeder-spatial-mechanical-proposal-apply'
-  );
-  assert.ok(proposalApply);
-  assert.ok(device.dispatches.indexOf(proposalApply) > device.dispatches.indexOf(g2pDispatch));
-  assert.ok(device.dispatches.indexOf(proposalApply)
-    < device.dispatches.indexOf(g2pFinalizeDispatch));
-  assert.equal(
-    device.createdBuffers.some(({ label }) => /separation-(bins|params|corrections)/.test(label)),
-    false
-  );
-
-  const paramsWrite = device.writes.find(
-    (write) => write.label === 'ulg-mls-mpm-g2p-params'
-  );
-  assert.ok(paramsWrite);
-  assert.equal(paramsWrite.byteLength, 144);
-  const params = new DataView(paramsWrite.data);
-  assert.equal(params.getInt32(28, true), 2);
-  assert.equal(params.getUint32(76, true), 1);
-  assert.equal(params.getUint32(80, true), 23);
-  assert.equal(params.getUint32(84, true), 29);
-  assert.equal(params.getUint32(88, true), 31);
-  assert.equal(params.getUint32(92, true), 1);
-  assert.equal(params.getUint32(96, true), 17);
-  assert.equal(params.getUint32(100, true), 37);
-  assert.equal(params.getUint32(104, true), 41);
-  assert.equal(params.getUint32(108, true), 43);
-  assert.equal(params.getUint32(112, true), 47);
-  assert.equal(params.getUint32(116, true), 53);
-  assert.equal(params.getUint32(120, true), 59);
-  assert.equal(params.getUint32(124, true), 61);
-  assert.equal(params.getUint32(128, true), 67);
-  assert.equal(params.getUint32(132, true), 71);
-  assert.equal(params.getUint32(136, true), 1);
+  assert.equal(proposalApplyCalls.length, 0);
+  assert.equal(device.submissions.length, 0);
 });
 
 test('WebGPU MLS-MPM G2P rejects a host-invalid selected epoch before submission', async () => {
@@ -1106,37 +1175,26 @@ test('WebGPU MLS-MPM G2P rejects a host-invalid selected epoch before submission
   );
 });
 
-test('WebGPU canonical G2P retains global restore after an authenticated zero-row proposal', async () => {
+test('WebGPU canonical G2P rejects a forged zero-row proposal before submission', async () => {
   const device = fakeG2pDevice();
   const { generation } = canonicalSpatialGenerationFixture(device);
   const mechanicalProposal = canonicalMechanicalProposalFixture(device, generation);
 
-  await runMlsMpmG2pWebGpu({
-    ...twoParticleFixture(),
-    device,
-    boxDimsM: [3, 3, 3],
-    particleSeparationRelaxation: 0,
-    particleSeparationVelocityDamping: 0,
-    readbackMode: 'no-full-readback',
-    schroederSelectedLevel: 2,
-    schroederSpatialEpochGeneration: generation,
-    schroederSpatialMechanicalProposal: mechanicalProposal,
-    canonicalSpatialRequired: true
-  });
-
-  assert.equal(device.dispatches.length, 3);
-  assert.equal(
-    device.dispatches[0].pipeline?.label,
-    'ulg-mls-mpm-g2p-reconstruct'
+  await assert.rejects(runMlsMpmG2pWebGpu({
+      ...twoParticleFixture(),
+      device,
+      boxDimsM: [3, 3, 3],
+      particleSeparationRelaxation: 0,
+      particleSeparationVelocityDamping: 0,
+      readbackMode: 'no-full-readback',
+      schroederSelectedLevel: 2,
+      schroederSpatialEpochGeneration: generation,
+      schroederSpatialMechanicalProposal: mechanicalProposal,
+      canonicalSpatialRequired: true
+    }),
+    /requires an authenticated deferred post-G2P contact\/separation residual solver/
   );
-  assert.equal(
-    device.dispatches[1].pipeline?.label,
-    'ulg-schroeder-spatial-mechanical-proposal-apply'
-  );
-  assert.equal(
-    device.dispatches[2].pipeline?.label,
-    'ulg-mls-mpm-g2p-finalize-spatial-authority'
-  );
+  assert.equal(device.submissions.length, 0);
   const productionShader = device.dispatches[0].pipeline.compute.module.code;
   assert.match(
     productionShader,

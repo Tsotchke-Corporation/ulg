@@ -13,13 +13,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  summarizePairedGpuStageProducerRuns,
   summarizePairedGpuTimestampRuns,
+  summarizePairedSpatialArenaDepthThroughputRuns,
   summarizePairedPhysicsThroughputRuns
 } from './sph-performance-benchmark.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const sourceRepoDir = path.resolve(scriptDir, '..');
 const benchmarkScript = path.join(scriptDir, 'sph-performance-benchmark.mjs');
+const SLICE8_REACTION_HISTORICAL_BASELINE_HEAD =
+  '6c20c32b814a0e4cb66ff973fb4cc225659f3f25';
+const SLICE8_REACTION_STEP_PRODUCER_ID =
+  'schroeder-hierarchy:two-level-post-mechanics-reactionStep';
+const SLICE8_REACTION_STEP_P50_CEILING_MS = 363.575232;
 
 function booleanEnv(name, fallback = false) {
   const value = process.env[name];
@@ -224,16 +231,24 @@ async function runArm({
 
 async function main() {
   const campaignKind = String(
-    process.env.ULG_SLICE7_CAMPAIGN_KIND || 'gpu-timestamp-target'
+    process.env.ULG_SLICE8_CAMPAIGN_KIND
+      || process.env.ULG_SLICE7_CAMPAIGN_KIND
+      || 'gpu-timestamp-target'
   ).trim().toLowerCase();
   const nonTargetPhysicsThroughput = campaignKind
     === 'non-target-physics-fps';
+  const historicalReactionStep = campaignKind
+    === 'reaction-step-historical';
+  const spatialArenaDepthCharacterization = campaignKind
+    === 'spatial-arena-depth-characterization';
   if (
     !nonTargetPhysicsThroughput
+    && !historicalReactionStep
+    && !spatialArenaDepthCharacterization
     && campaignKind !== 'gpu-timestamp-target'
   ) {
     throw new Error(
-      `Unsupported Slice 7 campaign kind ${campaignKind}`
+      `Unsupported performance campaign kind ${campaignKind}`
     );
   }
   const candidateRepoDir = path.resolve(
@@ -242,9 +257,27 @@ async function main() {
   const baselineRepoDir = path.resolve(
     process.env.ULG_SLICE7_CAMPAIGN_BASELINE_REPO || candidateRepoDir
   );
+  if (
+    spatialArenaDepthCharacterization
+    && baselineRepoDir !== candidateRepoDir
+  ) {
+    throw new Error(
+      'Spatial arena-depth characterization requires both arms to use the same repository path'
+    );
+  }
   const outputPath = path.resolve(
     process.env.ULG_SLICE7_CAMPAIGN_OUTPUT
-      || path.join(os.tmpdir(), 'ulg-slice7-gpu-timestamp-campaign.json')
+      || (historicalReactionStep
+        ? path.join(
+            os.tmpdir(),
+            'ulg-slice8-reaction-step-historical-campaign.json'
+          )
+        : (spatialArenaDepthCharacterization
+          ? path.join(
+              os.tmpdir(),
+              'ulg-slice8-spatial-arena-depth-characterization.json'
+            )
+          : path.join(os.tmpdir(), 'ulg-slice7-gpu-timestamp-campaign.json')))
   );
   const runCount = positiveIntegerEnv('ULG_SLICE7_CAMPAIGN_RUNS', 3, {
     min: 1,
@@ -252,18 +285,18 @@ async function main() {
   });
   const warmupBatchCount = positiveIntegerEnv(
     'ULG_SLICE7_CAMPAIGN_WARMUPS',
-    4,
+    spatialArenaDepthCharacterization ? 1 : 4,
     { min: 0, max: 100 }
   );
   const measuredSampleCount = positiveIntegerEnv(
     'ULG_SLICE7_CAMPAIGN_SAMPLES',
-    nonTargetPhysicsThroughput ? 1 : 9,
+    spatialArenaDepthCharacterization ? 6 : (nonTargetPhysicsThroughput ? 1 : 9),
     { min: 1, max: 100 }
   );
   const batches = warmupBatchCount + measuredSampleCount;
   const batchSteps = positiveIntegerEnv(
     'ULG_SLICE7_CAMPAIGN_BATCH_STEPS',
-    1,
+    spatialArenaDepthCharacterization ? 16 : 1,
     { min: 1, max: 1024 }
   );
   const particleCounts = String(
@@ -279,13 +312,35 @@ async function main() {
     2,
     { min: 1, max: 4 }
   );
+  const referenceSpatialArenaCount = positiveIntegerEnv(
+    'ULG_SLICE8_CAMPAIGN_REFERENCE_SPATIAL_ARENA_COUNT',
+    3,
+    { min: 1, max: 8 }
+  );
+  const comparisonSpatialArenaCount = positiveIntegerEnv(
+    'ULG_SLICE8_CAMPAIGN_COMPARISON_SPATIAL_ARENA_COUNT',
+    8,
+    { min: 1, max: 8 }
+  );
+  if (
+    spatialArenaDepthCharacterization
+    && referenceSpatialArenaCount === comparisonSpatialArenaCount
+  ) {
+    throw new Error(
+      'Spatial arena-depth characterization requires distinct reference and comparison arena counts'
+    );
+  }
   const dropMaterial = String(
     process.env.ULG_SLICE7_CAMPAIGN_DROP_MATERIAL
-      || (nonTargetPhysicsThroughput ? 'h2o' : 'na')
-  ).trim() || (nonTargetPhysicsThroughput ? 'h2o' : 'na');
+      || ((nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? 'h2o'
+        : 'na')
+  ).trim().toLowerCase() || ((nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+    ? 'h2o'
+    : 'na');
   const baseMaterial = String(
     process.env.ULG_SLICE7_CAMPAIGN_BASE_MATERIAL || 'h2o'
-  ).trim() || 'h2o';
+  ).trim().toLowerCase() || 'h2o';
   const dropTemperatureK = Number.isFinite(Number(
     process.env.ULG_SLICE7_CAMPAIGN_DROP_TEMPERATURE_K
   )) ? Number(process.env.ULG_SLICE7_CAMPAIGN_DROP_TEMPERATURE_K) : 300;
@@ -297,8 +352,31 @@ async function main() {
     max: 65_000
   });
   const tempDir = await mkdtemp(
-    path.join(os.tmpdir(), 'ulg-slice7-gpu-campaign-')
+    path.join(
+      os.tmpdir(),
+      historicalReactionStep
+        ? 'ulg-slice8-reaction-step-campaign-'
+        : (spatialArenaDepthCharacterization
+          ? 'ulg-slice8-spatial-arena-depth-campaign-'
+          : 'ulg-slice7-gpu-campaign-')
+    )
   );
+  if (historicalReactionStep && (
+    runCount !== 3
+    || warmupBatchCount !== 4
+    || measuredSampleCount !== 9
+    || batchSteps !== 1
+    || particleCounts !== '1000'
+    || fineSubstepCount !== 2
+    || dropMaterial !== 'na'
+    || baseMaterial !== 'h2o'
+    || dropTemperatureK !== 300
+    || baseTemperatureK !== 300
+  )) {
+    throw new Error(
+      'Historical reaction-step acceptance requires exactly 3 AB/BA/AB runs, 4 warmups, 9 one-step samples, requested 1000 particles, Na/H2O at 300 K, and 2 fine substeps'
+    );
+  }
   const commonEnvironment = {
     ULG_BENCH_PROFILE: 'smoke',
     ULG_BENCH_PARTICLE_COUNTS: particleCounts,
@@ -313,17 +391,29 @@ async function main() {
     ULG_BENCH_SCHROEDER_SIMULATION: '1',
     ULG_BENCH_SCHROEDER_LEVEL: '0',
     ULG_BENCH_SCHROEDER_CROSS_LEVEL_COUPLING:
-      nonTargetPhysicsThroughput ? '0' : '1',
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : '1',
     ULG_BENCH_MEASURE_GPU_TIMESTAMPS:
-      nonTargetPhysicsThroughput ? '0' : '1',
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : '1',
     ULG_BENCH_REQUIRE_GPU_TIMESTAMPS:
-      nonTargetPhysicsThroughput ? '0' : '1',
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : '1',
     ULG_BENCH_MEASURE_GPU_STAGE_TIMESTAMPS:
-      nonTargetPhysicsThroughput ? '0' : '1',
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : '1',
     ULG_BENCH_REQUIRE_MIGRATED_LAW_GPU_TIMESTAMPS:
-      nonTargetPhysicsThroughput ? '0' : '1',
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : '1',
     ULG_BENCH_GPU_TIMESTAMP_WARMUP_BATCHES:
-      nonTargetPhysicsThroughput ? '0' : String(warmupBatchCount),
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : String(warmupBatchCount),
     ULG_BENCH_DROP_MATERIAL: dropMaterial,
     ULG_BENCH_BASE_MATERIAL: baseMaterial,
     ULG_BENCH_DROP_TEMPERATURE_K: String(dropTemperatureK),
@@ -331,19 +421,40 @@ async function main() {
     ULG_BENCH_FAIL_ON_ERROR: nonTargetPhysicsThroughput ? '0' : '1'
   };
   const baselineEnvironment = {
-    ULG_BENCH_SCHROEDER_MAX_LEVEL: '0',
-    ULG_BENCH_SCHROEDER_TWO_LEVEL: '0',
-    ULG_BENCH_SCHROEDER_TWO_LEVEL_AUTHORITY: 'observation',
-    ULG_BENCH_SCHROEDER_TWO_LEVEL_SUBSTEPS: String(fineSubstepCount)
+    ULG_BENCH_SCHROEDER_MAX_LEVEL:
+      historicalReactionStep ? '1' : '0',
+    ULG_BENCH_SCHROEDER_TWO_LEVEL:
+      historicalReactionStep ? '1' : '0',
+    ULG_BENCH_SCHROEDER_TWO_LEVEL_AUTHORITY:
+      historicalReactionStep ? 'authoritative' : 'observation',
+    ULG_BENCH_SCHROEDER_TWO_LEVEL_SUBSTEPS: String(fineSubstepCount),
+    ...(spatialArenaDepthCharacterization
+      ? {
+          ULG_BENCH_SCHROEDER_SPATIAL_ARENA_COUNT:
+            String(referenceSpatialArenaCount)
+        }
+      : {})
   };
   const candidateEnvironment = {
     ULG_BENCH_SCHROEDER_MAX_LEVEL:
-      nonTargetPhysicsThroughput ? '0' : '1',
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : '1',
     ULG_BENCH_SCHROEDER_TWO_LEVEL:
-      nonTargetPhysicsThroughput ? '0' : '1',
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? '0'
+        : '1',
     ULG_BENCH_SCHROEDER_TWO_LEVEL_AUTHORITY:
-      nonTargetPhysicsThroughput ? 'observation' : 'authoritative',
-    ULG_BENCH_SCHROEDER_TWO_LEVEL_SUBSTEPS: String(fineSubstepCount)
+      (nonTargetPhysicsThroughput || spatialArenaDepthCharacterization)
+        ? 'observation'
+        : 'authoritative',
+    ULG_BENCH_SCHROEDER_TWO_LEVEL_SUBSTEPS: String(fineSubstepCount),
+    ...(spatialArenaDepthCharacterization
+      ? {
+          ULG_BENCH_SCHROEDER_SPATIAL_ARENA_COUNT:
+            String(comparisonSpatialArenaCount)
+        }
+      : {})
   };
   const commonConfigSignature = stableSignature({
     campaignKind,
@@ -355,10 +466,18 @@ async function main() {
     probeMode: 'scene',
     schroederSimulation: true,
     schroederLevel: 0,
-    crossLevelCoupling: !nonTargetPhysicsThroughput,
-    gpuTimestampInterval: !nonTargetPhysicsThroughput,
-    gpuStageTimestamps: !nonTargetPhysicsThroughput,
-    migratedLawGpuStageTimestampsRequired: !nonTargetPhysicsThroughput,
+    crossLevelCoupling: !(
+      nonTargetPhysicsThroughput || spatialArenaDepthCharacterization
+    ),
+    gpuTimestampInterval: !(
+      nonTargetPhysicsThroughput || spatialArenaDepthCharacterization
+    ),
+    gpuStageTimestamps: !(
+      nonTargetPhysicsThroughput || spatialArenaDepthCharacterization
+    ),
+    migratedLawGpuStageTimestampsRequired: !(
+      nonTargetPhysicsThroughput || spatialArenaDepthCharacterization
+    ),
     materials: {
       drop: dropMaterial,
       base: baseMaterial,
@@ -372,12 +491,36 @@ async function main() {
         arm: 'same-non-target-single-level-ss-scene-route'
       })
     : null;
+  const sharedHistoricalReactionArmConfigSignature = historicalReactionStep
+    ? stableSignature({
+        ...candidateEnvironment,
+        arm: 'same-authoritative-two-level-reaction-step-route'
+      })
+    : null;
+  const spatialArenaReferenceArmConfigSignature = spatialArenaDepthCharacterization
+    ? stableSignature({
+        ...baselineEnvironment,
+        arm: 'single-level-direct-spatial-arena-reference',
+        spatialArenaCount: referenceSpatialArenaCount
+      })
+    : null;
+  const spatialArenaComparisonArmConfigSignature = spatialArenaDepthCharacterization
+    ? stableSignature({
+        ...candidateEnvironment,
+        arm: 'single-level-direct-spatial-arena-comparison',
+        spatialArenaCount: comparisonSpatialArenaCount
+      })
+    : null;
   const baselineArmConfigSignature = sharedNonTargetArmConfigSignature
+    || sharedHistoricalReactionArmConfigSignature
+    || spatialArenaReferenceArmConfigSignature
     || stableSignature({
       ...baselineEnvironment,
       arm: 'baseline-single-level-control'
     });
   const candidateArmConfigSignature = sharedNonTargetArmConfigSignature
+    || sharedHistoricalReactionArmConfigSignature
+    || spatialArenaComparisonArmConfigSignature
     || stableSignature({
       ...candidateEnvironment,
       arm: 'candidate-authoritative-two-level'
@@ -411,7 +554,11 @@ async function main() {
       });
     }
     runs.push({
-      runId: `slice7-pair-${runIndex + 1}`,
+      runId: historicalReactionStep
+        ? `slice8-reaction-step-pair-${runIndex + 1}`
+        : (spatialArenaDepthCharacterization
+          ? `slice8-spatial-arena-depth-pair-${runIndex + 1}`
+          : `slice7-pair-${runIndex + 1}`),
       order,
       baseline: completed.baseline,
       candidate: completed.candidate
@@ -419,7 +566,7 @@ async function main() {
   }
   const applyRegressionGate = booleanEnv(
     'ULG_SLICE7_CAMPAIGN_APPLY_REGRESSION_GATE',
-    nonTargetPhysicsThroughput
+    nonTargetPhysicsThroughput || historicalReactionStep
   );
   const expectedRunOrders = Array.from(
     { length: runCount },
@@ -429,19 +576,34 @@ async function main() {
     process.env.ULG_SLICE7_CAMPAIGN_MAX_REGRESSION_PERCENT || 5
   );
   const expectedBaselineGitHead = String(
-    process.env.ULG_SLICE7_CAMPAIGN_EXPECT_BASELINE_HEAD || ''
+    process.env.ULG_SLICE7_CAMPAIGN_EXPECT_BASELINE_HEAD
+      || (historicalReactionStep
+        ? SLICE8_REACTION_HISTORICAL_BASELINE_HEAD
+        : '')
   ).trim();
   if (
-    nonTargetPhysicsThroughput
+    (nonTargetPhysicsThroughput || historicalReactionStep)
     && !/^[0-9a-f]{40}$/i.test(expectedBaselineGitHead)
   ) {
     throw new Error(
-      'Non-target physics FPS campaign requires ULG_SLICE7_CAMPAIGN_EXPECT_BASELINE_HEAD as a full 40-character Git SHA'
+      'Historical performance campaigns require ULG_SLICE7_CAMPAIGN_EXPECT_BASELINE_HEAD as a full 40-character Git SHA'
     );
   }
-  if (nonTargetPhysicsThroughput && applyRegressionGate !== true) {
+  if (
+    historicalReactionStep
+    && expectedBaselineGitHead
+      !== SLICE8_REACTION_HISTORICAL_BASELINE_HEAD
+  ) {
     throw new Error(
-      'Non-target physics FPS campaign cannot disable its regression gate'
+      `Historical reaction-step acceptance is pinned to immutable baseline ${SLICE8_REACTION_HISTORICAL_BASELINE_HEAD}`
+    );
+  }
+  if (
+    (nonTargetPhysicsThroughput || historicalReactionStep)
+    && applyRegressionGate !== true
+  ) {
+    throw new Error(
+      'Historical performance campaigns cannot disable their regression gate'
     );
   }
   const aggregation = nonTargetPhysicsThroughput
@@ -455,6 +617,30 @@ async function main() {
         expectedBaselineGitHead,
         maxRegressionPercent
       })
+    : spatialArenaDepthCharacterization
+      ? summarizePairedSpatialArenaDepthThroughputRuns({
+          runs,
+          requiredRunCount: runCount,
+          requiredWarmupBatchCount: warmupBatchCount,
+          requiredMeasuredBatchCount: measuredSampleCount,
+          requiredBatchStepCount: batchSteps,
+          expectedRunOrders,
+          referenceArenaCount: referenceSpatialArenaCount,
+          comparisonArenaCount: comparisonSpatialArenaCount
+        })
+    : historicalReactionStep
+      ? summarizePairedGpuStageProducerRuns({
+          runs,
+          producerId: SLICE8_REACTION_STEP_PRODUCER_ID,
+          expectedBaselineGitHead,
+          requiredRunCount: runCount,
+          requiredWarmupBatchCount: warmupBatchCount,
+          requiredMeasuredSampleCount: measuredSampleCount,
+          expectedRunOrders,
+          maxRegressionPercent,
+          maxCandidateMedianP50Ms:
+            SLICE8_REACTION_STEP_P50_CEILING_MS
+        })
     : summarizePairedGpuTimestampRuns({
         runs,
         requiredRunCount: runCount,
@@ -482,7 +668,11 @@ async function main() {
   const report = {
     schema: nonTargetPhysicsThroughput
       ? 'peercompute.ulg.slice7-non-target-physics-throughput-campaign.v0'
-      : 'peercompute.ulg.slice7-gpu-timestamp-acceptance-campaign.v0',
+      : (spatialArenaDepthCharacterization
+        ? 'peercompute.ulg.slice8-spatial-arena-depth-characterization-campaign.v0'
+        : (historicalReactionStep
+        ? 'peercompute.ulg.slice8-reaction-step-historical-acceptance-campaign.v0'
+        : 'peercompute.ulg.slice7-gpu-timestamp-acceptance-campaign.v0')),
     status: aggregation.status === 'pass' && armFailures.length === 0
       ? 'pass'
       : 'fail',
@@ -493,15 +683,27 @@ async function main() {
     artifactDirectory: tempDir,
     targetInterpretation: nonTargetPhysicsThroughput
       ? 'same-route-historical-versus-current-non-target-physics-fps-regression-gate'
-      : (applyRegressionGate
-        ? 'paired-regression-gate'
-        : 'target-path-cost-characterization-regression-gate-not-applicable'),
+      : (spatialArenaDepthCharacterization
+        ? 'same-source-configuration-only-direct-spatial-generation-arena-depth-characterization'
+        : (historicalReactionStep
+        ? 'same-authoritative-route-historical-versus-current-reaction-step-gpu-stage-regression-gate'
+        : (applyRegressionGate
+          ? 'paired-regression-gate'
+          : 'target-path-cost-characterization-regression-gate-not-applicable'))),
     materials: {
       drop: dropMaterial,
       base: baseMaterial,
       dropTemperatureK,
       baseTemperatureK
     },
+    spatialArenaDepth: spatialArenaDepthCharacterization
+      ? {
+          referenceRole: `arena-${referenceSpatialArenaCount}-reference`,
+          comparisonRole: `arena-${comparisonSpatialArenaCount}-comparison`,
+          referenceArenaCount: referenceSpatialArenaCount,
+          comparisonArenaCount: comparisonSpatialArenaCount
+        }
+      : null,
     armFailureCount: armFailures.length,
     aggregation,
     runs

@@ -19,6 +19,8 @@ export const ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA =
   'peercompute.ulg.sph-phase-carrier-transfer.v2';
 export const ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA =
   'peercompute.ulg.sph-phase-carrier-plan.v2';
+export const SPH_PHASE_FRACTION_VALIDATION_EPSILON = 1e-7;
+export const SPH_PHASE_COMPONENT_ACTIVATION_EPSILON = 0;
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -178,9 +180,10 @@ function createParamsArray({ particleCount, plan, closure }) {
   view.setUint32(24, closure.thermalOffsetVec4, true);
   view.setUint32(28, closure.mechanicsOffsetVec4, true);
   view.setUint32(32, PHASE_COMPANION_RESERVED_STATUS, true);
-  view.setFloat32(36, 1e-7, true);
+  view.setFloat32(36, SPH_PHASE_FRACTION_VALIDATION_EPSILON, true);
   view.setFloat32(40, 2e-4, true);
   view.setFloat32(44, 1e-20, true);
+  view.setFloat32(60, SPH_PHASE_COMPONENT_ACTIVATION_EPSILON, true);
   return buffer;
 }
 
@@ -209,10 +212,11 @@ struct PhaseTransferParams {
   thermal_offset_vec4: u32,
   mechanics_offset_vec4: u32,
   reserved_status: u32,
-  fraction_epsilon: f32,
+  fraction_validation_epsilon: f32,
   relative_tolerance: f32,
   mass_epsilon: f32,
-  pad0: vec4<u32>,
+  pad0: vec3<u32>,
+  fraction_activation_epsilon: f32,
 };
 
 struct LineagePhases {
@@ -345,13 +349,13 @@ fn lineage_phases(lineage_index: u32) -> LineagePhases {
     var local_phase1 = 0u;
     for (var lane = 0u; lane < 4u; lane = lane + 1u) {
       let fraction = fractions[lane];
-      if (!finite_f32(fraction) || fraction < -params.fraction_epsilon || fraction > 1.0 + params.fraction_epsilon) {
+      if (!finite_f32(fraction) || fraction < -params.fraction_validation_epsilon || fraction > 1.0 + params.fraction_validation_epsilon) {
         phase_set.valid = 0u;
         phase_set.error_bits = phase_set.error_bits | ERROR_FRACTION;
         return phase_set;
       }
       fraction_sum = fraction_sum + max(fraction, 0.0);
-      if (fraction > params.fraction_epsilon) {
+      if (fraction > params.fraction_activation_epsilon) {
         let phase_id = lane + 1u;
         let phase_bit = 1u << (phase_id - 1u);
         if ((phase_set.phase_mask & phase_bit) == 0u) {
@@ -401,7 +405,7 @@ fn source_component_energy(source_index: u32, target_phase: u32) -> vec2<f32> {
   var local_phase0 = 0u;
   var local_phase1 = 0u;
   for (var lane = 0u; lane < 4u; lane = lane + 1u) {
-    if (fractions[lane] > params.fraction_epsilon) {
+    if (fractions[lane] > params.fraction_activation_epsilon) {
       let phase_id = lane + 1u;
       if (positive_count == 0u) { local_phase0 = phase_id; }
       if (positive_count == 1u) { local_phase1 = phase_id; }
@@ -448,7 +452,7 @@ fn phase_aggregate(
     let fractions = thermo1(source_index);
     let t2 = thermo2(source_index);
     let fraction = max(fractions[target_phase - 1u], 0.0);
-    if (!(fraction > params.fraction_epsilon)) { continue; }
+    if (!(fraction > params.fraction_activation_epsilon)) { continue; }
     let component_mass = s0.w * fraction;
     let component_energy = source_component_energy(source_index, target_phase).x;
     aggregate.mass = aggregate.mass + component_mass;
@@ -527,7 +531,7 @@ fn write_phase_slot(
   let template_source_mass = state0(template_index).w;
   let template_source_fraction = thermo1(template_index)[target_phase - 1u];
   let preserve_deformation = template_source_mass > params.mass_epsilon
-    && template_source_fraction > params.fraction_epsilon
+    && template_source_fraction > params.fraction_activation_epsilon
     && mechanics_model_matches_target(template_index, record2.x, record1.w);
   for (var row = 0u; row < 8u; row = row + 1u) {
     out_mechanics[target_index * 8u + row] = source_mechanics[template_index * 8u + row];
@@ -804,14 +808,14 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     computeBufferBinding(8, 'uniform')
   ];
   const preflightPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-phase-carrier-transfer.v2.preflight',
+    cacheKey: 'ulg-sph-phase-carrier-transfer.v3.preflight',
     label: 'ulg-sph-phase-carrier-transfer-preflight',
     code: sphPhaseCarrierTransferWgsl,
     entryPoint: 'preflight',
     bindings
   });
   const applyPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-phase-carrier-transfer.v2.apply',
+    cacheKey: 'ulg-sph-phase-carrier-transfer.v3.apply',
     label: 'ulg-sph-phase-carrier-transfer-apply',
     code: sphPhaseCarrierTransferWgsl,
     entryPoint: 'apply_transfer',

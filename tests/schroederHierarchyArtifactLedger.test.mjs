@@ -111,6 +111,44 @@ test('exact-near consumer artifact families require and retain one spatial gener
   );
 });
 
+test('reaction-product placement publishes no ephemeral scratch buffers', () => {
+  const family =
+    SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.REACTION_PRODUCT_PLACEMENT;
+  const ledger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'reaction-product-placement-authority'
+  });
+  bindSchroederHierarchyArtifactLedgerSpatialEpoch(ledger, 53);
+  assert.throws(() => registerSchroederHierarchyArtifactFamily(ledger, {
+    family,
+    artifact: {
+      spatialEpochGenerationId: 999,
+      consumerReceipt: Object.freeze({ consumerId: 'reaction-product-placement' })
+    },
+    owned: false
+  }), /expected 53/);
+  assert.throws(() => registerSchroederHierarchyArtifactFamily(ledger, {
+    family,
+    artifact: {
+      consumerReceipt: Object.freeze({ consumerId: 'reaction-product-placement' })
+    },
+    owned: false
+  }), /exact u32 spatial epoch generation id/);
+  const registered = registerSchroederHierarchyArtifactFamily(ledger, {
+    family,
+    artifact: {
+      spatialEpochGenerationId: 53,
+      consumerReceipt: Object.freeze({ consumerId: 'reaction-product-placement' })
+    },
+    owned: false,
+    expectedConsumers: ['reaction-product-placement']
+  });
+
+  assert.equal(registered.length, 0);
+  const summary = summarizeSchroederHierarchyArtifactLedger(ledger);
+  assert.equal(summary.generationBoundResourceCount, 0);
+  assert.deepEqual(summary.resources, {});
+});
+
 test('generation-bound consumer aliases cannot cross spatial epochs', () => {
   const ledger = createSchroederHierarchyArtifactLedger({
     ledgerId: 'generation-bound-alias-conflict'

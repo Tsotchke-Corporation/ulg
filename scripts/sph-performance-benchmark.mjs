@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { deriveSphPhaseInitialBaseBlockEdgeM } from '../src/runtime/sphPhaseDemo.js';
 
 const repoDir = path.resolve(process.env.ULG_BENCH_REPO_DIR || process.cwd());
 const profile = String(process.env.ULG_BENCH_PROFILE || 'smoke').trim().toLowerCase();
@@ -16,6 +17,9 @@ const counts = String(
 const outputPath = process.env.ULG_BENCH_OUTPUT
   ? path.resolve(process.env.ULG_BENCH_OUTPUT)
   : path.join(repoDir, 'artifacts', 'sph-performance-benchmark.json');
+const iccTraceOutputPath = process.env.ULG_BENCH_ICC_TRACE_OUTPUT
+  ? path.resolve(process.env.ULG_BENCH_ICC_TRACE_OUTPUT)
+  : null;
 const dropMaterial = String(
   process.env.ULG_BENCH_DROP_MATERIAL || 'h2o'
 ).trim() || 'h2o';
@@ -28,6 +32,17 @@ const dropTemperatureK = Number.isFinite(Number(
 const baseTemperatureK = Number.isFinite(Number(
   process.env.ULG_BENCH_BASE_TEMPERATURE_K
 )) ? Number(process.env.ULG_BENCH_BASE_TEMPERATURE_K) : 300;
+const benchmarkIronBaseHeightM = (() => {
+  const raw = process.env.ULG_BENCH_IRON_BASE_HEIGHT_M;
+  if (raw == null || raw === '') return null;
+  const heightM = Number(raw);
+  if (!Number.isFinite(heightM) || heightM < 0) {
+    throw new RangeError(
+      'ULG_BENCH_IRON_BASE_HEIGHT_M must be a finite number greater than or equal to zero'
+    );
+  }
+  return heightM;
+})();
 const probeScript = path.join(repoDir, 'scripts', 'sph-long-horizon-probe.mjs');
 const basePort = Math.max(1, Math.round(Number(process.env.ULG_BENCH_PORT || 5180) || 5180));
 const batches = Math.max(1, Math.round(Number(process.env.ULG_BENCH_BATCHES || 3) || 3));
@@ -64,6 +79,17 @@ const retainedCompactSnapshotExportRequested = ['1', 'true', 'yes', 'on'].includ
 const schroederSimulationRequested = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ULG_BENCH_SCHROEDER_SIMULATION || '').toLowerCase()
 );
+const schroederSpatialArenaCount = (() => {
+  const raw = process.env.ULG_BENCH_SCHROEDER_SPATIAL_ARENA_COUNT;
+  if (raw == null || raw === '') return null;
+  const count = Number(raw);
+  if (!Number.isInteger(count) || count < 1 || count > 8) {
+    throw new RangeError(
+      'ULG_BENCH_SCHROEDER_SPATIAL_ARENA_COUNT must be an integer in [1, 8]'
+    );
+  }
+  return count;
+})();
 const schroederSelectedLevel = Number.isFinite(Number(process.env.ULG_BENCH_SCHROEDER_LEVEL))
   && Number(process.env.ULG_BENCH_SCHROEDER_LEVEL) >= 0
   ? Math.round(Number(process.env.ULG_BENCH_SCHROEDER_LEVEL))
@@ -224,6 +250,10 @@ const materialInterfaceCandidateReadbackMode = [
 ].includes(materialInterfaceCandidateReadbackModeEnv)
   ? materialInterfaceCandidateReadbackModeEnv
   : 'compact-active-readback';
+const captureThermalCandidateCsrRouteEvidence = booleanEnv(
+  'ULG_BENCH_CAPTURE_THERMAL_CSR_ROUTE_EVIDENCE',
+  false
+);
 const requireActiveGridGate = booleanEnv(
   'ULG_BENCH_REQUIRE_ACTIVE_GRID',
   probeMode === 'direct-resident' && fuseResidentMechanicsActiveGrid
@@ -255,6 +285,7 @@ export function createSchroederBenchmarkScenarioParams({
   simulationRequested = false,
   selectedLevel = 0,
   maxLevel = selectedLevel,
+  spatialArenaCount = null,
   portableSummaryRequested = false,
   activeNodeIndexRequested = false,
   lawQueueRequested = false,
@@ -284,6 +315,9 @@ export function createSchroederBenchmarkScenarioParams({
     ss: '1',
     schroederLevel: String(normalizedSelectedLevel),
     schroederMaxLevel: String(normalizedMaxLevel),
+    ...(spatialArenaCount == null
+      ? {}
+      : { schroederSpatialArenaCount: String(spatialArenaCount) }),
     schroederPortableSummary: portableSummaryRequested ? '1' : '0',
     schroederActiveNodeIndex: activeNodeIndexRequested ? '1' : '0',
     schroederLawQueue: lawQueueRequested ? '1' : '0',
@@ -298,16 +332,25 @@ export function createSchroederBenchmarkScenarioParams({
   };
 }
 
-function scenarioUrlForCount(targetCount) {
+export function scenarioUrlForCount(targetCount) {
   const edge = edgeForApproxParticleCount(targetCount);
   const actualParticleCount = edge ** 3 * 2;
+  const iceBaseHeightM = 0;
+  // The benchmark varies matter amount with particles-per-edge.  Its initial
+  // bodies must therefore use the demo's fixed matter quantum instead of a
+  // hard-coded height: the drop's bottom exactly meets the generated base.
+  const baseBlockEdgeM = deriveSphPhaseInitialBaseBlockEdgeM({
+    baseParticleEdge: edge
+  });
+  const ironBaseHeightM = benchmarkIronBaseHeightM
+    ?? (iceBaseHeightM + baseBlockEdgeM);
   const params = new URLSearchParams({
     drop: dropMaterial,
     base: baseMaterial,
     dropt: String(dropTemperatureK),
     baset: String(baseTemperatureK),
-    iceh: '0',
-    ironh: '1',
+    iceh: String(iceBaseHeightM),
+    ironh: String(ironBaseHeightM),
     boxx: '5',
     boxy: '5',
     boxz: '5',
@@ -324,6 +367,7 @@ function scenarioUrlForCount(targetCount) {
       simulationRequested: schroederSimulationRequested,
       selectedLevel: schroederSelectedLevel,
       maxLevel: schroederMaxLevel,
+      spatialArenaCount: schroederSpatialArenaCount,
       portableSummaryRequested: schroederPortableSummaryRequested,
       activeNodeIndexRequested: schroederActiveNodeIndexRequested,
       lawQueueRequested: schroederLawQueueRequested,
@@ -354,7 +398,13 @@ function scenarioUrlForCount(targetCount) {
   return {
     url: `/?${params.toString()}`,
     edge,
-    actualParticleCount
+    actualParticleCount,
+    iceBaseHeightM,
+    baseBlockEdgeM,
+    ironBaseHeightM,
+    ironBaseHeightSource: benchmarkIronBaseHeightM == null
+      ? 'derived-touching-base-block-edge'
+      : 'ULG_BENCH_IRON_BASE_HEIGHT_M'
   };
 }
 
@@ -409,6 +459,91 @@ function numberOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+/**
+ * Turn a compact transaction admission record into explicit runtime proof for
+ * ICC. This deliberately emits nothing unless a real resident simulation
+ * admitted a finalized, same-device WebGPU reaction-discovery receipt with
+ * every no-fallback invariant intact.
+ */
+export function buildSchroederReactionReceiptIccTrace({
+  scenarios = [],
+  reportPath = null
+} = {}) {
+  const candidates = (Array.isArray(scenarios) ? scenarios : []).flatMap(
+    (scenario) => (
+      Array.isArray(scenario?.schroederAdmittedConsumerReceiptTelemetry)
+        ? scenario.schroederAdmittedConsumerReceiptTelemetry.map((receipt) => ({
+            scenario,
+            receipt
+          }))
+        : []
+    )
+  ).filter(({ scenario, receipt }) => (
+    scenario?.schroederSimulationActive === true
+    && scenario?.schroederTransactionCoverageComplete === true
+    && receipt?.consumerId === 'reaction-discovery'
+    && receipt?.status === 'schroeder-spatial-epoch-consumer-receipt-finalized'
+    && receipt?.backend === 'webgpu'
+    && receipt?.backendSelection === 'same-device-submitted-webgpu-generation'
+    && receipt?.fallbackIntent === 'forbidden'
+    && receipt?.authenticated === true
+    && receipt?.gpuAuthenticated === true
+    && receipt?.submitPerformed === true
+    && receipt?.generationBound === true
+    && Number.isSafeInteger(receipt?.expectedTraversalCount)
+    && receipt.expectedTraversalCount > 0
+    && receipt.traversalCount === receipt.expectedTraversalCount
+    && receipt?.overflowed === false
+    && receipt?.partialPublication === false
+    && receipt?.fallbackObserved === false
+    && receipt?.fullReadbackPerformed === false
+    && receipt?.privateLookupBuildCount === 0
+    && receipt?.fixedCandidateBuildCount === 0
+    && receipt?.exhaustiveTraversalCount === 0
+  ));
+  if (candidates.length === 0) return Object.freeze([]);
+  const { scenario, receipt } = candidates.at(-1);
+  const value = Object.freeze({
+    backend: receipt.backend,
+    backendSelection: receipt.backendSelection,
+    fallbackIntent: receipt.fallbackIntent,
+    consumerId: receipt.consumerId,
+    deviceId: receipt.deviceId,
+    generationId: receipt.generationId,
+    epochIdentity: receipt.epochIdentity,
+    gpuAuthenticated: receipt.gpuAuthenticated,
+    submitPerformed: receipt.submitPerformed,
+    generationBound: receipt.generationBound,
+    expectedTraversalCount: receipt.expectedTraversalCount,
+    traversalCount: receipt.traversalCount,
+    overflowed: receipt.overflowed,
+    partialPublication: receipt.partialPublication,
+    fallbackObserved: receipt.fallbackObserved,
+    fullReadbackPerformed: receipt.fullReadbackPerformed,
+    privateLookupBuildCount: receipt.privateLookupBuildCount,
+    fixedCandidateBuildCount: receipt.fixedCandidateBuildCount,
+    exhaustiveTraversalCount: receipt.exhaustiveTraversalCount,
+    receiptCount: candidates.length,
+    particleCount: scenario?.targetParticleCount ?? null,
+    reportPath
+  });
+  return Object.freeze([
+    Object.freeze({
+      kind: 'function_called',
+      name: 'finalizeSchroederSpatialExactNearConsumerReceipt',
+      value,
+      snippet: 'A finalized reaction-discovery receipt was admitted by a real resident WebGPU transaction.'
+    }),
+    Object.freeze({
+      kind: 'test_result',
+      name: 'schroeder-spatial-reaction-discovery-native-receipt',
+      status: 'PASS',
+      value,
+      snippet: 'Native WebGPU reaction discovery finalized one same-device exact-near consumer receipt without fallback or full readback.'
+    })
+  ]);
 }
 
 function sumKnownNumbers(values) {
@@ -502,6 +637,8 @@ export function scenarioPerformanceGate({
   schroederSimulationRequestedObserved = null,
   schroederSimulationActive = null,
   schroederTransactionCoverageComplete = null,
+  schroederSpatialArenaCountRequested = null,
+  schroederSpatialArenaCountCoverageComplete = null,
   schroederTwoLevelMechanicsRequested = false,
   schroederTwoLevelMechanicsRequestedObserved = null,
   schroederTwoLevelMechanicsCoverageComplete = null,
@@ -534,6 +671,12 @@ export function scenarioPerformanceGate({
     && schroederTransactionCoverageComplete !== true
   ) {
     blockers.push('schroeder-spatial-transaction-coverage-incomplete');
+  }
+  if (
+    schroederSpatialArenaCountRequested !== null
+    && schroederSpatialArenaCountCoverageComplete !== true
+  ) {
+    blockers.push('schroeder-spatial-arena-count-coverage-incomplete');
   }
   if (
     schroederTwoLevelMechanicsRequested === true
@@ -653,6 +796,8 @@ export function scenarioPerformanceGate({
       schroederSimulationRequestedObserved,
       schroederSimulationActive,
       schroederTransactionCoverageComplete,
+      schroederSpatialArenaCountRequested,
+      schroederSpatialArenaCountCoverageComplete,
       schroederTwoLevelMechanicsRequested,
       schroederTwoLevelMechanicsRequestedObserved,
       schroederTwoLevelMechanicsCoverageComplete,
@@ -1633,6 +1778,605 @@ function pairedThroughputProvenanceEvidence(arm) {
   };
 }
 
+const REACTION_STEP_HISTORICAL_PRODUCER_ID =
+  'schroeder-hierarchy:two-level-post-mechanics-reactionStep';
+const REACTION_DISCOVERY_HISTORICAL_PRODUCER_ID =
+  'schroeder-hierarchy:two-level-post-mechanics-reaction-discovery-proposal';
+const REACTION_PLACEMENT_SERIAL_PRODUCER_ID =
+  'sph-reaction-summary:product-event-placement';
+const REACTION_PLACEMENT_SEGMENTED_PRODUCER_PREFIX =
+  `${REACTION_PLACEMENT_SERIAL_PRODUCER_ID}:`;
+
+function exactStringSet(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map(String))]
+    .sort();
+}
+
+function exactBenchmarkScenarioUrlEvidence(scenario) {
+  let params = null;
+  try {
+    params = new URL(
+      String(scenario?.scenarioUrl || ''),
+      'https://benchmark.invalid'
+    ).searchParams;
+  } catch {
+    params = null;
+  }
+  const exactParams = {
+    drop: 'na',
+    base: 'h2o',
+    dropt: '300',
+    baset: '300',
+    dropn: '8',
+    basen: '8',
+    mech: 'mlsmpm',
+    ss: '1',
+    schroederLevel: '0',
+    schroederMaxLevel: '1',
+    schroederCrossLevelCoupling: '1',
+    schroederTwoLevel: '1',
+    schroederTwoLevelAuthority: 'authoritative',
+    schroederTwoLevelSubsteps: '2',
+    residentGpuTimestampProfile: '1',
+    lawr: '1'
+  };
+  const observedParams = Object.fromEntries(Object.keys(exactParams).map(
+    (key) => [key, params?.get(key) ?? null]
+  ));
+  return {
+    complete: Boolean(
+      params
+      && Object.entries(exactParams).every(
+        ([key, expected]) => params.get(key) === expected
+      )
+    ),
+    expectedParams: exactParams,
+    observedParams
+  };
+}
+
+function pairedGpuStageProducerArmEvidence(arm, {
+  producerId,
+  requiredWarmupBatchCount,
+  requiredMeasuredSampleCount,
+  historicalBaseline = false
+}) {
+  const scenario = arm?.scenario ?? null;
+  const evidence = arm?.gpuStageTimestampEvidence
+    ?? scenario?.gpuStageTimestampEvidence
+    ?? null;
+  const interval = arm?.gpuTimestampIntervalEvidence
+    ?? scenario?.gpuTimestampIntervalEvidence
+    ?? null;
+  const expectedBatchCount = requiredWarmupBatchCount
+    + requiredMeasuredSampleCount;
+  const batches = Array.isArray(evidence?.batches) ? evidence.batches : [];
+  const expectedBatchIndices = Array.from(
+    { length: expectedBatchCount },
+    (_, index) => index + 1
+  );
+  const batchShapeComplete = Boolean(
+    exactNonNegativeIntegerOrNull(evidence?.expectedBatchCount)
+      === expectedBatchCount
+    && exactNonNegativeIntegerOrNull(evidence?.observedBatchCount)
+      === expectedBatchCount
+    && exactNonNegativeIntegerOrNull(evidence?.warmupBatchCount)
+      === requiredWarmupBatchCount
+    && exactNonNegativeIntegerOrNull(evidence?.measuredBatchCount)
+      === requiredMeasuredSampleCount
+    && batches.length === expectedBatchCount
+    && batches.every((batch, index) => (
+      exactNonNegativeIntegerOrNull(batch?.batchIndex)
+        === expectedBatchIndices[index]
+      && batch?.complete === true
+    ))
+  );
+  const measuredBatches = batchShapeComplete
+    ? batches.slice(requiredWarmupBatchCount)
+    : [];
+  const measuredTargetSpans = measuredBatches.flatMap((batch) => (
+    (Array.isArray(batch?.spans) ? batch.spans : []).filter(
+      (span) => span?.producerId === producerId
+    )
+  ));
+  const targetSpanCoverageComplete = Boolean(
+    measuredBatches.length === requiredMeasuredSampleCount
+    && measuredBatches.every((batch) => {
+      const matching = (Array.isArray(batch?.spans) ? batch.spans : [])
+        .filter((span) => span?.producerId === producerId);
+      return matching.length === 1
+        && matching[0]?.valid === true
+        && matching[0]?.spanClass === 'hierarchy-queue-stage'
+        && matching[0]?.markerSubmissionMode
+          === 'same-queue-boundary-submissions'
+        && finitePositiveNumberOrNull(matching[0]?.durationMs) !== null;
+    })
+  );
+  const measuredDurationsMs = targetSpanCoverageComplete
+    ? measuredTargetSpans.map((span) => Number(span.durationMs))
+    : [];
+  const recomputedP50Ms = percentile(measuredDurationsMs, 0.5);
+  const recomputedP95Ms = percentile(measuredDurationsMs, 0.95);
+  const producerSummaries = Array.isArray(evidence?.producerSummaries)
+    ? evidence.producerSummaries
+    : [];
+  const targetSummaries = producerSummaries.filter(
+    (summary) => summary?.producerId === producerId
+  );
+  const targetSummary = targetSummaries.length === 1
+    ? targetSummaries[0]
+    : null;
+  const summaryP50Ms = finitePositiveNumberOrNull(targetSummary?.p50Ms);
+  const summaryP95Ms = finitePositiveNumberOrNull(targetSummary?.p95Ms);
+  const summaryMatchesRawSpans = Boolean(
+    targetSummary
+    && exactNonNegativeIntegerOrNull(targetSummary.sampleCount)
+      === requiredMeasuredSampleCount
+    && exactStringSet(targetSummary.spanClasses).length === 1
+    && exactStringSet(targetSummary.spanClasses)[0]
+      === 'hierarchy-queue-stage'
+    && exactStringSet(targetSummary.markerSubmissionModes).length === 1
+    && exactStringSet(targetSummary.markerSubmissionModes)[0]
+      === 'same-queue-boundary-submissions'
+    && summaryP50Ms === recomputedP50Ms
+    && summaryP95Ms === recomputedP95Ms
+  );
+  const discoveryMapping = Array.isArray(evidence?.migratedLawConsumerMappings)
+    ? evidence.migratedLawConsumerMappings.filter((mapping) => (
+      mapping?.producerId === REACTION_DISCOVERY_HISTORICAL_PRODUCER_ID
+      && Array.isArray(mapping?.consumerIds)
+      && mapping.consumerIds.length === 1
+      && mapping.consumerIds[0] === 'reaction-discovery'
+    ))
+    : [];
+  const historicalDiscoveryIdentityComplete = Boolean(
+    discoveryMapping.length === 1
+    && discoveryMapping[0]?.coverageComplete === true
+    && exactNonNegativeIntegerOrNull(discoveryMapping[0]?.sampleCount)
+      === requiredMeasuredSampleCount
+    && exactNonNegativeIntegerOrNull(discoveryMapping[0]?.expectedSampleCount)
+      === requiredMeasuredSampleCount
+  );
+  const segmentedPlacementSummaries = producerSummaries.filter((summary) => (
+    typeof summary?.producerId === 'string'
+    && summary.producerId.startsWith(
+      REACTION_PLACEMENT_SEGMENTED_PRODUCER_PREFIX
+    )
+  ));
+  const serialPlacementSummaryCount = producerSummaries.filter(
+    (summary) => summary?.producerId
+      === REACTION_PLACEMENT_SERIAL_PRODUCER_ID
+  ).length;
+  const measuredSegmentedPlacementBatches = measuredBatches.filter((batch) => (
+    (Array.isArray(batch?.spans) ? batch.spans : []).some((span) => (
+      typeof span?.producerId === 'string'
+      && span.producerId.startsWith(
+        REACTION_PLACEMENT_SEGMENTED_PRODUCER_PREFIX
+      )
+      && span?.valid === true
+    ))
+  )).length;
+  const measuredSerialPlacementSpanCount = measuredBatches.reduce(
+    (count, batch) => count + (
+      Array.isArray(batch?.spans)
+        ? batch.spans.filter((span) => (
+          span?.producerId === REACTION_PLACEMENT_SERIAL_PRODUCER_ID
+        )).length
+        : 0
+    ),
+    0
+  );
+  const segmentedPlacementAttributionComplete = historicalBaseline
+    ? true
+    : Boolean(
+      segmentedPlacementSummaries.length > 0
+      && segmentedPlacementSummaries.every((summary) => (
+        exactNonNegativeIntegerOrNull(summary?.sampleCount) !== null
+        && summary.sampleCount > 0
+      ))
+      && serialPlacementSummaryCount === 0
+      && measuredSegmentedPlacementBatches === requiredMeasuredSampleCount
+      && measuredSerialPlacementSpanCount === 0
+    );
+  const intervalCoverageComplete = Boolean(
+    interval?.schema
+      === 'peercompute.ulg.sph-performance-gpu-queue-interval-evidence.v0'
+    && interval?.status === 'complete'
+    && interval?.requested === true
+    && interval?.batchCoverageComplete === true
+    && interval?.measurementCoverageComplete === true
+    && interval?.percentileEstimator === 'nearest-rank-ceil-nq'
+    && exactNonNegativeIntegerOrNull(interval?.warmupBatchCount)
+      === requiredWarmupBatchCount
+    && exactNonNegativeIntegerOrNull(interval?.measuredSampleCount)
+      === requiredMeasuredSampleCount
+  );
+  const scenarioUrl = exactBenchmarkScenarioUrlEvidence(scenario);
+  const performanceGateBlockers = Array.isArray(
+    scenario?.performanceGate?.blockers
+  ) ? [...scenario.performanceGate.blockers] : [];
+  const routeComplete = Boolean(
+    arm?.process?.exitCode === 0
+    && arm?.reportStatus === 'complete'
+    && arm?.reportPerformanceGateStatus === 'pass'
+    && arm?.scenarioStatus === 'good'
+    && scenario?.status === 'good'
+    && scenario?.exitCode === 0
+    && scenario?.probeMode === 'scene'
+    && exactNonNegativeIntegerOrNull(scenario?.targetParticleCount) === 1000
+    && exactNonNegativeIntegerOrNull(scenario?.actualParticleCount) === 1024
+    && exactNonNegativeIntegerOrNull(scenario?.effectiveParticleCount) === 1024
+    && exactNonNegativeIntegerOrNull(scenario?.batches)
+      === expectedBatchCount
+    && exactNonNegativeIntegerOrNull(scenario?.batchSteps) === 1
+    && exactNonNegativeIntegerOrNull(scenario?.completedStepCount) === 1
+    && scenario?.schroederSimulationConfiguredRequested === true
+    && scenario?.schroederSimulationRequestedObserved === true
+    && scenario?.schroederSimulationActive === true
+    && scenario?.schroederTransactionCoverageComplete === true
+    && exactNonNegativeIntegerOrNull(scenario?.schroederSelectedLevel) === 0
+    && scenario?.schroederTwoLevelMechanicsConfiguredRequested === true
+    && scenario?.schroederTwoLevelMechanicsRequestedObserved === true
+    && scenario?.schroederTwoLevelMechanicsCoverageComplete === true
+    && scenario?.schroederTwoLevelMechanicsAuthorityRequested
+      === 'authoritative'
+    && scenario?.schroederTwoLevelMechanicsAuthorityObserved
+      === 'authoritative'
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTwoLevelFineSubstepCountRequested
+    ) === 2
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTwoLevelFineSubstepCountObserved
+    ) === 2
+    && scenario?.schroederTwoLevelMechanicsStepStatus
+      === 'schroeder-two-level-authoritative-step-executed'
+    && scenario?.schroederTwoLevelAuthoritativeCommitVerified === true
+    && scenario?.performanceGate?.status === 'pass'
+    && performanceGateBlockers.length === 0
+    && intervalCoverageComplete
+    && scenarioUrl.complete
+  );
+  const complete = Boolean(
+    evidence?.schema
+      === 'peercompute.ulg.sph-performance-gpu-stage-evidence.v0'
+    && evidence?.status === 'complete'
+    && evidence?.requested === true
+    && evidence?.batchCoverageComplete === true
+    && evidence?.measurementCoverageComplete === true
+    && evidence?.stageCoverageComplete === true
+    && evidence?.migratedLawCoverageRequired === true
+    && evidence?.migratedLawCoverageComplete === true
+    && evidence?.percentileEstimator === 'nearest-rank-ceil-nq'
+    && batchShapeComplete
+    && targetSpanCoverageComplete
+    && targetSummaries.length === 1
+    && summaryMatchesRawSpans
+    && historicalDiscoveryIdentityComplete
+    && segmentedPlacementAttributionComplete
+    && routeComplete
+  );
+  return {
+    complete,
+    historicalBaseline: historicalBaseline === true,
+    status: evidence?.status ?? 'missing',
+    producerId,
+    targetProducerSummaryCount: targetSummaries.length,
+    sampleCount: targetSummary?.sampleCount ?? null,
+    p50Ms: recomputedP50Ms,
+    p95Ms: recomputedP95Ms,
+    summaryP50Ms,
+    summaryP95Ms,
+    batchShapeComplete,
+    targetSpanCoverageComplete,
+    summaryMatchesRawSpans,
+    historicalDiscoveryIdentityComplete,
+    segmentedPlacementAttributionComplete,
+    segmentedPlacementProducerIds: segmentedPlacementSummaries.map(
+      (summary) => summary.producerId
+    ).sort(),
+    serialPlacementSummaryCount,
+    measuredSegmentedPlacementBatches,
+    measuredSerialPlacementSpanCount,
+    intervalCoverageComplete,
+    routeComplete,
+    scenarioUrl,
+    performanceGateBlockers
+  };
+}
+
+/**
+ * Compare one exact GPU stage producer across three independent historical /
+ * candidate process pairs.  Each arm must prove its raw per-batch span shape,
+ * immutable source identity, and the exact authoritative SS route before any
+ * duration is admitted to the regression math.
+ */
+export function summarizePairedGpuStageProducerRuns({
+  runs = [],
+  producerId = REACTION_STEP_HISTORICAL_PRODUCER_ID,
+  expectedBaselineGitHead = null,
+  requiredRunCount = 3,
+  expectedRunOrders = ['AB', 'BA', 'AB'],
+  requiredWarmupBatchCount = 4,
+  requiredMeasuredSampleCount = 9,
+  maxRegressionPercent = 5,
+  maxCandidateMedianP50Ms = 363.575232
+} = {}) {
+  const normalizedRequiredRunCount = Math.max(
+    1,
+    Math.round(Number(requiredRunCount) || 3)
+  );
+  const normalizedRequiredWarmups = Math.max(
+    0,
+    Math.round(Number(requiredWarmupBatchCount) || 0)
+  );
+  const normalizedRequiredMeasurements = Math.max(
+    1,
+    Math.round(Number(requiredMeasuredSampleCount) || 9)
+  );
+  const normalizedExpectedOrders = Array.from(
+    { length: normalizedRequiredRunCount },
+    (_, index) => String(
+      expectedRunOrders[index]
+        ?? (index % 2 === 0 ? 'AB' : 'BA')
+    ).toUpperCase()
+  );
+  const normalizedExpectedBaselineGitHead = String(
+    expectedBaselineGitHead || ''
+  ).trim();
+  const regressionThresholdPercent = Number.isFinite(
+    Number(maxRegressionPercent)
+  ) ? Number(maxRegressionPercent) : 5;
+  const maximumCandidateMedianP50Ms = finitePositiveNumberOrNull(
+    maxCandidateMedianP50Ms
+  );
+  const normalizedRuns = (Array.isArray(runs) ? runs : []).map(
+    (run, index) => {
+      const baseline = pairedGpuStageProducerArmEvidence(run?.baseline, {
+        producerId,
+        requiredWarmupBatchCount: normalizedRequiredWarmups,
+        requiredMeasuredSampleCount: normalizedRequiredMeasurements,
+        historicalBaseline: true
+      });
+      const candidate = pairedGpuStageProducerArmEvidence(run?.candidate, {
+        producerId,
+        requiredWarmupBatchCount: normalizedRequiredWarmups,
+        requiredMeasuredSampleCount: normalizedRequiredMeasurements,
+        historicalBaseline: false
+      });
+      const baselineProvenance = pairedThroughputProvenanceEvidence(
+        run?.baseline
+      );
+      const candidateProvenance = pairedThroughputProvenanceEvidence(
+        run?.candidate
+      );
+      const p50Ratio = baseline.p50Ms && candidate.p50Ms
+        ? candidate.p50Ms / baseline.p50Ms
+        : null;
+      const p95Ratio = baseline.p95Ms && candidate.p95Ms
+        ? candidate.p95Ms / baseline.p95Ms
+        : null;
+      return {
+        runIndex: index + 1,
+        runId: String(run?.runId ?? ''),
+        order: String(run?.order ?? '').toUpperCase(),
+        baseline,
+        candidate,
+        baselineProvenance,
+        candidateProvenance,
+        p50Ratio,
+        p95Ratio
+      };
+    }
+  );
+  const blockers = [];
+  if (normalizedRuns.length !== normalizedRequiredRunCount) {
+    blockers.push('independent-run-count-mismatch');
+  }
+  const runIds = normalizedRuns.map((run) => run.runId);
+  if (runIds.some((runId) => !runId) || new Set(runIds).size !== runIds.length) {
+    blockers.push('run-identities-missing-or-duplicated');
+  }
+  if (normalizedRuns.some((run, index) => (
+    run.order !== normalizedExpectedOrders[index]
+  ))) {
+    blockers.push('run-order-not-ab-ba-alternating');
+  }
+  if (normalizedRuns.some((run) => !run.baseline.complete)) {
+    blockers.push('baseline-stage-producer-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidate.complete)) {
+    blockers.push('candidate-stage-producer-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.baseline.routeComplete)) {
+    blockers.push('baseline-authoritative-route-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidate.routeComplete)) {
+    blockers.push('candidate-authoritative-route-incomplete');
+  }
+  if (normalizedRuns.some((run) => (
+    !run.candidate.segmentedPlacementAttributionComplete
+  ))) {
+    blockers.push('candidate-segmented-placement-attribution-incomplete');
+  }
+  if (normalizedRuns.some((run) => (
+    run.candidate.serialPlacementSummaryCount > 0
+    || run.candidate.measuredSerialPlacementSpanCount > 0
+  ))) {
+    blockers.push('candidate-serial-placement-producer-present');
+  }
+  if (normalizedRuns.some((run) => !run.baselineProvenance.complete)) {
+    blockers.push('baseline-source-provenance-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.candidateProvenance.complete)) {
+    blockers.push('candidate-source-provenance-incomplete');
+  }
+  if (normalizedRuns.some((run) => (
+    run.baselineProvenance.worktreeDirtyBefore !== false
+    || run.baselineProvenance.worktreeDirtyAfter !== false
+  ))) {
+    blockers.push('historical-baseline-worktree-not-clean');
+  }
+  const commonConfigSignatures = new Set(normalizedRuns.flatMap((run) => [
+    run.baselineProvenance.commonConfigSignature,
+    run.candidateProvenance.commonConfigSignature
+  ]).filter(Boolean));
+  if (commonConfigSignatures.size !== 1) {
+    blockers.push('common-config-signature-mismatch');
+  }
+  const armConfigSignatures = new Set(normalizedRuns.flatMap((run) => [
+    run.baselineProvenance.armConfigSignature,
+    run.candidateProvenance.armConfigSignature
+  ]).filter(Boolean));
+  if (armConfigSignatures.size !== 1) {
+    blockers.push('authoritative-route-signature-mismatch');
+  }
+  const baselineSourceIdentities = new Set(normalizedRuns.map((run) => (
+    `${run.baselineProvenance.gitHead}:`
+    + `${run.baselineProvenance.sourceFingerprintBefore}:`
+    + `${run.baselineProvenance.worktreeStatusHashBefore}`
+  )));
+  const candidateSourceIdentities = new Set(normalizedRuns.map((run) => (
+    `${run.candidateProvenance.gitHead}:`
+    + `${run.candidateProvenance.sourceFingerprintBefore}:`
+    + `${run.candidateProvenance.worktreeStatusHashBefore}`
+  )));
+  if (baselineSourceIdentities.size !== 1) {
+    blockers.push('baseline-source-changed-between-runs');
+  }
+  if (candidateSourceIdentities.size !== 1) {
+    blockers.push('candidate-source-changed-between-runs');
+  }
+  if (
+    baselineSourceIdentities.size === 1
+    && candidateSourceIdentities.size === 1
+    && [...baselineSourceIdentities][0] === [...candidateSourceIdentities][0]
+  ) {
+    blockers.push('historical-and-candidate-source-identities-match');
+  }
+  if (
+    !/^[0-9a-f]{40}$/i.test(normalizedExpectedBaselineGitHead)
+    || normalizedRuns.some((run) => (
+      run.baselineProvenance.gitHead !== normalizedExpectedBaselineGitHead
+    ))
+  ) {
+    blockers.push('historical-baseline-git-head-mismatch');
+  }
+  const p50Ratios = normalizedRuns.map((run) => run.p50Ratio).filter(
+    (value) => Number.isFinite(value) && value > 0
+  );
+  const p95Ratios = normalizedRuns.map((run) => run.p95Ratio).filter(
+    (value) => Number.isFinite(value) && value > 0
+  );
+  if (
+    p50Ratios.length !== normalizedRequiredRunCount
+    || p95Ratios.length !== normalizedRequiredRunCount
+  ) {
+    blockers.push('paired-stage-producer-ratio-coverage-incomplete');
+  }
+  const pairedMedianP50Ratio = median(p50Ratios);
+  const pairedMedianP95Ratio = median(p95Ratios);
+  const baselineMedianP50Ms = median(normalizedRuns.map(
+    (run) => run.baseline.p50Ms
+  ));
+  const candidateMedianP50Ms = median(normalizedRuns.map(
+    (run) => run.candidate.p50Ms
+  ));
+  const baselineMedianP95Ms = median(normalizedRuns.map(
+    (run) => run.baseline.p95Ms
+  ));
+  const candidateMedianP95Ms = median(normalizedRuns.map(
+    (run) => run.candidate.p95Ms
+  ));
+  const independentP50Ratio = baselineMedianP50Ms && candidateMedianP50Ms
+    ? candidateMedianP50Ms / baselineMedianP50Ms
+    : null;
+  const independentP95Ratio = baselineMedianP95Ms && candidateMedianP95Ms
+    ? candidateMedianP95Ms / baselineMedianP95Ms
+    : null;
+  const maximumAcceptedRatio = 1 + regressionThresholdPercent / 100;
+  const pairedP50WithinThreshold = pairedMedianP50Ratio !== null
+    && pairedMedianP50Ratio <= maximumAcceptedRatio;
+  const pairedP95WithinThreshold = pairedMedianP95Ratio !== null
+    && pairedMedianP95Ratio <= maximumAcceptedRatio;
+  const independentP50WithinThreshold = independentP50Ratio !== null
+    && independentP50Ratio <= maximumAcceptedRatio;
+  const independentP95WithinThreshold = independentP95Ratio !== null
+    && independentP95Ratio <= maximumAcceptedRatio;
+  const candidateP50WithinAbsoluteCeiling = candidateMedianP50Ms !== null
+    && maximumCandidateMedianP50Ms !== null
+    && candidateMedianP50Ms <= maximumCandidateMedianP50Ms;
+  if (!pairedP50WithinThreshold) {
+    blockers.push('paired-stage-producer-p50-regression-exceeds-threshold');
+  }
+  if (!pairedP95WithinThreshold) {
+    blockers.push('paired-stage-producer-p95-regression-exceeds-threshold');
+  }
+  if (!independentP50WithinThreshold) {
+    blockers.push(
+      'independent-median-stage-producer-p50-regression-exceeds-threshold'
+    );
+  }
+  if (!independentP95WithinThreshold) {
+    blockers.push(
+      'independent-median-stage-producer-p95-regression-exceeds-threshold'
+    );
+  }
+  if (!candidateP50WithinAbsoluteCeiling) {
+    blockers.push('candidate-stage-producer-p50-exceeds-absolute-ceiling');
+  }
+  return {
+    schema: 'peercompute.ulg.sph-paired-gpu-stage-producer-campaign.v0',
+    status: blockers.length === 0 ? 'pass' : 'fail',
+    blockers,
+    method: {
+      producerId,
+      independentRunCount: normalizedRequiredRunCount,
+      expectedRunOrders: normalizedExpectedOrders,
+      requiredWarmupBatchCount: normalizedRequiredWarmups,
+      requiredMeasuredSampleCount: normalizedRequiredMeasurements,
+      percentileEstimator: 'nearest-rank-ceil-nq',
+      direction: 'lower-is-better',
+      pairedAggregation:
+        'median-of-within-run-candidate-over-historical-ratios',
+      independentMedianCrossCheckRequired: true,
+      regressionThresholdPercent,
+      maximumAcceptedRatio,
+      maximumCandidateMedianP50Ms,
+      expectedBaselineGitHead: normalizedExpectedBaselineGitHead || null,
+      candidatePlacementAttribution:
+        'segmented-product-event-placement-producers-required-serial-producer-rejected'
+    },
+    runCount: normalizedRuns.length,
+    runs: normalizedRuns,
+    paired: {
+      p50Ratios,
+      p95Ratios,
+      medianP50Ratio: pairedMedianP50Ratio,
+      medianP95Ratio: pairedMedianP95Ratio,
+      p50WithinThreshold: pairedP50WithinThreshold,
+      p95WithinThreshold: pairedP95WithinThreshold
+    },
+    independentMedianCrossCheck: {
+      baselineP50Ms: baselineMedianP50Ms,
+      candidateP50Ms: candidateMedianP50Ms,
+      p50Ratio: independentP50Ratio,
+      p50WithinThreshold: independentP50WithinThreshold,
+      baselineP95Ms: baselineMedianP95Ms,
+      candidateP95Ms: candidateMedianP95Ms,
+      p95Ratio: independentP95Ratio,
+      p95WithinThreshold: independentP95WithinThreshold
+    },
+    absoluteCandidateCeiling: {
+      metric: 'p50Ms',
+      observedMedianMs: candidateMedianP50Ms,
+      maximumMs: maximumCandidateMedianP50Ms,
+      withinCeiling: candidateP50WithinAbsoluteCeiling,
+      provenance:
+        'fixed-upper-bound-equal-to-best-accepted-historical-reaction-step-p50-not-historical-median'
+    }
+  };
+}
+
 function pairedThroughputArmEvidence(arm, {
   requiredBatchCount,
   requiredBatchStepCount,
@@ -2011,6 +2755,356 @@ export function summarizePairedPhysicsThroughputRuns({
   };
 }
 
+function spatialArenaDepthScenarioUrlEvidence(scenario, expectedArenaCount) {
+  let params = null;
+  try {
+    params = new URL(
+      String(scenario?.scenarioUrl || ''),
+      'https://benchmark.invalid'
+    ).searchParams;
+  } catch {
+    params = null;
+  }
+  const expectedParams = {
+    ss: '1',
+    schroederLevel: '0',
+    schroederMaxLevel: '0',
+    schroederCrossLevelCoupling: '0',
+    schroederSpatialArenaCount: String(expectedArenaCount)
+  };
+  const observedParams = Object.fromEntries(Object.keys(expectedParams).map(
+    (key) => [key, params?.get(key) ?? null]
+  ));
+  return {
+    complete: Boolean(
+      params
+      && Object.entries(expectedParams).every(
+        ([key, expected]) => params.get(key) === expected
+      )
+      && params.get('schroederTwoLevel') === null
+    ),
+    expectedParams,
+    observedParams,
+    observedTwoLevel: params?.get('schroederTwoLevel') ?? null
+  };
+}
+
+function pairedSpatialArenaDepthArmEvidence(arm, {
+  requiredBatchCount,
+  requiredBatchStepCount,
+  expectedArenaCount
+}) {
+  const throughput = pairedThroughputArmEvidence(arm, {
+    requiredBatchCount,
+    requiredBatchStepCount,
+    historicalBaseline: false
+  });
+  const scenario = arm?.scenario ?? null;
+  const requestedArenaCount = exactNonNegativeIntegerOrNull(
+    scenario?.schroederSpatialArenaCountRequested
+  );
+  const observedArenaCounts = [...new Set(
+    (Array.isArray(scenario?.schroederSpatialArenaCountsObserved)
+      ? scenario.schroederSpatialArenaCountsObserved
+      : []
+    ).map(exactNonNegativeIntegerOrNull).filter((value) => value !== null)
+  )].sort((a, b) => a - b);
+  const arenaCoverageComplete =
+    scenario?.schroederSpatialArenaCountCoverageComplete === true;
+  const scenarioUrlEvidence = spatialArenaDepthScenarioUrlEvidence(
+    scenario,
+    expectedArenaCount
+  );
+  const backpressureWaitCount = exactNonNegativeIntegerOrNull(
+    scenario?.schroederBackpressureWaitCount
+  );
+  const rawBackpressureWaitMs = Number(scenario?.schroederBackpressureWaitMs);
+  const backpressureWaitMs = Number.isFinite(rawBackpressureWaitMs)
+    && rawBackpressureWaitMs >= 0
+    ? rawBackpressureWaitMs
+    : null;
+  const backpressureEvidenceComplete = backpressureWaitCount !== null
+    && backpressureWaitMs !== null;
+  const arenaDepthEvidenceComplete = Boolean(
+    requestedArenaCount === expectedArenaCount
+    && observedArenaCounts.length === 1
+    && observedArenaCounts[0] === expectedArenaCount
+    && arenaCoverageComplete
+    && scenarioUrlEvidence.complete
+  );
+  return {
+    ...throughput,
+    throughputEvidenceComplete: throughput.complete,
+    complete: Boolean(
+      throughput.complete
+      && arenaDepthEvidenceComplete
+      && backpressureEvidenceComplete
+    ),
+    expectedArenaCount,
+    requestedArenaCount,
+    observedArenaCounts,
+    arenaCoverageComplete,
+    arenaDepthEvidenceComplete,
+    scenarioUrlEvidence,
+    backpressureWaitCount,
+    backpressureWaitMs,
+    backpressureEvidenceComplete
+  };
+}
+
+function spatialArenaDepthSourceIdentity(provenance) {
+  if (provenance?.complete !== true) return null;
+  return [
+    provenance.gitHead,
+    provenance.sourceFingerprintBefore,
+    provenance.worktreeStatusHashBefore,
+    provenance.trackedAndUntrackedFileCountBefore,
+    provenance.worktreeDirtyBefore === true ? 'dirty' : 'clean'
+  ].join(':');
+}
+
+function ratioOrNull(numerator, denominator) {
+  if (!(Number.isFinite(numerator) && Number.isFinite(denominator))) {
+    return null;
+  }
+  if (denominator === 0) return numerator === 0 ? 1 : null;
+  return numerator / denominator;
+}
+
+/**
+ * Characterize the same resident SS route with two direct spatial-generation
+ * arena depths.  This is deliberately a same-source diagnostic rather than a
+ * historical-versus-candidate regression gate: it must prove route/depth
+ * identity and stable source state, while reporting either performance result
+ * without prejudging the production default.
+ */
+export function summarizePairedSpatialArenaDepthThroughputRuns({
+  runs = [],
+  requiredRunCount = 3,
+  expectedRunOrders = ['AB', 'BA', 'AB'],
+  requiredWarmupBatchCount = 1,
+  requiredMeasuredBatchCount = 6,
+  requiredBatchStepCount = 16,
+  referenceArenaCount = 3,
+  comparisonArenaCount = 8
+} = {}) {
+  const normalizedRequiredRunCount = Math.max(
+    1,
+    Math.round(Number(requiredRunCount) || 3)
+  );
+  const normalizedWarmupBatchCount = Math.max(
+    0,
+    Math.round(Number(requiredWarmupBatchCount) || 0)
+  );
+  const normalizedMeasuredBatchCount = Math.max(
+    1,
+    Math.round(Number(requiredMeasuredBatchCount) || 1)
+  );
+  const normalizedBatchCount = normalizedWarmupBatchCount
+    + normalizedMeasuredBatchCount;
+  const normalizedBatchStepCount = Math.max(
+    1,
+    Math.round(Number(requiredBatchStepCount) || 16)
+  );
+  const normalizedReferenceArenaCount = exactNonNegativeIntegerOrNull(
+    referenceArenaCount
+  );
+  const normalizedComparisonArenaCount = exactNonNegativeIntegerOrNull(
+    comparisonArenaCount
+  );
+  const normalizedExpectedOrders = Array.from(
+    { length: normalizedRequiredRunCount },
+    (_, index) => String(
+      expectedRunOrders[index]
+        ?? (index % 2 === 0 ? 'AB' : 'BA')
+    ).toUpperCase()
+  );
+  const normalizedRuns = (Array.isArray(runs) ? runs : []).map(
+    (run, index) => {
+      const reference = pairedSpatialArenaDepthArmEvidence(run?.baseline, {
+        requiredBatchCount: normalizedBatchCount,
+        requiredBatchStepCount: normalizedBatchStepCount,
+        expectedArenaCount: normalizedReferenceArenaCount
+      });
+      const comparison = pairedSpatialArenaDepthArmEvidence(run?.candidate, {
+        requiredBatchCount: normalizedBatchCount,
+        requiredBatchStepCount: normalizedBatchStepCount,
+        expectedArenaCount: normalizedComparisonArenaCount
+      });
+      const referenceProvenance = pairedThroughputProvenanceEvidence(
+        run?.baseline
+      );
+      const comparisonProvenance = pairedThroughputProvenanceEvidence(
+        run?.candidate
+      );
+      return {
+        runIndex: index + 1,
+        runId: String(run?.runId ?? ''),
+        order: String(run?.order ?? '').toUpperCase(),
+        reference,
+        comparison,
+        referenceProvenance,
+        comparisonProvenance,
+        physicsStepsPerSecondRatio: ratioOrNull(
+          comparison.physicsStepsPerSecond,
+          reference.physicsStepsPerSecond
+        ),
+        backpressureWaitCountDelta: (
+          comparison.backpressureWaitCount === null
+          || reference.backpressureWaitCount === null
+        ) ? null : comparison.backpressureWaitCount - reference.backpressureWaitCount,
+        backpressureWaitMsDelta: (
+          comparison.backpressureWaitMs === null
+          || reference.backpressureWaitMs === null
+        ) ? null : comparison.backpressureWaitMs - reference.backpressureWaitMs
+      };
+    }
+  );
+  const blockers = [];
+  if (
+    normalizedReferenceArenaCount === null
+    || normalizedReferenceArenaCount < 1
+    || normalizedReferenceArenaCount > 8
+  ) {
+    blockers.push('reference-arena-count-invalid');
+  }
+  if (
+    normalizedComparisonArenaCount === null
+    || normalizedComparisonArenaCount < 1
+    || normalizedComparisonArenaCount > 8
+  ) {
+    blockers.push('comparison-arena-count-invalid');
+  }
+  if (
+    normalizedReferenceArenaCount !== null
+    && normalizedComparisonArenaCount !== null
+    && normalizedReferenceArenaCount === normalizedComparisonArenaCount
+  ) {
+    blockers.push('arena-depth-arms-not-distinct');
+  }
+  if (normalizedRuns.length !== normalizedRequiredRunCount) {
+    blockers.push('independent-run-count-mismatch');
+  }
+  const runIds = normalizedRuns.map((run) => run.runId);
+  if (runIds.some((runId) => !runId) || new Set(runIds).size !== runIds.length) {
+    blockers.push('run-identities-missing-or-duplicated');
+  }
+  if (normalizedRuns.some((run, index) => run.order !== normalizedExpectedOrders[index])) {
+    blockers.push('run-order-not-ab-ba-alternating');
+  }
+  if (normalizedRuns.some((run) => !run.reference.complete)) {
+    blockers.push('reference-arena-depth-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.comparison.complete)) {
+    blockers.push('comparison-arena-depth-evidence-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.referenceProvenance.complete)) {
+    blockers.push('reference-source-provenance-incomplete');
+  }
+  if (normalizedRuns.some((run) => !run.comparisonProvenance.complete)) {
+    blockers.push('comparison-source-provenance-incomplete');
+  }
+  const commonConfigSignatures = new Set(normalizedRuns.flatMap((run) => [
+    run.referenceProvenance.commonConfigSignature,
+    run.comparisonProvenance.commonConfigSignature
+  ]).filter(Boolean));
+  if (commonConfigSignatures.size !== 1) {
+    blockers.push('common-config-signature-mismatch');
+  }
+  const referenceArmConfigSignatures = new Set(normalizedRuns.map(
+    (run) => run.referenceProvenance.armConfigSignature
+  ).filter(Boolean));
+  const comparisonArmConfigSignatures = new Set(normalizedRuns.map(
+    (run) => run.comparisonProvenance.armConfigSignature
+  ).filter(Boolean));
+  if (referenceArmConfigSignatures.size !== 1) {
+    blockers.push('reference-arena-config-signature-mismatch');
+  }
+  if (comparisonArmConfigSignatures.size !== 1) {
+    blockers.push('comparison-arena-config-signature-mismatch');
+  }
+  if (
+    referenceArmConfigSignatures.size === 1
+    && comparisonArmConfigSignatures.size === 1
+    && [...referenceArmConfigSignatures][0]
+      === [...comparisonArmConfigSignatures][0]
+  ) {
+    blockers.push('arena-depth-arm-config-signatures-match');
+  }
+  const sourceIdentities = new Set(normalizedRuns.flatMap((run) => [
+    spatialArenaDepthSourceIdentity(run.referenceProvenance),
+    spatialArenaDepthSourceIdentity(run.comparisonProvenance)
+  ]).filter(Boolean));
+  if (sourceIdentities.size !== 1) {
+    blockers.push('arena-depth-arms-do-not-share-exact-source');
+  }
+  const throughputRatios = normalizedRuns.map(
+    (run) => run.physicsStepsPerSecondRatio
+  ).filter((value) => Number.isFinite(value) && value > 0);
+  if (throughputRatios.length !== normalizedRequiredRunCount) {
+    blockers.push('paired-throughput-ratio-coverage-incomplete');
+  }
+  const backpressureWaitCountDeltas = normalizedRuns.map(
+    (run) => run.backpressureWaitCountDelta
+  ).filter(Number.isFinite);
+  const backpressureWaitMsDeltas = normalizedRuns.map(
+    (run) => run.backpressureWaitMsDelta
+  ).filter(Number.isFinite);
+  if (backpressureWaitCountDeltas.length !== normalizedRequiredRunCount) {
+    blockers.push('backpressure-wait-count-coverage-incomplete');
+  }
+  if (backpressureWaitMsDeltas.length !== normalizedRequiredRunCount) {
+    blockers.push('backpressure-wait-ms-coverage-incomplete');
+  }
+  const referenceMedianPhysicsStepsPerSecond = median(normalizedRuns.map(
+    (run) => run.reference.physicsStepsPerSecond
+  ));
+  const comparisonMedianPhysicsStepsPerSecond = median(normalizedRuns.map(
+    (run) => run.comparison.physicsStepsPerSecond
+  ));
+  return {
+    schema: 'peercompute.ulg.sph-paired-spatial-arena-depth-characterization.v0',
+    status: blockers.length === 0 ? 'pass' : 'fail',
+    blockers,
+    method: {
+      independentRunCount: normalizedRequiredRunCount,
+      expectedRunOrders: normalizedExpectedOrders,
+      warmupBatchCount: normalizedWarmupBatchCount,
+      measuredBatchCount: normalizedMeasuredBatchCount,
+      batchStepCount: normalizedBatchStepCount,
+      referenceRole: `arena-${normalizedReferenceArenaCount}-reference`,
+      comparisonRole: `arena-${normalizedComparisonArenaCount}-comparison`,
+      referenceArenaCount: normalizedReferenceArenaCount,
+      comparisonArenaCount: normalizedComparisonArenaCount,
+      metric: 'physicsStepsPerSecond',
+      metricSource: 'complete-engine-batch',
+      sameSourceRequired: true,
+      performanceGate: 'diagnostic-only-no-throughput-threshold'
+    },
+    runCount: normalizedRuns.length,
+    runs: normalizedRuns,
+    paired: {
+      physicsStepsPerSecondRatios: throughputRatios,
+      medianPhysicsStepsPerSecondRatio: median(throughputRatios),
+      medianPhysicsStepsPerSecondDeltaPercent: median(throughputRatios) === null
+        ? null
+        : (median(throughputRatios) - 1) * 100,
+      backpressureWaitCountDeltas,
+      medianBackpressureWaitCountDelta: median(backpressureWaitCountDeltas),
+      backpressureWaitMsDeltas,
+      medianBackpressureWaitMsDelta: median(backpressureWaitMsDeltas)
+    },
+    independentMedianCrossCheck: {
+      referencePhysicsStepsPerSecond: referenceMedianPhysicsStepsPerSecond,
+      comparisonPhysicsStepsPerSecond: comparisonMedianPhysicsStepsPerSecond,
+      physicsStepsPerSecondRatio: ratioOrNull(
+        comparisonMedianPhysicsStepsPerSecond,
+        referenceMedianPhysicsStepsPerSecond
+      )
+    }
+  };
+}
+
 function ownMetricValue(object, key) {
   return object && Object.prototype.hasOwnProperty.call(object, key)
     ? object[key]
@@ -2029,6 +3123,111 @@ function firstNonNullMetricValue(...values) {
     if (value !== undefined && value !== null) return value;
   }
   return null;
+}
+
+// A resident batch publishes `surfaceDraw` after the render-state snapshot.
+// Treat the direct batch record as the authoritative observation when it is
+// available: a snapshot can otherwise describe the pre-publication state
+// while the same batch has already handed validated GPU buffers to the native
+// surface consumer. `false` and `0` are meaningful current observations and
+// must not be overwritten by an older snapshot.
+export function currentResidentSurfaceDrawEvidence({
+  surfaceDraw = null,
+  renderState = null
+} = {}) {
+  const direct = surfaceDraw && typeof surfaceDraw === 'object'
+    ? surfaceDraw
+    : null;
+  const snapshot = renderState && typeof renderState === 'object'
+    ? renderState
+    : null;
+  const current = (directKey, snapshotKey = directKey) => firstNonNullMetricValue(
+    ownMetricValue(direct, directKey),
+    ownMetricValue(snapshot, snapshotKey)
+  );
+
+  return {
+    status: current('status', 'surfaceDrawStatus'),
+    bridge: current('visibleRendererBridge', 'surfaceDrawVisibleRendererBridge'),
+    gpuBufferHandoffReady: current(
+      'gpuBufferHandoffReady',
+      'surfaceDrawGpuBufferHandoffReady'
+    ),
+    gpuBufferHandoffStatus: current(
+      'gpuBufferHandoffStatus',
+      'surfaceDrawGpuBufferHandoffStatus'
+    ),
+    gpuBufferHandoffReason: current(
+      'gpuBufferHandoffReason',
+      'surfaceDrawGpuBufferHandoffReason'
+    ),
+    gpuBufferHandoffKind: current(
+      'gpuBufferHandoffKind',
+      'surfaceDrawGpuBufferHandoffKind'
+    ),
+    gpuBufferHandoffInputSchema: current(
+      'gpuBufferHandoffInputSchema',
+      'surfaceDrawGpuBufferHandoffInputSchema'
+    ),
+    gpuBufferHandoffRequiresSurfaceExtraction: current(
+      'gpuBufferHandoffRequiresSurfaceExtraction',
+      'surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction'
+    ),
+    gpuBufferHandoffUpperBoundVertexCount: current(
+      'gpuBufferHandoffUpperBoundVertexCount',
+      'surfaceDrawGpuBufferHandoffUpperBoundVertexCount'
+    ),
+    summaryReadback: current('surfaceDrawSummaryReadback'),
+    summaryReadbackByteLength: current('surfaceDrawSummaryReadbackByteLength'),
+    rowsBufferByteLength: current('drawRowsBufferByteLength', 'surfaceDrawRowsBufferByteLength'),
+    indirectRowsBufferByteLength: current(
+      'drawIndirectRowsBufferByteLength',
+      'surfaceDrawIndirectRowsBufferByteLength'
+    ),
+    compactedVertexRowsBufferByteLength: current(
+      'compactedVertexRowsBufferByteLength',
+      'surfaceDrawCompactedVertexRowsBufferByteLength'
+    ),
+    compactPositionRowsBufferByteLength: current(
+      'compactPositionRowsBufferByteLength',
+      'surfaceDrawCompactPositionRowsBufferByteLength'
+    ),
+    compactPositionRowsStrideFloats: current(
+      'compactPositionRowsStrideFloats',
+      'surfaceDrawCompactPositionRowsStrideFloats'
+    ),
+    compactPositionRowsVertexCount: current(
+      'compactPositionRowsVertexCount',
+      'surfaceDrawCompactPositionRowsVertexCount'
+    ),
+    directCompactPositionDraw: current(
+      'directCompactPositionDraw',
+      'surfaceDrawDirectCompactPositionDraw'
+    ),
+    renderBridgeExternalGpuBufferInputLayout: current(
+      'renderBridgeExternalGpuBufferInputLayout',
+      'surfaceDrawRenderBridgeExternalGpuBufferInputLayout'
+    ),
+    renderBridgeCompactPositionDirectInput: current(
+      'renderBridgeCompactPositionDirectInput',
+      'surfaceDrawRenderBridgeCompactPositionDirectInput'
+    ),
+    renderFieldRowsBufferByteLength: current(
+      'renderFieldRowsBufferByteLength',
+      'surfaceDrawRenderFieldRowsBufferByteLength'
+    ),
+    renderFieldSurfaceBufferByteLength: current(
+      'renderFieldSurfaceBufferByteLength',
+      'surfaceDrawRenderFieldSurfaceBufferByteLength'
+    ),
+    source: firstNonNullMetricValue(
+      ownMetricValue(direct, 'visibleRenderSource'),
+      ownMetricValue(direct, 'source'),
+      ownMetricValue(snapshot, 'surfaceDrawVisibleRenderSource'),
+      ownMetricValue(snapshot, 'surfaceDrawSource')
+    ),
+    readback: current('surfaceDrawReadback')
+  };
 }
 
 const SCHROEDER_TRANSACTION_COUNTER_KEYS = Object.freeze([
@@ -2079,6 +3278,176 @@ function exactIntegerSequenceEvidence(values, { requireContiguous = true } = {})
   };
 }
 
+const SCHROEDER_SUCCESSOR_SOURCE_FAMILY_SCHEMA =
+  'peercompute.ulg.schroeder-committed-successor-source-family.v1';
+const SCHROEDER_SUCCESSOR_SOURCE_FAMILY_STATUS =
+  'schroeder-committed-successor-source-family-authenticated';
+const SCHROEDER_SUCCESSOR_EPOCH_IDENTITY_FIELDS = Object.freeze([
+  'storageGeneration',
+  'physicsTick',
+  'physicsSubstep',
+  'positionEpoch',
+  'topologyEpoch',
+  'chartEpoch',
+  'levelEpoch',
+  'supportEpoch'
+]);
+const U32_MAX = 0xffff_ffff;
+
+function exactU32OrNull(value) {
+  const number = exactNonNegativeIntegerOrNull(value);
+  return number !== null && number <= U32_MAX ? number : null;
+}
+
+function exactEpochIdentityOrNull(identity) {
+  if (!identity || typeof identity !== 'object') return null;
+  const normalized = {};
+  for (const field of SCHROEDER_SUCCESSOR_EPOCH_IDENTITY_FIELDS) {
+    const value = exactU32OrNull(identity[field]);
+    if (value === null) return null;
+    normalized[field] = value;
+  }
+  return normalized;
+}
+
+function exactEpochIdentitiesMatch(left, right) {
+  return Boolean(
+    left
+    && right
+    && SCHROEDER_SUCCESSOR_EPOCH_IDENTITY_FIELDS.every(
+      (field) => left[field] === right[field]
+    )
+  );
+}
+
+function successorEpochEvidenceClaimsPlacementFloor(evidence) {
+  return Boolean(
+    evidence
+    && typeof evidence === 'object'
+    && (
+      evidence.positionEpochFloorAuthenticated === true
+      || evidence.positionEpochFloor !== null && evidence.positionEpochFloor !== undefined
+      || evidence.positionAuthority
+        === 'authenticated-transactional-placement-epoch-floor-with-conservative-final-family'
+    )
+  );
+}
+
+function authenticatedPlacementEpochTransition(previous, next) {
+  const previousPositionEpoch = exactU32OrNull(
+    previous?.epochIdentity?.positionEpoch
+  );
+  const nextPositionEpoch = exactU32OrNull(next?.epochIdentity?.positionEpoch);
+  const evidence = previous?.successorEpochEvidence ?? null;
+  if (previousPositionEpoch === null || nextPositionEpoch === null) {
+    return { accepted: false, reason: 'position-epoch-not-u32' };
+  }
+  if (nextPositionEpoch === previousPositionEpoch + 1) {
+    return successorEpochEvidenceClaimsPlacementFloor(evidence)
+      ? { accepted: false, reason: 'unexpected-placement-floor-on-contiguous-transition' }
+      : { accepted: true, kind: 'ordinary-contiguous' };
+  }
+  if (
+    previousPositionEpoch > U32_MAX - 2
+    || nextPositionEpoch !== previousPositionEpoch + 2
+  ) {
+    return { accepted: false, reason: 'unsupported-position-epoch-transition' };
+  }
+  const previousIdentity = exactEpochIdentityOrNull(previous?.epochIdentity);
+  const nextIdentity = exactEpochIdentityOrNull(next?.epochIdentity);
+  const evidenceSourceIdentity = exactEpochIdentityOrNull(
+    evidence?.sourceEpochIdentity
+  );
+  const evidenceSuccessorIdentity = exactEpochIdentityOrNull(
+    evidence?.successorEpochIdentity
+  );
+  const previousGenerationId = exactU32OrNull(previous?.generationId);
+  const proofMatches = Boolean(
+    evidence
+    && evidence.schema === SCHROEDER_SUCCESSOR_SOURCE_FAMILY_SCHEMA
+    && evidence.status === SCHROEDER_SUCCESSOR_SOURCE_FAMILY_STATUS
+    && evidence.ready === true
+    && evidence.admitted === true
+    && evidence.authenticated === true
+    && evidence.sourceFamily === 'hot-particle-successor'
+    && evidence.sourceFamilyRole === 'committed-successor-x-n-plus-1'
+    && evidence.publicationAuthority
+      === 'spatial-epoch-transaction-preflight-and-commit'
+    && evidence.exactBufferFamilyAuthenticated === true
+    && evidence.storageAllocationAuthenticated === true
+    && evidence.topologyTransitionAuthenticated === true
+    && evidence.positionEpochFloorAuthenticated === true
+    && evidence.positionTransitionAuthenticated === false
+    && evidence.positionAuthority
+      === 'authenticated-transactional-placement-epoch-floor-with-conservative-final-family'
+    && evidence.positionChanged === true
+    && exactU32OrNull(evidence.positionEpochFloor) === nextPositionEpoch
+    && previousGenerationId !== null
+    && exactU32OrNull(evidence.sourceGenerationId) === previousGenerationId
+    && exactU32OrNull(evidence.ancestorSpatialGenerationId) === previousGenerationId
+    && typeof evidence.deviceId === 'string'
+    && evidence.deviceId.length > 0
+    && evidence.deviceId === previous?.deviceId
+    && evidence.deviceId === next?.deviceId
+    && exactEpochIdentitiesMatch(evidenceSourceIdentity, previousIdentity)
+    && exactEpochIdentitiesMatch(evidenceSuccessorIdentity, nextIdentity)
+  );
+  return proofMatches
+    ? { accepted: true, kind: 'authenticated-reaction-placement-floor' }
+    : { accepted: false, reason: 'authenticated-placement-floor-proof-mismatch' };
+}
+
+function sameLevelPositionEpochTransitionEvidence(transactions) {
+  const rows = Array.isArray(transactions) ? transactions : [];
+  const failureReasons = new Set();
+  let ordinaryContiguousTransitionCount = 0;
+  let authenticatedPlacementTransitionCount = 0;
+  let rejectedTransitionCount = 0;
+  for (let index = 1; index < rows.length; index += 1) {
+    const transition = authenticatedPlacementEpochTransition(
+      rows[index - 1],
+      rows[index]
+    );
+    if (!transition.accepted) {
+      rejectedTransitionCount += 1;
+      failureReasons.add(transition.reason ?? 'unknown-position-epoch-transition');
+    } else if (transition.kind === 'authenticated-reaction-placement-floor') {
+      authenticatedPlacementTransitionCount += 1;
+    } else {
+      ordinaryContiguousTransitionCount += 1;
+    }
+  }
+  return {
+    transitionCount: Math.max(0, rows.length - 1),
+    ordinaryContiguousTransitionCount,
+    authenticatedPlacementTransitionCount,
+    rejectedTransitionCount,
+    rejectionReasons: [...failureReasons].sort(),
+    complete: rows.length > 0 && rejectedTransitionCount === 0
+  };
+}
+
+function positionEpochSequenceWithTransitionProof({
+  positionEpochs,
+  transactions,
+  authoritativePrivateAdvance
+}) {
+  const sequence = exactIntegerSequenceEvidence(positionEpochs, {
+    requireContiguous: false
+  });
+  const transitionEvidence = authoritativePrivateAdvance
+    ? null
+    : sameLevelPositionEpochTransitionEvidence(transactions);
+  return {
+    sequence: {
+      ...sequence,
+      complete: sequence.complete
+        && (authoritativePrivateAdvance || transitionEvidence?.complete === true)
+    },
+    transitionEvidence
+  };
+}
+
 /**
  * Audit the canonical SS epoch transaction over the complete benchmark run.
  *
@@ -2096,7 +3465,8 @@ export function aggregateSchroederResidentBatchEvidence({
   schroederTwoLevelMechanicsAuthority:
     twoLevelMechanicsAuthorityRequested = 'authoritative',
   schroederTwoLevelFineSubstepCount:
-    twoLevelFineSubstepCountRequested = 2
+    twoLevelFineSubstepCountRequested = 2,
+  schroederSpatialArenaCount: spatialArenaCountRequested = null
 } = {}) {
   const expectedBatchCount = exactNonNegativeIntegerOrNull(requestedBatchCount);
   const expectedBatchStepCount = exactNonNegativeIntegerOrNull(requestedBatchStepCount);
@@ -2106,6 +3476,9 @@ export function aggregateSchroederResidentBatchEvidence({
   const expectedStepCount = requestedShapeValid
     ? expectedBatchCount * expectedBatchStepCount
     : 0;
+  const requestedSpatialArenaCount = spatialArenaCountRequested == null
+    ? null
+    : exactNonNegativeIntegerOrNull(spatialArenaCountRequested);
   // An authoritative two-level outer step legitimately consumes private fine
   // generations and position epochs between consecutive public transactions.
   // Physics ticks must remain contiguous; generation/position identities must
@@ -2198,9 +3571,13 @@ export function aggregateSchroederResidentBatchEvidence({
       (generation) => exactNonNegativeIntegerOrNull(generation?.generationId)
     );
     const physicsTickSequence = exactIntegerSequenceEvidence(physicsTicks);
-    const positionEpochSequence = exactIntegerSequenceEvidence(positionEpochs, {
-      requireContiguous: !authoritativePrivateAdvance
+    const positionEpochEvidence = positionEpochSequenceWithTransitionProof({
+      positionEpochs,
+      transactions,
+      authoritativePrivateAdvance
     });
+    const positionEpochSequence = positionEpochEvidence.sequence;
+    const positionEpochTransitionEvidence = positionEpochEvidence.transitionEvidence;
     const transactionGenerationSequence = exactIntegerSequenceEvidence(
       transactionGenerationIds,
       { requireContiguous: !authoritativePrivateAdvance }
@@ -2243,6 +3620,7 @@ export function aggregateSchroederResidentBatchEvidence({
       artifactLedgerSummaryCount: artifactLedgers.length,
       physicsTickSequence,
       positionEpochSequence,
+      positionEpochTransitionEvidence,
       transactionGenerationSequence,
       generationSummarySequence,
       transactionGenerationAlignmentComplete,
@@ -2291,6 +3669,15 @@ export function aggregateSchroederResidentBatchEvidence({
   const transactions = batchEvidence.flatMap((batch) => batch.transactions);
   const generations = batchEvidence.flatMap((batch) => batch.generations);
   const artifactLedgers = batchEvidence.flatMap((batch) => batch.artifactLedgers);
+  const admittedConsumerReceiptTelemetry = Object.freeze(
+    transactions.flatMap((transaction) => (
+      Array.isArray(transaction?.admittedReaders)
+        ? transaction.admittedReaders
+          .map((reader) => reader?.receiptTelemetry ?? null)
+          .filter(Boolean)
+        : []
+    ))
+  );
   const transactionGenerationIds = transactions.map(
     (transaction) => exactNonNegativeIntegerOrNull(transaction?.generationId)
   );
@@ -2307,9 +3694,14 @@ export function aggregateSchroederResidentBatchEvidence({
     requireContiguous: !authoritativePrivateAdvance
   });
   const transactionPhysicsTickSequence = exactIntegerSequenceEvidence(transactionPhysicsTicks);
-  const transactionPositionEpochSequence = exactIntegerSequenceEvidence(transactionPositionEpochs, {
-    requireContiguous: !authoritativePrivateAdvance
+  const transactionPositionEpochEvidence = positionEpochSequenceWithTransitionProof({
+    positionEpochs: transactionPositionEpochs,
+    transactions,
+    authoritativePrivateAdvance
   });
+  const transactionPositionEpochSequence = transactionPositionEpochEvidence.sequence;
+  const transactionPositionEpochTransitionEvidence =
+    transactionPositionEpochEvidence.transitionEvidence;
   const generationSummarySequence = exactIntegerSequenceEvidence(generationSummaryIds, {
     requireContiguous: !authoritativePrivateAdvance
   });
@@ -2467,6 +3859,23 @@ export function aggregateSchroederResidentBatchEvidence({
     (sum, generation) => sum + (Number(generation?.backpressureWaitMs) || 0),
     0
   );
+  const observedSpatialArenaCounts = Array.from(new Set(
+    generations.map((generation) => exactNonNegativeIntegerOrNull(
+      generation?.directArenaCount ?? generation?.arenaCapacity
+    )).filter((arenaCount) => arenaCount !== null)
+  )).sort((a, b) => a - b);
+  const spatialArenaCountCoverageComplete = requestedSpatialArenaCount === null
+    ? null
+    : Boolean(
+      requestedSpatialArenaCount >= 1
+      && generations.length === expectedStepCount
+      && generations.every((generation) => (
+        exactNonNegativeIntegerOrNull(generation?.directArenaCount)
+          === requestedSpatialArenaCount
+        && exactNonNegativeIntegerOrNull(generation?.arenaCapacity)
+          === requestedSpatialArenaCount
+      ))
+    );
   const transactionCoverageComplete = simulationRequested !== true
     ? null
     : Boolean(
@@ -2507,6 +3916,7 @@ export function aggregateSchroederResidentBatchEvidence({
     transactionGenerationSequence,
     transactionPhysicsTickSequence,
     transactionPositionEpochSequence,
+    transactionPositionEpochTransitionEvidence,
     transactionCounterTotals,
     transactionCountersComplete,
     transactionExactOnceCoverageComplete,
@@ -2526,6 +3936,7 @@ export function aggregateSchroederResidentBatchEvidence({
     artifactLedgerCoverageComplete,
     transactionGenerationAlignmentComplete,
     stepIdentityCoverageComplete,
+    admittedConsumerReceiptTelemetry,
     schroederSimulationActive,
     schroederSimulationActiveBatchCount,
     twoLevelMechanicsRequested: twoLevelMechanicsRequested === true,
@@ -2535,6 +3946,9 @@ export function aggregateSchroederResidentBatchEvidence({
     twoLevelAuthoritativeStepCount,
     backpressureWaitCount,
     backpressureWaitMs,
+    requestedSpatialArenaCount,
+    observedSpatialArenaCounts,
+    spatialArenaCountCoverageComplete,
     batchCoverage: batchEvidence.map((batch) => ({
       batchIndex: batch.batchIndex,
       residentStepsStatus: batch.residentStepsStatus,
@@ -2557,6 +3971,7 @@ export function aggregateSchroederResidentBatchEvidence({
       physicsTickEnd: batch.physicsTickSequence.end,
       positionEpochStart: batch.positionEpochSequence.start,
       positionEpochEnd: batch.positionEpochSequence.end,
+      positionEpochTransitionEvidence: batch.positionEpochTransitionEvidence,
       generationIdStart: batch.transactionGenerationSequence.start,
       generationIdEnd: batch.transactionGenerationSequence.end,
       transactionGenerationAlignmentComplete: batch.transactionGenerationAlignmentComplete,
@@ -2569,6 +3984,34 @@ export function aggregateSchroederResidentBatchEvidence({
 function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const analysis = result?.analysis || {};
   const metrics = Array.isArray(result?.timeline?.metrics) ? result.timeline.metrics : [];
+  const thermalCandidateCsrRouteEvidenceByBatch = metrics
+    .filter((entry) => entry?.phase === 'resident-batch')
+    .map((entry) => ({
+      batchIndex: entry.batchIndex ?? null,
+      ...(entry.thermalCandidateCsrRouteEvidence || {
+        schema: 'peercompute.ulg.sph-probe-thermal-candidate-csr-route-evidence.v1',
+        status: 'not-published'
+      })
+    }));
+  const thermalCandidateCsrRouteEvidence =
+    thermalCandidateCsrRouteEvidenceByBatch.at(-1) || null;
+  const thermalCandidateCsrRouteCounts = {
+    uniformCompletion: thermalCandidateCsrRouteEvidenceByBatch.filter(
+      (evidence) => evidence?.uniformCompletion === true
+    ).length,
+    replay: thermalCandidateCsrRouteEvidenceByBatch.filter(
+      (evidence) => evidence?.replay === true
+    ).length,
+    exactNearRewalk: thermalCandidateCsrRouteEvidenceByBatch.filter(
+      (evidence) => evidence?.exactNearRewalk === true
+    ).length,
+    sealed: thermalCandidateCsrRouteEvidenceByBatch.filter(
+      (evidence) => evidence?.sealed === true
+    ).length,
+    captured: thermalCandidateCsrRouteEvidenceByBatch.filter(
+      (evidence) => evidence?.status === 'candidate-csr-route-evidence-captured'
+    ).length
+  };
   const gpuTimestampIntervalEvidence = summarizeResidentGpuTimestampEvidence({
     metrics,
     requested: measureGpuTimestampInterval,
@@ -2596,6 +4039,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const metric = lastMetricWithRenderState(result);
   const renderState = metric?.renderState || null;
   const surfaceDraw = metric?.surfaceDraw || null;
+  const currentSurfaceDraw = currentResidentSurfaceDrawEvidence({
+    surfaceDraw,
+    renderState
+  });
   const materialMetric = lastMetricWithMaterialInterfaceState(result) || metric;
   const materialRenderState = materialMetric?.renderState || null;
   const materialInterfaceField =
@@ -2607,6 +4054,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? metric?.residentMaterialInterfaceState
     ?? null;
   const probeResidentBatchTiming = metric?.probeResidentBatchTiming || null;
+  const probeResidentBatchThermalCandidateCsrRouteReadbackMs = numberOrNull(
+    probeResidentBatchTiming?.thermalCandidateCsrRouteReadbackMs
+  );
   const probeResidentBatchResidentStepsAwaitMs = numberOrNull(
     probeResidentBatchTiming?.residentStepsAwaitMs
   );
@@ -2804,7 +4254,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederSimulationRequested,
     schroederTwoLevelMechanicsRequested,
     schroederTwoLevelMechanicsAuthority,
-    schroederTwoLevelFineSubstepCount
+    schroederTwoLevelFineSubstepCount,
+    schroederSpatialArenaCount
   });
   const schroederSimulationActive = schroederSimulationRequested === true
     ? schroederResidentBatchEvidence.schroederSimulationActive
@@ -2834,6 +4285,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederResidentBatchEvidence.transactionPositionEpochCount;
   const schroederTransactionCounterTotals =
     schroederResidentBatchEvidence.transactionCounterTotals;
+  const schroederAdmittedConsumerReceiptTelemetry =
+    schroederResidentBatchEvidence.admittedConsumerReceiptTelemetry;
   const schroederBackpressureWaitCount =
     schroederResidentBatchEvidence.backpressureWaitCount;
   const schroederBackpressureWaitMs =
@@ -3624,80 +5077,62 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     workerOffscreenRetainedCompactSnapshot?.errorMessage
     ?? renderState?.workerOffscreenRetainedCompactSnapshotErrorMessage
     ?? null;
-  const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
-  const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
-  const surfaceDrawBridgeCapabilityStatus = renderState?.surfaceDrawRenderBridgeCapabilityStatus
-    ?? surfaceDraw?.renderBridgeCapabilityStatus
+  const surfaceDrawStatus = currentSurfaceDraw.status;
+  const surfaceDrawBridge = currentSurfaceDraw.bridge;
+  const surfaceDrawBridgeCapabilityStatus = surfaceDraw?.renderBridgeCapabilityStatus
+    ?? renderState?.surfaceDrawRenderBridgeCapabilityStatus
     ?? null;
-  const surfaceDrawBridgeCapabilityReason = renderState?.surfaceDrawRenderBridgeCapabilityReason
-    ?? surfaceDraw?.renderBridgeCapabilityReason
+  const surfaceDrawBridgeCapabilityReason = surfaceDraw?.renderBridgeCapabilityReason
+    ?? renderState?.surfaceDrawRenderBridgeCapabilityReason
     ?? null;
-  const surfaceDrawBridgeRendererBackend = renderState?.surfaceDrawRenderBridgeRendererBackend
-    ?? surfaceDraw?.renderBridgeRendererBackend
+  const surfaceDrawBridgeRendererBackend = surfaceDraw?.renderBridgeRendererBackend
+    ?? renderState?.surfaceDrawRenderBridgeRendererBackend
     ?? null;
-  const surfaceDrawBridgeVisibleNoReadbackSupported = renderState?.surfaceDrawRenderBridgeVisibleNoReadbackSupported
-    ?? surfaceDraw?.renderBridgeVisibleNoReadbackSupported
+  const surfaceDrawBridgeVisibleNoReadbackSupported = surfaceDraw?.renderBridgeVisibleNoReadbackSupported
+    ?? renderState?.surfaceDrawRenderBridgeVisibleNoReadbackSupported
     ?? null;
   const surfaceDrawGpuBufferHandoffReady = Boolean(
-    renderState?.surfaceDrawGpuBufferHandoffReady
-    ?? surfaceDraw?.gpuBufferHandoffReady
-    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffReady
+    currentSurfaceDraw.gpuBufferHandoffReady
   );
-  const surfaceDrawGpuBufferHandoffStatus = renderState?.surfaceDrawGpuBufferHandoffStatus
-    ?? surfaceDraw?.gpuBufferHandoffStatus
-    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffStatus
-    ?? null;
-  const surfaceDrawGpuBufferHandoffReason = renderState?.surfaceDrawGpuBufferHandoffReason
-    ?? surfaceDraw?.gpuBufferHandoffReason
-    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffReason
-    ?? null;
-  const surfaceDrawGpuBufferHandoffKind = renderState?.surfaceDrawGpuBufferHandoffKind
-    ?? surfaceDraw?.gpuBufferHandoffKind
-    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffKind
-    ?? null;
-  const surfaceDrawGpuBufferHandoffInputSchema = renderState?.surfaceDrawGpuBufferHandoffInputSchema
-    ?? surfaceDraw?.gpuBufferHandoffInputSchema
-    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffInputSchema
-    ?? null;
+  const surfaceDrawGpuBufferHandoffStatus = currentSurfaceDraw.gpuBufferHandoffStatus;
+  const surfaceDrawGpuBufferHandoffReason = currentSurfaceDraw.gpuBufferHandoffReason;
+  const surfaceDrawGpuBufferHandoffKind = currentSurfaceDraw.gpuBufferHandoffKind;
+  const surfaceDrawGpuBufferHandoffInputSchema = currentSurfaceDraw.gpuBufferHandoffInputSchema;
   const surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction = Boolean(
-    renderState?.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction
-    ?? surfaceDraw?.gpuBufferHandoffRequiresSurfaceExtraction
-    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction
+    currentSurfaceDraw.gpuBufferHandoffRequiresSurfaceExtraction
   );
   const surfaceDrawGpuBufferHandoffUpperBoundVertexCount = numberOrNull(
-    renderState?.surfaceDrawGpuBufferHandoffUpperBoundVertexCount
-      ?? surfaceDraw?.gpuBufferHandoffUpperBoundVertexCount
-      ?? surfaceDraw?.surfaceDrawGpuBufferHandoffUpperBoundVertexCount
+    currentSurfaceDraw.gpuBufferHandoffUpperBoundVertexCount
   );
   const surfaceDrawVisibleGpuConsumerReady = Boolean(firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerReady'),
     ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerReady'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerReady')
+    ownMetricValue(surfaceDraw, 'visibleGpuConsumerReady'),
+    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerReady')
   ));
   const surfaceDrawVisibleGpuConsumerStatus = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerStatus'),
     ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerStatus'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerStatus')
+    ownMetricValue(surfaceDraw, 'visibleGpuConsumerStatus'),
+    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerStatus')
   );
   const surfaceDrawVisibleGpuConsumerReason = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerReason'),
     ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerReason'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerReason')
+    ownMetricValue(surfaceDraw, 'visibleGpuConsumerReason'),
+    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerReason')
   );
   const surfaceDrawVisibleGpuConsumerInputReady = Boolean(firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerInputReady'),
     ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerInputReady'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerInputReady')
+    ownMetricValue(surfaceDraw, 'visibleGpuConsumerInputReady'),
+    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerInputReady')
   ));
   const surfaceDrawVisibleGpuConsumerInputKind = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerInputKind'),
     ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerInputKind'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerInputKind')
+    ownMetricValue(surfaceDraw, 'visibleGpuConsumerInputKind'),
+    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerInputKind')
   );
   const surfaceDrawVisibleGpuConsumerRuntimeReady = Boolean(firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerRuntimeReady'),
     ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerRuntimeReady'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerRuntimeReady')
+    ownMetricValue(surfaceDraw, 'visibleGpuConsumerRuntimeReady'),
+    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerRuntimeReady')
   ));
   const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected = firstDefinedMetricValue(
     ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected'),
@@ -3960,31 +5395,28 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
         : null
     );
   const surfaceDrawSummaryReadbackByteLength = numberOrNull(
-    renderState?.surfaceDrawSummaryReadbackByteLength ?? surfaceDraw?.surfaceDrawSummaryReadbackByteLength
+    currentSurfaceDraw.summaryReadbackByteLength
   );
   const surfaceDrawRowsBufferByteLength = numberOrNull(
-    renderState?.surfaceDrawRowsBufferByteLength ?? surfaceDraw?.drawRowsBufferByteLength
+    currentSurfaceDraw.rowsBufferByteLength
   );
   const surfaceDrawIndirectRowsBufferByteLength = numberOrNull(
-    renderState?.surfaceDrawIndirectRowsBufferByteLength ?? surfaceDraw?.drawIndirectRowsBufferByteLength
+    currentSurfaceDraw.indirectRowsBufferByteLength
   );
   const surfaceDrawCompactedVertexRowsBufferByteLength = numberOrNull(
-    renderState?.surfaceDrawCompactedVertexRowsBufferByteLength ?? surfaceDraw?.compactedVertexRowsBufferByteLength
+    currentSurfaceDraw.compactedVertexRowsBufferByteLength
   );
   const surfaceDrawCompactPositionRowsBufferByteLength = numberOrNull(
-    renderState?.surfaceDrawCompactPositionRowsBufferByteLength ?? surfaceDraw?.compactPositionRowsBufferByteLength
+    currentSurfaceDraw.compactPositionRowsBufferByteLength
   );
   const surfaceDrawRenderBridgeExternalGpuBufferInputLayout =
-    renderState?.surfaceDrawRenderBridgeExternalGpuBufferInputLayout
-      ?? surfaceDraw?.renderBridgeExternalGpuBufferInputLayout
-      ?? null;
+    currentSurfaceDraw.renderBridgeExternalGpuBufferInputLayout;
   const surfaceDrawCompactPositionRowsStrideFloats = numberOrNull(
-    renderState?.surfaceDrawCompactPositionRowsStrideFloats
-      ?? surfaceDraw?.compactPositionRowsStrideFloats
+    currentSurfaceDraw.compactPositionRowsStrideFloats
       ?? (surfaceDrawRenderBridgeExternalGpuBufferInputLayout === 'webgpu-marching-cubes-compact-position-rows' ? 4 : null)
   );
   const surfaceDrawCompactPositionRowsVertexCountDirect = numberOrNull(
-    renderState?.surfaceDrawCompactPositionRowsVertexCount ?? surfaceDraw?.compactPositionRowsVertexCount
+    currentSurfaceDraw.compactPositionRowsVertexCount
   );
   const surfaceDrawCompactPositionRowsVertexCount = surfaceDrawCompactPositionRowsVertexCountDirect
     ?? (
@@ -3997,13 +5429,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
         : null
   );
   const surfaceDrawDirectCompactPositionDraw =
-    renderState?.surfaceDrawDirectCompactPositionDraw ?? surfaceDraw?.directCompactPositionDraw ?? null;
+    currentSurfaceDraw.directCompactPositionDraw;
   const surfaceDrawRenderBridgeCompactPositionDirectInput =
-    renderState?.surfaceDrawRenderBridgeCompactPositionDirectInput
-      ?? surfaceDraw?.renderBridgeCompactPositionDirectInput
-      ?? null;
+    currentSurfaceDraw.renderBridgeCompactPositionDirectInput;
   const surfaceDrawRenderFieldRowsBufferByteLength = numberOrNull(
-    renderState?.surfaceDrawRenderFieldRowsBufferByteLength ?? surfaceDraw?.renderFieldRowsBufferByteLength
+    currentSurfaceDraw.renderFieldRowsBufferByteLength
   );
   const surfaceDrawRenderFieldRowsBufferBorrowed =
     renderState?.surfaceDrawRenderFieldRowsBufferBorrowed
@@ -4030,7 +5460,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       ?? surfaceDraw?.renderFieldRowsBufferPoolByteLength
   );
   const surfaceDrawRenderFieldSurfaceBufferByteLength = numberOrNull(
-    renderState?.surfaceDrawRenderFieldSurfaceBufferByteLength ?? surfaceDraw?.renderFieldSurfaceBufferByteLength
+    currentSurfaceDraw.renderFieldSurfaceBufferByteLength
   );
   const surfaceDrawThreeGeometryByteLength = numberOrNull(
     renderState?.surfaceDrawRenderBridgeThreeGeometryByteLength
@@ -4390,6 +5820,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederSimulationRequestedObserved,
     schroederSimulationActive,
     schroederTransactionCoverageComplete,
+    schroederSpatialArenaCountRequested:
+      schroederResidentBatchEvidence.requestedSpatialArenaCount,
+    schroederSpatialArenaCountCoverageComplete:
+      schroederResidentBatchEvidence.spatialArenaCountCoverageComplete,
     schroederTwoLevelMechanicsRequested,
     schroederTwoLevelMechanicsRequestedObserved,
     schroederTwoLevelMechanicsCoverageComplete,
@@ -4493,8 +5927,14 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     performanceGate,
     gpuTimestampIntervalEvidence,
     gpuStageTimestampEvidence,
+    thermalCandidateCsrRouteEvidenceRequested:
+      captureThermalCandidateCsrRouteEvidence,
+    thermalCandidateCsrRouteEvidence,
+    thermalCandidateCsrRouteEvidenceByBatch,
+    thermalCandidateCsrRouteCounts,
     probeResidentBatchTiming,
     probeResidentBatchResidentStepsAwaitMs,
+    probeResidentBatchThermalCandidateCsrRouteReadbackMs,
     probeResidentBatchRenderRefreshAwaitMs,
     probeResidentBatchMaterialInterfaceDiagnosticMs,
     probeResidentBatchViewportRefreshMs,
@@ -4672,6 +6112,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederSimulationRequestedObserved,
     schroederSimulationActive,
     schroederTransactionCoverageComplete,
+    schroederSpatialArenaCountRequested:
+      schroederResidentBatchEvidence.requestedSpatialArenaCount,
+    schroederSpatialArenaCountsObserved:
+      schroederResidentBatchEvidence.observedSpatialArenaCounts,
+    schroederSpatialArenaCountCoverageComplete:
+      schroederResidentBatchEvidence.spatialArenaCountCoverageComplete,
     schroederTwoLevelMechanicsConfiguredRequested:
       schroederTwoLevelMechanicsRequested,
     schroederTwoLevelMechanicsRequestedObserved,
@@ -4718,6 +6164,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederTransactionPhysicsTickCount,
     schroederTransactionPositionEpochCount,
     schroederTransactionCounterTotals,
+    schroederAdmittedConsumerReceiptTelemetry,
     schroederTransactionReleaseCount:
       schroederTransactionCounterTotals.releaseCount,
     schroederTransactionReleaseRetryCount:
@@ -4864,12 +6311,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution,
     surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength,
     surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength,
-    surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource
-      ?? renderState?.surfaceDrawSource
-      ?? surfaceDraw?.visibleRenderSource
-      ?? surfaceDraw?.source
-      ?? null,
-    surfaceDrawReadback: renderState?.surfaceDrawReadback ?? surfaceDraw?.surfaceDrawReadback ?? null,
+    surfaceDrawSource: currentSurfaceDraw.source,
+    surfaceDrawReadback: currentSurfaceDraw.readback,
     renderRowsReadback: renderState?.renderRowsReadback ?? null,
     renderRowsReadbackMode: renderState?.renderRowsReadbackMode ?? null,
     renderRowsReadbackCoercionReason: renderState?.renderRowsReadbackCoercionReason ?? null,
@@ -4885,7 +6328,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree,
     presentationWorkerRetainedOutputPresentationOnlyReadbackFree,
     renderRowsReadbackByteLength,
-    surfaceDrawSummaryReadback: renderState?.surfaceDrawSummaryReadback ?? surfaceDraw?.surfaceDrawSummaryReadback ?? null,
+    surfaceDrawSummaryReadback: currentSurfaceDraw.summaryReadback,
     surfaceDrawSummaryReadbackByteLength,
     surfaceDrawRowsBufferByteLength,
     surfaceDrawIndirectRowsBufferByteLength,
@@ -5153,6 +6596,8 @@ async function main() {
         measureGpuStageTimestamps ? '1' : '0',
       ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC: materialInterfaceDiagnosticRequested ? '1' : '0',
       ULG_PROBE_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE: materialInterfaceCandidateReadbackMode,
+      ULG_PROBE_CAPTURE_THERMAL_CSR_ROUTE_EVIDENCE:
+        captureThermalCandidateCsrRouteEvidence ? '1' : '0',
       ...(fusedActiveGridSafetyCells ? {
         ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS: String(fusedActiveGridSafetyCells)
       } : {}),
@@ -5194,6 +6639,8 @@ async function main() {
     batchSteps,
     probeMode,
     compactSummaryMode,
+    thermalCandidateCsrRouteEvidenceRequested:
+      captureThermalCandidateCsrRouteEvidence,
     lawGroups: {
       mechanics: true,
       gravity: true,
@@ -5263,6 +6710,34 @@ async function main() {
   };
   await mkdir(path.dirname(outputPath), { recursive: true });
   await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  const iccTraceEvents = buildSchroederReactionReceiptIccTrace({
+    scenarios: report.scenarios,
+    reportPath: outputPath
+  });
+  if (iccTraceOutputPath) {
+    // Never leave a previous positive trace in place when a later benchmark
+    // did not exercise reaction discovery. A missing route is useful negative
+    // evidence, while stale PASS evidence would be actively misleading.
+    const persistedTraceEvents = iccTraceEvents.length > 0
+      ? iccTraceEvents
+      : [Object.freeze({
+          kind: 'failure',
+          name: 'schroeder-spatial-reaction-discovery-native-receipt',
+          status: 'FAIL',
+          value: Object.freeze({
+            backend: 'webgpu',
+            reportPath: outputPath,
+            reason: 'no finalized reaction-discovery receipt was admitted by this benchmark run'
+          }),
+          snippet: 'This benchmark did not exercise a finalized reaction-discovery receipt; no positive ICC backend proof is available.'
+        })];
+    await mkdir(path.dirname(iccTraceOutputPath), { recursive: true });
+    await writeFile(
+      iccTraceOutputPath,
+      `${persistedTraceEvents.map((event) => JSON.stringify(event)).join('\n')}\n`,
+      'utf8'
+    );
+  }
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (
     process.env.ULG_BENCH_FAIL_ON_ERROR === '1'

@@ -205,7 +205,7 @@ test('native receipt WGSL fails closed when either authenticated field count hea
         words[38] = 0;
         words[39] = 0;
         words[40] = plan.candidateCount;
-        words[41] = 0;
+        words[41] = fieldCapacity - fieldCount;
         words[42] = 0;
         words[43] = 0;
         words[44] = 1;
@@ -270,6 +270,12 @@ test('native receipt WGSL fails closed when either authenticated field count hea
         words[61] = 1;
         words[62] = 1;
         words[63] = 0;
+        // One exact selected source descriptor at the canonical descriptor
+        // offset.  The key rows below begin at word 96.
+        words[64] = 1;
+        words[65] = 7;
+        words[66] = 0;
+        words[67] = 1;
         words[96] = 0;
         words[97] = 1;
         words[98] = 7;
@@ -301,11 +307,26 @@ test('native receipt WGSL fails closed when either authenticated field count hea
         const sourceMechanics = new Float32Array(32);
         sourceMechanics[18] = 2;
         sourceMechanics[19] = 0.003;
+        const sourceAssignments = new Float32Array(16);
+        sourceAssignments[0] = 0;
+        sourceAssignments[1] = plan.gridSpacingM;
+        sourceAssignments[6] = 1;
+        sourceAssignments[8] = 1;
+        sourceAssignments[9] = 7;
+        sourceAssignments[10] = 1;
         const momentControl = makeMomentControl();
         const mechanicsField = makeMechanicsField();
         if (corruption === 'moment-field-count') momentControl[18] = 2;
         if (corruption === 'mechanics-field-count') mechanicsField[34] = 2;
+        if (corruption === 'off-level-active-descriptor') sourceAssignments[0] = 1;
+        if (corruption === 'selected-inactive-descriptor') mechanicsField[67] = 0;
+        if (corruption === 'out-of-range-assignment') sourceAssignments[8] = 16777216;
         const momentRows = makeMomentRows();
+        const sourceAssignmentsBuffer = createBuffer(
+          `native-receipt-source-assignments-${corruption || 'valid'}`,
+          sourceAssignments.byteLength,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
         const sourceMechanicsBuffer = createBuffer(
           `native-receipt-source-mechanics-${corruption || 'valid'}`,
           sourceMechanics.byteLength,
@@ -347,6 +368,7 @@ test('native receipt WGSL fails closed when either authenticated field count hea
           GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
         );
         const buffers = [
+          sourceAssignmentsBuffer,
           sourceMechanicsBuffer,
           momentControlBuffer,
           momentRowsBuffer,
@@ -357,6 +379,7 @@ test('native receipt WGSL fails closed when either authenticated field count hea
           readbackBuffer
         ];
         try {
+          device.queue.writeBuffer(sourceAssignmentsBuffer, 0, sourceAssignments);
           device.queue.writeBuffer(sourceMechanicsBuffer, 0, sourceMechanics);
           device.queue.writeBuffer(momentControlBuffer, 0, momentControl);
           device.queue.writeBuffer(momentRowsBuffer, 0, momentRows);
@@ -371,13 +394,17 @@ test('native receipt WGSL fails closed when either authenticated field count hea
             { binding: 5, resource: { buffer: receiptControlBuffer } },
             { binding: 6, resource: { buffer: paramsBuffer } }
           ];
+          const sourceEntries = [
+            ...entries,
+            { binding: 7, resource: { buffer: sourceAssignmentsBuffer } }
+          ];
           // The source pass reads raw V0*J; the later two passes intentionally
           // do not. Build entry-point-specific groups so the browser's native
           // layout optimizer cannot hide an accidental binding dependency.
           const bindGroups = {
             reduce_phase_volume_receipt_sources: device.createBindGroup({
               layout: pipelines.reduce_phase_volume_receipt_sources.getBindGroupLayout(0),
-              entries
+              entries: sourceEntries
             }),
             reduce_phase_volume_receipt_fields: device.createBindGroup({
               layout: pipelines.reduce_phase_volume_receipt_fields.getBindGroupLayout(0),
@@ -418,7 +445,12 @@ test('native receipt WGSL fails closed when either authenticated field count hea
           const floats = new Float32Array(control.buffer);
           return {
             statusFlags: control[2],
+            abiVersion: control[1],
+            globalSourceCount: control[16],
+            globalCandidateCount: control[20],
             fieldCount: control[18],
+            selectedSourceCount: control[47],
+            selectedCandidateCount: control[48],
             publicValues: Array.from(floats.slice(30, 41)),
             terminalSeal: control[59]
           };
@@ -429,6 +461,9 @@ test('native receipt WGSL fails closed when either authenticated field count hea
       const valid = await runCase();
       const corruptMomentFieldCount = await runCase('moment-field-count');
       const corruptMechanicsFieldCount = await runCase('mechanics-field-count');
+      const offLevelActiveDescriptor = await runCase('off-level-active-descriptor');
+      const selectedInactiveDescriptor = await runCase('selected-inactive-descriptor');
+      const outOfRangeAssignment = await runCase('out-of-range-assignment');
       const validationError = await device.popErrorScope();
       return {
         status: 'ok',
@@ -436,11 +471,16 @@ test('native receipt WGSL fails closed when either authenticated field count hea
           ready: receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_READY,
           admitted: receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_ADMITTED,
           failClosed: receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_FAIL_CLOSED,
-          momentRejected: receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_MOMENT_REJECTED
+          invalidSource: receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_INVALID_SOURCE,
+          momentRejected: receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_MOMENT_REJECTED,
+          identityMismatch: receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_IDENTITY_MISMATCH
         },
         valid,
         corruptMomentFieldCount,
         corruptMechanicsFieldCount,
+        offLevelActiveDescriptor,
+        selectedInactiveDescriptor,
+        outOfRangeAssignment,
         validationError: validationError?.message || null,
         uncapturedErrors
       };
@@ -454,6 +494,11 @@ test('native receipt WGSL fails closed when either authenticated field count hea
       native.valid.statusFlags,
       native.receiptFlags.ready | native.receiptFlags.admitted
     );
+    assert.equal(native.valid.abiVersion, 2);
+    assert.equal(native.valid.globalSourceCount, 1);
+    assert.equal(native.valid.globalCandidateCount, 27);
+    assert.equal(native.valid.selectedSourceCount, 1);
+    assert.equal(native.valid.selectedCandidateCount, 27);
     assert.equal(native.valid.fieldCount, 1);
     assert.ok(Math.abs(native.valid.publicValues[0] - 0.006) < 2e-5);
     assert.ok(Math.abs(native.valid.publicValues[1] - 0.006) < 2e-5);
@@ -472,6 +517,25 @@ test('native receipt WGSL fails closed when either authenticated field count hea
       assert.deepEqual(result.publicValues, Array(11).fill(0));
       assert.notEqual(result.terminalSeal, 0);
     }
+    for (const result of [
+      native.offLevelActiveDescriptor,
+      native.selectedInactiveDescriptor
+    ]) {
+      assert.notEqual(result.statusFlags & native.receiptFlags.failClosed, 0);
+      assert.equal(result.statusFlags & native.receiptFlags.ready, 0);
+      assert.equal(result.statusFlags & native.receiptFlags.admitted, 0);
+      assert.notEqual(result.statusFlags & native.receiptFlags.identityMismatch, 0);
+      assert.equal(result.fieldCount, 0);
+      assert.deepEqual(result.publicValues, Array(11).fill(0));
+      assert.notEqual(result.terminalSeal, 0);
+    }
+    assert.notEqual(native.outOfRangeAssignment.statusFlags & native.receiptFlags.failClosed, 0);
+    assert.notEqual(native.outOfRangeAssignment.statusFlags & native.receiptFlags.invalidSource, 0);
+    assert.equal(native.outOfRangeAssignment.statusFlags & native.receiptFlags.ready, 0);
+    assert.equal(native.outOfRangeAssignment.statusFlags & native.receiptFlags.admitted, 0);
+    assert.equal(native.outOfRangeAssignment.fieldCount, 0);
+    assert.deepEqual(native.outOfRangeAssignment.publicValues, Array(11).fill(0));
+    assert.notEqual(native.outOfRangeAssignment.terminalSeal, 0);
   } finally {
     await browser.close();
   }

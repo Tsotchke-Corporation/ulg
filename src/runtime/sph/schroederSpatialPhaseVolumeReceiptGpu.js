@@ -258,8 +258,8 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
     'device.limits.maxStorageBuffersPerShaderStage',
     0xffff
   );
-  if (maxStorageBuffersPerShaderStage < 6) {
-    throw new RangeError('phase-volume receipt requires six storage bindings');
+  if (maxStorageBuffersPerShaderStage < 7) {
+    throw new RangeError('phase-volume receipt requires seven storage bindings');
   }
   const maxBufferSize = positiveInteger(
     device.limits?.maxBufferSize ?? 256 * 1024 * 1024,
@@ -419,6 +419,8 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       || execution?.phaseVolumeMoment !== ownership.phaseVolumeMoment
       || execution?.parentPhaseVolumeMoment !== ownership.phaseVolumeMoment
       || execution?.sourceMechanicsBuffer !== ownership.sourceMechanicsBuffer
+      || execution?.sourceBuffer !== ownership.sourceBuffer
+      || execution?.sourceBufferBorrowed !== true
       || execution?.mechanicsFieldView !== ownership.mechanicsFieldView
     ) {
       throw phaseVolumeReceiptError(
@@ -525,6 +527,7 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       || mechanicsFieldView.released === true
       || !fieldOwned
       || phaseVolumeMoment.sourceMechanicsBufferBorrowed !== true
+      || !phaseVolumeMoment.sourceBuffer
       || phaseVolumeMoment.parentMechanicsFieldView !== mechanicsFieldView
       || mechanicsFieldView.sourceBuffer !== phaseVolumeMoment.sourceBuffer
       || mechanicsFieldView.fieldViewBuffer !== mechanicsFieldView.indirectDispatchBuffer
@@ -535,6 +538,7 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       || phaseVolumeMoment.rawVolumeRatioJMechanicsWord !== 18
       || phaseVolumeMoment.rawRestVolumeMechanicsWord !== 19
       || !webGpuBufferMatchesDevice(phaseVolumeMoment.sourceMechanicsBuffer, device)
+      || !webGpuBufferMatchesDevice(phaseVolumeMoment.sourceBuffer, device)
       || !webGpuBufferMatchesDevice(phaseVolumeMoment.controlBuffer, device)
       || !webGpuBufferMatchesDevice(phaseVolumeMoment.momentBuffer, device)
       || !webGpuBufferMatchesDevice(mechanicsFieldView.fieldViewBuffer, device)
@@ -547,6 +551,11 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       phaseVolumeMoment.sourceMechanicsBuffer,
       phaseVolumeMoment.sourceCount * 32 * Float32Array.BYTES_PER_ELEMENT,
       'phase-volume receipt source mechanics buffer'
+    );
+    bufferSizeAtLeast(
+      phaseVolumeMoment.sourceBuffer,
+      phaseVolumeMoment.sourceCount * 16 * Float32Array.BYTES_PER_ELEMENT,
+      'phase-volume receipt source assignment buffer'
     );
     bufferSizeAtLeast(
       phaseVolumeMoment.controlBuffer,
@@ -617,7 +626,8 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         mechanicsField: { binding: 3, resource: resource(mechanicsFieldView.fieldViewBuffer) },
         partials: { binding: 4, resource: resource(arena.partialBuffer) },
         control: { binding: 5, resource: resource(arena.controlBuffer) },
-        params: { binding: 6, resource: paramsResource }
+        params: { binding: 6, resource: paramsResource },
+        sourceAssignments: { binding: 7, resource: resource(phaseVolumeMoment.sourceBuffer) }
       });
       const bindGroup = (pipelineObject, bindingEntries, suffix) => device.createBindGroup({
         label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
@@ -633,7 +643,8 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         entries.mechanicsField,
         entries.partials,
         entries.control,
-        entries.params
+        entries.params,
+        entries.sourceAssignments
       ], 'sources');
       const fieldBindGroup = bindGroup(pipelines.fields, [
         entries.momentControl,
@@ -674,13 +685,15 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         parentPhaseVolumeMoment: phaseVolumeMoment,
         sourceMechanicsBuffer: phaseVolumeMoment.sourceMechanicsBuffer,
         sourceMechanicsBufferBorrowed: true,
+        sourceBuffer: phaseVolumeMoment.sourceBuffer,
+        sourceBufferBorrowed: true,
         mechanicsFieldView,
         controlBuffer: arena.controlBuffer,
         partialBuffer: arena.partialBuffer,
         paramsBuffer: arena.paramsBuffer,
         encodedDispatchCount: 0,
         encodedComputePassCount: 0,
-        storageBindingCount: 6,
+        storageBindingCount: 7,
         retainedGpuBufferBytes: retainedGpuBufferBytesPerArena[arena.arenaIndex],
         retainedGpuBufferBytesAllArenas: retainedGpuBufferBytes,
         gpuBufferCreationCountDuringEncode: 0,
@@ -709,6 +722,7 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         token,
         phaseVolumeMoment,
         sourceMechanicsBuffer: phaseVolumeMoment.sourceMechanicsBuffer,
+        sourceBuffer: phaseVolumeMoment.sourceBuffer,
         mechanicsFieldView
       };
       executionOwnership.set(execution, ownership);
@@ -964,7 +978,7 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
     arenaCount: resolvedArenaCount,
     layout,
     pipelineCount: Object.keys(pipelines).length,
-    storageBindingCount: 6,
+    storageBindingCount: 7,
     retainedGpuBufferBytes,
     normalHotLoopReadbackFree: true,
     encode,

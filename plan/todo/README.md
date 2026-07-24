@@ -77,16 +77,15 @@ material spectra without a measured-reference fallback is tracked in
 lower priority than making the SS-owned GPU spatial hierarchy/octree reliable
 and migrating production spatial consumers onto it.
 
-Current routing note, 2026-07-13 AKDT: spatial architecture and performance
-work routes through
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md` on branch
-`ss-spatial-authority-refactor`. Build one SS-owned GPU spatial generation per
-immutable position/topology/support epoch, then derive distinct mechanics,
-exact-near, cross-level, aggregate-far, solid-proxy, and render views. Do not
-add another private law grid, fixed per-particle candidate arena, universal
-widest-law pair list, implicit exhaustive fallback, or descriptor-only
-completion claim. The original Schroeder plan and SOL critique remain active
-scientific contracts.
+Completed-refactor routing note, 2026-07-21 AKDT:
+`plan/todo/SS/shared-spatial-authority-refactor-plan.md` records Slices 0–8 of
+the one SS-owned GPU spatial generation and its mechanics, exact-near,
+cross-level, aggregate-far, source-family, and render views. Follow-on
+phase-volume/gas-interface and long-liquid transport remain with their
+dedicated transport plans; coherent-solid body authority remains with
+`plan/todo/sol-critic.md`. Do not reintroduce a private law grid, fixed
+per-particle candidate arena, universal widest-law pair list, implicit
+exhaustive fallback, or descriptor-only completion claim.
 
 Current routing note, 2026-07-09 AKDT: `plan/todo/sol-critic.md` is the required
 Schroeder coherent-solid architecture correction. A solid needs an authoritative

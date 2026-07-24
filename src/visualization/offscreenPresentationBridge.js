@@ -526,6 +526,11 @@ function setDisplayCanvasStyle(canvas) {
   canvas.style.background = 'transparent';
 }
 
+function setDisplayCanvasOwnedVisibility(canvas, visible) {
+  if (!canvas?.style) return;
+  canvas.style.visibility = visible ? 'visible' : 'hidden';
+}
+
 function applyInitialCanvasBackingSize(canvas, size) {
   if (!canvas) return;
   canvas.width = size.backingWidth;
@@ -562,7 +567,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
     height,
     devicePixelRatio
   });
-  const publish = (nextStatus) => {
+  const publish = (nextStatus, { allowDisposed = false } = {}) => {
+    if (bridge?.disposed && !allowDisposed) return bridge.status;
     const status = {
       schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
       transport: requested ? ULG_WORKER_OFFSCREEN_PRESENTATION_TRANSPORT : null,
@@ -576,6 +582,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       pixelRatio: size.pixelRatio,
       backingWidth: size.backingWidth,
       backingHeight: size.backingHeight,
+      disposed: Boolean(bridge?.disposed),
+      lifecycleGeneration: bridge?.lifecycleGeneration ?? 1,
       updatedAtMs: nowMs(),
       scientificValidation: false,
       sphValidation: false,
@@ -586,15 +594,33 @@ export function createUlgWorkerOffscreenPresentationBridge({
     onStatus?.(status);
     return status;
   };
+  const disposedMutationStatus = (method) => ({
+    ...(bridge?.status || {}),
+    status: 'worker-offscreen-presentation-disposed-mutation-rejected',
+    reason: `worker offscreen presentation is disposed; ${method} rejected`,
+    disposed: true,
+    lifecycleGeneration: bridge?.lifecycleGeneration ?? null,
+    rejectedMutation: method
+  });
   const bridge = {
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
     canvas,
     worker: null,
+    workerMessageHandler: null,
+    workerErrorHandler: null,
+    disposed: false,
+    lifecycleGeneration: 1,
     status: null,
     renderRowsStatus: null,
     retainedGpuBufferHandoffStatus: null,
     residentStageStatus: null,
     retainedCompactSnapshotStatus: null,
+    displayOwner: requested ? 'worker' : 'none',
+    displayOwnerEpoch: 0,
+    displayOwnerReason: 'bridge-initialization',
+    displayOwnerContentReady: false,
+    displayOwnerContentFrameSerial: 0,
+    displayOwnerPresentedSphStep: null,
     residentRenderProducerSourceCacheKey: null,
     residentRenderProducerSourceParticleCount: 0,
     residentRenderProducerSourceStrideFloats: 0,
@@ -607,12 +633,14 @@ export function createUlgWorkerOffscreenPresentationBridge({
     residentParticleStateProducerThermoByteLength: 0,
     residentParticleStateProducerColorRowsByteLength: 0,
     clearResidentRenderProducerSourceCache() {
+      if (this.disposed) return disposedMutationStatus('clearResidentRenderProducerSourceCache');
       this.residentRenderProducerSourceCacheKey = null;
       this.residentRenderProducerSourceParticleCount = 0;
       this.residentRenderProducerSourceStrideFloats = 0;
       this.residentRenderProducerSourceByteLength = 0;
     },
     clearResidentParticleStateProducerCache() {
+      if (this.disposed) return disposedMutationStatus('clearResidentParticleStateProducerCache');
       this.residentParticleStateProducerCacheKey = null;
       this.residentParticleStateProducerParticleCount = 0;
       this.residentParticleStateProducerStateStrideFloats = 0;
@@ -621,7 +649,108 @@ export function createUlgWorkerOffscreenPresentationBridge({
       this.residentParticleStateProducerThermoByteLength = 0;
       this.residentParticleStateProducerColorRowsByteLength = 0;
     },
+    setDisplayOwner({
+      owner = 'worker',
+      epoch = null,
+      reason = 'display-owner-update',
+      revealWhenContentReady = owner === 'worker',
+      expectedOwner = null,
+      expectedEpoch = null,
+      expectedLifecycleGeneration = null
+    } = {}) {
+      if (this.disposed) return disposedMutationStatus('setDisplayOwner');
+      const normalizedOwner = owner === 'main-native'
+        ? 'main-native'
+        : (owner === 'worker' ? 'worker' : 'none');
+      const requestedEpoch = Number.isFinite(Number(epoch))
+        ? Math.max(0, Math.round(Number(epoch)))
+        : (
+          normalizedOwner === this.displayOwner
+            ? this.displayOwnerEpoch
+            : this.displayOwnerEpoch + 1
+        );
+      const ownerExpectationMatches = expectedOwner == null
+        || expectedOwner === this.displayOwner;
+      const epochExpectationMatches = expectedEpoch == null
+        || Number(expectedEpoch) === this.displayOwnerEpoch;
+      const lifecycleExpectationMatches = expectedLifecycleGeneration == null
+        || Number(expectedLifecycleGeneration) === this.lifecycleGeneration;
+      if (
+        !ownerExpectationMatches
+        || !epochExpectationMatches
+        || !lifecycleExpectationMatches
+      ) {
+        return publish({
+          ...(this.status || {}),
+          status: 'worker-offscreen-display-owner-compare-and-swap-rejected',
+          reason,
+          displayOwner: this.displayOwner,
+          displayOwnerEpoch: this.displayOwnerEpoch,
+          lifecycleGeneration: this.lifecycleGeneration,
+          expectedDisplayOwner: expectedOwner,
+          expectedDisplayOwnerEpoch: expectedEpoch,
+          expectedLifecycleGeneration,
+          rejectedDisplayOwner: normalizedOwner,
+          rejectedDisplayOwnerEpoch: requestedEpoch,
+          displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
+        });
+      }
+      if (requestedEpoch < this.displayOwnerEpoch) {
+        return publish({
+          ...(this.status || {}),
+          status: 'worker-offscreen-display-owner-stale-epoch-rejected',
+          reason,
+          displayOwner: this.displayOwner,
+          displayOwnerEpoch: this.displayOwnerEpoch,
+          rejectedDisplayOwner: normalizedOwner,
+          rejectedDisplayOwnerEpoch: requestedEpoch,
+          displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
+        });
+      }
+      const displayOwnerChanged = normalizedOwner !== this.displayOwner;
+      this.displayOwner = normalizedOwner;
+      this.displayOwnerEpoch = requestedEpoch;
+      this.displayOwnerReason = reason;
+      // An epoch refresh by the same presenter is not an ownership handoff.
+      // Keep its last complete frame visible until the matching new-epoch
+      // receipt arrives; hiding on every resident generation creates a blank
+      // frame between each simulation update.
+      if (displayOwnerChanged) {
+        this.displayOwnerContentReady = normalizedOwner === 'main-native';
+        this.displayOwnerPresentedSphStep = null;
+      }
+      const workerCanvasVisible = Boolean(
+        normalizedOwner === 'worker'
+        && (!revealWhenContentReady || this.displayOwnerContentReady)
+      );
+      setDisplayCanvasOwnedVisibility(this.canvas, workerCanvasVisible);
+      if (normalizedOwner === 'main-native' && this.worker && displayOwnerChanged) {
+        this.worker.postMessage?.({
+          type: 'clear',
+          backgroundColor: currentBackgroundColor,
+          clearAlpha,
+          displayOwnerEpoch: requestedEpoch,
+          reason: `display-owner-main-native:${reason}`
+        });
+      }
+      return publish({
+        ...(this.status || {}),
+        status: normalizedOwner === 'main-native'
+          ? 'worker-offscreen-display-hidden-main-native-owner'
+          : (workerCanvasVisible
+            ? 'worker-offscreen-display-worker-content-visible'
+            : 'worker-offscreen-display-worker-content-pending'),
+        reason,
+        displayOwner: normalizedOwner,
+        displayOwnerEpoch: requestedEpoch,
+        displayOwnerContentReady: this.displayOwnerContentReady,
+        displayOwnerContentFrameSerial: this.displayOwnerContentFrameSerial,
+        displayOwnerPresentedSphStep: this.displayOwnerPresentedSphStep,
+        displayCanvasVisible: workerCanvasVisible
+      });
+    },
     publishRenderRowsStatus(nextStatus = {}) {
+      if (this.disposed) return disposedMutationStatus('publishRenderRowsStatus');
       if (
         nextStatus?.schema === ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA
         && nextStatus?.sourceCacheStatus === 'source-cache-miss'
@@ -660,6 +789,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
       return status;
     },
     publishRetainedGpuBufferHandoffStatus(nextStatus = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus('publishRetainedGpuBufferHandoffStatus');
+      }
       const status = {
         schema: ULG_WORKER_OFFSCREEN_RETAINED_GPU_BUFFER_HANDOFF_SCHEMA,
         status: 'worker-offscreen-retained-gpubuffer-handoff-status',
@@ -689,6 +821,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       return status;
     },
     publishResidentStageStatus(nextStatus = {}) {
+      if (this.disposed) return disposedMutationStatus('publishResidentStageStatus');
       const status = {
         schema: ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_SCHEMA,
         status: 'worker-offscreen-resident-stage-on-presentation-device-status',
@@ -714,6 +847,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
       return status;
     },
     publishRetainedCompactSnapshotStatus(nextStatus = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus('publishRetainedCompactSnapshotStatus');
+      }
       const status = {
         schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
         status: 'presentation-worker-retained-compact-snapshot-export-status',
@@ -740,6 +876,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       return status;
     },
     resolveRetainedGpuBufferHandoff(next = {}) {
+      if (this.disposed) return disposedMutationStatus('resolveRetainedGpuBufferHandoff');
       return this.publishRetainedGpuBufferHandoffStatus(
         resolveUlgWorkerOffscreenRetainedGpuBufferHandoffCapability({
           requested: requestedRetainedGpuBufferHandoff,
@@ -750,6 +887,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       );
     },
     resize(next = {}) {
+      if (this.disposed) return disposedMutationStatus('resize');
       const nextSize = resolveUlgWorkerOffscreenPresentationSize({
         container,
         width: next.width ?? width,
@@ -780,6 +918,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       });
     },
     setBackgroundColor(color, { reason = 'background-color' } = {}) {
+      if (this.disposed) return disposedMutationStatus('setBackgroundColor');
       currentBackgroundColor = color || currentBackgroundColor;
       if (this.worker) {
         this.worker.postMessage?.({
@@ -811,6 +950,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       maxPointSizePx = 22,
       reason = 'resident-render-rows-refresh'
     } = {}) {
+      if (this.disposed) return disposedMutationStatus('drawRenderRows');
       if (!requested) {
         return this.publishRenderRowsStatus({
           status: 'worker-offscreen-render-rows-not-requested',
@@ -845,6 +985,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const inputTransferBytes = payload.byteLength + viewProjection.byteLength;
       this.worker.postMessage?.({
         type: 'draw-render-rows',
+        displayOwnerEpoch: this.displayOwnerEpoch,
         sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
         inputTransport: ULG_WORKER_OFFSCREEN_RENDER_ROWS_INPUT_TRANSPORT,
@@ -891,6 +1032,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       maxPointSizePx = 22,
       reason = 'worker-owned-resident-render-producer-refresh'
     } = {}) {
+      if (this.disposed) return disposedMutationStatus('drawResidentRenderProducer');
       if (!requested) {
         return this.publishRenderRowsStatus({
           status: 'worker-offscreen-resident-render-producer-not-requested',
@@ -966,6 +1108,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       );
       const message = {
         type: 'draw-resident-render-producer',
+        displayOwnerEpoch: this.displayOwnerEpoch,
         sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA,
         renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
@@ -1038,6 +1181,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
       maxPointSizePx = 22,
       reason = 'worker-owned-resident-particle-state-producer-refresh'
     } = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus('drawResidentParticleStateProducer');
+      }
       if (!requested) {
         return this.publishRenderRowsStatus({
           status: 'worker-offscreen-resident-particle-state-producer-not-requested',
@@ -1124,6 +1270,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const inputTransferBytes = viewProjection.byteLength + sourceTransferBytes;
       const message = {
         type: 'draw-resident-particle-state-producer',
+        displayOwnerEpoch: this.displayOwnerEpoch,
         sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
         renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
@@ -1225,6 +1372,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
       payload = null,
       reason = 'run-resident-stage-on-presentation-device'
     } = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus('runResidentStageOnPresentationDevice');
+      }
       if (!requested) {
         return this.publishResidentStageStatus({
           status: 'worker-offscreen-resident-stage-on-presentation-device-not-requested',
@@ -1275,6 +1425,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
       allowLocalMaterializationBypass = true,
       reason = 'export-retained-compact-snapshot'
     } = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus('exportRetainedCompactSnapshot');
+      }
       if (!requested) {
         return this.publishRetainedCompactSnapshotStatus({
           status: 'presentation-worker-retained-compact-snapshot-export-not-requested',
@@ -1338,18 +1491,46 @@ export function createUlgWorkerOffscreenPresentationBridge({
       });
     },
     dispose() {
-      this.worker?.postMessage?.({ type: 'dispose', reason: 'scene-dispose' });
-      this.worker?.terminate?.();
+      if (this.disposed) return this.status;
+      const worker = this.worker;
+      const messageHandler = this.workerMessageHandler;
+      this.disposed = true;
+      this.lifecycleGeneration += 1;
+      if (worker && messageHandler) {
+        if (typeof worker.removeEventListener === 'function') {
+          try { worker.removeEventListener('message', messageHandler); } catch {}
+        } else if (worker.onmessage === messageHandler) {
+          worker.onmessage = null;
+        }
+      }
+      if (worker && worker.onerror === this.workerErrorHandler) {
+        worker.onerror = null;
+      }
+      this.workerMessageHandler = null;
+      this.workerErrorHandler = null;
+      worker?.postMessage?.({ type: 'dispose', reason: 'scene-dispose' });
+      worker?.terminate?.();
       if (this.canvas?.parentNode) this.canvas.parentNode.removeChild(this.canvas);
       this.worker = null;
-      this.clearResidentRenderProducerSourceCache();
-      this.clearResidentParticleStateProducerCache();
+      this.residentRenderProducerSourceCacheKey = null;
+      this.residentRenderProducerSourceParticleCount = 0;
+      this.residentRenderProducerSourceStrideFloats = 0;
+      this.residentRenderProducerSourceByteLength = 0;
+      this.residentParticleStateProducerCacheKey = null;
+      this.residentParticleStateProducerParticleCount = 0;
+      this.residentParticleStateProducerStateStrideFloats = 0;
+      this.residentParticleStateProducerThermoStrideFloats = 0;
+      this.residentParticleStateProducerStateByteLength = 0;
+      this.residentParticleStateProducerThermoByteLength = 0;
+      this.residentParticleStateProducerColorRowsByteLength = 0;
       return publish({
         ...(this.status || {}),
         status: 'worker-offscreen-presentation-disposed',
         reason: 'scene-dispose',
-        workerReady: false
-      });
+        workerReady: false,
+        disposed: true,
+        lifecycleGeneration: this.lifecycleGeneration
+      }, { allowDisposed: true });
     }
   };
   const capability = resolveUlgWorkerOffscreenPresentationCapability({
@@ -1377,9 +1558,30 @@ export function createUlgWorkerOffscreenPresentationBridge({
       { type: 'module', name: 'ulg-offscreen-render' }
     );
     bridge.worker = worker;
+    const workerLifecycleGeneration = bridge.lifecycleGeneration;
     const handleWorkerMessage = (event) => {
+      if (
+        bridge.disposed
+        || bridge.lifecycleGeneration !== workerLifecycleGeneration
+      ) return;
       const data = event?.data || {};
       if (data?.schema !== ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA) return;
+      const contentReceipt = data.workerOffscreenRenderRows || null;
+      const contentReceiptReady = Boolean(
+        contentReceipt
+        && /-rendered$/.test(String(contentReceipt.status || ''))
+        && Math.max(0, Math.floor(Number(contentReceipt.particleCount) || 0)) > 0
+        && Number(contentReceipt.displayOwnerEpoch) === bridge.displayOwnerEpoch
+        && bridge.displayOwner === 'worker'
+      );
+      if (contentReceiptReady) {
+        bridge.displayOwnerContentReady = true;
+        bridge.displayOwnerContentFrameSerial += 1;
+        bridge.displayOwnerPresentedSphStep = Number.isFinite(Number(contentReceipt.sphStep))
+          ? Number(contentReceipt.sphStep)
+          : null;
+        setDisplayCanvasOwnedVisibility(canvas, true);
+      }
       if (
         data.workerOffscreenRenderRows?.schema === ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA
         || data.workerOffscreenRenderRows?.schema === ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA
@@ -1402,15 +1604,26 @@ export function createUlgWorkerOffscreenPresentationBridge({
       publish({
         ...data,
         requested: true,
-        canvasTransferred: true
+        canvasTransferred: true,
+        displayOwner: bridge.displayOwner,
+        displayOwnerEpoch: bridge.displayOwnerEpoch,
+        displayOwnerContentReady: bridge.displayOwnerContentReady,
+        displayOwnerContentFrameSerial: bridge.displayOwnerContentFrameSerial,
+        displayOwnerPresentedSphStep: bridge.displayOwnerPresentedSphStep,
+        displayCanvasVisible: canvas?.style?.visibility !== 'hidden'
       });
     };
+    bridge.workerMessageHandler = handleWorkerMessage;
     if (typeof worker.addEventListener === 'function') {
       worker.addEventListener('message', handleWorkerMessage);
     } else {
       worker.onmessage = handleWorkerMessage;
     }
-    worker.onerror = (event) => {
+    const handleWorkerError = (event) => {
+      if (
+        bridge.disposed
+        || bridge.lifecycleGeneration !== workerLifecycleGeneration
+      ) return;
       publish({
         status: 'worker-offscreen-presentation-worker-error',
         reason: event?.message || 'worker-owned presentation worker error',
@@ -1419,6 +1632,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
         workerReady: false
       });
     };
+    bridge.workerErrorHandler = handleWorkerError;
+    worker.onerror = handleWorkerError;
     worker.postMessage({
       type: 'init-offscreen-presentation',
       canvas: offscreenCanvas,

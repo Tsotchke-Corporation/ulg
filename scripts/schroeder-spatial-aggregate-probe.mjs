@@ -196,6 +196,9 @@ try {
         const specificInternalEnergy = 10 + (index % 13) * 0.5;
         const supportRadius = 0.7 + (index % 4) * 0.1;
         const visualRadius = 0.08 + (index % 3) * 0.01;
+        const restVolume = mass;
+        const currentVolume = restVolume;
+        const representedVolume = Math.max(restVolume, currentVolume);
         const stateBase = index * 8;
         state.set([
           ...position,
@@ -203,9 +206,10 @@ try {
           ...velocity,
           specificInternalEnergy
         ], stateBase);
+        const material = index % 3;
         const phase = index % 4;
         const thermoBase = index * 12;
-        thermo[thermoBase] = index % 3;
+        thermo[thermoBase] = material;
         thermo[thermoBase + 1] = phase;
         thermo[thermoBase + 2] = 300 + (index % 17);
         thermo[thermoBase + 3] = 1;
@@ -219,7 +223,13 @@ try {
         assignment[assignmentBase] = 0;
         assignment[assignmentBase + 1] = 1;
         assignment[assignmentBase + 2] = supportRadius;
+        assignment[assignmentBase + 3] = representedVolume;
+        assignment[assignmentBase + 4] = restVolume;
+        assignment[assignmentBase + 5] = currentVolume;
         assignment[assignmentBase + 6] = mass;
+        assignment[assignmentBase + 7] = 1;
+        assignment[assignmentBase + 8] = phase;
+        assignment[assignmentBase + 9] = material;
         assignment[assignmentBase + 10] = 1;
         assignment[assignmentBase + 12] = position[0];
         assignment[assignmentBase + 13] = position[1];
@@ -663,6 +673,14 @@ try {
           && header.internalRecordCount === particleCount - 1
           && header.totalRecordCount === particleCount * 2 - 1
           && header.rootRecordIndex === (particleCount === 1 ? 0 : particleCount)
+          && header.invalidSourceCount === 0
+          && header.nonfiniteSourceCount === 0
+          && header.identityMismatchCount === 0
+          && header.overflowCount === 0
+          && header.attemptedSourceCount === particleCount
+          && header.reducedSourceCount === particleCount
+          && header.reducedLeafCount === particleCount
+          && header.reducedInternalCount === particleCount - 1
           && header.malformedTopologyCount === 0
           && header.traversalLeafCoverage === particleCount
           && conservationFailureCount === 0

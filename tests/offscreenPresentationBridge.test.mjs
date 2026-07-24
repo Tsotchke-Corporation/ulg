@@ -76,6 +76,230 @@ test('worker offscreen presentation sizing caps device-pixel ratio for display c
   assert.equal(size.backingHeight, 1688);
 });
 
+test('worker offscreen display ownership hides native non-owner and reveals only matching content receipt', () => {
+  let worker = null;
+  class FakeWorker {
+    constructor() {
+      this.messages = [];
+      this.listeners = [];
+      worker = this;
+    }
+
+    postMessage(data, transfer = []) {
+      this.messages.push({ data, transfer });
+    }
+
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+
+    removeEventListener(type, listener) {
+      if (type === 'message') {
+        this.listeners = this.listeners.filter((entry) => entry !== listener);
+      }
+    }
+
+    emit(data) {
+      for (const listener of this.listeners) listener({ data });
+    }
+
+    terminate() {}
+  }
+  const canvas = {
+    style: {},
+    width: 0,
+    height: 0,
+    setAttribute() {},
+    transferControlToOffscreen() {
+      return { offscreen: true };
+    }
+  };
+  const container = {
+    clientWidth: 64,
+    clientHeight: 64,
+    appendChild(child) {
+      child.parentNode = this;
+    },
+    removeChild(child) {
+      if (child.parentNode === this) child.parentNode = null;
+    },
+    ownerDocument: {
+      createElement() {
+        return canvas;
+      }
+    }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true,
+    container,
+    width: 64,
+    height: 64,
+    workerFactory: FakeWorker,
+    navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+
+  const nativeOwner = bridge.setDisplayOwner({
+    owner: 'main-native',
+    epoch: 7,
+    reason: 'unit-native-owner'
+  });
+  assert.equal(nativeOwner.displayOwner, 'main-native');
+  assert.equal(nativeOwner.displayCanvasVisible, false);
+  assert.equal(canvas.style.visibility, 'hidden');
+  assert.equal(worker.messages.at(-1)?.data?.type, 'clear');
+  assert.equal(worker.messages.at(-1)?.data?.displayOwnerEpoch, 7);
+
+  const stale = bridge.setDisplayOwner({ owner: 'worker', epoch: 6 });
+  assert.equal(stale.status, 'worker-offscreen-display-owner-stale-epoch-rejected');
+  assert.equal(bridge.displayOwner, 'main-native');
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  const workerOwner = bridge.setDisplayOwner({
+    owner: 'worker',
+    epoch: 8,
+    revealWhenContentReady: true,
+    reason: 'unit-worker-owner'
+  });
+  assert.equal(workerOwner.displayCanvasVisible, false);
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  const drawStatus = bridge.drawRenderRows({
+    sphStep: 12,
+    positionsM: new Float32Array([0, 0, 0]),
+    colorsRgb: new Float32Array([1, 1, 1]),
+    particleRadiiM: new Float32Array([0.05]),
+    viewProjectionMatrix: new Float32Array(16)
+  });
+  assert.equal(drawStatus.particleCount, 1);
+  assert.equal(worker.messages.at(-1)?.data?.displayOwnerEpoch, 8);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-render-rows-rendered',
+      displayOwnerEpoch: 7,
+      sphStep: 11,
+      particleCount: 1
+    }
+  });
+  assert.equal(canvas.style.visibility, 'hidden');
+  assert.equal(bridge.displayOwnerContentReady, false);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-render-rows-rendered',
+      displayOwnerEpoch: 8,
+      sphStep: 12,
+      particleCount: 1
+    }
+  });
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerContentFrameSerial, 1);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 12);
+
+  const sameWorkerNextEpoch = bridge.setDisplayOwner({
+    owner: 'worker',
+    epoch: 9,
+    revealWhenContentReady: true,
+    reason: 'unit-worker-same-owner-next-epoch'
+  });
+  assert.equal(sameWorkerNextEpoch.displayCanvasVisible, true);
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 12);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-render-rows-rendered',
+      displayOwnerEpoch: 8,
+      sphStep: 13,
+      particleCount: 1
+    }
+  });
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerPresentedSphStep, 12);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-render-rows-rendered',
+      displayOwnerEpoch: 9,
+      sphStep: 14,
+      particleCount: 1
+    }
+  });
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerPresentedSphStep, 14);
+  assert.equal(bridge.displayOwnerContentFrameSerial, 2);
+
+  const rejectedCas = bridge.setDisplayOwner({
+    owner: 'main-native',
+    epoch: 9,
+    expectedOwner: 'worker',
+    expectedEpoch: 8,
+    expectedLifecycleGeneration: bridge.lifecycleGeneration,
+    reason: 'unit-stale-native-handoff'
+  });
+  assert.equal(
+    rejectedCas.status,
+    'worker-offscreen-display-owner-compare-and-swap-rejected'
+  );
+  assert.equal(bridge.displayOwner, 'worker');
+  assert.equal(canvas.style.visibility, 'visible');
+
+  const capturedLateListener = worker.listeners[0];
+  const committedNativeOwner = bridge.setDisplayOwner({
+    owner: 'main-native',
+    epoch: 9,
+    expectedOwner: 'worker',
+    expectedEpoch: 9,
+    expectedLifecycleGeneration: bridge.lifecycleGeneration,
+    reason: 'unit-validated-native-handoff'
+  });
+  assert.equal(committedNativeOwner.displayOwner, 'main-native');
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  const disposed = bridge.dispose();
+  const disposedLifecycleGeneration = bridge.lifecycleGeneration;
+  const disposedMessageCount = worker.messages.length;
+  assert.equal(disposed.status, 'worker-offscreen-presentation-disposed');
+  assert.equal(disposed.disposed, true);
+  assert.equal(bridge.worker, null);
+  assert.equal(worker.listeners.length, 0);
+
+  capturedLateListener({
+    data: {
+      schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+      status: 'worker-offscreen-presentation-ready',
+      workerOffscreenRenderRows: {
+        schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+        status: 'worker-offscreen-render-rows-rendered',
+        displayOwnerEpoch: 9,
+        sphStep: 99,
+        particleCount: 1
+      }
+    }
+  });
+  const lateMutation = bridge.setDisplayOwner({ owner: 'worker', epoch: 10 });
+  assert.equal(
+    lateMutation.status,
+    'worker-offscreen-presentation-disposed-mutation-rejected'
+  );
+  assert.equal(bridge.status.status, 'worker-offscreen-presentation-disposed');
+  assert.equal(bridge.lifecycleGeneration, disposedLifecycleGeneration);
+  assert.equal(bridge.displayOwner, 'main-native');
+  assert.equal(bridge.displayOwnerPresentedSphStep, null);
+  assert.equal(worker.messages.length, disposedMessageCount);
+});
+
 test('worker offscreen render rows pack compact transferable particle rows', () => {
   const payload = packUlgWorkerOffscreenRenderRowsPayload({
     positionsM: new Float32Array([1, 2, 3, 4, 5, 6]),

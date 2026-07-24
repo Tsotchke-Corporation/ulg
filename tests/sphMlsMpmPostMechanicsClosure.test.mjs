@@ -10,6 +10,11 @@ import {
   validateMlsMpmPostMechanicsContinuationClaim,
   runMlsMpmPostMechanicsClosureWebGpu
 } from '../src/runtime/sph/sphMlsMpmPostMechanicsClosure.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  issuePostSeparationThermalBinAuthority,
+  postSeparationThermalBinAuthorityLiveness
+} from '../src/runtime/sph/sphPostSeparationThermalBinAuthority.js';
 
 function buffer(label) {
   return { label, size: 4096, destroy() {} };
@@ -54,7 +59,7 @@ function minimalClosureInputs({
   };
 }
 
-test('shared post-mechanics closure preserves the five-stage resident lineage', async () => {
+test('shared post-mechanics closure preserves the post-thermal discovery lineage', async () => {
   const sourceState = buffer('mechanics-state');
   const sourceThermo = buffer('source-thermo');
   const sourceMechanics = buffer('mechanics-constitutive');
@@ -80,6 +85,7 @@ test('shared post-mechanics closure preserves the five-stage resident lineage', 
     status: 'resident-product-mass-merged-gpu-resident',
     productEventBuffer: buffer('merged-products-buffer')
   };
+  const gpuTimestampRecorder = { active: true };
   const calls = [];
   const sphParticleState = {
     particleCount: 2,
@@ -125,6 +131,10 @@ test('shared post-mechanics closure preserves the five-stage resident lineage', 
       return { stateBuffer: thermalState, thermoBuffer: thermalThermo };
     },
     reactionTable: { reactionCount: 1, gasProductCount: 1 },
+    spatialReactionDiscoveryProposalRunner: async (options) => {
+      calls.push(['reaction-discovery', options]);
+      return { ready: true, receipt: { consumerId: 'reaction-discovery' } };
+    },
     reactionStepRunner: async (options) => {
       calls.push(['reaction', options]);
       return {
@@ -151,6 +161,7 @@ test('shared post-mechanics closure preserves the five-stage resident lineage', 
     dtSeconds: 0.001,
     preferWebGpu: true,
     readbackMode: 'no-full-readback',
+    gpuTimestampRecorder,
     schroederSpatialEpochGeneration: {
       execution: {
         generationId: 17,
@@ -183,6 +194,7 @@ test('shared post-mechanics closure preserves the five-stage resident lineage', 
   assert.deepEqual(calls.map(([stage]) => stage), [
     'far',
     'thermal',
+    'reaction-discovery',
     'reaction',
     'refresh',
     'phase-v2',
@@ -191,21 +203,32 @@ test('shared post-mechanics closure preserves the five-stage resident lineage', 
   assert.equal(calls[0][1].sourceStateBuffer, sourceState);
   assert.equal(calls[1][1].sourceStateBuffer, farState);
   assert.equal(calls[1][1].sourceThermoBuffer, sourceThermo);
+  assert.equal(calls[1][1].proposalStateBuffer, farState);
+  assert.equal(calls[1][1].proposalThermoBuffer, sourceThermo);
+  assert.equal(calls[1][1].gpuTimestampRecorder, gpuTimestampRecorder);
   assert.equal(calls[2][1].sourceStateBuffer, thermalState);
   assert.equal(calls[2][1].sourceThermoBuffer, thermalThermo);
-  assert.equal(calls[2][1].sourceMechanicsBuffer, sourceMechanics);
-  assert.equal(calls[2][1].schroederLawQueue, null);
-  assert.equal(calls[2][1].schroederLawNeighborCandidates, null);
-  assert.equal(calls[2][1].readCompactReactionSummary, false);
-  assert.equal(calls[3][1].sourceStateBuffer, reactionState);
-  assert.equal(calls[3][1].sourceThermoBuffer, reactionThermo);
-  assert.equal(calls[3][1].sourceMechanicsBuffer, reactionMechanics);
+  assert.equal(calls[2][1].observeGpuEvidence, undefined);
+  assert.equal(calls[3][1].sourceStateBuffer, thermalState);
+  assert.equal(calls[3][1].sourceThermoBuffer, thermalThermo);
+  assert.equal(calls[3][1].sourceMechanicsBuffer, sourceMechanics);
+  assert.equal(calls[3][1].schroederLawQueue, null);
+  assert.equal(calls[3][1].schroederLawNeighborCandidates, null);
+  assert.equal(calls[3][1].readCompactReactionSummary, false);
+  assert.equal(calls[3][1].readReactionGasSpeciesSummary, false);
+  assert.equal(
+    calls[3][1].schroederSpatialReactionDiscoveryProposal.ready,
+    true
+  );
   assert.equal(calls[4][1].sourceStateBuffer, reactionState);
   assert.equal(calls[4][1].sourceThermoBuffer, reactionThermo);
-  assert.equal(calls[4][1].sourceMechanicsBuffer, refreshedMechanics);
-  assert.equal(calls[5][1].inputResidentProductMass,
+  assert.equal(calls[4][1].sourceMechanicsBuffer, reactionMechanics);
+  assert.equal(calls[5][1].sourceStateBuffer, reactionState);
+  assert.equal(calls[5][1].sourceThermoBuffer, reactionThermo);
+  assert.equal(calls[5][1].sourceMechanicsBuffer, refreshedMechanics);
+  assert.equal(calls[6][1].inputResidentProductMass,
     inputResidentProductMass);
-  assert.equal(calls[5][1].emittedResidentProductMass,
+  assert.equal(calls[6][1].emittedResidentProductMass,
     emittedResidentProductMass);
   assert.equal(result.continuation.stateBuffer, phaseState);
   assert.equal(result.continuation.thermoBuffer, phaseThermo);
@@ -216,6 +239,113 @@ test('shared post-mechanics closure preserves the five-stage resident lineage', 
     mergedResidentProductMass);
   assert.equal(result.generation.spatialGenerationId, 17);
   assert.equal(result.readbackMode, 'no-full-readback');
+});
+
+test('post-mechanics thermal consumes and retires the exact G2P bin authority once', async () => {
+  let queueFenceCount = 0;
+  const device = {
+    queue: {
+      onSubmittedWorkDone() {
+        queueFenceCount += 1;
+        return Promise.resolve();
+      }
+    }
+  };
+  const stateBuffer = tagWebGpuBufferDevice(
+    trackedBuffer('authority-post-separation-state'),
+    device
+  );
+  const thermoBuffer = trackedBuffer('authority-source-thermo');
+  const mechanicsBuffer = trackedBuffer('authority-source-mechanics');
+  const binsBuffer = tagWebGpuBufferDevice(
+    trackedBuffer('authority-post-separation-bins'),
+    device
+  );
+  const authority = issuePostSeparationThermalBinAuthority({
+    device,
+    stateBuffer,
+    binsBuffer,
+    particleCount: 2,
+    capacity: 2,
+    nx: 1,
+    ny: 1,
+    nz: 1,
+    cellSizeM: 1,
+    producerSubmission: { commandBuffer: {} }
+  });
+  const inputs = minimalClosureInputs({
+    stateBuffer,
+    thermoBuffer,
+    mechanicsBuffer,
+    device
+  });
+  inputs.postMechanicsParticleBuffers.postSeparationThermalBinAuthority =
+    authority;
+  let selectedNeighborBins = null;
+
+  await runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async ({ neighborBins }) => {
+      selectedNeighborBins = neighborBins;
+      return null;
+    }
+  });
+
+  assert.equal(selectedNeighborBins, authority);
+  const liveness = postSeparationThermalBinAuthorityLiveness(authority);
+  assert.equal(liveness.releaseScheduled, true);
+  await liveness.releasePromise;
+  assert.equal(queueFenceCount, 1);
+  assert.equal(
+    postSeparationThermalBinAuthorityLiveness(authority).destroyCount,
+    1
+  );
+  assert.equal(binsBuffer.destroyCount, 1);
+  assert.equal(stateBuffer.destroyCount, 0);
+});
+
+test('gas-producing closure keeps product state resident and observes species only when explicitly requested', async () => {
+  const run = async (reactionStepOptions = {}) => {
+    const inputs = minimalClosureInputs();
+    let captured = null;
+    const productEventBuffer = trackedBuffer('resident-gas-product-events');
+    const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+      ...inputs,
+      thermalMaterialTable: { materialCount: 1 },
+      thermalStepRunner: null,
+      reactionTable: { reactionCount: 1, gasProductCount: 3 },
+      reactionStepOptions,
+      reactionStepRunner: async (options) => {
+        captured = options;
+        return {
+          residentProductMass: {
+            status: 'resident-product-mass-buffer-retained',
+            productEventBuffer
+          }
+        };
+      }
+    });
+    return { captured, closure, productEventBuffer };
+  };
+
+  const hotPath = await run();
+  assert.equal(hotPath.captured.readCompactReactionSummary, false);
+  assert.equal(hotPath.captured.readReactionGasSpeciesSummary, false);
+  assert.equal(hotPath.captured.readReactionProductInventory, false);
+  assert.equal(hotPath.captured.readReactionAtomResidual, false);
+  assert.equal(
+    hotPath.closure.residentProductMass.productEventBuffer,
+    hotPath.productEventBuffer
+  );
+
+  const diagnostic = await run({ readReactionGasSpeciesSummary: true });
+  assert.equal(diagnostic.captured.readCompactReactionSummary, false);
+  assert.equal(diagnostic.captured.readReactionGasSpeciesSummary, true);
+  assert.equal(
+    diagnostic.closure.residentProductMass.productEventBuffer,
+    diagnostic.productEventBuffer
+  );
 });
 
 test('shared closure preserves a downstream error and retires wrapper outputs behind the queue fence', async () => {
@@ -433,6 +563,326 @@ test('reaction components are adopted independently without a torn-family fallba
     });
     assert.equal(reactionBuffer.destroyCount, 0, component);
   }
+});
+
+test('phase transfer preserves an adopted reaction owner family while its product handle remains live', async () => {
+  const inputs = minimalClosureInputs();
+  inputs.sphParticleUpload.phaseCarrierPlan = {
+    status: 'phase-lane-capacity-ready'
+  };
+  const thermalState = trackedBuffer('family-thermal-state');
+  const thermalThermo = trackedBuffer('family-thermal-thermo');
+  const reactionState = trackedBuffer('family-reaction-state');
+  const reactionThermo = trackedBuffer('family-reaction-thermo');
+  const reactionMechanics = trackedBuffer('family-reaction-mechanics');
+  const phaseState = trackedBuffer('family-phase-state');
+  const phaseThermo = trackedBuffer('family-phase-thermo');
+  const phaseMechanics = trackedBuffer('family-phase-mechanics');
+  const residentProductMass = {
+    status: 'resident-product-mass-buffer-retained',
+    productEventBuffer: trackedBuffer('family-product-events')
+  };
+  let reactionFamilyReleaseCount = 0;
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => ({
+      stateBuffer: thermalState,
+      thermoBuffer: thermalThermo
+    }),
+    reactionTable: { reactionCount: 1 },
+    reactionStepRunner: async () => ({
+      stateBuffer: reactionState,
+      thermoBuffer: reactionThermo,
+      mechanicsBuffer: reactionMechanics,
+      residentProductMass,
+      destroyOutputParticleBuffers() {
+        reactionFamilyReleaseCount += 1;
+        return true;
+      }
+    }),
+    mechanicsMaterialTable: { materialCount: 1 },
+    mechanicsRefreshRunner: null,
+    phaseCarrierTransferRunner: async () => ({
+      stateBuffer: phaseState,
+      thermoBuffer: phaseThermo,
+      mechanicsBuffer: phaseMechanics
+    })
+  });
+
+  assert.equal(closure.continuation.stateBuffer, phaseState);
+  assert.equal(closure.continuation.thermoBuffer, phaseThermo);
+  assert.equal(closure.continuation.mechanicsBuffer, phaseMechanics);
+  assert.equal(closure.continuation.residentProductMass, residentProductMass);
+  claimMlsMpmPostMechanicsContinuation(closure, {
+    stateBuffer: phaseState,
+    thermoBuffer: phaseThermo,
+    mechanicsBuffer: phaseMechanics
+  });
+  const retirement = await retireMlsMpmPostMechanicsClosureOutputsAfter(
+    closure,
+    { after: Promise.resolve(true) }
+  );
+
+  assert.equal(reactionFamilyReleaseCount, 0);
+  assert.equal(retirement.preservedOwnerFamilyBufferCount, 3);
+  assert.equal(reactionState.destroyCount, 0);
+  assert.equal(reactionThermo.destroyCount, 0);
+  assert.equal(reactionMechanics.destroyCount, 0);
+});
+
+test('failed closure releases owner-managed stage outputs exactly once without raw member destruction', async () => {
+  const inputs = minimalClosureInputs({
+    device: {
+      queue: { onSubmittedWorkDone: () => Promise.resolve() }
+    }
+  });
+  const thermalState = trackedBuffer('failed-family-thermal-state');
+  const thermalThermo = trackedBuffer('failed-family-thermal-thermo');
+  let familyReleaseCount = 0;
+
+  await assert.rejects(runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => ({
+      stateBuffer: thermalState,
+      thermoBuffer: thermalThermo,
+      destroyOutputParticleBuffers() {
+        familyReleaseCount += 1;
+      }
+    }),
+    reactionTable: { reactionCount: 1 },
+    reactionStepRunner: async () => {
+      throw new Error('failed-owner-family-sidecar');
+    }
+  }), /failed-owner-family-sidecar/);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(familyReleaseCount, 1);
+  assert.equal(thermalState.destroyCount, 0);
+  assert.equal(thermalThermo.destroyCount, 0);
+});
+
+test('owner-family retirement retries only the family that did not confirm release', async () => {
+  const inputs = minimalClosureInputs();
+  inputs.sphParticleUpload.phaseCarrierPlan = {
+    status: 'phase-lane-capacity-ready'
+  };
+  const thermalState = trackedBuffer('retry-family-thermal-state');
+  const thermalThermo = trackedBuffer('retry-family-thermal-thermo');
+  const reactionState = trackedBuffer('retry-family-reaction-state');
+  const reactionThermo = trackedBuffer('retry-family-reaction-thermo');
+  const reactionMechanics = trackedBuffer('retry-family-reaction-mechanics');
+  const phaseState = trackedBuffer('retry-family-phase-state');
+  const phaseThermo = trackedBuffer('retry-family-phase-thermo');
+  const phaseMechanics = trackedBuffer('retry-family-phase-mechanics');
+  let thermalReleaseCount = 0;
+  let reactionReleaseCount = 0;
+  let reactionReleaseAllowed = false;
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => ({
+      stateBuffer: thermalState,
+      thermoBuffer: thermalThermo,
+      destroyOutputParticleBuffers() {
+        thermalReleaseCount += 1;
+        return true;
+      }
+    }),
+    reactionTable: { reactionCount: 1 },
+    reactionStepRunner: async () => ({
+      stateBuffer: reactionState,
+      thermoBuffer: reactionThermo,
+      mechanicsBuffer: reactionMechanics,
+      destroyOutputParticleBuffers() {
+        reactionReleaseCount += 1;
+        return reactionReleaseAllowed;
+      }
+    }),
+    mechanicsMaterialTable: { materialCount: 1 },
+    mechanicsRefreshRunner: null,
+    phaseCarrierTransferRunner: async () => ({
+      stateBuffer: phaseState,
+      thermoBuffer: phaseThermo,
+      mechanicsBuffer: phaseMechanics
+    })
+  });
+  claimMlsMpmPostMechanicsContinuation(closure, {
+    stateBuffer: phaseState,
+    thermoBuffer: phaseThermo,
+    mechanicsBuffer: phaseMechanics
+  });
+
+  await assert.rejects(
+    retireMlsMpmPostMechanicsClosureOutputsAfter(closure, {
+      after: Promise.resolve(true)
+    }),
+    { code: 'ERR_MLS_MPM_POST_MECHANICS_FAMILY_RETIREMENT' }
+  );
+  assert.equal(thermalReleaseCount, 1);
+  assert.equal(reactionReleaseCount, 1);
+
+  assert.throws(
+    () => retireMlsMpmPostMechanicsClosureOutputsAfter(closure, {
+      after: Promise.resolve(true),
+      abandon: true
+    }),
+    { code: 'ERR_MLS_MPM_POST_MECHANICS_RETIREMENT_MODE' }
+  );
+  assert.equal(phaseState.destroyCount, 0);
+  assert.equal(phaseThermo.destroyCount, 0);
+  assert.equal(phaseMechanics.destroyCount, 0);
+
+  reactionReleaseAllowed = true;
+  const receipt = await retireMlsMpmPostMechanicsClosureOutputsAfter(closure, {
+    after: Promise.resolve(true)
+  });
+  assert.equal(receipt.status, 'post-mechanics-superseded-components-retired');
+  assert.equal(thermalReleaseCount, 1);
+  assert.equal(reactionReleaseCount, 2);
+});
+
+test('failed closure captures a rejected resident product owner without an unhandled rejection', async () => {
+  const inputs = minimalClosureInputs({
+    device: {
+      queue: { onSubmittedWorkDone: () => Promise.resolve() }
+    }
+  });
+  const reactionState = trackedBuffer('product-reject-reaction-state');
+  const reactionThermo = trackedBuffer('product-reject-reaction-thermo');
+  const reactionMechanics = trackedBuffer('product-reject-reaction-mechanics');
+  let productReleaseCount = 0;
+  const residentProductMass = {
+    productEventBuffer: trackedBuffer('product-reject-events'),
+    productEventBufferRetained: true,
+    productEventBufferByteLength: 128,
+    productEventRowCount: 1,
+    destroyResidentProductMassBuffers() {
+      productReleaseCount += 1;
+      return Promise.reject(new Error('injected-product-owner-rejection'));
+    }
+  };
+  let failure = null;
+  try {
+    await runMlsMpmPostMechanicsClosureWebGpu({
+      ...inputs,
+      thermalMaterialTable: { materialCount: 1 },
+      thermalStepRunner: null,
+      reactionTable: { reactionCount: 1 },
+      reactionStepRunner: async () => ({
+        stateBuffer: reactionState,
+        thermoBuffer: reactionThermo,
+        mechanicsBuffer: reactionMechanics,
+        residentProductMass
+      }),
+      mechanicsMaterialTable: { materialCount: 1 },
+      mechanicsRefreshRunner: async () => {
+        throw new Error('failure-after-product-publication');
+      }
+    });
+  } catch (error) {
+    failure = error;
+  }
+  assert.match(failure?.message || '', /failure-after-product-publication/);
+  const cleanup = await failure.postMechanicsCleanupCompletion;
+  assert.equal(productReleaseCount, 1);
+  assert.equal(cleanup.status, 'post-mechanics-failure-cleanup-blocked');
+  assert.deepEqual(cleanup.blockers, [
+    'resident-product-mass-release-failed:injected-product-owner-rejection'
+  ]);
+  assert.equal(reactionState.destroyCount, 1);
+  assert.equal(reactionThermo.destroyCount, 1);
+  assert.equal(reactionMechanics.destroyCount, 1);
+});
+
+test('failed closure uses component ownership to retire a sibling beside a preserved input alias', async () => {
+  const inputs = minimalClosureInputs({
+    device: {
+      queue: { onSubmittedWorkDone: () => Promise.resolve() }
+    }
+  });
+  const ownedThermoSibling = trackedBuffer('preserved-alias-owned-sibling');
+  let familyReleaseCount = 0;
+  const componentSelections = [];
+
+  let failure = null;
+  try {
+    await runMlsMpmPostMechanicsClosureWebGpu({
+      ...inputs,
+      thermalMaterialTable: { materialCount: 1 },
+      thermalStepRunner: async () => ({
+        stateBuffer: inputs.sphParticleUpload.stateBuffer,
+        thermoBuffer: ownedThermoSibling,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        destroyOutputParticleBuffers() {
+          familyReleaseCount += 1;
+          inputs.sphParticleUpload.stateBuffer.destroy();
+          ownedThermoSibling.destroy();
+          return true;
+        },
+        destroyOutputParticleBufferComponents(selection) {
+          componentSelections.push(selection);
+          if (selection.thermo === true) ownedThermoSibling.destroy();
+          return true;
+        }
+      }),
+      reactionTable: { reactionCount: 1 },
+      reactionStepRunner: async () => {
+        throw new Error('failure-after-preserved-family-alias');
+      }
+    });
+  } catch (error) {
+    failure = error;
+  }
+  assert.match(failure?.message || '', /failure-after-preserved-family-alias/);
+  const cleanup = await failure.postMechanicsCleanupCompletion;
+
+  assert.equal(familyReleaseCount, 0);
+  assert.deepEqual(componentSelections, [{ thermo: true }]);
+  assert.equal(inputs.sphParticleUpload.stateBuffer.destroyCount, 0);
+  assert.equal(ownedThermoSibling.destroyCount, 1);
+  assert.equal(cleanup.status, 'post-mechanics-failure-cleanup-complete');
+  assert.deepEqual(cleanup.blockers, []);
+});
+
+test('failed closure publishes a durable blocker when a preserved-alias owner has no component surface', async () => {
+  const inputs = minimalClosureInputs({
+    device: {
+      queue: { onSubmittedWorkDone: () => Promise.resolve() }
+    }
+  });
+  const ownedThermoSibling = trackedBuffer('blocked-preserved-alias-sibling');
+  let failure = null;
+  try {
+    await runMlsMpmPostMechanicsClosureWebGpu({
+      ...inputs,
+      thermalMaterialTable: { materialCount: 1 },
+      thermalStepRunner: async () => ({
+        stateBuffer: inputs.sphParticleUpload.stateBuffer,
+        thermoBuffer: ownedThermoSibling,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        destroyOutputParticleBuffers() {
+          throw new Error('whole family must not run');
+        }
+      }),
+      reactionTable: { reactionCount: 1 },
+      reactionStepRunner: async () => {
+        throw new Error('failure-before-component-retirement');
+      }
+    });
+  } catch (error) {
+    failure = error;
+  }
+  const cleanup = await failure.postMechanicsCleanupCompletion;
+  assert.equal(cleanup.status, 'post-mechanics-failure-cleanup-blocked');
+  assert.deepEqual(cleanup.blockers, [
+    'preserved-alias-owner-lacks-component-retirement:thermal-phase'
+  ]);
+  assert.equal(inputs.sphParticleUpload.stateBuffer.destroyCount, 0);
+  assert.equal(ownedThermoSibling.destroyCount, 0);
 });
 
 test('failed sidecar cleanup destroys owned outputs only and leaves borrowed aliases live', async () => {

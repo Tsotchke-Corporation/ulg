@@ -1115,6 +1115,9 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         assignmentBufferByteLength: assignmentRows.byteLength,
         sourceStateBuffer: sphUpload.stateBuffer,
         sourceStateBufferBorrowed: true,
+        sourceMechanicsBuffer: mlsUpload.mechanicsBuffer,
+        sourceMechanicsBufferBorrowed: true,
+        sourceMechanicsBufferByteLength: mlsUpload.mechanicsBuffer.size,
         storageGeneration: 1,
         physicsTick: 0,
         physicsSubstep: 0,
@@ -1142,6 +1145,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         particleCount,
         particleIdentityBuffer: sphUpload.identityBuffer,
         particleIdentityStrideWords: 1,
+        phaseVolumeInterfaceProposalEnabled: true,
         mechanicsLevels: [
           {
             selectedLevel: 0,
@@ -1163,10 +1167,30 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           }
         ]
       });
-      if (!generation.ready || !generation.parentFieldView) {
+      if (
+        !generation.ready
+        || !generation.parentFieldView
+        || !generation.phaseVolumeInterfaceProposal
+      ) {
         return {
           status: 'generation-rejected',
-          reason: generation.reason || 'parent field missing'
+          reason: generation.reason || 'parent field or S9-C interface proposal missing'
+        };
+      }
+      const phaseVolumeInterfaceProposal = generation.phaseVolumeInterfaceProposal;
+      const phaseVolumeInterfaceProposalRuntime =
+        generation.phaseVolumeInterfaceProposalRuntime;
+      if (
+        phaseVolumeInterfaceProposalRuntime?.ownsExecution?.(
+          phaseVolumeInterfaceProposal
+        ) !== true
+        || phaseVolumeInterfaceProposalRuntime?.isExecutionSubmitted?.(
+          phaseVolumeInterfaceProposal
+        ) !== true
+      ) {
+        return {
+          status: 'generation-rejected',
+          reason: 'mounted S9-C interface proposal was not owned and submitted'
         };
       }
       const macroRefluxLedger = workspaceModule.createSchroederCrossLevelRefluxLedgerGpu(
@@ -1252,6 +1276,41 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           floats: new Float32Array(bytes)
         };
       };
+      const phaseVolumeInterfaceProposalRead = m0Only
+        ? await readWords(
+            phaseVolumeInterfaceProposal.controlBuffer,
+            phaseVolumeInterfaceProposal.layout.controlByteLength,
+            'native-parent-mechanics-m0-phase-volume-interface-readback'
+          )
+        : null;
+      const finePhaseVolumeMomentRead = m0Only
+        ? await readWords(
+            generation.mechanicsLevelViews[0].phaseVolumeMoment.controlBuffer,
+            generation.mechanicsLevelViews[0].phaseVolumeMoment.layout.controlByteLength,
+            'native-parent-mechanics-m0-fine-phase-volume-moment-readback'
+          )
+        : null;
+      const coarsePhaseVolumeMomentRead = m0Only
+        ? await readWords(
+            generation.mechanicsLevelViews[1].phaseVolumeMoment.controlBuffer,
+            generation.mechanicsLevelViews[1].phaseVolumeMoment.layout.controlByteLength,
+            'native-parent-mechanics-m0-coarse-phase-volume-moment-readback'
+          )
+        : null;
+      const finePhaseVolumeReceiptRead = m0Only
+        ? await readWords(
+            generation.mechanicsLevelViews[0].phaseVolumeReceipt.controlBuffer,
+            generation.mechanicsLevelViews[0].phaseVolumeReceipt.layout.controlByteLength,
+            'native-parent-mechanics-m0-fine-phase-volume-receipt-readback'
+          )
+        : null;
+      const coarsePhaseVolumeReceiptRead = m0Only
+        ? await readWords(
+            generation.mechanicsLevelViews[1].phaseVolumeReceipt.controlBuffer,
+            generation.mechanicsLevelViews[1].phaseVolumeReceipt.layout.controlByteLength,
+            'native-parent-mechanics-m0-coarse-phase-volume-receipt-readback'
+          )
+        : null;
 
       let fineProjection = await p2g(0, 0.25);
       let coarseProjection = await p2g(1, 0.5);
@@ -1363,6 +1422,39 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           refluxFlags: refluxRead.words[2],
           refluxRowCount: refluxRead.words[4],
           refluxPhase: refluxRead.words[59],
+          phaseVolumeInterfaceProposal: {
+            enabled: generation.phaseVolumeInterfaceProposalEnabled === true,
+            submitted: phaseVolumeInterfaceProposal.submitPerformed === true,
+            owned: phaseVolumeInterfaceProposalRuntime.ownsExecution(
+              phaseVolumeInterfaceProposal
+            ) === true,
+            twoLevel: phaseVolumeInterfaceProposal.twoLevel === true,
+            fineReceiptMatches:
+              phaseVolumeInterfaceProposal.fineReceipt
+                === generation.mechanicsLevelViews[0].phaseVolumeReceipt,
+            coarseReceiptMatches:
+              phaseVolumeInterfaceProposal.coarseReceipt
+                === generation.mechanicsLevelViews[1].phaseVolumeReceipt,
+            parentFieldMatches:
+              phaseVolumeInterfaceProposal.parentFieldView
+                === generation.parentFieldView,
+            dispatchCount: phaseVolumeInterfaceProposal.encodedDispatchCount,
+            diagnosticOnly: phaseVolumeInterfaceProposal.diagnosticOnly === true,
+            stateMutationAllowed:
+              phaseVolumeInterfaceProposal.stateMutationAllowed === true,
+            readbackPerformed: phaseVolumeInterfaceProposal.readbackPerformed === true,
+            fullParticleReadbackPerformed:
+              phaseVolumeInterfaceProposal.fullParticleReadbackPerformed === true,
+            header: Array.from(phaseVolumeInterfaceProposalRead.words)
+          },
+          phaseVolumeMoments: {
+            fineHeader: Array.from(finePhaseVolumeMomentRead.words),
+            coarseHeader: Array.from(coarsePhaseVolumeMomentRead.words)
+          },
+          phaseVolumeReceipts: {
+            fineHeader: Array.from(finePhaseVolumeReceiptRead.words),
+            coarseHeader: Array.from(coarsePhaseVolumeReceiptRead.words)
+          },
           malformed,
           validationError: validationError?.message || null,
           errors
@@ -1424,7 +1516,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           mechanics.byteOffset,
           mechanics.length
         );
-        const proposalFor = (gridSpacingM) =>
+        const proposalFor = (gridSpacingM, selectedLevel) =>
           proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
             device,
             generation,
@@ -1434,6 +1526,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
             mlsMpmParticleUpload: mlsUpload,
             boxDimsM: [2, 2, 2],
             gridSpacingM,
+            selectedLevel,
             relaxation: 0,
             normalVelocityDamping: 0
           });
@@ -1461,7 +1554,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           readbackMode: 'no-full-readback'
         });
 
-        const fineProposal = proposalFor(0.25);
+        const fineProposal = proposalFor(0.25, 0);
         const fineG2p = await g2pModule.runMlsMpmG2pWebGpu(
           g2pOptions(correctedFineUpdate, 0, fineProposal)
         );
@@ -1659,7 +1752,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           terminalReflux.floats[112] + terminalReflux.floats[113]
         );
 
-        const coarseProposal = proposalFor(0.5);
+        const coarseProposal = proposalFor(0.5, 1);
         const coarseG2pRunOptions = g2pOptions(
           terminalGridUpdate,
           1,
@@ -1987,6 +2080,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           mlsMpmParticleUpload: mlsUpload,
           boxDimsM: [2, 2, 2],
           gridSpacingM: 0.25,
+          selectedLevel: 0,
           relaxation: 0,
           normalVelocityDamping: 0
         });
@@ -2383,6 +2477,81 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
       SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_ACCUMULATING,
       JSON.stringify(native)
     );
+    const momentHeaders = [
+      native.phaseVolumeMoments.fineHeader,
+      native.phaseVolumeMoments.coarseHeader
+    ];
+    for (const header of momentHeaders) {
+      assert.equal(header[2], 3, JSON.stringify(native));
+      assert.equal(header[16], 2, JSON.stringify(native));
+      assert.equal(header[32], 54, JSON.stringify(native));
+      assert.deepEqual(header.slice(37, 40), [0, 0, 0], JSON.stringify(native));
+      assert.equal(header[40], 27, JSON.stringify(native));
+    }
+    const receiptHeaders = [
+      native.phaseVolumeReceipts.fineHeader,
+      native.phaseVolumeReceipts.coarseHeader
+    ];
+    const f32 = (bits) => new Float32Array(new Uint32Array([bits]).buffer)[0];
+    for (const header of receiptHeaders) {
+      assert.equal(header[1], 2, JSON.stringify(native));
+      assert.equal(header[2], 3, JSON.stringify(native));
+      assert.equal(header[16], 2, JSON.stringify(native));
+      assert.equal(header[20], 54, JSON.stringify(native));
+      assert.deepEqual(header.slice(41, 47), [0, 0, 0, 0, 0, 0], JSON.stringify(native));
+      assert.equal(header[47], 1, JSON.stringify(native));
+      assert.equal(header[48], 27, JSON.stringify(native));
+      assert.ok(Math.abs(f32(header[30]) - 0.001) < 2e-6, JSON.stringify(native));
+      assert.ok(Math.abs(f32(header[31]) - 0.001) < 2e-6, JSON.stringify(native));
+      assert.ok(Math.abs(f32(header[32])) < 2e-6, JSON.stringify(native));
+    }
+    const interfaceProposal = native.phaseVolumeInterfaceProposal;
+    assert.deepEqual(
+      {
+        enabled: interfaceProposal.enabled,
+        submitted: interfaceProposal.submitted,
+        owned: interfaceProposal.owned,
+        twoLevel: interfaceProposal.twoLevel,
+        fineReceiptMatches: interfaceProposal.fineReceiptMatches,
+        coarseReceiptMatches: interfaceProposal.coarseReceiptMatches,
+        parentFieldMatches: interfaceProposal.parentFieldMatches,
+        dispatchCount: interfaceProposal.dispatchCount,
+        diagnosticOnly: interfaceProposal.diagnosticOnly,
+        stateMutationAllowed: interfaceProposal.stateMutationAllowed,
+        readbackPerformed: interfaceProposal.readbackPerformed,
+        fullParticleReadbackPerformed:
+          interfaceProposal.fullParticleReadbackPerformed
+      },
+      {
+        enabled: true,
+        submitted: true,
+        owned: true,
+        twoLevel: true,
+        fineReceiptMatches: true,
+        coarseReceiptMatches: true,
+        parentFieldMatches: true,
+        dispatchCount: 3,
+        diagnosticOnly: true,
+        stateMutationAllowed: false,
+        readbackPerformed: false,
+        fullParticleReadbackPerformed: false
+      },
+      JSON.stringify(native)
+    );
+    assert.equal(interfaceProposal.header[2], 3, JSON.stringify(native));
+    assert.ok(interfaceProposal.header[16] > 0, JSON.stringify(native));
+    assert.ok(interfaceProposal.header[18] > 0, JSON.stringify(native));
+    assert.equal(
+      interfaceProposal.header[22],
+      interfaceProposal.header[16],
+      JSON.stringify(native)
+    );
+    assert.equal(interfaceProposal.header[25], 1, JSON.stringify(native));
+    assert.equal(interfaceProposal.header[26], 1, JSON.stringify(native));
+    assert.deepEqual(interfaceProposal.header.slice(40, 45), [0, 0, 0, 0, 0]);
+    assert.equal(interfaceProposal.header[47], 1, JSON.stringify(native));
+    assert.equal(interfaceProposal.header[48], 0, JSON.stringify(native));
+    assert.equal(interfaceProposal.header[55], 64, JSON.stringify(native));
     const expectedMasks = {
       fineActiveEnd: { fineMask: 1 << 12, coarseMask: 0 },
       coarseCapacityEnd: { fineMask: 0, coarseMask: 1 << 13 },

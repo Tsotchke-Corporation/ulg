@@ -194,6 +194,15 @@ import {
   runSchroederSpatialReactionDiscoveryProposalWebGpu
 } from './schroederSpatialReactionDiscoveryProposalGpu.js';
 import {
+  applySchroederSpatialTopologyTransitionReceipt,
+  runSchroederSpatialTopologyTransitionWebGpu
+} from './schroederSpatialTopologyTransitionGpu.js';
+import {
+  prepareSchroederSpatialSuccessorSourceFamilyPublication,
+  publishPreparedSchroederSpatialSuccessorSourceFamily,
+  validateSchroederSpatialSuccessorPublicationReceipt
+} from './schroederSpatialSuccessorSourceFamily.js';
+import {
   destroySphThermalResponseGraphBuffers,
   thermalResponseGraphUploadMatchesDevice,
   uploadSphThermalResponseGraphBuffers
@@ -210,6 +219,7 @@ import {
   SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID,
   advanceSchroederSpatialEpochTransactionPrivate,
   abortSchroederSpatialEpochTransaction,
+  admitSchroederSpatialEpochTransactionLateConsumer,
   admitSchroederSpatialEpochTransactionReader,
   commitSchroederSpatialEpochTransaction,
   createSchroederSpatialEpochTransaction,
@@ -6891,9 +6901,41 @@ function schroederPortableRetainedRef({
     || (retained && resolvedFamily
       ? `${resolvedFamily}:${resolvedRole || 'default'}`
       : null);
+  const sourceGenerationId = artifact?.spatialEpochGenerationId
+    ?? artifact?.sourceGenerationId
+    ?? artifact?.generationId
+    ?? null;
+  const sourceEpochIdentity = Object.freeze({
+    storageGeneration:
+      artifact?.spatialEpochStorageGeneration
+      ?? artifact?.storageGeneration
+      ?? null,
+    physicsTick:
+      artifact?.spatialEpochPhysicsTick ?? artifact?.physicsTick ?? null,
+    physicsSubstep:
+      artifact?.spatialEpochPhysicsSubstep
+      ?? artifact?.physicsSubstep
+      ?? null,
+    positionEpoch:
+      artifact?.spatialEpochPositionEpoch ?? artifact?.positionEpoch ?? null,
+    topologyEpoch:
+      artifact?.spatialEpochTopologyEpoch ?? artifact?.topologyEpoch ?? null,
+    chartEpoch:
+      artifact?.spatialEpochChartEpoch ?? artifact?.chartEpoch ?? null,
+    levelEpoch:
+      artifact?.spatialEpochLevelEpoch ?? artifact?.levelEpoch ?? null,
+    supportEpoch:
+      artifact?.spatialEpochSupportEpoch ?? artifact?.supportEpoch ?? null
+  });
   return {
     family,
     role,
+    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    sourceGenerationId,
+    sourceEpochIdentity,
+    positionAuthority: 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority: false,
+    coherentSolidAuthority: false,
     schema,
     status,
     rowCount: Math.max(0, Math.round(finiteNumber(rowCount, 0))),
@@ -6956,7 +6998,7 @@ function createSchroederLocalRetainedRenderBufferResolverSummary({
     }),
     schroederLocalRetainedRenderBufferDescriptor({
       family: 'schroeder-hierarchy-aggregate-node',
-      role: 'coherent-aggregate-render-proxy-source',
+      role: 'spatial-aggregate-render-proxy-source',
       artifact: hierarchyAggregateNode,
       buffer: hierarchyAggregateNode?.aggregateNodeBuffer || null,
       rowCount: hierarchyAggregateNode?.aggregateNodeCount ?? hierarchyAggregateNode?.aggregateRowCount,
@@ -6995,6 +7037,18 @@ function createSchroederLocalRetainedRenderBufferResolverSummary({
       ? 'schroeder-local-retained-render-buffers-ready'
       : 'schroeder-local-retained-render-buffers-empty',
     source: 'same-device-schroeder-execution-artifacts',
+    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    positionAuthority: 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority: false,
+    coherentSolidAuthority: false,
+    sourceGenerationId:
+      buffers[0]?.sourceGenerationId
+      ?? buffers[1]?.sourceGenerationId
+      ?? null,
+    sourceEpochIdentity:
+      buffers[0]?.sourceEpochIdentity
+      ?? buffers[1]?.sourceEpochIdentity
+      ?? null,
     sameDeviceOnly: true,
     peerComputePortable: false,
     descriptorOnlyPeerComputeHandoff: true,
@@ -7275,7 +7329,7 @@ export function createSchroederPortableSummaryPlan({
     }) : null,
     hierarchyAggregateNode ? schroederPortableRetainedRef({
       family: 'schroeder-hierarchy-aggregate-node',
-      role: 'coherent-aggregate-render-proxy-source',
+      role: 'spatial-aggregate-render-proxy-source',
       artifact: hierarchyAggregateNode,
       rowCount: aggregateNodeCount,
       strideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
@@ -7312,6 +7366,9 @@ export function createSchroederPortableSummaryPlan({
     schema: ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
     status: 'schroeder-render-lod-summary-planned',
     mode: renderLodMode,
+    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    finalContinuationAuthority: false,
+    coherentSolidAuthority: false,
     selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
     nativeGridSpacingM,
     activeLeafProxyCount: activeNodeCount,
@@ -7328,7 +7385,7 @@ export function createSchroederPortableSummaryPlan({
     phaseVolumeDiagnosticRowsAvailable: phaseDiagnosticRowsAvailable,
     opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
     geometryPolicy: aggregateNodeCount > 0
-      ? 'aggregate-nodes-for-coherent-bulk-active-nodes-for-leaves'
+      ? 'spatial-aggregate-nodes-for-lod-active-nodes-for-leaves'
       : 'active-nodes-as-leaf-lod-proxies',
     fullParticleReadbackRequired: false
   };
@@ -7339,6 +7396,14 @@ export function createSchroederPortableSummaryPlan({
     dataStructure: 'schroeder-tree',
     kernelScope: 'schroeder-portable-render-lod-summary',
     peerComputeUseCase,
+    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    sourceGenerationId:
+      retainedRefs[0]?.sourceGenerationId ?? null,
+    sourceEpochIdentity:
+      retainedRefs[0]?.sourceEpochIdentity ?? null,
+    positionAuthority: 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority: false,
+    coherentSolidAuthority: false,
     summaryMode: 'descriptor-only-retained-buffer-summary',
     portableSummaryMode: 'portable-descriptors-not-raw-gpubuffers',
     selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
@@ -7484,11 +7549,11 @@ export async function runSchroederLevelAssignmentWebGpu({
     || writeStorageBuffer(device, 'ulg-schroeder-level-sph-thermo-in', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-level-mls-mpm-mechanics-in', mlsMpmParticleState.mechanics);
-  const assignmentBuffer = device.createBuffer({
+  const assignmentBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-schroeder-level-assignments-out',
     size: plan.assignmentByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  });
+  }), device);
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-level-assignment-params',
     size: 48,
@@ -13530,6 +13595,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
   coarseMechanicsGrid,
   boxDimsM,
   gpuTimestampRecorder = null,
+  directArenaCount = undefined,
   spatialEpochGenerationRunner =
     runSchroederSpatialEpochGenerationWithBackpressureWebGpu,
   mechanicalProposalRunner = runSchroederSpatialMechanicalProposalWebGpu,
@@ -14247,7 +14313,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
         legacyConsumerCount: 0,
         status: fusedPrivate
           ? 'fused-mechanics-proposals-deferred-to-final-post-mechanics'
-          : 'authenticated-two-level-mechanical-proposals-sealed'
+          : 'resident-fail-closed-two-level-mechanical-bindings-sealed'
       });
       if (fusedPrivate) {
         owned.privateAdvanceReceipt =
@@ -14649,6 +14715,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
           selectedLevel: resolvedFineLevel,
           mechanicsGrid: fineMechanicsGrid,
           mechanicsLevels: levelSpecs,
+          ...(directArenaCount == null ? {} : { directArenaCount }),
           gpuTimestampRecorder
         });
         refreshAttempt.generation = generation;
@@ -14817,10 +14884,6 @@ export function createSchroederTwoLevelCanonicalEpochController({
       );
       const orderedReaders = [
         [
-          SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
-          SCHROEDER_SPATIAL_EPOCH_READER_PHASE.REACTION_DISCOVERY_PROPOSAL
-        ],
-        [
           SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
           SCHROEDER_SPATIAL_EPOCH_READER_PHASE.THERMAL_CONDUCTION_PROPOSAL
         ],
@@ -14847,7 +14910,35 @@ export function createSchroederTwoLevelCanonicalEpochController({
         });
         admittedCount += 1;
       }
+      sealSchroederSpatialEpochTransactionReaders(owned.transaction);
       return admittedCount;
+    },
+
+    admitPostMechanicsLateConsumer(epoch, {
+      readerId,
+      consumerReceipt
+    } = {}) {
+      const owned = requireOwnedEpoch(epoch);
+      if (owned.kind !== 'post-mechanics' || owned.committed) {
+        throw new Error(
+          'Canonical post-mechanics late admission requires one live sidecar epoch'
+        );
+      }
+      if (readerId !== SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY) {
+        throw new Error(
+          'Only post-thermal reaction discovery may consume the public E* late; product placement borrows its canonical directory through a displaced query view'
+        );
+      }
+      admitSchroederSpatialEpochTransactionLateConsumer(owned.transaction, {
+        readerId,
+        phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE
+          .REACTION_DISCOVERY_PROPOSAL,
+        generation: owned.generation,
+        sphParticleUpload: owned.sphParticleUpload,
+        mlsMpmParticleUpload: owned.mlsMpmParticleUpload,
+        consumerReceipt
+      });
+      return true;
     },
 
     commitPostMechanics(epoch, {
@@ -14866,7 +14957,19 @@ export function createSchroederTwoLevelCanonicalEpochController({
         particleCount,
         allowTopologyChange: true
       });
-      sealSchroederSpatialEpochTransactionReaders(owned.transaction);
+      if (
+        owned.transaction.state
+          === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
+        || owned.transaction.state
+          === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE
+      ) {
+        // A public E* with no enabled consumers has no proposal-admission call
+        // to close the early-reader phase. Preserve that exact zero-consumer
+        // route while still requiring explicit late admission whenever a late
+        // reaction reader is configured: the proposal seal below checks every
+        // required reader, including late consumers.
+        sealSchroederSpatialEpochTransactionReaders(owned.transaction);
+      }
       sealSchroederSpatialEpochTransactionProposals(owned.transaction, {
         legacyConsumerCount: 0,
         status: 'authenticated-two-level-post-mechanics-proposals-sealed'
@@ -15424,11 +15527,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeDiagnosticReadbackMode = SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   mergeEpoch = 0,
   enableSpatialEpochGeneration = true,
+  spatialEpochArenaCount = null,
   spatialEpochGenerationRunner = runSchroederSpatialEpochGenerationWithBackpressureWebGpu,
   enablePressureInterfaceOwnerScope = true,
   pressureInterfaceStageRunner = runSphPressureInterfaceStageComputeTask,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
   twoLevelMechanicsRunner = runSchroederTwoLevelMechanicsStepWebGpu,
+  spatialTopologyTransitionRunner =
+    runSchroederSpatialTopologyTransitionWebGpu,
+  spatialSuccessorPublicationRunner =
+    publishPreparedSchroederSpatialSuccessorSourceFamily,
   gpuTimestampRecorder = null,
   residentStepOptions = {}
 } = {}) {
@@ -15437,6 +15545,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (typeof residentStepRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a residentStepRunner function');
+  }
+  if (typeof spatialSuccessorPublicationRunner !== 'function') {
+    throw new TypeError(
+      'runSchroederSameLevelMechanicsWebGpu requires a spatialSuccessorPublicationRunner function'
+    );
   }
   if (enableSpatialEpochGeneration && typeof spatialEpochGenerationRunner !== 'function') {
     throw new TypeError(
@@ -15998,11 +16111,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
                 particleCount: plan.particleCount,
                 particleIdentityBuffer: sphParticleUpload?.identityBuffer || null,
                 particleIdentityStrideWords: SPH_GPU_PARTICLE_IDENTITY_UINTS,
-                // The aggregate reduction is part of authoritative two-level
-                // identity and FAR traversal.  Supplying the particle family
-                // on the ordinary single-level route would encode that entire
-                // reduction every generation even though no consumer can
-                // admit it.
+                // Build the aggregate for the two-level/far-field route that
+                // consumes it. Same-level exact-near contact remains on the
+                // coordinate-indexed directory: native parity proves the
+                // dormant-safe aggregate is correct, while the production
+                // timestamp gate shows tree traversal is slower for this
+                // bounded local-support workload.
                 particleBufferSet: twoLevelAuthoritative
                   ? sphParticleUpload
                   : null,
@@ -16037,6 +16151,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
                       }
                     ]
                   : null,
+                ...(spatialEpochArenaCount == null
+                  ? {}
+                  : { directArenaCount: spatialEpochArenaCount }),
                 gpuTimestampRecorder
               });
               if (
@@ -16110,6 +16227,110 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let pendingTwoLevelPostMechanicsClosure = null;
   let twoLevelMechanicsPublicationReceipt = null;
   let twoLevelMechanicsPositiveCompletionPromise = null;
+  let spatialTopologyTransitionReceipt = null;
+  let spatialSuccessorSourceFamily = null;
+  let spatialSuccessorPublicationPlan = null;
+  let spatialSuccessorPublicationReceipt = null;
+  const requirePublishedSpatialSuccessorSourceFamily = ({
+    stage,
+    plan,
+    commitReceipt,
+    nextParticleUploads
+  }) => {
+    if (
+      validateSchroederSpatialSuccessorPublicationReceipt(
+        spatialSuccessorPublicationReceipt,
+        { plan, commitReceipt, nextParticleUploads }
+      )
+      && spatialSuccessorPublicationReceipt.sourceFamily?.ready === true
+      && spatialSuccessorPublicationReceipt.sourceFamily?.authenticated === true
+    ) {
+      return spatialSuccessorPublicationReceipt.sourceFamily;
+    }
+    const error = new Error(
+      `Canonical ${stage} committed without publishing its exact successor source family: ${
+        spatialSuccessorPublicationReceipt?.reason
+        ?? spatialSuccessorPublicationReceipt?.status
+        ?? 'publication receipt unavailable'
+      }`
+    );
+    error.code = 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_PUBLICATION_REJECTED';
+    error.stage = stage;
+    error.committedContinuationQuarantined = true;
+    throw error;
+  };
+  const topologyTransitionRunnerExplicitlyInjected =
+    spatialTopologyTransitionRunner
+      !== runSchroederSpatialTopologyTransitionWebGpu;
+  const applyObservedTopologyTransition = async ({
+    generation,
+    nextParticleUploads,
+    forceTopologyAdvance = false,
+    stage
+  }) => {
+    if (typeof spatialTopologyTransitionRunner !== 'function') {
+      const error = new TypeError(
+        'Canonical final topology publication requires a topology transition runner'
+      );
+      error.code = 'ERR_SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_RUNNER';
+      throw error;
+    }
+    const sphUpload = nextParticleUploads?.sphParticleUpload ?? null;
+    const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+    if (
+      !sphUpload?.stateBuffer
+      || !Number.isInteger(sphUpload.particleCount)
+      || sphUpload.particleCount < 1
+      || mlsUpload?.particleCount !== sphUpload.particleCount
+    ) {
+      const error = new Error(
+        'Canonical final topology publication requires one complete successor family'
+      );
+      error.code = 'ERR_SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_SUCCESSOR';
+      throw error;
+    }
+    const receipt = await runHierarchyStage(stage, () => (
+      spatialTopologyTransitionRunner({
+        device,
+        generation,
+        sourceStateBuffer: generation?.source?.sourceStateBuffer,
+        sourceParticleCount: generation?.source?.sourceCount,
+        successorStateBuffer: sphUpload.stateBuffer,
+        successorParticleCount: sphUpload.particleCount,
+        sourceTopologyEpoch: generation?.execution?.topologyEpoch,
+        forceTopologyAdvance
+      })
+    ));
+    if (!topologyTransitionRunnerExplicitlyInjected) {
+      applySchroederSpatialTopologyTransitionReceipt(
+        nextParticleUploads,
+        receipt,
+        { generation }
+      );
+    } else {
+      // Dependency-injected runners are an explicit test/embedding boundary.
+      // They must still return one exact coherent epoch for both descriptors.
+      const nextTopologyEpoch = receipt?.nextTopologyEpoch;
+      if (
+        receipt?.ready !== true
+        || receipt?.gpuAuthenticated !== true
+        || receipt?.generationId !== generation?.execution?.generationId
+        || !Number.isInteger(nextTopologyEpoch)
+        || nextTopologyEpoch < 0
+        || nextTopologyEpoch > 0xffff_ffff
+      ) {
+        const error = new Error(
+          'Injected topology transition runner returned an unauthenticated receipt'
+        );
+        error.code = 'ERR_SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_RECEIPT';
+        throw error;
+      }
+      sphUpload.topologyEpoch = nextTopologyEpoch;
+      mlsUpload.topologyEpoch = nextTopologyEpoch;
+      nextParticleUploads.schroederSpatialTopologyTransitionReceipt = receipt;
+    }
+    return receipt;
+  };
   const scheduleTwoLevelAggregateTraversalCleanup = () => {
     if (
       !twoLevelSpatialAggregateTraversalRuntime
@@ -16417,6 +16638,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         },
         boxDimsM,
         gpuTimestampRecorder,
+        directArenaCount: spatialEpochArenaCount,
         spatialEpochGenerationRunner,
         mechanicsEpochMode:
           SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_FUSED_PRIVATE
@@ -17476,29 +17698,6 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           twoLevelThermalResponseGraphUpload;
       }
     }
-    if (
-      residentStepOptions?.reactionTable?.reactionCount > 0
-      && residentStepOptions?.thermalMaterialTable
-    ) {
-      const reactionProposalRunner =
-        residentStepOptions?.spatialReactionDiscoveryProposalRunner
-        || runSchroederSpatialReactionDiscoveryProposalWebGpu;
-      twoLevelSpatialReactionDiscoveryProposal = await runHierarchyStage(
-        'two-level-post-mechanics-reaction-discovery-proposal',
-        () => reactionProposalRunner({
-          device,
-          generation: twoLevelPostMechanicsEpoch.generation,
-          sphParticleState: proposalSphParticleState,
-          sphParticleUpload: postMechanicsSphUpload,
-          reactionTable: residentStepOptions.reactionTable
-        })
-      );
-      if (twoLevelSpatialReactionDiscoveryProposal?.ready !== true) {
-        throw new Error(
-          'Two-level reaction discovery did not publish an authenticated proposal'
-        );
-      }
-    }
     if (residentStepOptions?.thermalMaterialTable) {
       const thermalProposalRunner =
         residentStepOptions?.spatialThermalProposalRunner
@@ -17508,8 +17707,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         () => thermalProposalRunner({
           device,
           generation: twoLevelPostMechanicsEpoch.generation,
+          schroederSpatialEpochTransaction:
+            twoLevelPostMechanicsEpoch.transaction,
           sphParticleState: proposalSphParticleState,
           sphParticleUpload: postMechanicsSphUpload,
+          mlsMpmParticleUpload:
+            twoLevelPostMechanicsCanonicalUploads.mlsMpmParticleUpload,
           thermalResponseGraphUpload: twoLevelThermalResponseGraphUpload,
           dtS: dt,
           smoothingLengthM:
@@ -17610,8 +17813,6 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         twoLevelPostMechanicsEpoch,
         {
           consumerReceipts: {
-            [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
-              twoLevelSpatialReactionDiscoveryProposal?.receipt ?? null,
             [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
               twoLevelSpatialThermalProposal?.consumerReceipt?.(
                 SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION
@@ -17625,7 +17826,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           }
         }
       );
-    if (admittedSidecarCount !== twoLevelPostMechanicsConsumerReaderIds.length) {
+    const earlySidecarCount = twoLevelPostMechanicsConsumerReaderIds.filter(
+      (readerId) => (
+        readerId !== SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY
+      )
+    ).length;
+    if (admittedSidecarCount !== earlySidecarCount) {
       throw new Error(
         'Two-level final-state spatial transaction did not admit every enabled sidecar'
       );
@@ -17701,8 +17907,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           twoLevelPostMechanicsEpoch?.transaction?.epochIdentity ?? null,
         schroederSpatialThermalProposal:
           twoLevelSpatialThermalProposal,
-        schroederSpatialReactionDiscoveryProposal:
-          twoLevelSpatialReactionDiscoveryProposal,
+        spatialReactionDiscoveryProposalRunner:
+          residentStepOptions?.spatialReactionDiscoveryProposalRunner
+          || runSchroederSpatialReactionDiscoveryProposalWebGpu,
         schroederLawQueue: null,
         schroederLawNeighborCandidates: null,
         reactionLawInputsQuarantined: true,
@@ -17710,20 +17917,77 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           residentStepOptions?.residentProductMass ?? null,
         residentProductMassMergeRunner:
           mergeResidentProductMassBuffersWebGpu,
-        timedStage: (stage, runStage) => runHierarchyStage(
-          `two-level-post-mechanics-${stage}`,
-          runStage
-        ),
-        afterThermalStep: ({ thermalStep }) => {
+        gpuTimestampRecorder,
+        timedStage: (stage, runStage) => {
+          // Preserve the established timestamp identity used by the clean
+          // historical baseline.  The closure's dependency key is camelCase,
+          // but the two-level hierarchy stage has always been published as a
+          // hyphenated reaction-discovery proposal.  Keep this translation at
+          // the hierarchy wrapper boundary so the same-level resident producer
+          // remains unchanged.
+          const hierarchyStage = stage === 'spatialReactionDiscoveryProposal'
+            ? 'reaction-discovery-proposal'
+            : stage;
+          return runHierarchyStage(
+            `two-level-post-mechanics-${hierarchyStage}`,
+            runStage
+          );
+        },
+        afterThermalStep: ({
+          thermalStep,
+          thermalSourceStateBuffer,
+          thermalSourceThermoBuffer
+        }) => {
           if (twoLevelSpatialThermalProposal && !thermalStep) {
             throw new Error(
               'Canonical two-level thermal proposal was not applied'
             );
           }
+          if (twoLevelSpatialThermalProposal) {
+            const canonical = thermalStep?.canonicalThermalProposal;
+            if (
+              canonical?.proposal !== twoLevelSpatialThermalProposal
+              || canonical.matchedTimeStateBuffer !== thermalSourceStateBuffer
+              || canonical.matchedTimeThermoBuffer !== thermalSourceThermoBuffer
+              || canonical.producerStage?.submissionObserved !== true
+              || thermalStep.thermalProposalProducerApplySingleSubmission !== true
+              || twoLevelSpatialThermalProposal
+                .matchedTimeProducerSubmissionObserved !== true
+            ) {
+              throw new Error(
+                'Canonical two-level thermal apply did not prove exact matched-time producer/apply identity in one submission'
+              );
+            }
+          }
           twoLevelSpatialThermalProposal
             ?.releaseAfterCanonicalApplySubmittedWork?.();
         },
-        afterReactionStep: ({ reactionStep }) => {
+        afterReactionDiscoveryProposal: ({
+          spatialReactionDiscoveryProposal: proposal
+        }) => {
+          twoLevelSpatialReactionDiscoveryProposal = proposal;
+          if (!twoLevelPostMechanicsConsumerReaderIds.includes(
+            SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY
+          )) return;
+          if (proposal?.ready !== true) {
+            throw new Error(
+              'Canonical two-level post-thermal reaction discovery did not execute'
+            );
+          }
+          twoLevelCanonicalEpochController.admitPostMechanicsLateConsumer(
+            twoLevelPostMechanicsEpoch,
+            {
+              readerId:
+                SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY,
+              consumerReceipt: proposal.receipt
+            }
+          );
+        },
+        afterReactionStep: ({
+          reactionStep,
+          spatialReactionDiscoveryProposal: proposal
+        }) => {
+          twoLevelSpatialReactionDiscoveryProposal = proposal;
           if (twoLevelSpatialReactionDiscoveryProposal && !reactionStep) {
             throw new Error(
               'Canonical two-level reaction proposal was not applied'
@@ -17841,10 +18105,25 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       }
     }
     : null;
-  finalTwoLevelContinuationUploads = twoLevelAdoptedUploads
+  const selectedTwoLevelContinuationUploads = twoLevelAdoptedUploads
     ?? twoLevelPostMechanicsUploads
     ?? twoLevelPublicEpochUploads;
-  finalTwoLevelContinuationLedgerOwned = Boolean(twoLevelAdoptedUploads);
+  const finalTwoLevelContinuationWasAdopted =
+    selectedTwoLevelContinuationUploads === twoLevelAdoptedUploads;
+  // The final authority stamps epoch identity and reserves its publication
+  // slot before commit, so never mutate a frozen public E* upload envelope.
+  finalTwoLevelContinuationUploads = selectedTwoLevelContinuationUploads
+    ? {
+        ...selectedTwoLevelContinuationUploads,
+        sphParticleUpload: {
+          ...selectedTwoLevelContinuationUploads.sphParticleUpload
+        },
+        mlsMpmParticleUpload: {
+          ...selectedTwoLevelContinuationUploads.mlsMpmParticleUpload
+        }
+      }
+    : null;
+  finalTwoLevelContinuationLedgerOwned = finalTwoLevelContinuationWasAdopted;
   const closureContinuationSelected = Boolean(
     twoLevelPostMechanicsClosure
     && twoLevelPostMechanicsContinuation?.ready === true
@@ -17911,6 +18190,62 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       )
     );
   }
+  if (
+    twoLevelPostMechanicsEpoch
+    && finalTwoLevelContinuationUploads
+    && topologyTransitionRunnerExplicitlyInjected
+  ) {
+    spatialTopologyTransitionReceipt = await applyObservedTopologyTransition({
+      generation: twoLevelPostMechanicsEpoch.generation,
+      nextParticleUploads: finalTwoLevelContinuationUploads,
+      forceTopologyAdvance:
+        finalTwoLevelContinuationWasAdopted,
+      stage: 'two-level-final-topology-transition'
+    });
+    resolvedTwoLevelMechanics.schroederSpatialTopologyTransitionReceipt =
+      spatialTopologyTransitionReceipt;
+    resolvedTwoLevelMechanics.schroederSpatialTopologyTransitionStatus =
+      spatialTopologyTransitionReceipt.status;
+  }
+  if (
+    twoLevelPostMechanicsEpoch
+    && !topologyTransitionRunnerExplicitlyInjected
+    && (
+      twoLevelMechanicsRunner === runSchroederTwoLevelMechanicsStepWebGpu
+      || twoLevelMechanicsRunner?.schroederSpatialTopologyTransitionAware === true
+    )
+  ) {
+    const reactionResult =
+      twoLevelPostMechanicsClosure?.reactionStep?.result
+      ?? twoLevelPostMechanicsClosure?.reactionStep
+      ?? null;
+    const placementPositionEpochFloorCandidate = closureContinuationSelected
+      ? reactionResult?.reactionPlacementPositionEpochFloorReceipt ?? null
+      : null;
+    // A later mechanics refresh or phase-carrier transfer may legitimately
+    // replace one component of the reaction destination family. In that case
+    // the exact placement receipt cannot authenticate the mixed final family.
+    // Its branded, ancestor-bound position epoch remains an authenticated
+    // floor, however, so the final family cannot collapse the post-G2P
+    // micro-epoch plus possible placement mutation back to one public increment.
+    // The resident submission proves a safe placed-or-frozen destination and
+    // an ancestor-bound epoch floor. Without observing the terminal GPU
+    // outcome it must never be promoted as an authenticated position-result
+    // transition, even when the exact destination buffers survive unchanged.
+    spatialSuccessorPublicationPlan =
+      await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+        transaction: twoLevelPostMechanicsEpoch.transaction,
+        generation: twoLevelPostMechanicsEpoch.generation,
+        nextParticleUploads: finalTwoLevelContinuationUploads,
+        topologyTransitionReceipt: spatialTopologyTransitionReceipt,
+        conservativeTopologyAdvance: true,
+        placementPositionEpochFloorReceipt:
+          placementPositionEpochFloorCandidate,
+        forcePositionAdvance: finalTwoLevelContinuationWasAdopted,
+        componentOwnerStages:
+          twoLevelPostMechanicsContinuation?.componentSources ?? null
+      });
+  }
   if (twoLevelPostMechanicsEpoch) {
     const publicCommit = twoLevelCanonicalEpochController.commitPostMechanics(
       twoLevelPostMechanicsEpoch,
@@ -17919,6 +18254,31 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         status: 'two-level-final-sidecar-state-submitted'
       }
     );
+    if (
+      !topologyTransitionRunnerExplicitlyInjected
+      && spatialSuccessorPublicationPlan
+    ) {
+      spatialSuccessorPublicationReceipt =
+        spatialSuccessorPublicationRunner(
+          spatialSuccessorPublicationPlan,
+          { commitReceipt: publicCommit.commitReceipt }
+        );
+      spatialSuccessorSourceFamily = requirePublishedSpatialSuccessorSourceFamily({
+        stage: 'two-level post-mechanics E*',
+        plan: spatialSuccessorPublicationPlan,
+        commitReceipt: publicCommit.commitReceipt,
+        nextParticleUploads: finalTwoLevelContinuationUploads
+      });
+      resolvedTwoLevelMechanics.schroederSpatialSuccessorSourceFamily =
+        spatialSuccessorSourceFamily;
+      resolvedTwoLevelMechanics.schroederSpatialSuccessorSourceFamilyStatus =
+        spatialSuccessorSourceFamily?.status
+        ?? spatialSuccessorPublicationReceipt.status;
+      resolvedTwoLevelMechanics.schroederSpatialSuccessorPublicationStatus =
+        spatialSuccessorPublicationReceipt.status;
+      resolvedTwoLevelMechanics.schroederSpatialSuccessorPublicationReason =
+        spatialSuccessorPublicationReceipt.reason;
+    }
     scheduleTwoLevelAggregateTraversalCleanup();
     resolvedTwoLevelMechanics.authoritativeCommitVerified = true;
     resolvedTwoLevelMechanics.authoritativeCommitStatus =
@@ -18344,10 +18704,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           particleCount: twoLevelParticleStorageAdoption.authoritativeParticleCount
         }
         : resolvedTwoLevelMechanics?.nextMlsMpmParticleState ?? null,
-      nextParticleUploads: twoLevelAdoptedUploads
-        ?? twoLevelPostMechanicsUploads
-        ?? resolvedTwoLevelMechanics?.nextParticleUploads
-        ?? null,
+      // Publication authenticates and stamps the cloned final envelope. Return
+      // that exact object so render admission and next-tick chaining cannot
+      // silently fall back to an unstamped pre-publication descriptor family.
+      nextParticleUploads: finalTwoLevelContinuationUploads,
       schroederParticleStorageAdoption: twoLevelParticleStorageAdoption,
       schroederParticleStorageAdoptionStatus:
         twoLevelParticleStorageAdoption?.status ?? particleStorageAdoptionSkipReason ?? null,
@@ -18420,6 +18780,77 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     // scene's continuation gate needs the reported mode to match the
     // requested one; a silent downgrade becomes a replay treadmill.
     residentStep.schroederRequestedReadbackMode = readbackMode;
+  }
+  const singleLevelFinalAuthorityEligible = Boolean(
+    !twoLevelAuthoritative
+    && resolvedSpatialEpochGeneration?.selected === true
+    && residentStep?.nextParticleUploads
+    && (
+      topologyTransitionRunnerExplicitlyInjected
+      || residentStepRunner === runMlsMpmResidentStepWithOptionalWebGpu
+      || residentStepRunner?.schroederSpatialTopologyTransitionAware === true
+    )
+  );
+  if (singleLevelFinalAuthorityEligible) {
+    residentStep.nextParticleUploads = {
+      ...residentStep.nextParticleUploads,
+      sphParticleUpload: {
+        ...residentStep.nextParticleUploads.sphParticleUpload
+      },
+      mlsMpmParticleUpload: {
+        ...residentStep.nextParticleUploads.mlsMpmParticleUpload
+      }
+    };
+  }
+  if (
+    singleLevelFinalAuthorityEligible
+    && topologyTransitionRunnerExplicitlyInjected
+  ) {
+    spatialTopologyTransitionReceipt = await applyObservedTopologyTransition({
+      generation: resolvedSpatialEpochGeneration,
+      nextParticleUploads: residentStep.nextParticleUploads,
+      forceTopologyAdvance:
+        residentStep.nextParticleUploads.sphParticleUpload?.sourceStage
+          === 'schroeder-particle-storage-materialization',
+      stage: 'single-level-final-topology-transition'
+    });
+  }
+  if (residentStep && spatialTopologyTransitionReceipt) {
+    residentStep.schroederSpatialTopologyTransitionReceipt =
+      spatialTopologyTransitionReceipt;
+    residentStep.schroederSpatialTopologyTransitionStatus =
+      spatialTopologyTransitionReceipt.status;
+  }
+  const singleLevelReactionResult =
+    residentStep?.reactionStep?.result
+    ?? residentStep?.reactionStep
+    ?? null;
+  const singleLevelPlacementPositionEpochFloorCandidate =
+    singleLevelFinalAuthorityEligible
+      ? singleLevelReactionResult
+        ?.reactionPlacementPositionEpochFloorReceipt ?? null
+      : null;
+  if (
+    !twoLevelAuthoritative
+    && spatialEpochTransaction
+    && singleLevelFinalAuthorityEligible
+    && !topologyTransitionRunnerExplicitlyInjected
+  ) {
+    spatialSuccessorPublicationPlan =
+      await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+        transaction: spatialEpochTransaction,
+        generation: resolvedSpatialEpochGeneration,
+        nextParticleUploads: residentStep.nextParticleUploads,
+        topologyTransitionReceipt: spatialTopologyTransitionReceipt,
+        conservativeTopologyAdvance: true,
+        placementPositionEpochFloorReceipt:
+          singleLevelPlacementPositionEpochFloorCandidate,
+        forcePositionAdvance: true,
+        componentOwnerStages:
+          residentStep.residentAuthorityFamilyOwners
+          ?? residentStep.residentAuthoritySummary?.familyOwners
+          ?? null
+      });
   }
   const exactNearConsumerArtifactFamilyByReader = {
     [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
@@ -18494,11 +18925,57 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           status: 'authenticated-exact-near-consumer-proposals-sealed'
         }
       );
-      commitSchroederSpatialEpochTransaction(spatialEpochTransaction, {
+      const commitReceipt = commitSchroederSpatialEpochTransaction(
+        spatialEpochTransaction,
+        {
         nextParticleUploads: residentStep?.nextParticleUploads ?? null,
         status: 'resident-next-state-submitted'
-      });
+        }
+      );
+      // Every generation reader has submitted by the successful direct
+      // transaction commit.  Start its arena retirement before the
+      // successor's CPU-only publication bookkeeping so the bounded arena
+      // window is not held across work which cannot consume the predecessor
+      // directory.  Preparation deliberately remains before commit because
+      // it authenticates the still-live generation.
+      if (
+        ownsResolvedSpatialEpochGeneration
+        && resolvedSpatialEpochGeneration?.releaseScheduled !== true
+      ) {
+        releaseSchroederSpatialEpochGenerationAfterQueue(
+          resolvedSpatialEpochGeneration,
+          device
+        );
+      }
+      if (
+        !topologyTransitionRunnerExplicitlyInjected
+        && spatialSuccessorPublicationPlan
+      ) {
+        spatialSuccessorPublicationReceipt =
+          spatialSuccessorPublicationRunner(
+            spatialSuccessorPublicationPlan,
+            { commitReceipt }
+          );
+        spatialSuccessorSourceFamily = requirePublishedSpatialSuccessorSourceFamily({
+          stage: 'single-level E*',
+          plan: spatialSuccessorPublicationPlan,
+          commitReceipt,
+          nextParticleUploads: residentStep?.nextParticleUploads ?? null
+        });
+      }
     }
+  }
+  if (residentStep && spatialSuccessorSourceFamily) {
+    residentStep.schroederSpatialSuccessorSourceFamily =
+      spatialSuccessorSourceFamily;
+    residentStep.schroederSpatialSuccessorSourceFamilyStatus =
+      spatialSuccessorSourceFamily.status;
+  }
+  if (residentStep && spatialSuccessorPublicationReceipt) {
+    residentStep.schroederSpatialSuccessorPublicationStatus =
+      spatialSuccessorPublicationReceipt.status;
+    residentStep.schroederSpatialSuccessorPublicationReason =
+      spatialSuccessorPublicationReceipt.reason;
   }
   if (
     ownsResolvedSpatialEpochGeneration
@@ -18758,6 +19235,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       directoryBuildCount: resolvedSpatialEpochGeneration.directoryBuildCount ?? 0,
       privateLookupBuildCount: resolvedSpatialEpochGeneration.privateLookupBuildCount ?? 0,
       runtimeCapacity: resolvedSpatialEpochGeneration.runtimeCapacity ?? null,
+      directArenaCount: resolvedSpatialEpochGeneration.directArenaCount ?? null,
       arenaCapacity: resolvedSpatialEpochGeneration.arenaCapacity ?? null,
       runtimeCacheHit: resolvedSpatialEpochGeneration.runtimeCacheHit === true,
       backpressureWaitCount: resolvedSpatialEpochGeneration.backpressureWaitCount ?? 0,
@@ -19594,6 +20072,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ? resolvedPortableSummary.retainedRefs.map((entry) => ({
           family: entry.family,
           role: entry.role,
+          sourceFamilyRole: entry.sourceFamilyRole,
+          sourceGenerationId: entry.sourceGenerationId,
+          sourceEpochIdentity: entry.sourceEpochIdentity,
+          positionAuthority: entry.positionAuthority,
+          finalContinuationAuthority:
+            entry.finalContinuationAuthority === true,
+          coherentSolidAuthority: entry.coherentSolidAuthority === true,
           schema: entry.schema,
           status: entry.status,
           rowCount: entry.rowCount,
@@ -19634,6 +20119,21 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       stateAuthorityStatus: resolvedPortableSummary.stateAuthorityStatus,
       fullParticleReadbackRequired: resolvedPortableSummary.fullParticleReadbackRequired === true
     } : null,
+    schroederSpatialSuccessorSourceFamily: spatialSuccessorSourceFamily,
+    schroederSpatialSuccessorSourceFamilyStatus:
+      spatialSuccessorSourceFamily?.status ?? null,
+    schroederSpatialSuccessorSourceFamilyReady:
+      spatialSuccessorSourceFamily?.ready === true,
+    schroederSpatialSuccessorSourceFamilyRole:
+      spatialSuccessorSourceFamily?.sourceFamilyRole ?? null,
+    schroederSpatialSuccessorSourceGenerationId:
+      spatialSuccessorSourceFamily?.sourceGenerationId ?? null,
+    schroederSpatialSuccessorEpochIdentity:
+      spatialSuccessorSourceFamily?.successorEpochIdentity ?? null,
+    schroederSpatialSuccessorPublicationStatus:
+      spatialSuccessorPublicationReceipt?.status ?? null,
+    schroederSpatialSuccessorPublicationReason:
+      spatialSuccessorPublicationReceipt?.reason ?? null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,

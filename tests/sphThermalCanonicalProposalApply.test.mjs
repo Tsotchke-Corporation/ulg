@@ -8,11 +8,16 @@ import {
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import {
-  runSchroederSpatialThermalProposalWebGpu
+  SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL,
+  runSchroederSpatialThermalProposalWebGpu,
+  schroederSpatialThermalDerivedPrepassWgsl
 } from '../src/runtime/sph/schroederSpatialThermalProposalsGpu.js';
 import {
   runSchroederSpatialEpochGenerationWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import {
+  createSchroederSpatialEpochTransaction
+} from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
 import {
   buildSphGpuParticleBuffers
 } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -25,6 +30,8 @@ import {
   buildSphThermalMaterialTable,
   buildSphThermalPhaseResponseTable,
   createSphThermalStepWebGpuEncoderStage,
+  SPH_THERMAL_CANONICAL_PROPOSAL_ROW_WORDS,
+  SPH_THERMAL_CANONICAL_PROPOSAL_VERSION,
   sphThermalStepWgsl,
   uploadSphThermalResponseGraphBuffers
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
@@ -54,6 +61,9 @@ function createFakeEncoder(device, descriptor = {}) {
         setBindGroup(index, bindGroup) { pass.bindGroup = { index, bindGroup }; },
         dispatchWorkgroups(x, y = 1, z = 1) {
           pass.commands.push({ dispatch: [x, y, z] });
+        },
+        dispatchWorkgroupsIndirect(buffer, offset = 0) {
+          pass.commands.push({ dispatchIndirect: { buffer, offset } });
         },
         end() { pass.ended = true; }
       };
@@ -215,11 +225,38 @@ function liveCanonicalThermalFixture() {
       sphParticleState.thermo.byteLength
     )
   };
+  const mlsMpmParticleUpload = {
+    mechanicsBuffer: taggedBuffer(
+      device,
+      'canonical-thermal-source-mechanics',
+      particleCount * 24 * Float32Array.BYTES_PER_ELEMENT
+    )
+  };
+  const schroederSpatialEpochTransaction =
+    createSchroederSpatialEpochTransaction({
+      device,
+      generation,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      requiredReaderIds: [],
+      enabledConsumerReaderIds: [
+        'thermal-conduction',
+        'thermal-radiation'
+      ],
+      consumerSupportProfileIds: {
+        'thermal-conduction':
+          SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
+        'thermal-radiation':
+          SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1
+      }
+    });
   const proposal = runSchroederSpatialThermalProposalWebGpu({
     device,
     generation,
+    schroederSpatialEpochTransaction,
     sphParticleState,
     sphParticleUpload,
+    mlsMpmParticleUpload,
     thermalResponseGraphUpload,
     dtS: 0.001
   });
@@ -227,8 +264,13 @@ function liveCanonicalThermalFixture() {
     device,
     generation,
     proposal,
+    dtS: 0.001,
     sphParticleState,
     sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederSpatialEpochTransaction,
+    proposalStateBuffer: sphParticleUpload.stateBuffer,
+    proposalThermoBuffer: sphParticleUpload.thermoBuffer,
     thermalMaterialTable,
     thermalClosureGraphSet,
     thermalPhaseResponseTable,
@@ -237,10 +279,36 @@ function liveCanonicalThermalFixture() {
 }
 
 test('thermal apply WGSL validates the complete canonical header before pair rows', () => {
+  assert.match(schroederSpatialThermalDerivedPrepassWgsl,
+    /fn thermal_prepass_reachable_energy_domain\(/);
+  assert.match(schroederSpatialThermalDerivedPrepassWgsl,
+    /row1\.x != previous_energy_hi[\s\S]*first\.y != previous_temperature_hi/);
+  assert.match(schroederSpatialThermalDerivedPrepassWgsl,
+    /var energy_lo = max\(reachable_domain\.energy_lo, lower_inverse\.energy\)/);
+  assert.match(schroederSpatialThermalDerivedPrepassWgsl,
+    /var energy_hi = min\(reachable_domain\.energy_hi, upper_inverse\.energy\)/);
+  assert.doesNotMatch(schroederSpatialThermalDerivedPrepassWgsl,
+    /max\(selection\.energy_lo, lower_inverse\.energy\)/);
   assert.match(sphThermalStepWgsl, /canonical_proposal_enabled: u32/);
+  assert.match(sphThermalStepWgsl, /fn thermal_carrier_phase_classification\(/);
+  assert.match(sphThermalStepWgsl,
+    /phase_from == classification\.x[\s\S]*phase_to == classification\.x/);
+  assert.match(sphThermalStepWgsl,
+    /classification\.y == 1u && abs\(row0\.y - 2\.0\) < 0\.5/);
+  assert.match(sphThermalStepWgsl,
+    /thermal_temperature_slope\(row0\.x, vel_u\.w, row0\.y, row1\)/);
+  assert.match(sphThermalStepWgsl,
+    /let other_row1 = thermo_row1\(other\)[\s\S]*other_row0\.y,[\s\S]*other_row1/);
   assert.match(sphThermalStepWgsl, /THERMAL_PROPOSAL_MAGIC: u32 = 0x54504831u/);
+  assert.equal(SPH_THERMAL_CANONICAL_PROPOSAL_VERSION, 2);
+  assert.equal(SPH_THERMAL_CANONICAL_PROPOSAL_ROW_WORDS, 4);
+  assert.match(sphThermalStepWgsl, /THERMAL_PROPOSAL_VERSION: u32 = 2u/);
   assert.match(sphThermalStepWgsl, /thermal_bins\[6u\] == 0u/);
   assert.match(sphThermalStepWgsl, /thermal_bins\[7u\] == 0u/);
+  assert.match(
+    sphThermalStepWgsl,
+    /thermal_bins\[15u\] == params\.particle_count/
+  );
   for (const word of [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15]) {
     assert.match(sphThermalStepWgsl, new RegExp(`thermal_bins\\[${word}u\\]`));
   }
@@ -254,18 +322,50 @@ test('thermal apply WGSL validates the complete canonical header before pair row
       SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1.toString(16).padStart(8, '0')
     }u`
   ));
+  assert.match(sphThermalStepWgsl, /let proposed_u_lo = bitcast<f32>/);
+  assert.match(sphThermalStepWgsl, /let proposed_u_hi = bitcast<f32>/);
   assert.match(
     sphThermalStepWgsl,
-    /proposed_conduction_du \+ proposed_radiation_du[\s\S]*clamp_du_to_temperature_range\([\s\S]*conduction_du/
+    /proposed_next_u >= proposed_u_lo[\s\S]*proposed_next_u <= proposed_u_hi/
   );
   assert.match(
     sphThermalStepWgsl,
-    /clamp_du_to_temperature_range\([\s\S]*for \(var face = 0u; face < 6u;[\s\S]*ambient_temperature_k/
+    /if \(params\.canonical_proposal_enabled == 1u\) \{[\s\S]*du = du \+ conduction_du;[\s\S]*\} else \{[\s\S]*clamp_du_to_temperature_range/
+  );
+  assert.match(sphThermalStepWgsl, /fn thermal_carrier_energy_domain\(/);
+  assert.match(sphThermalStepWgsl,
+    /fn canonical_thermal_reachable_energy_domain\(/);
+  assert.match(sphThermalStepWgsl,
+    /response1\.x != previous_energy_hi[\s\S]*first\.y != previous_temperature_hi/);
+  assert.match(sphThermalStepWgsl,
+    /proposed_u_lo >= canonical_reachable_domain\.x[\s\S]*proposed_u_hi <= canonical_reachable_domain\.y/);
+  assert.match(sphThermalStepWgsl,
+    /canonical_thermal_open_reservoir_delta\([\s\S]*equilibrium_limited_du,[\s\S]*vel_u\.w,[\s\S]*current_u,[\s\S]*carrier_domain\.x,[\s\S]*carrier_domain\.y/);
+  assert.match(sphThermalStepWgsl,
+    /if \(params\.canonical_proposal_enabled == 1u\) \{[\s\S]*canonical_reachable_domain_ready[\s\S]*canonical_reachable_domain\.x,[\s\S]*canonical_reachable_domain\.y/);
+  assert.match(sphThermalStepWgsl, /fn clamp_du_to_energy_domain\(/);
+  assert.match(
+    sphThermalStepWgsl,
+    /carrier_u_lo = carrier_domain\.x;[\s\S]*for \(var face = 0u; face < 6u;[\s\S]*clamp_du_to_energy_domain/
+  );
+  assert.match(
+    sphThermalStepWgsl,
+    /let candidate_next_u = vel_u\.w \+ du;[\s\S]*thermal_value_finite\(candidate_next_u\)[\s\S]*carrier_u_lo,[\s\S]*carrier_u_hi/
   );
 });
 
 test('thermal WebGPU consumes one authenticated canonical proposal without legacy lookup', () => {
   const fixture = liveCanonicalThermalFixture();
+  const postMechanicsStateBuffer = taggedBuffer(
+    fixture.device,
+    'canonical-thermal-post-mechanics-apply-state',
+    fixture.sphParticleState.state.byteLength
+  );
+  const postMechanicsThermoBuffer = taggedBuffer(
+    fixture.device,
+    'canonical-thermal-post-mechanics-apply-thermo',
+    fixture.sphParticleState.thermo.byteLength
+  );
   const borrowedLegacyBins = taggedBuffer(
     fixture.device,
     'legacy-bins-must-not-bind',
@@ -275,6 +375,10 @@ test('thermal WebGPU consumes one authenticated canonical proposal without legac
     ...fixture,
     schroederSpatialEpochGeneration: fixture.generation,
     schroederSpatialThermalProposal: fixture.proposal,
+    proposalStateBuffer: postMechanicsStateBuffer,
+    proposalThermoBuffer: postMechanicsThermoBuffer,
+    sourceStateBuffer: postMechanicsStateBuffer,
+    sourceThermoBuffer: postMechanicsThermoBuffer,
     neighborBins: {
       binsBuffer: borrowedLegacyBins,
       capacity: 16,
@@ -313,6 +417,22 @@ test('thermal WebGPU consumes one authenticated canonical proposal without legac
 
   const thermalBindGroup = fixture.device.bindGroups.at(-1);
   assert.equal(
+    thermalBindGroup.entries.find(({ binding }) => binding === 0).resource.buffer,
+    postMechanicsStateBuffer
+  );
+  assert.equal(
+    thermalBindGroup.entries.find(({ binding }) => binding === 1).resource.buffer,
+    postMechanicsThermoBuffer
+  );
+  assert.equal(
+    fixture.proposal.thermalProposalSourceAuthority.stateBuffer,
+    fixture.sphParticleUpload.stateBuffer
+  );
+  assert.equal(
+    fixture.proposal.thermalProposalSourceAuthority.thermoBuffer,
+    fixture.sphParticleUpload.thermoBuffer
+  );
+  assert.equal(
     thermalBindGroup.entries.find(({ binding }) => binding === 10).resource.buffer,
     fixture.proposal.proposalBuffer
   );
@@ -339,6 +459,50 @@ test('thermal WebGPU consumes one authenticated canonical proposal without legac
   assert.equal(
     stage.result.canonicalSpatialThermalConsumerReceipts['thermal-radiation'],
     fixture.proposal.consumerReceipt('thermal-radiation')
+  );
+  assert.equal(
+    fixture.proposal.activeSourceProjectionMode,
+    SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL,
+    'the active-node fixture intentionally exercises the local active-rank fallback'
+  );
+  assert.ok(
+    fixture.proposal.thermalCandidateCsr,
+    'the canonical fixture must retain the bounded thermal candidate CSR receipt'
+  );
+  assert.equal(
+    stage.result.canonicalThermalProposal.producerStage.thermalCandidateCsrEnabled,
+    true
+  );
+  assert.equal(
+    stage.result.canonicalThermalProposal.producerStage.proposalDispatchCount,
+    7
+  );
+  const encoder = fixture.device.createCommandEncoder({
+    label: 'canonical-matched-time-producer-and-apply'
+  });
+  stage.encode(encoder);
+  fixture.device.queue.submit([encoder.finish()]);
+  assert.equal(stage.markSubmittedWork(), true);
+  assert.deepEqual(
+    fixture.device.encoders.at(-1).passes.map((pass) => pass.descriptor.label),
+    [
+      'ulg-schroeder-spatial-thermal-derived-prepass',
+      'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
+      'ulg-schroeder-spatial-thermal-directional-budget',
+      'ulg-schroeder-spatial-thermal-csr-validate-rows',
+      'ulg-schroeder-spatial-thermal-csr-seal',
+      'ulg-schroeder-spatial-thermal-budget-resolve',
+      'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal',
+      'ulg-sph-thermal-v2-canonical-proposal-apply'
+    ]
+  );
+  assert.equal(
+    stage.result.canonicalThermalProposal.matchedTimeStateBuffer,
+    postMechanicsStateBuffer
+  );
+  assert.equal(
+    fixture.proposal.matchedTimeProducerSubmissionObserved,
+    true
   );
 
   stage.cleanupSubmittedWork();
@@ -375,9 +539,19 @@ test('thermal WebGPU fails closed for incomplete, stale, cross-device, or unders
     }),
     /not a complete same-device particle row set/
   );
+  assert.throws(
+    () => createStage({
+      proposalStateBuffer: taggedBuffer(
+        fixture.device,
+        'same-device-wrong-xn-state',
+        fixture.sphParticleState.state.byteLength
+      )
+    }),
+    /producer and apply must bind the exact same current state and thermo buffers/
+  );
   const otherDevice = createFakeDevice();
   assert.throws(
     () => createStage({ device: otherDevice }),
-    /consumer device does not own|not a complete same-device|not authenticated/
+    /source state and thermo buffers must belong|consumer device does not own|not a complete same-device|not authenticated/
   );
 });

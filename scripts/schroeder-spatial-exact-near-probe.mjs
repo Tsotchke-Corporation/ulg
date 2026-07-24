@@ -1246,6 +1246,14 @@ async function main() {
         tokenKinematicsRows
       );
       const tokenGasBuffer = createBuffer('policy-token-gas-rows', new Float32Array(12));
+      // The force-row ABI always declares the gas-authority control binding,
+      // even when this isolated policy-token fixture selects model 0. Mirror
+      // the production kernel's zeroed sentinel so native pipeline validation
+      // covers the actual bind-group shape without opting into model-2 data.
+      const tokenGasAuthorityControlBuffer = createBuffer(
+        'policy-token-gas-authority-control-sentinel',
+        new Uint32Array(32)
+      );
       const tokenParamsBuffer = createBuffer(
         'policy-token-force-params',
         pressure.createPressureInterfaceParamsArray({
@@ -1282,7 +1290,8 @@ async function main() {
           { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
           { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
           { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-          { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }
+          { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+          { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }
         ]
       });
       const tokenPipeline = runtimeDevice.createComputePipeline({
@@ -1298,7 +1307,8 @@ async function main() {
           { binding: 2, resource: { buffer: tokenParamsBuffer } },
           { binding: 3, resource: { buffer: tokenGasBuffer } },
           { binding: 4, resource: { buffer: tokenPolicyBuffer } },
-          { binding: 5, resource: { buffer: tokenKinematicsBuffer } }
+          { binding: 5, resource: { buffer: tokenKinematicsBuffer } },
+          { binding: 6, resource: { buffer: tokenGasAuthorityControlBuffer } }
         ]
       });
       const tokenEncoder = runtimeDevice.createCommandEncoder({
@@ -1333,6 +1343,7 @@ async function main() {
         tokenPolicyBuffer,
         tokenKinematicsBuffer,
         tokenGasBuffer,
+        tokenGasAuthorityControlBuffer,
         tokenParamsBuffer,
         tokenOutputBuffer,
         tokenReadbackBuffer

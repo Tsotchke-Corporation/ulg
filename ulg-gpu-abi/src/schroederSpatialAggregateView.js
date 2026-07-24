@@ -1,5 +1,7 @@
 export const ULG_SCHROEDER_SPATIAL_AGGREGATE_VIEW_SCHEMA =
   'peercompute.ulg.schroeder-spatial-aggregate-view.v2';
+export const ULG_SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-active-member-projection.v1';
 export const ULG_SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-aggregate-traversal.v1';
 export const ULG_SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_SUBMISSION_RECEIPT_SCHEMA =
@@ -32,6 +34,13 @@ export const SCHROEDER_SPATIAL_AGGREGATE_VIEW_AUTH_DISPATCH_SLOT =
   SCHROEDER_SPATIAL_AGGREGATE_VIEW_RECORD_DISPATCH_SLOT;
 export const SCHROEDER_SPATIAL_AGGREGATE_VIEW_DISPATCH_WORDS = 9;
 export const SCHROEDER_SPATIAL_AGGREGATE_VIEW_PARAMS_BYTES = 256;
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_MAGIC = 0x5341_4d31;
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_VERSION = 1;
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_OFFSET_WORDS = 91;
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_WORDS = 21;
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_STATUS_READY = 1 << 0;
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_STATUS_ADMITTED = 1 << 1;
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_STATUS_FAIL_CLOSED = 1 << 2;
 export const SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_SUMMARY_WORDS = 32;
 export const SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_PARAMS_BYTES = 128;
 export const SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_QUERY_FLOATS = 8;
@@ -62,6 +71,8 @@ export const SCHROEDER_SPATIAL_AGGREGATE_RECORD_STATUS_MIXED_MATERIAL = 1 << 4;
 export const SCHROEDER_SPATIAL_AGGREGATE_RECORD_STATUS_MIXED_PHASE = 1 << 5;
 export const SCHROEDER_SPATIAL_AGGREGATE_RECORD_STATUS_TOPOLOGY_AUTHENTICATED =
   1 << 6;
+export const SCHROEDER_SPATIAL_AGGREGATE_RECORD_STATUS_HOMOGENEOUS_DOMAIN_SUMMARY_EXACT =
+  1 << 7;
 
 export const SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_STATUS_READY = 1 << 0;
 export const SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_STATUS_ADMITTED = 1 << 1;
@@ -116,8 +127,8 @@ export const SCHROEDER_SPATIAL_AGGREGATE_VIEW_RECORD_LAYOUT = Object.freeze([
   'subtreeMortonRankEnd:u32',
   'prefixBitCount:u32',
   'topologyFingerprint:u32',
-  'reserved42:u32',
-  'reserved43:u32'
+  'homogeneousContinuityDomainId:u32-or-ffffffff',
+  'sourceMemberCount:u32'
 ]);
 
 export const SCHROEDER_SPATIAL_AGGREGATE_RECORD_LAYOUT =
@@ -231,6 +242,47 @@ export const SCHROEDER_SPATIAL_AGGREGATE_VIEW_ABI = Object.freeze({
   submissionOwnership: 'caller',
   materializedCandidateRows: false,
   perSourceCandidateBudget: null
+});
+
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_LAYOUT =
+  Object.freeze([
+    'magic:u32',
+    'abiVersion:u32',
+    'statusFlags:u32',
+    'memberOffsetWords:u32',
+    'memberCapacity:u32',
+    'activeMemberCount:u32',
+    'sourceCount:u32',
+    'cellCount:u32',
+    'generationId:u32',
+    'completionOrdinal:u32',
+    'replayGuardToken:u32',
+    'sourceAdapterId:u32',
+    'directoryCellMemberOffsetWords:u32',
+    'reducedCellCount:u32',
+    'invalidMemberCount:u32',
+    'constructionMode:u32',
+    'physicalCapacityWords:u32',
+    'sourceRowLayoutId:u32',
+    'storageGeneration:u32',
+    'projectionFingerprint:u32',
+    'reserved:u32'
+  ]);
+
+export const SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_ABI = Object.freeze({
+  schema: ULG_SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_SCHEMA,
+  version: SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_VERSION,
+  magic: SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_MAGIC,
+  headerOffsetWords:
+    SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_OFFSET_WORDS,
+  headerWords: SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_WORDS,
+  headerLayout: SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_LAYOUT,
+  construction:
+    'canonical-cell-original-range-prefix-compaction-by-mechanically-active-source',
+  memberOrdering: 'canonical-directory-order-within-each-cell',
+  cellRangeAuthority: 'aggregate-leaf-particle-count-and-directory-member-begin',
+  overflowPolicy: 'fail-closed-with-parent-aggregate-view',
+  readbackPolicy: 'explicit-probe-only'
 });
 
 const UINT32_MAX = 0xffff_ffff;
@@ -384,6 +436,12 @@ export function createSchroederSpatialAggregateViewPlan({
   if (layout.leafCapacity > resolvedSourceCapacity) {
     throw new RangeError('cellCapacity must not exceed sourceCapacity');
   }
+  const activeMemberOffsetWords = layout.wordLength;
+  const physicalWordLength = checkedAdd(
+    activeMemberOffsetWords,
+    resolvedSourceCapacity,
+    'aggregate view physical words'
+  );
   const identity = Object.fromEntries([
     ['generationId', generationId, true],
     ['deviceOrdinal', deviceOrdinal, false],
@@ -420,6 +478,18 @@ export function createSchroederSpatialAggregateViewPlan({
     layout,
     requiredCapacityWords: layout.wordLength,
     requiredCapacityBytes: layout.byteLength,
+    physicalWordLength,
+    physicalByteLength: physicalWordLength * Uint32Array.BYTES_PER_ELEMENT,
+    activeMemberProjection: Object.freeze({
+      schema: ULG_SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_SCHEMA,
+      headerOffsetWords:
+        SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_OFFSET_WORDS,
+      headerWords: SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_WORDS,
+      memberOffsetWords: activeMemberOffsetWords,
+      memberCapacity: resolvedSourceCapacity,
+      physicalWordLength,
+      constructionMode: 1
+    }),
     fullParticleReadbackRequired: false,
     constructionComplexity: 'O(sourceCount*keyWords+cellCount*prefixDepth)',
     traversalComplexity: 'O(visitedPrefixNodes)',
@@ -468,6 +538,7 @@ export function validateSchroederSpatialAggregateViewDescriptor(view, expected =
     || view.submitPerformed !== true
     || view.released === true
     || !view.aggregateViewBuffer
+    || view.activeMemberProjectionBuffer !== view.aggregateViewBuffer
     || !view.indirectDispatchBuffer
     || !view.mortonKeyBuffer
     || !view.mortonSortedIndicesBuffer
@@ -494,6 +565,27 @@ export function validateSchroederSpatialAggregateViewDescriptor(view, expected =
     || view.layout?.headerWords !== SCHROEDER_SPATIAL_AGGREGATE_VIEW_HEADER_WORDS
     || view.layout?.topologyMode
       !== SCHROEDER_SPATIAL_AGGREGATE_VIEW_TOPOLOGY_MODE_MORTON_PREFIX_BINARY
+    || view.activeMemberProjection?.schema
+      !== ULG_SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_SCHEMA
+    || view.activeMemberProjection?.headerOffsetWords
+      !== SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_OFFSET_WORDS
+    || view.activeMemberProjection?.headerWords
+      !== SCHROEDER_SPATIAL_ACTIVE_MEMBER_PROJECTION_HEADER_WORDS
+    || view.activeMemberProjection?.memberOffsetWords !== view.layout.wordLength
+    || view.activeMemberProjection?.memberCapacity !== view.sourceCapacity
+    || view.activeMemberProjection?.physicalWordLength
+      !== view.layout.wordLength + view.sourceCapacity
+    || view.activeMemberOffsetWords
+      !== view.activeMemberProjection.memberOffsetWords
+    || view.activeMemberCapacity !== view.activeMemberProjection.memberCapacity
+    || view.aggregatePhysicalWordLength
+      !== view.activeMemberProjection.physicalWordLength
+    || view.aggregatePhysicalByteLength
+      !== view.aggregatePhysicalWordLength * Uint32Array.BYTES_PER_ELEMENT
+    || (
+      Number.isFinite(Number(view.aggregateViewBuffer?.size))
+      && Number(view.aggregateViewBuffer.size) < view.aggregatePhysicalByteLength
+    )
   ) {
     return {
       admitted: false,
@@ -696,10 +788,12 @@ function emptyAggregate(kind, index, prefixBitCount = 0) {
     aabbMaxM: [-Infinity, -Infinity, -Infinity],
     boundingRadiusM: 0,
     particleCount: 0,
+    sourceMemberCount: 0,
     materialBloomMask: [0, 0, 0, 0],
     phaseMask: 0,
     homogeneousMaterialId: UINT32_MAX,
     homogeneousPhaseId: UINT32_MAX,
+    homogeneousContinuityDomainId: UINT32_MAX,
     cellKey: null,
     sourceBegin: 0,
     sourceEnd: 0,
@@ -714,6 +808,10 @@ function emptyAggregate(kind, index, prefixBitCount = 0) {
 }
 
 function combineAggregate(target, source) {
+  target.sourceMemberCount += source.sourceMemberCount;
+  if (source.particleCount === 0) {
+    return;
+  }
   const wasEmpty = target.particleCount === 0;
   target.massKg += source.massKg;
   for (let axis = 0; axis < 3; axis += 1) {
@@ -735,6 +833,8 @@ function combineAggregate(target, source) {
   if (wasEmpty) {
     target.homogeneousMaterialId = source.homogeneousMaterialId;
     target.homogeneousPhaseId = source.homogeneousPhaseId;
+    target.homogeneousContinuityDomainId =
+      source.homogeneousContinuityDomainId;
   } else {
     if (target.homogeneousMaterialId !== source.homogeneousMaterialId) {
       target.homogeneousMaterialId = UINT32_MAX;
@@ -742,14 +842,46 @@ function combineAggregate(target, source) {
     if (target.homogeneousPhaseId !== source.homogeneousPhaseId) {
       target.homogeneousPhaseId = UINT32_MAX;
     }
+    if (
+      target.homogeneousContinuityDomainId
+        !== source.homogeneousContinuityDomainId
+    ) {
+      target.homogeneousContinuityDomainId = UINT32_MAX;
+    }
   }
 }
 
+function canonicalizeEmptyAggregate(target) {
+  target.massKg = 0;
+  target.firstMassMomentKgM = [0, 0, 0];
+  target.linearMomentumKgMPerS = [0, 0, 0];
+  target.orbitalAngularMomentumKgM2PerS = [0, 0, 0];
+  target.internalEnergyJ = 0;
+  target.kineticEnergyJ = 0;
+  target.aabbMinM = [0, 0, 0];
+  target.aabbMaxM = [0, 0, 0];
+  target.boundingRadiusM = 0;
+  target.particleCount = 0;
+  target.materialBloomMask = [0, 0, 0, 0];
+  target.phaseMask = 0;
+  target.homogeneousMaterialId = UINT32_MAX;
+  target.homogeneousPhaseId = UINT32_MAX;
+  target.homogeneousContinuityDomainId = UINT32_MAX;
+  target.centerOfMassM = [0, 0, 0];
+  return target;
+}
+
 function finalizeRadius(target, children) {
-  const center = target.firstMassMomentKgM.map((value) => value / target.massKg);
+  if (target.particleCount === 0) {
+    return canonicalizeEmptyAggregate(target);
+  }
+  const center = target.firstMassMomentKgM.map(
+    (value) => value / target.massKg
+  );
   target.centerOfMassM = center;
   let radius = 0;
   for (const child of children) {
+    if (child.particleCount === 0) continue;
     const childCenter = child.centerOfMassM
       || child.firstMassMomentKgM.map((value) => value / child.massKg);
     radius = Math.max(
@@ -1000,6 +1132,10 @@ export function reduceSchroederSpatialAggregateCpuOracle({
   cellKeys,
   cellOffsets,
   cellMembers,
+  sourceRows = null,
+  sourceRowLayoutId = 1,
+  sourceStrideFloats = 16,
+  sourceCount = null,
   state,
   thermo,
   identity,
@@ -1017,11 +1153,42 @@ export function reduceSchroederSpatialAggregateCpuOracle({
   if (!ArrayBuffer.isView(thermo) || !ArrayBuffer.isView(identity)) {
     throw new TypeError('thermo and identity must be typed arrays');
   }
+  const inferredSourceCount = state.length / stateStrideFloats;
+  const resolvedSourceCount = sourceCount == null
+    ? inferredSourceCount
+    : Number(sourceCount);
+  if (
+    !Number.isInteger(resolvedSourceCount)
+    || resolvedSourceCount < 1
+    || !Number.isInteger(inferredSourceCount)
+    || inferredSourceCount < resolvedSourceCount
+    || cellMembers.length !== resolvedSourceCount
+    || thermo.length < resolvedSourceCount * thermoStrideFloats
+    || identity.length < resolvedSourceCount * identityStrideWords
+  ) {
+    throw new RangeError('aggregate source authority must exactly cover the declared source count');
+  }
+  const hasSourceAuthority = sourceRows != null;
+  if (hasSourceAuthority && !ArrayBuffer.isView(sourceRows)) {
+    throw new TypeError('sourceRows must be a typed array when supplied');
+  }
+  if (
+    hasSourceAuthority
+    && (
+      !Number.isInteger(sourceRowLayoutId)
+      || (sourceRowLayoutId !== 1 && sourceRowLayoutId !== 2)
+      || !Number.isInteger(sourceStrideFloats)
+      || sourceStrideFloats < 16
+      || sourceRows.length < resolvedSourceCount * sourceStrideFloats
+    )
+  ) {
+    throw new RangeError('sourceRows must provide a complete supported 16-float source authority');
+  }
   const cellCount = cellOffsets.length - 1;
   if (cellCount < 1 || cellKeys.length < cellCount * 5) {
     throw new RangeError('directory CSR must contain at least one complete cell');
   }
-  if (Number(cellOffsets[0]) !== 0 || Number(cellOffsets[cellCount]) !== cellMembers.length) {
+  if (Number(cellOffsets[0]) !== 0 || Number(cellOffsets[cellCount]) !== resolvedSourceCount) {
     throw new RangeError('directory CSR must exactly cover the source-member array');
   }
   for (let cellIndex = 1; cellIndex < cellCount; cellIndex += 1) {
@@ -1031,7 +1198,7 @@ export function reduceSchroederSpatialAggregateCpuOracle({
       throw new RangeError('directory cell keys must be strictly canonical lexicographic u32x5');
     }
   }
-  const seenParticles = new Uint8Array(cellMembers.length);
+  const seenParticles = new Uint8Array(resolvedSourceCount);
   const leaves = [];
   for (let cellIndex = 0; cellIndex < cellCount; cellIndex += 1) {
     const begin = Number(cellOffsets[cellIndex]);
@@ -1055,7 +1222,7 @@ export function reduceSchroederSpatialAggregateCpuOracle({
       if (
         !Number.isInteger(particle)
         || particle < 0
-        || particle >= cellMembers.length
+        || particle >= resolvedSourceCount
         || seenParticles[particle] !== 0
         || so + 7 >= state.length
         || to + 11 >= thermo.length
@@ -1068,6 +1235,61 @@ export function reduceSchroederSpatialAggregateCpuOracle({
         finite(value, 'particle position')
       ));
       const mass = finite(state[so + 3], 'particle mass');
+      if (mass < 0) {
+        throw new RangeError(`particle ${particle} has malformed aggregate mass`);
+      }
+      let mechanicallyActive = mass > 0;
+      let mechanicallyDormant = false;
+      if (hasSourceAuthority) {
+        const sourceOffset = particle * sourceStrideFloats;
+        const sourcePosition = [
+          sourceRows[sourceOffset + 12],
+          sourceRows[sourceOffset + 13],
+          sourceRows[sourceOffset + 14]
+        ].map((value) => finite(value, 'source position'));
+        if (!sourcePosition.every((value, axis) => Object.is(value, position[axis]))) {
+          throw new RangeError(`particle ${particle} source position authority mismatched state`);
+        }
+        if (sourceRowLayoutId === 1) {
+          const mechanicsAuthority = Array.from(
+            sourceRows.slice(sourceOffset + 2, sourceOffset + 7),
+            (value) => finite(value, 'level-assignment mechanical authority')
+          );
+          const canonicalDormant = Object.is(mass, 0)
+            && mechanicsAuthority.every((value) => Object.is(value, 0));
+          const authenticatedActive = mass > 0
+            && mechanicsAuthority.every((value) => value >= 0)
+            && mechanicsAuthority[2] > 0
+            && Object.is(mechanicsAuthority[4], mass);
+          mechanicallyActive = authenticatedActive;
+          mechanicallyDormant = canonicalDormant;
+        } else {
+          const sourceParticleIndex = finite(
+            sourceRows[sourceOffset + 10],
+            'active-node source particle index'
+          );
+          const supportRadius = finite(
+            sourceRows[sourceOffset + 9],
+            'active-node support radius'
+          );
+          mechanicallyActive = mass > 0
+            && Number.isInteger(sourceParticleIndex)
+            && sourceParticleIndex === particle
+            && supportRadius >= 0;
+          mechanicallyDormant = false;
+        }
+        if (!mechanicallyActive && !mechanicallyDormant) {
+          throw new RangeError(`particle ${particle} source mechanical authority mismatched state`);
+        }
+      } else if (mass === 0) {
+        throw new RangeError(`particle ${particle} dormant state lacks source mechanical authority`);
+      }
+      const particleAggregate = emptyAggregate('particle', particle, 0);
+      particleAggregate.sourceMemberCount = 1;
+      if (mechanicallyDormant) {
+        combineAggregate(leaf, particleAggregate);
+        continue;
+      }
       const velocity = [state[so + 4], state[so + 5], state[so + 6]].map((value) => (
         finite(value, 'particle velocity')
       ));
@@ -1078,8 +1300,12 @@ export function reduceSchroederSpatialAggregateCpuOracle({
       const material = finite(thermo[to], 'particle material id');
       const phase = finite(thermo[to + 1], 'particle phase id');
       const visualRadius = finite(thermo[to + 11], 'particle visual radius');
+      const phaseFractions = Array.from(
+        thermo.slice(to + 4, to + 8),
+        (value) => finite(value, 'particle phase fraction')
+      );
       if (
-        !(mass > 0)
+        !mechanicallyActive
         || !Number.isInteger(material)
         || material < 0
         || material > 0x00ff_ffff
@@ -1087,10 +1313,11 @@ export function reduceSchroederSpatialAggregateCpuOracle({
         || phase < 0
         || phase > 31
         || visualRadius < 0
+        || phaseFractions.some((value) => value < 0 || value > 1)
       ) {
         throw new RangeError(`particle ${particle} has malformed aggregate input`);
       }
-      Number(identity[io]) >>> 0;
+      const continuityDomainId = Number(identity[io]) >>> 0;
       const momentum = velocity.map((value) => mass * value);
       const firstMoment = position.map((value) => mass * value);
       const angular = [
@@ -1103,24 +1330,27 @@ export function reduceSchroederSpatialAggregateCpuOracle({
       if (![...momentum, ...firstMoment, ...angular, internal, kinetic].every(Number.isFinite)) {
         throw new RangeError(`particle ${particle} aggregate products overflowed`);
       }
-      const particleAggregate = emptyAggregate('particle', particle, 0);
+      particleAggregate.aabbMinM = position.map((value) => value - visualRadius);
+      particleAggregate.aabbMaxM = position.map((value) => value + visualRadius);
+      particleAggregate.boundingRadiusM = visualRadius;
+      particleAggregate.centerOfMassM = position;
       particleAggregate.massKg = mass;
       particleAggregate.firstMassMomentKgM = firstMoment;
       particleAggregate.linearMomentumKgMPerS = momentum;
       particleAggregate.orbitalAngularMomentumKgM2PerS = angular;
       particleAggregate.internalEnergyJ = internal;
       particleAggregate.kineticEnergyJ = kinetic;
-      particleAggregate.aabbMinM = position.map((value) => value - visualRadius);
-      particleAggregate.aabbMaxM = position.map((value) => value + visualRadius);
-      particleAggregate.boundingRadiusM = visualRadius;
-      particleAggregate.centerOfMassM = position;
       particleAggregate.particleCount = 1;
       particleAggregate.materialBloomMask = materialBloomMask(material);
       particleAggregate.phaseMask = (1 << phase) >>> 0;
       particleAggregate.homogeneousMaterialId = material >>> 0;
       particleAggregate.homogeneousPhaseId = phase >>> 0;
+      particleAggregate.homogeneousContinuityDomainId = continuityDomainId;
       combineAggregate(leaf, particleAggregate);
       points.push(particleAggregate);
+    }
+    if (leaf.sourceMemberCount !== end - begin) {
+      throw new RangeError(`cell ${cellIndex} did not authenticate every source member`);
     }
     leaves.push(finalizeRadius(leaf, points));
   }
@@ -1136,7 +1366,7 @@ export function reduceSchroederSpatialAggregateCpuOracle({
     finalizeRadius(internal, children);
   }
   const replayGuardToken = replayGuardTokenFor({
-    sourceCount: cellMembers.length,
+    sourceCount: resolvedSourceCount,
     cellCount,
     replayIdentity
   });
@@ -1147,6 +1377,12 @@ export function reduceSchroederSpatialAggregateCpuOracle({
     record.topologyFingerprint = topologyFingerprint(record, replayGuardToken);
   }
   const root = topology.root;
+  if (
+    root.sourceMemberCount !== resolvedSourceCount
+    || root.particleCount > root.sourceMemberCount
+  ) {
+    throw new Error('Morton-prefix topology did not authenticate the declared source count');
+  }
   const aggregateTopologyFingerprint = globalTopologyFingerprint(
     topology.records,
     replayGuardToken
@@ -1158,7 +1394,9 @@ export function reduceSchroederSpatialAggregateCpuOracle({
     schema: ULG_SCHROEDER_SPATIAL_AGGREGATE_VIEW_SCHEMA,
     status: 'schroeder-spatial-aggregate-cpu-oracle-ready',
     cellCount,
-    sourceCount: cellMembers.length,
+    sourceCount: resolvedSourceCount,
+    activeParticleCount: root.particleCount,
+    dormantSourceCount: resolvedSourceCount - root.particleCount,
     shape: topology.shape,
     records: Object.freeze(topology.records),
     leaves: Object.freeze(leaves),
@@ -1199,6 +1437,65 @@ function aggregateNodeSize(record) {
     record.aabbMaxM[2] - record.aabbMinM[2],
     record.boundingRadiusM * 2
   );
+}
+
+function aggregateRecordPayloadIsCanonical(record) {
+  const finiteVectors = [
+    record.firstMassMomentKgM,
+    record.linearMomentumKgMPerS,
+    record.orbitalAngularMomentumKgM2PerS,
+    record.aabbMinM,
+    record.aabbMaxM,
+    record.centerOfMassM
+  ];
+  if (
+    !Number.isInteger(record.sourceMemberCount)
+    || record.sourceMemberCount <= 0
+    || !Number.isInteger(record.particleCount)
+    || record.particleCount < 0
+    || record.particleCount > record.sourceMemberCount
+    || !Number.isFinite(record.massKg)
+    || !Number.isFinite(record.internalEnergyJ)
+    || !Number.isFinite(record.kineticEnergyJ)
+    || !Number.isFinite(record.boundingRadiusM)
+    || record.boundingRadiusM < 0
+    || finiteVectors.some((vector) => (
+      !Array.isArray(vector)
+      || vector.length !== 3
+      || vector.some((value) => !Number.isFinite(value))
+    ))
+    || record.aabbMinM.some((value, axis) => value > record.aabbMaxM[axis])
+  ) {
+    return false;
+  }
+  const physicalScalars = [
+    record.massKg,
+    record.internalEnergyJ,
+    record.kineticEnergyJ,
+    record.boundingRadiusM
+  ];
+  const physicalVectors = [
+    record.firstMassMomentKgM,
+    record.linearMomentumKgMPerS,
+    record.orbitalAngularMomentumKgM2PerS
+  ];
+  if (record.particleCount === 0) {
+    return physicalScalars.every((value) => Object.is(value, 0))
+      && physicalVectors.every((vector) => vector.every((value) => Object.is(value, 0)))
+      && record.aabbMinM.every((value) => Object.is(value, 0))
+      && record.aabbMaxM.every((value) => Object.is(value, 0))
+      && record.centerOfMassM.every((value) => Object.is(value, 0))
+      && record.materialBloomMask.every((value) => value === 0)
+      && record.phaseMask === 0
+      && record.homogeneousMaterialId === UINT32_MAX
+      && record.homogeneousPhaseId === UINT32_MAX
+      && record.homogeneousContinuityDomainId === UINT32_MAX;
+  }
+  return record.massKg > 0
+    && record.internalEnergyJ >= 0
+    && record.kineticEnergyJ >= 0
+    && record.materialBloomMask.some((value) => value !== 0)
+    && record.phaseMask !== 0;
 }
 
 function assertTraversalTopology(aggregate, expected = {}) {
@@ -1249,6 +1546,7 @@ function assertTraversalTopology(aggregate, expected = {}) {
       || record.subtreeLeafEnd > aggregate.leaves.length
       || record.prefixBitCount < 0
       || record.prefixBitCount > SCHROEDER_SPATIAL_AGGREGATE_VIEW_PREFIX_BIT_COUNT
+      || !aggregateRecordPayloadIsCanonical(record)
       || !expectedMortonKey
       || compareU32Words(record.mortonKey, expectedMortonKey) !== 0
     );
@@ -1268,6 +1566,7 @@ function assertTraversalTopology(aggregate, expected = {}) {
     if (valid && record.kind === 'leaf') {
       valid = record.subtreeLeafEnd === record.subtreeLeafBegin + 1
         && record.prefixBitCount === SCHROEDER_SPATIAL_AGGREGATE_VIEW_PREFIX_BIT_COUNT
+        && record.sourceMemberCount === record.sourceEnd - record.sourceBegin
         && aggregate.mortonLeafIndices[record.subtreeLeafBegin] === record.recordIndex;
     } else if (valid) {
       const left = aggregate.records[record.childBeginRecordIndex];
@@ -1280,6 +1579,9 @@ function assertTraversalTopology(aggregate, expected = {}) {
         && left.subtreeLeafBegin === record.subtreeLeafBegin
         && left.subtreeLeafEnd === right.subtreeLeafBegin
         && right.subtreeLeafEnd === record.subtreeLeafEnd
+        && record.sourceMemberCount
+          === left.sourceMemberCount + right.sourceMemberCount
+        && record.particleCount === left.particleCount + right.particleCount
         && record.prefixBitCount === commonPrefixBitCount(
           sortedEntries,
           record.subtreeLeafBegin,
@@ -1290,6 +1592,14 @@ function assertTraversalTopology(aggregate, expected = {}) {
     if (!valid) {
       throw new Error('aggregate traversal rejected malformed topology authority');
     }
+  }
+  if (
+    root.sourceMemberCount !== aggregate.sourceCount
+    || root.particleCount !== aggregate.activeParticleCount
+    || aggregate.dormantSourceCount
+      !== aggregate.sourceCount - aggregate.activeParticleCount
+  ) {
+    throw new Error('aggregate traversal rejected malformed source-member authority');
   }
 }
 
@@ -1315,6 +1625,7 @@ export function traverseSchroederSpatialAggregateCpuOracle({
   const theta = nonnegativeFinite(openingTheta, 'openingTheta');
   const farNodes = [];
   const nearLeaves = [];
+  const emptyNodes = [];
   const decisions = [];
   let recordIndex = aggregate.shape.rootRecordIndex;
   let stepCount = 0;
@@ -1326,6 +1637,17 @@ export function traverseSchroederSpatialAggregateCpuOracle({
     const record = aggregate.records[recordIndex];
     if (!record || record.recordIndex !== recordIndex) {
       throw new Error('aggregate traversal followed a malformed record link');
+    }
+    if (record.particleCount === 0) {
+      emptyNodes.push(record);
+      decisions.push({
+        recordIndex,
+        decision: 'empty-subtree',
+        nearIntersects: false,
+        openingRatio: 0
+      });
+      recordIndex = record.escapeRecordIndex;
+      continue;
     }
     const nearIntersects = squaredDistanceToAabb(
       query,
@@ -1382,6 +1704,11 @@ export function traverseSchroederSpatialAggregateCpuOracle({
       begin: node.subtreeLeafBegin,
       end: node.subtreeLeafEnd,
       kind: 'far'
+    })),
+    ...emptyNodes.map((node) => ({
+      begin: node.subtreeLeafBegin,
+      end: node.subtreeLeafEnd,
+      kind: 'empty'
     }))
   ].sort((left, right) => left.begin - right.begin);
   let cursor = 0;
@@ -1399,10 +1726,11 @@ export function traverseSchroederSpatialAggregateCpuOracle({
   const sum = (records) => {
     const result = emptyAggregate('partition', 0, 0);
     for (const record of records) combineAggregate(result, record);
-    return result;
+    return finalizeRadius(result, records);
   };
   const farAggregate = sum(farNodes);
   const nearAggregate = sum(nearLeaves);
+  const emptyPartition = sum(emptyNodes);
   return Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_SCHEMA,
     status: 'schroeder-spatial-aggregate-traversal-cpu-oracle-ready',
@@ -1413,11 +1741,13 @@ export function traverseSchroederSpatialAggregateCpuOracle({
     visitedNodeCount: stepCount,
     farNodes: Object.freeze(farNodes),
     nearLeaves: Object.freeze(nearLeaves),
+    emptyNodes: Object.freeze(emptyNodes),
     decisions: Object.freeze(decisions),
     coverage: Object.freeze(coverage),
     coveredLeafCount: cursor,
     farAggregate: Object.freeze(farAggregate),
     nearAggregate: Object.freeze(nearAggregate),
+    emptyAggregate: Object.freeze(emptyPartition),
     materializedCandidateRowCount: 0,
     perSourceCandidateBudget: null,
     partitionStatus: 'exact-no-overlap-no-gap'

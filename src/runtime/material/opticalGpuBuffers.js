@@ -13,6 +13,7 @@ import { opticalLookupWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { zForSymbol } from '../electronicStructure/periodicTable.js';
 import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
+  RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE,
   residentSphWebGpuLimitsForAdapter,
   residentSphWebGpuFeaturesForAdapter,
   webGpuDeviceDescriptorForResidentSph
@@ -439,27 +440,46 @@ export function buildOpticalGpuTable(descriptors, {
     const phase = descriptorPhase(descriptor);
     const opticalState = descriptorOpticalState(descriptor);
     const opticalStateKey = stableOpticalStateKey(opticalState);
+    const descriptorPathLengthM = Number(descriptor?.pathLengthM);
+    const recordPathLengthM = Number.isFinite(descriptorPathLengthM)
+      && descriptorPathLengthM > 0
+      ? descriptorPathLengthM
+      : pathLengthM;
     // A caller may provide a stable binding id that is independent of the
     // continuously changing optical values. This is required by resident
     // surface geometry: pressure/temperature can update the record contents
     // without invalidating the vertex rows that reference the record.
     const opticalStateId = descriptorOpticalStateId(descriptor, opticalState);
     const key = `${material}|${phase}|${opticalStateId}`;
-    const existingOpticalStateKey = seen.get(key);
-    if (existingOpticalStateKey != null) {
-      if (existingOpticalStateKey !== opticalStateKey) {
+    const existingBinding = seen.get(key);
+    if (existingBinding != null) {
+      if (existingBinding.opticalStateKey !== opticalStateKey) {
         throw new Error(
           `conflicting optical states share GPU binding ${key}; assign distinct stable opticalStateId values`
         );
       }
+      if (existingBinding.pathLengthM !== recordPathLengthM) {
+        throw new Error(
+          `conflicting optical path lengths share GPU binding ${key}; assign distinct stable opticalStateId values`
+        );
+      }
       continue;
     }
-    seen.set(key, opticalStateKey);
+    seen.set(key, {
+      opticalStateKey,
+      pathLengthM: recordPathLengthM
+    });
 
     const properties = typeof descriptor === 'object' && descriptor?.properties
       ? descriptor.properties
       : materialProperties[material];
-    const params = opticalRenderParams({ material, phase, properties, pathLengthM, opticalState });
+    const params = opticalRenderParams({
+      material,
+      phase,
+      properties,
+      pathLengthM: recordPathLengthM,
+      opticalState
+    });
     const materialId = materialIdFor(material);
     const materialPropertyBankPbrWarmInput = materialBankPbrWarmInputForRecord({
       material,
@@ -513,6 +533,11 @@ export function buildOpticalGpuTable(descriptors, {
       opticalState: opticalState ? { ...opticalState } : null,
       opticalStateKey,
       opticalStateId,
+      pathLengthM: recordPathLengthM,
+      pathLengthSource: Number.isFinite(descriptorPathLengthM)
+        && descriptorPathLengthM > 0
+        ? (descriptor?.pathLengthSource || 'descriptor')
+        : 'table-default',
       materialId,
       phaseId: gpuPhaseId(phase),
       recordIndex: records.length,
@@ -821,6 +846,34 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
     return { status: 'blocked-webgpu-unavailable', reason: 'requestAdapter returned null', device: null };
   }
   const { requiredLimits, adapterLimits } = residentSphWebGpuLimitsForAdapter(adapter);
+  // Browser GPUAdapter objects always expose limits. Some injected/test
+  // adapters intentionally implement only requestDevice(); in that case the
+  // requested limit is still sent to requestDevice and that authority decides
+  // admission. Only reject early when the adapter positively reports an
+  // under-limit value.
+  const explicitlyExposedStorageLimit = Number(
+    adapter?.limits?.maxStorageBuffersPerShaderStage
+  );
+  if (
+    Number.isFinite(explicitlyExposedStorageLimit)
+    && explicitlyExposedStorageLimit > 0
+    && explicitlyExposedStorageLimit
+      < RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE
+  ) {
+    return {
+      status: 'blocked-webgpu-resident-storage-limit',
+      reason: `resident WebGPU requires ${RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE} storage buffers per shader stage; adapter exposes ${adapterLimits.maxStorageBuffersPerShaderStage || 0}`,
+      device: null,
+      requiredLimits,
+      requiredFeatures: [],
+      adapterFeatures: [],
+      enabledFeatures: [],
+      timestampProfilingRequested: timestampProfilingRequested === true,
+      timestampQuerySupported: false,
+      timestampQueryStatus: 'not-requested-adapter-limit-blocked',
+      adapterLimits
+    };
+  }
   const featureEvidence = residentSphWebGpuFeaturesForAdapter(adapter, {
     timestampProfilingRequested
   });
@@ -857,7 +910,12 @@ function writeStorageBuffer(device, label, data) {
     size: byteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   });
-  if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
+  try {
+    if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
+  } catch (error) {
+    buffer?.destroy?.();
+    throw error;
+  }
   return buffer;
 }
 
@@ -873,24 +931,41 @@ export function uploadOpticalGpuTable(device, table) {
     : EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS;
   const recordsBufferByteLength = Math.max(16, table.records.byteLength);
   const spectralSamplesBufferByteLength = Math.max(16, spectralSamples.byteLength);
-  return {
-    schema: ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
-    tableSchema: table.schema,
-    recordCount: table.recordCount,
-    spectralSampleCount: table.spectralSampleCount,
-    recordStrideBytes: table.recordStrideBytes,
-    spectralSampleStrideBytes: table.spectralSampleStrideBytes,
-    recordsBuffer: writeStorageBuffer(device, 'ulg-optical-material-records', table.records),
-    recordsBufferByteLength,
-    spectralSamplesBuffer: writeStorageBuffer(
+  let recordsBuffer = null;
+  let spectralSamplesBuffer = null;
+  try {
+    recordsBuffer = writeStorageBuffer(
       device,
-      'ulg-optical-spectral-samples',
-      spectralSamples
-    ),
-    spectralSamplesBufferByteLength,
-    scientificValidation: false,
-    fullPhysicsValidation: false
-  };
+      'ulg-optical-material-records',
+      table.records
+    );
+    spectralSamplesBuffer = writeStorageBuffer(
+        device,
+        'ulg-optical-spectral-samples',
+        spectralSamples
+      );
+    return {
+      schema: ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
+      tableSchema: table.schema,
+      recordCount: table.recordCount,
+      spectralSampleCount: table.spectralSampleCount,
+      recordStrideBytes: table.recordStrideBytes,
+      spectralSampleStrideBytes: table.spectralSampleStrideBytes,
+      recordsBuffer,
+      recordsBufferByteLength,
+      spectralSamplesBuffer,
+      spectralSamplesBufferByteLength,
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    };
+  } catch (error) {
+    // writeStorageBuffer retires its own buffer when the write fails. Only
+    // successfully returned allocations are reachable here, so each one is
+    // destroyed exactly once when the two-buffer upload cannot commit.
+    recordsBuffer?.destroy?.();
+    spectralSamplesBuffer?.destroy?.();
+    throw error;
+  }
 }
 
 export function updateUploadedOpticalGpuTable(device, buffers, table) {

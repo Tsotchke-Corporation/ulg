@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const RUN_NATIVE = process.env.ULG_RUN_NATIVE_THERMAL === '1';
+const RUN_NATIVE_TREE = process.env.ULG_RUN_NATIVE_THERMAL_TREE === '1';
+const RUN_NATIVE = process.env.ULG_RUN_NATIVE_THERMAL === '1'
+  || RUN_NATIVE_TREE;
 const BASE_URL = process.env.ULG_THERMAL_BASE_URL
   || 'https://127.0.0.1:5174/';
 const CHROME = process.env.ULG_THERMAL_CHROME
@@ -11,7 +13,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
   skip: RUN_NATIVE
     ? false
     : 'set ULG_RUN_NATIVE_THERMAL=1 for native Vulkan WebGPU',
-  timeout: 300_000
+  timeout: RUN_NATIVE_TREE ? 900_000 : 300_000
 }, async () => {
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch({
@@ -32,7 +34,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
-    native = await page.evaluate(async () => {
+    native = await page.evaluate(async ({ runNativeTreeShadow }) => {
       const fail = (message) => {
         throw new Error(message);
       };
@@ -76,9 +78,20 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       if (!adapter) {
         return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
       }
+      if (
+        runNativeTreeShadow
+        && !adapter.features?.has?.('timestamp-query')
+      ) {
+        return {
+          status: 'unsupported',
+          reason: 'timestamp-query is required for the thermal tree campaign'
+        };
+      }
       const deviceLimits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(
-        deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter)
+        deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter, {
+          timestampProfilingRequested: runNativeTreeShadow
+        })
       );
       const uncapturedErrors = [];
       device.addEventListener('uncapturederror', (event) => {
@@ -186,6 +199,132 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         readback.unmap();
         readback.destroy();
         return bytes;
+      };
+      const median = (values) => {
+        const sorted = values
+          .map(Number)
+          .filter(Number.isFinite)
+          .sort((left, right) => left - right);
+        requireTrue(sorted.length > 0, 'median requires finite samples');
+        const middle = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 1
+          ? sorted[middle]
+          : 0.5 * (sorted[middle - 1] + sorted[middle]);
+      };
+      const createTimestampRecorder = (label, stages) => {
+        const expectedStages = [...new Set(stages)];
+        requireTrue(
+          expectedStages.length > 0,
+          `${label}: timestamp recorder requires stages`
+        );
+        const queryCount = expectedStages.length * 2;
+        const querySet = device.createQuerySet({
+          label: `${label}-queries`,
+          type: 'timestamp',
+          count: queryCount
+        });
+        const resolveBuffer = device.createBuffer({
+          label: `${label}-resolve`,
+          size: queryCount * BigUint64Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+        });
+        const readbackBuffer = device.createBuffer({
+          label: `${label}-readback`,
+          size: queryCount * BigUint64Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        const tokens = [];
+        return {
+          recorder: {
+            active: true,
+            beginEncoderSpan(encoder, descriptor = {}) {
+              if (!expectedStages.includes(descriptor.stage)) return null;
+              const token = {
+                encoder,
+                descriptor,
+                queryIndex: tokens.length * 2,
+                ended: false
+              };
+              requireTrue(
+                token.queryIndex + 1 < queryCount,
+                `${label}: too many timestamp spans`
+              );
+              encoder.writeTimestamp(querySet, token.queryIndex);
+              tokens.push(token);
+              return token;
+            },
+            endEncoderSpan(encoder, token) {
+              requireTrue(
+                token?.encoder === encoder && token.ended === false,
+                `${label}: timestamp end did not match begin`
+              );
+              encoder.writeTimestamp(querySet, token.queryIndex + 1);
+              token.ended = true;
+            }
+          },
+          async complete() {
+            requireTrue(
+              tokens.length === expectedStages.length
+                && tokens.every((token) => token.ended)
+                && expectedStages.every((stage) => tokens.some(
+                  (token) => token.descriptor.stage === stage
+                )),
+              `${label}: missing expected timestamp span: ${
+                JSON.stringify(tokens.map(({ descriptor }) => descriptor.stage))
+              }`
+            );
+            const encoder = device.createCommandEncoder({
+              label: `${label}-resolve-encoder`
+            });
+            encoder.resolveQuerySet(
+              querySet,
+              0,
+              queryCount,
+              resolveBuffer,
+              0
+            );
+            encoder.copyBufferToBuffer(
+              resolveBuffer,
+              0,
+              readbackBuffer,
+              0,
+              queryCount * BigUint64Array.BYTES_PER_ELEMENT
+            );
+            device.queue.submit([encoder.finish()]);
+            await readbackBuffer.mapAsync(
+              GPUMapMode.READ,
+              0,
+              queryCount * BigUint64Array.BYTES_PER_ELEMENT
+            );
+            const values = new BigUint64Array(
+              readbackBuffer.getMappedRange(
+                0,
+                queryCount * BigUint64Array.BYTES_PER_ELEMENT
+              ).slice(0)
+            );
+            readbackBuffer.unmap();
+            const result = {};
+            for (const token of tokens) {
+              const start = values[token.queryIndex];
+              const end = values[token.queryIndex + 1];
+              requireTrue(
+                end > start
+                  && end - start <= BigInt(Number.MAX_SAFE_INTEGER),
+                `${label}: non-monotonic timestamp for ${
+                  token.descriptor.stage
+                }`
+              );
+              result[token.descriptor.stage] =
+                Number(end - start) / 1e6;
+            }
+            return result;
+          },
+          destroy() {
+            querySet.destroy();
+            resolveBuffer.destroy();
+            readbackBuffer.destroy();
+          }
+        };
       };
       const responseDomain = (table, materialId, specificEnergy) => (
         thermal.resolveThermalCarrierEnergyDomainFromTable(
@@ -326,17 +465,52 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         cpuStateStale = false,
         corruptActiveProjection = null,
         expectProducerFailClosed = false,
+        corruptTreeWord = null,
+        expectTreeFailClosed = false,
         expectCandidateCsrFallback = false,
         expectCandidateCsrRoute = null,
         includePairLedgerInResult = true,
         requireThermalExchange = true,
         useAggregate = true,
-        useActiveRank = false
+        useActiveRank = false,
+        producerTraversal = 'direct',
+        observeTreeTraversalCounters = true,
+        includeAppliedRowsInResult = false,
+        particleLevels = null,
+        sameGenerationTreeShadow = false,
+        sameGenerationExhaustiveShadow = false
       }) => {
         requireTrue(
           !(useAggregate && useActiveRank),
           `${name}: aggregate and base active-rank projections are mutually exclusive`
         );
+        requireTrue(
+          producerTraversal === 'direct'
+            || producerTraversal === 'native-test-tree-shadow',
+          `${name}: unsupported producer traversal ${producerTraversal}`
+        );
+        requireTrue(
+          !sameGenerationTreeShadow || producerTraversal === 'direct',
+          `${name}: same-generation tree comparator requires the direct control arm`
+        );
+        requireTrue(
+          !sameGenerationExhaustiveShadow || producerTraversal === 'direct',
+          `${name}: same-generation exhaustive comparator requires the direct control arm`
+        );
+        const resolvedParticleLevels = particleLevels
+          ? [...particleLevels]
+          : Array.from({ length: particles.length }, () => 0);
+        requireTrue(
+          resolvedParticleLevels.length === particles.length
+            && resolvedParticleLevels.every((level) => (
+              Number.isInteger(level) && level >= -30 && level <= 30
+            )),
+          `${name}: particle levels do not match the source rows`
+        );
+        const minimumParticleLevel = Math.min(...resolvedParticleLevels);
+        const maximumParticleLevel = Math.max(...resolvedParticleLevels);
+        const expectedFailClosed = expectProducerFailClosed
+          || expectTreeFailClosed;
         epochOrdinal += 1;
         const source = sphStateModule.createSphState({
           smoothingLengthM,
@@ -456,12 +630,14 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           const x = packed.state[stateOffset];
           const y = packed.state[stateOffset + 1];
           const z = packed.state[stateOffset + 2];
-          const cellX = Math.floor(x / spatialCellSizeM);
-          const cellY = Math.floor(y / spatialCellSizeM);
-          const cellZ = Math.floor(z / spatialCellSizeM);
+          const level = resolvedParticleLevels[index];
+          const levelSpacingM = spatialCellSizeM * (2 ** level);
+          const cellX = Math.floor(x / levelSpacingM);
+          const cellY = Math.floor(y / levelSpacingM);
+          const cellZ = Math.floor(z / levelSpacingM);
           activeRows.set([
-            0, cellX, cellY, cellZ,
-            cellX, cellY, cellZ, spatialCellSizeM,
+            level, cellX, cellY, cellZ,
+            cellX, cellY, cellZ, levelSpacingM,
             nativeGridSpacingM, 2 * smoothingLengthM, index, 1,
             x, y, z, 0
           ], index * 16);
@@ -497,8 +673,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             'base-grid-spacing-times-pow2-level',
           spatialEpochPositionAuthority:
             'same-epoch-pre-integration-particle-state',
-          spatialEpochMinLevel: 0,
-          spatialEpochMaxLevel: 0,
+          spatialEpochMinLevel: minimumParticleLevel,
+          spatialEpochMaxLevel: maximumParticleLevel,
           spatialEpochBaseGridSpacingM: spatialCellSizeM,
           spatialEpochChartId: 0,
           spatialEpochStorageGeneration: epoch.storageGeneration,
@@ -517,6 +693,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           for (let index = 0; index < packed.particleCount; index += 1) {
             const stateOffset = index * 8;
             const thermoOffset = index * 12;
+            const level = resolvedParticleLevels[index];
+            const levelSpacingM = spatialCellSizeM * (2 ** level);
             const massKg = packed.state[stateOffset + 3];
             const restDensityKgPerM3 = packed.thermo[thermoOffset + 3];
             const active = massKg > 0;
@@ -524,8 +702,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               ? Math.max(1.0e-12, massKg / Math.max(restDensityKgPerM3, 1))
               : 0;
             assignmentRows.set([
-              0,
-              spatialCellSizeM,
+              level,
+              levelSpacingM,
               active ? 2 * smoothingLengthM : 0,
               active ? volumeM3 : 0,
               active ? volumeM3 : 0,
@@ -560,8 +738,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             assignmentBufferByteLength: assignmentRows.byteLength,
             sourceStateBuffer: particleUpload.stateBuffer,
             sourceStateBufferBorrowed: true,
-            minLevel: 0,
-            maxLevel: 0,
+            minLevel: minimumParticleLevel,
+            maxLevel: maximumParticleLevel,
             chartId: 0,
             baseGridSpacingM: spatialCellSizeM,
             phaseVolumeAssignmentOverlayEnabled: false,
@@ -575,6 +753,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         let classicBinsBuffer = null;
         let classicBinAuthority = null;
         let transactionMechanicsBuffer = null;
+        let treeShadowReceipt = null;
+        let sameGenerationTreeParity = null;
+        let sameGenerationExhaustiveParity = null;
         try {
           generation = spatial.runSchroederSpatialEpochGenerationWebGpu({
             device,
@@ -685,6 +866,42 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             conductionRate
           });
           requireTrue(proposal.ready === true, `${name}: proposal was not ready`);
+          if (producerTraversal === 'native-test-tree-shadow') {
+            treeShadowReceipt = proposalModule
+              .armSchroederSpatialThermalTreeShadowForNativeTest({
+                device,
+                schroederSpatialThermalProposal: proposal,
+                observeTraversalCounters: observeTreeTraversalCounters
+              });
+            requireTrue(
+              treeShadowReceipt?.nativeTestOnly === true
+                && treeShadowReceipt.tree
+                  === generation.exactNearCellTree
+                && treeShadowReceipt.fallback == null,
+              `${name}: native tree shadow did not bind the exact generation tree`
+            );
+            if (corruptTreeWord) {
+              const corruptTreeWordIndex =
+                typeof corruptTreeWord.word === 'function'
+                  ? corruptTreeWord.word(generation.exactNearCellTree)
+                  : corruptTreeWord.word;
+              requireTrue(
+                Number.isInteger(corruptTreeWordIndex)
+                  && corruptTreeWordIndex >= 0
+                  && corruptTreeWordIndex
+                    < generation.exactNearCellTree.layout.wordLength
+                  && Number.isInteger(corruptTreeWord.value)
+                  && corruptTreeWord.value >= 0
+                  && corruptTreeWord.value <= 0xffff_ffff,
+                `${name}: invalid tree-word corruption request`
+              );
+              device.queue.writeBuffer(
+                treeShadowReceipt.treeBuffer,
+                corruptTreeWordIndex * Uint32Array.BYTES_PER_ELEMENT,
+                new Uint32Array([corruptTreeWord.value])
+              );
+            }
+          }
           requireTrue(
             proposal.activeSourceProjectionMode === (
               useAggregate
@@ -822,6 +1039,35 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             new Uint32Array(activeDispatchBytes)
           );
           const directoryWords = new Uint32Array(directoryBytes);
+          const treeShadowDiagnostics = treeShadowReceipt?.diagnosticBuffer
+            ? Array.from(new Uint32Array(await readBuffer(
+                treeShadowReceipt.diagnosticBuffer,
+                treeShadowReceipt.diagnosticWordCount
+                  * Uint32Array.BYTES_PER_ELEMENT,
+                `ulg-native-thermal-${name}-tree-shadow-diagnostics-readback`
+              )))
+            : null;
+          if (treeShadowDiagnostics && !expectedFailClosed) {
+            const gpuPairwiseTemperatureUniform = derivedWords[2]
+              === ((~derivedWords[3]) >>> 0);
+            requireTrue(
+              treeShadowDiagnostics.length
+                  === proposalModule
+                    .SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_DIAGNOSTIC_WORDS
+                && (
+                  gpuPairwiseTemperatureUniform
+                    ? treeShadowDiagnostics.every((value) => value === 0)
+                    : (
+                        treeShadowDiagnostics[0] > 0
+                        && treeShadowDiagnostics[1] > 0
+                        && treeShadowDiagnostics[2] > 0
+                      )
+                ),
+              `${name}: tree shadow did not publish budget traversal counters: ${
+                JSON.stringify(treeShadowDiagnostics)
+              }`
+            );
+          }
           const aggregateHeader = generation.aggregateView
             ? Array.from(new Uint32Array(await readBuffer(
                 generation.aggregateView.aggregateViewBuffer,
@@ -836,22 +1082,36 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 `ulg-native-thermal-${name}-active-rank-header-readback`
               )))
             : null;
-          const thermalCandidateCsrHeader = proposal.thermalCandidateCsr
-            ? Array.from(new Uint32Array(await readBuffer(
+          const thermalCandidateCsrReplayBytes = proposal.thermalCandidateCsr
+            ? await readBuffer(
                 proposal.thermalCandidateCsr.replayBuffer,
+                (
+                  proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
+                    + proposal.thermalCandidateCsr.candidateCapacity
+                ) * Uint32Array.BYTES_PER_ELEMENT,
+                `ulg-native-thermal-${name}-candidate-csr-replay-readback`
+              )
+            : null;
+          const thermalCandidateCsrRowStateBytes =
+            proposal.thermalCandidateCsr
+              ? await readBuffer(
+                  proposal.thermalCandidateCsr.sourceRowStateBuffer,
+                  proposal.thermalCandidateCsr.sourceCapacity
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-candidate-csr-row-states-readback`
+                )
+              : null;
+          const thermalCandidateCsrHeader = thermalCandidateCsrReplayBytes
+            ? Array.from(new Uint32Array(
+                thermalCandidateCsrReplayBytes,
+                0,
                 proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
-                  * Uint32Array.BYTES_PER_ELEMENT,
-                `ulg-native-thermal-${name}-candidate-csr-header-readback`
-              )))
+              ))
             : null;
-          const thermalCandidateCsrRowStates = proposal.thermalCandidateCsr
-            ? Array.from(new Uint32Array(await readBuffer(
-                proposal.thermalCandidateCsr.sourceRowStateBuffer,
-                proposal.thermalCandidateCsr.sourceCapacity
-                  * Uint32Array.BYTES_PER_ELEMENT,
-                `ulg-native-thermal-${name}-candidate-csr-row-states-readback`
-              )))
-            : null;
+          const thermalCandidateCsrRowStates =
+            thermalCandidateCsrRowStateBytes
+              ? Array.from(new Uint32Array(thermalCandidateCsrRowStateBytes))
+              : null;
           const displacementHeaderWord = proposal.derivedHeaderLayout.indexOf(
             'maximumPositionDisplacementM:atomic<f32-bits>'
           );
@@ -877,7 +1137,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 .SCHROEDER_SPATIAL_THERMAL_ACTIVE_MEMBER_PROJECTION_ADMISSION_WORD,
             `${name}: active-member projection admission header ABI is missing`
           );
-          if (!expectProducerFailClosed && proposal.thermalCandidateCsr) {
+          if (!expectedFailClosed && proposal.thermalCandidateCsr) {
             const candidateCsr = proposal.thermalCandidateCsr;
             const gpuPairwiseTemperatureUniform = derivedWords[2]
               === ((~derivedWords[3]) >>> 0);
@@ -962,7 +1222,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 })
               }`
             );
-          } else if (!expectProducerFailClosed) {
+          } else if (!expectedFailClosed) {
             requireTrue(
               proposal.hierarchyTraversalCount === 2
                 && proposal.thermalCandidateCsr == null,
@@ -970,7 +1230,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             );
           }
           requireTrue(
-            expectProducerFailClosed
+            expectedFailClosed
               ? (
                   derivedWords[projectionAdmissionHeaderWord]
                     === proposalModule
@@ -990,9 +1250,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             { length: packed.particleCount },
             (_, index) => packed.state[index * 8 + 3]
           ).filter((massKg) => massKg > 0).length;
-          if (expectProducerFailClosed) {
+          if (expectedFailClosed) {
             requireTrue(
-              derivedWords[1] > 0
+              expectTreeFailClosed
+                || derivedWords[1] > 0
                 || derivedWords[currentActiveCountHeaderWord]
                   !== derivedWords[expectedActiveCountHeaderWord]
                 || derivedWords[materializedRankCountHeaderWord]
@@ -1004,7 +1265,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 && proposalWords[7] > 0
                 && proposalWords[15] === 0
                 && conductionEvidence[6] === 0
-                && radiationEvidence[6] === 0,
+                && radiationEvidence[6] === 0
+                && conductionEvidence[13] === 0
+                && conductionEvidence[14] === 0
+                && conductionEvidence[15] === 0
+                && radiationEvidence[13] === 0
+                && radiationEvidence[14] === 0
+                && radiationEvidence[15] === 0,
               `${name}: malformed active projection published rows or no invalid evidence: ${
                 proposalWords[6]
               }/${proposalWords[7]}/${proposalWords[15]}; evidence rows ${
@@ -1023,6 +1290,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             canonicalThermalStage.cleanupSubmittedWork();
             return {
               name,
+              producerTraversal,
+              treeShadowDiagnostics,
               useAggregate,
               useActiveRank,
               activeSourceProjectionMode: proposal.activeSourceProjectionMode,
@@ -1034,7 +1303,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               materializedRankCount: derivedWords[materializedRankCountHeaderWord],
               proposalInvalidCounts: [proposalWords[6], proposalWords[7]],
               publishedRowCount: proposalWords[15],
-              activeDispatch
+              activeDispatch,
+              conductionEvidence,
+              radiationEvidence
             };
           }
           requireTrue(
@@ -1445,6 +1716,550 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             `${name}: final readback row count mismatch`
           );
 
+          if (sameGenerationTreeShadow) {
+            for (
+              let waitOrdinal = 0;
+              waitOrdinal < 100 && proposal.released !== true;
+              waitOrdinal += 1
+            ) {
+              await device.queue.onSubmittedWorkDone();
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            requireTrue(
+              proposal.released === true
+                && generation.released !== true
+                && generation.exactNearCellTree.released !== true,
+              `${name}: direct proposal did not release while its generation/tree stayed live`
+            );
+            let treeProposal = null;
+            let treeStage = null;
+            let treeSubmitted = false;
+            let sameGenerationTreeReceipt = null;
+            try {
+              treeProposal =
+                proposalModule.runSchroederSpatialThermalProposalWebGpu({
+                  device,
+                  generation,
+                  schroederSpatialEpochTransaction,
+                  sphParticleState: proposalCpuState,
+                  sphParticleUpload: particleUpload,
+                  mlsMpmParticleUpload,
+                  thermalResponseGraphUpload: responseUpload,
+                  dtS,
+                  smoothingLengthM: packed.smoothingLengthM,
+                  conductionRate
+                });
+              sameGenerationTreeReceipt = proposalModule
+                .armSchroederSpatialThermalTreeShadowForNativeTest({
+                  device,
+                  schroederSpatialThermalProposal: treeProposal,
+                  observeTraversalCounters: true
+                });
+              requireTrue(
+                treeProposal.generationId === proposal.generationId
+                  && treeProposal.supportEpoch === proposal.supportEpoch
+                  && sameGenerationTreeReceipt.tree
+                    === generation.exactNearCellTree,
+                `${name}: same-generation tree shadow changed epoch identity`
+              );
+              treeStage = thermal.createSphThermalStepWebGpuEncoderStage({
+                device,
+                sphParticleState: packed,
+                thermalMaterialTable,
+                thermalClosureGraphSet: graphSet,
+                thermalClosureGraphBank: graphSet.graphBank,
+                thermalPhaseResponseTable: phaseResponseTable,
+                thermalResponseGraphUpload: responseUpload,
+                sphParticleUpload: particleUpload,
+                proposalStateBuffer: currentStateBuffer,
+                proposalThermoBuffer: particleUpload.thermoBuffer,
+                sourceStateBuffer: currentStateBuffer,
+                sourceThermoBuffer: particleUpload.thermoBuffer,
+                wallTemperaturesK: {},
+                boxDimsM: [10, 10, 10],
+                dtS,
+                conductionRate,
+                wallRate: 0,
+                wallLayerM: 0,
+                ambientTemperatureK: 0,
+                readbackMode: 'full-parity-readback',
+                schroederSpatialEpochGeneration: generation,
+                schroederSpatialThermalProposal: treeProposal
+              });
+              device.pushErrorScope('validation');
+              const treeEncoder = device.createCommandEncoder({
+                label: `ulg-native-thermal-${name}-same-generation-tree`
+              });
+              treeStage.encode(treeEncoder);
+              device.queue.submit([treeEncoder.finish()]);
+              treeStage.markSubmittedWork();
+              treeSubmitted = true;
+              await device.queue.onSubmittedWorkDone();
+              const treeValidationError = await device.popErrorScope();
+              requireTrue(
+                !treeValidationError,
+                `${name}: same-generation tree validation failed: ${
+                  treeValidationError?.message || String(treeValidationError)
+                }`
+              );
+              const [
+                treeDerivedBytes,
+                treeProposalBytes,
+                treeConductionEvidenceBytes,
+                treeRadiationEvidenceBytes,
+                treeFinalStateBytes,
+                treeFinalThermoBytes,
+                treeDiagnosticBytes,
+                treeActiveDispatchBytes,
+                treeCandidateCsrReplayBytes,
+                treeCandidateCsrRowStateBytes
+              ] = await Promise.all([
+                readBuffer(
+                  treeProposal.thermalDerivedBudgetBuffer,
+                  treeProposal.activeDerivedByteLength,
+                  `ulg-native-thermal-${name}-same-generation-tree-derived`
+                ),
+                readBuffer(
+                  treeProposal.proposalBuffer,
+                  treeProposal.activeProposalByteLength,
+                  `ulg-native-thermal-${name}-same-generation-tree-proposal`
+                ),
+                readBuffer(
+                  treeProposal.conductionEvidenceBuffer,
+                  treeProposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-tree-conduction`
+                ),
+                readBuffer(
+                  treeProposal.radiationEvidenceBuffer,
+                  treeProposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-tree-radiation`
+                ),
+                readBuffer(
+                  treeStage.stateBuffer,
+                  packed.state.byteLength,
+                  `ulg-native-thermal-${name}-same-generation-tree-state`
+                ),
+                readBuffer(
+                  treeStage.thermoBuffer,
+                  packed.thermo.byteLength,
+                  `ulg-native-thermal-${name}-same-generation-tree-thermo`
+                ),
+                readBuffer(
+                  sameGenerationTreeReceipt.diagnosticBuffer,
+                  sameGenerationTreeReceipt.diagnosticWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-tree-diagnostics`
+                ),
+                readBuffer(
+                  treeProposal.activeDispatchBuffer,
+                  3 * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-tree-active-dispatch`
+                ),
+                treeProposal.thermalCandidateCsr
+                  ? readBuffer(
+                      treeProposal.thermalCandidateCsr.replayBuffer,
+                      (
+                        proposalModule
+                          .SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
+                          + treeProposal.thermalCandidateCsr.candidateCapacity
+                      ) * Uint32Array.BYTES_PER_ELEMENT,
+                      `ulg-native-thermal-${name}-same-generation-tree-csr-replay`
+                    )
+                  : Promise.resolve(null),
+                treeProposal.thermalCandidateCsr
+                  ? readBuffer(
+                      treeProposal.thermalCandidateCsr.sourceRowStateBuffer,
+                      treeProposal.thermalCandidateCsr.sourceCapacity
+                        * Uint32Array.BYTES_PER_ELEMENT,
+                      `ulg-native-thermal-${name}-same-generation-tree-csr-row-states`
+                    )
+                  : Promise.resolve(null)
+              ]);
+              const exactBytes = (left, right) => {
+                const a = new Uint8Array(left);
+                const b = new Uint8Array(right);
+                return a.length === b.length
+                  && a.every((value, index) => value === b[index]);
+              };
+              const exactOptionalBytes = (left, right) => (
+                left == null || right == null
+                  ? left == null && right == null
+                  : exactBytes(left, right)
+              );
+              const byteReceipts = {
+                derived: exactBytes(derivedBytes, treeDerivedBytes),
+                proposal: exactBytes(proposalBytes, treeProposalBytes),
+                conductionEvidence: exactBytes(
+                  conductionEvidenceBytes,
+                  treeConductionEvidenceBytes
+                ),
+                radiationEvidence: exactBytes(
+                  radiationEvidenceBytes,
+                  treeRadiationEvidenceBytes
+                ),
+                activeDispatch: exactBytes(
+                  activeDispatchBytes,
+                  treeActiveDispatchBytes
+                ),
+                candidateCsrReplay: exactOptionalBytes(
+                  thermalCandidateCsrReplayBytes,
+                  treeCandidateCsrReplayBytes
+                ),
+                candidateCsrRowStates: exactOptionalBytes(
+                  thermalCandidateCsrRowStateBytes,
+                  treeCandidateCsrRowStateBytes
+                ),
+                appliedState: exactBytes(finalStateBytes, treeFinalStateBytes),
+                appliedThermo: exactBytes(finalThermoBytes, treeFinalThermoBytes)
+              };
+              requireTrue(
+                Object.values(byteReceipts).every(Boolean),
+                `${name}: same-generation direct/tree byte parity failed: ${
+                  JSON.stringify(byteReceipts)
+                }`
+              );
+              const diagnostics = Array.from(
+                new Uint32Array(treeDiagnosticBytes)
+              );
+              const uniform = conductionEvidence[3] === 0
+                && radiationEvidence[3] === 0;
+              requireTrue(
+                uniform
+                  ? diagnostics.every((value) => value === 0)
+                  : diagnostics.slice(0, 3).every((value) => value > 0),
+                `${name}: same-generation tree counters were ${
+                  JSON.stringify(diagnostics)
+                }`
+              );
+              sameGenerationTreeParity = {
+                exact: true,
+                generationId: proposal.generationId,
+                supportEpoch: proposal.supportEpoch,
+                treeArenaIndex: generation.exactNearCellTree.arenaIndex,
+                treeArenaGeneration:
+                  generation.exactNearCellTree.arenaGeneration,
+                uniform,
+                byteReceipts,
+                diagnostics
+              };
+            } finally {
+              if (treeStage) {
+                if (treeSubmitted) {
+                  treeStage.cleanupSubmittedWork?.();
+                } else {
+                  treeStage.cleanupAbortedWork?.();
+                }
+              } else {
+                treeProposal?.abandonPreparedWork?.(
+                  'same-generation-tree-shadow-setup-failed'
+                );
+              }
+              await device.queue.onSubmittedWorkDone();
+            }
+          }
+
+          if (sameGenerationExhaustiveShadow) {
+            for (
+              let waitOrdinal = 0;
+              waitOrdinal < 100 && proposal.released !== true;
+              waitOrdinal += 1
+            ) {
+              await device.queue.onSubmittedWorkDone();
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            requireTrue(
+              proposal.released === true
+                && generation.released !== true,
+              `${name}: direct proposal did not release before exhaustive control`
+            );
+            let exhaustiveProposal = null;
+            let exhaustiveStage = null;
+            let exhaustiveSubmitted = false;
+            try {
+              exhaustiveProposal =
+                proposalModule.runSchroederSpatialThermalProposalWebGpu({
+                  device,
+                  generation,
+                  schroederSpatialEpochTransaction,
+                  sphParticleState: proposalCpuState,
+                  sphParticleUpload: particleUpload,
+                  mlsMpmParticleUpload,
+                  thermalResponseGraphUpload: responseUpload,
+                  dtS,
+                  smoothingLengthM: packed.smoothingLengthM,
+                  conductionRate
+                });
+              const exhaustiveReceipt = proposalModule
+                .armSchroederSpatialThermalExhaustiveShadowForNativeTest({
+                  device,
+                  schroederSpatialThermalProposal: exhaustiveProposal
+                });
+              requireTrue(
+                exhaustiveProposal.generationId === proposal.generationId
+                  && exhaustiveProposal.supportEpoch === proposal.supportEpoch
+                  && exhaustiveReceipt.generation === generation
+                  && exhaustiveReceipt.fallback == null,
+                `${name}: same-generation exhaustive control changed epoch identity`
+              );
+              exhaustiveStage =
+                thermal.createSphThermalStepWebGpuEncoderStage({
+                  device,
+                  sphParticleState: packed,
+                  thermalMaterialTable,
+                  thermalClosureGraphSet: graphSet,
+                  thermalClosureGraphBank: graphSet.graphBank,
+                  thermalPhaseResponseTable: phaseResponseTable,
+                  thermalResponseGraphUpload: responseUpload,
+                  sphParticleUpload: particleUpload,
+                  proposalStateBuffer: currentStateBuffer,
+                  proposalThermoBuffer: particleUpload.thermoBuffer,
+                  sourceStateBuffer: currentStateBuffer,
+                  sourceThermoBuffer: particleUpload.thermoBuffer,
+                  wallTemperaturesK: {},
+                  boxDimsM: [10, 10, 10],
+                  dtS,
+                  conductionRate,
+                  wallRate: 0,
+                  wallLayerM: 0,
+                  ambientTemperatureK: 0,
+                  readbackMode: 'full-parity-readback',
+                  schroederSpatialEpochGeneration: generation,
+                  schroederSpatialThermalProposal: exhaustiveProposal
+                });
+              device.pushErrorScope('validation');
+              const exhaustiveEncoder = device.createCommandEncoder({
+                label:
+                  `ulg-native-thermal-${name}-same-generation-exhaustive`
+              });
+              exhaustiveStage.encode(exhaustiveEncoder);
+              device.queue.submit([exhaustiveEncoder.finish()]);
+              exhaustiveStage.markSubmittedWork();
+              exhaustiveSubmitted = true;
+              await device.queue.onSubmittedWorkDone();
+              const exhaustiveValidationError = await device.popErrorScope();
+              requireTrue(
+                !exhaustiveValidationError,
+                `${name}: same-generation exhaustive validation failed: ${
+                  exhaustiveValidationError?.message
+                    || String(exhaustiveValidationError)
+                }`
+              );
+              const [
+                exhaustiveDerivedBytes,
+                exhaustiveProposalBytes,
+                exhaustiveConductionEvidenceBytes,
+                exhaustiveRadiationEvidenceBytes,
+                exhaustiveFinalStateBytes,
+                exhaustiveFinalThermoBytes,
+                exhaustiveActiveDispatchBytes,
+                exhaustiveCandidateCsrReplayBytes,
+                exhaustiveCandidateCsrRowStateBytes
+              ] = await Promise.all([
+                readBuffer(
+                  exhaustiveProposal.thermalDerivedBudgetBuffer,
+                  exhaustiveProposal.activeDerivedByteLength,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-derived`
+                ),
+                readBuffer(
+                  exhaustiveProposal.proposalBuffer,
+                  exhaustiveProposal.activeProposalByteLength,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-proposal`
+                ),
+                readBuffer(
+                  exhaustiveProposal.conductionEvidenceBuffer,
+                  exhaustiveProposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-conduction`
+                ),
+                readBuffer(
+                  exhaustiveProposal.radiationEvidenceBuffer,
+                  exhaustiveProposal.evidenceWordCount
+                    * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-radiation`
+                ),
+                readBuffer(
+                  exhaustiveStage.stateBuffer,
+                  packed.state.byteLength,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-state`
+                ),
+                readBuffer(
+                  exhaustiveStage.thermoBuffer,
+                  packed.thermo.byteLength,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-thermo`
+                ),
+                readBuffer(
+                  exhaustiveProposal.activeDispatchBuffer,
+                  3 * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-active-dispatch`
+                ),
+                exhaustiveProposal.thermalCandidateCsr
+                  ? readBuffer(
+                      exhaustiveProposal.thermalCandidateCsr.replayBuffer,
+                      (
+                        proposalModule
+                          .SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
+                          + exhaustiveProposal
+                            .thermalCandidateCsr.candidateCapacity
+                      ) * Uint32Array.BYTES_PER_ELEMENT,
+                      `ulg-native-thermal-${name}-same-generation-exhaustive-csr-replay`
+                    )
+                  : Promise.resolve(null),
+                exhaustiveProposal.thermalCandidateCsr
+                  ? readBuffer(
+                      exhaustiveProposal
+                        .thermalCandidateCsr.sourceRowStateBuffer,
+                      exhaustiveProposal.thermalCandidateCsr.sourceCapacity
+                        * Uint32Array.BYTES_PER_ELEMENT,
+                      `ulg-native-thermal-${name}-same-generation-exhaustive-csr-row-states`
+                    )
+                  : Promise.resolve(null)
+              ]);
+              const exactBytes = (left, right) => {
+                const a = new Uint8Array(left);
+                const b = new Uint8Array(right);
+                return a.length === b.length
+                  && a.every((value, index) => value === b[index]);
+              };
+              const exactOptionalBytes = (left, right) => (
+                left == null || right == null
+                  ? left == null && right == null
+                  : exactBytes(left, right)
+              );
+              const byteReceipts = {
+                derived: exactBytes(
+                  derivedBytes,
+                  exhaustiveDerivedBytes
+                ),
+                proposal: exactBytes(
+                  proposalBytes,
+                  exhaustiveProposalBytes
+                ),
+                conductionEvidence: exactBytes(
+                  conductionEvidenceBytes,
+                  exhaustiveConductionEvidenceBytes
+                ),
+                radiationEvidence: exactBytes(
+                  radiationEvidenceBytes,
+                  exhaustiveRadiationEvidenceBytes
+                ),
+                activeDispatch: exactBytes(
+                  activeDispatchBytes,
+                  exhaustiveActiveDispatchBytes
+                ),
+                candidateCsrReplay: exactOptionalBytes(
+                  thermalCandidateCsrReplayBytes,
+                  exhaustiveCandidateCsrReplayBytes
+                ),
+                candidateCsrRowStates: exactOptionalBytes(
+                  thermalCandidateCsrRowStateBytes,
+                  exhaustiveCandidateCsrRowStateBytes
+                ),
+                appliedState: exactBytes(
+                  finalStateBytes,
+                  exhaustiveFinalStateBytes
+                ),
+                appliedThermo: exactBytes(
+                  finalThermoBytes,
+                  exhaustiveFinalThermoBytes
+                )
+              };
+              const proposalHeaderBytes =
+                proposal.proposalRowByteOffset;
+              const proposalHeaderExact = exactBytes(
+                proposalBytes.slice(0, proposalHeaderBytes),
+                exhaustiveProposalBytes.slice(0, proposalHeaderBytes)
+              );
+              const directProposalRows = new Float32Array(
+                proposalBytes,
+                proposalHeaderBytes
+              );
+              const exhaustiveProposalRows = new Float32Array(
+                exhaustiveProposalBytes,
+                proposalHeaderBytes
+              );
+              let maximumProposalAbsoluteDifference = 0;
+              const proposalRowsNear =
+                directProposalRows.length === exhaustiveProposalRows.length
+                && directProposalRows.every((value, index) => {
+                  const difference = Math.abs(
+                    value - exhaustiveProposalRows[index]
+                  );
+                  maximumProposalAbsoluteDifference = Math.max(
+                    maximumProposalAbsoluteDifference,
+                    difference
+                  );
+                  return near(
+                    value,
+                    exhaustiveProposalRows[index],
+                    1.0e-5,
+                    2.0e-6
+                  );
+                });
+              const evidenceExceptCandidateVisitsExact = (left, right) => {
+                const directWords = new Uint32Array(left);
+                const bruteForceWords = new Uint32Array(right);
+                return directWords.length === bruteForceWords.length
+                  && directWords.every((value, index) => (
+                    index === 3 || value === bruteForceWords[index]
+                  ));
+              };
+              const semanticReceipts = {
+                derived: byteReceipts.derived,
+                proposalHeader: proposalHeaderExact,
+                proposalRowsNear,
+                conductionEvidenceExceptCandidateVisits:
+                  evidenceExceptCandidateVisitsExact(
+                    conductionEvidenceBytes,
+                    exhaustiveConductionEvidenceBytes
+                  ),
+                radiationEvidenceExceptCandidateVisits:
+                  evidenceExceptCandidateVisitsExact(
+                    radiationEvidenceBytes,
+                    exhaustiveRadiationEvidenceBytes
+                  ),
+                activeDispatch: byteReceipts.activeDispatch,
+                candidateCsrRowStates: byteReceipts.candidateCsrRowStates,
+                appliedState: byteReceipts.appliedState,
+                appliedThermo: byteReceipts.appliedThermo
+              };
+              requireTrue(
+                Object.values(semanticReceipts).every(Boolean),
+                `${name}: same-generation direct/brute-force semantic parity failed: ${
+                  JSON.stringify({
+                    byteReceipts,
+                    semanticReceipts,
+                    maximumProposalAbsoluteDifference
+                  })
+                }`
+              );
+              sameGenerationExhaustiveParity = {
+                exact: Object.values(byteReceipts).every(Boolean),
+                semanticExact: true,
+                enumerationIndependent: true,
+                generationId: proposal.generationId,
+                supportEpoch: proposal.supportEpoch,
+                byteReceipts,
+                semanticReceipts,
+                maximumProposalAbsoluteDifference
+              };
+            } finally {
+              if (exhaustiveStage) {
+                if (exhaustiveSubmitted) {
+                  exhaustiveStage.cleanupSubmittedWork?.();
+                } else {
+                  exhaustiveStage.cleanupAbortedWork?.();
+                }
+              } else {
+                exhaustiveProposal?.abandonPreparedWork?.(
+                  'same-generation-exhaustive-shadow-setup-failed'
+                );
+              }
+              await device.queue.onSubmittedWorkDone();
+            }
+          }
+
           // Model the G2P post-apply refill with an exact submitted producer
           // command and issue the runtime-only authority bound to this state.
           const classicBinWords = new Uint32Array(1 + packed.particleCount);
@@ -1783,6 +2598,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
 
           return {
             name,
+            producerTraversal,
+            treeShadowDiagnostics,
+            treeArenaIndex: generation.exactNearCellTree.arenaIndex,
+            treeArenaGeneration:
+              generation.exactNearCellTree.arenaGeneration,
+            treeRuntimeCapacity: generation.runtimeCapacity,
             useAggregate,
             useActiveRank,
             activeSourceProjectionMode: proposal.activeSourceProjectionMode,
@@ -1824,9 +2645,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             nonH2oAcceptedEnergyJ,
             boundaryEvidence,
             exactTouchEvidence,
+            sameGenerationTreeParity,
+            sameGenerationExhaustiveParity,
             classicMaxTemperatureDeltaK,
             classicMaxSpecificEnergyDeltaJPerKg,
-            finalDomains
+            finalDomains,
+            appliedState: includeAppliedRowsInResult
+              ? Array.from(result.state)
+              : null,
+            appliedThermo: includeAppliedRowsInResult
+              ? Array.from(result.thermo)
+              : null
           };
         } finally {
           canonicalThermalStage?.cleanupAbortedWork?.();
@@ -1879,56 +2708,505 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       };
 
       const cases = [];
+      const treeShadowComparisons = [];
+      const treeShadowFailureCases = [];
+      let thermalTreeTiming = null;
+      const compareTreeAndDirect = (name, direct, tree) => {
+        for (const field of [
+          'derivedRows',
+          'proposalRows',
+          'conductionEvidence',
+          'radiationEvidence',
+          'appliedState',
+          'appliedThermo'
+        ]) {
+          const normalizeFreshGenerationIdentity = (value) => (
+            field === 'conductionEvidence' || field === 'radiationEvidence'
+              ? value.map((word, index) => (
+                  index === 10 || index === 11 ? 0 : word
+                ))
+              : value
+          );
+          requireTrue(
+            JSON.stringify(normalizeFreshGenerationIdentity(tree[field]))
+              === JSON.stringify(
+                normalizeFreshGenerationIdentity(direct[field])
+              ),
+            `${name} tree/direct ${field} mismatch: ${
+              JSON.stringify({
+                direct: direct[field],
+                tree: tree[field],
+                diagnostics: tree.treeShadowDiagnostics
+              })
+            }`
+          );
+        }
+        const diagnostics = tree.treeShadowDiagnostics;
+        const uniform = direct.conductionEvidence[3] === 0
+          && direct.radiationEvidence[3] === 0;
+        requireTrue(
+          diagnostics?.length
+              === proposalModule
+                .SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_DIAGNOSTIC_WORDS
+            && (
+              uniform
+                ? diagnostics.every((value) => value === 0)
+                : diagnostics.slice(0, 3).every((value) => value > 0)
+            ),
+          `${name}: invalid tree traversal diagnostics ${
+            JSON.stringify(diagnostics)
+          }`
+        );
+        const receipt = {
+          name,
+          exact: true,
+          uniform,
+          diagnostics,
+          treeArenaIndex: tree.treeArenaIndex,
+          treeArenaGeneration: tree.treeArenaGeneration,
+          treeRuntimeCapacity: tree.treeRuntimeCapacity,
+          candidateCsrRoute: tree.thermalCandidateCsrRoute
+        };
+        treeShadowComparisons.push(receipt);
+        return receipt;
+      };
+      const thermalTimingStages = [
+        'thermal-producer-apply-total',
+        'derived-prepass',
+        'directional-budget',
+        'candidate-csr-validate-rows',
+        'candidate-csr-seal',
+        'budget-resolve',
+        'reciprocal-limited-proposal'
+      ];
+      const runThermalTimingPair = async ({
+        name,
+        particles,
+        order,
+        ordinal,
+        expectedRoute,
+        smoothingLengthM = 0.1,
+        spatialCellSizeM = 0.1,
+        dtS = 0.001,
+        conductionRate = 1500
+      }) => {
+        epochOrdinal += 1;
+        const timingEpoch = epochOrdinal;
+        const source = sphStateModule.createSphState({
+          smoothingLengthM,
+          dimension: 3,
+          step: timingEpoch,
+          particles
+        });
+        const packed = gpuBuffers.buildSphGpuParticleBuffers(source, {
+          materialProperties
+        });
+        const epoch = {
+          storageGeneration: timingEpoch,
+          physicsTick: timingEpoch,
+          physicsSubstep: 0,
+          positionEpoch: timingEpoch,
+          topologyEpoch: 0,
+          chartEpoch: 0,
+          levelEpoch: timingEpoch,
+          supportEpoch: timingEpoch
+        };
+        Object.assign(packed, epoch);
+        const particleUpload = gpuBuffers.uploadSphGpuParticleBuffers(
+          device,
+          packed
+        );
+        Object.assign(particleUpload, epoch, {
+          bufferFamilyGenerationStatus:
+            'schroeder-particle-buffer-family-generation-ready',
+          slot: 0,
+          sourceSlot: 0,
+          nextSlot: 1
+        });
+        const assignmentRows = new Float32Array(
+          packed.particleCount * 16
+        );
+        for (let index = 0; index < packed.particleCount; index += 1) {
+          const stateOffset = index * 8;
+          const thermoOffset = index * 12;
+          const massKg = packed.state[stateOffset + 3];
+          const restDensityKgPerM3 = packed.thermo[thermoOffset + 3];
+          const volumeM3 = Math.max(
+            1.0e-12,
+            massKg / Math.max(restDensityKgPerM3, 1)
+          );
+          assignmentRows.set([
+            0,
+            spatialCellSizeM,
+            2 * smoothingLengthM,
+            volumeM3,
+            volumeM3,
+            volumeM3,
+            massKg,
+            restDensityKgPerM3,
+            packed.thermo[thermoOffset + 1],
+            packed.thermo[thermoOffset],
+            1,
+            0,
+            packed.state[stateOffset],
+            packed.state[stateOffset + 1],
+            packed.state[stateOffset + 2],
+            0
+          ], index * 16);
+        }
+        const assignmentBuffer = createTaggedBuffer(
+          `ulg-native-thermal-timing-${name}-${ordinal}-assignment`,
+          assignmentRows,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST
+        );
+        const levelAssignment = {
+          schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+          status: 'schroeder-level-assignment-submitted',
+          bufferFamilyGenerationStatus:
+            'schroeder-particle-buffer-family-generation-ready',
+          particleCount: packed.particleCount,
+          assignmentStrideFloats: 16,
+          assignmentBuffer,
+          assignmentBufferByteLength: assignmentRows.byteLength,
+          sourceStateBuffer: particleUpload.stateBuffer,
+          sourceStateBufferBorrowed: true,
+          minLevel: 0,
+          maxLevel: 0,
+          chartId: 0,
+          baseGridSpacingM: spatialCellSizeM,
+          phaseVolumeAssignmentOverlayEnabled: false,
+          ...epoch
+        };
+        const mechanicsBuffer = createTaggedBuffer(
+          `ulg-native-thermal-timing-${name}-${ordinal}-mechanics`,
+          new Float32Array(packed.particleCount * 24),
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST
+        );
+        const mlsMpmParticleUpload = { mechanicsBuffer };
+        let generation = null;
+        let treeBuildTimer = null;
+        try {
+          treeBuildTimer = createTimestampRecorder(
+            `ulg-native-thermal-timing-${name}-${ordinal}-tree-build`,
+            ['exact-near-cell-tree-build']
+          );
+          generation = spatial.runSchroederSpatialEpochGenerationWebGpu({
+            device,
+            levelAssignment,
+            particleCount: packed.particleCount,
+            particleIdentityBuffer: particleUpload.identityBuffer,
+            particleIdentityStrideWords: 1,
+            particleBufferSet: null,
+            laneId: `native-thermal-timing-${name}`,
+            sourceFamily: `native-thermal-timing-${name}`,
+            mechanicsLevels: [],
+            gpuTimestampRecorder: treeBuildTimer.recorder
+          });
+          requireTrue(
+            generation.ready === true
+              && generation.selected === true
+              && generation.activeRankView != null
+              && generation.exactNearCellTree != null,
+            `${name}/${ordinal}: timing generation rejected: ${
+              generation.reason || generation.status
+            }`
+          );
+          await device.queue.onSubmittedWorkDone();
+          const buildTiming = await treeBuildTimer.complete();
+          treeBuildTimer.destroy();
+          treeBuildTimer = null;
+
+          const consumerSupportProfileIds = Object.fromEntries(
+            proposalModule.SCHROEDER_SPATIAL_THERMAL_CONSUMERS.map(
+              (consumer) => [
+                consumer.consumerId,
+                consumer.supportProfileId
+              ]
+            )
+          );
+          const schroederSpatialEpochTransaction = transactionModule
+            .createSchroederSpatialEpochTransaction({
+              device,
+              generation,
+              sphParticleUpload: particleUpload,
+              mlsMpmParticleUpload,
+              requiredReaderIds: [],
+              enabledConsumerReaderIds:
+                Object.keys(consumerSupportProfileIds),
+              consumerSupportProfileIds
+            });
+          const runArm = async (route) => {
+            let proposal = null;
+            let stage = null;
+            let submitted = false;
+            let timer = null;
+            try {
+              proposal =
+                proposalModule.runSchroederSpatialThermalProposalWebGpu({
+                  device,
+                  generation,
+                  schroederSpatialEpochTransaction,
+                  sphParticleState: packed,
+                  sphParticleUpload: particleUpload,
+                  mlsMpmParticleUpload,
+                  thermalResponseGraphUpload: responseUpload,
+                  dtS,
+                  smoothingLengthM: packed.smoothingLengthM,
+                  conductionRate
+                });
+              if (route === 'tree') {
+                const receipt = proposalModule
+                  .armSchroederSpatialThermalTreeShadowForNativeTest({
+                    device,
+                    schroederSpatialThermalProposal: proposal,
+                    observeTraversalCounters: false
+                  });
+                requireTrue(
+                  receipt.tree === generation.exactNearCellTree
+                    && receipt.diagnosticBuffer == null,
+                  `${name}/${ordinal}: timing tree was not unobserved`
+                );
+              }
+              timer = createTimestampRecorder(
+                `ulg-native-thermal-timing-${name}-${ordinal}-${route}`,
+                thermalTimingStages
+              );
+              stage = thermal.createSphThermalStepWebGpuEncoderStage({
+                device,
+                sphParticleState: packed,
+                thermalMaterialTable,
+                thermalClosureGraphSet: graphSet,
+                thermalClosureGraphBank: graphSet.graphBank,
+                thermalPhaseResponseTable: phaseResponseTable,
+                thermalResponseGraphUpload: responseUpload,
+                sphParticleUpload: particleUpload,
+                proposalStateBuffer: particleUpload.stateBuffer,
+                proposalThermoBuffer: particleUpload.thermoBuffer,
+                sourceStateBuffer: particleUpload.stateBuffer,
+                sourceThermoBuffer: particleUpload.thermoBuffer,
+                wallTemperaturesK: {},
+                boxDimsM: [1000, 1000, 1000],
+                dtS,
+                conductionRate,
+                wallRate: 0,
+                wallLayerM: 0,
+                ambientTemperatureK: 0,
+                readbackMode: 'no-full-readback',
+                schroederSpatialEpochGeneration: generation,
+                schroederSpatialThermalProposal: proposal,
+                gpuTimestampRecorder: timer.recorder
+              });
+              const encoder = device.createCommandEncoder({
+                label:
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}`
+              });
+              const totalSpan = timer.recorder.beginEncoderSpan(encoder, {
+                producerId: `s9d4-thermal-${route}`,
+                stage: 'thermal-producer-apply-total',
+                generationId: generation.execution.generationId
+              });
+              stage.encode(encoder);
+              timer.recorder.endEncoderSpan(encoder, totalSpan);
+              device.queue.submit([encoder.finish()]);
+              stage.markSubmittedWork();
+              submitted = true;
+              const timing = await timer.complete();
+              const csrHeader = Array.from(new Uint32Array(await readBuffer(
+                proposal.thermalCandidateCsr.replayBuffer,
+                proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS
+                  * Uint32Array.BYTES_PER_ELEMENT,
+                `ulg-native-thermal-timing-${name}-${ordinal}-${route}-csr`
+              )));
+              const csrStatus = csrHeader[
+                proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_WORD
+              ];
+              const csrRoute = csrHeader[
+                proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_WORD
+              ];
+              requireTrue(
+                (csrRoute & expectedRoute) !== 0
+                  && (
+                    expectedRoute
+                      === proposalModule
+                        .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY
+                      ? (
+                          csrStatus
+                            & proposalModule
+                              .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY
+                        ) !== 0
+                      : (
+                          csrStatus
+                            & proposalModule
+                              .SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_OVERFLOW
+                        ) !== 0
+                  ),
+                `${name}/${ordinal}/${route}: unexpected CSR status/route ${
+                  csrStatus
+                }/${csrRoute}`
+              );
+              return { timing, csrStatus, csrRoute };
+            } finally {
+              timer?.destroy?.();
+              if (stage) {
+                if (submitted) {
+                  stage.cleanupSubmittedWork?.();
+                } else {
+                  stage.cleanupAbortedWork?.();
+                }
+              } else {
+                proposal?.abandonPreparedWork?.(
+                  `timing-${route}-setup-failed`
+                );
+              }
+              await device.queue.onSubmittedWorkDone();
+              for (
+                let waitOrdinal = 0;
+                waitOrdinal < 100 && proposal?.released !== true;
+                waitOrdinal += 1
+              ) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+              }
+              requireTrue(
+                proposal?.released === true,
+                `${name}/${ordinal}/${route}: proposal arena did not release`
+              );
+            }
+          };
+
+          const firstRoute = order === 'direct-tree' ? 'direct' : 'tree';
+          const secondRoute = firstRoute === 'direct' ? 'tree' : 'direct';
+          const first = await runArm(firstRoute);
+          const second = await runArm(secondRoute);
+          return {
+            name,
+            order,
+            ordinal,
+            particleCount: packed.particleCount,
+            treeBuildMs: buildTiming['exact-near-cell-tree-build'],
+            direct: firstRoute === 'direct' ? first : second,
+            tree: firstRoute === 'tree' ? first : second
+          };
+        } finally {
+          treeBuildTimer?.destroy?.();
+          if (generation) {
+            spatial.releaseSchroederSpatialEpochGenerationAfterQueue(
+              generation,
+              device
+            );
+          }
+          await device.queue.onSubmittedWorkDone();
+          if (generation?.releasePromise) {
+            await generation.releasePromise;
+          }
+          mechanicsBuffer.destroy?.();
+          assignmentBuffer.destroy?.();
+          gpuBuffers.destroySphGpuParticleBuffers(particleUpload);
+        }
+      };
       try {
+        const mixedBoilingParticles = [
+          {
+            id: 'h2o-mixed-boiling-carrier',
+            material: 'h2o',
+            x: [5, 5, 5],
+            v: [0, 0, 0],
+            massKg: 1.0e-5,
+            specificInternalEnergyJPerKg: boilingMidpointU
+          },
+          {
+            id: 'fe-hot-x-min',
+            material: 'fe',
+            x: [4.96, 5, 5],
+            v: [0, 0, 0],
+            massKg: 1.0e-2,
+            specificInternalEnergyJPerKg: ironHotU
+          },
+          {
+            id: 'fe-hot-x-max',
+            material: 'fe',
+            x: [5.04, 5, 5],
+            v: [0, 0, 0],
+            massKg: 1.0e-2,
+            specificInternalEnergyJPerKg: ironHotU
+          },
+          {
+            id: 'fe-cold-y-min',
+            material: 'fe',
+            x: [5, 4.96, 5],
+            v: [0, 0, 0],
+            massKg: 1.0e-2,
+            specificInternalEnergyJPerKg: ironColdU
+          },
+          {
+            id: 'fe-cold-y-max',
+            material: 'fe',
+            x: [5, 5.04, 5],
+            v: [0, 0, 0],
+            massKg: 1.0e-2,
+            specificInternalEnergyJPerKg: ironColdU
+          }
+        ];
         cases.push(await runFixture({
           name: 'mixed-boiling-plateau-four-neighbor',
-          particles: [
-            {
-              id: 'h2o-mixed-boiling-carrier',
-              material: 'h2o',
-              x: [5, 5, 5],
-              v: [0, 0, 0],
-              massKg: 1.0e-5,
-              specificInternalEnergyJPerKg: boilingMidpointU
-            },
-            {
-              id: 'fe-hot-x-min',
-              material: 'fe',
-              x: [4.96, 5, 5],
-              v: [0, 0, 0],
-              massKg: 1.0e-2,
-              specificInternalEnergyJPerKg: ironHotU
-            },
-            {
-              id: 'fe-hot-x-max',
-              material: 'fe',
-              x: [5.04, 5, 5],
-              v: [0, 0, 0],
-              massKg: 1.0e-2,
-              specificInternalEnergyJPerKg: ironHotU
-            },
-            {
-              id: 'fe-cold-y-min',
-              material: 'fe',
-              x: [5, 4.96, 5],
-              v: [0, 0, 0],
-              massKg: 1.0e-2,
-              specificInternalEnergyJPerKg: ironColdU
-            },
-            {
-              id: 'fe-cold-y-max',
-              material: 'fe',
-              x: [5, 5.04, 5],
-              v: [0, 0, 0],
-              massKg: 1.0e-2,
-              specificInternalEnergyJPerKg: ironColdU
-            }
-          ]
+          particles: mixedBoilingParticles,
+          includeAppliedRowsInResult: runNativeTreeShadow,
+          sameGenerationTreeShadow: runNativeTreeShadow,
+          sameGenerationExhaustiveShadow: runNativeTreeShadow
         }));
         requireTrue(
           cases[0].derivedRows[0][1] === 0,
           `mixed plateau slope was ${cases[0].derivedRows[0][1]}, not zero`
         );
+        if (runNativeTreeShadow) {
+          const tree = await runFixture({
+            name: 'tree-shadow-mixed-boiling-plateau-four-neighbor',
+            particles: mixedBoilingParticles,
+            producerTraversal: 'native-test-tree-shadow',
+            includeAppliedRowsInResult: true
+          });
+          const mixedComparison = compareTreeAndDirect(
+            'mixed-boiling-plateau-four-neighbor',
+            cases[0],
+            tree
+          );
+          const sameGenerationTree =
+            cases[0].sameGenerationTreeParity;
+          requireTrue(
+            sameGenerationTree?.treeArenaIndex === tree.treeArenaIndex
+              && sameGenerationTree.treeArenaGeneration
+                < tree.treeArenaGeneration
+              && cases[0].treeRuntimeCapacity === tree.treeRuntimeCapacity,
+            `mixed tree arena was not reused after the same-generation control: ${
+              JSON.stringify({
+                sameGenerationTree,
+                freshTree: {
+                  treeArenaIndex: tree.treeArenaIndex,
+                  treeArenaGeneration: tree.treeArenaGeneration,
+                  treeRuntimeCapacity: tree.treeRuntimeCapacity
+                }
+              })
+            }`
+          );
+          mixedComparison.arenaReuse = {
+            exact: true,
+            arenaIndex: tree.treeArenaIndex,
+            previousArenaGeneration:
+              sameGenerationTree.treeArenaGeneration,
+            currentArenaGeneration: tree.treeArenaGeneration,
+            runtimeCapacity: tree.treeRuntimeCapacity
+          };
+          mixedComparison.sameGeneration = true;
+          mixedComparison.byteReceipts =
+            sameGenerationTree.byteReceipts;
+          mixedComparison.exhaustiveByteReceipts =
+            cases[0].sameGenerationExhaustiveParity.byteReceipts;
+          mixedComparison.exhaustiveSemanticReceipts =
+            cases[0].sameGenerationExhaustiveParity.semanticReceipts;
+        }
 
         cases.push(await runFixture({
           name: 'pure-gas-shared-boil-knot',
@@ -2976,6 +4254,577 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             JSON.stringify(activeRankUniformCorrupt)
           }`
         );
+
+        if (runNativeTreeShadow) {
+          const negativeBoundaryParticles = [
+            {
+              id: 'negative-boundary-cold-water',
+              material: 'h2o',
+              x: [-0.1, -0.1, -0.1],
+              v: [0, 0, 0],
+              massKg: 1.0e-3,
+              specificInternalEnergyJPerKg: productionIceColdU
+            },
+            {
+              id: 'negative-boundary-hot-iron',
+              material: 'fe',
+              x: [-0.05, -0.1, -0.1],
+              v: [0, 0, 0],
+              massKg: 1.0e-2,
+              specificInternalEnergyJPerKg: ironHotU
+            },
+            {
+              id: 'positive-boundary-cold-iron',
+              material: 'fe',
+              x: [0.1, 0.1, 0.1],
+              v: [0, 0, 0],
+              massKg: 1.0e-2,
+              specificInternalEnergyJPerKg: ironColdU
+            }
+          ];
+          const multiLevelParticles = [
+            {
+              id: 'multilevel-fine-cold-water',
+              material: 'h2o',
+              x: [-0.025, 0, 0],
+              v: [0, 0, 0],
+              massKg: 1.0e-3,
+              specificInternalEnergyJPerKg: productionIceColdU
+            },
+            {
+              id: 'multilevel-base-hot-iron',
+              material: 'fe',
+              x: [0.025, 0, 0],
+              v: [0, 0, 0],
+              massKg: 1.0e-2,
+              specificInternalEnergyJPerKg: ironHotU
+            },
+            {
+              id: 'multilevel-coarse-cold-water',
+              material: 'h2o',
+              x: [0.2, 0, 0],
+              v: [0, 0, 0],
+              massKg: 1.0e-3,
+              specificInternalEnergyJPerKg: productionIceColdU
+            },
+            {
+              id: 'multilevel-coarse-hot-iron',
+              material: 'fe',
+              x: [0.38, 0, 0],
+              v: [0, 0, 0],
+              massKg: 1.0e-2,
+              specificInternalEnergyJPerKg: ironHotU
+            }
+          ];
+          const parityCampaigns = [
+            {
+              name: 'multilevel-fine-base-coarse',
+              args: {
+                particles: multiLevelParticles,
+                particleLevels: [-1, 0, 1, 1],
+                smoothingLengthM: 0.1,
+                spatialCellSizeM: 0.1,
+                useAggregate: false,
+                useActiveRank: true
+              }
+            },
+            {
+              name: 'negative-coordinate-cell-boundary',
+              args: {
+                particles: negativeBoundaryParticles,
+                smoothingLengthM: 0.1,
+                spatialCellSizeM: 0.1,
+                useAggregate: false
+              }
+            },
+            {
+              name: 'matched-time-current-contact-frozen-separated',
+              args: {
+                particles: [
+                  {
+                    id: 'tree-parity-h2o-frozen-origin',
+                    material: 'h2o',
+                    x: [5, 5, 5],
+                    v: [0, 0, 0],
+                    massKg: 1.0e-3,
+                    specificInternalEnergyJPerKg: productionIceColdU
+                  },
+                  {
+                    id: 'tree-parity-fe-frozen-far',
+                    material: 'fe',
+                    x: [5.5, 5, 5],
+                    v: [0, 0, 0],
+                    massKg: 1.0e-2,
+                    specificInternalEnergyJPerKg: ironHotU
+                  }
+                ],
+                currentPositions: [
+                  [5, 5, 5],
+                  [5.05, 5, 5]
+                ],
+                smoothingLengthM: 0.1,
+                spatialCellSizeM: 0.1
+              }
+            },
+            {
+              name: 'matched-time-current-separated-frozen-contact',
+              args: {
+                particles: [
+                  {
+                    id: 'tree-parity-h2o-frozen-contact',
+                    material: 'h2o',
+                    x: [5, 5, 5],
+                    v: [0, 0, 0],
+                    massKg: 1.0e-3,
+                    specificInternalEnergyJPerKg: productionIceColdU
+                  },
+                  {
+                    id: 'tree-parity-fe-frozen-contact',
+                    material: 'fe',
+                    x: [5.05, 5, 5],
+                    v: [0, 0, 0],
+                    massKg: 1.0e-2,
+                    specificInternalEnergyJPerKg: ironHotU
+                  }
+                ],
+                currentPositions: [
+                  [5, 5, 5],
+                  [5.5, 5, 5]
+                ],
+                smoothingLengthM: 0.1,
+                spatialCellSizeM: 0.1,
+                requireThermalExchange: false
+              }
+            },
+            {
+              name: 'base-active-rank-dormant-projection',
+              args: {
+                particles: frozenSlabParticles,
+                smoothingLengthM: productionSmoothingLengthM,
+                spatialCellSizeM: productionPitchM,
+                nativeGridSpacingM: productionPitchM,
+                exactTouchPlane: true,
+                useAggregate: false,
+                useActiveRank: true
+              }
+            },
+            {
+              name: 'dense-csr-overflow-exact-rewalk',
+              args: {
+                particles: denseOverflowParticles,
+                smoothingLengthM: 0.1,
+                spatialCellSizeM: 0.1,
+                expectCandidateCsrFallback: true,
+                includePairLedgerInResult: false
+              }
+            },
+            {
+              name: 'gpu-uniform-zero-traversal',
+              args: {
+                particles: uniformTemperatureParticles,
+                smoothingLengthM: 0.05,
+                spatialCellSizeM: 0.1,
+                requireThermalExchange: false,
+                useAggregate: false
+              }
+            }
+          ];
+          for (const campaign of parityCampaigns) {
+            const direct = await runFixture({
+              ...campaign.args,
+              name: `tree-direct-control-${campaign.name}`,
+              includeAppliedRowsInResult: true,
+              includePairLedgerInResult: false,
+              sameGenerationTreeShadow: true,
+              sameGenerationExhaustiveShadow: true
+            });
+            requireTrue(
+              direct.sameGenerationTreeParity?.exact === true
+                && Object.values(
+                  direct.sameGenerationTreeParity.byteReceipts
+                ).every(Boolean),
+              `${campaign.name}: same-generation byte comparator failed: ${
+                JSON.stringify(direct.sameGenerationTreeParity)
+              }`
+            );
+            requireTrue(
+              direct.sameGenerationExhaustiveParity?.semanticExact === true
+                && direct.sameGenerationExhaustiveParity
+                  .enumerationIndependent === true
+                && Object.values(
+                  direct.sameGenerationExhaustiveParity.semanticReceipts
+                ).every(Boolean),
+              `${campaign.name}: brute-force semantic comparator failed: ${
+                JSON.stringify(direct.sameGenerationExhaustiveParity)
+              }`
+            );
+            treeShadowComparisons.push({
+              name: campaign.name,
+              exact: true,
+              uniform: direct.sameGenerationTreeParity.uniform,
+              diagnostics: direct.sameGenerationTreeParity.diagnostics,
+              candidateCsrRoute: direct.thermalCandidateCsrRoute,
+              sameGeneration: true,
+              byteReceipts:
+                direct.sameGenerationTreeParity.byteReceipts,
+              exhaustiveByteReceipts:
+                direct.sameGenerationExhaustiveParity.byteReceipts,
+              exhaustiveSemanticReceipts:
+                direct.sameGenerationExhaustiveParity.semanticReceipts
+            });
+          }
+          for (const corruption of [
+            { name: 'status', word: 2, value: 4 },
+            { name: 'generation-id', word: 3, value: 0 },
+            { name: 'position-epoch', word: 11, value: 0 },
+            { name: 'node-capacity', word: 21, value: 0 },
+            { name: 'node-offset', word: 22, value: 41 },
+            {
+              name: 'root-aabb-nan',
+              word: 40,
+              value: 0x7fc0_0000,
+              traversedBeforeReject: true
+            },
+            {
+              name: 'live-child-status-cleared',
+              word: (tree) => tree.layout.nodeOffsetWords
+                + tree.layout.nodeWords + 6,
+              value: 0,
+              traversedBeforeReject: true
+            },
+            {
+              name: 'duplicate-live-leaf',
+              word: (tree) => tree.layout.nodeOffsetWords
+                + tree.layout.leafOffset * tree.layout.nodeWords + 7,
+              value: 1,
+              traversedBeforeReject: true
+            }
+          ]) {
+            const rejected = await runFixture({
+              name: `tree-shadow-corrupt-${corruption.name}-fails-closed`,
+              particles: mixedBoilingParticles,
+              producerTraversal: 'native-test-tree-shadow',
+              corruptTreeWord: corruption,
+              expectTreeFailClosed: true,
+              includePairLedgerInResult: false
+            });
+            requireTrue(
+              rejected.expectedFailClosed === true
+                && rejected.publishedRowCount === 0
+                && rejected.proposalInvalidCounts.every((count) => count > 0)
+                && (
+                  rejected.conductionEvidence[2] > 0
+                    || rejected.conductionEvidence[5] > 0
+                )
+                && (
+                  rejected.radiationEvidence[2] > 0
+                    || rejected.radiationEvidence[5] > 0
+                )
+                && (
+                  corruption.traversedBeforeReject === true
+                    ? (
+                        rejected.treeShadowDiagnostics[0] > 0
+                          && rejected.treeShadowDiagnostics[3] > 0
+                          && [
+                            rejected.treeShadowDiagnostics[1],
+                            rejected.treeShadowDiagnostics[2],
+                            rejected.treeShadowDiagnostics[4],
+                            rejected.treeShadowDiagnostics[5]
+                          ].every((value) => value === 0)
+                      )
+                    : rejected.treeShadowDiagnostics.every(
+                        (value) => value === 0
+                      )
+                ),
+              `corrupt ${corruption.name} tree did not fail closed: ${
+                JSON.stringify(rejected)
+              }`
+            );
+            treeShadowFailureCases.push({
+              name: corruption.name,
+              failClosed: true,
+              fallbackCounts: [
+                rejected.conductionEvidence[13],
+                rejected.conductionEvidence[14],
+                rejected.conductionEvidence[15],
+                rejected.radiationEvidence[13],
+                rejected.radiationEvidence[14],
+                rejected.radiationEvidence[15]
+              ]
+            });
+          }
+
+          const timingParticle = (index, position, prefix) => {
+            const isWater = index % 2 === 0;
+            return {
+              id: `${prefix}-${index}`,
+              material: isWater ? 'h2o' : 'fe',
+              x: position,
+              v: [0, 0, 0],
+              massKg: 1.0e-4,
+              specificInternalEnergyJPerKg: isWater
+                ? productionIceColdU
+                : ironHotU
+            };
+          };
+          const sparseTimingParticles = Array.from(
+            { length: 1024 },
+            (_, index) => {
+              const pair = Math.floor(index / 2);
+              return timingParticle(
+                index,
+                [pair * 0.5 + (index % 2) * 0.05, 0, 0],
+                'timing-sparse'
+              );
+            }
+          );
+          const clusteredTimingParticles = Array.from(
+            { length: 1024 },
+            (_, index) => {
+              const cluster = Math.floor(index / 16);
+              const local = index % 16;
+              return timingParticle(
+                index,
+                [
+                  (cluster % 8) * 1.0 + (local % 4) * 0.025,
+                  Math.floor(cluster / 8) * 1.0
+                    + Math.floor(local / 4) * 0.025,
+                  0
+                ],
+                'timing-clustered'
+              );
+            }
+          );
+          const timingFixtures = [
+            {
+              name: 'sparse-many-cells-replay',
+              particles: sparseTimingParticles,
+              expectedRoute:
+                proposalModule
+                  .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY
+            },
+            {
+              name: 'clustered-multi-cell-replay',
+              particles: clusteredTimingParticles,
+              expectedRoute:
+                proposalModule
+                  .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY
+            },
+            {
+              name: 'dense-one-cell-overflow-rewalk',
+              particles: denseOverflowParticles,
+              expectedRoute:
+                proposalModule
+                  .SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_EXACT_NEAR_REWALK
+            }
+          ];
+          const warmupOrders = [
+            'direct-tree',
+            'tree-direct',
+            'direct-tree',
+            'tree-direct'
+          ];
+          const measuredOrders = [
+            'direct-tree',
+            'tree-direct',
+            'direct-tree',
+            'tree-direct',
+            'direct-tree',
+            'tree-direct',
+            'direct-tree',
+            'tree-direct',
+            'direct-tree'
+          ];
+          const timingCampaigns = [];
+          for (
+            let fixtureIndex = 0;
+            fixtureIndex < timingFixtures.length;
+            fixtureIndex += 1
+          ) {
+            const fixture = timingFixtures[fixtureIndex];
+            const warmups = [];
+            for (
+              let orderIndex = 0;
+              orderIndex < warmupOrders.length;
+              orderIndex += 1
+            ) {
+              warmups.push(await runThermalTimingPair({
+                ...fixture,
+                order: warmupOrders[orderIndex],
+                ordinal:
+                  10_000 + fixtureIndex * 100 + orderIndex
+              }));
+            }
+            const measurements = [];
+            for (
+              let orderIndex = 0;
+              orderIndex < measuredOrders.length;
+              orderIndex += 1
+            ) {
+              measurements.push(await runThermalTimingPair({
+                ...fixture,
+                order: measuredOrders[orderIndex],
+                ordinal:
+                  20_000 + fixtureIndex * 100 + orderIndex
+              }));
+            }
+            timingCampaigns.push({
+              name: fixture.name,
+              warmupCount: warmups.length,
+              measuredOrders,
+              measurements
+            });
+          }
+          const ratioReceipt = (
+            measurements,
+            directValue,
+            treeValue
+          ) => {
+            const direct = measurements.map(directValue);
+            const tree = measurements.map(treeValue);
+            const paired = measurements.map((sample, index) => (
+              tree[index] / direct[index]
+            ));
+            const orderRatios = (order) => measurements
+              .map((sample, index) => ({ sample, ratio: paired[index] }))
+              .filter(({ sample }) => sample.order === order)
+              .map(({ ratio }) => ratio);
+            return {
+              directMedianMs: median(direct),
+              treeMedianMs: median(tree),
+              pairedRatioMedian: median(paired),
+              independentRatio:
+                median(tree) / median(direct),
+              directFirstRatioMedian:
+                median(orderRatios('direct-tree')),
+              treeFirstRatioMedian:
+                median(orderRatios('tree-direct'))
+            };
+          };
+          const stageValue = (route, stage) => (sample) => (
+            sample[route].timing[stage]
+          );
+          const traversalValue = (route) => (sample) => (
+            sample[route].timing['directional-budget']
+              + sample[route].timing['reciprocal-limited-proposal']
+          );
+          const totalValue = (route) => (sample) => (
+            sample[route].timing['thermal-producer-apply-total']
+          );
+          const sharedValue = (route) => (sample) => (
+            sample.treeBuildMs
+              + sample[route].timing['thermal-producer-apply-total']
+          );
+          const timingFixtureReceipts = timingCampaigns.map((campaign) => {
+            const receipt = {
+              name: campaign.name,
+              warmupSamples: campaign.warmupCount,
+              measuredSamples: campaign.measurements.length,
+              measuredOrders: campaign.measuredOrders,
+              treeBuildMedianMs: median(campaign.measurements.map(
+                ({ treeBuildMs }) => treeBuildMs
+              )),
+              directionalBudget: ratioReceipt(
+                campaign.measurements,
+                stageValue('direct', 'directional-budget'),
+                stageValue('tree', 'directional-budget')
+              ),
+              reciprocalProposal: ratioReceipt(
+                campaign.measurements,
+                stageValue('direct', 'reciprocal-limited-proposal'),
+                stageValue('tree', 'reciprocal-limited-proposal')
+              ),
+              traversal: ratioReceipt(
+                campaign.measurements,
+                traversalValue('direct'),
+                traversalValue('tree')
+              ),
+              fullThermalRoute: ratioReceipt(
+                campaign.measurements,
+                totalValue('direct'),
+                totalValue('tree')
+              ),
+              sharedTreePlusThermal: ratioReceipt(
+                campaign.measurements,
+                sharedValue('direct'),
+                sharedValue('tree')
+              )
+            };
+            const ratioFields = [
+              receipt.traversal,
+              receipt.fullThermalRoute,
+              receipt.sharedTreePlusThermal
+            ];
+            const noMaterialRegression = ratioFields.every((metric) => (
+              metric.pairedRatioMedian <= 1.05
+                && metric.independentRatio <= 1.05
+                && metric.directFirstRatioMedian <= 1.05
+                && metric.treeFirstRatioMedian <= 1.05
+            ));
+            const denseProposalAccepted =
+              campaign.name !== 'dense-one-cell-overflow-rewalk'
+                || (
+                  receipt.reciprocalProposal.pairedRatioMedian <= 1.05
+                    && receipt.reciprocalProposal.independentRatio <= 1.05
+                );
+            const topologyWin = campaign.name
+              === 'sparse-many-cells-replay'
+              ? true
+              : (
+                receipt.traversal.pairedRatioMedian <= 1.0
+                  && receipt.traversal.independentRatio <= 1.0
+              );
+            receipt.accepted = noMaterialRegression
+              && denseProposalAccepted
+              && topologyWin;
+            return receipt;
+          });
+          const compositeDirect = [];
+          const compositeTree = [];
+          for (
+            let sampleIndex = 0;
+            sampleIndex < measuredOrders.length;
+            sampleIndex += 1
+          ) {
+            compositeDirect.push(timingCampaigns.reduce(
+              (sum, campaign) => sum
+                + totalValue('direct')(campaign.measurements[sampleIndex]),
+              0
+            ));
+            compositeTree.push(timingCampaigns.reduce(
+              (sum, campaign) => sum
+                + totalValue('tree')(campaign.measurements[sampleIndex]),
+              0
+            ));
+          }
+          const composite = {
+            pairedRatioMedian: median(compositeTree.map(
+              (value, index) => value / compositeDirect[index]
+            )),
+            independentRatio:
+              median(compositeTree) / median(compositeDirect),
+            directMedianMs: median(compositeDirect),
+            treeMedianMs: median(compositeTree)
+          };
+          const accepted = timingFixtureReceipts.every(
+            ({ accepted: fixtureAccepted }) => fixtureAccepted
+          )
+            && composite.pairedRatioMedian <= 1.0
+            && composite.independentRatio <= 1.0;
+          thermalTreeTiming = {
+            schema:
+              'peercompute.ulg.native-test.s9d4-thermal-tree-timing.v0',
+            timestampQueryRequired: true,
+            warmupSamplesPerFixture: warmupOrders.length,
+            measuredSamplesPerFixture: measuredOrders.length,
+            fixtures: timingFixtureReceipts,
+            composite,
+            accepted,
+            productionDecision: accepted
+              ? 'admit-tree'
+              : 'retain-direct'
+          };
+        }
       } finally {
         thermal.destroySphThermalResponseGraphBuffers(responseUpload);
       }
@@ -3003,9 +4852,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         adapterInfo,
         uncapturedErrors,
         scopeErrors,
-        cases
+        cases,
+        treeShadowComparisons,
+        treeShadowFailureCases,
+        thermalTreeTiming
       };
-    });
+    }, { runNativeTreeShadow: RUN_NATIVE_TREE });
   } finally {
     await browser.close();
   }
@@ -3013,6 +4865,25 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
   assert.equal(native.status, 'passed', native.reason || JSON.stringify(native));
   assert.deepEqual(native.uncapturedErrors, []);
   assert.deepEqual(native.scopeErrors, []);
+  if (RUN_NATIVE_TREE) {
+    const adapterDescription = Object.values(native.adapterInfo || {})
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    assert.ok(
+      adapterDescription.length > 0,
+      `native thermal tree timing requires identified hardware: ${
+        JSON.stringify(native.adapterInfo)
+      }`
+    );
+    assert.doesNotMatch(
+      adapterDescription,
+      /swiftshader|software|llvmpipe|lavapipe/,
+      `native thermal tree timing rejects software adapters: ${
+        JSON.stringify(native.adapterInfo)
+      }`
+    );
+  }
   assert.deepEqual(
     native.cases.map(({ name }) => name),
     [
@@ -3046,4 +4917,197 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
     ]
   );
   assert.ok(native.cases.every(({ particleCount }) => particleCount > 0));
+  if (RUN_NATIVE_TREE) {
+    assert.deepEqual(
+      native.cases[0].sameGenerationTreeParity?.byteReceipts,
+      {
+        derived: true,
+        proposal: true,
+        conductionEvidence: true,
+        radiationEvidence: true,
+        activeDispatch: true,
+        candidateCsrReplay: true,
+        candidateCsrRowStates: true,
+        appliedState: true,
+        appliedThermo: true
+      },
+      JSON.stringify(native.cases[0].sameGenerationTreeParity)
+    );
+    assert.equal(
+      native.cases[0].sameGenerationTreeParity?.exact,
+      true,
+      JSON.stringify(native.cases[0].sameGenerationTreeParity)
+    );
+    assert.equal(
+      native.cases[0].sameGenerationExhaustiveParity?.semanticExact,
+      true,
+      JSON.stringify(native.cases[0].sameGenerationExhaustiveParity)
+    );
+    assert.equal(
+      native.cases[0].sameGenerationExhaustiveParity
+        ?.enumerationIndependent,
+      true,
+      JSON.stringify(native.cases[0].sameGenerationExhaustiveParity)
+    );
+    assert.ok(
+      Object.values(
+        native.cases[0].sameGenerationExhaustiveParity
+          ?.semanticReceipts || {}
+      ).every(Boolean),
+      JSON.stringify(native.cases[0].sameGenerationExhaustiveParity)
+    );
+    assert.ok(
+      native.cases[0].sameGenerationTreeParity?.diagnostics
+        ?.slice(0, 3)
+        .every((value) => value > 0),
+      JSON.stringify(native.cases[0].sameGenerationTreeParity)
+    );
+    assert.deepEqual(
+      native.treeShadowComparisons.map(({ name, exact }) => ({ name, exact })),
+      [
+        { name: 'mixed-boiling-plateau-four-neighbor', exact: true },
+        { name: 'multilevel-fine-base-coarse', exact: true },
+        { name: 'negative-coordinate-cell-boundary', exact: true },
+        {
+          name: 'matched-time-current-contact-frozen-separated',
+          exact: true
+        },
+        {
+          name: 'matched-time-current-separated-frozen-contact',
+          exact: true
+        },
+        { name: 'base-active-rank-dormant-projection', exact: true },
+        { name: 'dense-csr-overflow-exact-rewalk', exact: true },
+        { name: 'gpu-uniform-zero-traversal', exact: true }
+      ]
+    );
+    assert.ok(
+      native.treeShadowComparisons[0].diagnostics
+        .slice(0, 3)
+        .every((value) => value > 0),
+      JSON.stringify(native.treeShadowComparisons)
+    );
+    assert.equal(
+      native.treeShadowComparisons[0].arenaReuse?.exact,
+      true,
+      JSON.stringify(native.treeShadowComparisons[0])
+    );
+    assert.ok(
+      native.treeShadowComparisons[0].arenaReuse.currentArenaGeneration
+        > native.treeShadowComparisons[0].arenaReuse.previousArenaGeneration,
+      JSON.stringify(native.treeShadowComparisons[0])
+    );
+    assert.ok(
+      native.treeShadowComparisons.every((receipt) => (
+        receipt.sameGeneration === true
+          && Object.values(receipt.byteReceipts).every(Boolean)
+          && Object.values(receipt.exhaustiveSemanticReceipts).every(Boolean)
+      )),
+      JSON.stringify(native.treeShadowComparisons)
+    );
+    assert.deepEqual(
+      native.treeShadowFailureCases,
+      [
+        {
+          name: 'status',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        },
+        {
+          name: 'generation-id',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        },
+        {
+          name: 'position-epoch',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        },
+        {
+          name: 'node-capacity',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        },
+        {
+          name: 'node-offset',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        },
+        {
+          name: 'root-aabb-nan',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        },
+        {
+          name: 'live-child-status-cleared',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        },
+        {
+          name: 'duplicate-live-leaf',
+          failClosed: true,
+          fallbackCounts: [0, 0, 0, 0, 0, 0]
+        }
+      ]
+    );
+    assert.equal(
+      native.thermalTreeTiming?.schema,
+      'peercompute.ulg.native-test.s9d4-thermal-tree-timing.v0'
+    );
+    assert.equal(
+      native.thermalTreeTiming?.warmupSamplesPerFixture,
+      4
+    );
+    assert.equal(
+      native.thermalTreeTiming?.measuredSamplesPerFixture,
+      9
+    );
+    assert.deepEqual(
+      native.thermalTreeTiming?.fixtures.map(({ name }) => name),
+      [
+        'sparse-many-cells-replay',
+        'clustered-multi-cell-replay',
+        'dense-one-cell-overflow-rewalk'
+      ]
+    );
+    assert.ok(
+      native.thermalTreeTiming.fixtures.every((fixture) => (
+        fixture.measuredSamples === 9
+          && fixture.treeBuildMedianMs > 0
+          && fixture.traversal.directMedianMs > 0
+          && fixture.traversal.treeMedianMs > 0
+          && fixture.fullThermalRoute.directMedianMs > 0
+          && fixture.fullThermalRoute.treeMedianMs > 0
+      )),
+      JSON.stringify(native.thermalTreeTiming)
+    );
+    assert.equal(
+      native.thermalTreeTiming.productionDecision,
+      native.thermalTreeTiming.accepted
+        ? 'admit-tree'
+        : 'retain-direct'
+    );
+    const timingSummary = {
+      adapterInfo: native.adapterInfo,
+      accepted: native.thermalTreeTiming.accepted,
+      productionDecision:
+        native.thermalTreeTiming.productionDecision,
+      composite: native.thermalTreeTiming.composite,
+      fixtures: native.thermalTreeTiming.fixtures.map((fixture) => ({
+        name: fixture.name,
+        accepted: fixture.accepted,
+        treeBuildMedianMs: fixture.treeBuildMedianMs,
+        directionalBudget: fixture.directionalBudget,
+        reciprocalProposal: fixture.reciprocalProposal,
+        traversal: fixture.traversal,
+        fullThermalRoute: fixture.fullThermalRoute,
+        sharedTreePlusThermal: fixture.sharedTreePlusThermal
+      }))
+    };
+    console.log(`S9D4_THERMAL_TREE_TIMING ${JSON.stringify(timingSummary)}`);
+  } else {
+    assert.deepEqual(native.treeShadowComparisons, []);
+    assert.deepEqual(native.treeShadowFailureCases, []);
+    assert.equal(native.thermalTreeTiming, null);
+  }
 });

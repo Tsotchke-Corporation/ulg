@@ -257,7 +257,22 @@ test('exact-cell tree builds once from an owned directory and fails closed for s
     () => runtime.releaseExecutionAfter(first, null),
     /submission-fence thenable/
   );
-  assert.equal(await runtime.releaseExecutionAfter(first, Promise.resolve()), true);
+  let resolveReleaseFence;
+  const releaseFence = new Promise((resolve) => {
+    resolveReleaseFence = resolve;
+  });
+  const pendingRelease = runtime.releaseExecutionAfter(first, releaseFence);
+  assert.equal(first.releaseScheduled, true);
+  assert.equal(
+    resolveSchroederSpatialExactNearCellTreeForConsumer(first, {
+      device,
+      spatialExecution,
+      supportProfileId: SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1
+    }).ready,
+    false
+  );
+  resolveReleaseFence();
+  assert.equal(await pendingRelease, true);
   assert.equal(
     resolveSchroederSpatialExactNearCellTreeForConsumer(first, {
       device,

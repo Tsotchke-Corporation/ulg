@@ -2,41 +2,58 @@
 
 ## Current Focus - 2026-07-24 AKDT
 
-Slice S9D-3 is at its commit boundary. The canonical GPU-resident exact-cell
-reaction tree remains the only production reaction traversal; nine
-diagnostic-only hot counters now accumulate per source invocation and flush
-once, while control, certificate, rejection, and overflow atomics remain
-immediate. A native-test-only legacy global-atomic control proves exact
-proposal and all-27-word evidence parity. Default production combined-route
-ratios are `0.6154x` dense, `0.7483x` sparse, and `0.7179x` clustered across
-four warmups and nine alternating AB/BA samples.
+Slice S9D-4 is at its commit boundary with a measured production rejection.
+The canonical GPU-resident direct exact-cell directory remains the only
+production thermal traversal. A native-test-only exact-cell-tree shadow and an
+independent particle-index brute-force control now exercise the unchanged
+thermal law, projection, evidence, active-dispatch, CSR, and apply stages
+without exposing a production selector or fallback.
 
-The closure campaign also repaired native presentation liveness around real
-camera interaction and delayed candidate publication. Exact structured
-terminal receipts, current-latest scheduler identity, source lineage,
-foreground proof, epoch guards, and gate object identity are revalidated before
-physics is released. Real Chromium/Vulkan tests pass both recovery cases
-together and prove actual compute workers plus typed fail-closed startup when
-workers are disabled.
+Direct and tree routes preserve exact proposal/evidence/apply behavior. The
+independent control preserves the same derived state, proposal semantics, CSR
+row states, and applied state/thermo bytes while intentionally allowing
+different candidate-visit evidence and floating-point proposal order. Tree
+admission fails closed on stale/released/lost generations, foreign devices,
+malformed topology or AABBs, cleared or duplicate live leaves, partial pipeline
+creation, arena reuse, and the bind-to-encode release race.
+
+Four warmups and nine alternating AB/BA native NVIDIA Blackwell samples reject
+all three fixtures under the no-material-regression policy. Sparse full-route
+ratios are `1.2285x` paired / `1.2361x` independent; clustered ratios are
+`1.0843x` / `1.0605x`; dense is favorable in the aggregate at `0.9611x` /
+`0.9616x` but breaches the order-stratum guard at `1.1379x` tree-first. The
+composite traversal ratio is `0.9791x`, which is not an adoption basis because
+dense work dominates it. The next bounded experiment is a native-test-only
+source-cell-batched tree comparator using source-cell AABBs, radius expansion,
+and two-dimensional dispatch.
 
 Final verification reports:
 
-- full Node suite: `1945` tests, `1924` passed, `21` expected skips, zero
+- full Node suite: `1953` tests, `1932` passed, `21` expected skips, zero
   failures;
-- physics atomics: `11/11` required checks passed, three opt-in long-horizon
-  skips;
-- browser camera/late-publication: `2/2` passed;
-- browser worker/WebGPU prerequisites: `4/4` passed;
+- focused touched suites: `32/32` passed;
+- physics atomics: `11/11` required checks passed, with three opt-in
+  long-horizon skips;
+- native Vulkan tree/direct/brute campaign: passed on an identifiable NVIDIA
+  Blackwell adapter with timestamp queries;
 - production build and `git diff --check`: passed;
-- seven-scenario standard/random visual matrix: all `58` temporal captures
-  nonblank and current, zero stale-source, console, or visual-surface issues.
+- GitHub Pages build: passed with `972` transformed modules and a verified
+  `45`-file bundle containing both runtime workers and preserved service assets;
+- seven-scenario standard/random visual matrix plus an iron/ice rerun: all
+  structural and renderer checks good/nonblank, with zero console or
+  visual-surface issues.
 
-The unchanged steam-rise, condensation, hydrogen-rise, gas-cloud appearance,
-and material-spectrum separation deficits remain explicit follow-ons. ICC
-artifacts are fresh, scoped guard diffs pass, both completion oracles are
-complete, and both readiness reports score `100`. The next action is the one
-authorized all-dirty slice commit/push, followed by a separately leased
-hierarchy consumer slice.
+The unchanged steam-rise, condensation, hydrogen-rise, nonzero radiation-energy
+coverage, and real-device-loss-with-armed-shadow gaps remain explicit
+follow-ons. A real production consumer would also require a generation lease
+covering encode through submit. ICC index and memory are fresh, the
+source-scoped guard diff has no violations or warnings, and verified attempt
+`20260724-125103-verified` records the complete gate campaign under a
+generated-bundle-aware guard policy. Generic readiness remains blocked only by
+a name-only false positive on the classic neighbor-bin helper named `fallback`
+and absent machine-readable trace ingestion; neither identifies a tree-shadow
+production caller. The remaining closeout action is the authorized slice
+commit/push.
 
 ## Previous Focus - 2026-07-21 AKDT
 

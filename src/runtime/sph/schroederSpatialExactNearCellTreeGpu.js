@@ -685,6 +685,8 @@ export function resolveSchroederSpatialExactNearCellTreeForConsumer(
     || cellTree?.schema !== ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA
     || cellTree?.status !== 'schroeder-spatial-exact-near-cell-tree-build-submitted'
     || cellTree?.released === true
+    || cellTree?.releaseScheduled === true
+    || cellTree?.deviceLost === true
     || cellTree?.submitPerformed !== true
     || cellTree?.spatialExecution !== spatialExecution
     || cellTree?.directoryBuffer !== spatialExecution?.directoryBuffer

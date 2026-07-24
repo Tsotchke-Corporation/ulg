@@ -2060,3 +2060,63 @@ The 2026-07-24 closure campaign completes the remaining S9D-3 release gates:
 S9D-3 is therefore closed by the slice commit containing this checkpoint. The
 next hierarchy work must start as a separately leased, bounded consumer slice;
 it may not reopen the diagnostic-atomic control as a production fallback.
+
+### S9D-4 thermal exact-cell-tree consumer rejected for production - 2026-07-24
+
+S9D-4 tested the matched-time canonical thermal producer as the second
+exact-cell-tree consumer without changing the mounted route. The direct
+canonical-directory pipelines remain the only production thermal traversal.
+The tree and brute-force variants are reachable only through explicit
+native-test arming functions; neither has a URL selector, runtime fallback, or
+production caller.
+
+Correctness evidence is sufficient to reject or admit the candidate honestly:
+
+- direct and tree runs share one authenticated generation and compare the full
+  derived/proposal headers and rows, conduction and radiation evidence, active
+  dispatch, CSR replay/state, and applied state/thermo;
+- eight campaigns cover mixed temperatures, multilevel cells, negative
+  coordinates, both directions of frozen/current displacement, active-rank
+  dormant projection, dense CSR overflow/re-walk, and uniform completion;
+- the tree route is byte-identical to direct for every compared artifact;
+- a separate independent GPU control enumerates particle indices without
+  consulting cell keys, member ranks, particle-to-cell mappings, or a spatial
+  envelope. It preserves exact applied state/thermo and control evidence, with
+  proposal rows equal within the declared f32 tolerance. Candidate-visit
+  counters and CSR peer byte order are intentionally not equated because the
+  brute-force enumeration visits a different superset in a different order;
+- status/generation/position/capacity/offset/root-AABB corruption plus a
+  cleared live child and duplicated live-leaf payload all publish zero rows
+  with no fallback; and
+- host lifecycle coverage rejects foreign devices, swapped generations,
+  released and pending-release trees, physical arena reuse, device loss,
+  partial pipeline arming, and a tree retired after bind but before encode.
+  The final encode recheck happens before any command-encoder mutation.
+
+The final hardware receipt uses the NVIDIA Blackwell adapter with
+`timestamp-query`, four warmups, and nine alternating AB/BA samples per
+fixture. Diagnostic counters are disabled in the timed routes:
+
+- sparse replay: traversal `1.5224x` paired / `1.6110x` independent,
+  full thermal route `1.2285x / 1.2361x`, and shared tree-plus-thermal
+  `1.1877x / 1.1906x`;
+- clustered replay: traversal `1.1473x / 1.1548x`, full route
+  `1.0843x / 1.0605x`, and shared route `1.0713x / 1.0511x`;
+- dense overflow/re-walk: full route `0.9611x / 0.9616x`, but the
+  tree-first order stratum is `1.1379x` and the shared tree-first stratum is
+  `1.1342x`; and
+- the dense-dominated composite is `0.9791x / 0.9805x`, which cannot override
+  the material sparse/clustered and order-stratum regressions.
+
+The production decision is therefore **retain direct**. No thermal migration,
+runtime topology selector, hidden direct fallback, or dense-only special case
+is admitted.
+
+Before a later tree migration can be reconsidered, it still needs a real
+consumer lease spanning encode through submission, a representative nonzero
+radiative-energy campaign, and real-device loss evidence. The next bounded
+hierarchy experiment should remain native-test-only and batch traversal by
+frozen source cell, expanding each source-cell AABB by the maximum support
+radius plus `2D`. It must compare against both the current per-particle tree
+and direct-directory routes on the same sparse, clustered, and dense fixtures;
+production stays direct unless every no-material-regression gate passes.

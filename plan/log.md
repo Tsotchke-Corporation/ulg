@@ -41851,3 +41851,52 @@ Validation and review:
   S9D-3 and camera-liveness completion oracles are complete; both readiness
   reports score `100`. Production-audit warnings are limited to the inherited
   uncommitted slice diff and the intentionally unfinished task portfolio.
+
+## 2026-07-24 AKDT - S9D-4 thermal tree conditional adoption rejected
+
+- Kept the canonical direct exact-cell directory as the only production
+  thermal route. Added native-test-only tree and independent particle-index
+  brute-force controls; there is no runtime selector, production caller, or
+  fallback for either control.
+- Direct/tree comparisons preserve exact proposal, evidence, dispatch, CSR, and
+  apply results. The independent control preserves derived state, proposal
+  semantics, row states, and applied state/thermo bytes while permitting its
+  intentionally different candidate-visit count and floating-point proposal
+  order.
+- Tree validation and lifecycle coverage fail closed for stale or released
+  generations, foreign devices, device loss, malformed topology/AABBs,
+  cleared or duplicate live leaves, partial pipeline creation, physical-arena
+  reuse, and release scheduled between bind and encode. No corrupt case emits
+  rows or falls back.
+- The final four-warmup/nine-sample NVIDIA Blackwell timestamp campaign rejects
+  adoption. Sparse full-route ratios are `1.2285x` paired / `1.2361x`
+  independent, clustered ratios are `1.0843x` / `1.0605x`, and dense ratios
+  are `0.9611x` / `0.9616x` but fail the order guard at `1.1379x` tree-first.
+  Composite traversal is `0.9791x`, dominated by the dense fixture and not used
+  to hide the sparse and clustered regressions.
+- PASS: focused touched suites `32/32`; full suite `1932/1953` with zero
+  failures and `21` expected opt-in skips; physics atomics `11/14` with three
+  opt-in skips; native Vulkan tree/direct/brute campaign on an identifiable
+  hardware adapter; production build; syntax and `git diff --check`.
+- PASS: GitHub Pages build with `972` transformed modules. Its structural
+  verifier reports `45` files, one HTML entry, `27` JavaScript files, both
+  runtime workers, the resident-compute facade, and preserved service assets.
+- Presentation PASS: all seven standard/random scenarios and the isolated
+  iron/ice rerun are structurally good and nonblank with no browser-console or
+  visual-surface issues. Direct contact-sheet review confirms evolving water,
+  iron/ice contact and deformation, sodium/water reaction, visible energetic
+  cesium/fluorine products, and stable random pairs.
+- Steam rise/condensation and hydrogen rise remain inherited transport debt.
+  Nonzero radiation-energy parity and a real device-loss event while the
+  shadow is armed remain migration blockers. Any future production consumer
+  must also hold a spatial-generation lease through submit.
+- The next bounded hierarchy experiment is a native-test-only
+  source-cell-batched thermal comparator using source-cell AABBs, interaction
+  radius expansion, and two-dimensional dispatch, compared against both the
+  per-particle tree and canonical direct routes.
+- ICC index and memory are fresh. Source-scoped guard-diff passes without a
+  violation or warning; verified attempt `20260724-125103-verified` also passes
+  its generated-Pages-aware rollback/protected-path guard. Generic readiness
+  still reports a documented name-only false positive for an unrelated classic
+  neighbor-bin helper named `fallback` and lacks machine-readable runtime trace
+  ingestion; this was not “fixed” by changing valid production code.

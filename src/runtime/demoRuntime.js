@@ -21,13 +21,32 @@ import { WorkerSupervisor } from './WorkerSupervisor.js';
 import { createDefaultCarrierState } from './carrierRuntime.js';
 import { createId } from './ids.js';
 
-const serviceWorkerModule = new URL('../services/dummyService.worker.js', import.meta.url).href;
-const ulgRuntimeWorkerModule = new URL('../services/ulgRuntime.worker.js', import.meta.url).href;
-const childWorkerModule = new URL('../services/dummyChild.worker.js', import.meta.url).href;
+const DEFAULT_SERVICE_WORKER_MODULE_PATH = '../services/dummyService.worker.js';
+const DEFAULT_ULG_RUNTIME_WORKER_MODULE_PATH = '../services/ulgRuntime.worker.js';
+const DEFAULT_CHILD_WORKER_MODULE_PATH = '../services/dummyChild.worker.js';
 const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolSmokeBundleName = 'hello';
 
-export async function createDemoRuntime({ deferTriadServices = false, deferGpuProbe = false } = {}) {
+function resolveSourceWorkerModule(relativePath) {
+  return new URL(relativePath, import.meta.url).href;
+}
+
+export async function createDemoRuntime({
+  deferTriadServices = false,
+  deferGpuProbe = false,
+  serviceWorkerModuleUrl = null,
+  ulgRuntimeWorkerModuleUrl = null,
+  childWorkerModuleUrl = null
+} = {}) {
+  // Browser entrypoints pass Vite-bundled worker URLs. The lazy source-relative
+  // defaults keep direct module consumers and tests usable without making Vite
+  // copy unbundled worker sources (and their unresolved imports) into releases.
+  const serviceWorkerModule = serviceWorkerModuleUrl
+    || resolveSourceWorkerModule(DEFAULT_SERVICE_WORKER_MODULE_PATH);
+  const ulgRuntimeWorkerModule = ulgRuntimeWorkerModuleUrl
+    || resolveSourceWorkerModule(DEFAULT_ULG_RUNTIME_WORKER_MODULE_PATH);
+  const childWorkerModule = childWorkerModuleUrl
+    || resolveSourceWorkerModule(DEFAULT_CHILD_WORKER_MODULE_PATH);
   const registry = new ComputeServiceRegistry();
   const leaseManager = new ChildWorkerLeaseManager();
   const gpuBroker = new GpuBroker();

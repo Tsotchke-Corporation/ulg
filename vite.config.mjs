@@ -114,6 +114,11 @@ export default defineConfig({
   plugins: [
     routeCacheHeadersPlugin()
   ],
+  worker: {
+    // Every runtime worker is constructed as a module worker. The ULG runtime
+    // reaches code-split SPH modules, which cannot be emitted as one IIFE.
+    format: 'es'
+  },
   server: {
     https: resolveLocalHttpsConfig(),
     // Keep this narrow rather than setting `allowedHosts: true`: the exact

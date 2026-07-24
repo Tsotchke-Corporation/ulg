@@ -4,7 +4,10 @@
 import './styles.css';
 import * as peercomputeModule from '../../peercompute/peercompute/src/peercompute/index.js';
 import { createDemoRuntime } from './runtime/demoRuntime.js';
+import childWorkerModuleUrl from './services/dummyChild.worker.js?worker&url';
+import serviceWorkerModuleUrl from './services/dummyService.worker.js?worker&url';
 import residentMechanicsStageWorkerModuleUrl from './services/ulgMechanicsResidentStage.worker.js?worker&url';
+import ulgRuntimeWorkerModuleUrl from './services/ulgRuntime.worker.js?worker&url';
 import { mountSphPhaseDemoOverlay } from './visualization/sphPhaseDemoMount.js';
 
 function rejectedSphRuntime(error) {
@@ -30,7 +33,10 @@ async function launch() {
   const runtime = canBootstrapRuntime
     ? await createDemoRuntime({
       deferTriadServices: true,
-      deferGpuProbe: true
+      deferGpuProbe: true,
+      serviceWorkerModuleUrl,
+      ulgRuntimeWorkerModuleUrl,
+      childWorkerModuleUrl
     }).catch(rejectedSphRuntime)
     : null;
   const handle = await mountSphPhaseDemoOverlay({

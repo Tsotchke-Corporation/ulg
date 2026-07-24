@@ -1,6 +1,9 @@
 import './styles.css';
 import { createDemoRuntime } from './runtime/demoRuntime.js';
 import { formatHandoffAckStatus } from './runtime/handoffStatus.js';
+import childWorkerModuleUrl from './services/dummyChild.worker.js?worker&url';
+import serviceWorkerModuleUrl from './services/dummyService.worker.js?worker&url';
+import ulgRuntimeWorkerModuleUrl from './services/ulgRuntime.worker.js?worker&url';
 import { createWorkerTreeScene } from './visualization/workerTreeScene.js';
 import {
   SPH_PHASE_URL_PARAM_KEYS,
@@ -83,7 +86,10 @@ const artifactCount = document.querySelector('#artifact-count');
 
 const runtime = await createDemoRuntime({
   deferTriadServices: isSphPhaseRoute,
-  deferGpuProbe: isSphPhaseRoute
+  deferGpuProbe: isSphPhaseRoute,
+  serviceWorkerModuleUrl,
+  ulgRuntimeWorkerModuleUrl,
+  childWorkerModuleUrl
 });
 runtime.launchPeerComputeMagnetarDemo = launchPeerComputeMagnetarDemo;
 runtime.sendPeerComputeHandoffToMultiscale = launchPeerComputeMagnetarDemo;

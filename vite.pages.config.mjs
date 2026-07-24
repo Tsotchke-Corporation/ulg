@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url';
 // (e.g. https://user.github.io/<repo>/). Output goes to docs/ (GitHub Pages "/docs" source).
 export default defineConfig({
   base: './',
+  worker: {
+    // The supervised workers are module workers, and the ULG runtime reaches
+    // code-split SPH modules that cannot be emitted as one IIFE.
+    format: 'es'
+  },
   build: {
     outDir: 'docs',
     emptyOutDir: true,

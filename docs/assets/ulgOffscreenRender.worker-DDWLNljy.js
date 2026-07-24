@@ -1306,6 +1306,10 @@ function drawRenderRows(data) {
   publishRenderRowsStatus({
     status: 'worker-offscreen-render-rows-rendered',
     reason: data.reason || 'draw-render-rows',
+    displayOwnerEpoch: Number.isFinite(Number(data.displayOwnerEpoch))
+      ? Math.max(0, Math.round(Number(data.displayOwnerEpoch)))
+      : null,
+    sphStep: Number.isFinite(Number(data.sphStep)) ? Number(data.sphStep) : null,
     particleCount,
     inputTransferBytes: particleRows.byteLength + viewProjection.byteLength,
     inputTransport: data.inputTransport || RENDER_ROWS_INPUT_TRANSPORT,
@@ -1479,6 +1483,10 @@ function drawResidentRenderProducer(data) {
     renderRowsSchema: RENDER_ROWS_SCHEMA,
     status: 'worker-offscreen-resident-render-producer-rendered',
     reason: data.reason || 'draw-resident-render-producer',
+    displayOwnerEpoch: Number.isFinite(Number(data.displayOwnerEpoch))
+      ? Math.max(0, Math.round(Number(data.displayOwnerEpoch)))
+      : null,
+    sphStep: Number.isFinite(Number(data.sphStep)) ? Number(data.sphStep) : null,
     particleCount,
     inputTransferBytes: (sourceCacheHit ? 0 : activeSourceByteLength) + viewProjection.byteLength,
     inputTransport: data.inputTransport || RESIDENT_RENDER_PRODUCER_TRANSPORT,
@@ -1751,6 +1759,10 @@ function drawResidentParticleStateProducer(data) {
     renderRowsSchema: RENDER_ROWS_SCHEMA,
     status: 'worker-offscreen-resident-particle-state-producer-rendered',
     reason: data.reason || 'draw-resident-particle-state-producer',
+    displayOwnerEpoch: Number.isFinite(Number(data.displayOwnerEpoch))
+      ? Math.max(0, Math.round(Number(data.displayOwnerEpoch)))
+      : null,
+    sphStep: Number.isFinite(Number(data.sphStep)) ? Number(data.sphStep) : null,
     particleCount,
     inputTransferBytes,
     inputTransport: data.inputTransport || RESIDENT_RENDER_PRODUCER_TRANSPORT,

@@ -886,8 +886,23 @@ function scenarioEnv({
     ULG_PROBE_FAIL_ON_BAD: '1'
   };
   if (scenario.standardEnabled) {
-    env.ULG_PROBE_VIEWPORT_WIDTH = process.env.ULG_VISUAL_MATRIX_VIEWPORT_WIDTH || '1280';
-    env.ULG_PROBE_VIEWPORT_HEIGHT = process.env.ULG_VISUAL_MATRIX_VIEWPORT_HEIGHT || '800';
+    // The visual gate covers a desktop and a mobile preset. Without
+    // ULG_VISUAL_MATRIX_MOBILE the matrix only ever ran 1280x800 at scale 1,
+    // so the mobile half of the gate was never actually executed.
+    const mobile = envFlagEnabled(process.env.ULG_VISUAL_MATRIX_MOBILE, false);
+    if (mobile) {
+      env.ULG_PROBE_VIEWPORT_WIDTH =
+        process.env.ULG_VISUAL_MATRIX_MOBILE_VIEWPORT_WIDTH || '390';
+      env.ULG_PROBE_VIEWPORT_HEIGHT =
+        process.env.ULG_VISUAL_MATRIX_MOBILE_VIEWPORT_HEIGHT || '844';
+      env.ULG_PROBE_DEVICE_SCALE_FACTOR =
+        process.env.ULG_VISUAL_MATRIX_MOBILE_DEVICE_SCALE_FACTOR || '3';
+      env.ULG_PROBE_IS_MOBILE = '1';
+      env.ULG_PROBE_HAS_TOUCH = '1';
+    } else {
+      env.ULG_PROBE_VIEWPORT_WIDTH = process.env.ULG_VISUAL_MATRIX_VIEWPORT_WIDTH || '1280';
+      env.ULG_PROBE_VIEWPORT_HEIGHT = process.env.ULG_VISUAL_MATRIX_VIEWPORT_HEIGHT || '800';
+    }
     env.ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS =
       process.env.ULG_VISUAL_MATRIX_NATIVE_SURFACE_VALIDATION_WAIT_MS || '1500';
     // The probe-level guard admits the complete phase domain. The matrix then

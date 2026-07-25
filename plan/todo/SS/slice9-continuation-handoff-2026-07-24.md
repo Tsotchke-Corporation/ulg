@@ -1393,3 +1393,60 @@ with this failure recorded, and the two outward-facing steps — building and
 pushing Pages, and fast-forwarding `main` — are deliberately NOT performed.
 Shipping a 4-5x frame-time regression to the deployed demo is not a call to
 make silently on the strength of "the other nine items are green."
+
+## CORRECTION to the item 8 finding above: Slice 9 exhausts device memory
+
+The earlier section blames the first matrix run's OOM and device loss on a
+concurrent probe stealing the GPU. **That conclusion was wrong** and is
+retracted. The concurrent probe was real, but it was not the cause. The OOM
+reproduces cleanly with nothing else running.
+
+What misled the analysis: the paired A/B that came back clean was run at 4
+batches x 24 steps = 96 steps. The matrix runs `standard-water-cycle` at 4 x
+512 = 2048 steps. The leak needs a long horizon to show, so a 96-step A/B is
+simply too short to see it, and generalizing from it was the error.
+
+Re-measured at the matrix's own horizon, one scenario at a time, nothing else
+on the GPU:
+
+```text
+baseline worktree @7454ac9 (flags off)   water-cycle + cesium-fluorine
+  standard-cesium-fluorine   good   oom 0       device-lost 0
+  standard-water-cycle       good   oom 0       device-lost 0
+
+candidate worktree (flags on)            water-cycle + cesium-fluorine
+  standard-cesium-fluorine   good   oom 0       device-lost 0
+  standard-water-cycle       bad    oom 20479   device-lost 2
+
+candidate worktree (flags on)            water-cycle ALONE
+  standard-water-cycle       bad    oom 21401   device-lost 2
+```
+
+Water-cycle alone still fails, so this is not contention between scenarios and
+not a cumulative effect across them. The underlying error is
+`vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY`, i.e. genuine
+device memory exhaustion, not a validation or lifetime complaint.
+
+`failedDestroyResourceCount` is 0 and `destroyedResourceCount` is 23 in the
+failing run, so the hierarchy artifact ledger is not the leak — whatever is
+accumulating is allocated outside it. `schroederCrossLevelCouplingGpu.js`
+allocates at 13 sites but does route them through `deferSubmittedWorkCleanup`
+at 6 sites, and the parent-field workspace has explicit destroy/retire paths,
+so the obvious suspects are at least nominally handled and the actual leak
+still needs to be found.
+
+**Item 8 therefore does not pass either.** Two of the ten items fail:
+
+- item 9, the paired performance gate, at 5.04x p50 and 3.63x p95;
+- item 8, because the water-cycle visual gate exhausts device memory and loses
+  the device at its normal horizon.
+
+Both are resource problems in the same direction, and both belong to the Slice
+10 performance and resource refactor. The memory leak should be treated as the
+higher priority of the two: a 4x frame time is slow, but losing the WebGPU
+device is a hard failure for anyone running the demo.
+
+Method note for whoever picks this up: run visual A/B at the *scenario's own*
+batch/step budget. A short-horizon probe is not evidence about a leak, and this
+session produced a confidently wrong conclusion by treating it as though it
+were.

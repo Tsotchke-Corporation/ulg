@@ -1306,6 +1306,13 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   }
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_WIDTH[\s\S]*?'1280'/);
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_HEIGHT[\s\S]*?'800'/);
+  // The visual gate is desktop AND mobile. Keep the mobile preset reachable so
+  // it cannot silently drop back to desktop-only coverage.
+  assert.match(
+    matrixSource,
+    /ULG_VISUAL_MATRIX_MOBILE[\s\S]*?ULG_PROBE_IS_MOBILE = '1'[\s\S]*?ULG_PROBE_HAS_TOUCH = '1'/,
+    'the standard matrix must be able to run a mobile preset'
+  );
   assert.match(
     matrixSource,
     /scenario\.visualRendererMode === 'native-webgpu-surface-consumer'[\s\S]*?ULG_PROBE_READBACK_MODE = 'no-full-readback'[\s\S]*?ULG_PROBE_RENDER_READBACK_MODE = 'no-full-readback'[\s\S]*?ULG_PROBE_RENDER_ROWS_READBACK_MODE = 'no-full-readback'/,

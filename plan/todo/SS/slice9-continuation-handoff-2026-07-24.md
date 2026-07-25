@@ -1555,3 +1555,97 @@ scenarios is clean (maxSpeed 4.63 and 1.09, minJ 0.98 and 1.00), so they are a
 genuine Slice 9 regression and the next thing to run down: particles reaching
 78 m/s and J collapsing to 8.7e-4 is a blown-up integration, not a threshold
 that wants recalibrating.
+
+## Instability: localized to one file, exact defect NOT yet found
+
+Reproduced deterministically and bit-identically:
+`standard-iron-ice-quench` at 10 batches x 512 steps (5120 substeps, 2.56 s
+scene time), which is what the matrix actually runs.
+
+```text
+baseline @7454ac9   maxSpeed  4.634  minJ 0.9812   good
+candidate           maxSpeed 78.309  minJ 0.000874 bad (max-speed>50, min-J<0.1)
+```
+
+Both runs verified to have actually simulated (152 particles, not blocked).
+
+**The two diverge only after t≈0.5 s**, and they agree to 5-6 significant
+digits before that:
+
+```text
+t       candidate minJ / speed     baseline minJ / speed
+0.256   0.999828 / 2.5105          0.999827 / 2.5105
+0.512   0.995707 / 4.6339          0.995708 / 4.6339
+1.280   0.350924 / 78.3086         0.988069 / 0.7036
+2.560   0.410605 / 10.8625         0.986783 / 2.7788
+```
+
+It is the **H2O base** that blows up (`base/maxSpeedMPerS = 78.3086`), and the
+divergence coincides with the hot iron reaching the water, i.e. with contact
+and heat transfer.
+
+**Localized to `src/runtime/sph/sphMlsMpmGpuStep.js`.** Reverting that one file
+to baseline and keeping every other Slice 9 change makes the scenario pass:
+
+```text
+revert sphMlsMpmGpuStep.js   maxSpeed 26.169  minJ 0.1246   good
+```
+
+Not baseline-clean, but inside both gates. This is a diagnostic result, not a
+proposed fix -- reverting that file would also drop the mechanics-field
+pressure sidecar, which is core Slice 9.
+
+**Ruled out** (each tested individually against the valid repro, all returned
+the failing value bit-identically):
+
+- every URL flag combination, including all-off -- the failure is not
+  flag-gated, and all-off is bit-identical to all-on;
+- the P2G `volume = V0*J` clamp change;
+- the mechanics-refresh rest-volume growth guard, and the J=1-on-phase-change
+  reset, in both the CPU and WGSL paths;
+- `max(0, delta_j)` in `measure_g2p_energy_receipt`;
+- `g2p_field_pressure_specific_energy`, the pressure-work energy returned to
+  particles (neutralised at all three sites);
+- both G2P WGSL generators reverted to baseline wholesale.
+
+**Two bisect axes are unusable and a future attempt should not waste runs on
+them.** Reverting the P2G generators, or applying half the file's diff hunks,
+both leave the simulation inert (`maxSpeed = 0`, `minJ = 0.99999`) because the
+pressure-row publication is coupled to its consumers. Note the probe reports
+`status: good` for an inert run, so **treat `maxSpeed == 0` as an invalid run,
+not a pass**.
+
+There is also a variant-derivation layer (`replaceRequiredWgsl` building
+active-grid variants) between these template strings and the executed shader.
+Several targeted edits inside the templates produced bit-identical results,
+which is the signature of editing a string that the executed variant does not
+come from. Confirm any future edit actually reaches the GPU with a deliberate
+perturbation before drawing conclusions from it.
+
+## Correction: /tmp git worktrees silently run a blocked app
+
+`vite.config.mjs` resolves sibling repos by probing `../` and `../../../../`
+from the config file, so a worktree under `/tmp/...` finds neither and drops
+`peercompute` from `server.fs.allow`. The page then fails
+`Failed to fetch dynamically imported module: .../nodeKernel/NodeKernel.js`,
+reports `simulation blocked`, runs zero particles -- and the probe still emits
+a full artifact with plausible-looking numbers.
+
+Every measurement taken in a `/tmp` worktree during this session was therefore
+invalid, including the first "baseline is clean" comparisons and the baseline
+arm of the paired performance campaign. Baseline worktrees must live beside the
+main checkout (`/home/cos/projects/ulg-s9-baseline` is correct); always assert
+`'simulation blocked' not in statusText` and a nonzero particle count before
+believing a run.
+
+**The performance regression itself survives this correction.** Re-measured
+from the two runs above, both verified unblocked:
+
+```text
+kernelsWallMs median   baseline 4348.8   candidate 17424.2   = 4.01x
+```
+
+which independently corroborates the campaign's ~4-5x. The absolute p50/p95
+numbers in the earlier campaign section came from a blocked baseline arm and
+should be re-taken against `/home/cos/projects/ulg-s9-baseline`, but the
+conclusion that Slice 9 costs roughly 4x is confirmed.

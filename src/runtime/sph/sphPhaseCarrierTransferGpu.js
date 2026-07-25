@@ -720,9 +720,32 @@ fn write_phase_slot(
   );
   let specific_energy = (aggregate.internal_energy + thermalized_kinetic_energy) * inv_mass;
   let temperature = aggregate.temperature_mass * inv_mass;
+  // A phase component materializes in its own phase's rest state.
+  //
+  // The tempting alternative -- carry the source's represented current volume
+  // across the split so Vcurrent = V0 * J is conserved through the transfer --
+  // is wrong precisely where it matters. It derives V0 as mass/rho_rest for the
+  // TARGET phase while taking J from the SOURCE's current volume, so a
+  // liquid-to-gas split writes J of about 1/1667 into F as diag(J^(1/3)) and
+  // leaves the new gas sitting at liquid density. The EOS then sees very
+  // nearly the full liquid/gas density ratio as overpressure, which an
+  // explicit step cannot resolve. Measured on iron-ice-quench that drove the
+  // water to 78 m/s and collapsed J to 8.7e-4.
+  //
+  // Conserving the volume is not the more physical choice here either. When
+  // water flashes to steam the vapour expands by that same ratio; asserting
+  // that a gas component still occupies its liquid volume is the less physical
+  // state, not the more careful one. The expansion is sub-resolution, so the
+  // component is materialized already relaxed to its phase's rest volume and
+  // the volume change is that expansion.
+  //
+  // A conditional form of this -- conserve when the conserved density is close
+  // to the phase's rest density, fall back otherwise -- was tried and is worse:
+  // the predicate flips between steps for the same lineage, and the resulting
+  // V0 flapping pumped energy in, holding the scenario near 100 m/s.
   let rest_volume = aggregate.mass / max(record0.z, params.mass_epsilon);
-  let volume_ratio_j = aggregate.current_volume / max(rest_volume, params.mass_epsilon);
-  let isotropic_scale = pow(max(volume_ratio_j, params.mass_epsilon), 1.0 / 3.0);
+  let volume_ratio_j = 1.0;
+  let isotropic_scale = 1.0;
   out_state[target_index * 2u] = vec4<f32>(position, aggregate.mass);
   out_state[target_index * 2u + 1u] = vec4<f32>(velocity, specific_energy);
   out_thermo[target_index * 3u] = vec4<f32>(

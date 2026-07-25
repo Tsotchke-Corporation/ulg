@@ -243,9 +243,22 @@ test('encoder stage binds one immutable source set and orders global preflight b
   assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.internal_energy/);
   assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.source_kinetic_energy/);
   assert.match(sphPhaseCarrierTransferWgsl, /mechanics_model_matches_target/);
+  // A materialized phase component takes its own phase's rest state. This
+  // previously derived J from the source's current volume against a target
+  // rest volume, which for a liquid-to-gas split asserts a gas component at
+  // liquid density -- roughly the full 1667x liquid/gas ratio as overpressure,
+  // with F = diag(J^(1/3)) at J of about 1/1667. On iron-ice-quench that drove
+  // the water to 78 m/s and collapsed J to 8.7e-4. Pin both halves so the
+  // stiff form cannot come back.
   assert.match(
     sphPhaseCarrierTransferWgsl,
-    /let volume_ratio_j = aggregate\.current_volume \/ max\(rest_volume, params\.mass_epsilon\)/
+    /let rest_volume = aggregate\.mass \/ max\(record0\.z, params\.mass_epsilon\);\s*\n\s*let volume_ratio_j = 1\.0;/,
+    'a materialized component must start undeformed at its phase rest volume'
+  );
+  assert.doesNotMatch(
+    sphPhaseCarrierTransferWgsl,
+    /let volume_ratio_j = aggregate\.current_volume \//,
+    'materialization must not derive J from the source current volume'
   );
   assert.match(sphPhaseCarrierTransferWgsl, /const ERROR_VOLUME: u32 = 256u/);
   assert.match(sphPhaseCarrierTransferWgsl, /let template_index = aggregate\.template_index/);

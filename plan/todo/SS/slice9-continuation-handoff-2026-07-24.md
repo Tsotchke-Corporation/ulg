@@ -1649,3 +1649,92 @@ which independently corroborates the campaign's ~4-5x. The absolute p50/p95
 numbers in the earlier campaign section came from a blocked baseline arm and
 should be re-taken against `/home/cos/projects/ulg-s9-baseline`, but the
 conclusion that Slice 9 costs roughly 4x is confirmed.
+
+## Instability: exact defect found and fixed
+
+**Defect.** `write_phase_slot` in `src/runtime/sph/sphPhaseCarrierTransferGpu.js`
+materialized a phase component like this:
+
+```wgsl
+let rest_volume = aggregate.mass / max(record0.z, params.mass_epsilon);   // V0 from TARGET phase rest density
+let volume_ratio_j = aggregate.current_volume / max(rest_volume, ...);    // J from SOURCE current volume
+let isotropic_scale = pow(max(volume_ratio_j, ...), 1.0 / 3.0);           // F = diag(J^(1/3))
+```
+
+The reference volume comes from the target phase's rest density while the
+deformation comes from the source's current volume. Those are two different
+configurations, and at a liquid-to-gas split they differ by the whole
+liquid/gas density ratio: for water, `V0` grows about 1667x, so `J` lands near
+1/1667 and `F` becomes `diag(0.084)`. The new gas component is simultaneously
+declared enormously compressed *and* left sitting at liquid density, so the EOS
+sees nearly the full density ratio as overpressure. An explicit MPM step cannot
+resolve that stiffness.
+
+Measured consequence on `standard-iron-ice-quench`: the water reaches
+78.31 m/s and `J` collapses to 8.7e-4. Baseline reaches 4.63 m/s with `J` at
+0.981.
+
+**Fix.** A materialized component starts undeformed in its own phase's rest
+state — `volume_ratio_j = 1.0`, `isotropic_scale = 1.0`, `V0 = mass/rho_rest`.
+
+This is not merely the numerically convenient choice. When water flashes to
+steam the vapour genuinely expands by that ratio; asserting that a gas
+component still occupies its liquid volume is the *less* physical state, not
+the more careful one. The expansion is sub-resolution, so the component is
+materialized already relaxed and the volume change is that expansion.
+
+**Result:**
+
+```text
+                       maxSpeed   minJ        status
+baseline @7454ac9        4.634    0.9812      good
+candidate (broken)      78.309    0.000874    bad
+candidate + fix          6.217    0.999994    good     <- iron-ice-quench
+candidate + fix         12.724    0.999991    good     <- water-cycle
+```
+
+Both scenarios that failed now pass, with no out-of-memory.
+
+**A conditional version was tried and is worse — do not reintroduce it.**
+Conserving the current volume whenever the conserved density is within 4x of
+the phase rest density, and falling back otherwise, fixes the `J` collapse
+(`minJ` 0.95) but the predicate flips between steps for the same lineage; the
+resulting `V0` flapping pumps energy in and holds the scenario near 100 m/s
+(`maxSpeed` 132.8 over the full gate). The unconditional rule is both simpler
+and correct.
+
+**Tension with the Slice 9 mandate, stated plainly.** "Strict represented
+current volume `Vcurrent = V0 * J`" still governs transport, mechanics refresh,
+and split/merge. It cannot govern a phase-change *materialization*, because at
+that instant the component's volume genuinely changes. Slice 9 applied the rule
+there too, and this is what it cost. If a future slice wants materialization to
+conserve volume as well, the prerequisite is a two-phase mixture treatment —
+the parent particle's rest density interpolating as `1/sum(f_i/rho_i)` through
+the plateau, so it expands smoothly and there is real volume to partition —
+not a clamp or a predicate at the split site.
+
+`tests/sphPhaseCarrierTransferGpu.test.mjs` pins both halves: the component
+must materialize undeformed at its phase rest volume, and `J` must not be
+derived from the source current volume.
+
+### How this was found, for the next bisect
+
+Two things made the earlier attempts fail, both now fixed in the notes above:
+running at 4x24 steps when the matrix runs 10x512, and trusting `/tmp`
+worktrees that silently ran a blocked app. With those corrected the useful
+method was:
+
+1. Trajectory diff rather than pass/fail. Candidate and baseline agree to 6
+   digits until t=0.512 and split at t=0.768, where speed goes 0.258 -> 26.169
+   while `J` is still ~0.99. **Velocity moves first; the `J` collapse is
+   downstream.** That ruled out every volume-authority hypothesis at a stroke.
+2. A 4-batch probe keyed on `speed@0.768` (0.26 vs 26, a 100x gap) as the
+   discriminator, ~5 minutes per run instead of ~9.
+3. File-group bisection with an import-closure resolver, since reverting single
+   files breaks coupling. `sphMlsMpmGpuStep.js`, `sphG2pGpuKernel.js`,
+   `sphGridUpdateGpuKernel.js` and `schroederSpatialEpochTransaction.js` have to
+   move together.
+
+Note the earlier "reverting `sphMlsMpmGpuStep.js` fixes it" result was
+misleading: it moved `minJ` from 8.7e-4 to 0.1246, just inside the gate, while
+leaving the 26 m/s spike untouched. The spike was always the real defect.

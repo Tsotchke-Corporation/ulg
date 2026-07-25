@@ -445,10 +445,46 @@ function resolveInitialParticleSpacingPlan({
     : referenceTargetSpacingM;
   const globalParticleVolumeM3 = globalParticleSpacingM ** 3;
   const globalParticleRadiusM = 0.5 * globalParticleSpacingM;
+  // "A fixed quantum of matter" means fixed MASS, so the spacing a material
+  // packs at follows its own density: a denser material's quantum occupies
+  // less volume. The reference base block fixes the quantum mass; every role
+  // then derives its own spacing, and its axis-aligned block edge is that
+  // spacing times the requested particles-per-edge. Using one spacing for
+  // every material instead made an iron particle carry ~8x the mass of a water
+  // particle while both claimed to be the same quantum.
+  const referenceQuantumMassKg = globalParticleVolumeM3 * baseDensity;
+  // Spacing keys off the material's CONDENSED reference density, not the
+  // density of whatever phase the role currently happens to be in. Using the
+  // live phase density would make a gas role's block edge explode by the
+  // condensed/gas density ratio -- for water vapour that is roughly 12x per
+  // axis -- which both dwarfs the box and breaks the fixed-particle-count,
+  // no-automatic-gas-expansion policy that a phase change must not resize the
+  // block. The condensed reference is a stable material property, so iron and
+  // water still differ while a phase change does not move anything.
+  const materialSpacingForDensityM = (densityKgPerM3, materialState) => {
+    const referenceDensity = Number(
+      materialState?.phaseVolumeReferenceDensityKgPerM3
+    );
+    const density = Number.isFinite(referenceDensity) && referenceDensity > 0
+      ? referenceDensity
+      : Number(densityKgPerM3);
+    if (!Number.isFinite(density) || !(density > 0) || !(referenceQuantumMassKg > 0)) {
+      return globalParticleSpacingM;
+    }
+    const spacing = Math.cbrt(referenceQuantumMassKg / density);
+    return Number.isFinite(spacing) && spacing > 0 ? spacing : globalParticleSpacingM;
+  };
   const globalVisualParticleVolumeM3 = sphereVolumeFromRadiusM(globalParticleRadiusM);
 
   const withSupportMetadata = (row) => {
     const spacingM = Number(row.spacingM);
+    // Per-role quantum: the material's own density sets how tightly its fixed
+    // mass quantum packs, so the diameter and radii below are the role's, not
+    // a single global value shared by every material.
+    const roleSpacingM = Number.isFinite(spacingM) && spacingM > 0
+      ? spacingM
+      : globalParticleSpacingM;
+    const roleParticleRadiusM = 0.5 * roleSpacingM;
     const targetSmoothingLengthM = spacingM > 0 ? spacingM * smoothingLengthRatio : 0;
     const continuumCellVolumeM3 = spacingM > 0 ? spacingM ** 3 : 0;
     const density = Math.max(Number(row.densityKgPerM3) || 0, 0);
@@ -477,7 +513,7 @@ function resolveInitialParticleSpacingPlan({
       targetNeighborCount: neighborTarget,
       continuumCellVolumeM3,
       mechanicsRestVolumeM3: continuumCellVolumeM3,
-      restVolumeM3: globalVisualParticleVolumeM3,
+      restVolumeM3: sphereVolumeFromRadiusM(roleParticleRadiusM),
       particleMassKg,
       phaseVolumeReferenceDensityKgPerM3: phaseVolumeReferenceDensityRecord.densityKgPerM3,
       phaseVolumeReferenceMassKg,
@@ -490,18 +526,18 @@ function resolveInitialParticleSpacingPlan({
       materialStateRestVolumeM3: continuumCellVolumeM3,
       materialStateEntityVolumeM3,
       materialReferenceParticleRadiusM,
-      materialStateParticleRadiusM: globalParticleRadiusM,
+      materialStateParticleRadiusM: roleParticleRadiusM,
       pressurePa: Number.isFinite(Number(row.pressurePa)) ? Number(row.pressurePa) : pressurePa,
       volumeRatioJ: 1,
-      volumeEquivalentParticleRadiusM: globalParticleRadiusM,
-      pressureAdjustedParticleRadiusM: globalParticleRadiusM,
-      materialParticleDiameterM: globalParticleSpacingM,
-      blockSizeSource: 'global-particle-spacing-times-particles-per-edge',
+      volumeEquivalentParticleRadiusM: roleParticleRadiusM,
+      pressureAdjustedParticleRadiusM: roleParticleRadiusM,
+      materialParticleDiameterM: roleSpacingM,
+      blockSizeSource: 'material-particle-spacing-times-particles-per-edge',
       particleSizeSource: 'global-particle-volume-material-density-mass'
     };
   };
   const resolveRole = ({ role, sizeM, densityKgPerM3, materialState, requestedParticlesPerEdge }) => {
-    const uniformSpacingM = globalParticleSpacingM;
+    const uniformSpacingM = materialSpacingForDensityM(densityKgPerM3, materialState);
     const blockEdgeM = initialBlockEdgeFromParticleSpacingM({
       particleSpacingM: uniformSpacingM,
       particlesPerEdge: requestedParticlesPerEdge,
@@ -607,7 +643,7 @@ function resolveInitialParticleSpacingPlan({
   );
   const relativeParticleSize = {
     schema: 'peercompute.ulg.sph-relative-particle-size-diagnostics.v0',
-    source: 'fixed-global-particle-volume-material-density-derived-mass',
+    source: 'fixed-material-quantum-mass-density-derived-spacing',
     dropToBaseRadiusRatio: base.volumeEquivalentParticleRadiusM > 0
       ? drop.volumeEquivalentParticleRadiusM / base.volumeEquivalentParticleRadiusM
       : null,
@@ -637,7 +673,7 @@ function resolveInitialParticleSpacingPlan({
   return {
     schema: 'peercompute.ulg.sph-initial-particle-spacing-plan.v0',
     status: adaptiveParticleSpacing
-      ? 'requested-particle-edges-preserved-global-particle-volume'
+      ? 'requested-particle-edges-preserved-material-quantum-mass'
       : 'fixed-requested-particles-per-edge-global-particle-volume',
     adaptiveParticleSpacing,
     targetNeighborCount: neighborTarget,
@@ -652,7 +688,7 @@ function resolveInitialParticleSpacingPlan({
     matchingMaterialStateSpacingPlan: null,
     particleSizePolicy: {
       schema: 'peercompute.ulg.sph-initial-particle-size-policy.v0',
-      status: 'global-particle-volume-material-density-derived-mass',
+      status: 'material-quantum-mass-density-derived-spacing',
       source: 'initial-particle-spacing-plan',
       roleInputs: [
         'material',
@@ -1977,11 +2013,14 @@ export function buildSphPhaseDemoState({
     ...(closures || {})
   };
   // Box is a rectangular cuboid [Lx, Ly, Lz] (configurable per axis); a scalar edge stays cubic.
-  const boxDims = scenario.box.dimensionsM ?? [scenario.box.edgeM, scenario.box.edgeM, scenario.box.edgeM];
+  // Copied: the box may be grown below to contain corrected block geometry,
+  // and the scenario object must not be mutated by that.
+  const boxDims = [...(scenario.box.dimensionsM
+    ?? [scenario.box.edgeM, scenario.box.edgeM, scenario.box.edgeM])];
   const referenceIronEdge = scenario.iron.edgeM;
   const referenceIceEdge = scenario.ice.edgeM;
-  const cx = boxDims[0] / 2;
-  const cz = boxDims[2] / 2;
+  let cx = boxDims[0] / 2;
+  let cz = boxDims[2] / 2;
 
   // Configurable starting elevation (bottom face) of each block. The base block defaults to resting
   // on the floor; the drop block default is resolved after material particle sizes are known.
@@ -2112,14 +2151,85 @@ export function buildSphPhaseDemoState({
   const baseBlockEdgeM = Number(initialParticleSpacing.base.blockEdgeM) > 0
     ? Number(initialParticleSpacing.base.blockEdgeM)
     : referenceIceEdge;
-  const ironBase = ironBaseHeightM ?? (
+  const requestedIronBase = ironBaseHeightM ?? (
     iceBase + baseBlockEdgeM + Math.max(baseBlockEdgeM, dropBlockEdgeM, 1.0)
   );
+  // Overlapping or out-of-bounds initial geometry is corrected, not refused.
+  // A particle's support extends half a spacing past the block face, so two
+  // blocks whose faces merely touch already overlap in support and start the
+  // run with an interpenetration impulse. Separate them by both supports plus
+  // a spacing of slack, then grow the box if the corrected stack no longer
+  // fits. The corrections are reported on the summary so a surprising layout
+  // is still visible rather than silent.
+  const geometryCorrections = [];
+  const dropSupportM = 0.5 * Math.max(
+    Number(initialParticleSpacing.drop.spacingM) || 0,
+    0
+  );
+  const baseSupportM = 0.5 * Math.max(
+    Number(initialParticleSpacing.base.spacingM) || 0,
+    0
+  );
+  const baseTopM = iceBase + baseBlockEdgeM;
+  // Correct overlap only. Resting contact is a legitimate initial condition
+  // that several fixtures set deliberately, so the target is the contact
+  // boundary rather than an added margin.
+  //
+  // Contact is simply drop-block-bottom == base-block-top. fillCube insets
+  // particle centres half a spacing from each block face and the support
+  // radius is half a spacing, so the inset and the support cancel exactly:
+  // adding them again would push a touching fixture a full spacing apart.
+  const contactIronBaseM = baseTopM;
+  const overlapEpsilonM = 1e-9 * Math.max(1, contactIronBaseM);
+  let ironBase = requestedIronBase;
+  if (ironBase < contactIronBaseM - overlapEpsilonM) {
+    const correctedIronBase = contactIronBaseM + overlapEpsilonM;
+    geometryCorrections.push({
+      kind: 'drop-block-raised-out-of-base-overlap',
+      axis: 'y',
+      requestedM: requestedIronBase,
+      appliedM: correctedIronBase,
+      supportContactHeightM: contactIronBaseM
+    });
+    ironBase = correctedIronBase;
+  }
+  // Grow the box around whatever the corrected stack now needs.
+  const requiredHeightM = ironBase + dropBlockEdgeM + dropSupportM;
+  const requiredHorizontalM = Math.max(dropBlockEdgeM, baseBlockEdgeM)
+    + 2 * Math.max(dropSupportM, baseSupportM);
+  const correctedBoxDims = [...boxDims];
+  for (const [axis, needed] of [
+    [0, requiredHorizontalM],
+    [1, requiredHeightM],
+    [2, requiredHorizontalM]
+  ]) {
+    if (Number.isFinite(needed) && needed > correctedBoxDims[axis]) {
+      geometryCorrections.push({
+        kind: 'box-expanded-to-contain-blocks',
+        axis: ['x', 'y', 'z'][axis],
+        requestedM: correctedBoxDims[axis],
+        appliedM: needed
+      });
+      correctedBoxDims[axis] = needed;
+    }
+  }
+  if (geometryCorrections.some((entry) => entry.kind === 'box-expanded-to-contain-blocks')) {
+    boxDims[0] = correctedBoxDims[0];
+    boxDims[1] = correctedBoxDims[1];
+    boxDims[2] = correctedBoxDims[2];
+    cx = boxDims[0] / 2;
+    cz = boxDims[2] / 2;
+  }
   const dropBlockVolumeM3 = dropBlockEdgeM ** 3;
   const baseBlockVolumeM3 = baseBlockEdgeM ** 3;
   const scenarioWithDerivedBlockGeometry = {
     ...scenario,
-    box: { ...scenario.box },
+    box: {
+      ...scenario.box,
+      dimensionsM: [...boxDims],
+      edgeM: Math.max(...boxDims),
+      volumeM3: boxDims[0] * boxDims[1] * boxDims[2]
+    },
     ice: {
       ...scenario.ice,
       edgeM: baseBlockEdgeM,
@@ -2246,6 +2356,13 @@ export function buildSphPhaseDemoState({
     allowFixtureMaterialProperties,
     state,
     box: { dimensionsM: boxDims, edgeM: Math.max(...boxDims) },
+    initialGeometryCorrections: {
+      schema: 'peercompute.ulg.initial-block-geometry-corrections.v0',
+      status: geometryCorrections.length > 0
+        ? 'initial-block-geometry-corrected'
+        : 'initial-block-geometry-as-requested',
+      corrections: geometryCorrections
+    },
     dropMaterial,
     baseMaterial,
     initialTemperaturesK: { drop: dropTempK, base: baseTempK, gas: scenario.gas.initialTemperatureK },
@@ -4888,6 +5005,10 @@ function computeDerivedDemoPreflight(demo) {
   const finalDropPhase = equilibriumFromSpecificEnergy(dropProps, specificInternalEnergyJPerKg(dropProps, bindingInteriorTempK)).stablePhase;
   const thermodynamicFeasible = Boolean(finalBasePhase && finalDropPhase);
   const initialGeometry = initialBlockGeometrySummary(demo);
+  // Overlap is corrected at build time (see initialGeometryCorrections), so a
+  // residual overlap here is a real defect in that correction rather than a
+  // user input to refuse. It is still reported, and still blocks, because a
+  // corrected build that remains overlapping must not run silently.
   const geometryBlocked = initialGeometry.blockers.length > 0;
   const feasible = thermodynamicFeasible && !geometryBlocked;
   const sinkFaceCount = heatExportedToWallsJ > 0 ? wallTemps.length : 0;
@@ -4951,6 +5072,7 @@ function computeDerivedDemoPreflight(demo) {
       adiabaticEquilibriumK
     },
     initialGeometry,
+    initialGeometryCorrections: demo.initialGeometryCorrections ?? null,
     feasibility: {
       feasible,
       thermodynamicFeasible,

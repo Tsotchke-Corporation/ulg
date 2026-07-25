@@ -7719,6 +7719,9 @@ export async function mountSphPhaseDemoOverlay({
       messages.push(`Simulation blocked: ${simulationRuntimeAdmission.reason}`);
       return messages;
     }
+    if (pendingControlEdit) {
+      messages.push('Control changes staged — press Play or Reset to apply.');
+    }
     if (!navigator?.gpu) {
       messages.push('WebGPU unavailable: simulation admission is blocked.');
     }
@@ -12046,6 +12049,7 @@ export async function mountSphPhaseDemoOverlay({
 
   function scheduleDemoRebuild({ delayMs = 0 } = {}) {
     if (!simulationRuntimeAdmission.ready) return false;
+    pendingControlEdit = false;
     syncUrlFromControls();
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     playing = false;
@@ -12192,7 +12196,7 @@ export async function mountSphPhaseDemoOverlay({
           }
         }
         scenarioPresetSelect.value = 'custom';
-        scheduleDemoRebuild();
+        stageControlEdit();
       });
     }
   }
@@ -12797,6 +12801,27 @@ export async function mountSphPhaseDemoOverlay({
   }
 
   let playing = false;
+  // Editing a control stages the change instead of rebuilding under the user.
+  // A rebuild mid-run discards the state they were watching and, for controls
+  // that move geometry, does it while the solver is mid-step. Changes apply on
+  // Play or Reset.
+  let pendingControlEdit = false;
+  function stageControlEdit() {
+    pendingControlEdit = true;
+    if (playing) {
+      playing = false;
+      const playButton = overlay.querySelector('#sph-play');
+      if (playButton) playButton.textContent = 'Play';
+    }
+    syncUrlFromControls();
+    renderStatus();
+    updateWarningBanner();
+  }
+  function applyPendingControlEditIfAny() {
+    if (!pendingControlEdit) return false;
+    scheduleDemoRebuild();
+    return true;
+  }
   let playbackLoopScheduled = false;
   stopPlaybackForInvalidInitialBodyDraft = () => {
     playing = false;
@@ -13680,6 +13705,13 @@ export async function mountSphPhaseDemoOverlay({
   overlay.querySelector('#sph-play').addEventListener('click', (e) => {
     if (!simulationRuntimeAdmission.ready) return;
     if (overlay.__sphInitialBodiesDraftInvalid === true) return;
+    // Staged control edits apply here rather than at edit time. The rebuild
+    // leaves playback paused so the user sees the new initial state before
+    // stepping it.
+    if (applyPendingControlEditIfAny()) {
+      e.target.textContent = 'Play';
+      return;
+    }
     if (!driver) {
       if (activeViewState?.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
         driver = createDriverFromControls({ preferActiveViewStateCache: true });

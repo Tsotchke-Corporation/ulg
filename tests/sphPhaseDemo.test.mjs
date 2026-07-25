@@ -182,9 +182,9 @@ test('demo initial particle spacing preserves requested edges and derives materi
   const baseParticle = demo.state.particles.find((p) => p.role === 'base');
 
   assert.equal(spacing.schema, 'peercompute.ulg.sph-initial-particle-spacing-plan.v0');
-  assert.equal(spacing.status, 'requested-particle-edges-preserved-global-particle-volume');
+  assert.equal(spacing.status, 'requested-particle-edges-preserved-material-quantum-mass');
   assert.equal(spacing.particleSizePolicy.schema, 'peercompute.ulg.sph-initial-particle-size-policy.v0');
-  assert.equal(spacing.particleSizePolicy.status, 'global-particle-volume-material-density-derived-mass');
+  assert.equal(spacing.particleSizePolicy.status, 'material-quantum-mass-density-derived-spacing');
   assert.equal(
     spacing.particleSizePolicy.massModel,
     'phase-density-at-temperature-pressure * mechanicsRestVolumeM3'
@@ -219,8 +219,8 @@ test('demo initial particle spacing preserves requested edges and derives materi
   near(spacing.base.materialParticleDiameterM, spacing.base.spacingM);
   near(spacing.drop.blockEdgeM, spacing.drop.materialParticleDiameterM * spacing.drop.particlesPerEdge);
   near(spacing.base.blockEdgeM, spacing.base.materialParticleDiameterM * spacing.base.particlesPerEdge);
-  assert.equal(spacing.drop.blockSizeSource, 'global-particle-spacing-times-particles-per-edge');
-  assert.equal(spacing.base.blockSizeSource, 'global-particle-spacing-times-particles-per-edge');
+  assert.equal(spacing.drop.blockSizeSource, 'material-particle-spacing-times-particles-per-edge');
+  assert.equal(spacing.base.blockSizeSource, 'material-particle-spacing-times-particles-per-edge');
   assert.equal(spacing.drop.adaptiveWouldAdjustParticlesPerEdge, false);
   assert.equal(spacing.base.adaptiveWouldAdjustParticlesPerEdge, false);
   assert.equal(spacing.drop.adaptiveParticleSizingDeferred, true);
@@ -230,16 +230,44 @@ test('demo initial particle spacing preserves requested edges and derives materi
   assert.equal(spacing.relativeParticleSize.schema, 'peercompute.ulg.sph-relative-particle-size-diagnostics.v0');
   assert.equal(
     spacing.relativeParticleSize.source,
-    'fixed-global-particle-volume-material-density-derived-mass'
+    'fixed-material-quantum-mass-density-derived-spacing'
   );
-  near(spacing.drop.spacingM, spacing.base.spacingM);
-  near(spacing.drop.volumeEquivalentParticleRadiusM, spacing.base.volumeEquivalentParticleRadiusM);
-  near(spacing.relativeParticleSize.dropToBaseRadiusRatio, 1);
+  // Spacing follows each material's density so a particle is a fixed quantum
+  // of MASS, and the axis-aligned block edge is that spacing times the
+  // requested particles-per-edge. Iron is far denser than water, so its
+  // quantum occupies less volume and its block edge is correspondingly
+  // shorter at the same particles-per-edge. This previously pinned one global
+  // spacing for every material, which made an iron particle carry roughly the
+  // density ratio more mass than a water particle.
+  assert.ok(
+    spacing.drop.spacingM < spacing.base.spacingM,
+    `denser drop must pack tighter: ${spacing.drop.spacingM} vs ${spacing.base.spacingM}`
+  );
+  const spacingRatio = spacing.base.spacingM / spacing.drop.spacingM;
+  const densityRatio = spacing.drop.densityKgPerM3 / spacing.base.densityKgPerM3;
+  near(spacingRatio, Math.cbrt(densityRatio), 1e-6);
+  assert.ok(
+    spacing.drop.volumeEquivalentParticleRadiusM
+      < spacing.base.volumeEquivalentParticleRadiusM
+  );
+  // Radii now differ by the cube root of the density ratio, because the fixed
+  // quantum is mass rather than volume. The denser drop is the smaller
+  // particle, so it is the one relative-to-smallest is measured against.
+  const radiusRatio = spacing.relativeParticleSize.dropToBaseRadiusRatio;
+  assert.ok(radiusRatio < 1, `denser drop must be the smaller particle: ${radiusRatio}`);
+  near(
+    radiusRatio,
+    Math.cbrt(spacing.base.densityKgPerM3 / spacing.drop.densityKgPerM3),
+    1e-6
+  );
   near(spacing.relativeParticleSize.dropRadiusRelativeToSmallest, 1);
-  near(spacing.relativeParticleSize.globalParticleSpacingM, spacing.drop.spacingM);
-  near(spacing.relativeParticleSize.globalParticleVolumeM3, spacing.drop.mechanicsRestVolumeM3);
-  near(spacing.relativeParticleSize.globalVisualParticleRadiusM, spacing.drop.volumeEquivalentParticleRadiusM);
-  assert.ok(spacing.relativeParticleSize.dropToBaseMassRatio > 1);
+  // The masses are now the quantum, so they agree far better than the density
+  // ratio the uniform-volume policy produced.
+  const massRatio = spacing.relativeParticleSize.dropToBaseMassRatio;
+  assert.ok(
+    massRatio > 0.5 && massRatio < 2,
+    `a fixed mass quantum must keep particle masses close: ${massRatio}`
+  );
   assert.ok(spacing.drop.materialReferenceParticleRadiusM > 0);
   assert.ok(spacing.base.materialReferenceParticleRadiusM > 0);
   near(spacing.drop.particleMassKg, spacing.drop.densityKgPerM3 * spacing.drop.mechanicsRestVolumeM3);
@@ -795,7 +823,7 @@ test('demo initializes hydrostatic pressure only for wall-supported condensed bl
   assert.ok(drop.every((p) => p.mpmJ === undefined));
 });
 
-test('demo preflight reports overlapping initial block geometry', () => {
+test('demo corrects overlapping initial block geometry instead of refusing it', () => {
   const driver = createSphPhaseDemo({
     scenario: createSphPhaseScenario({ boxDimensionsM: [5, 5, 5] }),
     dropMaterial: 'h2o',
@@ -808,10 +836,21 @@ test('demo preflight reports overlapping initial block geometry', () => {
     baseParticleEdge: 5
   });
   const preflight = driver.preflight();
-  assert.equal(preflight.status, 'preflight-blocked-initial-geometry');
-  assert.equal(preflight.feasibility.geometryBlocked, true);
-  assert.ok(preflight.blockers.includes('initial-block-geometry-overlap'));
-  assert.ok(preflight.initialGeometry.pairs.some((pair) => pair.status === 'initial-blocks-overlap'));
+  // A drop height that would bury the drop inside the base is corrected by
+  // raising it clear, not refused. The correction is reported so the layout
+  // change is visible, and the resulting geometry must actually be separated.
+  assert.notEqual(preflight.status, 'preflight-blocked-initial-geometry');
+  assert.equal(preflight.feasibility.geometryBlocked, false);
+  assert.ok(!preflight.blockers.includes('initial-block-geometry-overlap'));
+  assert.ok(preflight.initialGeometry.pairs.every((pair) => pair.status !== 'initial-blocks-overlap'));
+  const corrections = driver.demo.initialGeometryCorrections;
+  assert.equal(corrections.status, 'initial-block-geometry-corrected');
+  assert.ok(
+    corrections.corrections.some(
+      (entry) => entry.kind === 'drop-block-raised-out-of-base-overlap'
+    ),
+    JSON.stringify(corrections)
+  );
 });
 
 test('demo preflight treats valid room-temperature H2O/H2O as liquid-feasible', () => {

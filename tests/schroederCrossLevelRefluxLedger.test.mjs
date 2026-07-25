@@ -38,9 +38,9 @@ function fakeDevice() {
   };
 }
 
-test('reflux-v2 header round-trips owner, terminal receipt, provenance, and measured scales', () => {
-  assert.equal(SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS, 128);
-  assert.equal(SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT.length, 128);
+test('reflux-v3 header round-trips pressure, drag, ambient, provenance, and measured scales', () => {
+  assert.equal(SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS, 136);
+  assert.equal(SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT.length, 136);
   assert.equal(
     SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT[126],
     'operatorSplitSynchronizationWorkJ:f32-bits'
@@ -49,12 +49,33 @@ test('reflux-v2 header round-trips owner, terminal receipt, provenance, and meas
     SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT[127],
     'operatorSplitSynchronizationWorkConditioningSumAbsJ:f32-bits'
   );
+  assert.deepEqual(
+    SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT.slice(128),
+    [
+      'fineCrossLevelPressureCompensationJ:f32-bits',
+      'coarseCrossLevelPressureCompensationJ:f32-bits',
+      'fineCrossLevelDragHeatJ:f32-bits',
+      'coarseCrossLevelDragHeatJ:f32-bits',
+      'cumulativeAmbientImpulseXNs:f32-bits',
+      'cumulativeAmbientImpulseYNs:f32-bits',
+      'cumulativeAmbientImpulseZNs:f32-bits',
+      'cumulativeAmbientExternalWorkJ:f32-bits'
+    ]
+  );
+  assert.equal(SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS, 18);
   const layout = createSchroederCrossLevelRefluxLedgerLayout({
     parentFieldCapacity: 7,
     coarseFieldCapacity: 5
   });
-  assert.equal(layout.rowOffsetWords, 128);
-  assert.equal(layout.wordLength, 128 + 5 * SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS);
+  assert.equal(
+    layout.rowOffsetWords,
+    SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+  );
+  assert.equal(
+    layout.wordLength,
+    SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+      + 5 * SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS
+  );
   const words = new Uint32Array(layout.wordLength);
   words.set(createSchroederCrossLevelRefluxLedgerHeader({
     rowCapacity: 5,
@@ -113,6 +134,14 @@ test('reflux-v2 header round-trips owner, terminal receipt, provenance, and meas
   words[121] = 1;
   floats[126] = -0.75;
   floats[127] = 2.5;
+  floats[128] = -0.125;
+  floats[129] = 0.25;
+  floats[130] = 0.5;
+  floats[131] = 0.75;
+  floats[132] = 1.5;
+  floats[133] = -2.5;
+  floats[134] = 3.5;
+  floats[135] = 4.5;
 
   const decoded = decodeSchroederCrossLevelRefluxEvidence(words);
   assert.equal(decoded.structuralValid, true);
@@ -149,6 +178,19 @@ test('reflux-v2 header round-trips owner, terminal receipt, provenance, and meas
     synchronizationToleranceJ: 1024 * 2 ** -24 * 2.5,
     valid: true
   });
+  assert.deepEqual(decoded.phaseVolumeTransport, {
+    fineCrossLevelPressureCompensationJ: -0.125,
+    coarseCrossLevelPressureCompensationJ: 0.25,
+    fineCrossLevelDragHeatJ: 0.5,
+    coarseCrossLevelDragHeatJ: 0.75,
+    toleranceJ: 1024 * 2 ** -24 * 4.75,
+    valid: true
+  });
+  assert.deepEqual(decoded.ambientBoundary, {
+    cumulativeImpulseNs: [1.5, -2.5, 3.5],
+    cumulativeExternalWorkJ: 4.5,
+    valid: true
+  });
   assert.deepEqual(decoded.finalIdentity, {
     generationId: 164,
     deviceOrdinal: 165,
@@ -166,12 +208,16 @@ test('reflux-v2 header round-trips owner, terminal receipt, provenance, and meas
   });
 });
 
-test('reflux-v2 r=2 energy seal separates temporal synchronization work from causal heat', () => {
+test('reflux-v3 r=2 energy seal separates pressure, drag, and synchronization work', () => {
   const closure = deriveSchroederCrossLevelRefluxEnergyClosure({
     fineKineticEnergyDeltaJ: -0.008227603510022163,
     virtualCoarseKineticEnergyDeltaJ: 0.001635174616239965,
     actualCoarseKineticEnergyDeltaJ: 0.002498876303434372,
     cumulativeFineRouteHeatJ: 0.0058620525524020195,
+    fineCrossLevelPressureCompensationJ: 0.000075,
+    coarseCrossLevelPressureCompensationJ: 0.000125,
+    fineCrossLevelDragHeatJ: 0.001,
+    coarseCrossLevelDragHeatJ: 0.0001,
     actualCoarseEnergyConditioningSumAbsJ: 0.0029828576371073723,
     virtualCoarseEnergyConditioningSumAbsJ: 0.001635174616239965
   });
@@ -184,7 +230,11 @@ test('reflux-v2 r=2 energy seal separates temporal synchronization work from cau
       <= 2 ** -30,
     JSON.stringify(closure)
   );
-  assert.ok(closure.coarseDeferredRouteHeatJ > 0.0007, JSON.stringify(closure));
+  assert.ok(closure.coarseDeferredRouteHeatJ > 0.0005, JSON.stringify(closure));
+  assert.equal(
+    closure.pressureCompensationJ,
+    Math.fround(Math.fround(0.000075) + Math.fround(0.000125))
+  );
   assert.ok(
     Math.abs(closure.totalEnergyResidualJ)
       <= closure.totalEnergyToleranceJ,
@@ -208,7 +258,7 @@ test('reflux-v2 r=2 energy seal separates temporal synchronization work from cau
   }));
 });
 
-test('reflux-v2 constructors and decoder reject malformed ranges and undersized evidence', () => {
+test('reflux-v3 constructors and decoder reject malformed ranges and undersized evidence', () => {
   assert.throws(() => createSchroederCrossLevelRefluxLedgerHeader({
     rowCapacity: 1,
     fineSubstepCount: 0
@@ -233,8 +283,16 @@ test('reflux-v2 constructors and decoder reject malformed ranges and undersized 
     parentFieldCapacity: 0xffff_ffff,
     coarseFieldCapacity: 0xffff_ffff
   }), /u32 word range/);
-  assert.equal(decodeSchroederCrossLevelRefluxEvidence(new Uint32Array(127)), null);
-  const malformed = new Uint32Array(128 + SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS);
+  assert.equal(
+    decodeSchroederCrossLevelRefluxEvidence(
+      new Uint32Array(SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS - 1)
+    ),
+    null
+  );
+  const malformed = new Uint32Array(
+    SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+      + SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS
+  );
   malformed.set(createSchroederCrossLevelRefluxLedgerHeader({ rowCapacity: 1 }));
   malformed[0] = 0;
   malformed[2] = SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY
@@ -254,7 +312,7 @@ test('reflux-v2 constructors and decoder reject malformed ranges and undersized 
   assert.equal(decodeSchroederCrossLevelRefluxEvidence(malformed).admitted, false);
 });
 
-test('reflux-v2 GPU ownership survives module reloads but rejects foreign, cloned, mutated, undersized, and destroyed ledgers', async () => {
+test('reflux-v3 GPU ownership survives module reloads but rejects foreign, cloned, mutated, undersized, and destroyed ledgers', async () => {
   const device = fakeDevice();
   const ledger = createSchroederCrossLevelRefluxLedgerGpu(device, {
     parentFieldCapacity: 3,

@@ -71,6 +71,7 @@ import {
   validateLocallySubmittedSchroederSpatialParentFieldFineCorrectionGpu
 } from '../src/runtime/sph/schroederSpatialParentFieldMechanicsWorkspaceGpu.js';
 import {
+  MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS,
   destroyMlsMpmResidentStepBuffers,
   runMlsMpmResidentStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
@@ -1648,9 +1649,16 @@ test('fused WebGPU P2G authenticates strict provenance and poisons post-submit f
     const stableOrderBuffer =
       fixture.microepochAuthority.fineFieldView.stableCandidateOrderBuffer;
     assert.ok(contributionBuffer);
+    // Slice 9 widened the deterministic contribution record to 12 floats: the
+    // third vec4 carries weighted represented volume, weighted V*p, and
+    // pressure publication evidence alongside the mass/momentum vec4s.
+    assert.equal(MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS, 12);
     assert.equal(
       contributionBuffer.size,
-      fixture.sphParticleState.particleCount * 27 * 8 * Float32Array.BYTES_PER_ELEMENT
+      fixture.sphParticleState.particleCount
+        * 27
+        * MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
     );
     assert.equal(
       projection.mechanicsFieldP2gContributionBufferAllocatedBytes,
@@ -1753,6 +1761,33 @@ test('fused WebGPU P2G authenticates strict provenance and poisons post-submit f
       projection,
       options
     ), true);
+    // Pressure-law provenance: the sealed pressure rows are only meaningful
+    // together with the law that produced them, so tampering with the ambient
+    // reference, the EOS gauge scale, or the declared consumer mask must break
+    // the origin match exactly like a substituted buffer does.
+    assert.equal(
+      typeof projection.mechanicsFieldPressureRequiredConsumerMask,
+      'number'
+    );
+    for (const key of [
+      'ambientPressurePa',
+      'internalPressureScale',
+      'mechanicsFieldPressureRequiredConsumerMask'
+    ]) {
+      const exact = projection[key];
+      projection[key] = Number(exact) + 1;
+      assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+        fixture.device,
+        projection,
+        options
+      ), false, `tampered ${key} must not authenticate`);
+      projection[key] = exact;
+      assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
+        fixture.device,
+        projection,
+        options
+      ), true, `restored ${key} must authenticate`);
+    }
     await Promise.resolve();
     await Promise.resolve();
     assert.equal(contributionBuffer.destroyed, true);

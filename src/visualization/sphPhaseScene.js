@@ -9309,7 +9309,12 @@ export function renderOrderFromOpticalResponse(optics = {}, descriptorOrRow = {}
 }
 
 export function residentSurfaceDrawOrder(surfaces = [], {
-  indirectStrideBytes = 4 * Uint32Array.BYTES_PER_ELEMENT
+  indirectStrideBytes = 4 * Uint32Array.BYTES_PER_ELEMENT,
+  // Blended surfaces must be drawn back-to-front from the current viewpoint.
+  // Without a camera the order below stays view-independent, which is correct
+  // for opaque draws but lets a farther blended surface draw over a nearer one
+  // as the camera rotates.
+  cameraPositionM = null
 } = {}) {
   if (!Array.isArray(surfaces)) return [];
   return surfaces
@@ -9322,9 +9327,18 @@ export function residentSurfaceDrawOrder(surfaces = [], {
       const depthWriteFlag = Number.isFinite(explicitDepthWriteFlag)
         ? (explicitDepthWriteFlag > 0 ? 1 : 0)
         : (transparencyClassId === 1 ? 0 : 1);
-      const renderOrder = Number.isFinite(Number(surface?.renderOrder))
+      const hasExplicitRenderOrder = Number.isFinite(Number(surface?.renderOrder));
+      const renderOrder = hasExplicitRenderOrder
         ? Number(surface.renderOrder)
         : (transparencyClassId * 1000 + surfaceIndex);
+      // An explicit render order is author intent and stays the primary key —
+      // it is what lets opaque -> refractive -> vapor override class order. A
+      // derived one is transparencyClassId * 1000 + surfaceIndex, whose
+      // per-surface term would otherwise pin the ordering to the surface list
+      // and make it view-independent, so only its class part is used here.
+      const layerOrder = hasExplicitRenderOrder
+        ? Number(surface.renderOrder)
+        : transparencyClassId;
       const explicitIndirectOffsetBytes = Number(surface?.indirectOffsetBytes);
       const explicitIndirectRowIndex = Number(surface?.indirectRowIndex);
       const indirectRowIndex = Number.isFinite(explicitIndirectRowIndex) && explicitIndirectRowIndex >= 0
@@ -9333,6 +9347,20 @@ export function residentSurfaceDrawOrder(surfaces = [], {
       const indirectOffsetBytes = Number.isFinite(explicitIndirectOffsetBytes) && explicitIndirectOffsetBytes >= 0
         ? Math.round(explicitIndirectOffsetBytes)
         : indirectRowIndex * indirectStrideBytes;
+      const center = surface?.boundsCenterM;
+      let viewDepth = 0;
+      if (
+        Array.isArray(cameraPositionM)
+        && cameraPositionM.length >= 3
+        && Array.isArray(center)
+        && center.length >= 3
+      ) {
+        const dx = Number(center[0]) - Number(cameraPositionM[0]);
+        const dy = Number(center[1]) - Number(cameraPositionM[1]);
+        const dz = Number(center[2]) - Number(cameraPositionM[2]);
+        const squared = dx * dx + dy * dy + dz * dz;
+        viewDepth = Number.isFinite(squared) ? squared : 0;
+      }
       return {
         surfaceIndex,
         renderOrder,
@@ -9340,13 +9368,25 @@ export function residentSurfaceDrawOrder(surfaces = [], {
         depthWriteFlag,
         renderLayer: surface?.renderLayer ?? null,
         indirectRowIndex,
-        indirectOffsetBytes
+        indirectOffsetBytes,
+        layerOrder,
+        viewDepth
       };
     })
     .sort((a, b) => (
-      a.renderOrder - b.renderOrder
+      // Group by the layer the render order encodes, not by its exact value.
+      // A derived render order is transparencyClassId * 1000 + surfaceIndex,
+      // so comparing it first made the whole ordering view-independent and
+      // left the depth term below unreachable.
+      a.layerOrder - b.layerOrder
       || b.depthWriteFlag - a.depthWriteFlag
-      || a.transparencyClassId - b.transparencyClassId
+      // Blended classes resolve back-to-front; opaque draws stay front-to-back
+      // so early-z still rejects. With no camera every viewDepth is 0 and this
+      // degrades to the render-order/surfaceIndex ordering below.
+      || (a.transparencyClassId > 0
+        ? b.viewDepth - a.viewDepth
+        : a.viewDepth - b.viewDepth)
+      || a.renderOrder - b.renderOrder
       || a.surfaceIndex - b.surfaceIndex
     ));
 }
@@ -12378,6 +12418,18 @@ export function createSphPhaseScene(container, {
   const width = initialViewport.width;
   const height = initialViewport.height;
   const camera = new Three.PerspectiveCamera(46, width / height, 0.05, 500);
+  // Blended resident surfaces must be ordered back-to-front from the live
+  // viewpoint. Read the camera at draw time rather than caching it: the order
+  // has to follow rotation, which is exactly the case that was wrong.
+  const residentSurfaceCameraPositionM = () => {
+    const position = camera?.position;
+    if (
+      !Number.isFinite(position?.x)
+      || !Number.isFinite(position?.y)
+      || !Number.isFinite(position?.z)
+    ) return null;
+    return [position.x, position.y, position.z];
+  };
   // Aim at the box centre and pull back proportionally to the largest box edge so the whole sealed
   // box (and everything contained in it) is framed, instead of looking at the floor and cropping.
   const center = new Three.Vector3(dims[0] / 2, dims[1] / 2, dims[2] / 2);
@@ -27543,7 +27595,8 @@ fn main(
         });
         const indirectStrideBytes = 4 * Uint32Array.BYTES_PER_ELEMENT;
         const drawOrder = residentSurfaceDrawOrder(surfaceDrawExecution.surfaces || [], {
-          indirectStrideBytes
+          indirectStrideBytes,
+          cameraPositionM: residentSurfaceCameraPositionM()
         });
         const surfaceDrawSurfaces = compactResidentSurfaceDrawSurfaces(
           surfaceDrawExecution.surfaces || [],
@@ -28034,7 +28087,8 @@ fn main(
       });
       const indirectStrideBytes = 4 * Uint32Array.BYTES_PER_ELEMENT;
       const drawOrder = residentSurfaceDrawOrder(surfaceDrawExecution.surfaces || [], {
-        indirectStrideBytes
+        indirectStrideBytes,
+        cameraPositionM: residentSurfaceCameraPositionM()
       });
         const surfaceDrawSurfaces = compactResidentSurfaceDrawSurfaces(
           surfaceDrawExecution.surfaces || [],

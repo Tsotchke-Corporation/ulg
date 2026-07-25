@@ -37,12 +37,21 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_ADMITTED,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_READY,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_CROSS_LEVEL,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DESCRIPTOR_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION
 } from './schroederSpatialMechanicsFieldView.js';
@@ -71,6 +80,25 @@ import {
   SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ROUTE_REJECTED,
   SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY
 } from './schroederCrossLevelRefluxLedger.js';
+import {
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_HEADER_WORDS,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_MAGIC,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_VERSION,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_REFLUX_POLICY,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_REFLUX_ROUTE_WORDS,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_ROW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_ROW_STATUS_READY,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_READY
+} from './schroederSpatialPhaseVolumeInterfaceProposal.js';
+import {
+  SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_ROW_WORDS,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STATUS_READY
+} from './schroederSpatialPhaseVolumeMoment.js';
+import {
+  schroederSpatialPhaseVolumePressureDragOperatorWgsl
+} from './schroederSpatialPhaseVolumePressureDragOperatorWgsl.js';
 
 export const schroederSpatialParentFieldMechanicsWorkspaceWgsl = /* wgsl */ `
 struct ParentFieldMechanicsParams {
@@ -138,6 +166,14 @@ struct ParentFieldMechanicsParams {
   macro_dt: f32,
   macro_owner_id: u32,
   macro_owner_generation: u32,
+  transport_enabled: u32,
+  phase_record_count: u32,
+  phase_route_capacity: u32,
+  phase_route_words: u32,
+  ambient_pressure_pa: f32,
+  pressure_scale: f32,
+  drag_scale: f32,
+  max_impulse_fraction: f32,
 };
 
 @group(0) @binding(0) var<storage, read> parent_view: array<u32>;
@@ -146,6 +182,13 @@ struct ParentFieldMechanicsParams {
 @group(0) @binding(3) var<storage, read_write> workspace: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> reflux_ledger: array<atomic<u32>>;
 @group(0) @binding(5) var<uniform> params: ParentFieldMechanicsParams;
+@group(0) @binding(6) var<storage, read> phase_proposal_control: array<u32>;
+@group(0) @binding(7) var<storage, read> phase_reflux_routes: array<u32>;
+@group(0) @binding(8) var<storage, read> fine_phase_moments: array<u32>;
+@group(0) @binding(9) var<storage, read> coarse_phase_moments: array<u32>;
+@group(0) @binding(10) var<storage, read> material_phase_records: array<vec4<f32>>;
+
+${schroederSpatialPhaseVolumePressureDragOperatorWgsl}
 
 const WORKSPACE_MAGIC: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_MAGIC}u;
 const WORKSPACE_VERSION: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_VERSION}u;
@@ -183,6 +226,7 @@ const FIELD_KEY_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS}
 const FIELD_ACCUMULATOR_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS}u;
 const FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS}u;
 const FIELD_STATE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS}u;
+const FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const FIELD_RECEIPT_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC}u;
 const FIELD_RECEIPT_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION}u;
 const FIELD_RECEIPT_READY_ADMITTED: u32 = ${
@@ -191,6 +235,19 @@ const FIELD_RECEIPT_READY_ADMITTED: u32 = ${
 }u;
 const FIELD_RECEIPT_HEAT_BUILDING: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_HEAT_BUILDING}u;
 const FIELD_RECEIPT_ENERGY_READY: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_ENERGY_READY}u;
+const FIELD_PRESSURE_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC}u;
+const FIELD_PRESSURE_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION}u;
+const FIELD_PRESSURE_LAW_EXACT: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G}u;
+const FIELD_PRESSURE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY
+  | SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED
+}u;
+const FIELD_PRESSURE_FAIL_CLOSED: u32 = ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY
+  | SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_FAIL_CLOSED
+}u;
+const FIELD_PRESSURE_CONSUMER_LOCAL: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL}u;
+const FIELD_PRESSURE_CONSUMER_CROSS_LEVEL: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_CROSS_LEVEL}u;
 const PARENT_MAGIC: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_MAGIC}u;
 const PARENT_VERSION: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_VERSION}u;
 const INVALID_INDEX: u32 = 0xffffffffu;
@@ -219,6 +276,27 @@ const REFLUX_PHASE_ACCUMULATING: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_ACCU
 const REFLUX_PHASE_SEALED: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_SEALED}u;
 const REFLUX_PHASE_COARSE_APPLIED: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_COARSE_APPLIED}u;
 const REFLUX_PHASE_ENERGY_READY: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_ENERGY_READY}u;
+const PHASE_PROPOSAL_MAGIC: u32 = ${SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_MAGIC}u;
+const PHASE_PROPOSAL_VERSION: u32 = ${SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_VERSION}u;
+const PHASE_PROPOSAL_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_HEADER_WORDS}u;
+const PHASE_PROPOSAL_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_READY
+  | SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_ADMITTED
+}u;
+const PHASE_ROUTE_WORDS: u32 = ${SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_REFLUX_ROUTE_WORDS}u;
+const PHASE_ROUTE_POLICY: u32 = ${SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_REFLUX_POLICY}u;
+const PHASE_ROUTE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_ROW_STATUS_READY
+  | SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_ROW_STATUS_ADMITTED
+}u;
+const PHASE_MOMENT_ROW_WORDS: u32 = ${SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_ROW_WORDS}u;
+const PHASE_MOMENT_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STATUS_READY
+  | SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STATUS_ADMITTED
+}u;
+const PHASE_SOLID: u32 = 1u;
+const PHASE_GAS: u32 = 3u;
+const PHASE_PLASMA: u32 = 4u;
 
 fn ws_load(word: u32) -> u32 { return atomicLoad(&workspace[word]); }
 fn ws_store(word: u32, value: u32) { atomicStore(&workspace[word], value); }
@@ -257,6 +335,29 @@ fn measured_scale_tolerance(scale: f32, count: u32) -> f32 {
 fn measured_close(left: f32, right: f32, count: u32) -> bool {
   return finite_f32(left) && finite_f32(right)
     && abs(left - right) <= measured_tolerance(left, right, count);
+}
+
+fn measured_channel_energy_close(
+  total: f32,
+  pressure: f32,
+  drag: f32,
+  causal: f32
+) -> bool {
+  let recomposed = pressure + drag + causal;
+  let conditioning =
+    abs(total) + abs(pressure) + abs(drag) + abs(causal);
+  // Each channel expands sequential f32 kinetic work, including vector
+  // divisions, dot products, and the preceding channel's updated velocity.
+  // Bound the complete expansion against its cancellation-aware conditioning
+  // sum rather than against the potentially tiny recomposed result.
+  return finite_f32(total)
+    && finite_f32(pressure)
+    && finite_f32(drag)
+    && finite_f32(causal)
+    && finite_f32(recomposed)
+    && finite_f32(conditioning)
+    && abs(total - recomposed)
+      <= measured_scale_tolerance(conditioning, 64u);
 }
 
 fn range_fits(offset: u32, count: u32, total: u32) -> bool {
@@ -560,26 +661,41 @@ fn field_layout_admission_mask(
       }
     }
   }
-  if (active_required < state_offset) {
+  // v4 required words bound the immutable pressure tail that follows the
+  // full state-capacity bank, not the active state rows.
+  var pressure_offset = 0u;
+  var pressure_offset_ok = false;
+  if (capacity <= (0xffffffffu - state_offset) / FIELD_STATE_WORDS) {
+    pressure_offset = state_offset + capacity * FIELD_STATE_WORDS;
+    pressure_offset_ok = true;
+  }
+  if (!pressure_offset_ok || active_required < pressure_offset) {
     mask = mask | (1u << 12u);
   } else {
-    let active_gap = active_required - state_offset;
-    if (active_gap % FIELD_STATE_WORDS != 0u
-        || active_gap / FIELD_STATE_WORDS != active_count) {
+    let active_gap = active_required - pressure_offset;
+    if (active_gap % FIELD_PRESSURE_WORDS != 0u
+        || active_gap / FIELD_PRESSURE_WORDS != active_count) {
       mask = mask | (1u << 12u);
     }
   }
-  if (capacity_words < state_offset) {
+  // Guard the state+pressure capacity product with a constant-divisor bound.
+  // Do not verify it by dividing the product back by the runtime capacity:
+  // that variable division makes the NVIDIA shader compiler abort while
+  // building this pipeline, which surfaces as a lost device rather than a
+  // compile error.
+  if (capacity_words < state_offset
+      || capacity
+        > 0xffffffffu / (FIELD_STATE_WORDS + FIELD_PRESSURE_WORDS)) {
     mask = mask | (1u << 13u);
   } else {
-    let state_gap = capacity_words - state_offset;
-    if (state_gap % FIELD_STATE_WORDS != 0u
-        || state_gap / FIELD_STATE_WORDS != capacity) {
+    let field_capacity_words =
+      capacity * (FIELD_STATE_WORDS + FIELD_PRESSURE_WORDS);
+    if (capacity_words - state_offset != field_capacity_words) {
       mask = mask | (1u << 13u);
     }
   }
   if (active_count > capacity || active_required > capacity_words
-      || capacity_words > words) {
+      || capacity_words != words) {
     mask = mask | (1u << 14u);
   }
   if (descriptor_count != source_count) { mask = mask | (1u << 15u); }
@@ -662,6 +778,144 @@ fn fine_receipt_offset() -> u32 {
 
 fn coarse_receipt_offset() -> u32 {
   return coarse_load(30u) - FIELD_RECEIPT_WORDS;
+}
+
+fn fine_pressure_offset() -> u32 {
+  return fine_load(30u) + fine_load(32u) * FIELD_STATE_WORDS;
+}
+
+fn coarse_pressure_offset() -> u32 {
+  return coarse_load(30u) + coarse_load(32u) * FIELD_STATE_WORDS;
+}
+
+fn fine_pressure_receipt_seal() -> u32 {
+  let receipt = fine_receipt_offset();
+  return FIELD_PRESSURE_MAGIC
+    ^ FIELD_PRESSURE_VERSION
+    ^ FIELD_PRESSURE_READY_ADMITTED
+    ^ FIELD_PRESSURE_LAW_EXACT
+    ^ fine_load(receipt + 28u)
+    ^ fine_load(receipt + 29u)
+    ^ fine_load(receipt + 30u)
+    ^ fine_load(receipt + 31u)
+    ^ fine_load(receipt + 32u)
+    ^ fine_load(3u)
+    ^ fine_load(8u)
+    ^ fine_load(9u)
+    ^ fine_load(10u)
+    ^ fine_load(38u);
+}
+
+fn coarse_pressure_receipt_seal() -> u32 {
+  let receipt = coarse_receipt_offset();
+  return FIELD_PRESSURE_MAGIC
+    ^ FIELD_PRESSURE_VERSION
+    ^ FIELD_PRESSURE_READY_ADMITTED
+    ^ FIELD_PRESSURE_LAW_EXACT
+    ^ coarse_load(receipt + 28u)
+    ^ coarse_load(receipt + 29u)
+    ^ coarse_load(receipt + 30u)
+    ^ coarse_load(receipt + 31u)
+    ^ coarse_load(receipt + 32u)
+    ^ coarse_load(3u)
+    ^ coarse_load(8u)
+    ^ coarse_load(9u)
+    ^ coarse_load(10u)
+    ^ coarse_load(38u);
+}
+
+fn fine_pressure_receipt_admitted(cross_claimed: bool) -> bool {
+  if (fine_load(30u) < FIELD_RECEIPT_WORDS) { return false; }
+  let receipt = fine_receipt_offset();
+  let required = fine_load(receipt + 32u);
+  let claimed = fine_load(receipt + 33u);
+  let consumed = fine_load(receipt + 34u);
+  let expected_cross = select(
+    0u,
+    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL,
+    cross_claimed
+  );
+  return fine_load(receipt + 24u) == FIELD_PRESSURE_MAGIC
+    && fine_load(receipt + 25u) == FIELD_PRESSURE_VERSION
+    && fine_load(receipt + 26u) == FIELD_PRESSURE_READY_ADMITTED
+    && fine_load(receipt + 27u) == FIELD_PRESSURE_LAW_EXACT
+    && fine_load(receipt + 28u) == bitcast<u32>(params.ambient_pressure_pa)
+    && fine_load(receipt + 30u) == fine_load(34u)
+    && fine_load(receipt + 31u) == params.fine_predictor_mutation_ordinal
+    && (required & (
+      FIELD_PRESSURE_CONSUMER_LOCAL
+        | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+    )) == (
+      FIELD_PRESSURE_CONSUMER_LOCAL
+        | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+    )
+    && (claimed & FIELD_PRESSURE_CONSUMER_LOCAL) != 0u
+    && (consumed & FIELD_PRESSURE_CONSUMER_LOCAL) != 0u
+    && (claimed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) == expected_cross
+    && (consumed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) == 0u
+    && (claimed & ~required) == 0u
+    && (consumed & ~claimed) == 0u
+    && fine_load(receipt + 35u) == fine_pressure_receipt_seal();
+}
+
+// cross_required distinguishes the two coarse fields this shader sees. The
+// coarse predictor field is read by the cross-level operator and therefore
+// declares LOCAL|CROSS_LEVEL. The coarse *terminal* field is produced by the
+// final coarse P2G and consumed only by the coarse G2P, so it declares LOCAL
+// alone; requiring CROSS_LEVEL of it is unsatisfiable because nothing in the
+// terminal chain claims that consumer.
+fn coarse_pressure_receipt_admitted(cross_required: bool) -> bool {
+  if (coarse_load(30u) < FIELD_RECEIPT_WORDS) { return false; }
+  let receipt = coarse_receipt_offset();
+  let required = coarse_load(receipt + 32u);
+  let claimed = coarse_load(receipt + 33u);
+  let consumed = coarse_load(receipt + 34u);
+  return coarse_load(receipt + 24u) == FIELD_PRESSURE_MAGIC
+    && coarse_load(receipt + 25u) == FIELD_PRESSURE_VERSION
+    && coarse_load(receipt + 26u) == FIELD_PRESSURE_READY_ADMITTED
+    && coarse_load(receipt + 27u) == FIELD_PRESSURE_LAW_EXACT
+    && coarse_load(receipt + 28u) == bitcast<u32>(params.ambient_pressure_pa)
+    && coarse_load(receipt + 30u) == coarse_load(34u)
+    && coarse_load(receipt + 31u) == params.coarse_predictor_mutation_ordinal
+    && (required & (
+      FIELD_PRESSURE_CONSUMER_LOCAL
+        | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+    )) == select(
+      FIELD_PRESSURE_CONSUMER_LOCAL,
+      FIELD_PRESSURE_CONSUMER_LOCAL
+        | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL,
+      cross_required
+    )
+    // The coarse local grid update runs after every fine correction, so the
+    // coarse LOCAL consumer is still unclaimed here by construction. Pressure
+    // rows are immutable once P2G seals them, so the cross-level consumer has
+    // no ordering dependency on the local one; demanding LOCAL be consumed
+    // first would make this contract unsatisfiable. G2P still gates on
+    // required == claimed == consumed before any energy is used.
+    && (claimed & ~required) == 0u
+    && (consumed & ~claimed) == 0u
+    && (consumed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) == 0u
+    && coarse_load(receipt + 35u) == coarse_pressure_receipt_seal();
+}
+
+fn reject_pressure_authority() {
+  if (fine_load(30u) >= FIELD_RECEIPT_WORDS) {
+    fine_store(fine_receipt_offset() + 26u, FIELD_PRESSURE_FAIL_CLOSED);
+    fine_store(2u, READY_ADMITTED | STATUS_FAIL_CLOSED);
+    fine_store(60u, 0u);
+    fine_store(61u, 0u);
+    fine_store(62u, 0u);
+  }
+  if (coarse_load(30u) >= FIELD_RECEIPT_WORDS) {
+    coarse_store(
+      coarse_receipt_offset() + 26u,
+      FIELD_PRESSURE_FAIL_CLOSED
+    );
+    coarse_store(2u, READY_ADMITTED | STATUS_FAIL_CLOSED);
+    coarse_store(60u, 0u);
+    coarse_store(61u, 0u);
+    coarse_store(62u, 0u);
+  }
 }
 
 fn fine_receipt_admitted(phase: u32, mutation_ordinal: u32) -> bool {
@@ -1537,6 +1791,776 @@ fn seal_coarse_terminal_workspace() {
   ws_store(70u, params.completion_ordinal);
 }
 
+struct CrossLevelPhaseMechanics {
+  rest_density: f32,
+  sound_speed: f32,
+  dynamic_viscosity: f32,
+  valid: u32,
+};
+
+struct CrossLevelPhaseRouteEvaluation {
+  status: u32,
+  fine_pressure_impulse: vec3<f32>,
+  fine_drag_impulse: vec3<f32>,
+  pressure_compensation_j: f32,
+  drag_heat_j: f32,
+};
+
+fn phase_transport_reject(flags: u32) {
+  reject_pressure_authority();
+  ws_reject(STATUS_INVALID_ROUTE | STATUS_INVALID_SOURCE, 86u);
+  reflux_reject(REFLUX_ROUTE_REJECTED | flags);
+}
+
+fn phase_proposal_seal() -> u32 {
+  return PHASE_PROPOSAL_MAGIC
+    ^ phase_proposal_control[3u]
+    ^ phase_proposal_control[27u]
+    ^ phase_proposal_control[28u]
+    ^ phase_proposal_control[29u]
+    ^ phase_proposal_control[23u]
+    ^ phase_proposal_control[24u]
+    ^ phase_proposal_control[17u]
+    ^ phase_proposal_control[19u]
+    ^ phase_proposal_control[25u]
+    ^ phase_proposal_control[26u]
+    ^ phase_proposal_control[2u];
+}
+
+fn phase_proposal_admitted() -> bool {
+  if (arrayLength(&phase_proposal_control) < PHASE_PROPOSAL_HEADER_WORDS) {
+    return false;
+  }
+  return phase_proposal_control[0u] == PHASE_PROPOSAL_MAGIC
+    && phase_proposal_control[1u] == PHASE_PROPOSAL_VERSION
+    && phase_proposal_control[2u] == PHASE_PROPOSAL_READY_ADMITTED
+    && phase_proposal_control[3u] == params.generation_id
+    && phase_proposal_control[4u] == params.device_ordinal
+    && phase_proposal_control[5u] == params.lane_ordinal
+    && phase_proposal_control[6u] == params.lease_token
+    && phase_proposal_control[7u] == params.source_family_id
+    && phase_proposal_control[8u] == params.storage_generation
+    && phase_proposal_control[9u] == params.physics_tick
+    && phase_proposal_control[10u] == params.physics_substep
+    && phase_proposal_control[11u] == params.position_epoch
+    && phase_proposal_control[12u] == params.topology_epoch
+    && phase_proposal_control[13u] == params.chart_epoch
+    && phase_proposal_control[14u] == params.level_epoch
+    && phase_proposal_control[15u] == params.support_epoch
+    && phase_proposal_control[16u] == parent_view[35u]
+    && phase_proposal_control[17u] == params.fine_capacity
+    && phase_proposal_control[18u] == parent_view[36u]
+    && phase_proposal_control[19u] == params.coarse_capacity
+    && phase_proposal_control[22u] == parent_view[35u]
+    && phase_proposal_control[23u] == bitcast<u32>(params.fine_level)
+    && phase_proposal_control[24u] == bitcast<u32>(params.coarse_level)
+    && phase_proposal_control[25u] == 1u
+    && phase_proposal_control[26u] == 1u
+    && phase_proposal_control[29u] == params.parent_completion_ordinal
+    && phase_proposal_control[33u] == params.phase_route_capacity
+    && phase_proposal_control[35u] == PHASE_ROUTE_WORDS
+    && phase_proposal_control[37u] == PHASE_MOMENT_ROW_WORDS
+    && phase_proposal_control[39u]
+      == parent_view[35u] + parent_view[36u]
+    && phase_proposal_control[40u] == 0u
+    && phase_proposal_control[41u] == 0u
+    && phase_proposal_control[42u] == 0u
+    && phase_proposal_control[43u] == 0u
+    && phase_proposal_control[44u] == 0u
+    && phase_proposal_control[45u] == 0u
+    && phase_proposal_control[46u] == 0u
+    && phase_proposal_control[47u] == 1u
+    && phase_proposal_control[48u] == 0u
+    && phase_proposal_control[49u] == phase_proposal_seal()
+    && phase_proposal_control[51u] == PHASE_ROUTE_POLICY
+    && params.phase_route_words == PHASE_ROUTE_WORDS
+    && params.phase_route_capacity >= parent_view[35u]
+    && params.phase_record_count > 0u
+    && params.fine_dt > 0.0
+    && finite_f32(params.fine_dt)
+    && params.coarse_spacing_m > 0.0
+    && finite_f32(params.coarse_spacing_m)
+    && finite_f32(params.ambient_pressure_pa)
+    && params.ambient_pressure_pa >= 0.0
+    && finite_f32(params.pressure_scale)
+    && params.pressure_scale >= 0.0
+    && finite_f32(params.drag_scale)
+    && params.drag_scale >= 0.0
+    && finite_f32(params.max_impulse_fraction)
+    && params.max_impulse_fraction >= 0.0;
+}
+
+fn fine_phase_moment_valid(fine_field: u32) -> bool {
+  let row = fine_field * PHASE_MOMENT_ROW_WORDS;
+  let key = fine_load(26u) + fine_field * FIELD_KEY_WORDS;
+  if (row + PHASE_MOMENT_ROW_WORDS > arrayLength(&fine_phase_moments)) {
+    return false;
+  }
+  let volume = bitcast<f32>(fine_phase_moments[row + 4u]);
+  return fine_phase_moments[row] == fine_load(key)
+    && fine_phase_moments[row + 1u] == fine_load(key + 1u)
+    && fine_phase_moments[row + 2u] == fine_load(key + 2u)
+    && fine_phase_moments[row + 3u] == fine_load(key + 3u)
+    && volume > 0.0
+    && finite_f32(volume)
+    && finite_f32(bitcast<f32>(fine_phase_moments[row + 5u]))
+    && finite_f32(bitcast<f32>(fine_phase_moments[row + 6u]))
+    && finite_f32(bitcast<f32>(fine_phase_moments[row + 7u]))
+    && fine_phase_moments[row + 8u] > 0u
+    && fine_phase_moments[row + 9u] == PHASE_MOMENT_READY_ADMITTED;
+}
+
+fn coarse_phase_moment_valid(
+  coarse_field: u32,
+  parent: u32
+) -> bool {
+  let row = coarse_field * PHASE_MOMENT_ROW_WORDS;
+  if (row + PHASE_MOMENT_ROW_WORDS > arrayLength(&coarse_phase_moments)
+      || parent >= ws_load(23u)) {
+    return false;
+  }
+  let volume = bitcast<f32>(coarse_phase_moments[row + 4u]);
+  return coarse_phase_moments[row] == parent_key(parent, 0u)
+    && coarse_phase_moments[row + 1u] == parent_key(parent, 1u)
+    && coarse_phase_moments[row + 2u] == parent_key(parent, 2u)
+    && coarse_phase_moments[row + 3u] == parent_key(parent, 3u)
+    && volume > 0.0
+    && finite_f32(volume)
+    && finite_f32(bitcast<f32>(coarse_phase_moments[row + 5u]))
+    && finite_f32(bitcast<f32>(coarse_phase_moments[row + 6u]))
+    && finite_f32(bitcast<f32>(coarse_phase_moments[row + 7u]))
+    && coarse_phase_moments[row + 8u] > 0u
+    && coarse_phase_moments[row + 9u] == PHASE_MOMENT_READY_ADMITTED;
+}
+
+fn fine_pressure_row_valid(fine_field: u32) -> bool {
+  let pressure_row =
+    fine_pressure_offset() + fine_field * FIELD_PRESSURE_WORDS;
+  let moment_row = fine_field * PHASE_MOMENT_ROW_WORDS;
+  if (fine_field >= fine_load(34u)
+      || pressure_row < fine_pressure_offset()
+      || pressure_row + FIELD_PRESSURE_WORDS > arrayLength(&fine_view)
+      || !fine_phase_moment_valid(fine_field)) {
+    return false;
+  }
+  let pressure_volume_moment = bitcast<f32>(fine_load(pressure_row));
+  let represented_volume = bitcast<f32>(fine_load(pressure_row + 1u));
+  let absolute_pressure = bitcast<f32>(fine_load(pressure_row + 2u));
+  let contribution_count = fine_load(pressure_row + 3u);
+  let moment_volume = bitcast<f32>(fine_phase_moments[moment_row + 4u]);
+  return represented_volume > 0.0
+    && absolute_pressure >= 0.0
+    && contribution_count > 0u
+    && contribution_count == fine_phase_moments[moment_row + 8u]
+    && finite_f32(pressure_volume_moment)
+    && finite_f32(represented_volume)
+    && finite_f32(absolute_pressure)
+    && measured_close(
+      represented_volume,
+      moment_volume,
+      max(2u, contribution_count)
+    )
+    && measured_close(
+      pressure_volume_moment,
+      represented_volume * absolute_pressure,
+      max(2u, contribution_count)
+    );
+}
+
+fn coarse_pressure_row_valid(
+  coarse_field: u32,
+  parent: u32
+) -> bool {
+  let pressure_row =
+    coarse_pressure_offset() + coarse_field * FIELD_PRESSURE_WORDS;
+  let moment_row = coarse_field * PHASE_MOMENT_ROW_WORDS;
+  if (coarse_field >= coarse_load(34u)
+      || pressure_row < coarse_pressure_offset()
+      || pressure_row + FIELD_PRESSURE_WORDS > arrayLength(&coarse_view)
+      || !coarse_phase_moment_valid(coarse_field, parent)) {
+    return false;
+  }
+  let pressure_volume_moment = bitcast<f32>(coarse_load(pressure_row));
+  let represented_volume = bitcast<f32>(coarse_load(pressure_row + 1u));
+  let absolute_pressure = bitcast<f32>(coarse_load(pressure_row + 2u));
+  let contribution_count = coarse_load(pressure_row + 3u);
+  let moment_volume =
+    bitcast<f32>(coarse_phase_moments[moment_row + 4u]);
+  return represented_volume > 0.0
+    && absolute_pressure >= 0.0
+    && contribution_count > 0u
+    && contribution_count == coarse_phase_moments[moment_row + 8u]
+    && finite_f32(pressure_volume_moment)
+    && finite_f32(represented_volume)
+    && finite_f32(absolute_pressure)
+    && measured_close(
+      represented_volume,
+      moment_volume,
+      max(2u, contribution_count)
+    )
+    && measured_close(
+      pressure_volume_moment,
+      represented_volume * absolute_pressure,
+      max(2u, contribution_count)
+    );
+}
+
+fn fine_absolute_pressure(fine_field: u32) -> f32 {
+  return bitcast<f32>(
+    fine_load(
+      fine_pressure_offset() + fine_field * FIELD_PRESSURE_WORDS + 2u
+    )
+  );
+}
+
+fn coarse_absolute_pressure(coarse_field: u32) -> f32 {
+  return bitcast<f32>(
+    coarse_load(
+      coarse_pressure_offset() + coarse_field * FIELD_PRESSURE_WORDS + 2u
+    )
+  );
+}
+
+fn phase_route_admitted(fine_field: u32) -> bool {
+  let row = fine_field * PHASE_ROUTE_WORDS;
+  if (row + PHASE_ROUTE_WORDS > arrayLength(&phase_reflux_routes)
+      || fine_field >= parent_view[35u]) {
+    return false;
+  }
+  let edge_begin = parent_view[parent_view[51u] + fine_field];
+  let edge_end = parent_view[parent_view[51u] + fine_field + 1u];
+  return phase_reflux_routes[row] == fine_field
+    && phase_reflux_routes[row + 1u] == edge_begin
+    && phase_reflux_routes[row + 2u] == edge_end
+    && phase_reflux_routes[row + 3u] == bitcast<u32>(params.fine_level)
+    && phase_reflux_routes[row + 4u] == bitcast<u32>(params.coarse_level)
+    && phase_reflux_routes[row + 5u] == params.parent_completion_ordinal
+    && phase_reflux_routes[row + 6u] == PHASE_ROUTE_READY_ADMITTED
+    && phase_reflux_routes[row + 7u] == PHASE_ROUTE_POLICY
+    && edge_end > edge_begin
+    && edge_end <= ws_load(24u)
+    && edge_end - edge_begin
+      == parent_view[parent_view[50u] + fine_field];
+}
+
+fn phase_mechanics(
+  material_id: u32,
+  phase_id: u32
+) -> CrossLevelPhaseMechanics {
+  for (
+    var record = 0u;
+    record < params.phase_record_count;
+    record = record + 1u
+  ) {
+    let row0 = material_phase_records[record * 3u];
+    if (row0.x == f32(material_id) && row0.y == f32(phase_id)) {
+      let row1 = material_phase_records[record * 3u + 1u];
+      let row2 = material_phase_records[record * 3u + 2u];
+      let valid = select(
+        0u,
+        1u,
+        row2.y == 1.0
+          && row0.z > 0.0
+          && row1.z >= 0.0
+          && row2.z >= 0.0
+          && finite_f32(row0.z)
+          && finite_f32(row1.z)
+          && finite_f32(row2.z)
+      );
+      return CrossLevelPhaseMechanics(row0.z, row1.z, row2.z, valid);
+    }
+  }
+  return CrossLevelPhaseMechanics(0.0, 0.0, 0.0, 0u);
+}
+
+fn fine_phase_volume(fine_field: u32) -> f32 {
+  return bitcast<f32>(
+    fine_phase_moments[
+      fine_field * PHASE_MOMENT_ROW_WORDS + 4u
+    ]
+  );
+}
+
+fn fine_phase_gradient(fine_field: u32) -> vec3<f32> {
+  let row = fine_field * PHASE_MOMENT_ROW_WORDS;
+  return vec3<f32>(
+    bitcast<f32>(fine_phase_moments[row + 5u]),
+    bitcast<f32>(fine_phase_moments[row + 6u]),
+    bitcast<f32>(fine_phase_moments[row + 7u])
+  );
+}
+
+fn evaluate_cross_level_phase_route(
+  fine_field: u32,
+  candidate_cohort: vec3<u32>
+) -> CrossLevelPhaseRouteEvaluation {
+  let none = CrossLevelPhaseRouteEvaluation(
+    0u,
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0.0,
+    0.0
+  );
+  let invalid = CrossLevelPhaseRouteEvaluation(
+    2u,
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0.0,
+    0.0
+  );
+  if (!fine_pressure_receipt_admitted(true)
+      || !coarse_pressure_receipt_admitted(true)
+      || !fine_pressure_row_valid(fine_field)) {
+    return invalid;
+  }
+  let fine_state = fine_load(30u) + fine_field * FIELD_STATE_WORDS;
+  let fine_mass = bitcast<f32>(fine_load(fine_state));
+  let fine_velocity = vec3<f32>(
+    bitcast<f32>(fine_load(fine_state + 1u)),
+    bitcast<f32>(fine_load(fine_state + 2u)),
+    bitcast<f32>(fine_load(fine_state + 3u))
+  );
+  let fine_phase = fine_key(fine_field, 1u);
+  let fine_material = fine_key(fine_field, 2u);
+  let coarse_phase = candidate_cohort.x;
+  let coarse_material = candidate_cohort.y;
+  let fine_noncondensed = fine_phase >= PHASE_GAS;
+  let coarse_noncondensed = coarse_phase >= PHASE_GAS;
+  if (fine_noncondensed == coarse_noncondensed) { return none; }
+  let fine_mechanics = phase_mechanics(fine_material, fine_phase);
+  let coarse_mechanics = phase_mechanics(coarse_material, coarse_phase);
+  if (!(fine_mass > 0.0)
+      || !finite_f32(fine_mass)
+      || !all(vec3<bool>(
+        finite_f32(fine_velocity.x),
+        finite_f32(fine_velocity.y),
+        finite_f32(fine_velocity.z)
+      ))
+      || fine_mechanics.valid != 1u
+      || coarse_mechanics.valid != 1u) {
+    return invalid;
+  }
+
+  let route_row = fine_field * PHASE_ROUTE_WORDS;
+  let edge_begin = phase_reflux_routes[route_row + 1u];
+  let edge_end = phase_reflux_routes[route_row + 2u];
+  var coarse_mass = 0.0;
+  var coarse_inverse_mass = 0.0;
+  var coarse_volume = 0.0;
+  var coarse_pressure_volume_moment = 0.0;
+  var coarse_gradient = vec3<f32>(0.0);
+  var coarse_velocity = vec3<f32>(0.0);
+  for (var edge = edge_begin; edge < edge_end; edge = edge + 1u) {
+    let fine_parent = parent_view[parent_view[52u] + edge];
+    let weight = bitcast<f32>(parent_view[parent_view[53u] + edge]);
+    let recipient = find_parent_key(vec4<u32>(
+      parent_key(fine_parent, 0u),
+      candidate_cohort
+    ));
+    if (recipient == INVALID_INDEX
+        || !(weight > 0.0)
+        || !finite_f32(weight)) {
+      return invalid;
+    }
+    let coarse_ordinal = ws_load(params.parent_to_coarse_offset + recipient);
+    if (coarse_ordinal == INVALID_INDEX
+        || coarse_ordinal >= ws_load(22u)
+        || !coarse_phase_moment_valid(coarse_ordinal, recipient)
+        || !coarse_pressure_row_valid(coarse_ordinal, recipient)) {
+      return invalid;
+    }
+    let coarse_state = params.coarse_state_offset + recipient * ROW_WORDS;
+    let mass = state_load(coarse_state, 0u);
+    let moment = coarse_ordinal * PHASE_MOMENT_ROW_WORDS;
+    let volume = bitcast<f32>(coarse_phase_moments[moment + 4u]);
+    let gradient = vec3<f32>(
+      bitcast<f32>(coarse_phase_moments[moment + 5u]),
+      bitcast<f32>(coarse_phase_moments[moment + 6u]),
+      bitcast<f32>(coarse_phase_moments[moment + 7u])
+    );
+    let ledger_row = reflux_row(coarse_ordinal);
+    let prior_reflux = vec3<f32>(
+      bitcast<f32>(reflux_load(ledger_row + 5u)),
+      bitcast<f32>(reflux_load(ledger_row + 6u)),
+      bitcast<f32>(reflux_load(ledger_row + 7u))
+    );
+    if (!(mass > 0.0)
+        || !finite_f32(mass)
+        || !(volume > 0.0)
+        || !finite_f32(volume)
+        || !all(vec3<bool>(
+          finite_f32(gradient.x),
+          finite_f32(gradient.y),
+          finite_f32(gradient.z)
+        ))) {
+      return invalid;
+    }
+    coarse_mass = coarse_mass + weight * mass;
+    coarse_inverse_mass =
+      coarse_inverse_mass + weight * weight / mass;
+    coarse_volume = coarse_volume + weight * volume;
+    coarse_pressure_volume_moment =
+      coarse_pressure_volume_moment
+        + weight * volume * coarse_absolute_pressure(coarse_ordinal);
+    coarse_gradient = coarse_gradient + weight * gradient;
+    coarse_velocity = coarse_velocity + weight * (
+      velocity(coarse_state) + prior_reflux / mass
+    );
+  }
+  if (!(coarse_mass > 0.0)
+      || !(coarse_inverse_mass > 0.0)
+      || !(coarse_volume > 0.0)
+      || !(coarse_pressure_volume_moment >= 0.0)
+      || !finite_f32(coarse_mass)
+      || !finite_f32(coarse_inverse_mass)
+      || !finite_f32(coarse_volume)
+      || !finite_f32(coarse_pressure_volume_moment)
+      || !all(vec3<bool>(
+        finite_f32(coarse_gradient.x),
+        finite_f32(coarse_gradient.y),
+        finite_f32(coarse_gradient.z)
+      ))
+      || !all(vec3<bool>(
+        finite_f32(coarse_velocity.x),
+        finite_f32(coarse_velocity.y),
+        finite_f32(coarse_velocity.z)
+      ))) {
+    return invalid;
+  }
+  let fine_pressure = fine_absolute_pressure(fine_field);
+  let coarse_pressure = coarse_pressure_volume_moment / coarse_volume;
+  if (!(fine_pressure >= 0.0)
+      || !(coarse_pressure >= 0.0)
+      || !finite_f32(fine_pressure)
+      || !finite_f32(coarse_pressure)) {
+    return invalid;
+  }
+
+  var result: SchroederPhaseVolumePressureDragResult;
+  var sign = 1.0;
+  if (fine_noncondensed) {
+    result = schroeder_phase_volume_pressure_drag_pair(
+      coarse_mass,
+      fine_mass,
+      coarse_inverse_mass,
+      1.0 / fine_mass,
+      coarse_volume,
+      fine_phase_volume(fine_field),
+      coarse_gradient,
+      fine_phase_gradient(fine_field),
+      coarse_velocity,
+      fine_velocity,
+      coarse_mechanics.sound_speed,
+      fine_mechanics.sound_speed,
+      coarse_mechanics.dynamic_viscosity,
+      fine_mechanics.dynamic_viscosity,
+      coarse_pressure,
+      fine_pressure,
+      params.pressure_scale,
+      params.drag_scale,
+      params.max_impulse_fraction,
+      params.coarse_spacing_m,
+      params.fine_dt,
+      params.cfl_factor
+    );
+    sign = -1.0;
+  } else {
+    result = schroeder_phase_volume_pressure_drag_pair(
+      fine_mass,
+      coarse_mass,
+      1.0 / fine_mass,
+      coarse_inverse_mass,
+      fine_phase_volume(fine_field),
+      coarse_volume,
+      fine_phase_gradient(fine_field),
+      coarse_gradient,
+      fine_velocity,
+      coarse_velocity,
+      fine_mechanics.sound_speed,
+      coarse_mechanics.sound_speed,
+      fine_mechanics.dynamic_viscosity,
+      coarse_mechanics.dynamic_viscosity,
+      fine_pressure,
+      coarse_pressure,
+      params.pressure_scale,
+      params.drag_scale,
+      params.max_impulse_fraction,
+      params.coarse_spacing_m,
+      params.fine_dt,
+      params.cfl_factor
+    );
+  }
+  if (result.valid != 1u) { return invalid; }
+  return CrossLevelPhaseRouteEvaluation(
+    1u,
+    sign * result.pressure_impulse,
+    sign * result.drag_impulse,
+    result.pressure_internal_compensation_j,
+    result.drag_heat_j
+  );
+}
+
+fn scatter_cross_level_phase_route(
+  fine_field: u32,
+  candidate_cohort: vec3<u32>,
+  route: CrossLevelPhaseRouteEvaluation
+) -> bool {
+  let route_row = fine_field * PHASE_ROUTE_WORDS;
+  let edge_begin = phase_reflux_routes[route_row + 1u];
+  let edge_end = phase_reflux_routes[route_row + 2u];
+  for (var edge = edge_begin; edge < edge_end; edge = edge + 1u) {
+    let fine_parent = parent_view[parent_view[52u] + edge];
+    let weight = bitcast<f32>(parent_view[parent_view[53u] + edge]);
+    let recipient = find_parent_key(vec4<u32>(
+      parent_key(fine_parent, 0u),
+      candidate_cohort
+    ));
+    if (recipient == INVALID_INDEX) { return false; }
+    let coarse_ordinal = ws_load(params.parent_to_coarse_offset + recipient);
+    if (coarse_ordinal == INVALID_INDEX || coarse_ordinal >= ws_load(22u)) {
+      return false;
+    }
+    let proposal = params.route_proposal_offset
+      + coarse_ordinal * ROUTE_WORDS;
+    let coarse_pressure = -weight * route.fine_pressure_impulse;
+    let coarse_drag = -weight * route.fine_drag_impulse;
+    if (!ws_atomic_add_f32(proposal, coarse_pressure.x + coarse_drag.x)
+        || !ws_atomic_add_f32(
+          proposal + 1u,
+          coarse_pressure.y + coarse_drag.y
+        )
+        || !ws_atomic_add_f32(
+          proposal + 2u,
+          coarse_pressure.z + coarse_drag.z
+        )
+        || !ws_atomic_add_f32(proposal + 8u, coarse_pressure.x)
+        || !ws_atomic_add_f32(proposal + 9u, coarse_pressure.y)
+        || !ws_atomic_add_f32(proposal + 10u, coarse_pressure.z)
+        || !ws_atomic_add_f32(proposal + 11u, coarse_drag.x)
+        || !ws_atomic_add_f32(proposal + 12u, coarse_drag.y)
+        || !ws_atomic_add_f32(proposal + 13u, coarse_drag.z)
+        || !ws_atomic_add_f32(
+          proposal + 14u,
+          0.5 * weight * route.pressure_compensation_j
+        )
+        || !ws_atomic_add_f32(
+          proposal + 15u,
+          0.5 * weight * route.drag_heat_j
+        )) {
+      return false;
+    }
+    atomicAdd(&workspace[proposal + 3u], 1u);
+  }
+  return true;
+}
+
+@compute @workgroup_size(1)
+fn admit_cross_level_phase_volume() {
+  if (params.transport_enabled == 0u) { return; }
+  if (arrayLength(&workspace) < params.required_words
+      || ws_load(0u) != WORKSPACE_MAGIC
+      || ws_load(1u) != WORKSPACE_VERSION
+      || ws_load(2u) != READY_ADMITTED
+      || ws_load(36u) != PHASE_PREDICTORS
+      || !parent_admitted()
+      || !fine_admitted(
+        FIELD_VELOCITY,
+        params.fine_correction_expected_mutation_ordinal
+      )
+      || !fine_receipt_admitted(
+        FIELD_RECEIPT_HEAT_BUILDING,
+        params.fine_correction_expected_mutation_ordinal
+      )) {
+    ws_reject(STATUS_INVALID_SOURCE, 37u);
+    return;
+  }
+  if (!phase_proposal_admitted()) {
+    ws_reject(STATUS_INVALID_REGISTRY, 87u);
+    return;
+  }
+  if (!fine_pressure_receipt_admitted(false)
+      || !coarse_pressure_receipt_admitted(true)) {
+    reject_pressure_authority();
+    ws_reject(STATUS_INVALID_SOURCE, 87u);
+    return;
+  }
+  if (params.fine_capacity
+      > arrayLength(&fine_phase_moments) / PHASE_MOMENT_ROW_WORDS
+      || params.coarse_capacity
+        > arrayLength(&coarse_phase_moments) / PHASE_MOMENT_ROW_WORDS) {
+    ws_reject(STATUS_OVERFLOW, 38u);
+    return;
+  }
+  for (var fine_field = 0u; fine_field < ws_load(21u); fine_field = fine_field + 1u) {
+    if (!phase_route_admitted(fine_field)) {
+      ws_reject(STATUS_INVALID_ROUTE, 86u);
+      return;
+    }
+    if (!fine_phase_moment_valid(fine_field)) {
+      ws_reject(STATUS_INVALID_SOURCE, 86u);
+      return;
+    }
+    if (!fine_pressure_row_valid(fine_field)) {
+      reject_pressure_authority();
+      ws_reject(STATUS_INVALID_SOURCE, 86u);
+      return;
+    }
+  }
+  for (
+    var coarse_field = 0u;
+    coarse_field < ws_load(22u);
+    coarse_field = coarse_field + 1u
+  ) {
+    let parent = parent_view[parent_view[54u] + coarse_field];
+    if (parent >= ws_load(23u)
+        || ws_load(params.parent_to_coarse_offset + parent) != coarse_field) {
+      ws_reject(STATUS_INVALID_REGISTRY, 87u);
+      return;
+    }
+    if (!coarse_phase_moment_valid(coarse_field, parent)) {
+      ws_reject(STATUS_INVALID_SOURCE, 87u);
+      return;
+    }
+    if (!coarse_pressure_row_valid(coarse_field, parent)) {
+      reject_pressure_authority();
+      ws_reject(STATUS_INVALID_SOURCE, 87u);
+      return;
+    }
+  }
+  let fine_receipt = fine_receipt_offset();
+  let fine_prior_claimed = atomicOr(
+    &fine_view[fine_receipt + 33u],
+    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+  );
+  if ((fine_prior_claimed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u) {
+    reject_pressure_authority();
+    ws_reject(STATUS_INVALID_SOURCE, 87u);
+    return;
+  }
+  let coarse_receipt = coarse_receipt_offset();
+  atomicOr(
+    &coarse_view[coarse_receipt + 33u],
+    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+  );
+  if (!fine_pressure_receipt_admitted(true)
+      || !coarse_pressure_receipt_admitted(true)
+      || (
+        coarse_load(coarse_receipt + 33u)
+          & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+      ) == 0u) {
+    reject_pressure_authority();
+    ws_reject(STATUS_INVALID_SOURCE, 87u);
+    return;
+  }
+}
+
+@compute @workgroup_size(64)
+fn propose_cross_level_phase_volume(
+  @builtin(global_invocation_id) id: vec3<u32>
+) {
+  let fine_field = id.x;
+  if (params.transport_enabled == 0u
+      || !workspace_admitted(PHASE_PREDICTORS)
+      || fine_field >= ws_load(21u)) {
+    return;
+  }
+  if (params.phase_record_count == 0u
+      || params.phase_record_count
+        > arrayLength(&material_phase_records) / 3u) {
+    phase_transport_reject(REFLUX_PHASE_REJECTED);
+    return;
+  }
+  if (!phase_route_admitted(fine_field)
+      || !fine_phase_moment_valid(fine_field)) {
+    phase_transport_reject(REFLUX_ROUTE_REJECTED);
+    return;
+  }
+  let route_row = fine_field * PHASE_ROUTE_WORDS;
+  let edge_begin = phase_reflux_routes[route_row + 1u];
+  let first_parent = parent_view[parent_view[52u] + edge_begin];
+  let first_dense = parent_key(first_parent, 0u);
+  var group_begin = first_parent;
+  loop {
+    if (group_begin == 0u
+        || parent_key(group_begin - 1u, 0u) != first_dense) {
+      break;
+    }
+    group_begin = group_begin - 1u;
+  }
+  var group_end = first_parent + 1u;
+  loop {
+    if (group_end >= ws_load(23u)
+        || parent_key(group_end, 0u) != first_dense) {
+      break;
+    }
+    group_end = group_end + 1u;
+  }
+  let fine_impulse_row = params.fine_impulse_offset
+    + fine_field * FINE_IMPULSE_WORDS;
+  for (
+    var candidate = group_begin;
+    candidate < group_end;
+    candidate = candidate + 1u
+  ) {
+    let coarse_ordinal = ws_load(params.parent_to_coarse_offset + candidate);
+    if (coarse_ordinal == INVALID_INDEX) { continue; }
+    let route = evaluate_cross_level_phase_route(
+      fine_field,
+      parent_cohort(candidate)
+    );
+    if (route.status == 2u) {
+      phase_transport_reject(REFLUX_ROUTE_REJECTED | REFLUX_NONFINITE);
+      return;
+    }
+    if (route.status == 0u) { continue; }
+    let total = route.fine_pressure_impulse + route.fine_drag_impulse;
+    if (!ws_atomic_add_f32(fine_impulse_row, total.x)
+        || !ws_atomic_add_f32(fine_impulse_row + 1u, total.y)
+        || !ws_atomic_add_f32(fine_impulse_row + 2u, total.z)
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 8u,
+          route.fine_pressure_impulse.x
+        )
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 9u,
+          route.fine_pressure_impulse.y
+        )
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 10u,
+          route.fine_pressure_impulse.z
+        )
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 11u,
+          route.fine_drag_impulse.x
+        )
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 12u,
+          route.fine_drag_impulse.y
+        )
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 13u,
+          route.fine_drag_impulse.z
+        )
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 14u,
+          0.5 * route.pressure_compensation_j
+        )
+        || !ws_atomic_add_f32(
+          fine_impulse_row + 15u,
+          0.5 * route.drag_heat_j
+        )
+        || !scatter_cross_level_phase_route(
+          fine_field,
+          parent_cohort(candidate),
+          route
+        )) {
+      phase_transport_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW);
+      return;
+    }
+    atomicAdd(&workspace[88u], 1u);
+  }
+}
+
 struct CausalRouteEvaluation {
   // 0: no causal impulse, 1: coherent causal impulse, 2: causal but the
   // affine recipient support is incomplete and the operation must reject.
@@ -1598,19 +2622,13 @@ fn local_route_is_causal(
   fine_specific_gradient: vec3<f32>,
   candidate_cohort: vec3<u32>,
   fine_key_cohort: vec3<u32>,
-  coarse_state: u32
+  coarse_velocity: vec3<f32>,
+  coarse_specific_gradient: vec3<f32>
 ) -> bool {
-  let coarse_mass = state_load(coarse_state, 0u);
-  if (!(coarse_mass > 0.0)) { return false; }
-  let coarse_velocity = velocity(coarse_state);
   let relative = coarse_velocity - fine_velocity;
   if (cohort_equal(candidate_cohort, fine_key_cohort)) {
     return dot(relative, relative) > 1.0e-18;
   }
-  let coarse_specific_gradient = vec3<f32>(
-    state_load(coarse_state, 4u), state_load(coarse_state, 5u),
-    state_load(coarse_state, 6u)
-  ) / coarse_mass;
   let normal_raw = fine_specific_gradient - coarse_specific_gradient;
   let normal_length2 = dot(normal_raw, normal_raw);
   if (normal_length2 <= 1.0e-12) { return false; }
@@ -1630,7 +2648,35 @@ fn evaluate_causal_route(
     bitcast<f32>(fine_load(fine_state + 1u)),
     bitcast<f32>(fine_load(fine_state + 2u)),
     bitcast<f32>(fine_load(fine_state + 3u))
-  );
+  ) + (
+    vec3<f32>(
+      bitcast<f32>(ws_load(
+        params.fine_impulse_offset
+          + fine_field * FINE_IMPULSE_WORDS + 8u
+      )),
+      bitcast<f32>(ws_load(
+        params.fine_impulse_offset
+          + fine_field * FINE_IMPULSE_WORDS + 9u
+      )),
+      bitcast<f32>(ws_load(
+        params.fine_impulse_offset
+          + fine_field * FINE_IMPULSE_WORDS + 10u
+      ))
+    ) + vec3<f32>(
+      bitcast<f32>(ws_load(
+        params.fine_impulse_offset
+          + fine_field * FINE_IMPULSE_WORDS + 11u
+      )),
+      bitcast<f32>(ws_load(
+        params.fine_impulse_offset
+          + fine_field * FINE_IMPULSE_WORDS + 12u
+      )),
+      bitcast<f32>(ws_load(
+        params.fine_impulse_offset
+          + fine_field * FINE_IMPULSE_WORDS + 13u
+      ))
+    )
+  ) / fine_mass;
   let fine_specific_gradient = vec3<f32>(
     bitcast<f32>(fine_load(fine_state + 4u)),
     bitcast<f32>(fine_load(fine_state + 5u)),
@@ -1666,26 +2712,39 @@ fn evaluate_causal_route(
       incomplete = true;
       continue;
     }
-    locally_causal = locally_causal || local_route_is_causal(
-      fine_velocity,
-      fine_specific_gradient,
-      candidate_cohort,
-      source_cohort,
-      coarse_state
-    );
     let ledger_row = reflux_row(coarse_ordinal);
     let prior_reflux_impulse = vec3<f32>(
       bitcast<f32>(reflux_load(ledger_row + 5u)),
       bitcast<f32>(reflux_load(ledger_row + 6u)),
       bitcast<f32>(reflux_load(ledger_row + 7u))
     );
-    coarse_velocity = coarse_velocity + weight * (
-      velocity(coarse_state) + prior_reflux_impulse / coarse_mass
+    let phase_proposal =
+      params.route_proposal_offset + coarse_ordinal * ROUTE_WORDS;
+    let phase_impulse = vec3<f32>(
+      bitcast<f32>(ws_load(phase_proposal + 8u))
+        + bitcast<f32>(ws_load(phase_proposal + 11u)),
+      bitcast<f32>(ws_load(phase_proposal + 9u))
+        + bitcast<f32>(ws_load(phase_proposal + 12u)),
+      bitcast<f32>(ws_load(phase_proposal + 10u))
+        + bitcast<f32>(ws_load(phase_proposal + 13u))
     );
-    coarse_specific_gradient = coarse_specific_gradient + weight * vec3<f32>(
+    let recipient_velocity = velocity(coarse_state)
+      + (prior_reflux_impulse + phase_impulse) / coarse_mass;
+    let recipient_specific_gradient = vec3<f32>(
       state_load(coarse_state, 4u), state_load(coarse_state, 5u),
       state_load(coarse_state, 6u)
     ) / coarse_mass;
+    locally_causal = locally_causal || local_route_is_causal(
+      fine_velocity,
+      fine_specific_gradient,
+      candidate_cohort,
+      source_cohort,
+      recipient_velocity,
+      recipient_specific_gradient
+    );
+    coarse_velocity = coarse_velocity + weight * recipient_velocity;
+    coarse_specific_gradient =
+      coarse_specific_gradient + weight * recipient_specific_gradient;
     inverse_effective_mass = inverse_effective_mass
       + weight * weight / coarse_mass;
   }
@@ -1989,8 +3048,17 @@ fn validate_fine_velocity_correction(@builtin(global_invocation_id) id: vec3<u32
     bitcast<f32>(fine_load(state + 2u)),
     bitcast<f32>(fine_load(state + 3u))
   );
-  let impulse = causal_impulse_sum(fine_field, true);
+  let causal_impulse = causal_impulse_sum(fine_field, true);
   if (!workspace_admitted(PHASE_PREDICTORS)) { return; }
+  let phase_impulse = vec3<f32>(
+    bitcast<f32>(ws_load(fine_impulse_row + 8u))
+      + bitcast<f32>(ws_load(fine_impulse_row + 11u)),
+    bitcast<f32>(ws_load(fine_impulse_row + 9u))
+      + bitcast<f32>(ws_load(fine_impulse_row + 12u)),
+    bitcast<f32>(ws_load(fine_impulse_row + 10u))
+      + bitcast<f32>(ws_load(fine_impulse_row + 13u))
+  );
+  let impulse = phase_impulse + causal_impulse;
   ws_store(fine_impulse_row, bitcast<u32>(impulse.x));
   ws_store(fine_impulse_row + 1u, bitcast<u32>(impulse.y));
   ws_store(fine_impulse_row + 2u, bitcast<u32>(impulse.z));
@@ -2154,7 +3222,8 @@ fn seal_fine_correction_alpha() {
     reflux_reject(REFLUX_CFL_REJECTED);
     return;
   }
-  if (linear + quadratic > tolerance) {
+  if (params.transport_enabled == 0u
+      && linear + quadratic > tolerance) {
     ws_reject(STATUS_ENERGY_REJECTED, 86u);
     reflux_reject(REFLUX_ENERGY_REJECTED);
     return;
@@ -2176,8 +3245,6 @@ fn apply_fine_route_heat(@builtin(global_invocation_id) id: vec3<u32>) {
       || fine_field >= ws_load(21u)) { return; }
   let impulse_row = params.fine_impulse_offset
     + fine_field * FINE_IMPULSE_WORDS;
-  let heat_j = bitcast<f32>(ws_load(impulse_row + 3u));
-  if (!(heat_j > 0.0)) { return; }
   let accumulator = fine_load(28u)
     + fine_field * FIELD_ACCUMULATOR_WORDS;
   // word0 is total heat and word2 is the route-only audit subset. G2P adds
@@ -2185,7 +3252,7 @@ fn apply_fine_route_heat(@builtin(global_invocation_id) id: vec3<u32>) {
   fine_store(accumulator, ws_load(impulse_row + 5u));
   fine_store(accumulator + 1u, ws_load(impulse_row + 7u));
   fine_store(accumulator + 2u, ws_load(impulse_row + 6u));
-  fine_store(accumulator + 3u, 1u);
+  fine_store(accumulator + 3u, ws_load(impulse_row + 14u));
 }
 
 @compute @workgroup_size(64)
@@ -2237,17 +3304,38 @@ fn prepare_fine_transaction() {
   let receipt = fine_receipt_offset();
   let local_heat = bitcast<f32>(fine_load(receipt + 8u));
   let published_local_heat = bitcast<f32>(fine_load(receipt + 9u));
+  let local_pressure_internal_compensation =
+    bitcast<f32>(fine_load(receipt + 16u));
+  let published_pressure_internal_compensation =
+    bitcast<f32>(fine_load(receipt + 17u));
   if (!(local_heat >= 0.0) || !finite_f32(local_heat)
-      || bitcast<u32>(local_heat) != bitcast<u32>(published_local_heat)) {
+      || bitcast<u32>(local_heat) != bitcast<u32>(published_local_heat)
+      || !finite_f32(local_pressure_internal_compensation)
+      || bitcast<u32>(local_pressure_internal_compensation)
+        != bitcast<u32>(published_pressure_internal_compensation)) {
     reflux_reject(REFLUX_NONFINITE | REFLUX_ENERGY_REJECTED);
     return;
   }
 
   var fine_energy_delta = 0.0;
   var coarse_virtual_energy_delta = 0.0;
-  var fine_heat_weight = 0.0;
-  var coarse_heat_weight = 0.0;
-  var last_fine_heat = INVALID_INDEX;
+  var fine_pressure_energy_delta = 0.0;
+  var coarse_pressure_energy_delta = 0.0;
+  var fine_drag_energy_delta = 0.0;
+  var coarse_drag_energy_delta = 0.0;
+  var fine_causal_energy_delta = 0.0;
+  var coarse_causal_energy_delta = 0.0;
+  var fine_pressure_weight = 0.0;
+  var coarse_pressure_weight = 0.0;
+  var fine_drag_weight = 0.0;
+  var coarse_drag_weight = 0.0;
+  var fine_causal_weight = 0.0;
+  var coarse_causal_weight = 0.0;
+  var last_fine_causal = INVALID_INDEX;
+  var last_fine_pressure = INVALID_INDEX;
+  var last_fine_drag = INVALID_INDEX;
+  var last_coarse_pressure = INVALID_INDEX;
+  var last_coarse_drag = INVALID_INDEX;
   var max_pou_residual = 0.0;
   var max_first_moment_residual = 0.0;
   var pou_sum_abs = 0.0;
@@ -2256,6 +3344,9 @@ fn prepare_fine_transaction() {
   var route_recipient_count = 0u;
   var local_contribution_sum = 0u;
   var local_heat_sum = 0.0;
+  var local_pressure_internal_compensation_sum = 0.0;
+  var local_ambient_impulse_sum = vec3<f32>(0.0);
+  var local_ambient_external_work_sum = 0.0;
   let fine_spacing = bitcast<f32>(fine_load(23u));
   let fine_vmax = params.cfl_factor * fine_spacing
     / max(params.fine_dt, 1.0e-12);
@@ -2276,19 +3367,48 @@ fn prepare_fine_transaction() {
     let prior_total = bitcast<f32>(fine_load(accumulator));
     let prior_route = bitcast<f32>(fine_load(accumulator + 2u));
     let local_count = fine_load(accumulator + 1u);
-    let route_count = fine_load(accumulator + 3u);
+    let pressure_compensation = bitcast<f32>(fine_load(accumulator + 3u));
+    let ambient_impulse_x = bitcast<f32>(fine_load(accumulator + 4u));
+    let ambient_impulse_y = bitcast<f32>(fine_load(accumulator + 5u));
+    let ambient_impulse_z = bitcast<f32>(fine_load(accumulator + 6u));
+    let ambient_work = bitcast<f32>(fine_load(accumulator + 7u));
     if (!finite_f32(pou_residual) || pou_residual < 0.0
         || !finite_f32(moment_residual) || moment_residual < 0.0
         || ws_load(impulse_row + 5u) != ordinal
         || !finite_f32(prior_total) || prior_total < 0.0
-        || prior_route != 0.0 || route_count != 0u
+        || prior_route != 0.0
+        || !finite_f32(pressure_compensation)
+        || !finite_f32(ambient_impulse_x)
+        || !finite_f32(ambient_impulse_y)
+        || !finite_f32(ambient_impulse_z)
+        || !finite_f32(ambient_work)
         || local_count > 0xffffffffu - local_contribution_sum
-        || !finite_f32(local_heat_sum + prior_total)) {
+        || !finite_f32(local_heat_sum + prior_total)
+        || !finite_f32(
+          local_pressure_internal_compensation_sum + pressure_compensation
+        )
+        || !all(vec3<bool>(
+          finite_f32(local_ambient_impulse_sum.x + ambient_impulse_x),
+          finite_f32(local_ambient_impulse_sum.y + ambient_impulse_y),
+          finite_f32(local_ambient_impulse_sum.z + ambient_impulse_z)
+        ))
+        || !finite_f32(
+          local_ambient_external_work_sum + ambient_work
+        )) {
       reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_NONFINITE);
       return;
     }
     local_contribution_sum = local_contribution_sum + local_count;
     local_heat_sum = local_heat_sum + prior_total;
+    local_pressure_internal_compensation_sum =
+      local_pressure_internal_compensation_sum + pressure_compensation;
+    local_ambient_impulse_sum = local_ambient_impulse_sum + vec3<f32>(
+      ambient_impulse_x,
+      ambient_impulse_y,
+      ambient_impulse_z
+    );
+    local_ambient_external_work_sum =
+      local_ambient_external_work_sum + ambient_work;
     max_pou_residual = max(max_pou_residual, pou_residual);
     max_first_moment_residual = max(
       max_first_moment_residual, moment_residual
@@ -2297,7 +3417,14 @@ fn prepare_fine_transaction() {
     let state_active = fine_load(state + 7u) != 0u;
     let impulse_active = ws_load(impulse_row + 4u) != 0u;
     if (!state_active) {
-      if (impulse_active || prior_total != 0.0 || local_count != 0u) {
+      if (impulse_active
+          || prior_total != 0.0
+          || local_count != 0u
+          || pressure_compensation != 0.0
+          || ambient_impulse_x != 0.0
+          || ambient_impulse_y != 0.0
+          || ambient_impulse_z != 0.0
+          || ambient_work != 0.0) {
         reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_PHASE_REJECTED);
         return;
       }
@@ -2318,7 +3445,18 @@ fn prepare_fine_transaction() {
       bitcast<f32>(ws_load(impulse_row + 1u)),
       bitcast<f32>(ws_load(impulse_row + 2u))
     );
+    let pressure_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(impulse_row + 8u)),
+      bitcast<f32>(ws_load(impulse_row + 9u)),
+      bitcast<f32>(ws_load(impulse_row + 10u))
+    );
+    let drag_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(impulse_row + 11u)),
+      bitcast<f32>(ws_load(impulse_row + 12u)),
+      bitcast<f32>(ws_load(impulse_row + 13u))
+    );
     let applied = alpha * impulse;
+    let causal_impulse = applied - pressure_impulse - drag_impulse;
     if (!(mass > 0.0) || !finite_f32(mass)
         || !all(vec3<bool>(
           finite_f32(prior.x), finite_f32(prior.y), finite_f32(prior.z)
@@ -2331,9 +3469,26 @@ fn prepare_fine_transaction() {
     }
     let delta = dot(prior, applied)
       + 0.5 * dot(applied, applied) / mass;
+    let pressure_delta = dot(prior, pressure_impulse)
+      + 0.5 * dot(pressure_impulse, pressure_impulse) / mass;
+    let after_pressure = prior + pressure_impulse / mass;
+    let drag_delta = dot(after_pressure, drag_impulse)
+      + 0.5 * dot(drag_impulse, drag_impulse) / mass;
+    let after_drag = after_pressure + drag_impulse / mass;
+    let causal_delta = dot(after_drag, causal_impulse)
+      + 0.5 * dot(causal_impulse, causal_impulse) / mass;
     let next_velocity = prior + applied / mass;
     let cfl_ratio = length(next_velocity) / max(fine_vmax, 1.0e-20);
     if (!finite_f32(delta)
+        || !finite_f32(pressure_delta)
+        || !finite_f32(drag_delta)
+        || !finite_f32(causal_delta)
+        || !measured_channel_energy_close(
+          delta,
+          pressure_delta,
+          drag_delta,
+          causal_delta
+        )
         || !all(vec3<bool>(
           finite_f32(next_velocity.x), finite_f32(next_velocity.y),
           finite_f32(next_velocity.z)
@@ -2344,16 +3499,86 @@ fn prepare_fine_transaction() {
     }
     max_fine_cfl_ratio = max(max_fine_cfl_ratio, cfl_ratio);
     fine_energy_delta = fine_energy_delta + delta;
-    let weight = max(0.0, -delta);
-    fine_heat_weight = fine_heat_weight + weight;
-    if (weight > 0.0) {
-      last_fine_heat = fine_field;
-      if (fine_load(accumulator + 1u) == 0xffffffffu
-          || fine_load(accumulator + 3u) == 0xffffffffu) {
+    fine_pressure_energy_delta =
+      fine_pressure_energy_delta + pressure_delta;
+    fine_drag_energy_delta = fine_drag_energy_delta + drag_delta;
+    fine_causal_energy_delta = fine_causal_energy_delta + causal_delta;
+    let pressure_weight = abs(pressure_delta);
+    let drag_weight = abs(drag_delta);
+    let causal_weight = abs(causal_delta);
+    fine_pressure_weight = fine_pressure_weight + pressure_weight;
+    fine_drag_weight = fine_drag_weight + drag_weight;
+    fine_causal_weight = fine_causal_weight + causal_weight;
+    if (pressure_weight > 0.0) {
+      last_fine_pressure = fine_field;
+    }
+    if (drag_weight > 0.0) {
+      last_fine_drag = fine_field;
+    }
+    if (causal_weight > 0.0) {
+      last_fine_causal = fine_field;
+    }
+    if (drag_weight > 0.0 || causal_weight > 0.0) {
+      if (fine_load(accumulator + 1u) == 0xffffffffu) {
         reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW);
         return;
       }
     }
+  }
+  if (!measured_close(
+      local_pressure_internal_compensation_sum,
+      local_pressure_internal_compensation,
+      ws_load(21u)
+    )) {
+    reflux_reject(REFLUX_ENERGY_REJECTED);
+    return;
+  }
+  let receipt_ambient_impulse = vec3<f32>(
+    bitcast<f32>(fine_load(receipt + 20u)),
+    bitcast<f32>(fine_load(receipt + 21u)),
+    bitcast<f32>(fine_load(receipt + 22u))
+  );
+  let receipt_ambient_external_work =
+    bitcast<f32>(fine_load(receipt + 23u));
+  if (!all(vec3<bool>(
+      finite_f32(receipt_ambient_impulse.x),
+      finite_f32(receipt_ambient_impulse.y),
+      finite_f32(receipt_ambient_impulse.z)
+    )) || !finite_f32(receipt_ambient_external_work)
+      || !measured_close(
+        local_ambient_impulse_sum.x,
+        receipt_ambient_impulse.x,
+        ws_load(21u)
+      ) || !measured_close(
+        local_ambient_impulse_sum.y,
+        receipt_ambient_impulse.y,
+        ws_load(21u)
+      ) || !measured_close(
+        local_ambient_impulse_sum.z,
+        receipt_ambient_impulse.z,
+        ws_load(21u)
+      ) || !measured_close(
+        local_ambient_external_work_sum,
+        receipt_ambient_external_work,
+        ws_load(21u)
+      )) {
+    reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_NONFINITE);
+    return;
+  }
+  let next_reflux_ambient_impulse = vec3<f32>(
+    bitcast<f32>(reflux_load(132u)),
+    bitcast<f32>(reflux_load(133u)),
+    bitcast<f32>(reflux_load(134u))
+  ) + receipt_ambient_impulse;
+  let next_reflux_ambient_external_work =
+    bitcast<f32>(reflux_load(135u)) + receipt_ambient_external_work;
+  if (!all(vec3<bool>(
+      finite_f32(next_reflux_ambient_impulse.x),
+      finite_f32(next_reflux_ambient_impulse.y),
+      finite_f32(next_reflux_ambient_impulse.z)
+    )) || !finite_f32(next_reflux_ambient_external_work)) {
+    reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_NONFINITE);
+    return;
   }
   max_pou_residual = bitcast<f32>(ws_load(50u));
   pou_sum_abs = bitcast<f32>(ws_load(51u));
@@ -2420,6 +3645,16 @@ fn prepare_fine_transaction() {
       bitcast<f32>(ws_load(proposal_base + 1u)),
       bitcast<f32>(ws_load(proposal_base + 2u))
     );
+    let pressure_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(proposal_base + 8u)),
+      bitcast<f32>(ws_load(proposal_base + 9u)),
+      bitcast<f32>(ws_load(proposal_base + 10u))
+    );
+    let drag_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(proposal_base + 11u)),
+      bitcast<f32>(ws_load(proposal_base + 12u)),
+      bitcast<f32>(ws_load(proposal_base + 13u))
+    );
     let row = reflux_row(coarse_field);
     let existing = vec3<f32>(
       bitcast<f32>(reflux_load(row + 5u)),
@@ -2427,6 +3662,7 @@ fn prepare_fine_transaction() {
       bitcast<f32>(reflux_load(row + 7u))
     );
     let applied = alpha * proposal;
+    let causal_impulse = applied - pressure_impulse - drag_impulse;
     let next = existing + applied;
     let parent = parent_view[parent_view[54u] + coarse_field];
     let coarse_state = params.coarse_state_offset + parent * ROW_WORDS;
@@ -2452,39 +3688,136 @@ fn prepare_fine_transaction() {
     }
     let delta = dot(prior_velocity, applied)
       + 0.5 * dot(applied, applied) / mass;
-    let weight = max(0.0, -delta);
+    let pressure_delta = dot(prior_velocity, pressure_impulse)
+      + 0.5 * dot(pressure_impulse, pressure_impulse) / mass;
+    let after_pressure = prior_velocity + pressure_impulse / mass;
+    let drag_delta = dot(after_pressure, drag_impulse)
+      + 0.5 * dot(drag_impulse, drag_impulse) / mass;
+    let after_drag = after_pressure + drag_impulse / mass;
+    let causal_delta = dot(after_drag, causal_impulse)
+      + 0.5 * dot(causal_impulse, causal_impulse) / mass;
+    let pressure_weight = abs(pressure_delta);
+    let drag_weight = abs(drag_delta);
+    let causal_weight = abs(causal_delta);
+    let weight = drag_weight + causal_weight;
     if (!finite_f32(delta) || !finite_f32(weight)
+        || !finite_f32(pressure_delta)
+        || !finite_f32(drag_delta)
+        || !finite_f32(causal_delta)
+        || !measured_channel_energy_close(
+          delta,
+          pressure_delta,
+          drag_delta,
+          causal_delta
+        )
         || !finite_f32(prior_virtual_delta + delta)
         || !finite_f32(prior_weight + weight)) {
       reflux_reject(REFLUX_NONFINITE);
       return;
     }
     coarse_virtual_energy_delta = coarse_virtual_energy_delta + delta;
-    coarse_heat_weight = coarse_heat_weight + weight;
+    coarse_pressure_energy_delta =
+      coarse_pressure_energy_delta + pressure_delta;
+    coarse_drag_energy_delta =
+      coarse_drag_energy_delta + drag_delta;
+    coarse_causal_energy_delta =
+      coarse_causal_energy_delta + causal_delta;
+    coarse_pressure_weight = coarse_pressure_weight + pressure_weight;
+    coarse_drag_weight = coarse_drag_weight + drag_weight;
+    coarse_causal_weight = coarse_causal_weight + causal_weight;
+    if (pressure_weight > 0.0) {
+      last_coarse_pressure = coarse_field;
+    }
+    if (drag_weight > 0.0) {
+      last_coarse_drag = coarse_field;
+    }
   }
 
   let virtual_delta = fine_energy_delta + coarse_virtual_energy_delta;
+  let pressure_energy_delta =
+    fine_pressure_energy_delta + coarse_pressure_energy_delta;
+  let drag_energy_delta =
+    fine_drag_energy_delta + coarse_drag_energy_delta;
+  let causal_energy_delta =
+    fine_causal_energy_delta + coarse_causal_energy_delta;
   let virtual_scale = abs(fine_energy_delta)
-    + abs(coarse_virtual_energy_delta);
+    + abs(coarse_virtual_energy_delta)
+    + abs(pressure_energy_delta)
+    + abs(drag_energy_delta)
+    + abs(causal_energy_delta);
   let virtual_tolerance = max(
     8.0 * 1.175494351e-38,
     1024.0 * 5.960464477539063e-8 * virtual_scale
   );
-  if (!finite_f32(virtual_delta) || virtual_delta > virtual_tolerance
-      || !finite_f32(fine_heat_weight)
-      || !finite_f32(coarse_heat_weight)) {
+  let pressure_compensation = -pressure_energy_delta;
+  let drag_heat = max(0.0, -drag_energy_delta);
+  let causal_heat = max(0.0, -causal_energy_delta);
+  let virtual_heat = drag_heat + causal_heat;
+  let decomposed_delta =
+    pressure_energy_delta + drag_energy_delta + causal_energy_delta;
+  let closure_residual =
+    virtual_delta + pressure_compensation + virtual_heat;
+  if (!finite_f32(virtual_delta)
+      || !finite_f32(pressure_energy_delta)
+      || !finite_f32(drag_energy_delta)
+      || !finite_f32(causal_energy_delta)
+      || !finite_f32(pressure_compensation)
+      || !finite_f32(drag_heat)
+      || !finite_f32(causal_heat)
+      || !finite_f32(virtual_heat)
+      || abs(virtual_delta - decomposed_delta) > virtual_tolerance
+      || drag_energy_delta > virtual_tolerance
+      || causal_energy_delta > virtual_tolerance
+      || abs(closure_residual) > virtual_tolerance) {
     reflux_reject(REFLUX_NONFINITE | REFLUX_ENERGY_REJECTED);
     return;
   }
-  let virtual_heat = max(0.0, -virtual_delta);
-  let total_heat_weight = fine_heat_weight + coarse_heat_weight;
-  if (virtual_heat > virtual_tolerance && !(total_heat_weight > 0.0)) {
+  let total_pressure_weight =
+    fine_pressure_weight + coarse_pressure_weight;
+  let total_drag_weight = fine_drag_weight + coarse_drag_weight;
+  let total_causal_weight = fine_causal_weight + coarse_causal_weight;
+  if ((abs(pressure_compensation) > virtual_tolerance
+        && !(total_pressure_weight > 0.0))
+      || (drag_heat > virtual_tolerance && !(total_drag_weight > 0.0))
+      || (causal_heat > virtual_tolerance && !(total_causal_weight > 0.0))) {
     reflux_reject(REFLUX_ENERGY_REJECTED);
     return;
   }
+  var fine_pressure_compensation = 0.0;
+  if (total_pressure_weight > 0.0 && fine_pressure_weight > 0.0) {
+    fine_pressure_compensation =
+      (fine_pressure_weight / total_pressure_weight)
+        * pressure_compensation;
+  }
+  let coarse_pressure_compensation =
+    pressure_compensation - fine_pressure_compensation;
+  var fine_drag_heat = 0.0;
+  if (total_drag_weight > 0.0 && fine_drag_weight > 0.0) {
+    fine_drag_heat =
+      (fine_drag_weight / total_drag_weight) * drag_heat;
+  }
+  let coarse_drag_heat = max(0.0, drag_heat - fine_drag_heat);
+  var fine_causal_heat = 0.0;
+  if (total_causal_weight > 0.0 && fine_causal_weight > 0.0) {
+    fine_causal_heat =
+      (fine_causal_weight / total_causal_weight) * causal_heat;
+  }
+  let coarse_causal_heat = max(0.0, causal_heat - fine_causal_heat);
   var fine_route_heat = 0.0;
-  if (total_heat_weight > 0.0 && fine_heat_weight > 0.0) {
-    fine_route_heat = (fine_heat_weight / total_heat_weight) * virtual_heat;
+  fine_route_heat = fine_drag_heat + fine_causal_heat;
+  let coarse_route_heat = coarse_drag_heat + coarse_causal_heat;
+  if (!finite_f32(fine_pressure_compensation)
+      || !finite_f32(coarse_pressure_compensation)
+      || !finite_f32(fine_drag_heat)
+      || !finite_f32(coarse_drag_heat)
+      || !finite_f32(fine_causal_heat)
+      || !finite_f32(coarse_causal_heat)
+      || !finite_f32(fine_route_heat)
+      || !finite_f32(coarse_route_heat)
+      || abs(fine_route_heat + coarse_route_heat - virtual_heat)
+        > virtual_tolerance) {
+    reflux_reject(REFLUX_NONFINITE | REFLUX_ENERGY_REJECTED);
+    return;
   }
 
   let next_fine_impulse = vec3<f32>(
@@ -2525,6 +3858,14 @@ fn prepare_fine_transaction() {
     + coarse_virtual_energy_delta;
   let next_fine_route_heat = bitcast<f32>(reflux_load(112u))
     + fine_route_heat;
+  let next_fine_cross_level_pressure_compensation =
+    bitcast<f32>(reflux_load(128u)) + fine_pressure_compensation;
+  let next_coarse_cross_level_pressure_compensation =
+    bitcast<f32>(reflux_load(129u)) + coarse_pressure_compensation;
+  let next_fine_cross_level_drag_heat =
+    bitcast<f32>(reflux_load(130u)) + fine_drag_heat;
+  let next_coarse_cross_level_drag_heat =
+    bitcast<f32>(reflux_load(131u)) + coarse_drag_heat;
   let next_local_heat = bitcast<f32>(reflux_load(116u)) + local_heat;
   let next_pou_residual = max(
     bitcast<f32>(reflux_load(90u)), max_pou_residual
@@ -2570,6 +3911,12 @@ fn prepare_fine_transaction() {
     )) || !finite_f32(next_fine_energy)
       || !finite_f32(next_virtual_coarse_energy)
       || !finite_f32(next_fine_route_heat) || next_fine_route_heat < 0.0
+      || !finite_f32(next_fine_cross_level_pressure_compensation)
+      || !finite_f32(next_coarse_cross_level_pressure_compensation)
+      || !finite_f32(next_fine_cross_level_drag_heat)
+      || next_fine_cross_level_drag_heat < 0.0
+      || !finite_f32(next_coarse_cross_level_drag_heat)
+      || next_coarse_cross_level_drag_heat < 0.0
       || !finite_f32(next_local_heat) || next_local_heat < 0.0
       || !finite_f32(next_pou_residual) || next_pou_residual < 0.0
       || !finite_f32(next_pou_sum_abs)
@@ -2595,6 +3942,9 @@ fn prepare_fine_transaction() {
   // words while the live field is still VELOCITY/HEAT_BUILDING. After this
   // pass, the claim/commit/apply sequence has no reachable arithmetic reject.
   var assigned_fine_heat = 0.0;
+  var assigned_fine_pressure_compensation = 0.0;
+  var assigned_fine_drag_heat = 0.0;
+  var assigned_fine_causal_heat = 0.0;
   var projected_total_heat_sum = 0.0;
   var projected_max_specific_heat = 0.0;
   for (var fine_field = 0u; fine_field < ws_load(21u); fine_field = fine_field + 1u) {
@@ -2610,6 +3960,9 @@ fn prepare_fine_transaction() {
       ws_store(impulse_row + 5u, 0u);
       ws_store(impulse_row + 6u, 0u);
       ws_store(impulse_row + 7u, 0u);
+      for (var word = 8u; word < FINE_IMPULSE_WORDS; word = word + 1u) {
+        ws_store(impulse_row + word, 0u);
+      }
       continue;
     }
     let mass = bitcast<f32>(fine_load(state));
@@ -2623,39 +3976,116 @@ fn prepare_fine_transaction() {
       bitcast<f32>(ws_load(impulse_row + 1u)),
       bitcast<f32>(ws_load(impulse_row + 2u))
     );
+    let pressure_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(impulse_row + 8u)),
+      bitcast<f32>(ws_load(impulse_row + 9u)),
+      bitcast<f32>(ws_load(impulse_row + 10u))
+    );
+    let drag_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(impulse_row + 11u)),
+      bitcast<f32>(ws_load(impulse_row + 12u)),
+      bitcast<f32>(ws_load(impulse_row + 13u))
+    );
     let applied = alpha * impulse;
+    let causal_impulse = applied - pressure_impulse - drag_impulse;
     let next_velocity = prior + applied / mass;
     let delta = dot(prior, applied)
       + 0.5 * dot(applied, applied) / mass;
-    let weight = max(0.0, -delta);
-    var share = 0.0;
-    if (weight > 0.0 && fine_route_heat > 0.0) {
-      let remaining = max(0.0, fine_route_heat - assigned_fine_heat);
-      if (fine_field == last_fine_heat) {
-        share = remaining;
+    let pressure_delta = dot(prior, pressure_impulse)
+      + 0.5 * dot(pressure_impulse, pressure_impulse) / mass;
+    let after_pressure = prior + pressure_impulse / mass;
+    let drag_delta = dot(after_pressure, drag_impulse)
+      + 0.5 * dot(drag_impulse, drag_impulse) / mass;
+    let after_drag = after_pressure + drag_impulse / mass;
+    let causal_delta = dot(after_drag, causal_impulse)
+      + 0.5 * dot(causal_impulse, causal_impulse) / mass;
+    let pressure_weight = abs(pressure_delta);
+    let drag_weight = abs(drag_delta);
+    let causal_weight = abs(causal_delta);
+    var pressure_share = 0.0;
+    if (pressure_weight > 0.0 && fine_pressure_weight > 0.0) {
+      let remaining = fine_pressure_compensation
+        - assigned_fine_pressure_compensation;
+      if (fine_field == last_fine_pressure) {
+        pressure_share = remaining;
       } else {
-        share = min(
-          (weight / fine_heat_weight) * fine_route_heat,
+        pressure_share = (
+          pressure_weight / fine_pressure_weight
+        ) * fine_pressure_compensation;
+      }
+    }
+    var drag_share = 0.0;
+    if (drag_weight > 0.0
+        && fine_drag_weight > 0.0
+        && fine_drag_heat > 0.0) {
+      let remaining = max(
+        0.0,
+        fine_drag_heat - assigned_fine_drag_heat
+      );
+      if (fine_field == last_fine_drag) {
+        drag_share = remaining;
+      } else {
+        drag_share = min(
+          (drag_weight / fine_drag_weight) * fine_drag_heat,
           remaining
         );
       }
     }
+    var causal_share = 0.0;
+    if (causal_weight > 0.0
+        && fine_causal_weight > 0.0
+        && fine_causal_heat > 0.0) {
+      let remaining = max(
+        0.0,
+        fine_causal_heat - assigned_fine_causal_heat
+      );
+      if (fine_field == last_fine_causal) {
+        causal_share = remaining;
+      } else {
+        causal_share = min(
+          (causal_weight / fine_causal_weight) * fine_causal_heat,
+          remaining
+        );
+      }
+    }
+    // Preserve the mandatory dissipative drag subset in every recipient,
+    // matching the coarse terminal route: only the residual causal heat is
+    // distributed independently.
+    let share = drag_share + causal_share;
     let accumulator = fine_load(28u)
       + fine_field * FIELD_ACCUMULATOR_WORDS;
     let prior_total = bitcast<f32>(fine_load(accumulator));
+    let prior_pressure =
+      bitcast<f32>(fine_load(accumulator + 3u));
     let prior_local_count = fine_load(accumulator + 1u);
     let has_share = share > 0.0;
     let next_field_total = prior_total + share;
     let next_field_route = share;
+    let next_field_pressure = prior_pressure + pressure_share;
     let next_local_count = prior_local_count + select(0u, 1u, has_share);
     let next_assigned = assigned_fine_heat + share;
+    let next_assigned_pressure =
+      assigned_fine_pressure_compensation + pressure_share;
+    let next_assigned_drag = assigned_fine_drag_heat + drag_share;
+    let next_assigned_causal =
+      assigned_fine_causal_heat + causal_share;
     let next_projected_total = projected_total_heat_sum + next_field_total;
     let specific_heat = next_field_total / mass;
     if (!finite_f32(share) || share < 0.0
+        || !finite_f32(pressure_share)
+        || !finite_f32(drag_share) || drag_share < 0.0
+        || !finite_f32(causal_share) || causal_share < 0.0
+        || share < drag_share
         || !finite_f32(next_assigned)
+        || !finite_f32(next_assigned_pressure)
+        || !finite_f32(next_assigned_drag)
+        || !finite_f32(next_assigned_causal)
         || next_assigned > fine_route_heat + virtual_tolerance
+        || next_assigned_drag > fine_drag_heat + virtual_tolerance
+        || next_assigned_causal > fine_causal_heat + virtual_tolerance
         || !finite_f32(next_field_total) || next_field_total < 0.0
         || !finite_f32(next_field_route) || next_field_route < 0.0
+        || !finite_f32(next_field_pressure)
         || !finite_f32(next_projected_total)
         || !finite_f32(specific_heat) || specific_heat < 0.0
         || (has_share && (
@@ -2667,6 +4097,9 @@ fn prepare_fine_transaction() {
     }
     if (has_share) { route_recipient_count = route_recipient_count + 1u; }
     assigned_fine_heat = next_assigned;
+    assigned_fine_pressure_compensation = next_assigned_pressure;
+    assigned_fine_drag_heat = next_assigned_drag;
+    assigned_fine_causal_heat = next_assigned_causal;
     projected_total_heat_sum = next_projected_total;
     projected_max_specific_heat = max(
       projected_max_specific_heat, specific_heat
@@ -2680,6 +4113,8 @@ fn prepare_fine_transaction() {
     ws_store(impulse_row + 5u, bitcast<u32>(next_field_total));
     ws_store(impulse_row + 6u, bitcast<u32>(next_field_route));
     ws_store(impulse_row + 7u, next_local_count);
+    ws_store(impulse_row + 14u, bitcast<u32>(next_field_pressure));
+    ws_store(impulse_row + 15u, bitcast<u32>(drag_share));
   }
   let assigned_tolerance = max(
     8.0 * 1.175494351e-38,
@@ -2687,6 +4122,36 @@ fn prepare_fine_transaction() {
       * (abs(assigned_fine_heat) + abs(fine_route_heat))
   );
   if (abs(assigned_fine_heat - fine_route_heat) > assigned_tolerance) {
+    reflux_reject(REFLUX_ENERGY_REJECTED);
+    return;
+  }
+  let assigned_pressure_tolerance = max(
+    8.0 * 1.175494351e-38,
+    1024.0 * 5.960464477539063e-8 * (
+      abs(assigned_fine_pressure_compensation)
+        + abs(fine_pressure_compensation)
+    )
+  );
+  let assigned_drag_tolerance = max(
+    8.0 * 1.175494351e-38,
+    1024.0 * 5.960464477539063e-8 * (
+      abs(assigned_fine_drag_heat) + abs(fine_drag_heat)
+    )
+  );
+  let assigned_causal_tolerance = max(
+    8.0 * 1.175494351e-38,
+    1024.0 * 5.960464477539063e-8 * (
+      abs(assigned_fine_causal_heat) + abs(fine_causal_heat)
+    )
+  );
+  if (abs(
+      assigned_fine_pressure_compensation
+        - fine_pressure_compensation
+    ) > assigned_pressure_tolerance
+      || abs(assigned_fine_drag_heat - fine_drag_heat)
+        > assigned_drag_tolerance
+      || abs(assigned_fine_causal_heat - fine_causal_heat)
+        > assigned_causal_tolerance) {
     reflux_reject(REFLUX_ENERGY_REJECTED);
     return;
   }
@@ -2710,6 +4175,8 @@ fn prepare_fine_transaction() {
 
   // Replace every route proposal with its exact future persistent row. The
   // post-claim ledger commit only copies these sealed words.
+  var assigned_coarse_pressure_compensation = 0.0;
+  var assigned_coarse_drag_heat = 0.0;
   for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
     let proposal_base = params.route_proposal_offset
       + coarse_field * ROUTE_WORDS;
@@ -2724,13 +4191,68 @@ fn prepare_fine_transaction() {
       bitcast<f32>(reflux_load(row + 6u)),
       bitcast<f32>(reflux_load(row + 7u))
     );
+    let pressure_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(proposal_base + 8u)),
+      bitcast<f32>(ws_load(proposal_base + 9u)),
+      bitcast<f32>(ws_load(proposal_base + 10u))
+    );
+    let drag_impulse = alpha * vec3<f32>(
+      bitcast<f32>(ws_load(proposal_base + 11u)),
+      bitcast<f32>(ws_load(proposal_base + 12u)),
+      bitcast<f32>(ws_load(proposal_base + 13u))
+    );
     let applied = alpha * proposal;
+    let causal_impulse = applied - pressure_impulse - drag_impulse;
     let parent = parent_view[parent_view[54u] + coarse_field];
     let coarse_state = params.coarse_state_offset + parent * ROW_WORDS;
     let mass = state_load(coarse_state, 0u);
     let prior_velocity = velocity(coarse_state) + existing / mass;
     let delta = dot(prior_velocity, applied)
       + 0.5 * dot(applied, applied) / mass;
+    let pressure_delta = dot(prior_velocity, pressure_impulse)
+      + 0.5 * dot(pressure_impulse, pressure_impulse) / mass;
+    let after_pressure = prior_velocity + pressure_impulse / mass;
+    let drag_delta = dot(after_pressure, drag_impulse)
+      + 0.5 * dot(drag_impulse, drag_impulse) / mass;
+    let after_drag = after_pressure + drag_impulse / mass;
+    let causal_delta = dot(after_drag, causal_impulse)
+      + 0.5 * dot(causal_impulse, causal_impulse) / mass;
+    let pressure_weight = abs(pressure_delta);
+    let drag_weight = abs(drag_delta);
+    let causal_weight = abs(causal_delta);
+    var pressure_share = 0.0;
+    if (pressure_weight > 0.0 && coarse_pressure_weight > 0.0) {
+      let remaining = coarse_pressure_compensation
+        - assigned_coarse_pressure_compensation;
+      if (coarse_field == last_coarse_pressure) {
+        pressure_share = remaining;
+      } else {
+        pressure_share = (
+          pressure_weight / coarse_pressure_weight
+        ) * coarse_pressure_compensation;
+      }
+    }
+    var drag_share = 0.0;
+    if (drag_weight > 0.0
+        && coarse_drag_weight > 0.0
+        && coarse_drag_heat > 0.0) {
+      let remaining = max(
+        0.0,
+        coarse_drag_heat - assigned_coarse_drag_heat
+      );
+      if (coarse_field == last_coarse_drag) {
+        drag_share = remaining;
+      } else {
+        drag_share = min(
+          (drag_weight / coarse_drag_weight) * coarse_drag_heat,
+          remaining
+        );
+      }
+    }
+    assigned_coarse_pressure_compensation =
+      assigned_coarse_pressure_compensation + pressure_share;
+    assigned_coarse_drag_heat =
+      assigned_coarse_drag_heat + drag_share;
     ws_store(proposal_base, bitcast<u32>(existing.x + applied.x));
     ws_store(proposal_base + 1u, bitcast<u32>(existing.y + applied.y));
     ws_store(proposal_base + 2u, bitcast<u32>(existing.z + applied.z));
@@ -2745,10 +4267,45 @@ fn prepare_fine_transaction() {
     ws_store(
       proposal_base + 5u,
       bitcast<u32>(
-        bitcast<f32>(reflux_load(row + 15u)) + max(0.0, -delta)
+        bitcast<f32>(reflux_load(row + 15u))
+          + causal_weight
+      )
+    );
+    ws_store(
+      proposal_base + 14u,
+      bitcast<u32>(
+        bitcast<f32>(reflux_load(row + 16u)) + pressure_share
+      )
+    );
+    ws_store(
+      proposal_base + 15u,
+      bitcast<u32>(
+        bitcast<f32>(reflux_load(row + 17u)) + drag_share
       )
     );
     ws_store(proposal_base + 7u, ordinal + 1u);
+  }
+  let coarse_pressure_assignment_tolerance = max(
+    8.0 * 1.175494351e-38,
+    1024.0 * 5.960464477539063e-8 * (
+      abs(assigned_coarse_pressure_compensation)
+        + abs(coarse_pressure_compensation)
+    )
+  );
+  let coarse_drag_assignment_tolerance = max(
+    8.0 * 1.175494351e-38,
+    1024.0 * 5.960464477539063e-8 * (
+      abs(assigned_coarse_drag_heat) + abs(coarse_drag_heat)
+    )
+  );
+  if (abs(
+      assigned_coarse_pressure_compensation
+        - coarse_pressure_compensation
+    ) > coarse_pressure_assignment_tolerance
+      || abs(assigned_coarse_drag_heat - coarse_drag_heat)
+        > coarse_drag_assignment_tolerance) {
+    reflux_reject(REFLUX_ENERGY_REJECTED);
+    return;
   }
   // Stage the exact future ledger header and fine receipt tuple. Index 0..31
   // is private workspace storage; none of these writes are externally visible.
@@ -2784,7 +4341,26 @@ fn prepare_fine_transaction() {
   fine_stage_store(29u, bitcast<u32>(next_mass_sum_abs));
   fine_stage_store(30u, bitcast<u32>(next_first_mass_moment_sum_abs));
   fine_stage_store(31u, reflux_load(111u) + 1u);
-  // Row zero has two spare sealed words after route staging.
+  // The route decomposition in row zero is dead after every future route row
+  // has been staged. Preserve exact cumulative ambient evidence here so the
+  // post-claim reflux commit remains store-only.
+  ws_store(
+    params.route_proposal_offset + 8u,
+    bitcast<u32>(next_reflux_ambient_impulse.x)
+  );
+  ws_store(
+    params.route_proposal_offset + 9u,
+    bitcast<u32>(next_reflux_ambient_impulse.y)
+  );
+  ws_store(
+    params.route_proposal_offset + 10u,
+    bitcast<u32>(next_reflux_ambient_impulse.z)
+  );
+  ws_store(
+    params.route_proposal_offset + 11u,
+    bitcast<u32>(next_reflux_ambient_external_work)
+  );
+  // Row zero has one additional sealed word after route staging.
   ws_store(params.route_proposal_offset + 6u, next_measurement_contribution_count);
   ws_store(68u, bitcast<u32>(alpha));
   // Preparation token is last. begin_fine_velocity_correction will not claim
@@ -2809,15 +4385,45 @@ fn commit_routed_reflux() {
       || reflux_load(15u) != ordinal) {
     return;
   }
+  var fine_pressure_compensation = 0.0;
+  var fine_drag_heat = 0.0;
+  for (
+    var fine_field = 0u;
+    fine_field < ws_load(21u);
+    fine_field = fine_field + 1u
+  ) {
+    let impulse_row = params.fine_impulse_offset
+      + fine_field * FINE_IMPULSE_WORDS;
+    let accumulator =
+      fine_load(28u) + fine_field * FIELD_ACCUMULATOR_WORDS;
+    fine_pressure_compensation =
+      fine_pressure_compensation
+      + bitcast<f32>(ws_load(impulse_row + 14u))
+      - bitcast<f32>(fine_load(accumulator + 3u));
+    fine_drag_heat =
+      fine_drag_heat + bitcast<f32>(ws_load(impulse_row + 15u));
+  }
+  var coarse_pressure_compensation = 0.0;
+  var coarse_drag_heat = 0.0;
   for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
     let proposal = params.route_proposal_offset + coarse_field * ROUTE_WORDS;
     let row = reflux_row(coarse_field);
+    coarse_pressure_compensation =
+      coarse_pressure_compensation
+      + bitcast<f32>(ws_load(proposal + 14u))
+      - bitcast<f32>(reflux_load(row + 16u));
+    coarse_drag_heat =
+      coarse_drag_heat
+      + bitcast<f32>(ws_load(proposal + 15u))
+      - bitcast<f32>(reflux_load(row + 17u));
     reflux_store(row + 5u, ws_load(proposal));
     reflux_store(row + 6u, ws_load(proposal + 1u));
     reflux_store(row + 7u, ws_load(proposal + 2u));
     reflux_store(row + 13u, ws_load(proposal + 3u));
     reflux_store(row + 9u, ws_load(proposal + 4u));
     reflux_store(row + 15u, ws_load(proposal + 5u));
+    reflux_store(row + 16u, ws_load(proposal + 14u));
+    reflux_store(row + 17u, ws_load(proposal + 15u));
   }
   reflux_store(16u, fine_stage_load(0u));
   reflux_store(17u, fine_stage_load(1u));
@@ -2840,6 +4446,34 @@ fn commit_routed_reflux() {
   reflux_store(93u, fine_stage_load(18u));
   reflux_store(112u, fine_stage_load(19u));
   reflux_store(116u, fine_stage_load(20u));
+  reflux_store(
+    128u,
+    bitcast<u32>(
+      bitcast<f32>(reflux_load(128u)) + fine_pressure_compensation
+    )
+  );
+  reflux_store(
+    129u,
+    bitcast<u32>(
+      bitcast<f32>(reflux_load(129u)) + coarse_pressure_compensation
+    )
+  );
+  reflux_store(
+    130u,
+    bitcast<u32>(
+      bitcast<f32>(reflux_load(130u)) + fine_drag_heat
+    )
+  );
+  reflux_store(
+    131u,
+    bitcast<u32>(
+      bitcast<f32>(reflux_load(131u)) + coarse_drag_heat
+    )
+  );
+  reflux_store(132u, ws_load(params.route_proposal_offset + 8u));
+  reflux_store(133u, ws_load(params.route_proposal_offset + 9u));
+  reflux_store(134u, ws_load(params.route_proposal_offset + 10u));
+  reflux_store(135u, ws_load(params.route_proposal_offset + 11u));
   reflux_store(32u, fine_stage_load(25u));
   reflux_store(33u, fine_stage_load(26u));
   reflux_store(34u, fine_stage_load(27u));
@@ -2863,7 +4497,8 @@ fn finalize_fine_velocity_correction() {
       params.fine_correction_output_mutation_ordinal
     ) || !reflux_accumulating()
       || reflux_load(8u) != params.fine_substep_ordinal + 1u
-      || reflux_load(15u) != params.fine_substep_ordinal) { return; }
+      || reflux_load(15u) != params.fine_substep_ordinal
+      || !fine_pressure_receipt_admitted(true)) { return; }
   let receipt = fine_receipt_offset();
   fine_store(receipt + 4u, params.fine_substep_ordinal);
   fine_store(receipt + 6u, fine_load(34u));
@@ -2876,10 +4511,43 @@ fn finalize_fine_velocity_correction() {
   fine_store(receipt + 13u, fine_stage_load(24u));
   fine_store(receipt + 14u, ws_load(50u));
   fine_store(receipt + 15u, ws_load(48u));
+  var pressure_compensation = 0.0;
+  for (
+    var fine_field = 0u;
+    fine_field < ws_load(21u);
+    fine_field = fine_field + 1u
+  ) {
+    let accumulator =
+      fine_load(28u) + fine_field * FIELD_ACCUMULATOR_WORDS;
+    pressure_compensation =
+      pressure_compensation
+        + bitcast<f32>(fine_load(accumulator + 3u));
+  }
+  fine_store(receipt + 16u, bitcast<u32>(pressure_compensation));
+  fine_store(receipt + 17u, bitcast<u32>(pressure_compensation));
   fine_store(59u, FIELD_VELOCITY);
   ws_store(36u, PHASE_FINE_COMPLETE);
   ws_store(58u, FIELD_VELOCITY);
   ws_store(70u, params.completion_ordinal);
+  let prior_pressure_consumed = atomicOr(
+    &fine_view[receipt + 34u],
+    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+  );
+  if ((prior_pressure_consumed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u
+      || (
+        fine_load(receipt + 34u)
+          & (
+            FIELD_PRESSURE_CONSUMER_LOCAL
+              | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+          )
+      ) != (
+        FIELD_PRESSURE_CONSUMER_LOCAL
+          | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+      )) {
+    reject_pressure_authority();
+    ws_reject(STATUS_INVALID_SOURCE, 87u);
+    return;
+  }
   // Receipt phase is the field-side publication commit word and is last.
   fine_store(receipt + 3u, FIELD_RECEIPT_ENERGY_READY);
 }
@@ -3055,11 +4723,11 @@ fn validate_coarse_velocity_publish(@builtin(global_invocation_id) id: vec3<u32>
       || reflux_load(row + 12u) != 0u
       || reflux_load(row + 14u) != 1u
       || coarse_load(accumulator + 2u) != 0u
-      || coarse_load(accumulator + 3u) != 0u
-      || coarse_load(accumulator + 4u) != 0u
-      || coarse_load(accumulator + 5u) != 0u
-      || coarse_load(accumulator + 6u) != 0u
-      || coarse_load(accumulator + 7u) != 0u
+      || !finite_f32(bitcast<f32>(coarse_load(accumulator + 3u)))
+      || !finite_f32(bitcast<f32>(coarse_load(accumulator + 4u)))
+      || !finite_f32(bitcast<f32>(coarse_load(accumulator + 5u)))
+      || !finite_f32(bitcast<f32>(coarse_load(accumulator + 6u)))
+      || !finite_f32(bitcast<f32>(coarse_load(accumulator + 7u)))
       || !all(vec3<bool>(
         finite_f32(prior.x), finite_f32(prior.y), finite_f32(prior.z)
       )) || !all(vec3<bool>(
@@ -3096,7 +4764,9 @@ fn validate_coarse_velocity_publish(@builtin(global_invocation_id) id: vec3<u32>
   ws_store(proposal + 1u, bitcast<u32>(future.y));
   ws_store(proposal + 2u, bitcast<u32>(future.z));
   ws_store(proposal + 3u, bitcast<u32>(delta_energy));
-  // Row 15 is the cumulative causal loss weight from committed fine slices.
+  // Row 15 is the cumulative causal-loss weight from committed fine slices.
+  // Drag has its own exact nonnegative row17 ledger and must not be mixed into
+  // this distribution weight.
   // It remains immutable; prepare later replaces only this workspace copy.
   ws_store(proposal + 4u, bitcast<u32>(causal_weight));
   ws_store(proposal + 5u, state_contribution_count);
@@ -3141,11 +4811,16 @@ fn seal_coarse_velocity_publish() {
   var terminal_moment_residual = vec3<f32>(0.0);
   var terminal_moment_sum_abs = 0.0;
   var local_heat_sum = 0.0;
+  var local_pressure_internal_compensation_sum = 0.0;
   var local_contribution_sum = 0u;
   var state_contribution_sum = 0u;
   var max_specific_heat = 0.0;
   var max_coarse_cfl = 0.0;
   var causal_weight_sum = 0.0;
+  var coarse_pressure_compensation_sum = 0.0;
+  var coarse_drag_heat_sum = 0.0;
+  var local_ambient_impulse_sum = vec3<f32>(0.0);
+  var local_ambient_external_work_sum = 0.0;
   var momentum_sum_abs = abs(fine_impulse.x) + abs(fine_impulse.y)
     + abs(fine_impulse.z);
   var angular_sum_abs = abs(fine_angular.x) + abs(fine_angular.y)
@@ -3175,7 +4850,20 @@ fn seal_coarse_velocity_publish() {
     let mass = bitcast<f32>(coarse_load(state));
     let frozen_mass = bitcast<f32>(reflux_load(row + 4u));
     let local_heat = bitcast<f32>(ws_load(proposal + 6u));
+    let pressure_internal_compensation =
+      bitcast<f32>(coarse_load(accumulator + 3u));
     let causal_weight = bitcast<f32>(ws_load(proposal + 4u));
+    let cross_level_pressure_compensation =
+      bitcast<f32>(reflux_load(row + 16u));
+    let cross_level_drag_heat =
+      bitcast<f32>(reflux_load(row + 17u));
+    let ambient_impulse = vec3<f32>(
+      bitcast<f32>(coarse_load(accumulator + 4u)),
+      bitcast<f32>(coarse_load(accumulator + 5u)),
+      bitcast<f32>(coarse_load(accumulator + 6u))
+    );
+    let ambient_external_work =
+      bitcast<f32>(coarse_load(accumulator + 7u));
     let delta_energy = bitcast<f32>(ws_load(proposal + 3u));
     let prior_virtual_energy = bitcast<f32>(reflux_load(row + 9u));
     let future = vec3<f32>(
@@ -3197,6 +4885,15 @@ fn seal_coarse_velocity_publish() {
         || !measured_close(mass, frozen_mass, state_contribution_count)
         || !finite_f32(local_heat) || local_heat < 0.0
         || !finite_f32(causal_weight) || causal_weight < 0.0
+        || !finite_f32(cross_level_pressure_compensation)
+        || !finite_f32(cross_level_drag_heat)
+        || cross_level_drag_heat < 0.0
+        || !all(vec3<bool>(
+          finite_f32(ambient_impulse.x),
+          finite_f32(ambient_impulse.y),
+          finite_f32(ambient_impulse.z)
+        ))
+        || !finite_f32(ambient_external_work)
         || !finite_f32(delta_energy) || !finite_f32(prior_virtual_energy)
         || !all(vec3<bool>(
           finite_f32(future.x), finite_f32(future.y), finite_f32(future.z)
@@ -3217,6 +4914,15 @@ fn seal_coarse_velocity_publish() {
       + abs(prior_virtual_energy);
     let next_local_heat = local_heat_sum + local_heat;
     let next_causal_weight = causal_weight_sum + causal_weight;
+    let next_coarse_pressure_compensation =
+      coarse_pressure_compensation_sum
+        + cross_level_pressure_compensation;
+    let next_coarse_drag_heat =
+      coarse_drag_heat_sum + cross_level_drag_heat;
+    let next_local_ambient_impulse =
+      local_ambient_impulse_sum + ambient_impulse;
+    let next_local_ambient_external_work =
+      local_ambient_external_work_sum + ambient_external_work;
     if (!all(vec3<bool>(
         finite_f32(position.x), finite_f32(position.y), finite_f32(position.z)
       )) || !all(vec3<bool>(
@@ -3227,7 +4933,21 @@ fn seal_coarse_velocity_publish() {
         || !finite_f32(next_virtual_energy)
         || !finite_f32(next_virtual_sum_abs)
         || !finite_f32(next_local_heat) || next_local_heat < 0.0
-        || !finite_f32(next_causal_weight) || next_causal_weight < 0.0) {
+        || !finite_f32(pressure_internal_compensation)
+        || !finite_f32(
+          local_pressure_internal_compensation_sum
+            + pressure_internal_compensation
+        )
+        || !finite_f32(next_causal_weight) || next_causal_weight < 0.0
+        || !finite_f32(next_coarse_pressure_compensation)
+        || !finite_f32(next_coarse_drag_heat)
+        || next_coarse_drag_heat < 0.0
+        || !all(vec3<bool>(
+          finite_f32(next_local_ambient_impulse.x),
+          finite_f32(next_local_ambient_impulse.y),
+          finite_f32(next_local_ambient_impulse.z)
+        ))
+        || !finite_f32(next_local_ambient_external_work)) {
       ws_reject(STATUS_NONFINITE, 39u);
       reflux_reject(REFLUX_NONFINITE);
       return;
@@ -3239,7 +4959,16 @@ fn seal_coarse_velocity_publish() {
     virtual_coarse_energy = next_virtual_energy;
     virtual_energy_sum_abs = next_virtual_sum_abs;
     local_heat_sum = next_local_heat;
+    local_pressure_internal_compensation_sum =
+      local_pressure_internal_compensation_sum
+        + pressure_internal_compensation;
     causal_weight_sum = next_causal_weight;
+    coarse_pressure_compensation_sum =
+      next_coarse_pressure_compensation;
+    coarse_drag_heat_sum = next_coarse_drag_heat;
+    local_ambient_impulse_sum = next_local_ambient_impulse;
+    local_ambient_external_work_sum =
+      next_local_ambient_external_work;
     max_coarse_cfl = max(max_coarse_cfl, cfl_ratio);
     max_specific_heat = max(max_specific_heat, local_heat / mass);
     momentum_sum_abs = momentum_sum_abs + abs(impulse.x)
@@ -3259,14 +4988,75 @@ fn seal_coarse_velocity_publish() {
   let receipt = coarse_receipt_offset();
   let receipt_heat = bitcast<f32>(coarse_load(receipt + 8u));
   let published_heat = bitcast<f32>(coarse_load(receipt + 9u));
+  let receipt_pressure_internal_compensation =
+    bitcast<f32>(coarse_load(receipt + 16u));
+  let published_pressure_internal_compensation =
+    bitcast<f32>(coarse_load(receipt + 17u));
   let receipt_max_specific = bitcast<f32>(coarse_load(receipt + 11u));
+  let fine_cross_level_pressure_compensation =
+    bitcast<f32>(reflux_load(128u));
+  let coarse_cross_level_pressure_compensation =
+    bitcast<f32>(reflux_load(129u));
+  let fine_cross_level_drag_heat = bitcast<f32>(reflux_load(130u));
+  let coarse_cross_level_drag_heat = bitcast<f32>(reflux_load(131u));
+  let receipt_ambient_impulse = vec3<f32>(
+    bitcast<f32>(coarse_load(receipt + 20u)),
+    bitcast<f32>(coarse_load(receipt + 21u)),
+    bitcast<f32>(coarse_load(receipt + 22u))
+  );
+  let receipt_ambient_external_work =
+    bitcast<f32>(coarse_load(receipt + 23u));
   if (local_contribution_sum != coarse_load(receipt + 7u)
       || !measured_close(
         local_heat_sum, receipt_heat, local_contribution_sum
       ) || !measured_close(
         receipt_heat, published_heat, local_contribution_sum
       ) || !measured_close(
+        local_pressure_internal_compensation_sum,
+        receipt_pressure_internal_compensation,
+        state_contribution_sum
+      ) || !measured_close(
+        receipt_pressure_internal_compensation,
+        published_pressure_internal_compensation,
+        state_contribution_sum
+      ) || !measured_close(
         max_specific_heat, receipt_max_specific, local_contribution_sum
+      ) || !finite_f32(fine_cross_level_pressure_compensation)
+      || !finite_f32(coarse_cross_level_pressure_compensation)
+      || !finite_f32(fine_cross_level_drag_heat)
+      || fine_cross_level_drag_heat < 0.0
+      || !finite_f32(coarse_cross_level_drag_heat)
+      || coarse_cross_level_drag_heat < 0.0
+      || !measured_close(
+        coarse_pressure_compensation_sum,
+        coarse_cross_level_pressure_compensation,
+        state_contribution_sum
+      ) || !measured_close(
+        coarse_drag_heat_sum,
+        coarse_cross_level_drag_heat,
+        state_contribution_sum
+      ) || !all(vec3<bool>(
+        finite_f32(receipt_ambient_impulse.x),
+        finite_f32(receipt_ambient_impulse.y),
+        finite_f32(receipt_ambient_impulse.z)
+      ))
+      || !finite_f32(receipt_ambient_external_work)
+      || !measured_close(
+        local_ambient_impulse_sum.x,
+        receipt_ambient_impulse.x,
+        state_contribution_sum
+      ) || !measured_close(
+        local_ambient_impulse_sum.y,
+        receipt_ambient_impulse.y,
+        state_contribution_sum
+      ) || !measured_close(
+        local_ambient_impulse_sum.z,
+        receipt_ambient_impulse.z,
+        state_contribution_sum
+      ) || !measured_close(
+        local_ambient_external_work_sum,
+        receipt_ambient_external_work,
+        state_contribution_sum
       )) {
     ws_reject(STATUS_ENERGY_REJECTED | STATUS_INVALID_SOURCE, 86u);
     reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_PHASE_REJECTED);
@@ -3306,8 +5096,17 @@ fn seal_coarse_velocity_publish() {
   );
   let fine_energy = bitcast<f32>(reflux_load(28u));
   let recorded_virtual_coarse_energy = bitcast<f32>(reflux_load(29u));
-  let causal_kinetic_residual = fine_energy + virtual_coarse_energy;
-  let actual_kinetic_residual = fine_energy + actual_coarse_energy;
+  let cross_level_pressure_compensation =
+    fine_cross_level_pressure_compensation
+      + coarse_cross_level_pressure_compensation;
+  let cross_level_drag_heat =
+    fine_cross_level_drag_heat + coarse_cross_level_drag_heat;
+  // Pressure work is reversible signed internal-energy exchange. Remove it
+  // before classifying the remaining drag/causal kinetic change as heat.
+  let causal_kinetic_residual = fine_energy + virtual_coarse_energy
+    + cross_level_pressure_compensation;
+  let actual_kinetic_residual = fine_energy + actual_coarse_energy
+    + cross_level_pressure_compensation;
   // The terminal coarse field lives at macro time while every frozen virtual
   // row was evaluated at its fine predictor theta. Their signed difference is
   // operator-split synchronization work, not dissipative reflux heat.
@@ -3319,7 +5118,31 @@ fn seal_coarse_velocity_publish() {
     1024.0 * 5.960464477539063e-8
       * synchronization_conditioning_sum_abs
   );
-  let causal_energy_sum_abs = abs(fine_energy) + virtual_energy_sum_abs;
+  let terminal_receipt = coarse_receipt_offset();
+  let next_terminal_ambient_impulse = vec3<f32>(
+    bitcast<f32>(reflux_load(132u)),
+    bitcast<f32>(reflux_load(133u)),
+    bitcast<f32>(reflux_load(134u))
+  ) + vec3<f32>(
+    bitcast<f32>(coarse_load(terminal_receipt + 20u)),
+    bitcast<f32>(coarse_load(terminal_receipt + 21u)),
+    bitcast<f32>(coarse_load(terminal_receipt + 22u))
+  );
+  let next_terminal_ambient_external_work =
+    bitcast<f32>(reflux_load(135u))
+      + bitcast<f32>(coarse_load(terminal_receipt + 23u));
+  if (!all(vec3<bool>(
+      finite_f32(next_terminal_ambient_impulse.x),
+      finite_f32(next_terminal_ambient_impulse.y),
+      finite_f32(next_terminal_ambient_impulse.z)
+    )) || !finite_f32(next_terminal_ambient_external_work)) {
+    ws_reject(STATUS_ENERGY_REJECTED | STATUS_NONFINITE, 86u);
+    reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_NONFINITE);
+    return;
+  }
+  let causal_energy_sum_abs = abs(fine_energy) + virtual_energy_sum_abs
+    + abs(fine_cross_level_pressure_compensation)
+    + abs(coarse_cross_level_pressure_compensation);
   let causal_energy_tolerance = max(
     8.0 * 1.175494351e-38,
     1024.0 * 5.960464477539063e-8 * causal_energy_sum_abs
@@ -3328,13 +5151,22 @@ fn seal_coarse_velocity_publish() {
   let causal_route_heat = max(0.0, -causal_kinetic_residual);
   let deferred_unclamped = causal_route_heat - fine_route_heat;
   var deferred_route_heat = max(0.0, deferred_unclamped);
-  if (deferred_route_heat <= causal_energy_tolerance
+  var coarse_causal_route_heat = max(
+    0.0,
+    deferred_route_heat - coarse_cross_level_drag_heat
+  );
+  if (coarse_causal_route_heat <= causal_energy_tolerance
       && !(causal_weight_sum > 0.0)) {
-    deferred_route_heat = 0.0;
+    coarse_causal_route_heat = 0.0;
+    // Preserve the independently accumulated mandatory drag subset exactly;
+    // the resulting closure perturbation is already bounded by tolerance.
+    deferred_route_heat = coarse_cross_level_drag_heat;
   }
   let total_route_heat = fine_route_heat + deferred_route_heat;
   let causal_energy_residual = causal_kinetic_residual + total_route_heat;
   let energy_sum_abs = abs(fine_energy) + actual_coarse_energy_sum_abs
+    + abs(fine_cross_level_pressure_compensation)
+    + abs(coarse_cross_level_pressure_compensation)
     + abs(total_route_heat) + abs(synchronization_work);
   let energy_tolerance = max(
     8.0 * 1.175494351e-38,
@@ -3366,6 +5198,12 @@ fn seal_coarse_velocity_publish() {
   ) <= angular_tolerance;
   let energy_ok = causal_kinetic_residual <= causal_energy_tolerance
     && deferred_unclamped >= -causal_energy_tolerance
+    && fine_cross_level_drag_heat
+      <= fine_route_heat + causal_energy_tolerance
+    && coarse_cross_level_drag_heat
+      <= deferred_route_heat + causal_energy_tolerance
+    && cross_level_drag_heat
+      <= total_route_heat + causal_energy_tolerance
     && abs(causal_energy_residual) <= causal_energy_tolerance
     && abs(total_energy_residual) <= energy_tolerance
     && abs(synchronization_work)
@@ -3403,9 +5241,14 @@ fn seal_coarse_velocity_publish() {
       || !finite_f32(actual_coarse_energy_sum_abs)
       || actual_coarse_energy_sum_abs < 0.0
       || !finite_f32(recorded_virtual_coarse_energy)
+      || !finite_f32(cross_level_pressure_compensation)
+      || !finite_f32(cross_level_drag_heat)
+      || cross_level_drag_heat < 0.0
       || !finite_f32(causal_kinetic_residual)
       || !finite_f32(causal_energy_residual)
       || !finite_f32(actual_kinetic_residual)
+      || !finite_f32(coarse_causal_route_heat)
+      || coarse_causal_route_heat < 0.0
       || !finite_f32(synchronization_work)
       || !finite_f32(synchronization_conditioning_sum_abs)
       || synchronization_conditioning_sum_abs < 0.0
@@ -3423,7 +5266,8 @@ fn seal_coarse_velocity_publish() {
       || max_coarse_cfl > 1.0 + measured_tolerance(
         max_coarse_cfl, 1.0, state_contribution_sum
       ) || !mass_ok || !momentum_ok || !angular_ok || !energy_ok
-      || (deferred_route_heat > 0.0 && !(causal_weight_sum > 0.0))) {
+      || (coarse_causal_route_heat > causal_energy_tolerance
+        && !(causal_weight_sum > 0.0))) {
     ws_reject(
       STATUS_NONFINITE | select(0u, STATUS_INVALID_REGISTRY, !mass_ok)
         | select(0u, STATUS_INVALID_ROUTE, !momentum_ok || !angular_ok)
@@ -3477,6 +5321,24 @@ fn seal_coarse_velocity_publish() {
   // local counts are no longer needed after this serial seal.
   ws_store(params.route_proposal_offset + 5u, bitcast<u32>(momentum_sum_abs));
   ws_store(params.route_proposal_offset + 6u, bitcast<u32>(angular_sum_abs));
+  // The row-zero pressure/drag impulse decomposition is dead after terminal
+  // validation. Seal the cumulative ambient header before any field claim.
+  ws_store(
+    params.route_proposal_offset + 8u,
+    bitcast<u32>(next_terminal_ambient_impulse.x)
+  );
+  ws_store(
+    params.route_proposal_offset + 9u,
+    bitcast<u32>(next_terminal_ambient_impulse.y)
+  );
+  ws_store(
+    params.route_proposal_offset + 10u,
+    bitcast<u32>(next_terminal_ambient_impulse.z)
+  );
+  ws_store(
+    params.route_proposal_offset + 11u,
+    bitcast<u32>(next_terminal_ambient_external_work)
+  );
 }
 
 @compute @workgroup_size(1)
@@ -3487,6 +5349,9 @@ fn prepare_coarse_transaction() {
   let deferred_heat = bitcast<f32>(fine_stage_load(2u));
   let weight_sum = bitcast<f32>(fine_stage_load(31u));
   let energy_tolerance = bitcast<f32>(fine_stage_load(23u));
+  let coarse_drag_heat = bitcast<f32>(reflux_load(131u));
+  let coarse_causal_heat_unclamped = deferred_heat - coarse_drag_heat;
+  let coarse_causal_heat = max(0.0, coarse_causal_heat_unclamped);
   let synchronization_work = bitcast<f32>(fine_stage_load(24u));
   let synchronization_conditioning_sum_abs = bitcast<f32>(
     fine_stage_load(25u)
@@ -3501,61 +5366,145 @@ fn prepare_coarse_transaction() {
     let weight = bitcast<f32>(reflux_load(reflux_row(coarse_field) + 15u));
     if (weight > 0.0) { last_weighted = coarse_field; }
   }
-  if (deferred_heat > 0.0 && last_weighted == INVALID_INDEX) {
+  if (!finite_f32(coarse_drag_heat) || coarse_drag_heat < 0.0
+      || !finite_f32(coarse_causal_heat_unclamped)
+      || coarse_causal_heat_unclamped < -energy_tolerance
+      || !finite_f32(coarse_causal_heat)
+      || coarse_causal_heat < 0.0
+      || (coarse_causal_heat > energy_tolerance
+        && last_weighted == INVALID_INDEX)) {
     ws_reject(STATUS_ENERGY_REJECTED | STATUS_INVALID_ROUTE, 86u);
     reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_ROUTE_REJECTED);
     return;
   }
-  var assigned = 0.0;
+  var assigned_causal_heat = 0.0;
+  var assigned_drag_heat = 0.0;
+  var assigned_total_heat = 0.0;
+  var future_pressure_compensation_sum = 0.0;
   var published_energy_sum_abs = abs(bitcast<f32>(reflux_load(28u)));
   var minimum_positive = bitcast<f32>(0x7f7fffffu);
   for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
     let proposal = params.route_proposal_offset
       + coarse_field * ROUTE_WORDS;
+    let row = reflux_row(coarse_field);
     let actual_delta_energy = bitcast<f32>(ws_load(proposal + 3u));
-    let weight = bitcast<f32>(reflux_load(reflux_row(coarse_field) + 15u));
-    var share = 0.0;
-    if (deferred_heat > 0.0 && weight > 0.0 && weight_sum > 0.0) {
-      let remaining = max(0.0, deferred_heat - assigned);
-      share = select(
-        min(deferred_heat * weight / weight_sum, remaining),
+    let weight = bitcast<f32>(reflux_load(row + 15u));
+    let pressure_compensation = bitcast<f32>(reflux_load(row + 16u));
+    let drag_heat = bitcast<f32>(reflux_load(row + 17u));
+    let accumulator = coarse_load(28u)
+      + coarse_field * FIELD_ACCUMULATOR_WORDS;
+    let local_pressure_compensation =
+      bitcast<f32>(coarse_load(accumulator + 3u));
+    var causal_share = 0.0;
+    if (coarse_causal_heat > 0.0 && weight > 0.0 && weight_sum > 0.0) {
+      let remaining = max(
+        0.0,
+        coarse_causal_heat - assigned_causal_heat
+      );
+      causal_share = select(
+        min(coarse_causal_heat * weight / weight_sum, remaining),
         remaining,
         coarse_field == last_weighted
       );
     }
-    let next_assigned = assigned + share;
-    if (!finite_f32(share) || share < 0.0
-        || !finite_f32(next_assigned)
-        || next_assigned > deferred_heat + energy_tolerance) {
+    let share = drag_heat + causal_share;
+    let future_pressure_compensation =
+      local_pressure_compensation + pressure_compensation;
+    let next_assigned_causal_heat =
+      assigned_causal_heat + causal_share;
+    let next_assigned_drag_heat = assigned_drag_heat + drag_heat;
+    let next_assigned_total_heat = assigned_total_heat + share;
+    let next_future_pressure_compensation_sum =
+      future_pressure_compensation_sum + future_pressure_compensation;
+    if (!finite_f32(causal_share) || causal_share < 0.0
+        || !finite_f32(drag_heat) || drag_heat < 0.0
+        || !finite_f32(share) || share < 0.0
+        || !finite_f32(pressure_compensation)
+        || !finite_f32(local_pressure_compensation)
+        || !finite_f32(future_pressure_compensation)
+        || !finite_f32(next_assigned_causal_heat)
+        || !finite_f32(next_assigned_drag_heat)
+        || !finite_f32(next_assigned_total_heat)
+        || !finite_f32(next_future_pressure_compensation_sum)
+        || next_assigned_causal_heat
+          > coarse_causal_heat + energy_tolerance
+        || next_assigned_drag_heat
+          > coarse_drag_heat + energy_tolerance
+        || next_assigned_total_heat
+          > deferred_heat + energy_tolerance) {
       ws_reject(STATUS_ENERGY_REJECTED | STATUS_NONFINITE, 86u);
       reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_NONFINITE);
       return;
     }
     ws_store(proposal + 4u, bitcast<u32>(share));
-    assigned = next_assigned;
+    // The post-claim field apply is store-only. Preserve the exact future
+    // pressure sidecar now, while every reject path is still transactional.
+    ws_store(
+      proposal + 14u,
+      bitcast<u32>(future_pressure_compensation)
+    );
+    assigned_causal_heat = next_assigned_causal_heat;
+    assigned_drag_heat = next_assigned_drag_heat;
+    assigned_total_heat = next_assigned_total_heat;
+    future_pressure_compensation_sum =
+      next_future_pressure_compensation_sum;
     published_energy_sum_abs = published_energy_sum_abs
       + abs(actual_delta_energy);
     if (share > 0.0) { minimum_positive = min(minimum_positive, share); }
   }
-  if (abs(assigned - deferred_heat) > energy_tolerance) {
+  if (abs(assigned_causal_heat - coarse_causal_heat) > energy_tolerance
+      || abs(assigned_drag_heat - coarse_drag_heat) > energy_tolerance
+      || abs(assigned_total_heat - deferred_heat) > energy_tolerance) {
     ws_reject(STATUS_ENERGY_REJECTED, 86u);
     reflux_reject(REFLUX_ENERGY_REJECTED);
     return;
   }
+  let prior_published_pressure_compensation = bitcast<f32>(
+    coarse_load(coarse_receipt_offset() + 17u)
+  );
+  let expected_future_pressure_compensation =
+    prior_published_pressure_compensation
+      + bitcast<f32>(reflux_load(129u));
+  if (!finite_f32(prior_published_pressure_compensation)
+      || !finite_f32(expected_future_pressure_compensation)
+      || !measured_close(
+        future_pressure_compensation_sum,
+        expected_future_pressure_compensation,
+        ws_load(22u)
+      )) {
+    ws_reject(STATUS_ENERGY_REJECTED | STATUS_NONFINITE, 86u);
+    reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_NONFINITE);
+    return;
+  }
+  // Row-zero word15 is terminal-only scratch after all per-row transport
+  // evidence has moved to the persistent reflux ledger.
+  ws_store(
+    params.route_proposal_offset + 15u,
+    bitcast<u32>(future_pressure_compensation_sum)
+  );
   let fine_route_heat = bitcast<f32>(reflux_load(112u));
-  let published_total_heat = fine_route_heat + assigned;
+  let published_total_heat = fine_route_heat + assigned_total_heat;
+  let pressure_compensation = bitcast<f32>(reflux_load(128u))
+    + bitcast<f32>(reflux_load(129u));
   let kinetic_residual = bitcast<f32>(reflux_load(28u))
-    + bitcast<f32>(fine_stage_load(0u));
+    + bitcast<f32>(fine_stage_load(0u))
+    + pressure_compensation;
   let published_residual = kinetic_residual + published_total_heat
     - synchronization_work;
   published_energy_sum_abs = published_energy_sum_abs
+    + abs(bitcast<f32>(reflux_load(128u)))
+    + abs(bitcast<f32>(reflux_load(129u)))
     + abs(published_total_heat) + abs(synchronization_work);
   let published_energy_tolerance = max(
     8.0 * 1.175494351e-38,
     1024.0 * 5.960464477539063e-8 * published_energy_sum_abs
   );
-  if (!finite_f32(assigned) || assigned < 0.0
+  if (!finite_f32(assigned_causal_heat)
+      || assigned_causal_heat < 0.0
+      || !finite_f32(assigned_drag_heat) || assigned_drag_heat < 0.0
+      || !finite_f32(assigned_total_heat) || assigned_total_heat < 0.0
       || !finite_f32(published_total_heat) || published_total_heat < 0.0
+      || !finite_f32(pressure_compensation)
       || !finite_f32(kinetic_residual)
       || !finite_f32(published_residual)
       || !finite_f32(synchronization_work)
@@ -3576,17 +5525,21 @@ fn prepare_coarse_transaction() {
   }
   // Derive every published energy word from the actual staged row8 sum.
   fine_stage_store(1u, bitcast<u32>(published_total_heat));
-  fine_stage_store(2u, bitcast<u32>(assigned));
+  fine_stage_store(2u, bitcast<u32>(assigned_total_heat));
   fine_stage_store(22u, bitcast<u32>(abs(published_residual)));
   fine_stage_store(23u, bitcast<u32>(published_energy_tolerance));
   fine_stage_store(30u, bitcast<u32>(published_energy_sum_abs));
   fine_stage_store(
     26u,
-    bitcast<u32>(select(0.0, minimum_positive, assigned > 0.0))
+    bitcast<u32>(select(
+      0.0,
+      minimum_positive,
+      assigned_total_heat > 0.0
+    ))
   );
   // Preserve the independently accumulated row sum for the final preclaim
   // gate; H113 is published from the same staged value.
-  fine_stage_store(31u, bitcast<u32>(assigned));
+  fine_stage_store(31u, bitcast<u32>(assigned_total_heat));
   // A begin pass may claim the field only after every future persistent word
   // and every row-local heat share has been sealed.
   ws_store(67u, params.fine_substep_count + 1u);
@@ -3686,6 +5639,10 @@ fn commit_coarse_reflux() {
   reflux_store(116u, fine_stage_load(3u));
   reflux_store(126u, fine_stage_load(24u));
   reflux_store(127u, fine_stage_load(25u));
+  reflux_store(132u, ws_load(params.route_proposal_offset + 8u));
+  reflux_store(133u, ws_load(params.route_proposal_offset + 9u));
+  reflux_store(134u, ws_load(params.route_proposal_offset + 10u));
+  reflux_store(135u, ws_load(params.route_proposal_offset + 11u));
   // Header evidence is staged after both physical store passes. Finalize owns
   // the persistent operation-count commit and publication words.
   ws_store(66u, params.fine_substep_count + 3u);
@@ -3716,9 +5673,12 @@ fn apply_coarse_velocity_publish(@builtin(global_invocation_id) id: vec3<u32>) {
   let proposal = params.route_proposal_offset
     + coarse_field * ROUTE_WORDS;
   let state = coarse_load(30u) + coarse_field * FIELD_STATE_WORDS;
+  let accumulator = coarse_load(28u)
+    + coarse_field * FIELD_ACCUMULATOR_WORDS;
   coarse_store(state + 1u, ws_load(proposal));
   coarse_store(state + 2u, ws_load(proposal + 1u));
   coarse_store(state + 3u, ws_load(proposal + 2u));
+  coarse_store(accumulator + 3u, ws_load(proposal + 14u));
 }
 
 @compute @workgroup_size(1)
@@ -3726,6 +5686,12 @@ fn finalize_coarse_velocity_publish() {
   if (!workspace_admitted(PHASE_PREDICTORS)
       || ws_load(68u) != params.fine_substep_count + 2u
       || ws_load(66u) != params.fine_substep_count + 3u) { return; }
+  // The terminal coarse pressure receipt is authenticated by its own consumer,
+  // the coarse G2P, which checks magic/version/status/law/count, the sealed
+  // source ordinal, and the consumer masks. Re-validating it here against the
+  // workspace's predictor ordinal and ambient is mis-specified: the pressure
+  // rows were sealed by the coarse P2G at the pre-update ordinal, which the
+  // terminal grid update has since advanced. Baseline gates nothing here.
   let receipt = coarse_receipt_offset();
   coarse_store(receipt + 4u, params.fine_substep_count);
   coarse_store(receipt + 6u, coarse_load(34u));
@@ -3738,6 +5704,14 @@ fn finalize_coarse_velocity_publish() {
   coarse_store(receipt + 13u, fine_stage_load(7u));
   coarse_store(receipt + 14u, reflux_load(90u));
   coarse_store(receipt + 15u, reflux_load(92u));
+  coarse_store(
+    receipt + 16u,
+    ws_load(params.route_proposal_offset + 15u)
+  );
+  coarse_store(
+    receipt + 17u,
+    ws_load(params.route_proposal_offset + 15u)
+  );
   coarse_store(59u, FIELD_VELOCITY);
   ws_store(47u, fine_stage_load(29u));
   ws_store(36u, PHASE_COARSE_COMPLETE);
@@ -3749,6 +5723,45 @@ fn finalize_coarse_velocity_publish() {
   // Captured operation count commits after row, field, and header stores.
   reflux_store(97u, params.fine_substep_count + 1u);
   reflux_store(59u, REFLUX_PHASE_ENERGY_READY);
+  // Terminal publication is the coarse field's cross-level consumer: it folds
+  // the reflux correction into the coarse velocities. Claim that consumer here
+  // before consuming it, mirroring the fine side where admission claims and
+  // finalization consumes. Without the claim the receipt would carry
+  // consumed bits its claimed mask never authorized and G2P would fail closed.
+  let prior_pressure_claimed = atomicOr(
+    &coarse_view[receipt + 33u],
+    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+  );
+  if ((prior_pressure_claimed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u) {
+    coarse_store(receipt + 26u, FIELD_PRESSURE_FAIL_CLOSED);
+    coarse_store(2u, READY_ADMITTED | STATUS_FAIL_CLOSED);
+    coarse_store(60u, 0u);
+    coarse_store(61u, 0u);
+    coarse_store(62u, 0u);
+    return;
+  }
+  let prior_pressure_consumed = atomicOr(
+    &coarse_view[receipt + 34u],
+    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+  );
+  if ((prior_pressure_consumed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u
+      || (
+        coarse_load(receipt + 34u)
+          & (
+            FIELD_PRESSURE_CONSUMER_LOCAL
+              | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+          )
+      ) != (
+        FIELD_PRESSURE_CONSUMER_LOCAL
+          | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+      )) {
+    coarse_store(receipt + 26u, FIELD_PRESSURE_FAIL_CLOSED);
+    coarse_store(2u, READY_ADMITTED | STATUS_FAIL_CLOSED);
+    coarse_store(60u, 0u);
+    coarse_store(61u, 0u);
+    coarse_store(62u, 0u);
+    return;
+  }
   // The field receipt phase is the globally last terminal publication word.
   coarse_store(receipt + 3u, FIELD_RECEIPT_ENERGY_READY);
 }

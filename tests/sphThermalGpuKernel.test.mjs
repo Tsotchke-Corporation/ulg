@@ -237,6 +237,78 @@ function classicThermalStageArgs(device, {
   };
 }
 
+test('thermal records carry a pressure carrier law only where a plateau admits one', () => {
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const stride = table.recordStrideFloats;
+  assert.equal(stride, 8, 'v1 must repurpose the pads without changing stride');
+  assert.deepEqual(table.recordLayout.slice(5), [
+    'pressureCarrierLawId:f32',
+    'referencePressurePa:f32',
+    'clausiusInvTemperatureLogSlopePerK:f32'
+  ]);
+
+  const byMaterial = new Map(table.metadata.map((row) => [row.material, row]));
+
+  // Water has exactly one liquid-to-gas plateau, so it is pressure-shiftable
+  // and the slope must be the real beta = R/(L*M) for that plateau.
+  const water = byMaterial.get('h2o');
+  assert.equal(water.pressureCarrierLawId, 1);
+  assert.equal(water.referencePressurePa, 101325);
+  const waterSegments = table.segmentMetadata.filter((segment) => (
+    segment.material === 'h2o' && segment.from === 'liquid' && segment.to === 'gas'
+  ));
+  assert.equal(waterSegments.length, 1);
+  const latentHeatJPerKg = waterSegments[0].eEnd - waterSegments[0].eStart;
+  const expectedSlope =
+    8.314462618 / (latentHeatJPerKg * closures.h2o.properties.molarMassKgPerMol);
+  nearlyEqual(
+    water.clausiusInvTemperatureLogSlopePerK,
+    expectedSlope,
+    1e-12 * Math.max(1, expectedSlope)
+  );
+  // Sanity: a real vaporization latent heat, and a slope that moves the boil by
+  // a physically sensible amount over a halving of pressure.
+  assert.ok(latentHeatJPerKg > 1.5e6 && latentHeatJPerKg < 3.5e6, `${latentHeatJPerKg}`);
+  const referenceTemperatureK = waterSegments[0].temperatureK;
+  const halfAtmosphereK =
+    1 / (1 / referenceTemperatureK - expectedSlope * Math.log(0.5));
+  assert.ok(
+    halfAtmosphereK < referenceTemperatureK - 5,
+    `half an atmosphere must boil meaningfully lower, got ${halfAtmosphereK}`
+  );
+
+  // Air has no admitted liquid-to-gas plateau in this closure, so it must stay
+  // on the identity law rather than be given a manufactured one.
+  const air = byMaterial.get('air');
+  assert.equal(air.pressureCarrierLawId, 0);
+  assert.equal(air.referencePressurePa, 0);
+  assert.equal(air.clausiusInvTemperatureLogSlopePerK, 0);
+
+  // The response table must carry the same lanes through verbatim.
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  assert.deepEqual(responseTable.recordLayout.slice(5), [
+    'pressureCarrierLawId:f32',
+    'referencePressurePa:f32',
+    'clausiusInvTemperatureLogSlopePerK:f32'
+  ]);
+  // Compare against the packed f32 records rather than the f64 metadata: the
+  // packed buffer is what the device reads, so exact carry-through has to hold
+  // there.
+  for (const record of responseTable.metadata) {
+    const sourceIndex = table.metadata.findIndex(
+      (row) => row.materialId === record.materialId
+    );
+    const base = sourceIndex * stride;
+    assert.equal(record.pressureCarrierLawId, table.records[base + 5]);
+    assert.equal(record.referencePressurePa, table.records[base + 6]);
+    assert.equal(
+      record.clausiusInvTemperatureLogSlopePerK,
+      table.records[base + 7]
+    );
+  }
+});
+
 test('SPH thermal material table packs closure-derived energy/phase segments', () => {
   const table = buildSphThermalMaterialTable(materialProperties);
   const waterId = stableOpticalMaterialId('h2o');

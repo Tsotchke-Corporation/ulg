@@ -346,12 +346,15 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         eosModelId = 1,
         solidFlag = 0,
         mechanicsStatus = 1,
-        dispositionId = 0
+        dispositionId = 0,
+        currentVolumeM3 = null
       } = {}) => {
         const unplacedMassKg = f32(Math.max(0, massKg - placedMassKg));
-        const supportVolumeM3 = restDensityKgPerM3 > 0
-          ? f32(unplacedMassKg / restDensityKgPerM3)
-          : 0;
+        const supportVolumeM3 = currentVolumeM3 == null
+          ? (restDensityKgPerM3 > 0
+            ? f32(unplacedMassKg / restDensityKgPerM3)
+            : 0)
+          : f32(currentVolumeM3);
         return new Float32Array([
           ...position.map(f32), f32(massKg),
           f32(materialId), f32(productTermIndex), f32(reactionIndex),
@@ -382,7 +385,9 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         carrierInternalEnergyJPerKg = 10,
         materialId = 11,
         phaseId = 2,
-        restDensityKgPerM3 = 1000
+        restDensityKgPerM3 = 1000,
+        carrierRestVolumeM3 = carrierMassKg / restDensityKgPerM3,
+        carrierVolumeRatioJ = 1
       } = {}) => {
         const state = new Float32Array(particleCount * 8);
         const thermo = new Float32Array(particleCount * 12);
@@ -403,12 +408,13 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           0.05, 1, 1, 0.05
         ], thermoBase);
         const mechanicsBase = carrierIndex * 32;
+        const deformationScale = f32(Math.cbrt(carrierVolumeRatioJ));
         mechanics.set([
-          1, 0, 0, 0,
-          1, 0, 0, 0,
-          1, 0, 0, 0,
+          deformationScale, 0, 0, 0,
+          deformationScale, 0, 0, 0,
+          deformationScale, 0, 0, 0,
           0, 0, 0, 0,
-          0, 0, 1, f32(carrierMassKg / restDensityKgPerM3),
+          0, 0, f32(carrierVolumeRatioJ), f32(carrierRestVolumeM3),
           0, 1, 100, 0,
           100, 10, 1, 1,
           0, 0, 0, 0
@@ -446,15 +452,26 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         const aggregateMomentum = [0, 1, 2].map((axis) => (
           reduceFixedTree((event) => f32Mul(event[20 + axis], event[13]))
         ));
-        const aggregateInternalEnergy = reduceFixedTree((event) => (
-          f32Mul(event[19], event[13])
-        ));
+        const aggregateTotalEnergy = reduceFixedTree((event) => {
+          const speedSquared = f32Add(
+            f32Add(
+              f32Mul(event[20], event[20]),
+              f32Mul(event[21], event[21])
+            ),
+            f32Mul(event[22], event[22])
+          );
+          return f32Mul(
+            f32Add(event[19], f32Mul(0.5, speedSquared)),
+            event[13]
+          );
+        });
         const aggregateTemperatureMoment = reduceFixedTree((event) => (
           f32Mul(event[16], event[13])
         ));
         const aggregateRestVolume = reduceFixedTree((event) => (
           f32(event[13] / event[17])
         ));
+        const aggregateCurrentVolume = reduceFixedTree((event) => event[23]);
         for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
           const eventBase = eventIndex * 32;
           productEvents[eventBase + 13] = 0;
@@ -465,6 +482,12 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           return { state, thermo, mechanics, productEvents };
         }
         const sourceMass = state[stateBase + 3];
+        const sourceVelocity = [
+          state[stateBase + 4],
+          state[stateBase + 5],
+          state[stateBase + 6]
+        ];
+        const sourceInternalEnergy = state[stateBase + 7];
         const mass = f32Add(sourceMass, aggregateMass);
         const inverseMass = f32(1 / Math.max(mass, 1.0e-20));
         for (let axis = 0; axis < 3; axis += 1) {
@@ -484,10 +507,31 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           );
         }
         state[stateBase + 3] = mass;
+        const sourceSpeedSquared = f32Add(
+          f32Add(
+            f32Mul(sourceVelocity[0], sourceVelocity[0]),
+            f32Mul(sourceVelocity[1], sourceVelocity[1])
+          ),
+          f32Mul(sourceVelocity[2], sourceVelocity[2])
+        );
+        const destinationTotalEnergy = f32Mul(
+          sourceMass,
+          f32Add(
+            sourceInternalEnergy,
+            f32Mul(0.5, sourceSpeedSquared)
+          )
+        );
+        const outputSpeedSquared = f32Add(
+          f32Add(
+            f32Mul(state[stateBase + 4], state[stateBase + 4]),
+            f32Mul(state[stateBase + 5], state[stateBase + 5])
+          ),
+          f32Mul(state[stateBase + 6], state[stateBase + 6])
+        );
         state[stateBase + 7] = f32Mul(
           f32Add(
-            f32Mul(state[stateBase + 7], sourceMass),
-            aggregateInternalEnergy
+            f32Add(destinationTotalEnergy, aggregateTotalEnergy),
+            -f32Mul(0.5, f32Mul(mass, outputSpeedSquared))
           ),
           inverseMass
         );
@@ -498,14 +542,31 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           ),
           inverseMass
         );
-        mechanics[mechanicsBase + 19] = f32Add(
-          mechanics[mechanicsBase + 19],
-          aggregateRestVolume
+        const previousJ = mechanics[mechanicsBase + 18];
+        const previousRestVolume = mechanics[mechanicsBase + 19];
+        const previousCurrentVolume = f32Mul(previousJ, previousRestVolume);
+        const nextRestVolume = f32Add(previousRestVolume, aggregateRestVolume);
+        const nextCurrentVolume = f32Add(
+          previousCurrentVolume,
+          aggregateCurrentVolume
         );
+        const nextJ = f32(nextCurrentVolume / nextRestVolume);
+        const deformationScale = f32(Math.cbrt(f32(nextJ / previousJ)));
+        for (let index = 0; index <= 8; index += 1) {
+          mechanics[mechanicsBase + index] = f32Mul(
+            mechanics[mechanicsBase + index],
+            deformationScale
+          );
+        }
+        mechanics[mechanicsBase + 18] = nextJ;
+        mechanics[mechanicsBase + 19] = nextRestVolume;
         return { state, thermo, mechanics, productEvents };
       };
       const makeAllToOneCaptureSpec = (eventCount) => {
-        const destination = makeDestinationFamily({ particleCount: 4 });
+        const destination = makeDestinationFamily({
+          particleCount: 4,
+          carrierVolumeRatioJ: 2
+        });
         const events = Array.from({ length: eventCount }, (_, index) => (
           makeProductEvent({
             position: [
@@ -514,6 +575,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
               f32(0.5 + (index % 3) / 512)
             ],
             massKg: f32(1 / 1024),
+            currentVolumeM3: f32((index % 3 + 2) / 1048576),
             temperatureK: f32(350 + (index % 11)),
             specificInternalEnergyJPerKg: f32(20 + (index % 13)),
             velocityMPerS: [
@@ -551,6 +613,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           makeProductEvent({
             position: [f32(0.1 + index * 0.1), 0.5, 0.5],
             massKg: f32((index + 1) / 128),
+            currentVolumeM3: f32((index + 2) / 32768),
             velocityMPerS: [f32(index / 8), 0, 0]
           })
         ));
@@ -596,7 +659,33 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           events: packProductEvents(events),
           decisions,
           destination,
+          expectedRollback: true,
+          expectedClassifierRejectedCount: events.length,
           expectedRejectedCount: events.length
+        };
+      };
+      const makeFiniteMomentOverflowSpec = () => {
+        const particleCount = 4;
+        const destination = makeDestinationFamily({ particleCount });
+        const events = [makeProductEvent({
+          massKg: 1.0e20,
+          restDensityKgPerM3: 1.0e23,
+          currentVolumeM3: 1.0e-3,
+          velocityMPerS: [1.0e20, 0, 0],
+          specificInternalEnergyJPerKg: 1
+        })];
+        const decisions = new Float32Array([0, 0, 1, particleCount]);
+        return {
+          name: 'finite-input-moment-overflow-terminal-rejection',
+          eventCount: 1,
+          particleCount,
+          productTermCount: 1,
+          events: packProductEvents(events),
+          decisions,
+          destination,
+          expectedRollback: true,
+          expectedClassifierRejectedCount: 0,
+          expectedRejectedCount: 1
         };
       };
       const makeDirectOverlapSpec = () => {
@@ -1107,6 +1196,95 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         return total;
       };
+      const particleCurrentVolume = (state, mechanics) => {
+        let total = 0;
+        const particleCount = Math.min(
+          Math.floor(state.length / 8),
+          Math.floor(mechanics.length / 32)
+        );
+        for (let index = 0; index < particleCount; index += 1) {
+          if (!(state[index * 8 + 3] > 0)) continue;
+          const volume = Number(mechanics[index * 32 + 18])
+            * Number(mechanics[index * 32 + 19]);
+          if (Number.isFinite(volume) && volume > 0) total += volume;
+        }
+        return total;
+      };
+      const liveEventCurrentVolume = (events) => {
+        let total = 0;
+        for (let base = 0; base < events.length; base += 32) {
+          if (!(events[base + 13] > 0)) continue;
+          const volume = Number(events[base + 23]);
+          if (Number.isFinite(volume) && volume > 0) total += volume;
+        }
+        return total;
+      };
+      const particleMomentum = (state) => {
+        const momentum = [0, 0, 0];
+        for (let base = 0; base < state.length; base += 8) {
+          const mass = Number(state[base + 3]);
+          if (!(mass > 0)) continue;
+          for (let axis = 0; axis < 3; axis += 1) {
+            momentum[axis] += mass * Number(state[base + 4 + axis]);
+          }
+        }
+        return momentum;
+      };
+      const liveEventMomentum = (events) => {
+        const momentum = [0, 0, 0];
+        for (let base = 0; base < events.length; base += 32) {
+          const mass = Number(events[base + 13]);
+          if (!(mass > 0)) continue;
+          for (let axis = 0; axis < 3; axis += 1) {
+            momentum[axis] += mass * Number(events[base + 20 + axis]);
+          }
+        }
+        return momentum;
+      };
+      const particleTotalEnergy = (state) => {
+        let total = 0;
+        for (let base = 0; base < state.length; base += 8) {
+          const mass = Number(state[base + 3]);
+          if (!(mass > 0)) continue;
+          const speedSquared =
+            Number(state[base + 4]) ** 2
+            + Number(state[base + 5]) ** 2
+            + Number(state[base + 6]) ** 2;
+          total += mass * (Number(state[base + 7]) + 0.5 * speedSquared);
+        }
+        return total;
+      };
+      const liveEventTotalEnergy = (events) => {
+        let total = 0;
+        for (let base = 0; base < events.length; base += 32) {
+          const mass = Number(events[base + 13]);
+          if (!(mass > 0)) continue;
+          const speedSquared =
+            Number(events[base + 20]) ** 2
+            + Number(events[base + 21]) ** 2
+            + Number(events[base + 22]) ** 2;
+          total += mass * (
+            Number(events[base + 19])
+            + 0.5 * speedSquared
+          );
+        }
+        return total;
+      };
+      const deformationDeterminant = (mechanics, particleIndex) => {
+        const base = particleIndex * 32;
+        const a = mechanics[base];
+        const b = mechanics[base + 1];
+        const c = mechanics[base + 2];
+        const d = mechanics[base + 3];
+        const e = mechanics[base + 4];
+        const f = mechanics[base + 5];
+        const g = mechanics[base + 6];
+        const h = mechanics[base + 7];
+        const i = mechanics[base + 8];
+        return a * (e * i - f * h)
+          - b * (d * i - f * g)
+          + c * (d * h - e * g);
+      };
       const browserNearestRank = (values, quantile) => {
         const sorted = [...values].sort((left, right) => left - right);
         const rank = Math.max(1, Math.ceil(sorted.length * quantile));
@@ -1135,7 +1313,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         && receipt.serialConflictFoldEventCount === 0
         && receipt.fallbackEventCount === 0
         && receipt.unknownDispositionCount === 0
-        && receipt.status === 1
+        && receipt.status === (
+          spec.expectedRollback === true ? 3 : 1
+        )
+        && receipt.transactionalTerminalStatus === (
+          spec.expectedRollback === true ? 2 : 1
+        )
         && receipt.hostCompletionReadbackCount === (diagnostic ? 1 : 0)
       );
       const verifyOutput = (spec, output) => {
@@ -1149,6 +1332,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         const initialMass = particleMass(spec.destination.state)
           + unplacedMass(spec.events);
         const finalMass = particleMass(state) + unplacedMass(events);
+        const initialCurrentVolume = particleCurrentVolume(
+          spec.destination.state,
+          spec.destination.mechanics
+        ) + liveEventCurrentVolume(spec.events);
+        const finalCurrentVolume = particleCurrentVolume(state, mechanics)
+          + liveEventCurrentVolume(events);
+        const initialParticleMomentum = particleMomentum(
+          spec.destination.state
+        );
+        const initialEventMomentum = liveEventMomentum(spec.events);
+        const finalParticleMomentum = particleMomentum(state);
+        const finalEventMomentum = liveEventMomentum(events);
+        const initialMomentum = initialParticleMomentum.map(
+          (value, axis) => value + initialEventMomentum[axis]
+        );
+        const finalMomentum = finalParticleMomentum.map(
+          (value, axis) => value + finalEventMomentum[axis]
+        );
+        const initialTotalEnergy =
+          particleTotalEnergy(spec.destination.state)
+          + liveEventTotalEnergy(spec.events);
+        const finalTotalEnergy =
+          particleTotalEnergy(state)
+          + liveEventTotalEnergy(events);
 
         if (spec.oracle) {
           cpuOracleParity = cpuOracleParity
@@ -1160,7 +1367,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             && receipt.ssCaptureHitCount === spec.eventCount
             && receipt.destinationMutationCount === (spec.eventCount > 0 ? 1 : 0)
             && receipt.maxDestinationSegmentSize === spec.eventCount;
-          conserved = near(finalMass, initialMass, 2.0e-3);
+          conserved = near(finalMass, initialMass, 2.0e-3)
+            && near(finalCurrentVolume, initialCurrentVolume, 2.0e-5)
+            && near(
+              deformationDeterminant(mechanics, 0),
+              mechanics[18],
+              2.0e-5
+            );
         } else if (spec.expectedSpareCount != null) {
           const dispositions = Array.from(
             { length: spec.eventCount },
@@ -1175,14 +1388,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               value === (index < spec.expectedSpareCount ? 3 : 7)
             ));
           for (let index = 0; index < spec.expectedSpareCount; index += 1) {
+            const restVolume = mechanics[index * 32 + 19];
+            const deformationJ = mechanics[index * 32 + 18];
             cpuOracleParity = cpuOracleParity
               && near(state[index * 8 + 3], spec.events[index * 32 + 13])
-              && events[index * 32 + 13] === 0;
+              && events[index * 32 + 13] === 0
+              && near(
+                restVolume,
+                state[index * 8 + 3] / spec.events[index * 32 + 17]
+              )
+              && near(
+                restVolume * deformationJ,
+                spec.events[index * 32 + 23]
+              )
+              && near(
+                deformationDeterminant(mechanics, index),
+                deformationJ
+              );
           }
-          conserved = near(finalMass, initialMass, 5.0e-6);
-        } else if (spec.expectedRejectedCount != null) {
+          conserved = near(finalMass, initialMass, 5.0e-6)
+            && near(finalCurrentVolume, initialCurrentVolume, 5.0e-6);
+        } else if (spec.expectedRollback === true) {
           cpuOracleParity = cpuOracleParity
-            && receipt.classifierRejectedCount === spec.expectedRejectedCount
+            && receipt.classifierRejectedCount
+              === spec.expectedClassifierRejectedCount
             && receipt.rejectedEventCount === spec.expectedRejectedCount
             && receipt.destinationMutationCount === 0
             && fnv1a(new Uint8Array(state.buffer))
@@ -1190,14 +1419,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             && fnv1a(new Uint8Array(thermo.buffer))
               === fnv1a(new Uint8Array(spec.destination.thermo.buffer))
             && fnv1a(new Uint8Array(mechanics.buffer))
-              === fnv1a(new Uint8Array(spec.destination.mechanics.buffer));
-          for (let index = 0; index < spec.eventCount; index += 1) {
-            cpuOracleParity = cpuOracleParity
-              && events[index * 32 + 13] === 0
-              && events[index * 32 + 18] === 0
-              && events[index * 32 + 31] === 8;
-          }
-          conserved = particleMass(state) === particleMass(spec.destination.state);
+              === fnv1a(new Uint8Array(spec.destination.mechanics.buffer))
+            && arraysByteEqual(events, spec.events);
+          conserved = near(finalMass, initialMass, 5.0e-6)
+            && near(finalCurrentVolume, initialCurrentVolume, 5.0e-6);
         } else {
           const dispositions = Array.from(
             { length: spec.eventCount },
@@ -1217,9 +1442,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             && Array.from(state).every(Number.isFinite)
             && Array.from(thermo).every(Number.isFinite)
             && Array.from(mechanics).every(Number.isFinite);
-          conserved = near(finalMass, initialMass, 5.0e-6);
+          conserved = near(finalMass, initialMass, 5.0e-6)
+            && near(finalCurrentVolume, initialCurrentVolume, 5.0e-6);
         }
-        return { cpuOracleParity, conserved };
+        if (spec.expectedRollback !== true) {
+          conserved = conserved
+            && initialMomentum.every(
+              (value, axis) => near(finalMomentum[axis], value, 2.0e-3)
+            )
+            && near(finalTotalEnergy, initialTotalEnergy, 2.0e-2);
+        }
+        return {
+          cpuOracleParity,
+          conserved,
+          conservation: {
+            initialMomentum,
+            finalMomentum,
+            initialTotalEnergy,
+            finalTotalEnergy
+          }
+        };
       };
 
       let retainedArena = null;
@@ -1345,8 +1587,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         const captureHitCount = spec.oracle
           ? spec.eventCount
           : (spec.expectedCaptureCount ?? 0);
-        const rejectedCount = spec.expectedRejectedCount ?? 0;
-        const classifierReadyCount = spec.eventCount - rejectedCount;
+        const classifierRejectedCount =
+          spec.expectedClassifierRejectedCount ?? 0;
+        const classifierReadyCount =
+          spec.eventCount - classifierRejectedCount;
         device.queue.writeBuffer(
           authentic.authority.completionReceiptBuffer,
           0,
@@ -1355,7 +1599,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             particleCount: spec.particleCount,
             activeEventCount: spec.eventCount,
             classifierReadyCount,
-            classifierRejectedCount: rejectedCount,
+            classifierRejectedCount,
             captureHitCount,
             spareAvailableCount: spec.expectedSpareCount ?? 0,
             spareAssignedCount: spec.expectedSpareCount ?? 0,
@@ -1766,6 +2010,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       const adversarialSpecs = [
         makeSpareExhaustionSpec(),
         makeInvalidPayloadSpec(),
+        makeFiniteMomentOverflowSpec(),
         makeDirectOverlapSpec()
       ];
       const cases = [];

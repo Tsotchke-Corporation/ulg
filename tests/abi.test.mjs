@@ -353,10 +353,10 @@ test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
 });
 
 test('SPH GPU thermal material table ABI exposes closure-derived row layouts', () => {
-  assert.equal(ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-material-table.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-material-table.v1');
   assert.equal(ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0');
-  assert.equal(ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v1');
   assert.equal(
     ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
     'peercompute.ulg.sph-gpu-thermal-response-graph-buffer-set.v0'
@@ -366,7 +366,9 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-parity.v0');
   // Record rows grew 4 -> 8 (still vec4-aligned) for radiative transfer: the
   // second vec4 carries the Kirchhoff gray emissivity derived from the
-  // optical closure at table build (2026-07-10 radiation law).
+  // optical closure at table build (2026-07-10 radiation law). Table v1
+  // repurposes the three trailing radiation pads for the pressure-adjusted
+  // carrier transform without changing the stride.
   assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length, 8);
   assert.equal(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.length, 12);
   assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT.length, 8);
@@ -381,9 +383,9 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
     'segmentCount:f32',
     'status:f32',
     'emissivityGray:f32',
-    'radiationPad0:f32',
-    'radiationPad1:f32',
-    'radiationPad2:f32'
+    'pressureCarrierLawId:f32',
+    'referencePressurePa:f32',
+    'clausiusInvTemperatureLogSlopePerK:f32'
   ]);
   assert.deepEqual(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.slice(0, 8), [
     'materialId:f32',
@@ -401,9 +403,9 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
     'responseCount:f32',
     'status:f32',
     'emissivityGray:f32',
-    'radiationPad0:f32',
-    'radiationPad1:f32',
-    'radiationPad2:f32'
+    'pressureCarrierLawId:f32',
+    'referencePressurePa:f32',
+    'clausiusInvTemperatureLogSlopePerK:f32'
   ]);
   assert.deepEqual(SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT.slice(0, 8), [
     'materialId:f32',
@@ -769,6 +771,19 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.doesNotMatch(sphReactionProductEventWgsl, /visible_mass_kg = visible_mass_kg \+/);
   assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 2u\] = vec4<f32>\(f32\(partner_index\), row_moles, routing_id, phase_id\)/);
   assert.match(sphReactionProductEventWgsl, /let event_ready = phase_id > 0\.0/);
+  assert.match(sphReactionProductEventWgsl, /consumed_total_energy/);
+  assert.match(
+    sphReactionProductEventWgsl,
+    /0\.5 \* consumed_mass \* dot\(product_velocity, product_velocity\)/
+  );
+  assert.match(
+    sphReactionProductEventWgsl,
+    /source_constitutive_row\.y != 1\.0/
+  );
+  assert.match(
+    sphReactionProductEventWgsl,
+    /partner_eos_row\.w != 1\.0/
+  );
   assert.match(sphReactionProductEventWgsl, /select\(0\.0, 1\.0, event_ready\)/);
   assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 5u\] = vec4<f32>\(product_velocity\.x, product_velocity\.y, product_velocity\.z, support_volume_m3\)/);
   assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 7u\] = vec4<f32>/);
@@ -1199,7 +1214,7 @@ test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () 
     'constitutiveStatus:f32'
   ]);
   assert.deepEqual(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.slice(28, 32), [
-    'hydrostaticPressurePa:f32',
+    'resolvedAbsolutePressurePa:f32',
     'dynamicViscosityPaS:f32',
     'surfaceTensionNPerM:f32',
     'phaseVolumeReferenceMassKg:f32'

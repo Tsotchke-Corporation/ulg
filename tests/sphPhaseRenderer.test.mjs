@@ -7140,3 +7140,46 @@ test('mounted successor temperature retirement authenticates the exact destroy h
     'a substituted public alias must not replace the private retirement target'
   );
 });
+
+test('resident surface draw order blends back-to-front from the live camera', () => {
+  // Blended surfaces were ordered by surfaceIndex alone, which is
+  // view-independent. Rotating the camera then left a farther blended surface
+  // drawing over a nearer one, which reads as intermittent z-clipping.
+  const surfaces = [
+    {
+      surfaceIndex: 0,
+      transparencyClassId: 1,
+      depthWriteFlag: 0,
+      boundsCenterM: [0, 0, -2]
+    },
+    {
+      surfaceIndex: 1,
+      transparencyClassId: 1,
+      depthWriteFlag: 0,
+      boundsCenterM: [0, 0, 2]
+    }
+  ];
+  const orderFrom = (cameraPositionM) => residentSurfaceDrawOrder(surfaces, {
+    cameraPositionM
+  }).map((draw) => draw.surfaceIndex);
+
+  // Camera on the +z side: the +z surface is nearer, so it must be drawn last.
+  assert.deepEqual(orderFrom([0, 0, 10]), [0, 1]);
+  // Rotate to the -z side: the ordering must follow the viewpoint.
+  assert.deepEqual(orderFrom([0, 0, -10]), [1, 0]);
+
+  // Opaque surfaces keep front-to-back so early-z still rejects.
+  const opaque = surfaces.map((surface) => ({
+    ...surface,
+    transparencyClassId: 0,
+    depthWriteFlag: 1
+  }));
+  assert.deepEqual(
+    residentSurfaceDrawOrder(opaque, { cameraPositionM: [0, 0, 10] })
+      .map((draw) => draw.surfaceIndex),
+    [1, 0]
+  );
+
+  // With no camera the order degrades to the previous stable behaviour.
+  assert.deepEqual(orderFrom(null), [0, 1]);
+});

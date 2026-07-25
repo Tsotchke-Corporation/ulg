@@ -1,6 +1,8 @@
 import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
@@ -31,8 +33,11 @@ export const SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE = Object.freeze({
 const U32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const ASSIGNMENT_STRIDE_WORDS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 const STATE_STRIDE_WORDS = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
+const MECHANICS_STRIDE_WORDS =
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
 const ASSIGNMENT_STRIDE_BYTES = ASSIGNMENT_STRIDE_WORDS * U32_BYTES;
 const STATE_STRIDE_BYTES = STATE_STRIDE_WORDS * U32_BYTES;
+const MECHANICS_STRIDE_BYTES = MECHANICS_STRIDE_WORDS * U32_BYTES;
 const MAX_EXACT_F32_INTEGER = 0x00ff_ffff;
 const GPU_BUFFER_USAGE = {
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -397,6 +402,65 @@ function validateCurrentState({
     chartEpoch,
     stateBuffer: current.stateBuffer,
     stateBufferByteLength: requiredStateBytes
+  };
+}
+
+function validateCurrentMechanics({
+  currentMlsMpmParticleUpload,
+  device,
+  particleCount,
+  currentState
+}) {
+  if (currentMlsMpmParticleUpload == null) return null;
+  const current = currentMlsMpmParticleUpload;
+  if (
+    current?.schema !== ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    || current?.status !== 'webgpu-uploaded'
+    || current.particleCount !== particleCount
+    || current.mechanicsStrideBytes !== MECHANICS_STRIDE_BYTES
+  ) {
+    throw refreshError(
+      'currentMlsMpmParticleUpload must be the matching retained MLS-MPM WebGPU buffer set',
+      'ERR_SCHROEDER_FROZEN_REFRESH_CURRENT_MECHANICS_CONTRACT',
+      TypeError
+    );
+  }
+  const requiredMechanicsBytes = checkedByteLength(
+    particleCount,
+    MECHANICS_STRIDE_BYTES,
+    'current mechanics'
+  );
+  if (
+    !Number.isInteger(current.mechanicsBufferByteLength)
+    || current.mechanicsBufferByteLength < requiredMechanicsBytes
+  ) {
+    throw refreshError(
+      'currentMlsMpmParticleUpload.mechanicsBufferByteLength is incomplete',
+      'ERR_SCHROEDER_FROZEN_REFRESH_BUFFER_SIZE',
+      RangeError
+    );
+  }
+  requireLiveSameDeviceBuffer(
+    current.mechanicsBuffer,
+    device,
+    'currentMlsMpmParticleUpload.mechanicsBuffer',
+    requiredMechanicsBytes
+  );
+  const storageGeneration = exactU32(
+    current.storageGeneration ?? current.bufferFamilyGeneration,
+    'currentMlsMpmParticleUpload.storageGeneration',
+    { positive: true }
+  );
+  if (storageGeneration !== currentState.storageGeneration) {
+    throw refreshError(
+      'current SPH and MLS-MPM uploads do not belong to one buffer-family generation',
+      'ERR_SCHROEDER_FROZEN_REFRESH_MECHANICS_PROVENANCE'
+    );
+  }
+  return {
+    storageGeneration,
+    mechanicsBuffer: current.mechanicsBuffer,
+    mechanicsBufferByteLength: requiredMechanicsBytes
   };
 }
 
@@ -821,6 +885,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       encoder = null,
       priorLevelAssignment,
       currentSphParticleUpload,
+      currentMlsMpmParticleUpload = null,
       physicsTick,
       physicsSubstep,
       macroBoundaryLevelAssignment = null,
@@ -834,6 +899,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
         return this.encode(encoder, {
           priorLevelAssignment,
           currentSphParticleUpload,
+          currentMlsMpmParticleUpload,
           physicsTick,
           physicsSubstep,
           refreshMode
@@ -909,6 +975,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
     encode(encoder, {
       priorLevelAssignment,
       currentSphParticleUpload,
+      currentMlsMpmParticleUpload = null,
       physicsTick = priorLevelAssignment?.physicsTick,
       physicsSubstep,
       refreshMode =
@@ -948,6 +1015,12 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
         priorIdentity: prior.identity,
         physicsTick,
         physicsSubstep
+      });
+      const currentMechanics = validateCurrentMechanics({
+        currentMlsMpmParticleUpload,
+        device,
+        particleCount: prior.particleCount,
+        currentState: current
       });
       const arena = arenas.find((candidate) => !candidate.busy && !candidate.retired);
       if (!arena) {
@@ -1001,6 +1074,13 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           retainedAssignmentBuffer: true,
           sourceStateBuffer: current.stateBuffer,
           sourceStateBufferBorrowed: true,
+          sourceMechanicsBuffer: currentMechanics?.mechanicsBuffer ?? null,
+          sourceMechanicsBufferBorrowed: currentMechanics != null,
+          sourceMechanicsBufferByteLength:
+            currentMechanics?.mechanicsBufferByteLength ?? 0,
+          sourceMechanicsProvenanceStatus: currentMechanics
+            ? 'schroeder-frozen-level-assignment-refresh-current-mechanics-v0j-ready'
+            : 'schroeder-frozen-level-assignment-refresh-current-mechanics-v0j-unavailable',
           storageGeneration: current.storageGeneration,
           physicsTick: current.physicsTick,
           physicsSubstep: current.physicsSubstep,

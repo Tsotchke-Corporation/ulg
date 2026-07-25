@@ -5,6 +5,7 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION
 } from './schroederSpatialMechanicsFieldView.js';
@@ -115,6 +116,7 @@ const FIELD_KEY_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS}
 const FIELD_ACCUMULATOR_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS}u;
 const FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS}u;
 const FIELD_STATE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS}u;
+const FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const HIERARCHY_MAGIC: u32 = 0x53485631u;
 const HIERARCHY_VERSION: u32 = 1u;
 const PARENT_FIELD_MAGIC: u32 = 0x53504631u;
@@ -250,21 +252,31 @@ fn field_view_admission_mask(
       }
     }
   }
-  if (active_required < state_offset) {
+  // Mechanics-field view v4 appends immutable pressure rows after the
+  // state-capacity bank, so required/capacity words bound the pressure tail.
+  // The pressure offset is derived from the state bank exactly as the
+  // producer derives it; it is never uploaded as a separate word.
+  var pressure_offset = 0u;
+  var pressure_offset_ok = false;
+  if (field_capacity <= (0xffffffffu - state_offset) / FIELD_STATE_WORDS) {
+    pressure_offset = state_offset + field_capacity * FIELD_STATE_WORDS;
+    pressure_offset_ok = true;
+  }
+  if (!pressure_offset_ok || active_required < pressure_offset) {
     mask = mask | (1u << 12u);
   } else {
-    let active_gap = active_required - state_offset;
-    if (active_gap % FIELD_STATE_WORDS != 0u
-        || active_gap / FIELD_STATE_WORDS != active_count) {
+    let active_gap = active_required - pressure_offset;
+    if (active_gap % FIELD_PRESSURE_WORDS != 0u
+        || active_gap / FIELD_PRESSURE_WORDS != active_count) {
       mask = mask | (1u << 12u);
     }
   }
-  if (capacity_words < state_offset) {
+  if (!pressure_offset_ok || capacity_words < pressure_offset) {
     mask = mask | (1u << 13u);
   } else {
-    let state_gap = capacity_words - state_offset;
-    if (state_gap % FIELD_STATE_WORDS != 0u
-        || state_gap / FIELD_STATE_WORDS != field_capacity) {
+    let pressure_gap = capacity_words - pressure_offset;
+    if (pressure_gap % FIELD_PRESSURE_WORDS != 0u
+        || pressure_gap / FIELD_PRESSURE_WORDS != field_capacity) {
       mask = mask | (1u << 13u);
     }
   }

@@ -1275,6 +1275,7 @@ test('SPH reaction compact summary runs a two-pass WebGPU reduction without part
     reactionTable: reactionTable(),
     sourceStateBuffer: buffer('source-state'),
     sourceThermoBuffer: buffer('source-thermo'),
+    sourceMechanicsBuffer: buffer('source-mechanics'),
     nextStateBuffer: buffer('next-state'),
     nextThermoBuffer: buffer('next-thermo'),
     proposalBuffer,
@@ -1321,7 +1322,7 @@ test('SPH reaction compact summary runs a two-pass WebGPU reduction without part
   assert.equal(summary.ledgerUnplacedGasProductMassKg, 0.375);
   assert.equal(summary.sealedBoxGasProductMoles, 93.75);
   assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [2, 1, 2, 3, 4, 1]);
-  assert.deepEqual(device.bindGroups.map((group) => group.entries.length), [8, 3, 8, 8, 6, 8]);
+  assert.deepEqual(device.bindGroups.map((group) => group.entries.length), [8, 3, 8, 9, 6, 8]);
   assert.equal(device.copies.length, 5);
   assert.equal(device.copies[0].size, 128);
   assert.equal(device.copies[1].size, 65 * 2 * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT);
@@ -1372,6 +1373,7 @@ test('SPH reaction product events can remain GPU-resident without product-event 
     reactionTable: reactionTable(),
     sourceStateBuffer: buffer('source-state'),
     sourceThermoBuffer: buffer('source-thermo'),
+    sourceMechanicsBuffer: buffer('source-mechanics'),
     nextStateBuffer: buffer('next-state'),
     nextThermoBuffer: buffer('next-thermo'),
     proposalBuffer: buffer('reaction-proposals'),
@@ -1413,6 +1415,7 @@ test('SPH reaction resident product-event mode skips compact summary readbacks',
     reactionTable: reactionTable(),
     sourceStateBuffer: buffer('source-state'),
     sourceThermoBuffer: buffer('source-thermo'),
+    sourceMechanicsBuffer: buffer('source-mechanics'),
     nextStateBuffer: buffer('next-state'),
     nextThermoBuffer: buffer('next-thermo'),
     proposalBuffer: buffer('reaction-proposals'),
@@ -1444,7 +1447,49 @@ test('SPH reaction resident product-event mode skips compact summary readbacks',
   assert.equal(retained.destroyed, true);
 });
 
-test('SPH reaction host binds and reads the per-term placement accumulator without particle readback', async () => {
+test('SPH reaction host refuses product placement without the canonical spatial placement authority', async () => {
+  // Slice 9 makes represented current volume the geometry authority. The
+  // legacy placement path derives geometry from density, writes F = I with
+  // J = 1, and loses relative kinetic energy, so production must present the
+  // canonical placement authority or fail closed rather than silently falling
+  // back. This fixture supplies no authority, so placement must be refused.
+  const placementValues = concatenateFloat32Rows(
+    productPlacementRow({ status: 1 }),
+    productPlacementRow({ status: 1 })
+  );
+  const device = fakeSummaryDevice(
+    new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS),
+    { productPlacementValues: placementValues }
+  );
+  const buffer = (label) => ({ label });
+  await assert.rejects(
+    () => runSphReactionSummaryWebGpu({
+      device,
+      sphParticleState: {
+        schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+        particleCount: 2
+      },
+      reactionTable: reactionTable(),
+      sourceStateBuffer: buffer('source-state'),
+      sourceThermoBuffer: buffer('source-thermo'),
+      sourceMechanicsBuffer: buffer('source-mechanics'),
+      nextStateBuffer: buffer('next-state'),
+      nextThermoBuffer: buffer('next-thermo'),
+      nextMechanicsBuffer: buffer('next-mechanics'),
+      proposalBuffer: buffer('reaction-proposals'),
+      boxDimsM: [3, 4, 5],
+      retainProductEventBuffer: true,
+      readCompactSummary: false,
+      readGasSpeciesSummary: false,
+      readProductInventory: false,
+      readAtomResidual: false,
+      productPlacementReadbackCadence: 'resident-sequence-final'
+    }),
+    /canonical Schroeder spatial placement authority/
+  );
+});
+
+test('SPH reaction host binds and reads the per-term placement accumulator without particle readback', { skip: 'legacy placement path removed in Slice 9; see the refusal test above' }, async () => {
   const placementValues = concatenateFloat32Rows(
     productPlacementRow({ status: 1 }),
     productPlacementRow({ status: 1 })
@@ -1468,6 +1513,7 @@ test('SPH reaction host binds and reads the per-term placement accumulator witho
     reactionTable: reactionTable(),
     sourceStateBuffer: buffer('source-state'),
     sourceThermoBuffer: buffer('source-thermo'),
+    sourceMechanicsBuffer: buffer('source-mechanics'),
     nextStateBuffer: buffer('next-state'),
     nextThermoBuffer: buffer('next-thermo'),
     nextMechanicsBuffer: buffer('next-mechanics'),

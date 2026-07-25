@@ -616,8 +616,14 @@ test('SPH reaction CPU step converts only mutual nearest contact pairs and reset
   assert.equal(result.reactionLedger.eventCount, 1);
   assert.equal(result.reactionLedger.unplacedProductMassKg, 0);
   assert.equal(result.reactionLedger.productMassKgByMaterial.ab, 6);
-  assert.equal(result.mechanics[18], 1);
+  assert.ok(Math.abs(result.mechanics[18] - (0.16 * (2 / 6)) / (2 / 500)) < 1e-5);
   assert.ok(Math.abs(result.mechanics[19] - (2 / 500)) < 1e-8);
+  assert.ok(Math.abs(
+    result.mechanics[18] * result.mechanics[19]
+      + result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 18]
+        * result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19]
+      - 0.16
+  ) < 1e-6);
   assert.equal(result.mechanics[20], 0);
   assert.equal(result.mechanics[22], 5e5);
   assert.equal(result.proposals[0], 1);
@@ -659,9 +665,23 @@ test('SPH reaction WGSL places gas products into freed parent slots after conden
   assert.match(sphReactionStepWgsl, /let\s+condensed\s*=\s*term1\.y\s*<\s*0\.5/);
   assert.match(sphReactionStepWgsl, /fn\s+product_term_for_gas_slot/);
   assert.match(sphReactionStepWgsl, /fn\s+product_term_for_parent_slot/);
+  assert.match(sphReactionStepWgsl, /fn\s+particle_current_volume/);
+  assert.match(
+    sphReactionStepWgsl,
+    /if \(!\(self_current_volume > 0\.0\) \|\| !\(partner_current_volume > 0\.0\)\)/
+  );
+  assert.doesNotMatch(
+    sphReactionStepWgsl,
+    /select\(\s*rest_volume,\s*current_volume_m3/
+  );
   assert.match(sphReactionStepWgsl, /product_term_for_parent_slot\(reaction_index,\s*local_product_slot\)/);
   // Products launch at the consumed pair's COM velocity (momentum-exact).
   assert.match(sphReactionStepWgsl, /product_com_velocity/);
+  assert.match(sphReactionStepWgsl, /consumed_total_energy/);
+  assert.match(
+    sphReactionStepWgsl,
+    /0\.5 \* consumed_mass \* dot\(product_com_velocity, product_com_velocity\)/
+  );
 });
 
 test('SPH reaction product placement receives simulation-domain dimensions, not translated bin bounds', () => {
@@ -1026,7 +1046,7 @@ test('SPH reaction CPU step resolves product phase state from thermal graph resp
     thermalPhaseResponseTable
   });
 
-  assert.equal(explicit.thermalPhaseResponseTableSchema, 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0');
+  assert.equal(explicit.thermalPhaseResponseTableSchema, 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v1');
   assert.equal(explicit.thermalClosureGraphSetSchema, 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0');
   assert.equal(explicit.thermalClosureGraphBankSchema, 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0');
   assert.equal(explicit.responseCount, thermalPhaseResponseTable.responseCount);

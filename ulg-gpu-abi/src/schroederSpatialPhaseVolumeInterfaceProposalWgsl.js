@@ -32,6 +32,9 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_CAPACITY_OVERFLOW,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED,
@@ -186,8 +189,15 @@ const FIELD_HEADER_WORDS: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEA
 const FIELD_KEY_WORDS: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS)};
 const FIELD_DESCRIPTOR_WORDS: u32 = 32u;
 const FIELD_ACCUMULATOR_WORDS: u32 = 8u;
-const FIELD_RECEIPT_WORDS: u32 = 16u;
-const FIELD_STATE_WORDS: u32 = 8u;
+const FIELD_RECEIPT_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
+)};
+const FIELD_STATE_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS
+)};
+const FIELD_PRESSURE_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS
+)};
 const FIELD_READY: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY)};
 const FIELD_ADMITTED: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED)};
 const FIELD_FAIL_CLOSED: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED)};
@@ -307,6 +317,8 @@ fn receipt_admitted(
   let selected_candidate_count = (*receipt)[48u];
   let source_groups = group_count(global_source_count);
   let field_groups = group_count(field_count);
+  let source_capacity_groups = group_count(global_source_capacity);
+  let field_capacity_groups = group_count(field_capacity);
   if (
     global_source_count == 0u
     || global_source_capacity == 0u
@@ -320,6 +332,7 @@ fn receipt_admitted(
     || field_count == 0u
     || field_count > field_capacity
     || field_groups > (0xffffffffu - source_groups) / 2u
+    || field_capacity_groups > (0xffffffffu - source_capacity_groups) / 2u
   ) { return false; }
   let source_total = bitcast<f32>((*receipt)[30u]);
   let field_total = bitcast<f32>((*receipt)[31u]);
@@ -348,7 +361,7 @@ fn receipt_admitted(
     && (*receipt)[26u] == completion_ordinal
     && (*receipt)[27u] == source_groups
     && (*receipt)[28u] == field_groups
-    && (*receipt)[29u] == source_groups + 2u * field_groups
+    && (*receipt)[29u] == source_capacity_groups + 2u * field_capacity_groups
     && finite_f32(source_total)
     && finite_f32(field_total)
     && finite_f32(volume_residual)
@@ -412,20 +425,28 @@ fn field_admitted(
   let state_offset = (*field_view)[30u];
   let required_words = (*field_view)[41u];
   let capacity_words = (*field_view)[42u];
+  // Mechanics-field view v4 appends immutable pressure rows after the
+  // state-capacity bank. The pressure offset is always derived from the
+  // state bank, never uploaded as a separate word, so required/capacity
+  // words now bound the pressure tail rather than the state tail.
+  if (field_capacity > (0xffffffffu - state_offset) / FIELD_STATE_WORDS) {
+    return false;
+  }
+  let pressure_offset = state_offset + field_capacity * FIELD_STATE_WORDS;
   if (
     key_offset < FIELD_HEADER_WORDS
     || accumulator_offset < key_offset
     || state_offset < accumulator_offset
     || state_offset - accumulator_offset < FIELD_RECEIPT_WORDS
-    || required_words < state_offset
+    || required_words < pressure_offset
     || capacity_words < required_words
     || capacity_words > arrayLength(field_view)
   ) { return false; }
   let descriptor_span = key_offset - FIELD_HEADER_WORDS;
   let key_span = accumulator_offset - key_offset;
   let accumulator_span = state_offset - accumulator_offset - FIELD_RECEIPT_WORDS;
-  let state_required_span = required_words - state_offset;
-  let state_capacity_span = capacity_words - state_offset;
+  let pressure_required_span = required_words - pressure_offset;
+  let pressure_capacity_span = capacity_words - pressure_offset;
   if (
     descriptor_span % FIELD_DESCRIPTOR_WORDS != 0u
     || descriptor_span / FIELD_DESCRIPTOR_WORDS < source_count
@@ -433,10 +454,10 @@ fn field_admitted(
     || key_span / FIELD_KEY_WORDS != field_capacity
     || accumulator_span % FIELD_ACCUMULATOR_WORDS != 0u
     || accumulator_span / FIELD_ACCUMULATOR_WORDS != field_capacity
-    || state_required_span % FIELD_STATE_WORDS != 0u
-    || state_required_span / FIELD_STATE_WORDS != field_count
-    || state_capacity_span % FIELD_STATE_WORDS != 0u
-    || state_capacity_span / FIELD_STATE_WORDS != field_capacity
+    || pressure_required_span % FIELD_PRESSURE_WORDS != 0u
+    || pressure_required_span / FIELD_PRESSURE_WORDS != field_count
+    || pressure_capacity_span % FIELD_PRESSURE_WORDS != 0u
+    || pressure_capacity_span / FIELD_PRESSURE_WORDS != field_capacity
     || grid_xy * grid_dim_z != grid_node_count
   ) { return false; }
   return (*field_view)[0u] == FIELD_MAGIC

@@ -340,10 +340,8 @@ test('phase-volume moment runtime preserves exact field provenance and caller-ow
   assert.equal(encoder.passes.length, 4);
   assert.deepEqual(encoder.passes[0].dispatch, [1, 1, 1]);
   assert.deepEqual(encoder.passes[1].dispatch, [1, 1, 1]);
-  assert.deepEqual(encoder.passes[2].indirect, {
-    buffer: authority.field.fieldViewBuffer,
-    offset: 240
-  });
+  assert.deepEqual(encoder.passes[2].dispatch, [2, 1, 1]);
+  assert.equal(encoder.passes[2].indirect, null);
   assert.deepEqual(encoder.passes[3].dispatch, [1, 1, 1]);
   assert.deepEqual(
     tracker.bindGroups.map(({ descriptor }) => descriptor.entries.map(({ binding }) => binding)),

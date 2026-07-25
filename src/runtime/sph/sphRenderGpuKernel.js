@@ -347,7 +347,12 @@ function invalidateSphRenderFieldSuccessorSourceLineage(renderField) {
     );
   }
 }
-export const SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO = 2;
+// Caps how far one particle's surface contribution spreads, as a multiple of
+// the smoothing length. At 2.0 the isosurface from two separated bodies still
+// overlaps across a real gap, so surfaces read as touching when the particles
+// are not. 1.9 tightens the support enough to resolve that gap while keeping
+// the surface closed over a single body.
+export const SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO = 1.9;
 export const SPH_RENDER_ROW_MAX_GAS_RADIUS_SMOOTHING_RATIO = 0.5;
 const SPH_RENDER_ROWS_PARAMS_BYTES = 48;
 export const ULG_SPH_RENDER_ROW_PARTICLE_SCALE_STABILITY_SCHEMA =

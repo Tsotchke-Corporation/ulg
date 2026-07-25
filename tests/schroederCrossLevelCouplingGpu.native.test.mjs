@@ -49,7 +49,24 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
       if (!adapter) {
         return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
       }
-      const device = await adapter.requestDevice();
+      // Request the same limits the resident SPH runtime requires. A bare
+      // requestDevice() caps storage buffers at the 8-per-stage default, which
+      // the two-level workspace exceeds, so the harness would fail on a limit
+      // the production device never hits.
+      const deviceLimitsModule = await import('/src/runtime/webgpuDeviceLimits.js');
+      const device = await adapter.requestDevice(
+        deviceLimitsModule.webGpuDeviceDescriptorForResidentSph(adapter)
+      );
+      // A lost device surfaces downstream only as an opaque mapAsync abort.
+      // Record the real reason so a driver-level loss is not misread as a
+      // readback or validation defect.
+      const deviceLost = [];
+      device.lost.then((info) => {
+        deviceLost.push({
+          reason: info?.reason ?? null,
+          message: info?.message ?? String(info)
+        });
+      }).catch(() => {});
       const uncapturedErrors = [];
       device.addEventListener('uncapturederror', (event) => {
         uncapturedErrors.push(event.error?.message || String(event.error));
@@ -90,7 +107,9 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         updateModule,
         g2pModule,
         workspaceModule,
-        fusedModule
+        fusedModule,
+        materialTableModule,
+        mechanicsRefreshModule
       ] = await Promise.all([
         import(versioned(
           '/ulg-gpu-abi/src/index.js',
@@ -138,6 +157,12 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           '/src/runtime/sph/schroederFusedFineSubstepGpu.js',
           couplingSource,
           hierarchySource
+        )),
+        import('/src/runtime/sph/sphMechanicsMaterialTable.js'),
+        import(versioned(
+          '/src/runtime/sph/sphMechanicsRefreshGpuKernel.js',
+          couplingSource,
+          hierarchySource
         ))
       ]);
 
@@ -155,7 +180,16 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         const encoder = device.createCommandEncoder();
         encoder.copyBufferToBuffer(buffer, 0, readback, 0, size);
         device.queue.submit([encoder.finish()]);
-        await readback.mapAsync(GPUMapMode.READ);
+        try {
+          await readback.mapAsync(GPUMapMode.READ);
+        } catch (error) {
+          // Name the readback: a device/instance teardown surfaces here as an
+          // opaque AbortError with no indication of which stage died.
+          throw new Error(
+            `readback '${label}' (${size} bytes) failed: `
+              + (error?.message || String(error))
+          );
+        }
         const bytes = readback.getMappedRange().slice(0, Number(byteLength));
         readback.unmap();
         readback.destroy();
@@ -239,6 +273,20 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
       const f32Subtract = (left, right) => Math.fround(
         Math.fround(left) - Math.fround(right)
       );
+      const measuredClose = (left, right, count = 1) => {
+        const nEpsilon = Math.min(
+          0.25,
+          Math.max(1, Number(count) || 1) * 2 ** -24
+        );
+        const gamma = nEpsilon / Math.max(1e-20, 1 - nEpsilon);
+        const tolerance = Math.max(
+          8 * 1.175494351e-38,
+          gamma * (Math.abs(left) + Math.abs(right))
+        );
+        return Number.isFinite(left)
+          && Number.isFinite(right)
+          && Math.abs(left - right) <= tolerance;
+      };
       const wordFromF32 = (value) => {
         floatValues[0] = Math.fround(value);
         return floatBits[0];
@@ -248,9 +296,14 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         execution,
         ledgerWords
       ) => {
-        if (!ledgerWords || ledgerWords.length < 128) return null;
+        if (
+          !ledgerWords
+          || ledgerWords.length
+            < abi.SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+        ) return null;
         const coarseFieldCount = workspaceWords[22];
         const routeOffset = execution.layout.routeProposalOffsetWords;
+        const routeRowWords = execution.layout.routeProposalRowWords;
         const ledgerRowOffset = ledgerWords[6];
         const ledgerRowWords = ledgerWords[5];
         let actualCoarseEnergy = 0;
@@ -263,15 +316,19 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         let virtualEnergySumAbs = 0;
         const rows = [];
         for (let index = 0; index < coarseFieldCount; index += 1) {
-          const proposal = routeOffset + index * 8;
+          const proposal = routeOffset + index * routeRowWords;
           const ledgerRow = ledgerRowOffset + index * ledgerRowWords;
           const deltaEnergy = f32FromWord(workspaceWords[proposal + 3]);
-          const causalWeight = f32FromWord(workspaceWords[proposal + 4]);
+          const causalWeight = f32FromWord(ledgerWords[ledgerRow + 15]);
           const stateContributionCount = workspaceWords[proposal + 5];
           const localHeat = f32FromWord(workspaceWords[proposal + 6]);
           const localContributionCount = workspaceWords[proposal + 7];
           const virtualEnergy = f32FromWord(ledgerWords[ledgerRow + 9]);
           const ledgerCausalWeight = f32FromWord(ledgerWords[ledgerRow + 15]);
+          const crossLevelPressureCompensation =
+            f32FromWord(ledgerWords[ledgerRow + 16]);
+          const crossLevelDragHeat =
+            f32FromWord(ledgerWords[ledgerRow + 17]);
           actualCoarseEnergy = f32Add(actualCoarseEnergy, deltaEnergy);
           coarseEnergySumAbs = f32Add(
             coarseEnergySumAbs,
@@ -294,77 +351,49 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             localHeat,
             localContributionCount,
             virtualEnergy,
-            ledgerCausalWeight
+            ledgerCausalWeight,
+            crossLevelPressureCompensation,
+            crossLevelDragHeat
           });
         }
         const fineKineticEnergy = f32FromWord(ledgerWords[28]);
         const ledgerVirtualCoarseEnergy = f32FromWord(ledgerWords[29]);
         const fineRouteHeat = f32FromWord(ledgerWords[112]);
-        const causalKineticResidual = f32Add(
-          fineKineticEnergy,
-          virtualCoarseEnergy
-        );
-        const actualKineticResidual = f32Add(
-          fineKineticEnergy,
-          actualCoarseEnergy
-        );
-        const synchronizationWork = f32Subtract(
-          actualCoarseEnergy,
-          virtualCoarseEnergy
-        );
-        const synchronizationConditioningSumAbs = f32Add(
-          coarseEnergySumAbs,
-          virtualEnergySumAbs
-        );
-        const synchronizationTolerance = Math.max(
-          8 * 1.175494351e-38,
-          Math.fround(
-            1024 * 5.960464477539063e-8
-              * synchronizationConditioningSumAbs
-          )
-        );
-        const causalEnergySumAbs = f32Add(
-          Math.abs(fineKineticEnergy),
-          virtualEnergySumAbs
-        );
-        const causalEnergyTolerance = Math.max(
-          8 * 1.175494351e-38,
-          Math.fround(
-            1024 * 5.960464477539063e-8 * causalEnergySumAbs
-          )
-        );
-        const causalRouteHeat = Math.fround(
-          Math.max(0, -causalKineticResidual)
-        );
-        const deferredUnclamped = Math.fround(
-          causalRouteHeat - fineRouteHeat
-        );
-        let deferredRouteHeat = Math.fround(Math.max(0, deferredUnclamped));
-        if (
-          deferredRouteHeat <= causalEnergyTolerance
-          && !(causalWeightSum > 0)
-        ) {
-          deferredRouteHeat = 0;
-        }
-        const totalRouteHeat = f32Add(fineRouteHeat, deferredRouteHeat);
-        let energySumAbs = f32Add(
-          Math.abs(fineKineticEnergy),
-          coarseEnergySumAbs
-        );
-        energySumAbs = f32Add(energySumAbs, Math.abs(totalRouteHeat));
-        energySumAbs = f32Add(energySumAbs, Math.abs(synchronizationWork));
-        const energyTolerance = Math.max(
-          8 * 1.175494351e-38,
-          Math.fround(1024 * 5.960464477539063e-8 * energySumAbs)
-        );
-        const causalEnergyResidual = f32Add(
-          causalKineticResidual,
-          totalRouteHeat
-        );
-        const totalEnergyResidual = f32Subtract(
-          f32Add(actualKineticResidual, totalRouteHeat),
-          synchronizationWork
-        );
+        const finePressureCompensation = f32FromWord(ledgerWords[128]);
+        const coarsePressureCompensation = f32FromWord(ledgerWords[129]);
+        const fineDragHeat = f32FromWord(ledgerWords[130]);
+        const coarseDragHeat = f32FromWord(ledgerWords[131]);
+        const closure = abi.deriveSchroederCrossLevelRefluxEnergyClosure({
+          fineKineticEnergyDeltaJ: fineKineticEnergy,
+          virtualCoarseKineticEnergyDeltaJ: virtualCoarseEnergy,
+          actualCoarseKineticEnergyDeltaJ: actualCoarseEnergy,
+          cumulativeFineRouteHeatJ: fineRouteHeat,
+          fineCrossLevelPressureCompensationJ: finePressureCompensation,
+          coarseCrossLevelPressureCompensationJ: coarsePressureCompensation,
+          fineCrossLevelDragHeatJ: fineDragHeat,
+          coarseCrossLevelDragHeatJ: coarseDragHeat,
+          actualCoarseEnergyConditioningSumAbsJ: coarseEnergySumAbs,
+          virtualCoarseEnergyConditioningSumAbsJ: virtualEnergySumAbs
+        });
+        const causalKineticResidual =
+          closure.causalKineticEnergyResidualJ;
+        const actualKineticResidual =
+          closure.actualKineticEnergyResidualJ;
+        const synchronizationWork = closure.synchronizationWorkJ;
+        const synchronizationConditioningSumAbs =
+          closure.synchronizationConditioningSumAbsJ;
+        const synchronizationTolerance = closure.synchronizationToleranceJ;
+        const causalEnergySumAbs =
+          closure.causalEnergyConditioningSumAbsJ;
+        const causalEnergyTolerance = closure.causalEnergyToleranceJ;
+        const causalRouteHeat = closure.causalRouteHeatJ;
+        const deferredUnclamped = closure.deferredRouteHeatUnclampedJ;
+        const deferredRouteHeat = closure.coarseDeferredRouteHeatJ;
+        const totalRouteHeat = closure.totalRouteHeatJ;
+        const energySumAbs = closure.totalEnergyConditioningSumAbsJ;
+        const energyTolerance = closure.totalEnergyToleranceJ;
+        const causalEnergyResidual = closure.causalEnergyResidualJ;
+        const totalEnergyResidual = closure.totalEnergyResidualJ;
         const virtualEnergyTolerance = Math.max(
           8 * 1.175494351e-38,
           Math.fround(
@@ -376,18 +405,11 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           )
         );
         const predicates = {
-          causalKineticResidualAtMostTolerance:
-            causalKineticResidual <= causalEnergyTolerance,
-          deferredUnclampedAboveNegativeTolerance:
-            deferredUnclamped >= -causalEnergyTolerance,
-          causalEnergyResidualWithinTolerance:
-            Math.abs(causalEnergyResidual) <= causalEnergyTolerance,
-          totalEnergyResidualWithinTolerance:
-            Math.abs(totalEnergyResidual) <= energyTolerance,
-          synchronizationWorkConditioned:
-            Math.abs(synchronizationWork)
-              <= synchronizationConditioningSumAbs
-                + synchronizationTolerance,
+          causalKineticResidualAtMostTolerance: closure.causalValid,
+          deferredUnclampedAboveNegativeTolerance: closure.causalValid,
+          causalEnergyResidualWithinTolerance: closure.causalValid,
+          totalEnergyResidualWithinTolerance: closure.totalValid,
+          synchronizationWorkConditioned: closure.operatorSplitValid,
           virtualCoarseEnergyMatches:
             Math.abs(ledgerVirtualCoarseEnergy - virtualCoarseEnergy)
               <= virtualEnergyTolerance
@@ -398,9 +420,17 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           ledgerH28Bits: ledgerWords[28],
           ledgerH29Bits: ledgerWords[29],
           ledgerH112Bits: ledgerWords[112],
+          ledgerH128Bits: ledgerWords[128],
+          ledgerH129Bits: ledgerWords[129],
+          ledgerH130Bits: ledgerWords[130],
+          ledgerH131Bits: ledgerWords[131],
           fineKineticEnergy,
           ledgerVirtualCoarseEnergy,
           fineRouteHeat,
+          finePressureCompensation,
+          coarsePressureCompensation,
+          fineDragHeat,
+          coarseDragHeat,
           actualCoarseEnergy,
           coarseEnergySumAbs,
           causalKineticResidual,
@@ -834,9 +864,33 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         const particleCount = 2;
         const dt = Math.fround(0.005 * ratio);
         const storageGeneration = 100 + ratio;
+        const mechanicsMaterialTable =
+          materialTableModule.buildMlsMpmMechanicsMaterialTable({
+            h2o: {
+              molarMassKgPerMol: 0.018015,
+              phases: [{
+                name: 'liquid',
+                densityKgPerM3: 997,
+                bulkModulusPa: 2.2e9,
+                shearModulusPa: 0,
+                cpJPerKgK: 4184,
+                dynamicViscosityPaS: 0.001,
+                temperatureRange: [273.15, 373.15]
+              }, {
+                name: 'gas',
+                densityKgPerM3: 0.6,
+                bulkModulusPa: null,
+                shearModulusPa: 0,
+                cpJPerKgK: 2010,
+                dynamicViscosityPaS: 1.3e-5,
+                temperatureRange: [373.15, 1000]
+              }]
+            }
+          }, { viscosityEnabled: true });
+        const materialId = mechanicsMaterialTable.metadata[0].materialId;
         const state = new Float32Array([
-          0.9, 1, 1, 1, 0.2, 0, 0, 0,
-          1.1, 1, 1, 1, 0, 0.2, 0, 0
+          0.9, 1, 1, 1, 0.2, 0, 0, 16,
+          1.1, 1, 1, 1, 0, 0.2, 0, 16
         ]);
         const thermo = new Float32Array(particleCount * 12);
         const identity = new Uint32Array([101, 202]);
@@ -844,10 +898,12 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           particleCount * abi.MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
         );
         for (let index = 0; index < particleCount; index += 1) {
+          const phaseId = index === 0 ? 3 : 2;
+          const restDensity = index === 0 ? 0.6 : 997;
           thermo.set([
-            7, 1, 300, 1000,
-            1, 0, 0, 0,
-            0.25, 1, 7, 0.001
+            materialId, phaseId, index === 0 ? 500 : 300, restDensity,
+            0, index === 1 ? 1 : 0, index === 0 ? 1 : 0, 0,
+            0.25, 1, materialId, 0.001
           ], index * 12);
           const offset = index
             * abi.MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
@@ -856,7 +912,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           mechanics[offset + 19] = 0.001;
           mechanics[offset + 20] = 0;
           mechanics[offset + 21] = 1;
-          mechanics[offset + 27] = 7;
+          mechanics[offset + 27] = 1;
           mechanics[offset + 31] = 1;
         }
 
@@ -953,8 +1009,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           const offset = index * 16;
           assignmentRows.set([
             level, 0.25 * (2 ** level), 1, 0.001,
-            0.001, 0.001, 1, 1000,
-            1, 7, 1, 0.15,
+            0.001, 0.001, 1, index === 0 ? 0.6 : 997,
+            index === 0 ? 3 : 2, materialId, 1, 0.15,
             state[index * 8], state[index * 8 + 1], state[index * 8 + 2], 0
           ], offset);
         }
@@ -978,6 +1034,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           assignmentBufferByteLength: assignmentRows.byteLength,
           sourceStateBuffer: sphParticleUpload.stateBuffer,
           sourceStateBufferBorrowed: true,
+          sourceMechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer,
+          sourceMechanicsBufferBorrowed: true,
+          sourceMechanicsBufferByteLength:
+            mlsMpmParticleUpload.mechanicsBufferByteLength,
           ...epochIdentity,
           minLevel: 0,
           maxLevel: 1,
@@ -1002,10 +1062,11 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           particleIdentityBuffer: sphParticleUpload.identityBuffer,
           particleIdentityStrideWords: 1,
           particleBufferSet: sphParticleUpload,
-          mechanicsLevels: [
-            { selectedLevel: 0, mechanicsGrid: fineGrid },
-            { selectedLevel: 1, mechanicsGrid: coarseGrid }
-          ]
+            mechanicsLevels: [
+              { selectedLevel: 0, mechanicsGrid: fineGrid },
+              { selectedLevel: 1, mechanicsGrid: coarseGrid }
+            ],
+            phaseVolumeInterfaceProposalEnabled: true
         });
         requireTrue(
           generation.ready === true && generation.selected === true,
@@ -1030,9 +1091,15 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             sphParticleUpload,
             mlsMpmParticleUpload,
             twoLevelAuthoritative: true,
+            phaseVolumeInterfaceProposalAuthoritative: true,
             enabledConsumerReaderIds: [],
             consumerSupportProfileIds: {}
           });
+        const mechanicsMaterialPhaseUpload =
+          mechanicsRefreshModule.uploadMlsMpmMechanicsMaterialPhaseRecords(
+            device,
+            mechanicsMaterialTable
+          );
         let controller = null;
       const diagnosticSpatialGenerationRunner = async (options) => {
           const priorGenerationRuntimeSnapshots = [
@@ -1167,6 +1234,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             fineMechanicsGrid: fineGrid,
             coarseMechanicsGrid: coarseGrid,
             boxDimsM: [2, 2, 2],
+            phaseVolumeInterfaceTransportEnabled: true,
             spatialEpochGenerationRunner: diagnosticSpatialGenerationRunner,
             mechanicsEpochMode:
               hierarchyModule.SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_FUSED_PRIVATE
@@ -1176,6 +1244,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         const backends = [];
         const statuses = [];
         const gridUpdateDiagnostics = [];
+        const g2pDiagnostics = [];
         let terminalPreWorkspaceLedgerWords = null;
         const workspaceCaptures = [];
         const workspaceCaptureByExecution = new WeakMap();
@@ -1240,7 +1309,12 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             boxDimsM: [2, 2, 2],
             dt,
             internalPressureScale: 0,
-            ambientPressurePa: 0,
+            ambientPressurePa: 101325,
+            mechanicsMaterialTable,
+            mechanicsMaterialPhaseUpload,
+            phaseVolumePressureScale: 0.01,
+            phaseVolumeMaxImpulseFraction: 0.01,
+            phaseVolumeInterfaceTransportEnabled: true,
             gridSpecFactory: gridModule.createMlsMpmGridSpec,
             p2gRunner: async (options) => {
               counts.p2g += 1;
@@ -1274,7 +1348,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
                   ledger.buffer,
                   kind === 'terminal-pre-workspace'
                     ? ledger.wordLength
-                    : 126,
+                    : abi.SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
                   `native-m3-r${ratio}-${kind}-ledger`
                 );
                 if (kind === 'terminal-pre-workspace') {
@@ -1302,9 +1376,34 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
                   fieldHeaderWords: [...fieldWords.slice(0, 64)],
                   fieldReceiptOffsetWords: receiptOffset,
                   fieldReceiptWords: [
-                    ...fieldWords.slice(receiptOffset, receiptOffset + 16)
+                    ...fieldWords.slice(
+                      receiptOffset,
+                      receiptOffset + fieldView.layout.receiptControlWords
+                    )
                   ],
-                  ledgerHeaderWords: [...ledgerWords.slice(0, 126)]
+                  fieldAccumulatorOffsetWords:
+                    fieldView.layout.accumulatorOffsetWords,
+                  fieldAccumulatorWords: [
+                    ...fieldWords.slice(
+                      fieldView.layout.accumulatorOffsetWords,
+                      fieldView.layout.accumulatorOffsetWords
+                        + fieldWords[34] * fieldView.layout.accumulatorWords
+                    )
+                  ],
+                  fieldStateOffsetWords: fieldView.layout.stateOffsetWords,
+                  fieldStateWords: [
+                    ...fieldWords.slice(
+                      fieldView.layout.stateOffsetWords,
+                      fieldView.layout.stateOffsetWords
+                        + fieldWords[34] * fieldView.layout.stateWords
+                    )
+                  ],
+                  ledgerHeaderWords: [
+                    ...ledgerWords.slice(
+                      0,
+                      abi.SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+                    )
+                  ]
                 });
               }
               backends.push(update.backend);
@@ -1315,6 +1414,40 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               counts.g2p += 1;
               const reconstruction =
                 await g2pModule.runMlsMpmG2pWebGpu(options);
+              const transaction = options.fusedCoarseTerminalTransaction
+                ?? options.fusedFineSubstepTransaction
+                ?? null;
+              const fieldView = options.fusedCoarseTerminalTransaction
+                ? transaction?.coarseFieldView
+                : transaction?.fineFieldView;
+              const ledger = transaction?.refluxLedger ?? null;
+              if (fieldView?.fieldViewBuffer && ledger?.buffer) {
+                const fieldWords = await readU32Words(
+                  fieldView.fieldViewBuffer,
+                  fieldView.layout.wordLength,
+                  `native-m3-r${ratio}-g2p-field`
+                );
+                const ledgerWords = await readU32Words(
+                  ledger.buffer,
+                  abi.SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
+                  `native-m3-r${ratio}-g2p-ledger`
+                );
+                const receiptOffset =
+                  fieldView.layout.receiptControlOffsetWords;
+                g2pDiagnostics.push({
+                  kind: options.fusedCoarseTerminalTransaction
+                    ? 'coarse'
+                    : 'fine',
+                  fieldHeaderWords: [...fieldWords.slice(0, 64)],
+                  fieldReceiptWords: [
+                    ...fieldWords.slice(
+                      receiptOffset,
+                      receiptOffset + fieldView.layout.receiptControlWords
+                    )
+                  ],
+                  ledgerHeaderWords: [...ledgerWords]
+                });
+              }
               const provenance = options.fusedFineSubstepTransaction ? {
                 transaction: options.fusedFineSubstepTransaction,
                 macroAuthority:
@@ -1437,11 +1570,12 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             `native-m3-r${ratio}-final-mechanics-readback`
           );
           const compactRefluxEvidenceByteLength =
-            128 * Uint32Array.BYTES_PER_ELEMENT;
+            abi.SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+              * Uint32Array.BYTES_PER_ELEMENT;
           requireTrue(
             result.invariantEvidenceBufferByteLength
               === compactRefluxEvidenceByteLength,
-            `r=${ratio} reflux exposure is not the exact 128-word compact header`
+            `r=${ratio} reflux exposure is not the exact v3 compact header`
           );
           requireTrue(
             Number(result.invariantEvidenceBuffer?.size ?? 0)
@@ -1478,6 +1612,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               && reflux.routeRejectCount === 0
               && reflux.failClosed === false
               && reflux.operatorSplit?.valid === true
+              && reflux.phaseVolumeTransport?.valid === true
+              && reflux.ambientBoundary?.valid === true
               && finiteArray([
                 reflux.massResidualKg,
                 ...reflux.linearMomentumResidualKgMPerS,
@@ -1579,12 +1715,9 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             1024 * 2 ** -24 * expectedSynchronizationConditioning
           );
           const recomputedSynchronizedResidual = terminalSealEnergy
-            ? f32Subtract(
+              ? f32Subtract(
                 f32Add(
-                  f32Add(
-                    terminalSealEnergy.fineKineticEnergy,
-                    terminalSealEnergy.actualCoarseEnergy
-                  ),
+                  terminalSealEnergy.actualKineticResidual,
                   reflux.internalEnergyDepositJ
                 ),
                 reflux.operatorSplit.synchronizationWorkJ
@@ -1623,6 +1756,219 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             h31WithinH47:
               reflux.totalEnergyResidualJ <= reflux.tolerance.totalEnergyJ,
             decoderOperatorSplitValid: reflux.operatorSplit.valid === true
+          };
+          const refluxRowCount = refluxWords[4];
+          const refluxRowOffset = refluxWords[6];
+          const refluxRowWords = refluxWords[5];
+          let coarsePressureRowSum = 0;
+          // L1 of the pressure channel. The net compensation is a signed sum
+          // over these rows, so this is the magnitude whose f32 accumulation
+          // could manufacture or cancel that net value, and it is the correct
+          // conditioning for asking whether pressure actually participated.
+          let coarsePressureRowAbsSum = 0;
+          let coarseDragRowSum = 0;
+          let everyCoarseHeatContainsDrag = true;
+          const transportRows = [];
+          for (let index = 0; index < refluxRowCount; index += 1) {
+            const row = refluxRowOffset + index * refluxRowWords;
+            const depositedHeatJ = f32FromWord(refluxWords[row + 8]);
+            const pressureCompensationJ =
+              f32FromWord(refluxWords[row + 16]);
+            const dragHeatJ = f32FromWord(refluxWords[row + 17]);
+            coarsePressureRowSum = f32Add(
+              coarsePressureRowSum,
+              pressureCompensationJ
+            );
+            coarsePressureRowAbsSum = f32Add(
+              coarsePressureRowAbsSum,
+              Math.abs(pressureCompensationJ)
+            );
+            coarseDragRowSum = f32Add(coarseDragRowSum, dragHeatJ);
+            everyCoarseHeatContainsDrag =
+              everyCoarseHeatContainsDrag
+              && Number.isFinite(depositedHeatJ)
+              && Number.isFinite(dragHeatJ)
+              && depositedHeatJ >= dragHeatJ;
+            transportRows.push({
+              index,
+              depositedHeatJ,
+              pressureCompensationJ,
+              dragHeatJ
+            });
+          }
+          const terminalCapture = workspaceCaptures.find(
+            (capture) => capture.kind === 'terminal'
+          );
+          const terminalGridDiagnostic = gridUpdateDiagnostics.find(
+            (diagnostic) => diagnostic.kind === 'terminal-pre-workspace'
+          );
+          requireTrue(
+            terminalCapture?.execution?.coarseFieldView?.fieldViewBuffer
+              && terminalGridDiagnostic,
+            `r=${ratio} terminal field proof source is missing`
+          );
+          const finalCoarseFieldView =
+            terminalCapture.execution.coarseFieldView;
+          const finalCoarseFieldWords = await readU32Words(
+            finalCoarseFieldView.fieldViewBuffer,
+            finalCoarseFieldView.layout.wordLength,
+            `native-m3-r${ratio}-final-coarse-field`
+          );
+          const finalAccumulatorOffset =
+            finalCoarseFieldView.layout.accumulatorOffsetWords;
+          const accumulatorWords =
+            finalCoarseFieldView.layout.accumulatorWords;
+          const finalReceiptOffset =
+            finalCoarseFieldView.layout.receiptControlOffsetWords;
+          let finalAccumulatorPressureSum = 0;
+          let accumulatorPressureRouteExact = true;
+          for (let index = 0; index < refluxRowCount; index += 1) {
+            const priorPressureBits =
+              terminalGridDiagnostic.fieldAccumulatorWords[
+                index * accumulatorWords + 3
+              ];
+            const rowPressureBits = refluxWords[
+              refluxRowOffset + index * refluxRowWords + 16
+            ];
+            const finalPressureBits = finalCoarseFieldWords[
+              finalAccumulatorOffset + index * accumulatorWords + 3
+            ];
+            const expectedFinalPressure = f32Add(
+              f32FromWord(priorPressureBits),
+              f32FromWord(rowPressureBits)
+            );
+            accumulatorPressureRouteExact =
+              accumulatorPressureRouteExact
+              && finalPressureBits === wordFromF32(expectedFinalPressure);
+            finalAccumulatorPressureSum = f32Add(
+              finalAccumulatorPressureSum,
+              f32FromWord(finalPressureBits)
+            );
+          }
+          const finalReceiptPressureBits = [
+            finalCoarseFieldWords[finalReceiptOffset + 16],
+            finalCoarseFieldWords[finalReceiptOffset + 17]
+          ];
+          const expectedAmbientImpulseNs = [0, 0, 0];
+          let expectedAmbientExternalWorkJ = 0;
+          for (const diagnostic of gridUpdateDiagnostics) {
+            for (let axis = 0; axis < 3; axis += 1) {
+              expectedAmbientImpulseNs[axis] = f32Add(
+                expectedAmbientImpulseNs[axis],
+                f32FromWord(diagnostic.fieldReceiptWords[20 + axis])
+              );
+            }
+            expectedAmbientExternalWorkJ = f32Add(
+              expectedAmbientExternalWorkJ,
+              f32FromWord(diagnostic.fieldReceiptWords[23])
+            );
+          }
+          const ambientReceiptBitsExact = [0, 1, 2].every(
+            (axis) => refluxWords[132 + axis]
+              === wordFromF32(expectedAmbientImpulseNs[axis])
+          ) && refluxWords[135] === wordFromF32(
+            expectedAmbientExternalWorkJ
+          );
+          // Same gamma_n model the row/header comparisons above use, applied to
+          // the pressure channel's own L1 magnitude.
+          const pressureChannelNEpsilon = Math.min(
+            0.25,
+            Math.max(1, refluxRowCount * (ratio + 1)) * 2 ** -24
+          );
+          const pressureChannelFloorJ = Math.max(
+            8 * 1.175494351e-38,
+            (pressureChannelNEpsilon
+              / Math.max(1e-20, 1 - pressureChannelNEpsilon))
+              * coarsePressureRowAbsSum
+          );
+          const phaseVolumeTransportProof = {
+            // Surfaced so a failing participation predicate shows whether the
+            // term is genuinely absent or merely under this ledger's own
+            // conditioning tolerance.
+            observedFinePressureCompensationJ:
+              reflux.phaseVolumeTransport
+                .fineCrossLevelPressureCompensationJ,
+            observedCoarsePressureCompensationJ:
+              reflux.phaseVolumeTransport
+                .coarseCrossLevelPressureCompensationJ,
+            observedPhaseVolumeToleranceJ:
+              reflux.phaseVolumeTransport.toleranceJ,
+            observedPressureChannelFloorJ: pressureChannelFloorJ,
+            // Condition this on the pressure channel, not on
+            // phaseVolumeTransport.toleranceJ. That ledger tolerance tracks
+            // total deposited heat (~4e-3 J here, dominated by ordinary
+            // local/route heat), which is six orders above the cross-level
+            // pressure term, so comparing against it can never succeed and
+            // gets further from succeeding as the pressure scale is raised.
+            // What "participated" means is that the net compensation survived
+            // its own f32 accumulation rather than cancelling into noise.
+            pressureParticipated:
+              Math.abs(
+                reflux.phaseVolumeTransport
+                  .fineCrossLevelPressureCompensationJ
+              ) + Math.abs(
+                reflux.phaseVolumeTransport
+                  .coarseCrossLevelPressureCompensationJ
+              ) > pressureChannelFloorJ,
+            dragParticipated:
+              reflux.phaseVolumeTransport.fineCrossLevelDragHeatJ
+                + reflux.phaseVolumeTransport.coarseCrossLevelDragHeatJ > 0,
+            coarsePressureRowsMatchHeader: measuredClose(
+              coarsePressureRowSum,
+              reflux.phaseVolumeTransport
+                .coarseCrossLevelPressureCompensationJ,
+              refluxRowCount * (ratio + 1)
+            ),
+            coarsePressureRowsBitsExact:
+              refluxWords[129] === wordFromF32(coarsePressureRowSum),
+            coarseDragRowsMatchHeader: measuredClose(
+              coarseDragRowSum,
+              reflux.phaseVolumeTransport.coarseCrossLevelDragHeatJ,
+              refluxRowCount * (ratio + 1)
+            ),
+            coarseDragRowsBitsExact:
+              refluxWords[131] === wordFromF32(coarseDragRowSum),
+            everyCoarseHeatContainsDrag,
+            fineDragWithinRoute:
+              reflux.phaseVolumeTransport.fineCrossLevelDragHeatJ
+                <= reflux.heatSplit.cumulativeFineRouteHeatJ
+                  + reflux.phaseVolumeTransport.toleranceJ,
+            coarseDragWithinRoute:
+              reflux.phaseVolumeTransport.coarseCrossLevelDragHeatJ
+                <= reflux.heatSplit.coarseDeferredRouteHeatJ
+                  + reflux.phaseVolumeTransport.toleranceJ,
+            accumulatorPressureRouteExact,
+            finalAccumulatorPressureSum,
+            finalReceiptPressureExact:
+              finalReceiptPressureBits[0]
+                === wordFromF32(finalAccumulatorPressureSum)
+              && finalReceiptPressureBits[1]
+                === wordFromF32(finalAccumulatorPressureSum),
+            fineRouteConsumed: measuredClose(
+              reflux.heatSplit.fineParticleConsumedRouteHeatJ,
+              reflux.heatSplit.cumulativeFineRouteHeatJ,
+              reflux.measuredScale.contributionCount
+            ),
+            coarseRouteConsumed: measuredClose(
+              reflux.heatSplit.coarseParticleConsumedRouteHeatJ,
+              reflux.heatSplit.coarseDeferredRouteHeatJ,
+              reflux.measuredScale.contributionCount
+            ),
+            totalHeatConsumed: measuredClose(
+              reflux.particleConsumedHeatJ,
+              f32Add(
+                reflux.internalEnergyDepositJ,
+                reflux.heatSplit.cumulativeLocalHeatJ
+              ),
+              reflux.measuredScale.contributionCount
+            ),
+            ambientParticipated:
+              expectedAmbientImpulseNs.some((value) => value !== 0)
+                || expectedAmbientExternalWorkJ !== 0,
+            ambientReceiptBitsExact,
+            expectedAmbientImpulseNs,
+            expectedAmbientExternalWorkJ,
+            transportRows
           };
 
           requireTrue(
@@ -1693,6 +2039,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               result.invariantEvidenceBufferByteLength,
             fullRefluxEvidenceByteLength: invariantBytes.byteLength,
             gridUpdateDiagnostics,
+            g2pDiagnostics,
             workspaceDiagnostics,
             reflux: {
               valid: refluxValid,
@@ -1724,9 +2071,18 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               internalEnergyDepositJ: reflux.internalEnergyDepositJ,
               totalEnergyResidualJ: reflux.totalEnergyResidualJ,
               totalEnergyToleranceJ: reflux.tolerance.totalEnergyJ,
+              heatSplit: reflux.heatSplit,
               operatorSplit: reflux.operatorSplit,
+              phaseVolumeTransport: reflux.phaseVolumeTransport,
+              ambientBoundary: reflux.ambientBoundary,
+              phaseVolumeTransportProof,
               synchronizationProof,
-              rawHeaderWords: [...refluxWords.slice(0, 128)]
+              rawHeaderWords: [
+                ...refluxWords.slice(
+                  0,
+                  abi.SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+                )
+              ]
             },
             cleanupReplayRejected: replayRejected,
             postCleanupSpatialDiagnostics,
@@ -1756,6 +2112,9 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           assignmentBuffer.destroy();
           buffersModule.destroySphGpuParticleBuffers(sphParticleUpload);
           buffersModule.destroyMlsMpmGpuParticleBuffers(mlsMpmParticleUpload);
+          mechanicsRefreshModule.destroyMlsMpmMechanicsMaterialPhaseUpload(
+            mechanicsMaterialPhaseUpload
+          );
         }
       };
 
@@ -1793,6 +2152,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         } catch (error) {
           throw new Error(
             `native M3 r=${ratio} failed: ${error?.message || String(error)}; `
+              + `deviceLost=${JSON.stringify(deviceLost)}; `
               + `diagnostics=${JSON.stringify(diagnosticErrorChain(error))}`,
             { cause: error }
           );
@@ -1936,6 +2296,11 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
     assert.equal(result.coarseTerminalCount, 1);
     assert.equal(result.coarsePublishCount, 0);
     assert.equal(result.finalState.every(Number.isFinite), true);
+    assert.equal(
+      result.finalStateChanged,
+      true,
+      JSON.stringify(result, null, 2)
+    );
     assert.equal(result.finalMechanicsFinite, true);
     assert.equal(result.reflux.valid, true, JSON.stringify(result, null, 2));
     assert.equal(result.reflux.structuralValid, true);
@@ -1945,7 +2310,50 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
     assert.equal(result.reflux.invalidCount, 0);
     assert.equal(result.reflux.keyMismatchCount, 0);
     assert.equal(result.reflux.routeRejectCount, 0);
+    assert.equal(result.reflux.committedFineSubstepCount, ratio);
+    assert.equal(result.reflux.consumedFineSubstepCount, ratio);
+    assert.equal(result.reflux.capturedOperationCount, ratio + 1);
+    assert.equal(result.reflux.expectedOperationCount, ratio + 1);
+    assert.equal(result.reflux.phase, 6);
     assert.equal(result.reflux.operatorSplit.valid, true);
+    assert.equal(result.reflux.phaseVolumeTransport.valid, true);
+    assert.equal(result.reflux.ambientBoundary.valid, true);
+    const transportProof = result.reflux.phaseVolumeTransportProof;
+    for (const predicate of [
+      'pressureParticipated',
+      'dragParticipated',
+      'coarsePressureRowsMatchHeader',
+      'coarseDragRowsMatchHeader',
+      'everyCoarseHeatContainsDrag',
+      'fineDragWithinRoute',
+      'coarseDragWithinRoute',
+      'accumulatorPressureRouteExact',
+      'finalReceiptPressureExact',
+      'fineRouteConsumed',
+      'coarseRouteConsumed',
+      'totalHeatConsumed',
+      'ambientParticipated',
+      'ambientReceiptBitsExact'
+    ]) {
+      assert.equal(
+        transportProof[predicate],
+        true,
+        `r=${ratio} Slice 9 proof failed: ${predicate}; `
+          + JSON.stringify(transportProof, null, 2)
+      );
+    }
+    if (ratio === 1) {
+      assert.equal(transportProof.coarsePressureRowsBitsExact, true);
+      assert.equal(transportProof.coarseDragRowsBitsExact, true);
+    }
+    assert.deepEqual(
+      result.reflux.ambientBoundary.cumulativeImpulseNs,
+      transportProof.expectedAmbientImpulseNs
+    );
+    assert.equal(
+      result.reflux.ambientBoundary.cumulativeExternalWorkJ,
+      transportProof.expectedAmbientExternalWorkJ
+    );
     assert.equal(
       result.reflux.synchronizationProof.actualRowDeltaBitsExact,
       true

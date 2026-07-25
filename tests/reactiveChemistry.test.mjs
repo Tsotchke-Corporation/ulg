@@ -226,6 +226,68 @@ test('stoichiometric extent consumes limiting reactant and preserves leftover re
   assert.equal(parts[0].reactionProductTerm.sourceEquation, '2 Na + 2 H2O -> 2 NaOH + H2');
 });
 
+test('stoichiometric products preserve momentum and thermalize relative kinetic energy', () => {
+  const parts = [
+    { x: [0, 0, 0], v: [4, -1, 0.5], massKg: 2, material: 'a', specificInternalEnergyJPerKg: 100 },
+    { x: [0.01, 0, 0], v: [-2, 3, -0.5], massKg: 3, material: 'b', specificInternalEnergyJPerKg: 200 }
+  ];
+  const momentum = (particles) => particles.reduce(
+    (sum, particle) => sum.map(
+      (component, axis) => component + particle.massKg * particle.v[axis]
+    ),
+    [0, 0, 0]
+  );
+  const totalEnergy = (particles) => particles.reduce((sum, particle) => (
+    sum + particle.massKg * (
+      particle.specificInternalEnergyJPerKg
+      + 0.5 * particle.v.reduce(
+        (speedSquared, velocity) => speedSquared + velocity * velocity,
+        0
+      )
+    )
+  ), 0);
+  const beforeMomentum = momentum(parts);
+  const beforeEnergy = totalEnergy(parts);
+  const specificEnthalpyJPerKg = -1000;
+  const events = reactiveStep({ particles: parts }, {
+    reactions: [{
+      a: 'a',
+      b: 'b',
+      product: 'c',
+      activationTemperatureK: 0,
+      specificEnthalpyJPerKg,
+      stoichiometry: {
+        equation: 'A + B -> C + D',
+        reactants: [
+          { coefficient: 1, formula: 'A', material: 'a' },
+          { coefficient: 1, formula: 'B', material: 'b' }
+        ],
+        products: [
+          { coefficient: 1, formula: 'C', material: 'c' },
+          { coefficient: 1, formula: 'D', material: 'd' }
+        ]
+      }
+    }],
+    materialProperties: {
+      a: { molarMassKgPerMol: 1, phases: [{ name: 'solid', densityKgPerM3: 1, cpJPerKgK: 1, temperatureRange: [0, 10000] }], transitions: [] },
+      b: { molarMassKgPerMol: 1.5, phases: [{ name: 'solid', densityKgPerM3: 1, cpJPerKgK: 1, temperatureRange: [0, 10000] }], transitions: [] },
+      c: { molarMassKgPerMol: 1.75, phases: [{ name: 'liquid', densityKgPerM3: 1, cpJPerKgK: 1, temperatureRange: [0, 10000] }], transitions: [] },
+      d: { molarMassKgPerMol: 0.75, phases: [{ name: 'gas', densityKgPerM3: 1, cpJPerKgK: 1, temperatureRange: [0, 10000] }], transitions: [] }
+    },
+    contactRadiusM: 0.05,
+    temperatureOf: () => 1000
+  });
+
+  assert.equal(events, 1);
+  const afterMomentum = momentum(parts);
+  for (let axis = 0; axis < 3; axis += 1) {
+    assert.ok(Math.abs(afterMomentum[axis] - beforeMomentum[axis]) < 1e-9);
+  }
+  const reactedMass = parts.reduce((sum, particle) => sum + particle.massKg, 0);
+  const expectedEnergy = beforeEnergy - specificEnthalpyJPerKg * reactedMass;
+  assert.ok(Math.abs(totalEnergy(parts) - expectedEnergy) < 1e-8);
+});
+
 test('stoichiometric extent writes mass, heat, and gas-product reaction ledger', () => {
   const state = {
     particles: [

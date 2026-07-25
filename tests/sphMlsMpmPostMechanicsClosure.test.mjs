@@ -196,8 +196,8 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
     'thermal',
     'reaction-discovery',
     'reaction',
-    'refresh',
     'phase-v2',
+    'refresh',
     'product-merge'
   ]);
   assert.equal(calls[0][1].sourceStateBuffer, sourceState);
@@ -223,16 +223,16 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
   assert.equal(calls[4][1].sourceStateBuffer, reactionState);
   assert.equal(calls[4][1].sourceThermoBuffer, reactionThermo);
   assert.equal(calls[4][1].sourceMechanicsBuffer, reactionMechanics);
-  assert.equal(calls[5][1].sourceStateBuffer, reactionState);
-  assert.equal(calls[5][1].sourceThermoBuffer, reactionThermo);
-  assert.equal(calls[5][1].sourceMechanicsBuffer, refreshedMechanics);
+  assert.equal(calls[5][1].sourceStateBuffer, phaseState);
+  assert.equal(calls[5][1].sourceThermoBuffer, phaseThermo);
+  assert.equal(calls[5][1].sourceMechanicsBuffer, phaseMechanics);
   assert.equal(calls[6][1].inputResidentProductMass,
     inputResidentProductMass);
   assert.equal(calls[6][1].emittedResidentProductMass,
     emittedResidentProductMass);
   assert.equal(result.continuation.stateBuffer, phaseState);
   assert.equal(result.continuation.thermoBuffer, phaseThermo);
-  assert.equal(result.continuation.mechanicsBuffer, phaseMechanics);
+  assert.equal(result.continuation.mechanicsBuffer, refreshedMechanics);
   assert.equal(result.continuation.phaseCarrierTransferApplied, true);
   assert.equal(result.continuation.productMassMergeRequired, false);
   assert.equal(result.continuation.residentProductMass,
@@ -1004,4 +1004,32 @@ test('unadopted reaction outputs retire once while exact claim replay stays auth
   assert.equal(reactionState.destroyCount, 1);
   assert.equal(reactionThermo.destroyCount, 1);
   assert.equal(reactionMechanics.destroyCount, 1);
+});
+
+test('post-mechanics closure never carries mechanics-field pressure rows as continuation state', async () => {
+  // Slice 9 appends immutable pressure rows to the mechanics-field view. Those
+  // rows belong to the field runtime for exactly one mutation generation and
+  // must never be reclassified as retained particle continuation state, or a
+  // later step could consume pressure that no longer describes its own P2G.
+  // The closure only ever classifies particle-side buffers, and this pins that:
+  // it must not name the mechanics-field view, its buffer, or its pressure rows.
+  const source = await import('node:fs').then(({ readFileSync }) => readFileSync(
+    new URL(
+      '../src/runtime/sph/sphMlsMpmPostMechanicsClosure.js',
+      import.meta.url
+    ),
+    'utf8'
+  ));
+  for (const forbidden of [
+    'mechanicsFieldView',
+    'fieldViewBuffer',
+    'pressureOffsetWords',
+    'pressureRow'
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      `post-mechanics closure must not classify ${forbidden}`
+    );
+  }
 });

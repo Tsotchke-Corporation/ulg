@@ -765,6 +765,17 @@ async function driveAuthoritativeCanonicalEpochs(options, {
     backend: 'webgpu',
     readbackMode: 'no-full-readback',
     normalHotLoopReadbackFree: true,
+    phaseVolumeInterfaceTransport: {
+      enabled: true,
+      pressureScale: 1,
+      dragScale: 1,
+      maxImpulseFraction: 0.5,
+      ambientBoundaryEvidence: 'sealed-external-impulse-and-work'
+    },
+    internalEnergyTransferStatus:
+      'signed-pressure-compensation-plus-nonnegative-drag-causal-heat-deposited-by-transpose-g2p',
+    refluxEvidenceStatus:
+      'gpu-measured-equal-opposite-linear-angular-pressure-drag-energy-ledger',
     couplingMode: 'composite-grid-subcycled-delta-prolongation',
     fineLevel: options.fineLevel,
     coarseLevel: options.fineLevel + 1,
@@ -1482,18 +1493,21 @@ test('Schroeder level assignment plan is GPU-first and readback-free by contract
   assert.equal(view.getFloat32(16, true), 0.25);
 });
 
-test('Schroeder level assignment WGSL uses SS phase-volume reference mass for represented volume', () => {
-  assert.match(schroederLevelAssignmentWgsl, /phase_volume_reference_mass_kg/);
-  assert.match(schroederLevelAssignmentWgsl, /mls_mpm_mechanics\[mechanics_offset \+ 31u\]/);
+test('Schroeder level assignment WGSL uses only authenticated V0*J current volume', () => {
   assert.match(
     schroederLevelAssignmentWgsl,
-    /density_represented_volume_m3 = phase_volume_reference_mass_kg \/ rest_density_kg_per_m3/
+    /let mechanics_volume_m3 = rest_volume_m3 \* volume_ratio_j/
   );
   assert.match(
     schroederLevelAssignmentWgsl,
-    /represented_volume_m3 = max\(mechanics_volume_m3, density_represented_volume_m3\)/
+    /let current_volume_authority_valid =/
   );
-  assert.match(schroederLevelAssignmentWgsl, /source_volume_m3 = mass_kg \/ rest_density_kg_per_m3/);
+  assert.match(schroederLevelAssignmentWgsl, /constitutive_status == 1\.0/);
+  assert.match(schroederLevelAssignmentWgsl, /eos_status == 1\.0/);
+  assert.doesNotMatch(
+    schroederLevelAssignmentWgsl,
+    /phase_volume_reference_mass_kg|mass_kg \/ rest_density_kg_per_m3/
+  );
   assert.match(schroederLevelAssignmentWgsl, /physical_radius_m = ss_volume_radius\(source_volume_m3\)/);
   assert.match(schroederLevelAssignmentWgsl, /level_assignments\[assignment_offset \+ 3u\] = represented_volume_m3/);
   assert.match(schroederLevelAssignmentWgsl, /level_assignments\[assignment_offset \+ 5u\] = source_volume_m3/);
@@ -10359,7 +10373,7 @@ test('Schroeder two-level authority builds one canonical generation with two com
   );
   assert.equal(
     result.spatialEpochConsumerStatus,
-    'canonical-spatial-directory-not-consumed-two-level-authoritative-path'
+    'canonical-spatial-directory-consumed-by-two-level-authoritative-mechanics'
   );
   const step = result.residentStep;
   assert.equal(step.status, 'schroeder-two-level-authoritative-step-executed');
@@ -10373,6 +10387,19 @@ test('Schroeder two-level authority builds one canonical generation with two com
   assert.equal(step.internalPressureScale, 0.75);
   assert.equal(step.ambientPressurePa, 101325);
   assert.equal(step.sidecars, 'shared-post-mechanics-closure');
+  assert.deepEqual(
+    step.phaseVolumeInterfaceTransport,
+    result.twoLevelMechanics.phaseVolumeInterfaceTransport
+  );
+  assert.equal(
+    step.internalEnergyTransferStatus,
+    result.twoLevelMechanics.internalEnergyTransferStatus
+  );
+  assert.equal(
+    step.refluxEvidenceStatus,
+    result.twoLevelMechanics.refluxEvidenceStatus
+  );
+  assert.equal(step.phaseVolumeInterfaceTransport.enabled, true);
   assert.ok(result.schroederSpatialSuccessorSourceFamily);
   assert.equal(
     step.nextParticleUploads.schroederSpatialSuccessorSourceFamily,

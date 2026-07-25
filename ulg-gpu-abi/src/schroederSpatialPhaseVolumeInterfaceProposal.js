@@ -299,6 +299,8 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalLayout({
     localHeadWords,
     localHeadByteLength: byteLength(localHeadWords, 'interface local-head bytes'),
     refluxRouteCapacity,
+    refluxRouteRowWords:
+      SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_REFLUX_ROUTE_WORDS,
     refluxRouteWords,
     refluxRouteByteLength: refluxRouteWords === 0
       ? Uint32Array.BYTES_PER_ELEMENT

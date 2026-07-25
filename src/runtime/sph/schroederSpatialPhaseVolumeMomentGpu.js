@@ -153,31 +153,6 @@ function encodePass(encoder, pipeline, bindGroup, workgroups, label, {
   return 1;
 }
 
-function encodeIndirectPass(encoder, pipeline, bindGroup, buffer, offset, label, options) {
-  const { gpuTimestampRecorder = null, timestampMetadata = null, producerId, stage } = options;
-  const timestampSpan = gpuTimestampRecorder?.active === true
-    && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
-    ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
-        producerId,
-        stage,
-        spanClass: 'same-production-command-encoder',
-        ...(timestampMetadata || {})
-      })
-    : null;
-  const pass = encoder.beginComputePass({ label });
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
-    throw new TypeError('phase-volume moment reduction requires indirect WebGPU dispatch');
-  }
-  pass.dispatchWorkgroupsIndirect(buffer, offset);
-  pass.end();
-  if (timestampSpan && typeof gpuTimestampRecorder.endEncoderSpan === 'function') {
-    gpuTimestampRecorder.endEncoderSpan(encoder, timestampSpan);
-  }
-  return 1;
-}
-
 /**
  * Create a retained GPU diagnostic sidecar for strict per-field V0*J volume
  * moments. Its source and field-view buffers are borrowed read-only; only the
@@ -645,6 +620,14 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
       const dispatch = Math.ceil(
         plan.candidateCount / SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_WORKGROUP_SIZE
       );
+      // The reducer owns the complete retained row capacity, not just the
+      // active field prefix. Every inactive row must be visited and zeroed so
+      // S9-B can authenticate the capacity tail without trusting stale arena
+      // contents from a prior generation.
+      const fieldCapacityDispatch = Math.ceil(
+        plan.fieldCapacity
+          / SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_WORKGROUP_SIZE
+      );
       let encodedDispatchCount = 0;
       const commonTimestamp = {
         generationId: plan.generationId,
@@ -677,12 +660,11 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
           stage: 'materialize-ranges'
         }
       );
-      encodedDispatchCount += encodeIndirectPass(
+      encodedDispatchCount += encodePass(
         encoder,
         pipelines.reduce,
         reduceBindGroup,
-        mechanicsFieldView.fieldViewBuffer,
-        FIELD_VIEW_DISPATCH_OFFSET_BYTES,
+        [fieldCapacityDispatch, 1, 1],
         `${label}Reduce`,
         {
           gpuTimestampRecorder,

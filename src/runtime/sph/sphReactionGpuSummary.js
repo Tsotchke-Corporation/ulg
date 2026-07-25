@@ -1322,6 +1322,7 @@ export async function runSphReactionSummaryWebGpu({
   reactionTable,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
+  sourceMechanicsBuffer = null,
   nextStateBuffer = null,
   nextThermoBuffer = null,
   nextMechanicsBuffer = null,
@@ -1367,6 +1368,11 @@ export async function runSphReactionSummaryWebGpu({
     || retainProductEventBuffer
     || canonicalReactionProductPlacementAuthority != null
   );
+  if (useProductEventBuffer && !sourceMechanicsBuffer) {
+    throw new TypeError(
+      'SPH reaction product events require the retained source mechanics buffer for V0*J conservation'
+    );
+  }
   const productEventWorkgroupCount = Math.max(1, Math.ceil(Math.max(1, productEventCount) / SUMMARY_WORKGROUP_SIZE));
   const placementParticleWorkgroupCount = Math.max(
     1,
@@ -1429,6 +1435,16 @@ export async function runSphReactionSummaryWebGpu({
   if (reactionWarmArenaLease && !canonicalSpatialPlacementEnabled) {
     throw new TypeError(
       'reaction warm arena summary execution requires canonical product placement'
+    );
+  }
+  // Slice 9 makes represented current volume the geometry authority. The
+  // legacy placement path derives geometry from density, writes F = I with
+  // J = 1, and loses relative kinetic energy, so it cannot satisfy that
+  // contract. Any run that actually places products must present the canonical
+  // placement authority or fail closed; there is no silent legacy fallback.
+  if (shouldRunProductPlacement && !canonicalSpatialPlacementEnabled) {
+    throw new TypeError(
+      'product placement requires the canonical Schroeder spatial placement authority'
     );
   }
   const reactionWarmArena = reactionWarmArenaLease
@@ -1939,7 +1955,7 @@ export async function runSphReactionSummaryWebGpu({
     }
     if (useProductEventBuffer) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-product-event',
+        cacheKey: 'ulg-sph-reaction-product-event-v2-current-volume',
         label: 'ulg-sph-reaction-product-event',
         code: sphReactionProductEventWgsl,
         entryPoint: 'main',
@@ -1951,7 +1967,8 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(4, 'read-only-storage'),
           computeBufferBinding(5, 'read-only-storage'),
           computeBufferBinding(6, 'storage'),
-          computeBufferBinding(7, 'uniform')
+          computeBufferBinding(7, 'uniform'),
+          computeBufferBinding(8, 'read-only-storage')
         ]
       });
       productEventPipeline = pipeline;
@@ -1965,7 +1982,8 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 4, resource: { buffer: recordsBuffer } },
           { binding: 5, resource: { buffer: proposalsBuffer } },
           { binding: 6, resource: { buffer: productEventEmissionBuffer } },
-          { binding: 7, resource: { buffer: paramsBuffer } }
+          { binding: 7, resource: { buffer: paramsBuffer } },
+          { binding: 8, resource: { buffer: sourceMechanicsBuffer } }
         ]
       });
     }

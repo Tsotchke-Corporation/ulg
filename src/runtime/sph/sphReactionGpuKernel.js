@@ -1760,7 +1760,12 @@ function appendReactionLedgerEvent(ledger, event) {
   }
 }
 
-function sourceInfoForReaction({ sphParticleState, index, reactantTerms }) {
+function sourceInfoForReaction({
+  sphParticleState,
+  mlsMpmParticleState,
+  index,
+  reactantTerms
+}) {
   const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
   const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
   const materialId = sphParticleState.thermo[thermoOffset];
@@ -1770,11 +1775,40 @@ function sourceInfoForReaction({ sphParticleState, index, reactantTerms }) {
   const molarMassKgPerMol = finiteNumber(term.molarMassKgPerMol, 0);
   const coefficient = finiteNumber(term.coefficient, 0);
   if (!(massKg > 0) || !(molarMassKgPerMol > 0) || !(coefficient > 0)) return null;
+  const mechanicsOffset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+  const volumeRatioJ = Number(
+    mlsMpmParticleState.mechanics[mechanicsOffset + 18]
+  );
+  const restVolumeM3 = Number(
+    mlsMpmParticleState.mechanics[mechanicsOffset + 19]
+  );
+  const currentVolumeM3 = volumeRatioJ * restVolumeM3;
+  if (
+    !(volumeRatioJ > 0)
+    || !(restVolumeM3 > 0)
+    || !(currentVolumeM3 > 0)
+    || !Number.isFinite(currentVolumeM3)
+    || Math.round(mlsMpmParticleState.mechanics[mechanicsOffset + 21]) !== 1
+    || Math.round(mlsMpmParticleState.mechanics[mechanicsOffset + 27]) !== 1
+  ) {
+    return null;
+  }
   return {
     index,
     term,
     materialId,
     massKg,
+    position: [
+      sphParticleState.state[stateOffset],
+      sphParticleState.state[stateOffset + 1],
+      sphParticleState.state[stateOffset + 2]
+    ],
+    velocity: [
+      sphParticleState.state[stateOffset + 4],
+      sphParticleState.state[stateOffset + 5],
+      sphParticleState.state[stateOffset + 6]
+    ],
+    currentVolumeM3,
     specificInternalEnergyJPerKg: sphParticleState.state[stateOffset + 7],
     availableMoles: massKg / molarMassKgPerMol,
     limitingExtentMol: massKg / (coefficient * molarMassKgPerMol)
@@ -1808,13 +1842,19 @@ function planStoichiometricFixedBufferEvent({
   table,
   reactionIndex,
   sourceIndices,
-  sphParticleState
+  sphParticleState,
+  mlsMpmParticleState
 }) {
   const reactantTerms = reactantTermsForReactionTableRecord(table, reactionIndex);
   const productTerms = productTermsForReactionTableRecord(table, reactionIndex)
     .filter((term) => finiteNumber(term.molarMassKgPerMol, 0) > 0 && finiteNumber(term.coefficient, 0) > 0);
   if (reactantTerms.length < 2 || productTerms.length === 0) return null;
-  const sources = sourceIndices.map((index) => sourceInfoForReaction({ sphParticleState, index, reactantTerms }));
+  const sources = sourceIndices.map((index) => sourceInfoForReaction({
+    sphParticleState,
+    mlsMpmParticleState,
+    index,
+    reactantTerms
+  }));
   if (sources.some((source) => !source || !(source.limitingExtentMol > 0))) return null;
   const extentMol = Math.min(...sources.map((source) => source.limitingExtentMol));
   if (!(extentMol > 0)) return null;
@@ -1826,6 +1866,8 @@ function planStoichiometricFixedBufferEvent({
     return {
       ...source,
       consumedMassKg,
+      consumedCurrentVolumeM3:
+        source.currentVolumeM3 * consumedMassKg / source.massKg,
       remainingMassKg: Math.max(0, source.massKg - consumedMassKg)
     };
   });
@@ -1839,12 +1881,38 @@ function planStoichiometricFixedBufferEvent({
   });
   if (!products.length) return null;
   const rx = reactionRecord(table, reactionIndex);
-  const consumedEnergyJ = consumed.reduce(
-    (sum, source) => sum + source.consumedMassKg * source.specificInternalEnergyJPerKg,
+  const consumedMomentum = [0, 0, 0];
+  const consumedCenter = [0, 0, 0];
+  const consumedTotalEnergyJ = consumed.reduce((sum, source) => {
+    let speedSquared = 0;
+    for (let axis = 0; axis < 3; axis += 1) {
+      consumedMomentum[axis] += source.consumedMassKg * source.velocity[axis];
+      consumedCenter[axis] += source.consumedMassKg * source.position[axis];
+      speedSquared += source.velocity[axis] * source.velocity[axis];
+    }
+    return sum + source.consumedMassKg
+      * (source.specificInternalEnergyJPerKg + 0.5 * speedSquared);
+  }, 0);
+  const productVelocity = consumedMomentum.map(
+    (momentum) => momentum / consumedMassKg
+  );
+  const productPosition = consumedCenter.map(
+    (moment) => moment / consumedMassKg
+  );
+  const productSpeedSquared = productVelocity.reduce(
+    (sum, velocity) => sum + velocity * velocity,
     0
   );
   const heatJ = -rx.specificEnthalpyJPerKg * consumedMassKg;
-  const productSpecificInternalEnergyJPerKg = (consumedEnergyJ + heatJ) / consumedMassKg;
+  const productSpecificInternalEnergyJPerKg = (
+    consumedTotalEnergyJ
+    + heatJ
+    - 0.5 * consumedMassKg * productSpeedSquared
+  ) / consumedMassKg;
+  const consumedCurrentVolumeM3 = consumed.reduce(
+    (sum, source) => sum + source.consumedCurrentVolumeM3,
+    0
+  );
   const freeSlots = consumed.filter((source) => {
     const epsilon = Math.max(source.massKg, 1) * 1e-7;
     return source.remainingMassKg <= epsilon;
@@ -1866,6 +1934,10 @@ function planStoichiometricFixedBufferEvent({
         productIndex: 0,
         product: productVisibility[0],
         massKg,
+        currentVolumeM3:
+          consumedCurrentVolumeM3 * massKg / consumedMassKg,
+        position: productPosition,
+        velocity: productVelocity,
         specificInternalEnergyJPerKg: productSpecificInternalEnergyJPerKg
       });
       productVisibility[0].visibleMassKg += massKg;
@@ -1879,6 +1951,10 @@ function planStoichiometricFixedBufferEvent({
         productIndex: slot,
         product,
         massKg: product.massKg,
+        currentVolumeM3:
+          consumedCurrentVolumeM3 * product.massKg / consumedMassKg,
+        position: productPosition,
+        velocity: productVelocity,
         specificInternalEnergyJPerKg: productSpecificInternalEnergyJPerKg
       });
       product.visibleMassKg += product.massKg;
@@ -1989,17 +2065,39 @@ function writeResolvedThermoRow(thermo, index, materialId, resolved, sourceTherm
   thermo[offset + 11] = sourceThermo2[3] ?? 0;
 }
 
-function resetMechanicsForProduct(mechanics, index, massKg, resolved, productMechanics) {
+function resetMechanicsForProduct(
+  mechanics,
+  index,
+  massKg,
+  currentVolumeM3,
+  resolved,
+  productMechanics
+) {
   const offset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
   const restDensity = resolved.restDensityKgPerM3 > 0
     ? resolved.restDensityKgPerM3
     : productMechanics.restDensityKgPerM3;
+  const restVolumeM3 = restDensity > 0 ? massKg / restDensity : 0;
+  const volumeRatioJ = restVolumeM3 > 0
+    ? currentVolumeM3 / restVolumeM3
+    : 0;
+  const deformationScale = Math.cbrt(volumeRatioJ);
+  if (
+    !(massKg > 0)
+    || !(currentVolumeM3 > 0)
+    || !(restVolumeM3 > 0)
+    || !(volumeRatioJ > 0)
+    || !Number.isFinite(deformationScale)
+    || Math.round(productMechanics.status) !== 1
+  ) {
+    return false;
+  }
   mechanics.set([
-    1, 0, 0, 0,
-    1, 0, 0, 0,
-    1, 0, 0, 0,
+    deformationScale, 0, 0, 0,
+    deformationScale, 0, 0, 0,
+    deformationScale, 0, 0, 0,
     0, 0, 0, 0,
-    0, 0, 1, restDensity > 0 ? massKg / restDensity : 0,
+    0, 0, volumeRatioJ, restVolumeM3,
     productMechanics.solidFlag,
     productMechanics.status,
     productMechanics.effectiveBulkModulusPa,
@@ -2013,6 +2111,7 @@ function resetMechanicsForProduct(mechanics, index, massKg, resolved, productMec
     0,
     0
   ], offset);
+  return true;
 }
 
 function updateMechanicsRestVolumeForMass(mechanics, thermo, index, massKg) {
@@ -2431,9 +2530,58 @@ export function runSphReactionStepCpu({
       table: reactionTable,
       reactionIndex: Math.round(reactionIndex),
       sourceIndices,
-      sphParticleState
+      sphParticleState,
+      mlsMpmParticleState
     });
     if (fixedBufferPlan) {
+      const preparedProducts = new Map();
+      let fixedBufferPlanReady = true;
+      for (const sourceIndex of sourceIndices) {
+        const output = fixedBufferPlan.outputs.get(sourceIndex);
+        if (!output || output.kind !== 'product') continue;
+        const materialId = output.product?.term?.materialId || rx.productMaterialId;
+        const nextMass = Math.max(output.massKg, 0);
+        const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
+          graphSet: resolvedGraphSet,
+          responseTable: resolvedPhaseResponseTable,
+          materialId,
+          specificInternalEnergyJPerKg: output.specificInternalEnergyJPerKg
+        });
+        const productMechanics = productPhaseRecord(
+          reactionTable,
+          materialId,
+          resolved.phaseId
+        );
+        const mechanicsProbe = new Float32Array(
+          MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+        );
+        if (
+          !output.position.every(Number.isFinite)
+          || !output.velocity.every(Number.isFinite)
+          || !Number.isFinite(output.specificInternalEnergyJPerKg)
+          || !resetMechanicsForProduct(
+            mechanicsProbe,
+            0,
+            nextMass,
+            output.currentVolumeM3,
+            resolved,
+            productMechanics
+          )
+        ) {
+          fixedBufferPlanReady = false;
+          break;
+        }
+        preparedProducts.set(sourceIndex, {
+          materialId,
+          nextMass,
+          resolved,
+          productMechanics
+        });
+      }
+      if (!fixedBufferPlanReady) {
+        stoichiometryFailClosedPairCount += 1;
+        continue;
+      }
       for (const sourceIndex of sourceIndices) {
         const output = fixedBufferPlan.outputs.get(sourceIndex);
         if (!output) continue;
@@ -2444,17 +2592,22 @@ export function runSphReactionStepCpu({
           updateMechanicsRestVolumeForMass(mechanics, thermo, sourceIndex, state[stateOffset + 3]);
           continue;
         }
-        const materialId = output.product?.term?.materialId || rx.productMaterialId;
-        const nextMass = Math.max(output.massKg, 0);
-        const nextU = output.specificInternalEnergyJPerKg;
-        state[stateOffset + 3] = nextMass;
-        state[stateOffset + 7] = nextU;
-        const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
-          graphSet: resolvedGraphSet,
-          responseTable: resolvedPhaseResponseTable,
+        const prepared = preparedProducts.get(sourceIndex);
+        const {
           materialId,
-          specificInternalEnergyJPerKg: nextU
-        });
+          nextMass,
+          resolved,
+          productMechanics
+        } = prepared;
+        const nextU = output.specificInternalEnergyJPerKg;
+        state[stateOffset] = output.position[0];
+        state[stateOffset + 1] = output.position[1];
+        state[stateOffset + 2] = output.position[2];
+        state[stateOffset + 3] = nextMass;
+        state[stateOffset + 4] = output.velocity[0];
+        state[stateOffset + 5] = output.velocity[1];
+        state[stateOffset + 6] = output.velocity[2];
+        state[stateOffset + 7] = nextU;
         writeResolvedThermoRow(thermo, sourceIndex, materialId, resolved, [
           sphParticleState.thermo[thermoOffset + 8],
           sphParticleState.thermo[thermoOffset + 9],
@@ -2465,8 +2618,9 @@ export function runSphReactionStepCpu({
           mechanics,
           sourceIndex,
           nextMass,
+          output.currentVolumeM3,
           resolved,
-          productPhaseRecord(reactionTable, materialId, resolved.phaseId)
+          productMechanics
         );
         conversionCount += 1;
       }
@@ -2486,6 +2640,19 @@ export function runSphReactionStepCpu({
       return sphParticleState.state[stateOffset + 3];
     });
     const totalSourceMass = sourceMasses.reduce((sum, mass) => sum + mass, 0);
+    const sourceCurrentVolumes = sourceIndices.map((sourceIndex) => {
+      const mechanicsOffset =
+        sourceIndex * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+      return mlsMpmParticleState.mechanics[mechanicsOffset + 18]
+        * mlsMpmParticleState.mechanics[mechanicsOffset + 19];
+    });
+    const totalSourceCurrentVolume = sourceCurrentVolumes.reduce(
+      (sum, volume) => sum + volume,
+      0
+    );
+    const legacyPrepared = [];
+    let legacyReady = Number.isFinite(totalSourceCurrentVolume)
+      && totalSourceCurrentVolume > 0;
     for (let slotIndex = 0; slotIndex < sourceIndices.length; slotIndex += 1) {
       const sourceIndex = sourceIndices[slotIndex];
       const term = productTerms[Math.min(slotIndex, productTerms.length - 1)] || productTerms[0];
@@ -2498,15 +2665,64 @@ export function runSphReactionStepCpu({
       const nextMass = productTerms.length === 1
         ? sourceMasses[slotIndex]
         : Math.max(totalSourceMass * massFraction, 0);
+      const nextCurrentVolume = productTerms.length === 1
+        ? sourceCurrentVolumes[slotIndex]
+        : totalSourceCurrentVolume * nextMass / Math.max(totalSourceMass, 1e-20);
       const nextU = sphParticleState.state[stateOffset + 7] - rx.specificEnthalpyJPerKg;
-      state[stateOffset + 3] = nextMass;
-      state[stateOffset + 7] = nextU;
       const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
         graphSet: resolvedGraphSet,
         responseTable: resolvedPhaseResponseTable,
         materialId,
         specificInternalEnergyJPerKg: nextU
       });
+      const productMechanics = productPhaseRecord(
+        reactionTable,
+        materialId,
+        resolved.phaseId
+      );
+      const mechanicsProbe = new Float32Array(
+        MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+      );
+      if (!resetMechanicsForProduct(
+        mechanicsProbe,
+        0,
+        nextMass,
+        nextCurrentVolume,
+        resolved,
+        productMechanics
+      )) {
+        legacyReady = false;
+      }
+      legacyPrepared.push({
+        sourceIndex,
+        stateOffset,
+        thermoOffset,
+        materialId,
+        nextMass,
+        nextCurrentVolume,
+        nextU,
+        resolved,
+        productMechanics
+      });
+    }
+    if (!legacyReady) {
+      stoichiometryFailClosedPairCount += 1;
+      continue;
+    }
+    for (const prepared of legacyPrepared) {
+      const {
+        sourceIndex,
+        stateOffset,
+        thermoOffset,
+        materialId,
+        nextMass,
+        nextCurrentVolume,
+        nextU,
+        resolved,
+        productMechanics
+      } = prepared;
+      state[stateOffset + 3] = nextMass;
+      state[stateOffset + 7] = nextU;
       writeResolvedThermoRow(thermo, sourceIndex, materialId, resolved, [
         sphParticleState.thermo[thermoOffset + 8],
         sphParticleState.thermo[thermoOffset + 9],
@@ -2517,8 +2733,9 @@ export function runSphReactionStepCpu({
         mechanics,
         sourceIndex,
         nextMass,
+        nextCurrentVolume,
         resolved,
-        productPhaseRecord(reactionTable, materialId, resolved.phaseId)
+        productMechanics
       );
       conversionCount += 1;
     }
@@ -3693,8 +3910,15 @@ export async function runSphReactionStepWebGpu({
         || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-state', sphParticleState.state));
       const summarySourceThermoBuffer = packSourceThermoBuffer
         || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-thermo', sphParticleState.thermo));
+      const summarySourceMechanicsBuffer = packSourceMechanicsBuffer
+        || registerReactionOwnedBuffer(writeStorageBuffer(
+          device,
+          'ulg-sph-reaction-summary-source-mechanics',
+          mlsMpmParticleState.mechanics
+        ));
       if (!packSourceStateBuffer) temporarySummaryBuffers.push(summarySourceStateBuffer);
       if (!packSourceThermoBuffer) temporarySummaryBuffers.push(summarySourceThermoBuffer);
+      if (!packSourceMechanicsBuffer) temporarySummaryBuffers.push(summarySourceMechanicsBuffer);
       if (canonicalReactionDiscoveryEnabled) {
         const positionInvariantCertificate =
           createSphReactionResolvePositionInvariantCertificate({
@@ -3757,6 +3981,7 @@ export async function runSphReactionStepWebGpu({
         reactionTable,
         sourceStateBuffer: summarySourceStateBuffer,
         sourceThermoBuffer: summarySourceThermoBuffer,
+        sourceMechanicsBuffer: summarySourceMechanicsBuffer,
         nextStateBuffer: continuationStateBuffer,
         nextThermoBuffer: continuationThermoBuffer,
         nextMechanicsBuffer: continuationMechanicsBuffer,

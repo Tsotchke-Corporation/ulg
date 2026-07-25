@@ -43,6 +43,12 @@ import {
   validateLocallySubmittedMlsMpmMechanicsFieldP2g
 } from './sphGridGpuKernel.js';
 import {
+  resolveSchroederSpatialPhaseVolumeTransportAuthority
+} from './schroederSpatialEpochTransaction.js';
+import {
+  uploadedMechanicsMaterialPhaseRecordsMatch
+} from './sphMechanicsRefreshGpuKernel.js';
+import {
   claimSchroederFusedCoarseTerminalStageProducer,
   markSchroederFusedCoarseTerminalStageSubmissionObserved,
   markSchroederFusedCoarseTerminalStageSubmitted,
@@ -111,7 +117,17 @@ const PIPELINE_BINDINGS = Object.freeze({
   applyFine: Object.freeze([0, 1, 3, 4, 5]),
   applyFineHeat: Object.freeze([0, 1, 3, 4, 5]),
   commitReflux: Object.freeze([0, 1, 3, 4, 5]),
-  finalizeFine: Object.freeze([0, 1, 3, 4, 5]),
+  // Fine finalization now settles cross-level phase-volume routes, which
+  // reads the coarse mechanics field view (2).
+  finalizeFine: Object.freeze([0, 1, 2, 3, 4, 5]),
+  // Admission authenticates the coarse pressure receipt and coarse phase
+  // moments, so it binds the coarse mechanics field view (2) as well.
+  admitCrossLevelPhaseVolume:
+    Object.freeze([0, 1, 2, 3, 5, 6, 7, 8, 9]),
+  // Proposal reads coarse phase state and pressure rows through the coarse
+  // mechanics field view (2) while routing impulses through the workspace.
+  proposeCrossLevelPhaseVolume:
+    Object.freeze([0, 1, 2, 3, 4, 5, 7, 8, 9, 10]),
   initializeTerminal: Object.freeze([0, 2, 3, 4, 5]),
   registerTerminal: Object.freeze([0, 2, 3, 4, 5]),
   sealTerminal: Object.freeze([0, 2, 3, 4, 5]),
@@ -119,7 +135,7 @@ const PIPELINE_BINDINGS = Object.freeze({
   beginCoarse: Object.freeze([0, 2, 3, 4, 5]),
   validateCoarse: Object.freeze([0, 2, 3, 4, 5]),
   sealCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  prepareCoarse: Object.freeze([3, 4, 5]),
+  prepareCoarse: Object.freeze([2, 3, 4, 5]),
   applyCoarseRows: Object.freeze([3, 4, 5]),
   applyCoarse: Object.freeze([2, 3, 4, 5]),
   commitCoarse: Object.freeze([3, 4, 5]),
@@ -495,7 +511,7 @@ function fineCorrectionMatchesOrigin(correction, origin, {
     && correction?.proposalMode === origin.proposalMode
     && receipt === origin.receipt
     && receipt?.schema
-      === 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2'
+      === 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3'
     && receipt?.status === 'energy-ready-submitted-unverified'
     && receipt?.deferSeal === false
     && receipt?.fieldMutationOrdinal === origin.outputOrdinal
@@ -724,7 +740,7 @@ function coarseTerminalMatchesOrigin(artifact, origin, {
     && artifact.normalHotLoopReadbackFree === true
     && receipt === origin.receipt
     && receipt?.schema
-      === 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2'
+      === 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3'
     && receipt?.status === 'energy-ready-submitted-unverified'
     && receipt?.deferSeal === false
     && receipt?.fieldMutationOrdinal === origin.mutationSegment.outputOrdinal
@@ -1013,7 +1029,13 @@ function paramsData(execution, {
   maxCorrectionMPerS,
   wallBarrierElasticStiffnessNPerM = 0,
   wallBarrierContactScale = 1,
-  wallBarrierMinGapM = 1e-6
+  wallBarrierMinGapM = 1e-6,
+  phaseVolumeTransportAuthority = null,
+  mechanicsMaterialPhaseUpload = null,
+  ambientPressurePa = 0,
+  phaseVolumePressureScale = 1,
+  phaseVolumeDragScale = 1,
+  phaseVolumeMaxImpulseFraction = 0.5
 }) {
   const data = new ArrayBuffer(
     SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES
@@ -1123,6 +1145,47 @@ function paramsData(execution, {
   f32(61, macroDtSeconds);
   u32(62, execution.refluxLedger.macroOwnerId ?? execution.arenaGeneration);
   u32(63, execution.refluxLedger.ownerGeneration ?? execution.arenaGeneration);
+  u32(64, phaseVolumeTransportAuthority ? 1 : 0);
+  u32(
+    65,
+    phaseVolumeTransportAuthority
+      ? mechanicsMaterialPhaseUpload?.phaseRecordCount ?? 0
+      : 0
+  );
+  u32(
+    66,
+    phaseVolumeTransportAuthority
+      ?.phaseVolumeInterfaceRefluxRouteCapacity
+      ?? 0
+  );
+  u32(
+    67,
+    phaseVolumeTransportAuthority
+      ?.phaseVolumeInterfaceRefluxRouteRowWords
+      ?? 0
+  );
+  f32(68, Math.max(0, finiteNumber(ambientPressurePa, 'ambientPressurePa')));
+  f32(
+    69,
+    Math.max(
+      0,
+      finiteNumber(phaseVolumePressureScale, 'phaseVolumePressureScale')
+    )
+  );
+  f32(
+    70,
+    Math.max(0, finiteNumber(phaseVolumeDragScale, 'phaseVolumeDragScale'))
+  );
+  f32(
+    71,
+    Math.max(
+      0,
+      finiteNumber(
+        phaseVolumeMaxImpulseFraction,
+        'phaseVolumeMaxImpulseFraction'
+      )
+    )
+  );
   return data;
 }
 
@@ -1310,8 +1373,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     'device.limits.maxStorageBuffersPerShaderStage',
     0xffff
   );
-  if (maxStorageBuffersPerShaderStage < 5) {
-    throw new RangeError('parent-field mechanics requires five storage bindings');
+  if (maxStorageBuffersPerShaderStage < 8) {
+    throw new RangeError('parent-field mechanics requires eight storage bindings');
   }
   if (
     SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES
@@ -1348,6 +1411,10 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     applyFineHeat: pipeline('apply_fine_route_heat'),
     commitReflux: pipeline('commit_routed_reflux'),
     finalizeFine: pipeline('finalize_fine_velocity_correction'),
+    admitCrossLevelPhaseVolume:
+      pipeline('admit_cross_level_phase_volume'),
+    proposeCrossLevelPhaseVolume:
+      pipeline('propose_cross_level_phase_volume'),
     initializeTerminal: pipeline('initialize_coarse_terminal_workspace'),
     registerTerminal: pipeline('register_coarse_terminal_registry'),
     sealTerminal: pipeline('seal_coarse_terminal_workspace'),
@@ -1760,7 +1827,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       )
       || coarseGridUpdate?.mechanicsFieldEnergyReceipt?.deferSeal !== true
       || coarseGridUpdate?.mechanicsFieldEnergyReceipt?.schema
-        !== 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2'
+        !== 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3'
       || coarseGridUpdate?.mechanicsFieldEnergyReceipt?.status
         !== 'heat-building-deferred-to-reflux-owner'
       || coarseGridUpdate?.mechanicsFieldEnergyReceipt?.fieldMutationOrdinal
@@ -1812,7 +1879,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   }
 
   function resourcesFor(execution) {
-    return new Map([
+    const resources = new Map([
       [0, execution.parentFieldView.parentFieldViewBuffer],
       [1, execution.parentFieldView.fineFieldView.fieldViewBuffer],
       [2, execution.parentFieldView.coarseFieldView.fieldViewBuffer],
@@ -1820,6 +1887,21 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       [4, execution.refluxLedger.buffer],
       [5, execution.paramsBuffer]
     ]);
+    const transport = execution.phaseVolumeTransportAuthority;
+    if (transport) {
+      resources.set(
+        6,
+        transport.phaseVolumeInterfaceProposalControlBuffer
+      );
+      resources.set(
+        7,
+        transport.phaseVolumeInterfaceRefluxRouteBuffer
+      );
+      resources.set(8, transport.finePhaseVolumeMomentBuffer);
+      resources.set(9, transport.coarsePhaseVolumeMomentBuffer);
+      resources.set(10, execution.mechanicsMaterialPhaseBuffer);
+    }
+    return resources;
   }
 
   function resolveRefluxLedger(
@@ -2237,7 +2319,15 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     fineGridUpdate,
     deltaScale = 1,
     maxCorrectionMPerS = 0,
-    fusedFineSubstepTransaction = execution?.fusedFineSubstepTransaction ?? null
+    fusedFineSubstepTransaction = execution?.fusedFineSubstepTransaction ?? null,
+    schroederSpatialEpochTransaction = null,
+    mechanicsMaterialTable = null,
+    mechanicsMaterialPhaseUpload = null,
+    ambientPressurePa = 0,
+    phaseVolumePressureScale = 1,
+    phaseVolumeDragScale = 1,
+    phaseVolumeMaxImpulseFraction = 0.5,
+    phaseVolumeInterfaceTransportRequired = false
   } = {}) {
     assertEncoder(encoder);
     const ownership = ownershipFor(execution);
@@ -2319,6 +2409,65 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         'Slice-7 fine correction requires the full causal impulse (deltaScale must equal 1)'
       );
     }
+    let phaseVolumeTransportAuthority = null;
+    if (schroederSpatialEpochTransaction != null) {
+      phaseVolumeTransportAuthority =
+        resolveSchroederSpatialPhaseVolumeTransportAuthority(
+          schroederSpatialEpochTransaction,
+          {
+            generation:
+              fusedTransaction?.microepochAuthority?.generation
+              ?? schroederSpatialEpochTransaction.generation,
+            selectedLevel: execution.parentFieldView.fineLevel,
+            mechanicsFieldView: execution.fineFieldView
+          }
+        );
+      if (
+        phaseVolumeTransportAuthority.fineMechanicsFieldView
+          !== execution.fineFieldView
+        || phaseVolumeTransportAuthority.coarseMechanicsFieldView
+          !== execution.coarseFieldView
+        || phaseVolumeTransportAuthority.parentFieldView
+          !== execution.parentFieldView
+        || phaseVolumeTransportAuthority.parentFieldViewBuffer
+          !== execution.parentFieldView.parentFieldViewBuffer
+        || phaseVolumeTransportAuthority.levelIndex !== 0
+        || phaseVolumeTransportAuthority.selectedLevel
+          !== execution.parentFieldView.fineLevel
+        || uploadedMechanicsMaterialPhaseRecordsMatch(
+          mechanicsMaterialPhaseUpload,
+          mechanicsMaterialTable,
+          device
+        ) !== true
+      ) {
+        throw new TypeError(
+          'Cross-level phase-volume transport requires exact fine/coarse S9 authority and mechanics material records'
+        );
+      }
+    }
+    if (
+      phaseVolumeInterfaceTransportRequired === true
+      && phaseVolumeTransportAuthority == null
+    ) {
+      throw new TypeError(
+        'Required cross-level phase-volume transport authority is unavailable'
+      );
+    }
+    if (
+      phaseVolumeInterfaceTransportRequired !== true
+      && phaseVolumeTransportAuthority != null
+    ) {
+      throw new TypeError(
+        'Cross-level phase-volume transport authority cannot be supplied when transport is disabled'
+      );
+    }
+    execution.phaseVolumeTransportAuthority =
+      phaseVolumeTransportAuthority;
+    execution.mechanicsMaterialPhaseBuffer =
+      phaseVolumeTransportAuthority
+        ? mechanicsMaterialPhaseUpload.recordsBuffer
+          ?? mechanicsMaterialPhaseUpload.materialPhaseBuffer
+        : null;
     const fieldRuntime = execution.fineFieldView.ownerRuntime;
     if (fusedTransaction == null && (
       typeof fieldRuntime?.reserveStateMutation !== 'function'
@@ -2356,7 +2505,29 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       cflFactor: fineGridUpdate.cflFactor,
       deltaScale,
       maxCorrectionMPerS
+      ,
+      phaseVolumeTransportAuthority,
+      mechanicsMaterialPhaseUpload,
+      ambientPressurePa,
+      phaseVolumePressureScale,
+      phaseVolumeDragScale,
+      phaseVolumeMaxImpulseFraction
     }));
+    if (phaseVolumeTransportAuthority) {
+      encodeDirect(
+        encoder,
+        pipelines.admitCrossLevelPhaseVolume,
+        bindGroup(execution, 'admitCrossLevelPhaseVolume'),
+        `${label}AdmitCrossLevelPhaseVolume`
+      );
+      encodeIndirect(
+        encoder,
+        pipelines.proposeCrossLevelPhaseVolume,
+        bindGroup(execution, 'proposeCrossLevelPhaseVolume'),
+        ownership.arena.fineIndirectBuffer,
+        `${label}ProposeCrossLevelPhaseVolume`
+      );
+    }
     encodeIndirect(
       encoder,
       pipelines.validateFine,
@@ -2513,8 +2684,10 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     }
     execution.deltaScale = Number(deltaScale);
     execution.maxCorrectionMPerS = Number(maxCorrectionMPerS);
-    execution.encodedDispatchCount += 9;
-    execution.encodedComputePassCount += 9;
+    const correctionDispatchCount =
+      phaseVolumeTransportAuthority ? 11 : 9;
+    execution.encodedDispatchCount += correctionDispatchCount;
+    execution.encodedComputePassCount += correctionDispatchCount;
     return correctedGridUpdate;
   }
 
@@ -2531,7 +2704,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       mechanicsFieldMutationInputStateEncoding: mutationToken.expectedEncoding,
       mechanicsFieldMutationOutputStateEncoding: mutationToken.outputEncoding,
       mechanicsFieldEnergyReceipt: Object.freeze({
-        schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2',
+        schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3',
         status: 'energy-ready-by-parent-field-terminal-encoded-unsubmitted',
         deferSeal: false,
         fieldMutationOrdinal: mutationToken.outputOrdinal
@@ -3406,7 +3579,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         terminalArtifact.fieldStateUpdateSubmittedInPlace = true;
         terminalArtifact.parentFieldMechanicsTerminalSubmitted = true;
         terminalArtifact.mechanicsFieldEnergyReceipt = Object.freeze({
-          schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2',
+          schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3',
           status: 'energy-ready-submitted-unverified',
           deferSeal: false,
           fieldMutationOrdinal: terminalMutationToken.outputOrdinal,
@@ -3506,7 +3679,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
           terminalArtifact.fieldStateUpdateSubmittedInPlace = true;
           terminalArtifact.parentFieldMechanicsTerminalSubmitted = true;
           terminalArtifact.mechanicsFieldEnergyReceipt = Object.freeze({
-            schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2',
+            schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3',
             status: 'energy-ready-submitted-unverified',
             deferSeal: false,
             fieldMutationOrdinal: terminalMutationToken.outputOrdinal,
@@ -3570,7 +3743,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         terminalArtifact.fieldStateUpdateSubmittedInPlace = true;
         terminalArtifact.parentFieldMechanicsTerminalSubmitted = true;
         terminalArtifact.mechanicsFieldEnergyReceipt = Object.freeze({
-          schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2',
+          schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3',
           status: 'energy-ready-submitted-unverified',
           deferSeal: false,
           fieldMutationOrdinal: terminalMutationToken.outputOrdinal,

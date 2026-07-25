@@ -1,10 +1,10 @@
 export const ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA =
-  'peercompute.ulg.schroeder-cross-level-reflux-ledger.v2';
+  'peercompute.ulg.schroeder-cross-level-reflux-ledger.v3';
 
-export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_MAGIC = 0x53524c32;
-export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_VERSION = 2;
-export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS = 128;
-export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS = 16;
+export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_MAGIC = 0x53524c33;
+export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_VERSION = 3;
+export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS = 136;
+export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS = 18;
 
 export const SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY = 1 << 0;
 export const SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED = 1 << 1;
@@ -158,7 +158,15 @@ export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT = Object.freeze([
   'statusCaptureSentinel:u32',
   'statusCaptureMissingCount:u32',
   'operatorSplitSynchronizationWorkJ:f32-bits',
-  'operatorSplitSynchronizationWorkConditioningSumAbsJ:f32-bits'
+  'operatorSplitSynchronizationWorkConditioningSumAbsJ:f32-bits',
+  'fineCrossLevelPressureCompensationJ:f32-bits',
+  'coarseCrossLevelPressureCompensationJ:f32-bits',
+  'fineCrossLevelDragHeatJ:f32-bits',
+  'coarseCrossLevelDragHeatJ:f32-bits',
+  'cumulativeAmbientImpulseXNs:f32-bits',
+  'cumulativeAmbientImpulseYNs:f32-bits',
+  'cumulativeAmbientImpulseZNs:f32-bits',
+  'cumulativeAmbientExternalWorkJ:f32-bits'
 ]);
 
 export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_LAYOUT = Object.freeze([
@@ -177,7 +185,9 @@ export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_LAYOUT = Object.freeze([
   'appliedMomentumZKgMPerS:f32-bits',
   'contributionCount:u32',
   'registryFlags:u32',
-  'reserved15:u32'
+  'cumulativeCausalLossWeightJ:f32-bits',
+  'cumulativeCoarsePressureCompensationJ:f32-bits',
+  'cumulativeCoarseDragHeatJ:f32-bits'
 ]);
 
 const UINT32_MAX = 0xffff_ffff;
@@ -333,6 +343,10 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
   virtualCoarseKineticEnergyDeltaJ,
   actualCoarseKineticEnergyDeltaJ,
   cumulativeFineRouteHeatJ,
+  fineCrossLevelPressureCompensationJ = 0,
+  coarseCrossLevelPressureCompensationJ = 0,
+  fineCrossLevelDragHeatJ = 0,
+  coarseCrossLevelDragHeatJ = 0,
   actualCoarseEnergyConditioningSumAbsJ = Math.abs(
     actualCoarseKineticEnergyDeltaJ
   ),
@@ -357,6 +371,24 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
     'cumulativeFineRouteHeatJ',
     { nonnegative: true }
   );
+  const finePressure = finiteF32Value(
+    fineCrossLevelPressureCompensationJ,
+    'fineCrossLevelPressureCompensationJ'
+  );
+  const coarsePressure = finiteF32Value(
+    coarseCrossLevelPressureCompensationJ,
+    'coarseCrossLevelPressureCompensationJ'
+  );
+  const fineDragHeat = finiteF32Value(
+    fineCrossLevelDragHeatJ,
+    'fineCrossLevelDragHeatJ',
+    { nonnegative: true }
+  );
+  const coarseDragHeat = finiteF32Value(
+    coarseCrossLevelDragHeatJ,
+    'coarseCrossLevelDragHeatJ',
+    { nonnegative: true }
+  );
   const actualScale = finiteF32Value(
     actualCoarseEnergyConditioningSumAbsJ,
     'actualCoarseEnergyConditioningSumAbsJ',
@@ -372,7 +404,12 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
     actualScale,
     virtualScale
   );
-  const causalKineticEnergyResidualJ = addF32(fine, virtual);
+  const pressureCompensationJ = addF32(finePressure, coarsePressure);
+  const crossLevelDragHeatJ = addF32(fineDragHeat, coarseDragHeat);
+  const causalKineticEnergyResidualJ = addF32(
+    addF32(fine, virtual),
+    pressureCompensationJ
+  );
   const causalRouteHeatJ = Math.fround(Math.max(
     0,
     -causalKineticEnergyResidualJ
@@ -390,7 +427,10 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
     causalKineticEnergyResidualJ,
     totalRouteHeatJ
   );
-  const actualKineticEnergyResidualJ = addF32(fine, actual);
+  const actualKineticEnergyResidualJ = addF32(
+    addF32(fine, actual),
+    pressureCompensationJ
+  );
   const totalEnergyResidualJ = subtractF32(
     addF32(actualKineticEnergyResidualJ, totalRouteHeatJ),
     synchronizationWorkJ
@@ -400,15 +440,18 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
     1024 * 2 ** -24 * synchronizationConditioningSumAbsJ
   ));
   const causalEnergyConditioningSumAbsJ = addF32(
-    Math.abs(fine),
-    virtualScale
+    addF32(Math.abs(fine), virtualScale),
+    addF32(Math.abs(finePressure), Math.abs(coarsePressure))
   );
   const causalEnergyToleranceJ = Math.fround(Math.max(
     8 * 1.175494351e-38,
     1024 * 2 ** -24 * causalEnergyConditioningSumAbsJ
   ));
   const totalEnergyConditioningSumAbsJ = addF32(
-    addF32(Math.abs(fine), actualScale),
+    addF32(
+      addF32(Math.abs(fine), actualScale),
+      addF32(Math.abs(finePressure), Math.abs(coarsePressure))
+    ),
     addF32(Math.abs(totalRouteHeatJ), Math.abs(synchronizationWorkJ))
   );
   const totalEnergyToleranceJ = Math.fround(Math.max(
@@ -417,6 +460,11 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
   ));
   const causalValid = causalKineticEnergyResidualJ <= causalEnergyToleranceJ
     && deferredRouteHeatUnclampedJ >= -causalEnergyToleranceJ
+    && fineDragHeat <= fineHeat + causalEnergyToleranceJ
+    && coarseDragHeat
+      <= coarseDeferredRouteHeatJ + causalEnergyToleranceJ
+    && crossLevelDragHeatJ
+      <= totalRouteHeatJ + causalEnergyToleranceJ
     && Math.abs(causalEnergyResidualJ) <= causalEnergyToleranceJ;
   const operatorSplitValid = Math.abs(synchronizationWorkJ)
     <= synchronizationConditioningSumAbsJ + synchronizationToleranceJ;
@@ -425,6 +473,12 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
     fineKineticEnergyDeltaJ: fine,
     virtualCoarseKineticEnergyDeltaJ: virtual,
     actualCoarseKineticEnergyDeltaJ: actual,
+    fineCrossLevelPressureCompensationJ: finePressure,
+    coarseCrossLevelPressureCompensationJ: coarsePressure,
+    pressureCompensationJ,
+    fineCrossLevelDragHeatJ: fineDragHeat,
+    coarseCrossLevelDragHeatJ: coarseDragHeat,
+    crossLevelDragHeatJ,
     causalKineticEnergyResidualJ,
     causalRouteHeatJ,
     cumulativeFineRouteHeatJ: fineHeat,
@@ -488,6 +542,38 @@ export function decodeSchroederCrossLevelRefluxEvidence(words) {
     && synchronizationConditioningSumAbsJ >= 0
     && Math.abs(synchronizationWorkJ)
       <= synchronizationConditioningSumAbsJ + synchronizationToleranceJ;
+  const fineCrossLevelPressureCompensationJ = f32(words, 128);
+  const coarseCrossLevelPressureCompensationJ = f32(words, 129);
+  const fineCrossLevelDragHeatJ = f32(words, 130);
+  const coarseCrossLevelDragHeatJ = f32(words, 131);
+  const phaseVolumeToleranceJ = Math.max(
+    8 * 1.175494351e-38,
+    1024 * 2 ** -24 * (
+      Math.abs(f32(words, 112))
+        + Math.abs(f32(words, 113))
+        + fineCrossLevelDragHeatJ
+        + coarseCrossLevelDragHeatJ
+    )
+  );
+  const phaseVolumeTransportValid =
+    Number.isFinite(fineCrossLevelPressureCompensationJ)
+    && Number.isFinite(coarseCrossLevelPressureCompensationJ)
+    && Number.isFinite(fineCrossLevelDragHeatJ)
+    && fineCrossLevelDragHeatJ >= 0
+    && Number.isFinite(coarseCrossLevelDragHeatJ)
+    && coarseCrossLevelDragHeatJ >= 0
+    && fineCrossLevelDragHeatJ
+      <= f32(words, 112) + phaseVolumeToleranceJ
+    && coarseCrossLevelDragHeatJ
+      <= f32(words, 113) + phaseVolumeToleranceJ;
+  const cumulativeAmbientImpulseNs = [
+    f32(words, 132),
+    f32(words, 133),
+    f32(words, 134)
+  ];
+  const cumulativeAmbientExternalWorkJ = f32(words, 135);
+  const ambientBoundaryValid = cumulativeAmbientImpulseNs.every(Number.isFinite)
+    && Number.isFinite(cumulativeAmbientExternalWorkJ);
   const terminalAdmitted = statusAdmitted
     && words[8] === words[54]
     && words[9] === words[4]
@@ -510,7 +596,9 @@ export function decodeSchroederCrossLevelRefluxEvidence(words) {
     && words[121] === 1
     && words[124] === UINT32_MAX
     && words[125] === 0
-    && operatorSplitValid;
+    && operatorSplitValid
+    && phaseVolumeTransportValid
+    && ambientBoundaryValid;
   return Object.freeze({
     schema: ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA,
     magic: words[0],
@@ -643,6 +731,19 @@ export function decodeSchroederCrossLevelRefluxEvidence(words) {
       synchronizationConditioningSumAbsJ,
       synchronizationToleranceJ,
       valid: operatorSplitValid
+    }),
+    phaseVolumeTransport: Object.freeze({
+      fineCrossLevelPressureCompensationJ,
+      coarseCrossLevelPressureCompensationJ,
+      fineCrossLevelDragHeatJ,
+      coarseCrossLevelDragHeatJ,
+      toleranceJ: phaseVolumeToleranceJ,
+      valid: phaseVolumeTransportValid
+    }),
+    ambientBoundary: Object.freeze({
+      cumulativeImpulseNs: Object.freeze(cumulativeAmbientImpulseNs),
+      cumulativeExternalWorkJ: cumulativeAmbientExternalWorkJ,
+      valid: ambientBoundaryValid
     })
   });
 }
@@ -664,5 +765,9 @@ export const SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ABI = Object.freeze({
   route: 'coherent-causal-cohort-affine-transpose',
   operatorSplit:
     'causal-virtual-reflux-heat-plus-explicit-coarse-temporal-synchronization-work',
+  phaseVolumeTransport:
+    'signed-cross-level-pressure-compensation-plus-nonnegative-drag-heat',
+  ambientBoundary:
+    'sealed-external-ambient-impulse-and-kinetic-work-never-deposited-as-particle-heat',
   readbackPolicy: 'normal-path-gpu-canonicalization;fixed-header-explicit-audit-only'
 });

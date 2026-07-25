@@ -64,14 +64,16 @@ const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
     renderOwnership: 'main-thread-renderer',
     surfaceDraw: 'native-webgpu-surface-consumer',
     ss: '1',
-    schroederLevel: '0',
+    schroederLevel: '1',
     schroederPortableSummary: '1',
     schroederActiveNodeIndex: '1',
-    schroederTwoLevel: '0',
-    schroederCrossLevelCoupling: '0',
-    schroederPhaseVolumeMigration: '0',
-    schroederLawQueue: '0',
-    schroederLawNeighborCandidates: '0'
+    // Slice 9 puts the two-level/cross-level transport under test. Leaving
+    // these off runs the matrix around the feature it is supposed to gate.
+    schroederTwoLevel: '1',
+    schroederCrossLevelCoupling: '1',
+    schroederPhaseVolumeMigration: '1',
+    schroederLawQueue: '1',
+    schroederLawNeighborCandidates: '1'
   }),
   visualRendererMode: 'native-webgpu-surface-consumer',
   ...entry.validation,
@@ -385,14 +387,15 @@ function deterministicRandomPairScenarios() {
     params.set('renderOwnership', 'main-thread-renderer');
     params.set('surfaceDraw', 'native-webgpu-surface-consumer');
     params.set('ss', '1');
-    params.set('schroederLevel', '0');
+    params.set('schroederLevel', '1');
     params.set('schroederPortableSummary', '1');
     params.set('schroederActiveNodeIndex', '1');
-    params.set('schroederTwoLevel', '0');
-    params.set('schroederCrossLevelCoupling', '0');
-    params.set('schroederPhaseVolumeMigration', '0');
-    params.set('schroederLawQueue', '0');
-    params.set('schroederLawNeighborCandidates', '0');
+    // See STANDARD_SCENARIOS: the Slice 9 transport must be live here too.
+    params.set('schroederTwoLevel', '1');
+    params.set('schroederCrossLevelCoupling', '1');
+    params.set('schroederPhaseVolumeMigration', '1');
+    params.set('schroederLawQueue', '1');
+    params.set('schroederLawNeighborCandidates', '1');
     scenarios.push({
       label: `random-elements-${drop.key.toLowerCase()}-${base.key.toLowerCase()}`,
       randomPair: { drop: drop.key, base: base.key, seed: rawSeed },

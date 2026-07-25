@@ -48,6 +48,13 @@ import {
   runMlsMpmGridUpdateWebGpu
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
 import {
+  buildMlsMpmMechanicsMaterialTable
+} from '../src/runtime/sph/sphMechanicsMaterialTable.js';
+import {
+  destroyMlsMpmMechanicsMaterialPhaseUpload,
+  uploadMlsMpmMechanicsMaterialPhaseRecords
+} from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
+import {
   runMlsMpmG2pWebGpu,
   validateLocallySubmittedMlsMpmFusedG2p
 } from '../src/runtime/sph/sphG2pGpuKernel.js';
@@ -223,7 +230,8 @@ function productionM3Device({
 function productionM3Fixture({
   fineSubstepCount,
   device = productionM3Device(),
-  baseGridSpacingM = 0.25
+  baseGridSpacingM = 0.25,
+  phaseVolumeInterfaceTransportEnabled = false
 }) {
   const particleCount = 1;
   const state = new Float32Array([
@@ -305,6 +313,11 @@ function productionM3Fixture({
     assignmentBufferByteLength: assignmentBuffer.size,
     sourceStateBuffer: stateBuffer,
     sourceStateBufferBorrowed: true,
+    ...(phaseVolumeInterfaceTransportEnabled ? {
+      sourceMechanicsBuffer: mechanicsBuffer,
+      sourceMechanicsBufferBorrowed: true,
+      sourceMechanicsBufferByteLength: mechanicsBuffer.size
+    } : {}),
     ...epochIdentity,
     minLevel: 0,
     maxLevel: 1,
@@ -375,7 +388,9 @@ function productionM3Fixture({
     mechanicsLevels: [
       { selectedLevel: 0, mechanicsGrid: fineGrid },
       { selectedLevel: 1, mechanicsGrid: coarseGrid }
-    ]
+    ],
+    phaseVolumeInterfaceProposalEnabled:
+      phaseVolumeInterfaceTransportEnabled
   });
   assert.equal(
     generation.selected,
@@ -388,9 +403,38 @@ function productionM3Fixture({
     sphParticleUpload,
     mlsMpmParticleUpload,
     twoLevelAuthoritative: true,
+    phaseVolumeInterfaceProposalAuthoritative:
+      phaseVolumeInterfaceTransportEnabled,
     enabledConsumerReaderIds: [],
     consumerSupportProfileIds: {}
   });
+  const mechanicsMaterialTable = phaseVolumeInterfaceTransportEnabled
+    ? buildMlsMpmMechanicsMaterialTable({
+        h2o: {
+          molarMassKgPerMol: 0.018015,
+          phases: [{
+            name: 'liquid',
+            densityKgPerM3: 997,
+            bulkModulusPa: 2.2e9,
+            shearModulusPa: 0,
+            cpJPerKgK: 4184,
+            dynamicViscosityPaS: 0.001,
+            temperatureRange: [273.15, 373.15]
+          }, {
+            name: 'gas',
+            densityKgPerM3: 0.6,
+            bulkModulusPa: null,
+            shearModulusPa: 0,
+            cpJPerKgK: 2010,
+            dynamicViscosityPaS: 1.3e-5,
+            temperatureRange: [373.15, 1000]
+          }]
+        }
+      }, { viscosityEnabled: true })
+    : null;
+  const mechanicsMaterialPhaseUpload = mechanicsMaterialTable
+    ? uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable)
+    : null;
   const controller = createSchroederTwoLevelCanonicalEpochController({
     device,
     initialGeneration: generation,
@@ -404,6 +448,7 @@ function productionM3Fixture({
     fineMechanicsGrid: fineGrid,
     coarseMechanicsGrid: coarseGrid,
     boxDimsM: [1, 1, 1],
+    phaseVolumeInterfaceTransportEnabled,
     mechanicsEpochMode:
       SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_FUSED_PRIVATE
   });
@@ -419,7 +464,10 @@ function productionM3Fixture({
     coarseGrid,
     controller,
     fineSubstepCount,
-    baseGridSpacingM
+    baseGridSpacingM,
+    phaseVolumeInterfaceTransportEnabled,
+    mechanicsMaterialTable,
+    mechanicsMaterialPhaseUpload
   };
 }
 
@@ -500,6 +548,12 @@ async function runProductionM3Fixture(fixture, {
     parentFieldMechanicsWorkspaceRuntimeFactory:
       createSchroederSpatialParentFieldMechanicsWorkspaceGpu,
     canonicalEpochController: fixture.controller,
+    phaseVolumeInterfaceTransportEnabled:
+      fixture.phaseVolumeInterfaceTransportEnabled,
+    mechanicsMaterialTable: fixture.mechanicsMaterialTable,
+    mechanicsMaterialPhaseUpload: fixture.mechanicsMaterialPhaseUpload,
+    ambientPressurePa:
+      fixture.phaseVolumeInterfaceTransportEnabled ? 101325 : 0,
     postMechanicsConsumerReaderIds: [],
     postMechanicsConsumerSupportProfileIds: {},
     retainOutputParticleBuffers: true,
@@ -1008,6 +1062,21 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     );
     assert.equal(result.canonicalEpochControllerSummary.publishedEpochCount, 0);
     assert.equal(result.canonicalEpochControllerSummary.proposalBuildCount, 0);
+    assert.equal(
+      result.internalEnergyTransferStatus,
+      'nonnegative-reflux-kinetic-loss-deposited-by-transpose-g2p'
+    );
+    assert.equal(
+      result.refluxEvidenceStatus,
+      'gpu-measured-equal-opposite-linear-angular-energy-ledger'
+    );
+    assert.deepEqual(result.phaseVolumeInterfaceTransport, {
+      enabled: false,
+      pressureScale: 1,
+      dragScale: 1,
+      maxImpulseFraction: 0.5,
+      ambientBoundaryEvidence: 'disabled-phase-volume-interface-transport'
+    });
     assert.equal(result.postMechanicsEpoch, null);
     assert.equal('stateBuffer' in result, false);
     assert.equal('mechanicsBuffer' in result, false);
@@ -1035,6 +1104,93 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     );
     assert.equal(await fixture.controller.completionPromise(), true);
   }
+});
+
+test('Slice 9 mounts S9-C transport on every fine and terminal coarse grid update', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 1,
+    phaseVolumeInterfaceTransportEnabled: true
+  });
+  const { result, counts } = await runProductionM3Fixture(fixture);
+
+  assert.deepEqual(counts, { p2g: 3, gridUpdate: 2, g2p: 2 });
+  assert.equal(
+    fixture.generation.phaseVolumeInterfaceProposalEnabled,
+    true
+  );
+  assert.equal(
+    fixture.generation.phaseVolumeInterfaceProposal?.twoLevel,
+    true
+  );
+  assert.equal(
+    result.canonicalEpochControllerSummary
+      .phaseVolumeInterfaceTransportEnabled,
+    true
+  );
+  assert.deepEqual(result.phaseVolumeInterfaceTransport, {
+    enabled: true,
+    pressureScale: 1,
+    dragScale: 1,
+    maxImpulseFraction: 0.5,
+    ambientBoundaryEvidence: 'sealed-external-impulse-and-work'
+  });
+  assert.equal(
+    result.internalEnergyTransferStatus,
+    'signed-pressure-compensation-plus-nonnegative-drag-causal-heat-deposited-by-transpose-g2p'
+  );
+  assert.equal(
+    result.refluxEvidenceStatus,
+    'gpu-measured-equal-opposite-linear-angular-pressure-drag-energy-ledger'
+  );
+  assert.equal(
+    fixture.device.createdBuffers.filter(
+      ({ label }) =>
+        label === 'ulg-schroeder-phase-volume-transport-scratch'
+    ).length,
+    2
+  );
+
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('Slice 9 mounted-transport fixture cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    fixture.mechanicsMaterialPhaseUpload
+  );
+});
+
+test('Slice 9 transport fails before GPU work without its exact material upload', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 1,
+    phaseVolumeInterfaceTransportEnabled: true
+  });
+  const counts = { p2g: 0, gridUpdate: 0, g2p: 0 };
+  const submissionCount = fixture.device.submissions.length;
+  await assert.rejects(
+    runProductionM3Fixture(fixture, {
+      counts,
+      overrides: { mechanicsMaterialPhaseUpload: null }
+    }),
+    (error) => {
+      assert.equal(
+        error?.code,
+        'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_TRANSPORT_AUTHORITY'
+      );
+      return true;
+    }
+  );
+  assert.deepEqual(counts, { p2g: 0, gridUpdate: 0, g2p: 0 });
+  assert.equal(fixture.device.submissions.length, submissionCount);
+  await fixture.controller.abortAllAfter(
+    new Error('Slice 9 fail-fast fixture cleanup'),
+    { mechanicsRetirement: Promise.resolve(true) }
+  );
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    fixture.mechanicsMaterialPhaseUpload
+  );
 });
 
 test('M3 production controller preserves exact field identity for non-binary grid spacing', async () => {

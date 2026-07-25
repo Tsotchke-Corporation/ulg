@@ -1271,12 +1271,39 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   assert.match(matrixSource, /renderOwnership: 'main-thread-renderer'/);
   assert.match(matrixSource, /surfaceDraw: 'native-webgpu-surface-consumer'/);
   assert.match(matrixSource, /ss: '1'/);
-  assert.match(matrixSource, /schroederPhaseVolumeMigration: '0'/);
+  // Slice 9 is the two-level/cross-level transport, so the matrix that gates it
+  // must actually execute it. These previously pinned '0', which kept every
+  // scenario green on a configuration that never ran the feature under test.
+  for (const flag of [
+    'schroederTwoLevel',
+    'schroederCrossLevelCoupling',
+    'schroederPhaseVolumeMigration',
+    'schroederLawQueue',
+    'schroederLawNeighborCandidates'
+  ]) {
+    assert.match(
+      matrixSource,
+      new RegExp(`${flag}: '1'`),
+      `${flag} must be enabled in the standard matrix scenarios`
+    );
+  }
   assert.match(matrixSource, /params\.set\('renderer', 'native-webgpu'\)/);
   assert.match(matrixSource, /params\.set\('renderOwnership', 'main-thread-renderer'\)/);
   assert.match(matrixSource, /params\.set\('surfaceDraw', 'native-webgpu-surface-consumer'\)/);
   assert.match(matrixSource, /params\.set\('ss', '1'\)/);
-  assert.match(matrixSource, /params\.set\('schroederPhaseVolumeMigration', '0'\)/);
+  for (const flag of [
+    'schroederTwoLevel',
+    'schroederCrossLevelCoupling',
+    'schroederPhaseVolumeMigration',
+    'schroederLawQueue',
+    'schroederLawNeighborCandidates'
+  ]) {
+    assert.match(
+      matrixSource,
+      new RegExp(`params\\.set\\('${flag}', '1'\\)`),
+      `${flag} must be enabled for the random-pair matrix scenarios`
+    );
+  }
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_WIDTH[\s\S]*?'1280'/);
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_HEIGHT[\s\S]*?'800'/);
   assert.match(

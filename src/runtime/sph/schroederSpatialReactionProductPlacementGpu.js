@@ -1392,7 +1392,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   const rw = (binding) => computeBufferBinding(binding, 'storage');
   const uniform = (binding) => computeBufferBinding(binding, 'uniform');
   const pipeline = (name, code, entryPoint, bindings) => explicitPlacementPipeline(device, {
-    cacheKey: `ulg-sph-reaction-placement-segmented-v3-${name}`,
+    cacheKey: `ulg-sph-reaction-placement-segmented-v4-${name}`,
     label: `ulg-sph-reaction-placement-segmented-${name}`,
     code,
     entryPoint,
@@ -1496,7 +1496,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   encode(plan, placementBindGroup(device, plan, 'placement-plan-bind-group', [
     { binding: 0, resource: { buffer: events } },
     { binding: 1, resource: { buffer: frozenState } },
-    { binding: 2, resource: { buffer: frozenThermo } },
+    { binding: 2, resource: { buffer: frozenMechanics } },
     { binding: 4, resource: { buffer: decisions } },
     { binding: 5, resource: { buffer: buffers.captureKeys } },
     { binding: 6, resource: { buffer: buffers.captureValues } },
@@ -2896,6 +2896,12 @@ export async function observeSchroederSpatialReactionProductPlacementCompletion(
     || classifierReadyCount + classifierRejectedCount
       + classifierUnknownCount !== activeEventCount
     || classifierUnknownCount !== 0
+    // A no-carrier event is a product that had real mass and found no slot.
+    // Leaving it live keeps feeding the grid splat ledger, so mass is not lost
+    // on paper, but the product never becomes a moving mechanics participant —
+    // H2 and steam stay frozen sidecar mass at the interface. Slice 9 requires
+    // every valid event to materialize or the transaction to fail closed.
+    || noCarrierEventCount !== 0
     // Every admitted SS cell owns at least one member. Filter and capture
     // evidence are both subsets of the member rows actually visited.
     || ssCellVisitCount > ssMemberVisitCount
@@ -2953,10 +2959,27 @@ export async function observeSchroederSpatialReactionProductPlacementCompletion(
     || transactionalTerminalStatus
       !== SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS.SAFE_PLACED
   ) {
-    throw placementError(
+    const error = placementError(
       'placement GPU completion receipt is missing, rejected, or internally inconsistent',
       'OBSERVATION'
     );
+    error.receiptDiagnostic = Object.freeze({
+      status,
+      transactionalTerminalStatus,
+      classifierReadyCount,
+      classifierRejectedCount,
+      classifierUnknownCount,
+      rejectedEventCount,
+      unknownDispositionCount,
+      overflowFlags,
+      activeEventCount,
+      captureMergeEventCount,
+      destinationMutationCount,
+      transactionalCommittedParticleCount,
+      transactionalFallbackParticleCount
+    });
+    error.message += `: ${JSON.stringify(error.receiptDiagnostic)}`;
+    throw error;
   }
   const observation = Object.freeze({
     schema: ULG_SPH_REACTION_PRODUCT_PLACEMENT_COMPLETION_RECEIPT_SCHEMA,

@@ -1,3 +1,10 @@
+import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION
+} from './schroederSpatialMechanicsFieldView.js';
+
 export const schroederSpatialMechanicsFieldViewWgsl = /* wgsl */ `
 struct MechanicsFieldViewParams {
   source_count: u32,
@@ -61,8 +68,8 @@ struct MechanicsFieldViewParams {
 @group(0) @binding(8) var<storage, read> sorted_candidate_indices: array<u32>;
 @group(0) @binding(9) var<storage, read> unique_group_by_sorted_position: array<u32>;
 
-const FIELD_MAGIC: u32 = 0x53464632u;
-const FIELD_VERSION: u32 = 2u;
+const FIELD_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u;
+const FIELD_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u;
 const FIELD_STATUS_READY: u32 = 1u;
 const FIELD_STATUS_ADMITTED: u32 = 2u;
 const FIELD_STATUS_FAIL_CLOSED: u32 = 4u;
@@ -74,8 +81,9 @@ const FIELD_KEY_WORDS: u32 = 4u;
 const FIELD_RADIX_KEY_WORDS: u32 = 3u;
 const FIELD_RADIX_MATERIAL_MASK: u32 = 0x00ffffffu;
 const FIELD_ACCUMULATOR_WORDS: u32 = 8u;
-const FIELD_RECEIPT_WORDS: u32 = 16u;
+const FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS}u;
 const FIELD_STATE_WORDS: u32 = 8u;
+const FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const FIELD_DISPATCH_OFFSET_WORDS: u32 = 60u;
 const FIELD_INVALID_KEY: u32 = 0xffffffffu;
 const FIELD_UNIQUE_STATUS_READY: u32 = 1u;
@@ -514,6 +522,10 @@ fn field_layout_admitted() -> bool {
     && params.descriptor_words == FIELD_DESCRIPTOR_WORDS
     && params.accumulator_words == FIELD_ACCUMULATOR_WORDS
     && params.state_words == FIELD_STATE_WORDS
+    && params.capacity_words == params.state_offset_words
+      + params.field_capacity * (
+        FIELD_STATE_WORDS + FIELD_PRESSURE_WORDS
+      )
     && params.capacity_words <= arrayLength(&field_view);
 }
 
@@ -566,7 +578,12 @@ fn field_publish(
   field_store(38u, params.completion_ordinal);
   field_store(39u, params.source_row_layout_id);
   field_store(40u, params.identity_stride_words);
-  field_store(41u, params.state_offset_words + field_count * FIELD_STATE_WORDS);
+  let pressure_offset = params.state_offset_words
+    + params.field_capacity * FIELD_STATE_WORDS;
+  field_store(
+    41u,
+    pressure_offset + field_count * FIELD_PRESSURE_WORDS
+  );
   field_store(42u, params.capacity_words);
   // Generation construction does not clear mechanics-owned accumulators.
   // The consumer clear pass publishes/observes that boundary separately.

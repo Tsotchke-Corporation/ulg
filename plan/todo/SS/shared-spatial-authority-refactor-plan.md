@@ -1835,6 +1835,17 @@ are the final transport operations. Their immutable SHA/ref results are
 recorded in ICC and the final handoff rather than by creating a second source
 commit solely to self-reference the first.
 
+## Whole Slice 9 continuation checkpoint - 2026-07-24
+
+The whole phase-volume/gas-interface transport slice remains in progress in the
+dirty `ss-spatial-authority-refactor` worktree. The exact implemented boundary,
+pressure-sidecar ABI, current focused verification, known risks, and ordered
+remaining work are recorded in
+`plan/todo/SS/slice9-continuation-handoff-2026-07-24.md`. That handoff is the
+required entry point for the next model. It does not mark any of the nine ICC
+Slice 9 gates complete and it is not authorization for an intermediate slice
+commit.
+
 ## Slice 9D shared exact-near traversal view - planned 2026-07-23
 
 The next performance slice shares the exact local spatial traversal that is

@@ -27,6 +27,9 @@ import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_VERSION
 } from './schroederSpatialPhaseVolumeMoment.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY,
@@ -150,6 +153,15 @@ const FIELD_HEADER_WORDS: u32 = 64u;
 const FIELD_KEY_WORDS: u32 = 4u;
 const FIELD_DESCRIPTOR_WORDS: u32 = 32u;
 const FIELD_DESCRIPTOR_ACTIVE_WORD: u32 = 3u;
+const FIELD_RECEIPT_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
+)};
+const FIELD_STATE_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS
+)};
+const FIELD_PRESSURE_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS
+)};
 const FIELD_STENCIL_SIZE: u32 = 27u;
 const MECHANICS_STRIDE: u32 = 32u;
 const ASSIGNMENT_STRIDE: u32 = 16u;
@@ -354,26 +366,45 @@ fn mechanics_field_header_admitted() -> bool {
   }
 
   let state_offset = mechanics_field[30u];
-  if (state_offset < accumulator_offset || state_offset - accumulator_offset < 16u) {
+  if (
+    state_offset < accumulator_offset
+    || state_offset - accumulator_offset < FIELD_RECEIPT_WORDS
+  ) {
     return false;
   }
-  let accumulator_span = state_offset - accumulator_offset - 16u;
+  let accumulator_span =
+    state_offset - accumulator_offset - FIELD_RECEIPT_WORDS;
   if (accumulator_span % 8u != 0u || accumulator_span / 8u != params.field_capacity) {
     return false;
   }
 
+  // Mechanics-field view v4 appends immutable pressure rows after the
+  // state-capacity bank. The pressure offset is derived here exactly the way
+  // the producer derives it, so required/capacity words bound the pressure
+  // tail rather than the state tail.
+  if (
+    params.field_capacity > (0xffffffffu - state_offset) / FIELD_STATE_WORDS
+  ) {
+    return false;
+  }
+  let pressure_offset =
+    state_offset + params.field_capacity * FIELD_STATE_WORDS;
+
   let required_words = mechanics_field[41u];
-  if (required_words < state_offset) { return false; }
-  let state_required_span = required_words - state_offset;
-  if (state_required_span % 8u != 0u || state_required_span / 8u != field_count) {
+  if (required_words < pressure_offset) { return false; }
+  let pressure_required_span = required_words - pressure_offset;
+  if (
+    pressure_required_span % FIELD_PRESSURE_WORDS != 0u
+    || pressure_required_span / FIELD_PRESSURE_WORDS != field_count
+  ) {
     return false;
   }
 
   let capacity_words = mechanics_field[42u];
-  if (capacity_words < state_offset) { return false; }
-  let state_capacity_span = capacity_words - state_offset;
-  return state_capacity_span % 8u == 0u
-    && state_capacity_span / 8u == params.field_capacity;
+  if (capacity_words < pressure_offset) { return false; }
+  let pressure_capacity_span = capacity_words - pressure_offset;
+  return pressure_capacity_span % FIELD_PRESSURE_WORDS == 0u
+    && pressure_capacity_span / FIELD_PRESSURE_WORDS == params.field_capacity;
 }
 
 // S9-A's rows are valid only when both headers prove one *same* mechanics

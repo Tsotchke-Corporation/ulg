@@ -1736,6 +1736,67 @@ fn find_product_mechanics(material_id: f32, phase_id: f32) -> ProductMechanics {
   return ProductMechanics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 255.0);
 }
 
+fn product_output_ready(
+  index: u32,
+  material_id: f32,
+  mass_kg: f32,
+  current_volume_m3: f32,
+  next_u: f32,
+  velocity: vec3<f32>
+) -> bool {
+  if (
+    !reaction_value_finite(material_id)
+    || !reaction_value_finite(mass_kg)
+    || !reaction_value_finite(current_volume_m3)
+    || !reaction_value_finite(next_u)
+    || !all(velocity == velocity)
+    || !all(abs(velocity) <= vec3<f32>(3.402823e38))
+    || !(material_id > 0.0)
+    || !(mass_kg > 0.0)
+    || !(current_volume_m3 > 0.0)
+  ) {
+    return false;
+  }
+  let resolved = resolve_thermal_rows(material_id, next_u, thermo_row2(index));
+  let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y);
+  let resolved_finite = all(resolved.row0 == resolved.row0)
+    && all(resolved.row1 == resolved.row1)
+    && all(resolved.row2 == resolved.row2)
+    && all(abs(resolved.row0) <= vec4<f32>(3.402823e38))
+    && all(abs(resolved.row1) <= vec4<f32>(3.402823e38))
+    && all(abs(resolved.row2) <= vec4<f32>(3.402823e38));
+  let mechanics_finite =
+    reaction_value_finite(mechanics.rest_density)
+    && reaction_value_finite(mechanics.bulk)
+    && reaction_value_finite(mechanics.shear)
+    && reaction_value_finite(mechanics.lambda)
+    && reaction_value_finite(mechanics.sound_speed)
+    && reaction_value_finite(mechanics.eos_model)
+    && reaction_value_finite(mechanics.solid)
+    && reaction_value_finite(mechanics.status);
+  if (
+    !resolved_finite
+    || !mechanics_finite
+    || resolved.row0.x != material_id
+    || !(resolved.row0.y > 0.0)
+    || !(resolved.row0.w > 0.0)
+    || resolved.row2.z != 1.0
+    || mechanics.status != 1.0
+    || !(mechanics.rest_density > 0.0)
+  ) {
+    return false;
+  }
+  let rest_volume = mass_kg / resolved.row0.w;
+  let deformation_j = current_volume_m3 / rest_volume;
+  let deformation_scale = pow(deformation_j, 1.0 / 3.0);
+  return reaction_value_finite(rest_volume)
+    && reaction_value_finite(deformation_j)
+    && reaction_value_finite(deformation_scale)
+    && rest_volume > 0.0
+    && deformation_j > 0.0
+    && deformation_scale > 0.0;
+}
+
 fn copy_particle(index: u32) {
   let base = index * REACTION_PARTICLE_RECORD_VEC4S;
   for (var row = 0u; row < REACTION_PARTICLE_RECORD_VEC4S; row = row + 1u) {
@@ -1743,20 +1804,49 @@ fn copy_particle(index: u32) {
   }
 }
 
+fn particle_current_volume(index: u32) -> f32 {
+  let mechanics_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
+  let volume_row = particle_records[mechanics_base + 4u];
+  let constitutive_row = particle_records[mechanics_base + 5u];
+  let eos_row = particle_records[mechanics_base + 6u];
+  let current_volume = volume_row.z * volume_row.w;
+  return select(
+    -1.0,
+    current_volume,
+    reaction_value_finite(volume_row.z)
+      && reaction_value_finite(volume_row.w)
+      && reaction_value_finite(current_volume)
+      && volume_row.z > 0.0
+      && volume_row.w > 0.0
+      && current_volume > 0.0
+      && constitutive_row.y == 1.0
+      && eos_row.w == 1.0
+  );
+}
+
 fn copy_particle_with_mass(index: u32, mass_kg: f32) {
   copy_particle(index);
   let base = index * REACTION_PARTICLE_RECORD_VEC4S;
   let pos_mass = particle_records[base];
-  out_particle_records[base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
-  let rest_density = particle_records[base + 2u].w;
-  if (rest_density > 0.0) {
-    let mechanics_base = base + 5u;
-    let volume_row = out_particle_records[mechanics_base + 4u];
-    out_particle_records[mechanics_base + 4u] = vec4<f32>(volume_row.x, volume_row.y, volume_row.z, max(mass_kg, 0.0) / rest_density);
+  let next_mass = max(mass_kg, 0.0);
+  out_particle_records[base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, next_mass);
+  let mechanics_base = base + 5u;
+  let volume_row = out_particle_records[mechanics_base + 4u];
+  if (pos_mass.w > 0.0 && volume_row.w > 0.0) {
+    // A partially consumed carrier retains its deformation and the same
+    // specific current volume. Scaling V0 by the surviving mass fraction
+    // partitions Vcurrent = V0 * J exactly between remainder and products.
+    let surviving_fraction = clamp(next_mass / pos_mass.w, 0.0, 1.0);
+    out_particle_records[mechanics_base + 4u] = vec4<f32>(
+      volume_row.x,
+      volume_row.y,
+      volume_row.z,
+      volume_row.w * surviving_fraction
+    );
   }
 }
 
-fn write_reacted_mechanics(index: u32, mass_kg: f32, resolved: ThermalRows) {
+fn write_reacted_mechanics(index: u32, mass_kg: f32, current_volume_m3: f32, resolved: ThermalRows) {
   let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y);
   var rest_density = resolved.row0.w;
   if (rest_density <= 0.0) {
@@ -1766,18 +1856,41 @@ fn write_reacted_mechanics(index: u32, mass_kg: f32, resolved: ThermalRows) {
   if (rest_density > 0.0) {
     rest_volume = mass_kg / rest_density;
   }
+  // Every caller authenticates source V0*J before reaching this mutation.
+  // Target density establishes the new reference volume only; it may never
+  // substitute for missing represented current volume.
+  let current_volume = current_volume_m3;
+  let deformation_j = current_volume / rest_volume;
+  let deformation_scale = pow(deformation_j, 1.0 / 3.0);
   let out_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
-  out_particle_records[out_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_particle_records[out_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_particle_records[out_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_particle_records[out_base] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
+  out_particle_records[out_base + 1u] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
+  out_particle_records[out_base + 2u] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
   out_particle_records[out_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  out_particle_records[out_base + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+  out_particle_records[out_base + 4u] = vec4<f32>(0.0, 0.0, deformation_j, rest_volume);
   out_particle_records[out_base + 5u] = vec4<f32>(mechanics.solid, mechanics.status, mechanics.bulk, mechanics.shear);
   out_particle_records[out_base + 6u] = vec4<f32>(mechanics.lambda, mechanics.sound_speed, mechanics.eos_model, mechanics.status);
   out_particle_records[out_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
-fn write_product_particle(index: u32, material_id: f32, mass_kg: f32, next_u: f32, velocity: vec3<f32>) {
+fn write_product_particle(
+  index: u32,
+  material_id: f32,
+  mass_kg: f32,
+  current_volume_m3: f32,
+  next_u: f32,
+  velocity: vec3<f32>
+) -> bool {
+  if (!product_output_ready(
+    index,
+    material_id,
+    mass_kg,
+    current_volume_m3,
+    next_u,
+    velocity
+  )) {
+    return false;
+  }
   let pos_mass = state_pos_mass(index);
   let source_row2 = thermo_row2(index);
   let resolved = resolve_thermal_rows(material_id, next_u, source_row2);
@@ -1788,13 +1901,21 @@ fn write_product_particle(index: u32, material_id: f32, mass_kg: f32, next_u: f3
   out_particle_records[out_base + 3u] = resolved.row1;
   out_particle_records[out_base + 4u] = resolved.row2;
   if (params.reset_mechanics != 0u) {
-    write_reacted_mechanics(index, max(mass_kg, 0.0), resolved);
+    write_reacted_mechanics(index, max(mass_kg, 0.0), current_volume_m3, resolved);
   } else {
     let mechanics_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
     for (var row = 0u; row < 8u; row = row + 1u) {
       out_particle_records[mechanics_base + row] = particle_records[mechanics_base + row];
     }
+    let volume_row = out_particle_records[mechanics_base + 4u];
+    if (current_volume_m3 > 0.0 && volume_row.z > 0.0) {
+      out_particle_records[mechanics_base + 4u] = vec4<f32>(
+        volume_row.xyz,
+        current_volume_m3 / volume_row.z
+      );
+    }
   }
+  return true;
 }
 
 
@@ -2586,6 +2707,12 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     copy_particle(particle_index);
     return;
   }
+  let self_current_volume = particle_current_volume(particle_index);
+  let partner_current_volume = particle_current_volume(partner_index);
+  if (!(self_current_volume > 0.0) || !(partner_current_volume > 0.0)) {
+    copy_particle(particle_index);
+    return;
+  }
   let product_term_count = u32(max(header1.x, 0.0));
   let self_term = reactant_term_for_material(reaction_index, self_thermo.x);
   let partner_term = reactant_term_for_material(reaction_index, partner_thermo.x);
@@ -2622,7 +2749,25 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
         legacy_next_mass = max((pos_mass.w + partner_pos_mass.w) * term1.x, 0.0);
       }
     }
-    write_product_particle(particle_index, legacy_product_material_id, legacy_next_mass, legacy_next_u, vel_u.xyz);
+    var legacy_current_volume = self_current_volume
+      * legacy_next_mass / max(pos_mass.w, 1.0e-20);
+    if (product_term_count > 1u) {
+      let pair_current_volume = self_current_volume
+        + partner_current_volume;
+      legacy_current_volume = pair_current_volume * legacy_next_mass
+        / max(pos_mass.w + partner_pos_mass.w, 1.0e-20);
+    }
+    let legacy_written = write_product_particle(
+      particle_index,
+      legacy_product_material_id,
+      legacy_next_mass,
+      legacy_current_volume,
+      legacy_next_u,
+      vel_u.xyz
+    );
+    if (!legacy_written) {
+      copy_particle(particle_index);
+    }
     return;
   }
 
@@ -2655,13 +2800,19 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let source1_thermo = thermo_row0(source1_index);
   let source0_term = reactant_term_for_material(reaction_index, source0_thermo.x);
   let source1_term = reactant_term_for_material(reaction_index, source1_thermo.x);
+  let source0_current_volume = particle_current_volume(source0_index);
+  let source1_current_volume = particle_current_volume(source1_index);
   let source0_consumed = min(source0_pos_mass.w, extent_mol * source0_term.coefficient * source0_term.molar_mass);
   let source1_consumed = min(source1_pos_mass.w, extent_mol * source1_term.coefficient * source1_term.molar_mass);
+  let consumed_current_volume =
+    source0_current_volume * source0_consumed
+      / max(source0_pos_mass.w, 1.0e-20)
+    + source1_current_volume * source1_consumed
+      / max(source1_pos_mass.w, 1.0e-20);
   let source0_remaining = max(source0_pos_mass.w - source0_consumed, 0.0);
   let source1_remaining = max(source1_pos_mass.w - source1_consumed, 0.0);
   let source0_free = source0_remaining <= max(source0_pos_mass.w, 1.0) * 1.0e-7;
   let source1_free = source1_remaining <= max(source1_pos_mass.w, 1.0) * 1.0e-7;
-  let product_u = ((self_consumed * vel_u.w) + (partner_consumed * partner_vel_u.w) - rx1.x * consumed_mass) / consumed_mass;
   let product_mass_scale = consumed_mass / raw_product_mass;
 
   // Products are born at the consumed pair's mass-weighted COM velocity.
@@ -2671,10 +2822,50 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // one parent's full velocity) ejected hot products from the interface at
   // the pre-contact approach speed, carrying the reaction enthalpy away and
   // starving ignition (fork9 energy audit).
-  let source0_velocity = state_vel_u(source0_index).xyz;
-  let source1_velocity = state_vel_u(source1_index).xyz;
+  let source0_vel_u = state_vel_u(source0_index);
+  let source1_vel_u = state_vel_u(source1_index);
+  let source0_velocity = source0_vel_u.xyz;
+  let source1_velocity = source1_vel_u.xyz;
   let product_com_velocity = (source0_velocity * source0_consumed + source1_velocity * source1_consumed)
     / max(consumed_mass, 1.0e-20);
+  let consumed_total_energy =
+    source0_consumed * (source0_vel_u.w + 0.5 * dot(source0_velocity, source0_velocity))
+    + source1_consumed * (source1_vel_u.w + 0.5 * dot(source1_velocity, source1_velocity));
+  // Changing two reactant velocities to one COM velocity is an inelastic
+  // merge. Preserve total energy by thermalizing the relative kinetic energy;
+  // rx1.x is specific reaction enthalpy per kg of products (negative when
+  // exothermic), so subtracting it adds released chemical heat.
+  let product_u = (
+    consumed_total_energy
+    - rx1.x * consumed_mass
+    - 0.5 * consumed_mass * dot(product_com_velocity, product_com_velocity)
+  ) / max(consumed_mass, 1.0e-20);
+  // Validate every product lane against one deterministic source row before
+  // either reacting invocation mutates. A corrupt phase/mechanics record
+  // therefore rejects the pair atomically rather than publishing one product.
+  for (var product_local = 0u; product_local < product_term_count; product_local = product_local + 1u) {
+    let product_term_index = u32(max(header0.w, 0.0)) + product_local;
+    let product_term0 = product_term_row0(product_term_index);
+    let product_term1 = product_term_row1(product_term_index);
+    let product_mass = extent_mol * product_term0.z * product_term0.w
+      * product_mass_scale;
+    let product_current_volume = consumed_current_volume
+      * product_mass / max(consumed_mass, 1.0e-20);
+    if (
+      product_term1.w != 1.0
+      || !product_output_ready(
+        source0_index,
+        product_term0.y,
+        product_mass,
+        product_current_volume,
+        product_u,
+        product_com_velocity
+      )
+    ) {
+      copy_particle(particle_index);
+      return;
+    }
+  }
 
   var emits_product = false;
   var local_product_slot = 0u;
@@ -2710,7 +2901,20 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // existed as a frozen product event becomes a real eos=2 particle here.
     let product_term = product_term_for_parent_slot(reaction_index, local_product_slot);
     if (product_term.status == 1.0 && product_term.material_id > 0.0 && emitted_product_mass > 0.0) {
-      write_product_particle(particle_index, product_term.material_id, emitted_product_mass, product_u, product_com_velocity);
+      let emitted_product_current_volume = consumed_current_volume
+        * emitted_product_mass / max(consumed_mass, 1.0e-20);
+      let product_written = write_product_particle(
+        particle_index,
+        product_term.material_id,
+        emitted_product_mass,
+        emitted_product_current_volume,
+        product_u,
+        product_com_velocity
+      );
+      if (product_written) {
+        return;
+      }
+      copy_particle(particle_index);
       return;
     }
   }
@@ -5542,6 +5746,7 @@ struct ProductMechanics {
 @group(0) @binding(5) var<storage, read> proposals: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> product_events: array<vec4<f32>>;
 @group(0) @binding(7) var<uniform> params: ReactionSummaryParams;
+@group(0) @binding(8) var<storage, read> source_mechanics: array<vec4<f32>>;
 
 fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
   let base = (params.reaction_count + params.product_phase_count) * 3u;
@@ -5871,6 +6076,39 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
   let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
   let consumed_mass = source_consumed + partner_consumed;
+  let source_volume_row = source_mechanics[particle_index * 8u + 4u];
+  let partner_volume_row = source_mechanics[partner_index * 8u + 4u];
+  let source_constitutive_row = source_mechanics[particle_index * 8u + 5u];
+  let partner_constitutive_row = source_mechanics[partner_index * 8u + 5u];
+  let source_eos_row = source_mechanics[particle_index * 8u + 6u];
+  let partner_eos_row = source_mechanics[partner_index * 8u + 6u];
+  let source_current_volume = source_volume_row.z * source_volume_row.w;
+  let partner_current_volume = partner_volume_row.z * partner_volume_row.w;
+  if (
+    !all(vec4<bool>(
+      source_volume_row.z > 0.0,
+      source_volume_row.w > 0.0,
+      source_current_volume > 0.0,
+      source_current_volume == source_current_volume
+    ))
+    || !all(vec4<bool>(
+      partner_volume_row.z > 0.0,
+      partner_volume_row.w > 0.0,
+      partner_current_volume > 0.0,
+      partner_current_volume == partner_current_volume
+    ))
+    || abs(source_current_volume) > 3.402823e38
+    || abs(partner_current_volume) > 3.402823e38
+    || source_constitutive_row.y != 1.0
+    || partner_constitutive_row.y != 1.0
+    || source_eos_row.w != 1.0
+    || partner_eos_row.w != 1.0
+  ) {
+    return;
+  }
+  let consumed_current_volume =
+    source_current_volume * source_consumed / max(source_pos_mass.w, 1.0e-20)
+    + partner_current_volume * partner_consumed / max(partner_source_pos_mass.w, 1.0e-20);
   let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
   if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
     return;
@@ -5878,6 +6116,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let mass_scale = consumed_mass / raw_product_mass;
   let row_mass = extent_mol * coefficient * molar_mass * mass_scale;
   let row_moles = row_mass / molar_mass;
+  let row_current_volume = consumed_current_volume * row_mass / max(consumed_mass, 1.0e-20);
 	  let next0 = next_thermo[particle_index * 3u];
 	  let next1 = next_thermo[partner_index * 3u];
 	  var phase_id = resolved_product_phase_id(product_term_index, target_phase_id, material_id);
@@ -5926,22 +6165,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  let partner_velocity = source_state[partner_index * 2u + 1u].xyz;
 	  let product_velocity = (source_velocity * source_consumed + partner_velocity * partner_consumed)
 	    / max(consumed_mass, 1.0e-20);
-	  // Specific internal energy of the products: consumed-mass-weighted parent
-	  // energies plus the reaction enthalpy share (rx1.x is J/kg of consumed
-	  // mass, negative for exothermic) -- identical to the apply kernel's
-	  // product_u, so a placed event particle carries the same energy the
-	  // in-slot product would have carried. Conservation: the enthalpy of the
-	  // consumed mass is split pro-rata between in-slot products and event mass.
+	  // Specific internal energy is identical to the apply kernel: the consumed
+	  // total (internal + kinetic) energy, plus reaction heat, minus the product
+	  // COM kinetic energy. Relative approach kinetic energy is thermalized.
 	  let source_u = source_state[particle_index * 2u + 1u].w;
 	  let partner_u = source_state[partner_index * 2u + 1u].w;
 	  let rx1 = reaction_row1(reaction_index);
-	  let product_u = ((source_consumed * source_u) + (partner_consumed * partner_u) - rx1.x * consumed_mass)
-	    / max(consumed_mass, 1.0e-20);
-	  let support_volume_m3 = select(
-	    0.0,
-	    unplaced_mass_kg / max(rest_density_kg_per_m3, 1.0e-20),
-	    unplaced_mass_kg > 0.0 && rest_density_kg_per_m3 > 0.0
-	  );
+	  let consumed_total_energy =
+	    source_consumed * (source_u + 0.5 * dot(source_velocity, source_velocity))
+	    + partner_consumed * (partner_u + 0.5 * dot(partner_velocity, partner_velocity));
+	  let product_u = (
+	    consumed_total_energy
+	    - rx1.x * consumed_mass
+	    - 0.5 * consumed_mass * dot(product_velocity, product_velocity)
+	  ) / max(consumed_mass, 1.0e-20);
+	  let support_volume_m3 = row_current_volume
+	    * unplaced_mass_kg / max(row_mass, 1.0e-20);
 	  let event_ready = phase_id > 0.0
 	    && rest_density_kg_per_m3 > 0.0
 	    && product_mechanics.status == 1.0
@@ -8764,9 +9003,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let c00 = row2.y; let c01 = row2.z; let c02 = row2.w;
   let c10 = row3.x; let c11 = row3.y; let c12 = row3.z;
   let c20 = row3.w; let c21 = row4.x; let c22 = row4.y;
-  let volume = max(row4.w * max(row4.z, 1.0e-9), 0.0);
+  // Current volume is authoritative only when both stored V0 and J are
+  // finite-positive. Do not manufacture a pressure volume by clamping an
+  // invalid determinant.
+  let volume = select(
+    0.0,
+    row4.w * row4.z,
+    row4.w > 0.0 && row4.z > 0.0
+  );
+  var resolved_absolute_pressure_pa = max(params.ambient_pressure_pa, 0.0);
   var sigma = StressRows(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-  if (params.dt != 0.0 && volume > 0.0) {
+  if (volume > 0.0) {
     if (row5.x > 0.5 && row5.w > 0.0) {
       sigma = corotated_stress(
         f00, f01, f02,
@@ -8774,6 +9021,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         f20, f21, f22,
         row5.w,
         row6.x
+      );
+      // Positive Cauchy trace is tensile in the corotated convention, so the
+      // scalar mechanical pressure is -tr(sigma)/3.
+      resolved_absolute_pressure_pa = max(
+        0.0,
+        params.ambient_pressure_pa
+          - (sigma.x.x + sigma.y.y + sigma.z.z) / 3.0
       );
     } else {
       let density = pos_mass.w / max(volume, 1.0e-30);
@@ -8804,6 +9058,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         packed_material_pressure,
         gas_fraction * gas_partial_pressure,
         gas_eos
+      );
+      resolved_absolute_pressure_pa = max(
+        0.0,
+        params.ambient_pressure_pa + pressure
       );
       let dynamic_viscosity = max(row7.y, 0.0);
       let div_third = (c00 + c11 + c22) / 3.0;
@@ -10900,12 +11158,52 @@ struct PhaseMechanics {
 @group(0) @binding(4) var<storage, read_write> out_mechanics: array<vec4<f32>>;
 @group(0) @binding(5) var<uniform> params: MechanicsRefreshParams;
 @group(0) @binding(6) var<storage, read> material_bank_warm_input_rows: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> authority_validation: array<atomic<u32>>;
 
 fn material_bank_warm_input_anchor() -> f32 {
   if (params.material_bank_warm_input_row_count == 0u) {
     return 0.0;
   }
-  return material_bank_warm_input_rows[0u].x * 0.0;
+  let value = material_bank_warm_input_rows[0u].x;
+  if (value != value || abs(value) > 3.402823e38) {
+    return 0.0;
+  }
+  return value * 0.0;
+}
+
+fn mechanics_refresh_finite(value: f32) -> bool {
+  return value == value && abs(value) <= 3.402823e38;
+}
+
+fn mechanics_refresh_finite_vec4(value: vec4<f32>) -> bool {
+  return all(value == value)
+    && all(abs(value) <= vec4<f32>(3.402823e38));
+}
+
+fn mechanics_refresh_fail() {
+  atomicOr(&authority_validation[0u], 1u);
+}
+
+fn mechanics_refresh_determinant(
+  row0: vec4<f32>,
+  row1: vec4<f32>,
+  row2: vec4<f32>
+) -> f32 {
+  return row0.x * (row1.x * row2.x - row1.y * row1.w)
+    - row0.y * (row0.w * row2.x - row1.y * row1.z)
+    + row0.z * (row0.w * row1.w - row1.x * row1.z);
+}
+
+fn mechanics_refresh_determinant_matches(
+  row0: vec4<f32>,
+  row1: vec4<f32>,
+  row2: vec4<f32>,
+  volume_ratio_j: f32
+) -> bool {
+  let determinant = mechanics_refresh_determinant(row0, row1, row2);
+  return mechanics_refresh_finite(determinant)
+    && abs(determinant - volume_ratio_j)
+      <= max(1.0e-5, abs(volume_ratio_j) * 1.0e-2);
 }
 
 fn phase_record_row0(record_index: u32) -> vec4<f32> {
@@ -10966,44 +11264,133 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let thermo0 = sph_thermo[particle_index * 3u];
   let state0 = sph_state[particle_index * 2u];
-  if (!(state0.w > 0.0)) {
+  if (state0.w == 0.0) {
+    return;
+  }
+  if (
+    !mechanics_refresh_finite_vec4(state0)
+    || !mechanics_refresh_finite_vec4(thermo0)
+    || !(state0.w > 0.0)
+    || !(thermo0.w > 0.0)
+  ) {
+    mechanics_refresh_fail();
     return;
   }
   let phase_mechanics = find_phase_mechanics(thermo0.x, thermo0.y);
-  if (phase_mechanics.status != 1.0) {
+  let phase_mechanics_finite =
+    mechanics_refresh_finite(phase_mechanics.rest_density)
+    && mechanics_refresh_finite(phase_mechanics.bulk)
+    && mechanics_refresh_finite(phase_mechanics.shear)
+    && mechanics_refresh_finite(phase_mechanics.lambda)
+    && mechanics_refresh_finite(phase_mechanics.sound_speed)
+    && mechanics_refresh_finite(phase_mechanics.eos_model)
+    && mechanics_refresh_finite(phase_mechanics.solid)
+    && mechanics_refresh_finite(phase_mechanics.status)
+    && mechanics_refresh_finite(phase_mechanics.dynamic_viscosity)
+    && mechanics_refresh_finite(phase_mechanics.surface_tension);
+  if (
+    phase_mechanics.status != 1.0
+    || !phase_mechanics_finite
+    || !(phase_mechanics.rest_density > 0.0)
+  ) {
+    mechanics_refresh_fail();
     return;
   }
 
-  var rest_density = thermo0.w;
-  if (rest_density <= 0.0) {
-    rest_density = phase_mechanics.rest_density;
-  }
-  var rest_volume = 0.0;
-  if (rest_density > 0.0) {
-    rest_volume = max(state0.w, 0.0) / rest_density;
-  }
+  let rest_density = thermo0.w;
+  var rest_volume = state0.w / rest_density;
   rest_volume = rest_volume + material_bank_warm_input_anchor();
-
-  var row4 = out_mechanics[mechanics_base + 4u];
-  // Vaporization continuity: a liquid->gas flip must NOT snap the reference
-  // rest volume to the gas phase (a ~1700x jump that makes the EOS read
-  // "already expanded" while positions never moved - inert steam). Rate-limit
-  // rest-volume growth per refresh; the deformation J carries real expansion
-  // and the SS phase-volume path owns large represented-volume changes.
-  let previous_rest_volume_m3 = row4.w;
-  if (previous_rest_volume_m3 > 0.0 && rest_volume > previous_rest_volume_m3 * 4.0) {
-    rest_volume = previous_rest_volume_m3;
+  if (!(rest_volume > 0.0) || !mechanics_refresh_finite(rest_volume)) {
+    mechanics_refresh_fail();
+    return;
   }
+
+  var row0 = out_mechanics[mechanics_base];
+  var row1 = out_mechanics[mechanics_base + 1u];
+  var row2 = out_mechanics[mechanics_base + 2u];
+  var row3 = out_mechanics[mechanics_base + 3u];
+  var row4 = out_mechanics[mechanics_base + 4u];
   let row5 = out_mechanics[mechanics_base + 5u];
   let row6 = out_mechanics[mechanics_base + 6u];
-  if (mechanics_refresh_should_reset(row4, row5, row6, phase_mechanics, rest_volume)) {
-    out_mechanics[mechanics_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-    out_mechanics[mechanics_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-    out_mechanics[mechanics_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-    out_mechanics[mechanics_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    row4 = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+  let row7 = out_mechanics[mechanics_base + 7u];
+  let previous_current_volume = row4.z * row4.w;
+  let previous_volume_authority_valid = row4.z > 0.0
+    && row4.w > 0.0
+    && previous_current_volume > 0.0
+    && previous_current_volume == previous_current_volume
+    && abs(previous_current_volume) <= 3.402823e38
+    && row5.y == 1.0
+    && row6.w == 1.0
+    && mechanics_refresh_finite_vec4(row0)
+    && mechanics_refresh_finite_vec4(row1)
+    && mechanics_refresh_finite_vec4(row2)
+    && mechanics_refresh_finite_vec4(row3)
+    && mechanics_refresh_finite_vec4(row4)
+    && mechanics_refresh_finite_vec4(row5)
+    && mechanics_refresh_finite_vec4(row6)
+    && mechanics_refresh_finite_vec4(row7)
+    && mechanics_refresh_determinant_matches(row0, row1, row2, row4.z);
+  if (!previous_volume_authority_valid) {
+    mechanics_refresh_fail();
+    return;
   }
-  out_mechanics[mechanics_base + 4u] = vec4<f32>(row4.x, row4.y, row4.z, rest_volume);
+  let current_volume = previous_current_volume;
+  let next_volume_ratio_j = current_volume / rest_volume;
+  if (
+    !(next_volume_ratio_j > 0.0)
+    || !mechanics_refresh_finite(next_volume_ratio_j)
+  ) {
+    mechanics_refresh_fail();
+    return;
+  }
+  var next_row4_xy = row4.xy;
+  if (mechanics_refresh_should_reset(row4, row5, row6, phase_mechanics, rest_volume)) {
+    let isotropic_scale = pow(next_volume_ratio_j, 1.0 / 3.0);
+    row0 = vec4<f32>(isotropic_scale, 0.0, 0.0, 0.0);
+    row1 = vec4<f32>(isotropic_scale, 0.0, 0.0, 0.0);
+    row2 = vec4<f32>(isotropic_scale, 0.0, 0.0, 0.0);
+    row3 = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    next_row4_xy = vec2<f32>(0.0);
+  } else {
+    let deformation_scale = pow(
+      next_volume_ratio_j / row4.z,
+      1.0 / 3.0
+    );
+    if (!mechanics_refresh_finite(deformation_scale) || !(deformation_scale > 0.0)) {
+      mechanics_refresh_fail();
+      return;
+    }
+    row0 = row0 * deformation_scale;
+    row1 = row1 * deformation_scale;
+    row2 = vec4<f32>(
+      row2.x * deformation_scale,
+      row2.yzw
+    );
+  }
+  if (
+    !mechanics_refresh_finite_vec4(row0)
+    || !mechanics_refresh_finite_vec4(row1)
+    || !mechanics_refresh_finite_vec4(row2)
+    || !mechanics_refresh_finite_vec4(row3)
+    || !mechanics_refresh_determinant_matches(
+      row0,
+      row1,
+      row2,
+      next_volume_ratio_j
+    )
+  ) {
+    mechanics_refresh_fail();
+    return;
+  }
+  out_mechanics[mechanics_base] = row0;
+  out_mechanics[mechanics_base + 1u] = row1;
+  out_mechanics[mechanics_base + 2u] = row2;
+  out_mechanics[mechanics_base + 3u] = row3;
+  out_mechanics[mechanics_base + 4u] = vec4<f32>(
+    next_row4_xy,
+    next_volume_ratio_j,
+    rest_volume
+  );
   out_mechanics[mechanics_base + 5u] = vec4<f32>(
     phase_mechanics.solid,
     phase_mechanics.status,
@@ -11016,13 +11403,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     phase_mechanics.eos_model,
     phase_mechanics.status
   );
-  let row7 = out_mechanics[mechanics_base + 7u];
   out_mechanics[mechanics_base + 7u] = vec4<f32>(
     row7.x,
     phase_mechanics.dynamic_viscosity,
     phase_mechanics.surface_tension,
     row7.w
   );
+}
+
+@compute @workgroup_size(64)
+fn commit_or_restore(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (
+    particle_index >= params.particle_count
+    || atomicLoad(&authority_validation[0u]) == 0u
+  ) {
+    return;
+  }
+  let mechanics_base = particle_index * 8u;
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    out_mechanics[mechanics_base + row] =
+      source_mechanics[mechanics_base + row];
+  }
 }
 `;
 
@@ -12045,7 +12447,7 @@ const SCHROEDER_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_PI: f32 = 3.141592653589793;
 
 fn ss_positive(value: f32) -> bool {
-  return value == value && value > 0.0;
+  return value == value && abs(value) <= 3.402823e38 && value > 0.0;
 }
 
 fn ss_volume_radius(volume_m3: f32) -> f32 {
@@ -12074,17 +12476,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let px = sph_state[state_offset + 0u];
   let py = sph_state[state_offset + 1u];
   let pz = sph_state[state_offset + 2u];
-  let mass_kg = max(sph_state[state_offset + 3u], 0.0);
+  let mass_kg = sph_state[state_offset + 3u];
   let material_id = sph_thermo[thermo_offset + 0u];
   let phase_id = sph_thermo[thermo_offset + 1u];
-  let rest_density_kg_per_m3 = max(sph_thermo[thermo_offset + 3u], 0.0);
+  let rest_density_kg_per_m3 = sph_thermo[thermo_offset + 3u];
   let smoothing_length_m = max(sph_thermo[thermo_offset + 8u], 0.0);
   let visual_radius_m = max(sph_thermo[thermo_offset + 11u], 0.0);
-  let volume_ratio_j = max(mls_mpm_mechanics[mechanics_offset + 18u], 0.0);
-  let rest_volume_m3 = max(mls_mpm_mechanics[mechanics_offset + 19u], 0.0);
-  let mechanics_volume_m3 = rest_volume_m3 * max(volume_ratio_j, 0.000001);
-  let phase_volume_reference_mass_kg = max(mls_mpm_mechanics[mechanics_offset + 31u], 0.0);
-  if (!(mass_kg > 0.0)) {
+  let volume_ratio_j = mls_mpm_mechanics[mechanics_offset + 18u];
+  let rest_volume_m3 = mls_mpm_mechanics[mechanics_offset + 19u];
+  let mechanics_volume_m3 = rest_volume_m3 * volume_ratio_j;
+  let constitutive_status = mls_mpm_mechanics[mechanics_offset + 21u];
+  let eos_status = mls_mpm_mechanics[mechanics_offset + 27u];
+  if (mass_kg == 0.0) {
     let inactive_level = params.min_level;
     let inactive_dx = max(params.base_grid_spacing_m * exp2(f32(inactive_level)), 0.000001);
     level_assignments[assignment_offset + 0u] = f32(inactive_level);
@@ -12108,34 +12511,63 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     level_assignments[assignment_offset + 15u] = params.chart_id;
     return;
   }
-  var density_represented_volume_m3 = 0.0;
-  if (ss_positive(phase_volume_reference_mass_kg) && ss_positive(rest_density_kg_per_m3)) {
-    density_represented_volume_m3 = phase_volume_reference_mass_kg / rest_density_kg_per_m3;
+  let current_volume_authority_valid =
+    ss_positive(mass_kg)
+    && ss_positive(rest_density_kg_per_m3)
+    && ss_positive(volume_ratio_j)
+    && ss_positive(rest_volume_m3)
+    && ss_positive(mechanics_volume_m3)
+    && constitutive_status == 1.0
+    && eos_status == 1.0;
+  if (!current_volume_authority_valid) {
+    let rejected_level = params.min_level;
+    let rejected_dx = max(
+      params.base_grid_spacing_m * exp2(f32(rejected_level)),
+      0.000001
+    );
+    level_assignments[assignment_offset + 0u] = f32(rejected_level);
+    level_assignments[assignment_offset + 1u] = rejected_dx;
+    level_assignments[assignment_offset + 2u] = 0.0;
+    level_assignments[assignment_offset + 3u] = 0.0;
+    level_assignments[assignment_offset + 4u] = 0.0;
+    level_assignments[assignment_offset + 5u] = 0.0;
+    level_assignments[assignment_offset + 6u] = mass_kg;
+    level_assignments[assignment_offset + 7u] = rest_density_kg_per_m3;
+    level_assignments[assignment_offset + 8u] = phase_id;
+    level_assignments[assignment_offset + 9u] = material_id;
+    level_assignments[assignment_offset + 10u] = 0.0;
+    level_assignments[assignment_offset + 11u] = max(params.hysteresis_band, 0.0);
+    level_assignments[assignment_offset + 12u] = px;
+    level_assignments[assignment_offset + 13u] = py;
+    level_assignments[assignment_offset + 14u] = pz;
+    level_assignments[assignment_offset + 15u] = params.chart_id;
+    return;
   }
-  var source_volume_m3 = mechanics_volume_m3;
-  if (!ss_positive(source_volume_m3) && ss_positive(rest_density_kg_per_m3) && ss_positive(mass_kg)) {
-    source_volume_m3 = mass_kg / rest_density_kg_per_m3;
-  }
-  var represented_volume_m3 = max(mechanics_volume_m3, density_represented_volume_m3);
-  if (!ss_positive(represented_volume_m3) && ss_positive(rest_density_kg_per_m3) && ss_positive(mass_kg)) {
-    represented_volume_m3 = mass_kg / rest_density_kg_per_m3;
-  }
-  if (!ss_positive(source_volume_m3)) {
-    source_volume_m3 = represented_volume_m3;
-  }
+  let source_volume_m3 = mechanics_volume_m3;
+  let represented_volume_m3 = mechanics_volume_m3;
 
   let physical_radius_m = ss_volume_radius(source_volume_m3);
   var support_radius_m = physical_radius_m * max(params.support_radius_scale, 0.0);
   var status = 1.0;
   if (!ss_positive(support_radius_m)) {
-    support_radius_m = max(max(smoothing_length_m, visual_radius_m), params.fallback_support_radius_m);
-    status = status + 2.0;
+    // Render radius, smoothing metadata, and density-derived geometry are not
+    // permitted to manufacture support for an invalid current-volume row.
+    support_radius_m = 0.0;
+    status = 0.0;
   }
-  if (ss_positive(params.min_support_radius_m) && support_radius_m < params.min_support_radius_m) {
+  if (
+    status > 0.0
+    && ss_positive(params.min_support_radius_m)
+    && support_radius_m < params.min_support_radius_m
+  ) {
     support_radius_m = params.min_support_radius_m;
     status = status + 4.0;
   }
-  if (ss_positive(params.max_support_radius_m) && support_radius_m > params.max_support_radius_m) {
+  if (
+    status > 0.0
+    && ss_positive(params.max_support_radius_m)
+    && support_radius_m > params.max_support_radius_m
+  ) {
     support_radius_m = params.max_support_radius_m;
     status = status + 8.0;
   }
@@ -17029,16 +17461,50 @@ fn ss_psm_source_represented_volume(source_index: u32, mechanics_stride: u32) ->
 // group is recovered with the same exact same-cell scan the allocator
 // used. Returns sum(m*x) in xyz and sum(m) in w; w <= 0 means no valid
 // multi-member group and the caller keeps the leader position.
+// F occupies vec4[0].xyzw, vec4[1].xyzw and vec4[2].x. Any producer that
+// changes J must move F with it or det(F) == J stops holding.
+fn ss_psm_deformation_determinant(
+  row0: vec4<f32>, row1: vec4<f32>, row2: vec4<f32>
+) -> f32 {
+  let f00 = row0.x; let f01 = row0.y; let f02 = row0.z; let f10 = row0.w;
+  let f11 = row1.x; let f12 = row1.y; let f20 = row1.z; let f21 = row1.w;
+  let f22 = row2.x;
+  return f00 * (f11 * f22 - f12 * f21)
+    - f01 * (f10 * f22 - f12 * f20)
+    + f02 * (f10 * f21 - f11 * f20);
+}
+
+// Isotropic rescale to a target determinant. Preserves the source's shape and
+// anisotropy while restoring det(F) == J exactly enough for the admission
+// checks that follow.
+fn ss_psm_deformation_scale_for(current_det: f32, target_det: f32) -> f32 {
+  if (!(current_det > 0.0) || !(target_det > 0.0)) { return 1.0; }
+  let ratio = target_det / current_det;
+  if (!(ratio > 0.0) || ratio != ratio) { return 1.0; }
+  return pow(ratio, 1.0 / 3.0);
+}
+
 struct SsPsmMergeGroup {
   moment: vec3<f32>,
   mass: f32,
   momentum: vec3<f32>,
   mass_temperature: f32,
+  // Latent heat lives in the phase fractions, not in temperature. Merging on
+  // mass-weighted temperature alone conserves energy only when every member
+  // shares one heat capacity and no member straddles a plateau, which is
+  // exactly the case Slice 9 exists to handle. Carry the mass-weighted
+  // fractions so a liquid+gas merge cannot create or destroy latent heat.
+  mass_phase_fractions: vec4<f32>,
+  // Represented current volume is the geometry authority: V_current = V0 * J.
+  // Merges must conserve its sum rather than re-derive a child size from
+  // mass / restDensity, which mints geometry the deformation state never had.
+  current_volume: f32,
+  rest_volume: f32,
   member_count: u32,
 };
 
-fn ss_psm_merge_group(assignment_offset: u32, state_stride: u32, thermo_stride: u32) -> SsPsmMergeGroup {
-  var group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
+fn ss_psm_merge_group(assignment_offset: u32, state_stride: u32, thermo_stride: u32, mechanics_stride: u32) -> SsPsmMergeGroup {
+  var group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, vec4<f32>(0.0), 0.0, 0.0, 0u);
   if (assignment_rows[assignment_offset + 8u] != 2.0) {
     return group;
   }
@@ -17070,15 +17536,24 @@ fn ss_psm_merge_group(assignment_offset: u32, state_stride: u32, thermo_stride: 
     let member_state = source_sph_state[member_index * state_stride];
     let member_velocity = source_sph_state[member_index * state_stride + 1u];
     let member_temperature = source_sph_thermo[member_index * thermo_stride].z;
+    let member_fractions = source_sph_thermo[member_index * thermo_stride + 1u];
     let member_mass = max(member_state.w, 0.0);
     group.moment = group.moment + member_state.xyz * member_mass;
     group.momentum = group.momentum + member_velocity.xyz * member_mass;
     group.mass_temperature = group.mass_temperature + max(member_temperature, 0.0) * member_mass;
+    group.mass_phase_fractions =
+      group.mass_phase_fractions + member_fractions * member_mass;
+    let member_row4 = source_mls_mechanics[member_index * mechanics_stride + 4u];
+    let member_rest_volume = max(member_row4.w, 0.0);
+    let member_volume_ratio = max(member_row4.z, 0.0);
+    group.rest_volume = group.rest_volume + member_rest_volume;
+    group.current_volume =
+      group.current_volume + member_rest_volume * member_volume_ratio;
     group.mass = group.mass + member_mass;
     group.member_count = group.member_count + 1u;
   }
   if (group.member_count < 2u || group.mass <= 0.0) {
-    return SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
+    return SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, vec4<f32>(0.0), 0.0, 0.0, 0u);
   }
   return group;
 }
@@ -17129,9 +17604,11 @@ fn ss_psm_copy_particle(
   // aggregate stamps (assignment cols 19/22/24-27) read zero because the
   // aggregate stage bound a superseded buffer (observed live: merges lost
   // exactly the non-leader members' mass).
-  var merge_group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
+  var merge_group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, vec4<f32>(0.0), 0.0, 0.0, 0u);
   if (!divide_mass_split) {
-    merge_group = ss_psm_merge_group(assignment_offset, state_stride, thermo_stride);
+    merge_group = ss_psm_merge_group(
+      assignment_offset, state_stride, thermo_stride, mechanics_stride
+    );
   }
   var merge_group_valid = merge_group.member_count >= 2u && merge_group.mass > 0.0;
   // Leader-with-freed-range merge encoding: one assignment row writes the
@@ -17225,7 +17702,14 @@ fn ss_psm_copy_particle(
     child_temperature,
     thermo0.w
   );
-  out_sph_thermo[target_thermo_base + 1u] = thermo1;
+  // A merged child carries the group's mass-weighted phase fractions. Copying
+  // the leader's row instead would hand the child one member's latent-heat
+  // state and silently rebalance the group's internal energy.
+  var child_fractions = thermo1;
+  if (merge_group_valid && merge_group.mass > 0.0) {
+    child_fractions = merge_group.mass_phase_fractions / merge_group.mass;
+  }
+  out_sph_thermo[target_thermo_base + 1u] = child_fractions;
   out_sph_thermo[target_thermo_base + 2u] = vec4<f32>(
     thermo2.x,
     thermo2.y * entity_scale,
@@ -17233,29 +17717,53 @@ fn ss_psm_copy_particle(
     thermo2.w
   );
 
-  out_mls_mechanics[target_mechanics_base] = source_mls_mechanics[source_mechanics_base];
-  out_mls_mechanics[target_mechanics_base + 1u] = source_mls_mechanics[source_mechanics_base + 1u];
-  out_mls_mechanics[target_mechanics_base + 2u] = source_mls_mechanics[source_mechanics_base + 2u];
+  // Deformation rows are published after row4 below, once the child's J is
+  // known, so det(F) == J holds for whatever this write publishes.
+  let source_f0 = source_mls_mechanics[source_mechanics_base];
+  let source_f1 = source_mls_mechanics[source_mechanics_base + 1u];
+  let source_f2 = source_mls_mechanics[source_mechanics_base + 2u];
   out_mls_mechanics[target_mechanics_base + 3u] = source_mls_mechanics[source_mechanics_base + 3u];
   var row4 = source_mls_mechanics[source_mechanics_base + 4u];
-  var target_volume = assignment_rows[assignment_offset + 22u];
+  var target_rest_volume = row4.w;
+  var target_volume_ratio = row4.z;
   if (divide_mass_split) {
-    target_volume = target_volume / divisor;
+    // A split divides the represented body, not its deformation state. Divide
+    // the rest volume and keep J, so sum(V0 * J) is conserved exactly and F
+    // still satisfies det(F) == J with no rescale at all.
+    target_rest_volume = row4.w / divisor;
+  } else if (merge_group_valid
+      && merge_group.rest_volume > 0.0
+      && merge_group.current_volume > 0.0) {
+    // A merge conserves the group's represented current volume. Deriving the
+    // child from mass / restDensity instead would mint geometry that no
+    // member's deformation state ever had.
+    target_rest_volume = merge_group.rest_volume;
+    target_volume_ratio = merge_group.current_volume / merge_group.rest_volume;
   }
-  // Merged child rest-volume fallback: when the aggregate volume stamp is
-  // absent, size the child from its conserved mass at the source rest
-  // density so the EOS does not read an N-times over-dense particle.
-  if (is_merge_write && thermo0.w > 0.0) {
-    // Merge child rest volume tracks conserved mass at source rest density;
-    // the aggregate volume stamp describes the whole cell, not this child.
-    target_volume = child_mass / thermo0.w;
-  } else if (merge_group_valid && !(target_volume > 0.0) && thermo0.w > 0.0) {
-    target_volume = merge_group.mass / thermo0.w;
-  }
-  if (target_volume > 0.0 && row4.w > 0.0) {
-    row4 = vec4<f32>(row4.x, row4.y, max(target_volume / row4.w, 1.0e-9), row4.w);
+  if (target_rest_volume > 0.0 && target_volume_ratio > 0.0) {
+    row4 = vec4<f32>(
+      row4.x,
+      row4.y,
+      max(target_volume_ratio, 1.0e-9),
+      target_rest_volume
+    );
   }
   out_mls_mechanics[target_mechanics_base + 4u] = row4;
+  let source_determinant =
+    ss_psm_deformation_determinant(source_f0, source_f1, source_f2);
+  let deformation_scale =
+    ss_psm_deformation_scale_for(source_determinant, row4.z);
+  out_mls_mechanics[target_mechanics_base] = source_f0 * deformation_scale;
+  out_mls_mechanics[target_mechanics_base + 1u] = vec4<f32>(
+    source_f1.xyz * deformation_scale,
+    source_f1.w * deformation_scale
+  );
+  out_mls_mechanics[target_mechanics_base + 2u] = vec4<f32>(
+    source_f2.x * deformation_scale,
+    source_f2.y,
+    source_f2.z,
+    source_f2.w
+  );
   out_mls_mechanics[target_mechanics_base + 5u] = source_mls_mechanics[source_mechanics_base + 5u];
   out_mls_mechanics[target_mechanics_base + 6u] = source_mls_mechanics[source_mechanics_base + 6u];
   out_mls_mechanics[target_mechanics_base + 7u] = source_mls_mechanics[source_mechanics_base + 7u];
@@ -17351,7 +17859,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // first moment, momentum, and thermal energy.
   let freed_state_stride = ss_psm_stride(params.state_vec4_stride, SCHROEDER_PSM_STATE_VEC4_STRIDE);
   let freed_thermo_stride = ss_psm_stride(params.thermo_vec4_stride, SCHROEDER_PSM_THERMO_VEC4_STRIDE);
-  var freed_group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
+  var freed_group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, vec4<f32>(0.0), 0.0, 0.0, 0u);
   var freed_includes_source = false;
   if (free_start_value >= 0.0 && free_count > 0u) {
     for (var slot = 0u; slot < free_count; slot = slot + 1u) {

@@ -348,6 +348,10 @@ test('S9-C ABI is capacity-dispatched and keeps live field counts GPU-only', () 
   assert.match(wgsl, /field_count\(&fine_field_view\)/);
   assert.doesNotMatch(wgsl, /params\.fine_field_count/);
   assert.match(wgsl, /emit_phase_volume_interface_reflux_routes/);
+  assert.match(
+    wgsl,
+    /\(\*receipt\)\[29u\] == source_capacity_groups \+ 2u \* field_capacity_groups/
+  );
 });
 
 test('S9-C one-level proposal is a read-only, same-encoder artifact with no host field count', () => {
@@ -507,13 +511,21 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       const wgslModule = await import(
         `/ulg-gpu-abi/src/schroederSpatialPhaseVolumeInterfaceProposalWgsl.js?nativeInterface=${nonce}`
       );
+      const fieldAbi = await import(
+        `/ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js?nativeInterface=${nonce}`
+      );
       const layout = abi.createSchroederSpatialPhaseVolumeInterfaceProposalLayout({
         fineFieldCapacity: 27
       });
+      const fieldLayout =
+        fieldAbi.createSchroederSpatialMechanicsFieldViewLayout({
+          sourceCapacity: 1,
+          fieldCapacity: 27
+        });
       const storageUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
       const storageBuffer = (size) => device.createBuffer({ size, usage: storageUsage });
       const fineReceipt = storageBuffer(64 * Uint32Array.BYTES_PER_ELEMENT);
-      const fineField = storageBuffer(652 * Uint32Array.BYTES_PER_ELEMENT);
+      const fineField = storageBuffer(fieldLayout.byteLength);
       const dummy = storageBuffer(Uint32Array.BYTES_PER_ELEMENT);
       const localHeads = storageBuffer(layout.localHeadByteLength);
       const refluxRoutes = storageBuffer(layout.refluxRouteByteLength);
@@ -572,9 +584,9 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       receipt[58] = 64;
       receipt[59] = (0x53505652 ^ generationId ^ completionOrdinal ^ admittedFlags) >>> 0;
       device.queue.writeBuffer(fineReceipt, 0, receipt);
-      const field = new Uint32Array(652);
-      field[0] = 0x53464632;
-      field[1] = 2;
+      const field = new Uint32Array(fieldLayout.wordLength);
+      field[0] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC;
+      field[1] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION;
       field[2] = admittedFlags;
       field[3] = generationId;
       field[4] = 5;
@@ -597,11 +609,11 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       field[23] = f32Bits(0.25);
       field[24] = 64;
       field[25] = 32;
-      field[26] = 96;
+      field[26] = fieldLayout.keyOffsetWords;
       field[27] = 4;
-      field[28] = 204;
+      field[28] = fieldLayout.accumulatorOffsetWords;
       field[29] = 8;
-      field[30] = 436;
+      field[30] = fieldLayout.stateOffsetWords;
       field[31] = 8;
       field[32] = 27;
       field[33] = 27;
@@ -609,8 +621,12 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       field[38] = completionOrdinal;
       field[39] = 1;
       field[40] = 1;
-      field[41] = 460;
-      field[42] = 652;
+      // v4 required words bound the immutable pressure tail that follows the
+      // full state-capacity bank, matching the mechanics-field producer.
+      field[41] =
+        fieldLayout.pressureOffsetWords
+        + 3 * fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS;
+      field[42] = fieldLayout.wordLength;
       field[44] = 1;
       field[45] = 1;
       field[46] = 1;
@@ -629,9 +645,9 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       field[61] = 1;
       field[62] = 1;
       // Two fields share dense node 9, producing exactly one admitted span.
-      field.set([9, 1, 1, 1], 96);
-      field.set([9, 1, 2, 1], 100);
-      field.set([10, 1, 1, 1], 104);
+      field.set([9, 1, 1, 1], fieldLayout.keyOffsetWords);
+      field.set([9, 1, 2, 1], fieldLayout.keyOffsetWords + 4);
+      field.set([10, 1, 1, 1], fieldLayout.keyOffsetWords + 8);
       device.queue.writeBuffer(fineField, 0, field);
       const paramsWords = new Uint32Array(48);
       paramsWords[0] = 27;

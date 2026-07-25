@@ -124,7 +124,11 @@ function fakeStageFixture(device, primaryCapacity = 3) {
         1, 2, 1, 2,
         120_000, 453_000, 273.15, 273.15,
         917, 1000, 1, 0
-      ])
+      ]),
+      // materialId, segmentOffset, segmentCount, status, emissivityGray,
+      // then the pressure carrier lanes. This fixture's only plateau is
+      // solid->liquid, so the identity law is the correct value here.
+      records: new Float32Array([1, 0, 1, 1, 0.9, 0, 0, 0])
     },
     mechanicsMaterialTable: {
       schema: ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA,
@@ -217,7 +221,7 @@ test('encoder stage binds one immutable source set and orders global preflight b
   assert.equal(stage.result.failClosedPolicy, 'global-layout-copy-through-lineage-local-invalid-copy-through');
   assert.equal(
     stage.result.conservationPolicy,
-    'mass-momentum-first-moment-total-energy-with-relative-kinetic-thermalization'
+    'mass-current-volume-momentum-first-moment-total-energy-with-relative-kinetic-thermalization'
   );
   assert.equal(stage.result.normalHotLoopReadbackFree, true);
   assert.equal(stage.result.fullParticleReadbackPerformed, false);
@@ -235,9 +239,15 @@ test('encoder stage binds one immutable source set and orders global preflight b
   assert.match(sphPhaseCarrierTransferWgsl, /phase_lane_index\(lineage_index, target_phase\)/);
   assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.first_moment/);
   assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.momentum/);
+  assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.current_volume/);
   assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.internal_energy/);
   assert.match(sphPhaseCarrierTransferWgsl, /aggregate\.source_kinetic_energy/);
   assert.match(sphPhaseCarrierTransferWgsl, /mechanics_model_matches_target/);
+  assert.match(
+    sphPhaseCarrierTransferWgsl,
+    /let volume_ratio_j = aggregate\.current_volume \/ max\(rest_volume, params\.mass_epsilon\)/
+  );
+  assert.match(sphPhaseCarrierTransferWgsl, /const ERROR_VOLUME: u32 = 256u/);
   assert.match(sphPhaseCarrierTransferWgsl, /let template_index = aggregate\.template_index/);
   assert.equal(SPH_PHASE_FRACTION_VALIDATION_EPSILON, 1e-7);
   assert.equal(SPH_PHASE_COMPONENT_ACTIVATION_EPSILON, 0);
@@ -362,7 +372,11 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
           1, 2, 2, 3,
           VAPOR_ENDPOINT_LIQUID_U, VAPOR_ENDPOINT_GAS_U, 373.15, 373.15,
           1000, 0.6, 1, 0
-        ])
+        ]),
+        // Identity carrier law: this fixture pins reference-pressure behavior,
+        // so the plateau must not shift. The pressure-shifted path has its own
+        // native test.
+        records: new Float32Array([1, 0, 2, 1, 0.9, 0, 0, 0])
       };
       const upload = (label, values) => {
         const buffer = device.createBuffer({
@@ -462,9 +476,10 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
       const vector = (values, base) => Array.from(values.slice(base, base + 3));
       const sumVector = (left, right) => left.map((value, axis) => value + right[axis]);
       const scaleVector = (value, scale) => value.map((component) => component * scale);
-      const totalsFor = (state, lineage, lineageCapacity) => {
+      const totalsFor = (state, mechanics, lineage, lineageCapacity) => {
         const totals = {
           mass: 0,
+          currentVolume: 0,
           momentum: [0, 0, 0],
           firstMoment: [0, 0, 0],
           internalEnergy: 0,
@@ -474,9 +489,14 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
         for (let phaseLane = 0; phaseLane < 4; phaseLane += 1) {
           const index = phaseLane * lineageCapacity + lineage;
           const base = index * STATE_FLOATS;
+          const mechanicsBase = index * MECHANICS_FLOATS;
           const mass = state[base + 3];
           const velocity = vector(state, base + 4);
           totals.mass += mass;
+          if (mass > 0) {
+            totals.currentVolume += mechanics[mechanicsBase + 18]
+              * mechanics[mechanicsBase + 19];
+          }
           totals.momentum = sumVector(totals.momentum, scaleVector(velocity, mass));
           totals.firstMoment = sumVector(
             totals.firstMoment,
@@ -493,8 +513,9 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
       };
 
       const packedSweep = makePackedStates(fractions);
-      // A stale gas constitutive state on the first mixed carrier must not
-      // leak J=1000 into either condensed phase during slot-role projection.
+      // A large but valid source current volume must be partitioned into both
+      // target phases. Constitutive model replacement may change V0, but it
+      // must express the same geometry through the corresponding target J.
       packedSweep.mechanics[18] = 1000;
       packedSweep.mechanics[20] = 0;
       packedSweep.mechanics[26] = 2;
@@ -527,8 +548,18 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
             companionSolid: sweepResult.mechanics[liquidLane * MECHANICS_FLOATS + 20],
             companionEos: sweepResult.mechanics[liquidLane * MECHANICS_FLOATS + 26]
           },
-          before: totalsFor(packedSweep.state, primary, packedSweep.primaryCapacity),
-          after: totalsFor(sweepResult.state, primary, packedSweep.primaryCapacity)
+          before: totalsFor(
+            packedSweep.state,
+            packedSweep.mechanics,
+            primary,
+            packedSweep.primaryCapacity
+          ),
+          after: totalsFor(
+            sweepResult.state,
+            sweepResult.mechanics,
+            primary,
+            packedSweep.primaryCapacity
+          )
         };
       });
       const reservedPrimary = fractions.length - 1;
@@ -559,9 +590,14 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
       ], gasThermoBase);
       initializeMechanics(triplePacked.mechanics, gasIndex, 3, false);
       triplePacked.mechanics[gasIndex * MECHANICS_FLOATS + 18] = 1000;
-      const tripleBefore = totalsFor(triplePacked.state, 0, 1);
+      const tripleBefore = totalsFor(triplePacked.state, triplePacked.mechanics, 0, 1);
       const tripleResult = await runPacked(triplePacked, 'native-phase-triple');
-      const tripleAfter = totalsFor(tripleResult.state, 0, 1);
+      const tripleAfter = totalsFor(
+        tripleResult.state,
+        tripleResult.mechanics,
+        0,
+        1
+      );
       const triple = {
         status: tripleResult.status,
         errorBits: tripleResult.evidence?.[2] ?? 0,
@@ -575,6 +611,10 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
         )),
         phaseIds: [0, 1, 2, 3].map((index) => tripleResult.thermo[index * THERMO_FLOATS + 1]),
         mechanicsJ: [0, 1, 2].map((index) => tripleResult.mechanics[index * MECHANICS_FLOATS + 18]),
+        currentVolumes: [0, 1, 2].map((index) => (
+          tripleResult.mechanics[index * MECHANICS_FLOATS + 18]
+            * tripleResult.mechanics[index * MECHANICS_FLOATS + 19]
+        )),
         before: tripleBefore,
         after: tripleAfter
       };
@@ -660,13 +700,20 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
     assert.equal(entry.companionPhaseId, 2);
     nearlyEqualVector(entry.primaryFractions, [1, 0, 0, 0]);
     nearlyEqualVector(entry.companionFractions, [0, 1, 0, 0]);
-    nearlyEqual(entry.mechanicsProjection.primaryJ, 1);
+    nearlyEqual(
+      entry.mechanicsProjection.primaryJ,
+      entry.before.currentVolume * 917 / entry.before.mass
+    );
     nearlyEqual(entry.mechanicsProjection.primarySolid, 1);
     nearlyEqual(entry.mechanicsProjection.primaryEos, 1);
-    nearlyEqual(entry.mechanicsProjection.companionJ, 1);
+    nearlyEqual(
+      entry.mechanicsProjection.companionJ,
+      entry.before.currentVolume * 1000 / entry.before.mass
+    );
     nearlyEqual(entry.mechanicsProjection.companionSolid, 0);
     nearlyEqual(entry.mechanicsProjection.companionEos, 1);
     nearlyEqual(entry.after.mass, entry.before.mass);
+    nearlyEqual(entry.after.currentVolume, entry.before.currentVolume);
     nearlyEqualVector(entry.after.momentum, entry.before.momentum);
     nearlyEqualVector(entry.after.firstMoment, entry.before.firstMoment);
     nearlyEqual(entry.after.internalEnergy, entry.before.internalEnergy);
@@ -684,8 +731,9 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
   nearlyEqualVector(native.triple.fractions[1], [0, 1, 0, 0]);
   nearlyEqualVector(native.triple.fractions[2], [0, 0, 1, 0]);
   nearlyEqualVector(native.triple.fractions[3], [0, 0, 0, 0]);
-  nearlyEqualVector(native.triple.mechanicsJ, [1, 1, 1000]);
+  nearlyEqualVector(native.triple.currentVolumes, [0.005, 2.505, 7.5]);
   nearlyEqual(native.triple.after.mass, native.triple.before.mass);
+  nearlyEqual(native.triple.after.currentVolume, native.triple.before.currentVolume);
   nearlyEqualVector(native.triple.after.momentum, native.triple.before.momentum);
   nearlyEqualVector(native.triple.after.firstMoment, native.triple.before.firstMoment);
   nearlyEqual(native.triple.after.totalEnergy, native.triple.before.totalEnergy);

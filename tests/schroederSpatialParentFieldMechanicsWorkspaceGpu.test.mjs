@@ -9,7 +9,9 @@ import {
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_REFLUX_MEASURED_CONSERVATIVE,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROUTE_WORDS,
   ULG_SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_SCHEMA,
   buildSchroederSpatialParentFieldMechanicsCpuOracle,
   createSchroederSpatialParentFieldMechanicsWorkspaceLayout
@@ -417,7 +419,7 @@ function exactFixture(device) {
     boxDimsM: [1, 1, 1],
     cflFactor: 0.4,
     mechanicsFieldEnergyReceipt: Object.freeze({
-      schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2',
+      schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3',
       status: 'heat-building-deferred-to-reflux-owner',
       deferSeal: true,
       fieldMutationOrdinal: 2
@@ -558,7 +560,12 @@ function submittedPredictorWorkspace(device, { arenaCount = 2 } = {}) {
 test('parent-field mechanics ABI reserves predictors plus phase-separated causal-route proposals', () => {
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS, 104);
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT.length, 104);
-  assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES, 256);
+  assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES, 288);
+  assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROUTE_WORDS, 16);
+  assert.equal(
+    SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS,
+    16
+  );
   const layout = createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     parentFieldCapacity: 9
   });
@@ -568,8 +575,9 @@ test('parent-field mechanics ABI reserves predictors plus phase-separated causal
   assert.equal(layout.combinedStateOffsetWords, 248);
   assert.equal(layout.coarsePredictorStateOffsetWords, 320);
   assert.equal(layout.routeProposalOffsetWords, 392);
-  assert.equal(layout.parentToCoarseOrdinalOffsetWords, 536);
-  assert.equal(layout.wordLength, 545);
+  assert.equal(layout.fineImpulseOffsetWords, 536);
+  assert.equal(layout.parentToCoarseOrdinalOffsetWords, 680);
+  assert.equal(layout.wordLength, 689);
   assert.throws(
     () => createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
       parentFieldCapacity: 0x4000_0000
@@ -607,6 +615,18 @@ test('parent-field mechanics CPU oracle restricts and prolongs one transpose del
   assert.ok(Math.abs(oracle.totalEnergyResidualJ) < 1e-12);
 });
 
+test('parent-field mechanics rejects devices below the eight-storage-binding floor', () => {
+  const device = fakeDevice();
+  device.limits.maxStorageBuffersPerShaderStage = 7;
+  assert.throws(
+    () => createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+      parentFieldCapacity: 1,
+      fineFieldCapacity: 1
+    }),
+    /requires eight storage bindings/
+  );
+});
+
 test('workspace WGSL has frozen coarse registry, causal affine routes, and sealed energy evidence', () => {
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn begin_fine_velocity_correction/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fine_store\(59u, FIELD_EMPTY\)/);
@@ -629,6 +649,22 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn prepare_fine_transaction/);
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fn admit_cross_level_phase_volume/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fn propose_cross_level_phase_volume/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fine_impulse_row \+ 8u/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /proposal_base \+ 14u/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /fn commit_routed_reflux\(\)[\s\S]*reflux_store\(8u, ordinal \+ 1u\)/
   );
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn seal_coarse_velocity_publish/);
@@ -642,6 +678,10 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   );
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fine_cross_level_pressure_compensation\s+\+ coarse_cross_level_pressure_compensation/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /let total_energy_residual = actual_kinetic_residual \+ total_route_heat\s+- synchronization_work/
   );
   assert.match(
@@ -651,6 +691,71 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /reflux_store\(127u, fine_stage_load\(25u\)\)/
+  );
+  for (const word of [128, 129, 130, 131, 132, 133, 134, 135]) {
+    assert.match(
+      schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+      new RegExp(`reflux_store\\(\\s*${word}u,`)
+    );
+  }
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /let share = drag_share \+ causal_share/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /share < drag_share/
+  );
+  const fineCommitSource =
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl.slice(
+      schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+        'fn commit_routed_reflux()'
+      ),
+      schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+        'fn finalize_fine_velocity_correction()'
+      )
+    );
+  const coarseCommitSource =
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl.slice(
+      schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+        'fn commit_coarse_reflux()'
+      ),
+      schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+        'fn apply_coarse_reflux_rows'
+      )
+    );
+  for (const [offset, word] of [
+    [8, 132],
+    [9, 133],
+    [10, 134],
+    [11, 135]
+  ]) {
+    assert.match(
+      fineCommitSource,
+      new RegExp(
+        `reflux_store\\(${word}u, ws_load\\(params\\.route_proposal_offset \\+ ${offset}u\\)\\)`
+      )
+    );
+    assert.match(
+      coarseCommitSource,
+      new RegExp(
+        `reflux_store\\(${word}u, ws_load\\(params\\.route_proposal_offset \\+ ${offset}u\\)\\)`
+      )
+    );
+  }
+  assert.doesNotMatch(fineCommitSource, /reflux_load\(13[2-5]u\)\s*\+/);
+  assert.doesNotMatch(coarseCommitSource, /reflux_load\(13[2-5]u\)\s*\+/);
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /reflux_store\(row \+ 16u, ws_load\(proposal \+ 14u\)\)/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /reflux_store\(row \+ 17u, ws_load\(proposal \+ 15u\)\)/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /coarse_store\(accumulator \+ 3u, ws_load\(proposal \+ 14u\)\)/
   );
   assert.doesNotMatch(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
@@ -942,7 +1047,10 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         powerPreference: 'high-performance'
       });
       if (!adapter) return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
-      const device = await adapter.requestDevice();
+      const deviceLimits = await import('/src/runtime/webgpuDeviceLimits.js');
+      const device = await adapter.requestDevice(
+        deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter)
+      );
       const errors = [];
       device.addEventListener('uncapturederror', (event) => {
         errors.push(event.error?.message || String(event.error));
@@ -1606,16 +1714,47 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         );
 
         const terminalEncoder = device.createCommandEncoder();
-        const terminalGridUpdate = fineWorkspace.runtime.encodeCoarseTerminal(
-          terminalEncoder,
-          {
-            parentFieldView: generation.parentFieldView,
-            coarseGridUpdate,
-            refluxLedger: macroRefluxLedger,
-            fineSubstepCount: 1,
-            fineDt: 0.01
-          }
-        );
+        let terminalGridUpdate;
+        try {
+          terminalGridUpdate = fineWorkspace.runtime.encodeCoarseTerminal(
+            terminalEncoder,
+            {
+              parentFieldView: generation.parentFieldView,
+              coarseGridUpdate,
+              refluxLedger: macroRefluxLedger,
+              fineSubstepCount: 1,
+              fineDt: 0.01
+            }
+          );
+        } catch (error) {
+          const fieldView = generation.parentFieldView.coarseFieldView;
+          throw new Error(`${error?.message || error}; diagnostic=${JSON.stringify({
+            receipt: coarseGridUpdate?.mechanicsFieldEnergyReceipt,
+            submittedValidation:
+              updateModule.validateSubmittedMlsMpmMechanicsFieldGridUpdate(
+                device,
+                coarseGridUpdate,
+                {
+                  sourceProjection: coarseProjection,
+                  fieldExecution: fieldView,
+                  requireDeferred: true
+                }
+              ),
+            currentState: fieldView.ownerRuntime?.isCurrentStateArtifact?.(
+              fieldView,
+              {
+                mutationOrdinal:
+                  coarseGridUpdate?.mechanicsFieldMutationOutputOrdinal,
+                stateEncoding:
+                  coarseGridUpdate?.mechanicsFieldMutationOutputStateEncoding
+              }
+            ),
+            updateByteLength: coarseGridUpdate?.mechanicsFieldViewByteLength,
+            fieldByteLength: fieldView.fieldViewBuffer?.size,
+            updateSourceExact:
+              coarseGridUpdate?.sourceProjection === coarseProjection
+          })}`);
+        }
         device.queue.submit([terminalEncoder.finish()]);
         const terminalExecution =
           terminalGridUpdate.parentFieldMechanicsWorkspaceExecution;
@@ -1774,6 +1913,8 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         const coarseG2p = await g2pModule.runMlsMpmG2pWebGpu(
           coarseG2pRunOptions
         );
+        coarseProposal.releaseAfterSubmittedWork();
+        await coarseProposal.releasePromise;
         const coarseCandidateState = await readWords(
           coarseG2p.stateBuffer,
           coarseG2p.stateBufferByteLength,
@@ -1798,9 +1939,11 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           postCoarseReflux.words
         );
         const publicationToken = postCoarseReflux.words[95];
-        const replayG2p = await g2pModule.runMlsMpmG2pWebGpu(
-          coarseG2pRunOptions
-        );
+        const replayProposal = proposalFor(0.5, 1);
+        const replayG2p = await g2pModule.runMlsMpmG2pWebGpu({
+          ...coarseG2pRunOptions,
+          schroederSpatialMechanicalProposal: replayProposal
+        });
         const replayState = await readWords(
           replayG2p.stateBuffer,
           replayG2p.stateBufferByteLength,
@@ -2043,8 +2186,8 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         fineG2p.destroyOutputParticleBuffers();
         coarseG2p.destroyOutputParticleBuffers();
         replayG2p.destroyOutputParticleBuffers();
-        coarseProposal.releaseAfterSubmittedWork();
-        await coarseProposal.releasePromise;
+        replayProposal.releaseAfterSubmittedWork();
+        await replayProposal.releasePromise;
         const fence = device.queue.onSubmittedWorkDone();
         await Promise.all([
           fineWorkspace.runtime.releaseExecutionAfter(
@@ -2136,6 +2279,8 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           readbackMode: 'no-full-readback'
         };
         const g2p = await g2pModule.runMlsMpmG2pWebGpu(g2pOptions);
+        proposal.releaseAfterSubmittedWork();
+        await proposal.releasePromise;
         const candidateState = await readWords(
           g2p.stateBuffer,
           g2p.stateBufferByteLength,
@@ -2196,7 +2341,24 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           particleDeltaHeat += state[row + 3]
             * (candidateState.floats[row + 7] - state[row + 7]);
         }
-        const replayG2p = await g2pModule.runMlsMpmG2pWebGpu(g2pOptions);
+        const replayProposal =
+          proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+            device,
+            generation,
+            sphParticleState,
+            mlsMpmParticleState,
+            sphParticleUpload: sphUpload,
+            mlsMpmParticleUpload: mlsUpload,
+            boxDimsM: [2, 2, 2],
+            gridSpacingM: 0.25,
+            selectedLevel: 0,
+            relaxation: 0,
+            normalVelocityDamping: 0
+          });
+        const replayG2p = await g2pModule.runMlsMpmG2pWebGpu({
+          ...g2pOptions,
+          schroederSpatialMechanicalProposal: replayProposal
+        });
         const replayState = await readWords(
           replayG2p.stateBuffer,
           replayG2p.stateBufferByteLength,
@@ -2307,8 +2469,8 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         };
         g2p.destroyOutputParticleBuffers();
         replayG2p.destroyOutputParticleBuffers();
-        proposal.releaseAfterSubmittedWork();
-        await proposal.releasePromise;
+        replayProposal.releaseAfterSubmittedWork();
+        await replayProposal.releasePromise;
         const fence = device.queue.onSubmittedWorkDone();
         await fineWorkspace.runtime.releaseExecutionAfter(
           fineWorkspace.execution,
@@ -2327,25 +2489,76 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         return result;
       }
 
-      fineProjection = await p2g(0, 0.25);
-      coarseProjection = await p2g(1, 0.5);
-      const coarseWorkspace = await buildPredictors(fineProjection, coarseProjection);
-      const coarseEncoder = device.createCommandEncoder();
-      const coarseUpdate = coarseWorkspace.runtime.encodeCoarsePublish(
-        coarseEncoder,
-        coarseWorkspace.execution,
-        {
+      const fineProposal =
+        proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+          device,
+          generation,
+          sphParticleState,
+          mlsMpmParticleState,
+          sphParticleUpload: sphUpload,
+          mlsMpmParticleUpload: mlsUpload,
+          boxDimsM: [2, 2, 2],
+          gridSpacingM: 0.25,
+          selectedLevel: 0,
+          relaxation: 0,
+          normalVelocityDamping: 0
+        });
+      const fineG2p = await g2pModule.runMlsMpmG2pWebGpu({
+        device,
+        sphParticleState,
+        mlsMpmParticleState,
+        gridUpdate: correctedFineUpdate,
+        sphParticleUpload: sphUpload,
+        mlsMpmParticleUpload: mlsUpload,
+        dt: 0.01,
+        boxDimsM: [2, 2, 2],
+        internalPressureScale: 0,
+        liquidWallDampingAlpha: 0,
+        liquidWallDampingDistanceM: 0,
+        particleSeparationRelaxation: 0,
+        particleSeparationVelocityDamping: 0,
+        schroederSelectedLevel: 0,
+        schroederSpatialEpochGeneration: generation,
+        schroederSpatialMechanicalProposal: fineProposal,
+        canonicalSpatialRequired: true,
+        observeCanonicalSpatialAuthority: false,
+        mechanicsFieldMode: 'required',
+        retainOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback'
+      });
+      fineProposal.releaseAfterSubmittedWork();
+      await fineProposal.releasePromise;
+
+      const coarseGridUpdate =
+        await updateModule.runMlsMpmGridUpdateWebGpu({
+          device,
+          p2gGridProjection: coarseProjection,
+          mechanicsFieldMode: 'required',
           dt: 0.01,
           gravityMPerS2: [0, -9.80665, 0],
           boxDimsM: [2, 2, 2],
-          cflFactor: 0.4
+          mechanicsFieldEnergyReceipt: { deferSeal: true },
+          retainUpdatedGridBuffer: false,
+          readbackMode: 'no-full-readback'
+        });
+      const coarseEncoder = device.createCommandEncoder();
+      const coarseUpdate = fineWorkspace.runtime.encodeCoarseTerminal(
+        coarseEncoder,
+        {
+          parentFieldView: generation.parentFieldView,
+          coarseGridUpdate,
+          refluxLedger: macroRefluxLedger,
+          fineSubstepCount: 1,
+          fineDt: 0.01
         }
       );
       device.queue.submit([coarseEncoder.finish()]);
-      coarseWorkspace.runtime.markTerminalSubmitted(coarseWorkspace.execution);
+      const terminalExecution =
+        coarseUpdate.parentFieldMechanicsWorkspaceExecution;
+      fineWorkspace.runtime.markTerminalSubmitted(terminalExecution);
       const coarseWorkspaceRead = await readWords(
-        coarseWorkspace.execution.workspaceBuffer,
-        coarseWorkspace.execution.layout.byteLength,
+        terminalExecution.workspaceBuffer,
+        terminalExecution.layout.byteLength,
         'native-parent-mechanics-coarse-workspace-readback'
       );
       const coarseFieldRead = await readWords(
@@ -2370,7 +2583,6 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         fineFieldEncoding: fineFieldRead.words[59],
         fineFieldMutationOrdinal: fineFieldRead.words[63],
         fineMassResidual: fineWorkspaceRead.floats[50],
-        fineRefluxStatus: fineWorkspaceRead.words[72],
         coarseWorkspaceFlags: coarseWorkspaceRead.words[2],
         coarseWorkspacePhase: coarseWorkspaceRead.words[36],
         coarseInvalidCounts: Array.from(coarseWorkspaceRead.words.slice(37, 42)),
@@ -2417,13 +2629,13 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           fineWorkspace.execution,
           fence
         ),
-        coarseWorkspace.runtime.releaseExecutionAfter(
-          coarseWorkspace.execution,
+        fineWorkspace.runtime.releaseExecutionAfter(
+          terminalExecution,
           fence
         )
       ]);
       fineWorkspace.runtime.destroy();
-      coarseWorkspace.runtime.destroy();
+      fineG2p.destroyOutputParticleBuffers();
       macroRefluxLedger.destroy();
       spatialModule.releaseSchroederSpatialEpochGenerationAfterQueue(
         generation,
@@ -3049,11 +3261,8 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
   assert.ok(native.fineCorrectionCount > 0);
   assert.equal(native.fineFieldEncoding, 2);
   assert.equal(native.fineFieldMutationOrdinal, 3);
-  assert.equal(Number.isNaN(native.fineMassResidual), true);
-  assert.equal(
-    native.fineRefluxStatus,
-    SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_REFLUX_MEASURED_CONSERVATIVE
-  );
+  assert.equal(Number.isFinite(native.fineMassResidual), true);
+  assert.ok(native.fineMassResidual >= 0);
   assert.equal(native.coarseWorkspaceFlags, 3, JSON.stringify(native));
   assert.equal(
     native.coarseWorkspacePhase,
@@ -3107,8 +3316,6 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
   );
   assert.ok(native.refluxInternalEnergyDeposit >= 0, JSON.stringify(native));
   assert.deepEqual(native.p2gAllocationEvidence, [
-    [0, 0],
-    [0, 0],
     [0, 0],
     [0, 0]
   ]);

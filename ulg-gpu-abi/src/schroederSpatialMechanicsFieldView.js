@@ -1,15 +1,16 @@
 export const ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-mechanics-field-view.v2';
+  'peercompute.ulg.schroeder-spatial-mechanics-field-view.v4';
 
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC = 0x53464632;
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION = 2;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC = 0x53464634;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION = 4;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS = 64;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DESCRIPTOR_WORDS = 32;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS = 4;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS = 8;
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS = 16;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS = 36;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS = 8;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS = 4;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE = 27;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS = 60;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PARAMS_BYTES = 192;
@@ -30,11 +31,11 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRAD
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT = 2;
 
 // Once stable-order P2G has materialized the immutable state rows, the still-zero
-// field accumulator bank becomes the field-local heat sidecar. The receipt tail is
+// field accumulator bank becomes the field-local energy sidecar. The receipt tail is
 // deliberately outside the per-field rows so it can gate clear/build/consume
 // without duplicating the full keyed field dictionary or adding a binding.
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC = 0x53465232;
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION = 2;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC = 0x53465233;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION = 3;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_READY = 1 << 0;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_ADMITTED = 1 << 1;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_FAIL_CLOSED = 1 << 2;
@@ -45,6 +46,26 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_HEAT_BUILDING = 3;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_ENERGY_READY = 4;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_G2P_CLAIMED = 5;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_CONSUMED = 6;
+
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G = 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC = 0x53504631;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION = 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY = 1 << 0;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED = 1 << 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_FAIL_CLOSED =
+  1 << 2;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL =
+  1 << 0;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_CROSS_LEVEL =
+  1 << 1;
+
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_ROW_LAYOUT =
+  Object.freeze([
+    'pressureVolumeMomentPaM3:f32-bits',
+    'representedCurrentVolumeM3:f32-bits',
+    'absolutePressurePa:f32-bits',
+    'contributionCount:u32'
+  ]);
 
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT = Object.freeze([
   'magic:u32',
@@ -62,7 +83,27 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT = Object.freeze([
   'macroLedgerGeneration:u32',
   'maxFineCflRatio:f32-bits',
   'partitionOfUnityResidual:f32-bits',
-  'firstMomentResidualM:f32-bits'
+  'firstMomentResidualM:f32-bits',
+  'totalPressureInternalCompensationJ:f32-bits',
+  'publishedPressureInternalCompensationJ:f32-bits',
+  'consumedPressureInternalCompensationJ:f32-bits',
+  'measuredParticleInternalEnergyDeltaJ:f32-bits',
+  'totalAmbientImpulseXNs:f32-bits',
+  'totalAmbientImpulseYNs:f32-bits',
+  'totalAmbientImpulseZNs:f32-bits',
+  'totalAmbientExternalWorkJ:f32-bits',
+  'pressureMagic:u32',
+  'pressureVersion:u32',
+  'pressureStatusFlags:u32',
+  'pressureLawId:u32',
+  'pressureAmbientPa:f32-bits',
+  'pressureInternalScale:f32-bits',
+  'pressureFieldCount:u32',
+  'pressureSourceMutationOrdinal:u32',
+  'pressureRequiredConsumerMask:u32',
+  'pressureClaimedConsumerMask:u32',
+  'pressureConsumedConsumerMask:u32',
+  'pressureSeal:u32'
 ]);
 
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT = Object.freeze([
@@ -166,9 +207,18 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ABI = Object.freeze({
     'generation-materialized-particle-stencil-to-field-index-o1-with-key-recheck',
   overflowPolicy: 'fail-closed-zero-indirect-dispatch',
   mutationPolicy:
-    'identity-layout-descriptors-keys-immutable;mechanics-may-publish-clear-evidence-state-encoding-and-fail-closed-zero-dispatch;accumulators-transition-p2g-to-local-heat-only-through-one-shot-receipt',
+    'identity-layout-descriptors-keys-immutable;mechanics-may-publish-clear-evidence-state-encoding-and-fail-closed-zero-dispatch;accumulators-transition-p2g-to-local-heat-and-phase-volume-transport-ledgers-only-through-one-shot-receipt',
   accumulatorLifecycle:
-    'particle-stencil-contribution-record-emission-then-stable-radix-ordered-field-reduction-with-exact-contribution-count-then-field-local-heat-receipt-until-g2p-consumed',
+    'particle-stencil-contribution-record-emission-then-stable-radix-ordered-field-and-pressure-reduction-with-exact-contribution-count;immutable-pressure-rows-survive-field-local-heat-pressure-work-and-ambient-ledgers-until-required-consumers-complete',
+  pressureRows: Object.freeze({
+    rowWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
+    rowLayout: SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_ROW_LAYOUT,
+    offsetDerivation:
+      'stateOffsetWords + fieldCapacity * stateWords; canonical field index is the row key',
+    law: 'exact-p2g-volume-weighted-absolute-pressure',
+    fallbackPolicy:
+      'fail-closed-no-density-rest-volume-render-radius-private-grid-or-ambient-substitution'
+  }),
   receiptControlWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
   receiptControlLayout: SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT,
   stateEncodingWord: 59,
@@ -270,9 +320,19 @@ export function createSchroederSpatialMechanicsFieldViewLayout({
     SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
     'field state capacity words'
   );
-  const wordLength = checkedAdd(
+  const pressureOffsetWords = checkedAdd(
     stateOffsetWords,
     stateCapacityWords,
+    'field pressure offset'
+  );
+  const pressureCapacityWords = checkedProduct(
+    resolvedFieldCapacity,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
+    'field pressure capacity words'
+  );
+  const wordLength = checkedAdd(
+    pressureOffsetWords,
+    pressureCapacityWords,
     'field view word length'
   );
   return Object.freeze({
@@ -295,6 +355,9 @@ export function createSchroederSpatialMechanicsFieldViewLayout({
     stateOffsetWords,
     stateWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
     stateCapacityWords,
+    pressureOffsetWords,
+    pressureWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
+    pressureCapacityWords,
     dispatchOffsetWords:
       SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS,
     wordLength,
@@ -512,6 +575,8 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     || view.layout?.accumulatorWords
       !== SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS
     || view.layout?.stateWords !== SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS
+    || view.layout?.pressureWords
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS
     || view.layout?.dispatchOffsetWords
       !== SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS
     || view.layout?.sourceCapacity !== expectedLayout.sourceCapacity
@@ -532,6 +597,11 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
       !== view.layout.receiptControlOffsetWords
         + view.layout.receiptControlWords
     || view.layout?.stateCapacityWords !== expectedLayout.stateCapacityWords
+    || view.layout?.pressureOffsetWords !== expectedLayout.pressureOffsetWords
+    || view.layout?.pressureOffsetWords
+      !== view.layout.stateOffsetWords + view.layout.stateCapacityWords
+    || view.layout?.pressureCapacityWords
+      !== expectedLayout.pressureCapacityWords
     || view.layout?.wordLength !== expectedLayout.wordLength
     || view.layout?.byteLength !== expectedLayout.byteLength
   ) {

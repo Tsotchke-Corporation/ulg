@@ -30,6 +30,7 @@ import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
@@ -268,13 +269,19 @@ test('mechanics-field contact requires interface authority for mixed noncondense
     mlsMpmMechanicsFieldGridUpdateWgsl,
     /contact_policy != FIELD_CONTACT_PAIR_ELIGIBLE\) \{ continue; \}[\s\S]*let left_gradient/
   );
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS, 36);
+  assert.match(
+    mlsMpmMechanicsFieldGridUpdateWgsl,
+    /fn summarize_heat_rows\([\s\S]*receipt \+ 20u, ambient_impulse\.x[\s\S]*receipt \+ 21u, ambient_impulse\.y[\s\S]*receipt \+ 22u, ambient_impulse\.z[\s\S]*receipt \+ 23u,[\s\S]*ambient_external_work_j/
+  );
 });
 
-test('single-level fused mechanics omits cross-level-only G2P receipt stages', () => {
+test('single-level fused mechanics measures signed field energy without reflux consumers', () => {
   assert.deepEqual(
     FUSED_SINGLE_LEVEL_MECHANICS_FIELD_G2P_RECEIPT_ENTRY_POINTS,
     [
       { id: 'claim', entryPoint: 'claim_g2p_energy_receipt' },
+      { id: 'measure', entryPoint: 'measure_g2p_energy_receipt' },
       { id: 'consume-field', entryPoint: 'consume_g2p_energy_receipt' }
     ]
   );
@@ -357,13 +364,55 @@ test('single-level fused mechanics G2P keeps local heat but omits route sampling
       /g2p_field_receipt_structural/
     );
     assert.match(singleLevel, /g2p_field_receipt_offset\(\) \+ 10u/);
+    assert.match(singleLevel, /g2p_field_receipt_offset\(\) \+ 18u/);
+    assert.match(singleLevel, /g2p_field_receipt_offset\(\) \+ 19u/);
     assert.match(singleLevel, /fn claim_g2p_energy_receipt\(\)/);
+    assert.match(singleLevel, /fn measure_g2p_energy_receipt\(/);
     assert.match(singleLevel, /fn consume_g2p_energy_receipt\(\)/);
     assert.doesNotMatch(singleLevel, /sampled_field_route_internal_energy_delta/);
     assert.doesNotMatch(singleLevel, /sampled_route_internal_energy_delta/);
     assert.match(crossLevel, /fn measure_g2p_energy_receipt\(/);
+    // The particle-side measurement differences stored f32 internal energy,
+    // so it is bounded one-sided against that state per particle. There is no
+    // sound receipt-level measured-vs-expected equality at this conditioning.
+    assert.doesNotMatch(crossLevel, /fn g2p_energy_receipt_close\(/);
+    assert.match(
+      crossLevel,
+      /measure_gamma_n \* mass \* \(abs\(prior\) \+ abs\(next\)\)/
+    );
+    assert.match(crossLevel, /delta_j < -measure_tolerance/);
+    for (const source of [crossLevel, singleLevel]) {
+      assert.match(
+        source,
+        /let local_energy_evidence_count = g2p_saturating_add\([\s\S]*params\.particle_count \* 28u[\s\S]*g2p_field_load\(34u\)/
+      );
+      assert.match(
+        source,
+        /measure_gamma_n \* mass \* \(abs\(prior\) \+ abs\(next\)\)/
+      );
+      assert.match(
+        source,
+        /g2p_scale_close\([\s\S]*published_field_heat,[\s\S]*consumed_field_heat,[\s\S]*energy_evidence_count[\s\S]*g2p_scale_close\([\s\S]*published_pressure_internal_compensation,[\s\S]*consumed_pressure_internal_compensation,[\s\S]*energy_evidence_count/
+      );
+    }
+    assert.match(
+      crossLevel,
+      /energy_evidence_count = max\([\s\S]*g2p_reflux_load\(94u\)/
+    );
+    assert.match(
+      crossLevel,
+      /consumed_coarse_reflux_heat[\s\S]*84u,[\s\S]*consumed_field_heat \+ consumed_coarse_reflux_heat/
+    );
     assert.match(crossLevel, /fn consume_g2p_fine_reflux_receipt\(\)/);
     assert.match(crossLevel, /fn consume_g2p_coarse_reflux_receipt\(\)/);
+    assert.match(
+      crossLevel,
+      /consumed_coarse_reflux_heat[\s\S]*g2p_selected_is_coarse\(\)[\s\S]*g2p_reflux_load\(115u\)[\s\S]*84u,[\s\S]*consumed_field_heat \+ consumed_coarse_reflux_heat/
+    );
+    assert.match(
+      singleLevel,
+      /if \(g2p_reflux_present\(\) && g2p_selected_is_coarse\(\)\) \{[\s\S]*g2p_reflux_load\(115u\)/
+    );
   }
 });
 
@@ -14821,7 +14870,7 @@ test('MLS-MPM fused resident sequence encodes thermal sidecar fusion in one subm
   assert.equal(execution.sidecarAwareResidentSequenceActive, false);
   assert.equal(execution.sidecarAwareDirectRunnerContractStatus, 'thermal-sidecar-direct-runner-not-candidate');
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 20);
+  assert.equal(device.dispatches.length, 22);
   const dispatchEntryPoints = device.dispatches.map(
     (dispatch) => dispatch.pipeline?.compute?.entryPoint ?? null
   );

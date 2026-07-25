@@ -24,6 +24,10 @@ import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
 import {
+  PRESSURE_CARRIER_LAW_CLAUSIUS_PLATEAU,
+  PRESSURE_CARRIER_LAW_REFERENCE_ONLY
+} from '../material/pressureCarrierTransform.js';
+import {
   MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT,
   MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
 } from '../material/materialPropertyBank.js';
@@ -559,6 +563,51 @@ function materialBankWarmInputConsumerForOutput(thermalMaterialTable, {
   };
 }
 
+// The packed plateau temperature is a material constant derived at the
+// standard atmosphere, so that is the pressure the reference carrier ladder is
+// defined against.
+const THERMAL_CARRIER_REFERENCE_PRESSURE_PA = 101325;
+const THERMAL_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K = 8.314462618;
+
+/**
+ * Derive the pressure-adjusted carrier lanes for one material.
+ *
+ * Only a material with exactly one admitted liquid-to-gas plateau of positive
+ * latent width and a finite-positive molar mass can be pressure-shifted. Any
+ * other material returns the identity law, so the device leaves it on the
+ * reference ladder rather than inventing a plateau for it. Ambiguity (more than
+ * one vaporization plateau) is deliberately not resolved by picking one.
+ */
+function derivePressureCarrierLanes(properties, materialSegments) {
+  const plateaus = materialSegments.filter((segment) => segment.type !== 'phase'
+    && segment.from === 'liquid'
+    && segment.to === 'gas');
+  const identity = {
+    pressureCarrierLawId: PRESSURE_CARRIER_LAW_REFERENCE_ONLY,
+    referencePressurePa: 0,
+    clausiusInvTemperatureLogSlopePerK: 0
+  };
+  if (plateaus.length !== 1) return identity;
+  const [plateau] = plateaus;
+  const latentHeatJPerKg = finiteNumber(plateau.eEnd) - finiteNumber(plateau.eStart);
+  const molarMassKgPerMol = Number(properties?.molarMassKgPerMol);
+  const referenceTemperatureK = finiteNumber(plateau.temperatureK);
+  if (
+    !(latentHeatJPerKg > 0)
+    || !Number.isFinite(molarMassKgPerMol)
+    || !(molarMassKgPerMol > 0)
+    || !(referenceTemperatureK > 0)
+  ) return identity;
+  const molarLatentHeat = latentHeatJPerKg * molarMassKgPerMol;
+  const slope = THERMAL_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / molarLatentHeat;
+  if (!Number.isFinite(slope) || !(slope > 0)) return identity;
+  return {
+    pressureCarrierLawId: PRESSURE_CARRIER_LAW_CLAUSIUS_PLATEAU,
+    referencePressurePa: THERMAL_CARRIER_REFERENCE_PRESSURE_PA,
+    clausiusInvTemperatureLogSlopePerK: slope
+  };
+}
+
 export function buildSphThermalMaterialTable(materialProperties = {}, {
   materialPropertyBankGpuWarmInputTable = null
 } = {}) {
@@ -616,13 +665,24 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
       }
     }
     const emissivityGray = deriveGrayEmissivityForMaterial(material, properties);
-    records.push(materialId, segmentOffset, materialSegments.length, THERMAL_STATUS.ready, emissivityGray, 0, 0, 0);
+    const carrier = derivePressureCarrierLanes(properties, materialSegments);
+    records.push(
+      materialId,
+      segmentOffset,
+      materialSegments.length,
+      THERMAL_STATUS.ready,
+      emissivityGray,
+      carrier.pressureCarrierLawId,
+      carrier.referencePressurePa,
+      carrier.clausiusInvTemperatureLogSlopePerK
+    );
     metadata.push({
       material,
       materialId,
       segmentOffset,
       segmentCount: materialSegments.length,
       emissivityGray,
+      ...carrier,
       phaseNames: [...new Set(materialSegments.map(phaseNameOfSegment))],
       materialPropertyBankWarmInput: materialBankWarmInput,
       materialPropertyBankWarmInputStatus: materialBankWarmInput
@@ -1040,12 +1100,30 @@ export function buildSphThermalPhaseResponseTable(materialPropertiesOrTable = {}
       );
     }
     const emissivityGray = finiteNumber(table.records[recordOffset + 4], 0);
-    records.push(materialId, responseOffset, segmentCount, THERMAL_STATUS.ready, emissivityGray, 0, 0, 0);
+    // Carried through verbatim: the response ladder must resolve the same
+    // plateau shift as the segment table it was derived from.
+    const pressureCarrierLawId = finiteNumber(table.records[recordOffset + 5], 0);
+    const referencePressurePa = finiteNumber(table.records[recordOffset + 6], 0);
+    const clausiusInvTemperatureLogSlopePerK =
+      finiteNumber(table.records[recordOffset + 7], 0);
+    records.push(
+      materialId,
+      responseOffset,
+      segmentCount,
+      THERMAL_STATUS.ready,
+      emissivityGray,
+      pressureCarrierLawId,
+      referencePressurePa,
+      clausiusInvTemperatureLogSlopePerK
+    );
     metadata.push({
       materialId,
       responseOffset,
       responseCount: segmentCount,
-      emissivityGray
+      emissivityGray,
+      pressureCarrierLawId,
+      referencePressurePa,
+      clausiusInvTemperatureLogSlopePerK
     });
   }
   return {

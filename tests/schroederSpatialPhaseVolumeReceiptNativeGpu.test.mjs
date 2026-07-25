@@ -85,6 +85,11 @@ test('native receipt WGSL fails closed when either authenticated field count hea
         gridSpacingM: 0.25,
         ...identity
       });
+      const fieldLayout =
+        fieldAbi.createSchroederSpatialMechanicsFieldViewLayout({
+          sourceCapacity,
+          fieldCapacity
+        });
       const shader = device.createShaderModule({
         label: 'native-phase-volume-receipt-header-authentication',
         code: receiptWgsl.createSchroederSpatialPhaseVolumeReceiptWgsl(layout)
@@ -222,7 +227,7 @@ test('native receipt WGSL fails closed when either authenticated field count hea
         return words;
       };
       const makeMechanicsField = () => {
-        const wordLength = 652;
+        const wordLength = fieldLayout.wordLength;
         const words = new Uint32Array(wordLength);
         words[0] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC;
         words[1] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION;
@@ -239,11 +244,11 @@ test('native receipt WGSL fails closed when either authenticated field count hea
         words[23] = f32Bits(plan.gridSpacingM);
         words[24] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS;
         words[25] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DESCRIPTOR_WORDS;
-        words[26] = 96;
+        words[26] = fieldLayout.keyOffsetWords;
         words[27] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS;
-        words[28] = 204;
+        words[28] = fieldLayout.accumulatorOffsetWords;
         words[29] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS;
-        words[30] = 436;
+        words[30] = fieldLayout.stateOffsetWords;
         words[31] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS;
         words[32] = fieldCapacity;
         words[33] = plan.candidateCount;
@@ -254,7 +259,12 @@ test('native receipt WGSL fails closed when either authenticated field count hea
         words[38] = identity.completionOrdinal;
         words[39] = 1;
         words[40] = 1;
-        words[41] = 444;
+        // v4 required words bound the immutable pressure tail that follows the
+        // full state-capacity bank, matching the mechanics-field producer.
+        words[41] =
+          fieldLayout.pressureOffsetWords
+          + fieldCount
+            * fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS;
         words[42] = wordLength;
         words[43] = 0;
         words[44] = 1;

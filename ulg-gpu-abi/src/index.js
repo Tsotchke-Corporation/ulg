@@ -19,6 +19,11 @@ export * from './schroederSpatialPhaseVolumeMoment.js';
 export * from './schroederSpatialPhaseVolumeMomentWgsl.js';
 export * from './schroederSpatialPhaseVolumeReceipt.js';
 export * from './schroederSpatialPhaseVolumeReceiptWgsl.js';
+export * from './schroederSpatialPhaseVolumeInterfaceProposal.js';
+export * from './schroederSpatialPhaseVolumeInterfaceProposalWgsl.js';
+export * from './schroederSpatialPhaseVolumeTransport.js';
+export * from './schroederSpatialPhaseVolumePressureDragOperatorWgsl.js';
+export * from './schroederSpatialPhaseVolumeTransportWgsl.js';
 export * from './schroederSpatialHierarchyView.js';
 export * from './schroederSpatialHierarchyViewWgsl.js';
 export * from './schroederSpatialParentFieldView.js';
@@ -53,10 +58,13 @@ export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-parti
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
 export const ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA =
   'peercompute.ulg.sph-gpu-particle-identity-buffer.v0';
-export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-material-table.v0';
+// v1 repurposes material-record lanes 5-7 from radiation pads to the
+// pressure-adjusted carrier transform. The stride is unchanged.
+export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-material-table.v1';
 export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0';
 export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0';
-export const ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0';
+// v1 carries the same repurposed lanes 5-7 as the material table above.
+export const ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v1';
 export const ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-response-graph-buffer-set.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-execution.v0';
@@ -384,9 +392,18 @@ export const SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT = Object.freeze([
   // absorbed fraction over the optics path, condensed dielectrics the
   // universal near-gray IR estimate. Row stays vec4-aligned (stride 8).
   'emissivityGray:f32',
-  'radiationPad0:f32',
-  'radiationPad1:f32',
-  'radiationPad2:f32'
+  // Pressure-adjusted carrier transform for this material's admitted
+  // liquid-to-gas plateau. The three lanes replace the former radiation pads
+  // and keep the stride at 8. referencePressurePa is the pressure the packed
+  // plateau temperature was derived at; a particle whose resolved absolute
+  // pressure is bit-identical to it takes the untransformed path. The log
+  // slope is beta = R / (L * M), precomputed on the host so the device
+  // evaluates 1/T* = 1/Tref - beta*ln(P/Pref) without carrying L and M.
+  // lawId 0 means this material has no admitted plateau and must not be
+  // pressure-shifted; there is no implicit one-atmosphere fallback.
+  'pressureCarrierLawId:f32',
+  'referencePressurePa:f32',
+  'clausiusInvTemperatureLogSlopePerK:f32'
 ]);
 export const SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
@@ -410,9 +427,12 @@ export const SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT = Object.freeze([
   // Copied from the thermal material record (see emissivityGray there); the
   // thermal kernel reads it per material for pair and ambient radiation.
   'emissivityGray:f32',
-  'radiationPad0:f32',
-  'radiationPad1:f32',
-  'radiationPad2:f32'
+  // Carried through from the thermal material record so a response-table
+  // consumer resolves the same plateau shift as the segment table it was
+  // derived from. See the material record for the lane semantics.
+  'pressureCarrierLawId:f32',
+  'referencePressurePa:f32',
+  'clausiusInvTemperatureLogSlopePerK:f32'
 ]);
 export const SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
@@ -779,7 +799,11 @@ export const MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT = Object.freeze([
   'soundSpeedMPerS:f32',
   'eosModelId:f32',
   'constitutiveStatus:f32',
-  'hydrostaticPressurePa:f32',
+  // Seeded with the initial hydrostatic pressure, then overwritten by G2P with
+  // the pressure resolved from the immutable mechanics-field pressure rows once
+  // every declared consumer has finished. Post-G2P this lane is an absolute
+  // pressure, not a hydrostatic one.
+  'resolvedAbsolutePressurePa:f32',
   'dynamicViscosityPaS:f32',
   'surfaceTensionNPerM:f32',
   'phaseVolumeReferenceMassKg:f32'

@@ -293,6 +293,17 @@ function captureFusedG2pInputSnapshot({
     internalPressureScale: Number(internalPressureScale),
     sourceInternalPressureScale:
       gridUpdate.sourceProjection?.internalPressureScale,
+    // Bind the exact pressure law and mutation ordinal of the originating P2G.
+    // The shader can only check that the sealed source ordinal is not newer
+    // than the field it is reading; proving that these rows came from *this*
+    // P2G transaction has to happen on the host, where the projection identity
+    // is available.
+    sourcePressureAmbientPressurePa:
+      gridUpdate.sourceProjection?.ambientPressurePa,
+    sourcePressureRequiredConsumerMask:
+      gridUpdate.sourceProjection?.mechanicsFieldPressureRequiredConsumerMask,
+    sourcePressureMutationOrdinal:
+      gridUpdate.sourceProjection?.mechanicsFieldMutationOutputOrdinal,
     liquidWallDampingAlpha: Number(liquidWallDampingAlpha),
     liquidWallDampingDistanceM: Number(liquidWallDampingDistanceM),
     schroederSpatialEpochGeneration,
@@ -358,6 +369,14 @@ function fusedG2pInputSnapshotMatches(device, snapshot, current) {
       gridUpdate?.sourceProjection?.internalPressureScale,
       snapshot.sourceInternalPressureScale
     )
+    && Object.is(
+      gridUpdate?.sourceProjection?.ambientPressurePa,
+      snapshot.sourcePressureAmbientPressurePa
+    )
+    && gridUpdate?.sourceProjection?.mechanicsFieldPressureRequiredConsumerMask
+      === snapshot.sourcePressureRequiredConsumerMask
+    && gridUpdate?.sourceProjection?.mechanicsFieldMutationOutputOrdinal
+      === snapshot.sourcePressureMutationOrdinal
     && sphParticleUpload === snapshot.sphParticleUpload
     && mlsMpmParticleUpload === snapshot.mlsMpmParticleUpload
     && sphParticleUpload?.stateBuffer === snapshot.stateBuffer
@@ -3331,7 +3350,7 @@ export async function runMlsMpmG2pWebGpu({
           ['consume-fine-reflux', 'consume_g2p_fine_reflux_receipt'],
           ['consume-coarse-reflux', 'consume_g2p_coarse_reflux_receipt']
         ].map(([stage, entryPoint]) => createCachedExplicitComputePipeline(device, {
-          cacheKey: `ulg-mls-mpm-g2p-reconstruct.field-energy-${stage}.v2`,
+          cacheKey: `ulg-mls-mpm-g2p-reconstruct.field-energy-${stage}.v3.${g2pVariant}`,
           label: `ulg-mls-mpm-g2p-field-energy-${stage}`,
           code: g2pShader,
           entryPoint,

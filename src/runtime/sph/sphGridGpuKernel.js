@@ -2,6 +2,8 @@ import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_CROSS_LEVEL,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
@@ -217,6 +219,10 @@ function mechanicsFieldP2gMatchesOrigin(projection, origin, options = {}) {
     && projection?.mechanicsFieldMutationOutputOrdinal === origin.outputOrdinal
     && projection?.mechanicsFieldMutationInputStateEncoding === origin.inputEncoding
     && projection?.mechanicsFieldMutationOutputStateEncoding === origin.outputEncoding
+    && Object.is(projection?.ambientPressurePa, origin.pressureAmbientPressurePa)
+    && Object.is(projection?.internalPressureScale, origin.pressureInternalScale)
+    && projection?.mechanicsFieldPressureRequiredConsumerMask
+      === origin.pressureRequiredConsumerMask
     && projection?.dt === origin.dt
     && projection?.gridSpacingM === origin.gridSpacingM
     && projection?.gridNodeCount === origin.gridNodeCount
@@ -368,6 +374,14 @@ function registerSubmittedMechanicsFieldP2g(
     outputOrdinal: projection.mechanicsFieldMutationOutputOrdinal,
     inputEncoding: projection.mechanicsFieldMutationInputStateEncoding,
     outputEncoding: projection.mechanicsFieldMutationOutputStateEncoding,
+    // Pressure-law provenance. The pressure rows this P2G sealed are only
+    // meaningful together with the law that produced them, so the exact
+    // ambient reference, EOS gauge scale, and declared consumer mask are bound
+    // to the originating transaction alongside the mutation ordinals.
+    pressureAmbientPressurePa: projection.ambientPressurePa,
+    pressureInternalScale: projection.internalPressureScale,
+    pressureRequiredConsumerMask:
+      projection.mechanicsFieldPressureRequiredConsumerMask,
     dt: projection.dt,
     gridSpacingM: projection.gridSpacingM,
     gridNodeCount: projection.gridNodeCount,
@@ -1582,6 +1596,11 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   canonicalParticleContinuation = null,
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
+  // A projection whose pressure rows are read by the cross-level phase-volume
+  // operator must declare CROSS_LEVEL required even when it carries no fused
+  // transaction of its own: the coarse predictor projection is consumed by the
+  // parent workspace before the coarse local grid update ever runs.
+  pressureCrossLevelConsumerRequired = false,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -2188,6 +2207,17 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
           );
       }
     }
+    // Declare exactly the consumers that will run. Carrying a fused
+    // transaction does not imply cross-level pressure consumption: the coarse
+    // terminal projection is fused yet is never read by the cross-level
+    // operator, and a field that declares a consumer which never claims it
+    // blocks G2P forever on required == claimed == consumed. Bound once here
+    // so the published pressure provenance records the exact mask uploaded.
+    const mechanicsFieldPressureRequiredConsumerMask =
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL
+        | (pressureCrossLevelConsumerRequired === true
+          ? SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+          : 0);
     device.queue.writeBuffer(
       paramsBuffer,
       0,
@@ -2203,7 +2233,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
             ambientPressurePa,
             externalGaugePressurePa,
             externalGaugePressureEnabled,
-            mechanicsFieldMutationToken
+            mechanicsFieldMutationToken,
+            mechanicsFieldPressureRequiredConsumerMask
           )
         : createProjectionParamsArray(
             gridSpec,
@@ -2582,6 +2613,13 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       mechanicsFieldMutationToken?.expectedEncoding ?? null;
     projection.mechanicsFieldMutationOutputStateEncoding =
       mechanicsFieldMutationToken?.outputEncoding ?? null;
+    // The exact pressure law sealed into this field's pressure receipt. Every
+    // downstream consumer authenticates against these, not against whatever
+    // pressure parameters it happens to be called with.
+    projection.mechanicsFieldPressureRequiredConsumerMask =
+      mechanicsFieldViewEnabled
+        ? mechanicsFieldPressureRequiredConsumerMask
+        : null;
     projection.gridStateAuthority = mechanicsFieldViewEnabled
       ? 'schroeder-spatial-mechanics-field-view-v1'
       : 'dense-mls-mpm-grid-state';
@@ -2959,6 +2997,8 @@ function executionFromProjection(projection, {
       projection?.mechanicsFieldMutationInputStateEncoding ?? null,
     mechanicsFieldMutationOutputStateEncoding:
       projection?.mechanicsFieldMutationOutputStateEncoding ?? null,
+    mechanicsFieldPressureRequiredConsumerMask:
+      projection?.mechanicsFieldPressureRequiredConsumerMask ?? null,
     gridStateAuthority:
       projection?.gridStateAuthority ?? 'dense-mls-mpm-grid-state',
     denseGridAuthoritative:

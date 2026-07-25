@@ -380,17 +380,31 @@ function applyStoichiometricExtentProducts({ state, particles, indices, reaction
 
   const consumedMomentum = [0, 0, 0];
   const consumedCenter = [0, 0, 0];
-  const consumedEnergyJ = consumed.reduce((sum, record) => {
+  const consumedTotalEnergyJ = consumed.reduce((sum, record) => {
+    let speedSquared = 0;
     for (let axis = 0; axis < 3; axis += 1) {
-      consumedMomentum[axis] += record.consumedMassKg * (record.particle.v?.[axis] ?? 0);
+      const velocity = record.particle.v?.[axis] ?? 0;
+      consumedMomentum[axis] += record.consumedMassKg * velocity;
       consumedCenter[axis] += record.consumedMassKg * (record.particle.x?.[axis] ?? 0);
+      speedSquared += velocity * velocity;
     }
-    return sum + record.consumedMassKg * record.particle.specificInternalEnergyJPerKg;
+    return sum + record.consumedMassKg
+      * (record.particle.specificInternalEnergyJPerKg + 0.5 * speedSquared);
   }, 0);
   for (let axis = 0; axis < 3; axis += 1) consumedCenter[axis] /= consumedMassKg;
   const productVelocity = consumedMomentum.map((momentum) => momentum / consumedMassKg);
+  const productSpeedSquared = productVelocity.reduce(
+    (sum, velocity) => sum + velocity * velocity,
+    0
+  );
   const heatJ = -reaction.specificEnthalpyJPerKg * productMassKg;
-  const productSpecificEnergy = (consumedEnergyJ + heatJ) / productMassKg;
+  // Products share the consumed center-of-mass velocity. Relative reactant
+  // kinetic energy is therefore thermalized instead of disappearing.
+  const productSpecificEnergy = (
+    consumedTotalEnergyJ
+    + heatJ
+    - 0.5 * productMassKg * productSpeedSquared
+  ) / productMassKg;
 
   const reusableProductSlots = [];
   for (const record of consumed) {
@@ -479,10 +493,14 @@ function applyStoichiometricProducts({ particles, indices, reaction, materialPro
   const totalMassKg = sourceParticles.reduce((sum, particle) => sum + particle.massKg, 0);
   if (!(totalMassKg > 0)) return false;
   const heat = -reaction.specificEnthalpyJPerKg;
-  const sourceEnergyJ = sourceParticles.reduce(
-    (sum, particle) => sum + particle.massKg * particle.specificInternalEnergyJPerKg,
-    0
-  );
+  const sourceTotalEnergyJ = sourceParticles.reduce((sum, particle) => {
+    const speedSquared = (particle.v || []).reduce(
+      (speed2, velocity) => speed2 + velocity * velocity,
+      0
+    );
+    return sum + particle.massKg
+      * (particle.specificInternalEnergyJPerKg + 0.5 * speedSquared);
+  }, 0);
   if (productTerms.length === 1) {
     for (const particle of sourceParticles) {
       particle.material = productTerms[0].material;
@@ -507,13 +525,18 @@ function applyStoichiometricProducts({ particles, indices, reaction, materialPro
     }
   }
   for (let axis = 0; axis < 3; axis += 1) center[axis] /= totalMassKg;
-  const baseSpecificEnergy = sourceEnergyJ / totalMassKg;
-  const productSpecificEnergy = baseSpecificEnergy + heat;
+  const velocity = sourceMomentum.map((momentum) => momentum / totalMassKg);
+  const productSpeedSquared = velocity.reduce(
+    (sum, component) => sum + component * component,
+    0
+  );
+  const productSpecificEnergy = sourceTotalEnergyJ / totalMassKg
+    + heat
+    - 0.5 * productSpeedSquared;
   const reusable = [...indices];
   for (let termIndex = 0; termIndex < productTerms.length; termIndex += 1) {
     const term = productTerms[termIndex];
     const massKg = totalMassKg * term.massFraction;
-    const velocity = sourceMomentum.map((momentum) => momentum / totalMassKg);
     const slot = reusable[termIndex] ?? null;
     const target = slot == null
       ? cloneProductParticle(sourceParticles[0], {

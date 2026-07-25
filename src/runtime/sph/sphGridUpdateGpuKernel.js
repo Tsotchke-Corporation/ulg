@@ -1,6 +1,9 @@
 import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
   MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT,
+  createSchroederSpatialPhaseVolumeTransportScratchHeader,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_PARAMS_BYTES,
+  schroederSpatialPhaseVolumeTransportScratchWordLength,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
@@ -11,6 +14,9 @@ import {
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmGridUpdateWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import {
+  schroederSpatialPhaseVolumeTransportWgsl
+} from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeTransportWgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
@@ -42,6 +48,12 @@ import {
 import {
   strictReactionGateAllowsForceCoupling
 } from './sphReactionGpuSummary.js';
+import {
+  resolveSchroederSpatialPhaseVolumeTransportAuthority
+} from './schroederSpatialEpochTransaction.js';
+import {
+  uploadedMechanicsMaterialPhaseRecordsMatch
+} from './sphMechanicsRefreshGpuKernel.js';
 
 export {
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -84,6 +96,7 @@ const EMPTY_PRESSURE_INTERFACE_FORCE_ROWS = new Float32Array(SPH_PRESSURE_INTERF
 const DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M = 0;
 const DEFAULT_WALL_BARRIER_CONTACT_SCALE = 1;
 const DEFAULT_WALL_BARRIER_MIN_GAP_M = 1e-6;
+const MLS_MPM_GRID_UPDATE_PARAMS_BYTES = 80;
 const ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA = 'peercompute.ulg.algorithm-material-contact-rows.v0';
 const mechanicsFieldGridUpdateOrigins = new WeakMap();
 const PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES = new Set([
@@ -163,7 +176,7 @@ function mechanicsFieldGridUpdateMatchesOrigin(update, origin, {
     && update?.mechanicsFieldMutationOutputStateEncoding === origin.outputEncoding
     && receipt === origin.receipt
     && receipt?.schema
-      === 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2'
+      === 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3'
     && receipt?.status === origin.receiptStatus
     && receipt?.deferSeal === origin.deferSeal
     && receipt?.fieldMutationOrdinal === origin.outputOrdinal
@@ -1314,7 +1327,19 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
-function createGridUpdateParamsArray({
+function createGridUpdateParamsArray(options) {
+  const buffer = new ArrayBuffer(MLS_MPM_GRID_UPDATE_PARAMS_BYTES);
+  return writeGridUpdateParamsArray(buffer, options);
+}
+
+function createMechanicsFieldGridUpdateParamsArray(options) {
+  const buffer = new ArrayBuffer(
+    SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_PARAMS_BYTES
+  );
+  return writeGridUpdateParamsArray(buffer, options);
+}
+
+function writeGridUpdateParamsArray(buffer, {
   p2gGridProjection,
   dt,
   gravityMPerS2,
@@ -1325,9 +1350,15 @@ function createGridUpdateParamsArray({
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
   mechanicsFieldMutation = null,
-  mechanicsFieldReceiptModeFlags = null
+  mechanicsFieldReceiptModeFlags = null,
+  phaseVolumeTransportAuthority = null,
+  mechanicsMaterialPhaseUpload = null,
+  ambientPressurePa = 0,
+  ambientReferenceDensityKgPerM3 = 1.2041,
+  phaseVolumePressureScale = 1,
+  phaseVolumeDragScale = 1,
+  phaseVolumeMaxImpulseFraction = 0.5
 }) {
-  const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   const gridDims = p2gGridProjection.gridDims ?? [1, 1, 1];
   view.setUint32(0, p2gGridProjection.gridNodeCount ?? 0, true);
@@ -1362,6 +1393,80 @@ function createGridUpdateParamsArray({
   view.setFloat32(68, Math.max(0, finiteNumber(wallBarrierElasticStiffnessNPerM, 0)), true);
   view.setFloat32(72, clamp01(wallBarrierContactScale), true);
   view.setFloat32(76, Math.max(1e-12, Math.abs(finiteNumber(wallBarrierMinGapM, DEFAULT_WALL_BARRIER_MIN_GAP_M))), true);
+  if (buffer.byteLength === MLS_MPM_GRID_UPDATE_PARAMS_BYTES) return buffer;
+  if (
+    buffer.byteLength
+      !== SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_PARAMS_BYTES
+  ) {
+    throw new RangeError('mechanics-field grid-update params size is not canonical');
+  }
+  const transport = phaseVolumeTransportAuthority;
+  const proposal = transport?.phaseVolumeInterfaceProposal ?? null;
+  const phaseRecordCount = transport
+    ? Math.max(0, Math.round(finiteNumber(
+        mechanicsMaterialPhaseUpload?.phaseRecordCount,
+        0
+      )))
+    : 0;
+  view.setUint32(80, transport ? 1 : 0, true);
+  view.setUint32(84, phaseRecordCount, true);
+  view.setInt32(88, Number(transport?.selectedLevel ?? 0) | 0, true);
+  view.setUint32(92, Number(transport?.fieldCapacity ?? 0) >>> 0, true);
+  view.setUint32(
+    96,
+    Number(transport?.phaseVolumeInterfaceLocalHeadOffsetWords ?? 0) >>> 0,
+    true
+  );
+  view.setUint32(100, Number(transport?.generationId ?? 0) >>> 0, true);
+  view.setUint32(
+    104,
+    Number(transport?.phaseVolumeReceipt?.completionOrdinal ?? 0) >>> 0,
+    true
+  );
+  view.setUint32(
+    108,
+    Number(
+      transport?.levelIndex === 0
+        ? proposal?.coarseReceiptCompletionOrdinal
+        : proposal?.fineReceiptCompletionOrdinal
+    ) >>> 0,
+    true
+  );
+  view.setUint32(
+    112,
+    Number(proposal?.parentFieldCompletionOrdinal ?? 0) >>> 0,
+    true
+  );
+  view.setInt32(116, Number(transport?.fineLevel ?? 0) | 0, true);
+  view.setInt32(120, Number(transport?.coarseLevel ?? 0) | 0, true);
+  view.setUint32(124, Number(transport?.levelIndex ?? 0) >>> 0, true);
+  const ambientPressure = Math.max(0, finiteNumber(ambientPressurePa, 0));
+  const ambientDensity = transport
+    ? Math.max(0, finiteNumber(ambientReferenceDensityKgPerM3, 1.2041))
+      * ambientPressure / 101325
+    : 0;
+  view.setFloat32(128, ambientPressure, true);
+  view.setFloat32(132, ambientDensity, true);
+  view.setFloat32(136, Math.max(0, finiteNumber(phaseVolumePressureScale, 1)), true);
+  view.setFloat32(140, Math.max(0, finiteNumber(phaseVolumeDragScale, 1)), true);
+  view.setFloat32(
+    144,
+    Math.max(0, finiteNumber(phaseVolumeMaxImpulseFraction, 0.5)),
+    true
+  );
+  const identity = transport?.epochIdentity ?? {};
+  for (const [index, field] of [
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ].entries()) {
+    view.setUint32(160 + index * 4, Number(identity[field] ?? 0) >>> 0, true);
+  }
   return buffer;
 }
 
@@ -1464,6 +1569,15 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   wallBarrierContactScale,
   wallBarrierMinGapM,
   mechanicsFieldEnergyReceipt,
+  schroederSpatialEpochTransaction,
+  mechanicsMaterialTable,
+  mechanicsMaterialPhaseUpload,
+  ambientPressurePa,
+  ambientReferenceDensityKgPerM3,
+  phaseVolumePressureScale,
+  phaseVolumeDragScale,
+  phaseVolumeMaxImpulseFraction,
+  phaseVolumeInterfaceTransportRequired,
   fusedFineSubstepTransaction,
   fusedCoarseTerminalTransaction,
   fusedProducerCapability,
@@ -1572,6 +1686,102 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       'Mechanics-field grid update cannot consume dense pressure-interface rows'
     );
   }
+  const spatialGeneration = fusedTransaction?.microepochAuthority?.generation
+    ?? schroederSpatialEpochTransaction?.generation
+    ?? null;
+  let phaseVolumeTransportAuthority = null;
+  if (schroederSpatialEpochTransaction != null) {
+    if (
+      fusedTransaction != null
+      && spatialGeneration !== schroederSpatialEpochTransaction.generation
+    ) {
+      throw new TypeError(
+        'Phase-volume transport transaction does not match the active mechanics microepoch'
+      );
+    }
+    phaseVolumeTransportAuthority =
+      resolveSchroederSpatialPhaseVolumeTransportAuthority(
+        schroederSpatialEpochTransaction,
+        {
+          generation: spatialGeneration,
+          selectedLevel: fieldExecution.selectedLevel,
+          mechanicsFieldView: fieldExecution
+        }
+      );
+  }
+  const materialPhaseUploadReady = Boolean(
+    phaseVolumeTransportAuthority
+    && uploadedMechanicsMaterialPhaseRecordsMatch(
+      mechanicsMaterialPhaseUpload,
+      mechanicsMaterialTable,
+      device
+    )
+  );
+  if (
+    phaseVolumeInterfaceTransportRequired === true
+    && (!phaseVolumeTransportAuthority || !materialPhaseUploadReady)
+  ) {
+    throw new TypeError(
+      'Required phase-volume transport lacks exact S9 authority or mechanics material records'
+    );
+  }
+  if (!materialPhaseUploadReady) phaseVolumeTransportAuthority = null;
+  if (phaseVolumeTransportAuthority) {
+    // The transport operator reads absolute pressures that P2G resolved
+    // against a specific ambient reference and EOS gauge scale, and the
+    // shader authenticates the receipt's sealed ambient bits against the
+    // ambient we upload here. Prove the match on the host too, so a mismatched
+    // caller fails with the actual cause instead of an opaque fail-closed
+    // receipt. Compare f32 bits: the receipt stores the bit pattern.
+    const sealedAmbientPa = Math.max(
+      0,
+      finiteNumber(p2gGridProjection?.ambientPressurePa, 0)
+    );
+    const requestedAmbientPa = Math.max(0, finiteNumber(ambientPressurePa, 0));
+    if (
+      !Object.is(Math.fround(sealedAmbientPa), Math.fround(requestedAmbientPa))
+    ) {
+      throw new TypeError(
+        'Phase-volume transport ambient pressure does not match the ambient '
+          + `sealed by its originating P2G (${sealedAmbientPa} vs `
+          + `${requestedAmbientPa})`
+      );
+    }
+  }
+  const materialPhaseBuffer = phaseVolumeTransportAuthority
+    ? mechanicsMaterialPhaseUpload.recordsBuffer
+      ?? mechanicsMaterialPhaseUpload.materialPhaseBuffer
+    : null;
+  const transportScratchWordLength = phaseVolumeTransportAuthority
+    ? schroederSpatialPhaseVolumeTransportScratchWordLength(
+        phaseVolumeTransportAuthority.fieldCapacity
+      )
+    : 0;
+  const transportScratchByteLength =
+    transportScratchWordLength * Uint32Array.BYTES_PER_ELEMENT;
+  if (phaseVolumeTransportAuthority) {
+    const maxStorageBindings = Number(
+      device.limits?.maxStorageBuffersPerShaderStage ?? 8
+    );
+    const maxStorageBindingBytes = Number(
+      device.limits?.maxStorageBufferBindingSize
+        ?? Number.POSITIVE_INFINITY
+    );
+    const maxBufferBytes = Number(
+      device.limits?.maxBufferSize ?? Number.POSITIVE_INFINITY
+    );
+    if (
+      !Number.isSafeInteger(transportScratchByteLength)
+      || transportScratchByteLength < Uint32Array.BYTES_PER_ELEMENT
+      || maxStorageBindings < 7
+      || transportScratchByteLength > maxStorageBindingBytes
+      || transportScratchByteLength > maxBufferBytes
+    ) {
+      throw new RangeError(
+        'Phase-volume transport scratch exceeds the admitted WebGPU storage limits'
+      );
+    }
+  }
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -1636,13 +1846,14 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   };
   let paramsBuffer = null;
   let indirectBuffer = null;
+  let transportScratchBuffer = null;
   let submitted = false;
   let mutationCommitted = false;
   let mutationToken = null;
   try {
     paramsBuffer = trackOwnedBuffer(device.createBuffer({
       label: 'ulg-mls-mpm-mechanics-field-grid-update-params',
-      size: 80,
+      size: SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_PARAMS_BYTES,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
     }));
     indirectBuffer = trackOwnedBuffer(device.createBuffer({
@@ -1650,6 +1861,24 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       size: 3 * Uint32Array.BYTES_PER_ELEMENT,
       usage: GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.INDIRECT
     }));
+    if (phaseVolumeTransportAuthority) {
+      transportScratchBuffer = trackOwnedBuffer(device.createBuffer({
+        label: 'ulg-schroeder-phase-volume-transport-scratch',
+        size: transportScratchByteLength,
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      }));
+      device.queue.writeBuffer(
+        transportScratchBuffer,
+        0,
+        createSchroederSpatialPhaseVolumeTransportScratchHeader({
+          fieldCapacity: phaseVolumeTransportAuthority.fieldCapacity,
+          generationId: phaseVolumeTransportAuthority.generationId,
+          fieldCompletionOrdinal:
+            phaseVolumeTransportAuthority.phaseVolumeReceipt
+              ?.completionOrdinal
+        })
+      );
+    }
     mutationToken = fusedTransaction != null
       ? fusedTransaction.gridUpdateMutation
       : fieldRuntime.reserveStateMutation(fieldExecution, {
@@ -1660,7 +1889,10 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
             SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
           operation: 'grid-update-mass-velocity-gradient-submitted'
         });
-    device.queue.writeBuffer(paramsBuffer, 0, createGridUpdateParamsArray({
+    device.queue.writeBuffer(
+      paramsBuffer,
+      0,
+      createMechanicsFieldGridUpdateParamsArray({
       p2gGridProjection,
       dt: dtSeconds,
       gravityMPerS2: gravity,
@@ -1671,8 +1903,16 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       wallBarrierContactScale: wallBarrierContact.wallBarrierContactScale,
       wallBarrierMinGapM: wallBarrierContact.wallBarrierMinGapM,
       mechanicsFieldMutation: mutationToken,
-      mechanicsFieldReceiptModeFlags: receiptModeFlags
-    }));
+      mechanicsFieldReceiptModeFlags: receiptModeFlags,
+      phaseVolumeTransportAuthority,
+      mechanicsMaterialPhaseUpload,
+      ambientPressurePa,
+      ambientReferenceDensityKgPerM3,
+      phaseVolumePressureScale,
+      phaseVolumeDragScale,
+      phaseVolumeMaxImpulseFraction
+      })
+    );
     const { mlsMpmMechanicsFieldGridUpdateWgsl } = await import(
       './sphMlsMpmGpuStep.js'
     );
@@ -1750,6 +1990,43 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       entryPoint: 'seal_velocity_state',
       bindings
     });
+    const transportBindings = [
+      computeBufferBinding(0, 'storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(6, 'uniform'),
+      computeBufferBinding(7, 'storage')
+    ];
+    const transportStage = phaseVolumeTransportAuthority
+      ? createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-schroeder-phase-volume-transport.stage.v3',
+          label: 'ulg-schroeder-phase-volume-transport-stage',
+          code: schroederSpatialPhaseVolumeTransportWgsl,
+          entryPoint: 'stage_transport',
+          bindings: transportBindings
+        })
+      : null;
+    const transportValidate = phaseVolumeTransportAuthority
+      ? createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-schroeder-phase-volume-transport.validate-staged.v3',
+          label: 'ulg-schroeder-phase-volume-transport-validate-staged',
+          code: schroederSpatialPhaseVolumeTransportWgsl,
+          entryPoint: 'validate_staged_transport',
+          bindings: transportBindings
+        })
+      : null;
+    const transportCommit = phaseVolumeTransportAuthority
+      ? createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-schroeder-phase-volume-transport.commit.v3',
+          label: 'ulg-schroeder-phase-volume-transport-commit',
+          code: schroederSpatialPhaseVolumeTransportWgsl,
+          entryPoint: 'commit_transport',
+          bindings: transportBindings
+        })
+      : null;
     const entries = [
       { binding: 0, resource: { buffer: fieldBuffer } },
       { binding: 2, resource: { buffer: paramsBuffer } }
@@ -1786,6 +2063,59 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       layout: seal.bindGroupLayout,
       entries
     });
+    const transportEntries = phaseVolumeTransportAuthority
+      ? [
+          { binding: 0, resource: { buffer: fieldBuffer } },
+          {
+            binding: 1,
+            resource: {
+              buffer: phaseVolumeTransportAuthority
+                .phaseVolumeInterfaceProposalControlBuffer
+            }
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: phaseVolumeTransportAuthority
+                .phaseVolumeInterfaceLocalHeadBuffer
+            }
+          },
+          {
+            binding: 3,
+            resource: {
+              buffer: phaseVolumeTransportAuthority
+                .phaseVolumeReceiptControlBuffer
+            }
+          },
+          {
+            binding: 4,
+            resource: {
+              buffer: phaseVolumeTransportAuthority.phaseVolumeMomentBuffer
+            }
+          },
+          { binding: 5, resource: { buffer: materialPhaseBuffer } },
+          { binding: 6, resource: { buffer: paramsBuffer } },
+          { binding: 7, resource: { buffer: transportScratchBuffer } }
+        ]
+      : null;
+    const transportStageBindGroup = transportStage
+      ? device.createBindGroup({
+          layout: transportStage.bindGroupLayout,
+          entries: transportEntries
+        })
+      : null;
+    const transportValidateBindGroup = transportValidate
+      ? device.createBindGroup({
+          layout: transportValidate.bindGroupLayout,
+          entries: transportEntries
+        })
+      : null;
+    const transportCommitBindGroup = transportCommit
+      ? device.createBindGroup({
+          layout: transportCommit.bindGroupLayout,
+          entries: transportEntries
+        })
+      : null;
     const encoder = device.createCommandEncoder();
     if (typeof encoder.copyBufferToBuffer !== 'function') {
       throw new Error('Mechanics-field grid update requires indirect-dispatch staging');
@@ -1822,6 +2152,23 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     mainPass.setBindGroup(0, mainBindGroup);
     mainPass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
     mainPass.end();
+    if (transportStage && transportValidate && transportCommit) {
+      const transportStagePass = encoder.beginComputePass();
+      transportStagePass.setPipeline(transportStage.pipeline);
+      transportStagePass.setBindGroup(0, transportStageBindGroup);
+      transportStagePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      transportStagePass.end();
+      const transportValidatePass = encoder.beginComputePass();
+      transportValidatePass.setPipeline(transportValidate.pipeline);
+      transportValidatePass.setBindGroup(0, transportValidateBindGroup);
+      transportValidatePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      transportValidatePass.end();
+      const transportCommitPass = encoder.beginComputePass();
+      transportCommitPass.setPipeline(transportCommit.pipeline);
+      transportCommitPass.setBindGroup(0, transportCommitBindGroup);
+      transportCommitPass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      transportCommitPass.end();
+    }
     const contactPass = encoder.beginComputePass();
     contactPass.setPipeline(contact.pipeline);
     contactPass.setBindGroup(0, contactBindGroup);
@@ -1889,7 +2236,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     update.fieldStateUpdateSubmittedInPlace = true;
     update.fieldStateUpdatedInPlace = false;
     update.mechanicsFieldEnergyReceipt = Object.freeze({
-      schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v2',
+      schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3',
       status: receiptModeFlags === 0
         ? 'energy-ready-submitted-unverified'
         : 'heat-building-deferred-to-reflux-owner',
@@ -2057,6 +2404,15 @@ export async function runMlsMpmGridUpdateWebGpu({
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
   mechanicsFieldEnergyReceipt = null,
+  schroederSpatialEpochTransaction = null,
+  mechanicsMaterialTable = null,
+  mechanicsMaterialPhaseUpload = null,
+  ambientPressurePa = 0,
+  ambientReferenceDensityKgPerM3 = 1.2041,
+  phaseVolumePressureScale = 1,
+  phaseVolumeDragScale = 1,
+  phaseVolumeMaxImpulseFraction = 0.5,
+  phaseVolumeInterfaceTransportRequired = false,
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
   retainUpdatedGridBuffer = false,
@@ -2158,6 +2514,15 @@ export async function runMlsMpmGridUpdateWebGpu({
         wallBarrierContactScale,
         wallBarrierMinGapM,
         mechanicsFieldEnergyReceipt,
+        schroederSpatialEpochTransaction,
+        mechanicsMaterialTable,
+        mechanicsMaterialPhaseUpload,
+        ambientPressurePa,
+        ambientReferenceDensityKgPerM3,
+        phaseVolumePressureScale,
+        phaseVolumeDragScale,
+        phaseVolumeMaxImpulseFraction,
+        phaseVolumeInterfaceTransportRequired,
         fusedFineSubstepTransaction,
         fusedCoarseTerminalTransaction,
         fusedProducerCapability,
@@ -2270,7 +2635,7 @@ export async function runMlsMpmGridUpdateWebGpu({
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-grid-update-params',
-    size: 80,
+    size: MLS_MPM_GRID_UPDATE_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
@@ -2603,6 +2968,15 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
   mechanicsFieldEnergyReceipt = null,
+  schroederSpatialEpochTransaction = null,
+  mechanicsMaterialTable = null,
+  mechanicsMaterialPhaseUpload = null,
+  ambientPressurePa = 0,
+  ambientReferenceDensityKgPerM3 = 1.2041,
+  phaseVolumePressureScale = 1,
+  phaseVolumeDragScale = 1,
+  phaseVolumeMaxImpulseFraction = 0.5,
+  phaseVolumeInterfaceTransportRequired = false,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -2726,6 +3100,15 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       fusedFineSubstepTransaction,
       fusedCoarseTerminalTransaction,
       mechanicsFieldEnergyReceipt,
+      schroederSpatialEpochTransaction,
+      mechanicsMaterialTable,
+      mechanicsMaterialPhaseUpload,
+      ambientPressurePa,
+      ambientReferenceDensityKgPerM3,
+      phaseVolumePressureScale,
+      phaseVolumeDragScale,
+      phaseVolumeMaxImpulseFraction,
+      phaseVolumeInterfaceTransportRequired,
       retainUpdatedGridBuffer,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });

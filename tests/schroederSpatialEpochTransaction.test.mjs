@@ -16,6 +16,7 @@ import {
   createSchroederSpatialEpochTransaction,
   quarantineSchroederSpatialEpochTransactionLawInputs,
   recordSchroederSpatialEpochTransactionLegacyLookup,
+  resolveSchroederSpatialPhaseVolumeTransportAuthority,
   scheduleSchroederSpatialEpochTransactionRelease,
   sealSchroederSpatialEpochTransactionProposals,
   sealSchroederSpatialEpochTransactionReaders,
@@ -779,7 +780,7 @@ test('two-level transaction exposes and freezes the submitted read-only phase-vo
   );
   assert.equal(
     transaction.phaseVolumeReceiptPolicy,
-    'read-only-future-law-eligibility-only'
+    'read-only-law-and-transport-eligibility'
   );
   let summary = summarizeSchroederSpatialEpochTransaction(transaction);
   assert.equal(
@@ -847,7 +848,7 @@ test('two-level transaction exposes and freezes an explicitly authorized read-on
   );
   assert.equal(
     transaction.phaseVolumeInterfaceProposalPolicy,
-    'read-only-interface-topology-future-operator-only'
+    'read-only-interface-topology-transport-authority'
   );
   let summary = summarizeSchroederSpatialEpochTransaction(transaction);
   assert.equal(summary.phaseVolumeInterfaceProposalAuthoritative, true);
@@ -881,6 +882,107 @@ test('two-level transaction exposes and freezes an explicitly authorized read-on
   ), true);
   summary = summarizeSchroederSpatialEpochTransaction(transaction);
   assert.equal(summary.phaseVolumeInterfaceProposalReadOnly, true);
+});
+
+test('S9-C transport authority is exact and exists only between P2G and G2P', () => {
+  const f = twoLevelFixture({
+    phaseVolume: true,
+    phaseVolumeInterfaceProposalEnabled: true
+  });
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: true,
+    phaseVolumeInterfaceProposalAuthoritative: true
+  });
+  const readerInputs = {
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  };
+  const fineFieldView = f.generation.mechanicsLevelViews[0].mechanicsFieldView;
+  const coarseFieldView = f.generation.mechanicsLevelViews[1].mechanicsFieldView;
+
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: fineFieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LIFECYCLE' }
+  );
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION,
+    ...readerInputs
+  }), true);
+
+  const fine = resolveSchroederSpatialPhaseVolumeTransportAuthority(
+    transaction,
+    {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: fineFieldView
+    }
+  );
+  const coarse = resolveSchroederSpatialPhaseVolumeTransportAuthority(
+    transaction,
+    {
+      generation: f.generation,
+      selectedLevel: 1,
+      mechanicsFieldView: coarseFieldView
+    }
+  );
+  assert.equal(fine.levelRole, 'fine');
+  assert.equal(fine.levelIndex, 0);
+  assert.equal(fine.mechanicsFieldView, fineFieldView);
+  assert.equal(fine.phaseVolumeMoment, f.generation.mechanicsLevelViews[0].phaseVolumeMoment);
+  assert.equal(fine.phaseVolumeReceipt, f.generation.mechanicsLevelViews[0].phaseVolumeReceipt);
+  assert.equal(coarse.levelRole, 'coarse');
+  assert.equal(coarse.levelIndex, 1);
+  assert.equal(coarse.mechanicsFieldView, coarseFieldView);
+  assert.equal(
+    fine.phaseVolumeInterfaceRefluxRouteRowWords,
+    f.generation.phaseVolumeInterfaceProposal.layout.refluxRouteRowWords
+  );
+
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 2,
+      mechanicsFieldView: fineFieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LEVEL' }
+  );
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: { ...fineFieldView }
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY' }
+  );
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: { ...f.generation },
+      selectedLevel: 0,
+      mechanicsFieldView: fineFieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY' }
+  );
+
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT,
+    ...readerInputs
+  }), true);
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 1,
+      mechanicsFieldView: coarseFieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LIFECYCLE' }
+  );
 });
 
 test('two-level transaction refuses opt-in S9-C authority without its exact proposal', () => {

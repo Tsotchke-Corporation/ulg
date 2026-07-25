@@ -12,6 +12,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { pressureCarrierTransformWgsl } from '../../../ulg-gpu-abi/src/pressureCarrierTransformWgsl.js';
 import { ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA } from './sphMechanicsMaterialTable.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
@@ -121,6 +122,14 @@ function assertInputs({
   if (!(thermalMaterialTable?.segments instanceof Float32Array)) {
     throw new TypeError('Phase-carrier transfer requires a packed thermal segment table');
   }
+  // The material records carry the pressure-adjusted carrier law (lanes 5-7).
+  // Without them a plateau cannot be pressure-shifted at all, so refuse rather
+  // than silently resolving every particle on the reference ladder.
+  if (!(thermalMaterialTable?.records instanceof Float32Array)) {
+    throw new TypeError(
+      'Phase-carrier transfer requires packed thermal material records for the pressure carrier law'
+    );
+  }
   if (mechanicsMaterialTable?.schema !== ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA) {
     throw new TypeError('Phase-carrier transfer requires a mechanics material table');
   }
@@ -156,19 +165,34 @@ function uploadStorageBuffer(device, label, values, extraUsage = 0) {
 function createClosureRows(thermalMaterialTable, mechanicsMaterialTable) {
   const thermalSegments = thermalMaterialTable.segments;
   const mechanicsRecords = mechanicsMaterialTable.records;
-  const values = new Float32Array(thermalSegments.length + mechanicsRecords.length);
+  // The thermal material records ride along so the shader can resolve each
+  // material's pressure-adjusted carrier law (lanes 5-7) without a fourth
+  // storage binding. Stride 8 floats = 2 vec4 per record.
+  const materialRecords = thermalMaterialTable.records;
+  const values = new Float32Array(
+    thermalSegments.length + mechanicsRecords.length + materialRecords.length
+  );
   values.set(thermalSegments, 0);
   values.set(mechanicsRecords, thermalSegments.length);
+  values.set(materialRecords, thermalSegments.length + mechanicsRecords.length);
   return {
     values,
     thermalSegmentCount: Math.floor(thermalSegments.length / 12),
     mechanicsRecordCount: Math.floor(mechanicsRecords.length / 12),
+    materialRecordCount: Math.floor(materialRecords.length / 8),
     thermalOffsetVec4: 0,
-    mechanicsOffsetVec4: Math.floor(thermalSegments.length / 4)
+    mechanicsOffsetVec4: Math.floor(thermalSegments.length / 4),
+    materialRecordOffsetVec4:
+      Math.floor((thermalSegments.length + mechanicsRecords.length) / 4)
   };
 }
 
-function createParamsArray({ particleCount, plan, closure }) {
+function createParamsArray({
+  particleCount,
+  plan,
+  closure,
+  absolutePressureAuthority = false
+}) {
   const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
@@ -183,6 +207,9 @@ function createParamsArray({ particleCount, plan, closure }) {
   view.setFloat32(36, SPH_PHASE_FRACTION_VALIDATION_EPSILON, true);
   view.setFloat32(40, 2e-4, true);
   view.setFloat32(44, 1e-20, true);
+  view.setUint32(48, closure.materialRecordCount, true);
+  view.setUint32(52, closure.materialRecordOffsetVec4, true);
+  view.setUint32(56, absolutePressureAuthority === true ? 1 : 0, true);
   view.setFloat32(60, SPH_PHASE_COMPONENT_ACTIVATION_EPSILON, true);
   return buffer;
 }
@@ -202,6 +229,7 @@ function initialEvidence(primaryCapacity) {
 }
 
 export const sphPhaseCarrierTransferWgsl = /* wgsl */ `
+${pressureCarrierTransformWgsl}
 struct PhaseTransferParams {
   particle_count: u32,
   lineage_capacity: u32,
@@ -215,7 +243,15 @@ struct PhaseTransferParams {
   fraction_validation_epsilon: f32,
   relative_tolerance: f32,
   mass_epsilon: f32,
-  pad0: vec3<u32>,
+  material_record_count: u32,
+  material_record_offset_vec4: u32,
+  // Nonzero only when the host declares that mechanics lane 28 holds a real
+  // absolute pressure. It does not by default: the host currently packs a
+  // depth-derived hydrostatic *gauge* prestress there, and reading a gauge
+  // value as absolute would put deep water at a few kPa absolute and boil it.
+  // While this is zero the pressure plateau fails closed and every particle
+  // resolves on the reference ladder, which is the pre-Slice-9 behavior.
+  absolute_pressure_authority: u32,
   fraction_activation_epsilon: f32,
 };
 
@@ -229,6 +265,7 @@ struct LineagePhases {
 
 struct PhaseAggregate {
   mass: f32,
+  current_volume: f32,
   first_moment: vec3<f32>,
   momentum: vec3<f32>,
   internal_energy: f32,
@@ -261,6 +298,7 @@ const ERROR_PHASE_COUNT: u32 = 16u;
 const ERROR_PLATEAU: u32 = 32u;
 const ERROR_ENERGY: u32 = 64u;
 const ERROR_MECHANICS: u32 = 128u;
+const ERROR_VOLUME: u32 = 256u;
 const INVALID_INDEX: u32 = 0xffffffffu;
 
 fn finite_f32(value: f32) -> bool {
@@ -281,13 +319,115 @@ fn phase_lane_index(lineage_index: u32, phase_id: u32) -> u32 {
   return (phase_id - 1u) * params.phase_lane_stride + lineage_index;
 }
 
+// Resolve the pressure-adjusted plateau for this material's liquid-to-gas
+// segment at the particle's resolved absolute pressure.
+//
+// Away from the reference pressure the plateau that actually contains the
+// particle's physical energy is [E0*, E1*], not the packed [E0, E1]; searching
+// the reference ladder directly would simply fail to recognize a boiling
+// particle. Instead the particle's energy is mapped into reference-carrier
+// space, the existing reference search runs unchanged, and the endpoint it
+// returns is mapped back to physical energy.
+//
+// A material with no admitted plateau, or a nonpositive/nonfinite pressure,
+// yields valid = 0 and the caller keeps the untransformed reference path.
+fn carrier_plateau_for(material_id: f32, absolute_pressure_pa: f32) -> UlgPressurePlateau {
+  // Refuse to interpret the pressure lane at all until the host says it is an
+  // absolute pressure. There is deliberately no fallback to one atmosphere.
+  if (params.absolute_pressure_authority == 0u) {
+    return ulg_pressure_plateau_invalid();
+  }
+  var law_id = 0u;
+  var reference_pressure_pa = 0.0;
+  var log_slope = 0.0;
+  var found = false;
+  for (var record = 0u; record < params.material_record_count; record = record + 1u) {
+    let base = params.material_record_offset_vec4 + record * 2u;
+    let row0 = closure_rows[base];
+    if (row0.x == material_id) {
+      let row1 = closure_rows[base + 1u];
+      law_id = u32(round(row1.y));
+      reference_pressure_pa = row1.z;
+      log_slope = row1.w;
+      found = true;
+      break;
+    }
+  }
+  if (!found || law_id != ULG_PRESSURE_CARRIER_LAW_CLAUSIUS_PLATEAU) {
+    return ulg_pressure_plateau_invalid();
+  }
+
+  // Locate the packed liquid-to-gas plateau and the liquid branch that feeds
+  // it. The anchor is the phase segment ending exactly where the plateau
+  // starts, which is what makes cp = (E0-Ea)/(Tref-Ta) the liquid branch's
+  // mean heat capacity rather than an unrelated slope.
+  var plateau_start = 0.0;
+  var plateau_end = 0.0;
+  var reference_temperature_k = 0.0;
+  var plateau_found = false;
+  for (var segment = 0u; segment < params.thermal_segment_count; segment = segment + 1u) {
+    let base = params.thermal_offset_vec4 + segment * 3u;
+    let row0 = closure_rows[base];
+    if (
+      row0.x == material_id
+      && abs(row0.y - 2.0) < 0.5
+      && u32(round(row0.z)) == 2u
+      && u32(round(row0.w)) == 3u
+    ) {
+      let row1 = closure_rows[base + 1u];
+      plateau_start = row1.x;
+      plateau_end = row1.y;
+      reference_temperature_k = row1.z;
+      plateau_found = true;
+      break;
+    }
+  }
+  if (!plateau_found) { return ulg_pressure_plateau_invalid(); }
+
+  var anchor_energy = 0.0;
+  var anchor_temperature_k = 0.0;
+  var anchor_found = false;
+  for (var segment = 0u; segment < params.thermal_segment_count; segment = segment + 1u) {
+    let base = params.thermal_offset_vec4 + segment * 3u;
+    let row0 = closure_rows[base];
+    let row1 = closure_rows[base + 1u];
+    if (
+      row0.x == material_id
+      && abs(row0.y - 1.0) < 0.5
+      && row1.y == plateau_start
+    ) {
+      anchor_energy = row1.x;
+      anchor_temperature_k = row1.z;
+      anchor_found = true;
+      break;
+    }
+  }
+  if (!anchor_found) { return ulg_pressure_plateau_invalid(); }
+
+  return ulg_resolve_pressure_plateau_with_slope(
+    anchor_energy,
+    anchor_temperature_k,
+    plateau_start,
+    plateau_end,
+    reference_temperature_k,
+    absolute_pressure_pa,
+    reference_pressure_pa,
+    log_slope
+  );
+}
+
 fn plateau_endpoint(
   material_id: f32,
   phase0: u32,
   phase1: u32,
   source_u: f32,
-  target_phase: u32
+  target_phase: u32,
+  absolute_pressure_pa: f32
 ) -> vec2<f32> {
+  // Reference-carrier space. At the reference pressure this is bitwise the
+  // untransformed energy, so the search below is unchanged.
+  let plateau = carrier_plateau_for(material_id, absolute_pressure_pa);
+  let carrier_u = ulg_carrier_from_physical_energy(plateau, source_u);
   for (var segment = 0u; segment < params.thermal_segment_count; segment = segment + 1u) {
     let base = params.thermal_offset_vec4 + segment * 3u;
     let row0 = closure_rows[base];
@@ -297,11 +437,15 @@ fn plateau_endpoint(
       && abs(row0.y - 2.0) < 0.5
       && u32(round(row0.z)) == phase0
       && u32(round(row0.w)) == phase1
-      && source_u >= row1.x - params.relative_tolerance * max(1.0, abs(row1.x))
-      && source_u <= row1.y + params.relative_tolerance * max(1.0, abs(row1.y))
+      && carrier_u >= row1.x - params.relative_tolerance * max(1.0, abs(row1.x))
+      && carrier_u <= row1.y + params.relative_tolerance * max(1.0, abs(row1.y))
     ) {
-      if (target_phase == phase0) { return vec2<f32>(row1.x, 1.0); }
-      if (target_phase == phase1) { return vec2<f32>(row1.y, 1.0); }
+      if (target_phase == phase0) {
+        return vec2<f32>(ulg_physical_energy_from_carrier(plateau, row1.x), 1.0);
+      }
+      if (target_phase == phase1) {
+        return vec2<f32>(ulg_physical_energy_from_carrier(plateau, row1.y), 1.0);
+      }
     }
   }
   return vec2<f32>(0.0, 0.0);
@@ -326,6 +470,8 @@ fn lineage_phases(lineage_index: u32) -> LineagePhases {
     if (!(s0.w > params.mass_epsilon)) { continue; }
     let t0 = thermo0(source_index);
     let fractions = thermo1(source_index);
+    let mechanics_row4 = source_mechanics[source_index * 8u + 4u];
+    let current_volume = mechanics_row4.z * mechanics_row4.w;
     if (
       !finite_f32(s0.x) || !finite_f32(s0.y) || !finite_f32(s0.z)
       || !finite_f32(s0.w) || !finite_f32(s1.x) || !finite_f32(s1.y)
@@ -334,6 +480,18 @@ fn lineage_phases(lineage_index: u32) -> LineagePhases {
     ) {
       phase_set.valid = 0u;
       phase_set.error_bits = phase_set.error_bits | ERROR_NONFINITE;
+      return phase_set;
+    }
+    if (
+      !finite_f32(mechanics_row4.z)
+      || !finite_f32(mechanics_row4.w)
+      || !finite_f32(current_volume)
+      || !(mechanics_row4.z > 0.0)
+      || !(mechanics_row4.w > 0.0)
+      || !(current_volume > 0.0)
+    ) {
+      phase_set.valid = 0u;
+      phase_set.error_bits = phase_set.error_bits | ERROR_VOLUME;
       return phase_set;
     }
     if (phase_set.material_id == 0.0) {
@@ -378,8 +536,13 @@ fn lineage_phases(lineage_index: u32) -> LineagePhases {
         local_phase0 = local_phase1;
         local_phase1 = swap;
       }
-      let e0 = plateau_endpoint(t0.x, local_phase0, local_phase1, s1.w, local_phase0);
-      let e1 = plateau_endpoint(t0.x, local_phase0, local_phase1, s1.w, local_phase1);
+      let absolute_pressure_pa = source_mechanics[source_index * 8u + 7u].x;
+      let e0 = plateau_endpoint(
+        t0.x, local_phase0, local_phase1, s1.w, local_phase0, absolute_pressure_pa
+      );
+      let e1 = plateau_endpoint(
+        t0.x, local_phase0, local_phase1, s1.w, local_phase1, absolute_pressure_pa
+      );
       if (e0.y == 0.0 || e1.y == 0.0) {
         phase_set.valid = 0u;
         phase_set.error_bits = phase_set.error_bits | ERROR_PLATEAU;
@@ -421,7 +584,13 @@ fn source_component_energy(source_index: u32, target_phase: u32) -> vec2<f32> {
       local_phase0 = local_phase1;
       local_phase1 = swap;
     }
-    return plateau_endpoint(t0.x, local_phase0, local_phase1, s1.w, target_phase);
+    // Mechanics lane 28 is the particle's resolved absolute pressure; a
+    // nonpositive or nonfinite value fails the plateau closed rather than
+    // silently standing in for one atmosphere.
+    let absolute_pressure_pa = source_mechanics[source_index * 8u + 7u].x;
+    return plateau_endpoint(
+      t0.x, local_phase0, local_phase1, s1.w, target_phase, absolute_pressure_pa
+    );
   }
   return vec2<f32>(0.0, 0.0);
 }
@@ -431,6 +600,7 @@ fn phase_aggregate(
   target_phase: u32
 ) -> PhaseAggregate {
   var aggregate = PhaseAggregate(
+    0.0,
     0.0,
     vec3<f32>(0.0),
     vec3<f32>(0.0),
@@ -454,8 +624,11 @@ fn phase_aggregate(
     let fraction = max(fractions[target_phase - 1u], 0.0);
     if (!(fraction > params.fraction_activation_epsilon)) { continue; }
     let component_mass = s0.w * fraction;
+    let mechanics_row4 = source_mechanics[source_index * 8u + 4u];
+    let component_current_volume = mechanics_row4.z * mechanics_row4.w * fraction;
     let component_energy = source_component_energy(source_index, target_phase).x;
     aggregate.mass = aggregate.mass + component_mass;
+    aggregate.current_volume = aggregate.current_volume + component_current_volume;
     aggregate.first_moment = aggregate.first_moment + s0.xyz * component_mass;
     aggregate.momentum = aggregate.momentum + s1.xyz * component_mass;
     aggregate.internal_energy = aggregate.internal_energy + component_energy * component_mass;
@@ -548,6 +721,8 @@ fn write_phase_slot(
   let specific_energy = (aggregate.internal_energy + thermalized_kinetic_energy) * inv_mass;
   let temperature = aggregate.temperature_mass * inv_mass;
   let rest_volume = aggregate.mass / max(record0.z, params.mass_epsilon);
+  let volume_ratio_j = aggregate.current_volume / max(rest_volume, params.mass_epsilon);
+  let isotropic_scale = pow(max(volume_ratio_j, params.mass_epsilon), 1.0 / 3.0);
   out_state[target_index * 2u] = vec4<f32>(position, aggregate.mass);
   out_state[target_index * 2u + 1u] = vec4<f32>(velocity, specific_energy);
   out_thermo[target_index * 3u] = vec4<f32>(
@@ -564,14 +739,36 @@ fn write_phase_slot(
     pow(max(aggregate.radius_cubed, 0.0), 1.0 / 3.0)
   );
   if (!preserve_deformation) {
-    out_mechanics[target_index * 8u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-    out_mechanics[target_index * 8u + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-    out_mechanics[target_index * 8u + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    out_mechanics[target_index * 8u] = vec4<f32>(isotropic_scale, 0.0, 0.0, 0.0);
+    out_mechanics[target_index * 8u + 1u] = vec4<f32>(isotropic_scale, 0.0, 0.0, 0.0);
+    out_mechanics[target_index * 8u + 2u] = vec4<f32>(isotropic_scale, 0.0, 0.0, 0.0);
     out_mechanics[target_index * 8u + 3u] = vec4<f32>(0.0);
-    out_mechanics[target_index * 8u + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+    out_mechanics[target_index * 8u + 4u] = vec4<f32>(
+      0.0,
+      0.0,
+      volume_ratio_j,
+      rest_volume
+    );
   } else {
+    let template_row0 = out_mechanics[target_index * 8u];
+    let template_row1 = out_mechanics[target_index * 8u + 1u];
+    let template_row2 = out_mechanics[target_index * 8u + 2u];
     let old4 = out_mechanics[target_index * 8u + 4u];
-    out_mechanics[target_index * 8u + 4u] = vec4<f32>(old4.xyz, rest_volume);
+    let deformation_scale = pow(
+      max(volume_ratio_j / max(old4.z, params.mass_epsilon), params.mass_epsilon),
+      1.0 / 3.0
+    );
+    out_mechanics[target_index * 8u] = template_row0 * deformation_scale;
+    out_mechanics[target_index * 8u + 1u] = template_row1 * deformation_scale;
+    out_mechanics[target_index * 8u + 2u] = vec4<f32>(
+      template_row2.x * deformation_scale,
+      template_row2.yzw
+    );
+    out_mechanics[target_index * 8u + 4u] = vec4<f32>(
+      old4.xy,
+      volume_ratio_j,
+      rest_volume
+    );
   }
   out_mechanics[target_index * 8u + 5u] = vec4<f32>(record2.x, record2.y, record0.w, record1.x);
   out_mechanics[target_index * 8u + 6u] = vec4<f32>(record1.y, record1.z, record1.w, record2.y);
@@ -725,6 +922,10 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   sourceStateBuffer,
   sourceThermoBuffer,
   sourceMechanicsBuffer,
+  // Set this only when mechanics lane 28 genuinely carries a resolved absolute
+  // pressure for every particle. It does not today, so the pressure-adjusted
+  // plateau stays inert and the reference ladder is used, exactly as before.
+  absolutePressureAuthority = false,
   retainOutputParticleBuffers = false,
   readbackMode = NO_FULL_READBACK_MODE
 } = {}) {
@@ -793,7 +994,8 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     plan,
-    closure
+    closure,
+    absolutePressureAuthority
   }));
 
   const bindings = [
@@ -885,7 +1087,7 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     fullParticleReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     failClosedPolicy: 'global-layout-copy-through-lineage-local-invalid-copy-through',
-    conservationPolicy: 'mass-momentum-first-moment-total-energy-with-relative-kinetic-thermalization',
+    conservationPolicy: 'mass-current-volume-momentum-first-moment-total-energy-with-relative-kinetic-thermalization',
     destroyOutputParticleBuffers: retainOutputParticleBuffers
       ? () => deferSubmittedWorkCleanup(device, destroyOutputs)
       : null,

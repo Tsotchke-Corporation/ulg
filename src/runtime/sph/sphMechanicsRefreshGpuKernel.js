@@ -47,18 +47,66 @@ function finiteNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function resetMechanicsDeformation(mechanics, mechanicsOffset) {
-  mechanics[mechanicsOffset] = 1;
+function mechanicsDeformationDeterminant(mechanics, offset) {
+  const a = mechanics[offset];
+  const b = mechanics[offset + 1];
+  const c = mechanics[offset + 2];
+  const d = mechanics[offset + 3];
+  const e = mechanics[offset + 4];
+  const f = mechanics[offset + 5];
+  const g = mechanics[offset + 6];
+  const h = mechanics[offset + 7];
+  const i = mechanics[offset + 8];
+  return a * (e * i - f * h)
+    - b * (d * i - f * g)
+    + c * (d * h - e * g);
+}
+
+function mechanicsAuthorityRowFinite(mechanics, offset) {
+  for (let lane = 0; lane < MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS; lane += 1) {
+    if (!Number.isFinite(Number(mechanics[offset + lane]))) return false;
+  }
+  return true;
+}
+
+function determinantMatchesVolumeRatio(mechanics, offset, volumeRatioJ) {
+  const determinant = mechanicsDeformationDeterminant(mechanics, offset);
+  return Number.isFinite(determinant)
+    && Math.abs(determinant - volumeRatioJ)
+      <= Math.max(1e-5, Math.abs(volumeRatioJ) * 1e-2);
+}
+
+function resetMechanicsDeformation(mechanics, mechanicsOffset, volumeRatioJ = 1) {
+  const isotropicScale = Math.cbrt(Math.max(finiteNumber(volumeRatioJ, 1), 1e-20));
+  mechanics[mechanicsOffset] = isotropicScale;
   mechanics[mechanicsOffset + 1] = 0;
   mechanics[mechanicsOffset + 2] = 0;
   mechanics[mechanicsOffset + 3] = 0;
-  mechanics[mechanicsOffset + 4] = 1;
+  mechanics[mechanicsOffset + 4] = isotropicScale;
   mechanics[mechanicsOffset + 5] = 0;
   mechanics[mechanicsOffset + 6] = 0;
   mechanics[mechanicsOffset + 7] = 0;
-  mechanics[mechanicsOffset + 8] = 1;
+  mechanics[mechanicsOffset + 8] = isotropicScale;
   for (let index = 9; index <= 17; index += 1) mechanics[mechanicsOffset + index] = 0;
-  mechanics[mechanicsOffset + 18] = 1;
+  mechanics[mechanicsOffset + 18] = volumeRatioJ;
+}
+
+function rescaleMechanicsDeformation(
+  mechanics,
+  mechanicsOffset,
+  previousVolumeRatioJ,
+  nextVolumeRatioJ
+) {
+  const ratio = Math.max(
+    finiteNumber(nextVolumeRatioJ, 0)
+      / Math.max(finiteNumber(previousVolumeRatioJ, 0), 1e-20),
+    1e-20
+  );
+  const scale = Math.cbrt(ratio);
+  for (let index = 0; index <= 8; index += 1) {
+    mechanics[mechanicsOffset + index] *= scale;
+  }
+  mechanics[mechanicsOffset + 18] = nextVolumeRatioJ;
 }
 
 function shouldResetMechanicsForPhaseChange(mechanics, mechanicsOffset, phaseMechanics, nextRestVolumeM3) {
@@ -340,7 +388,10 @@ function outputEnvelope({
   readbackMode = FULL_READBACK_MODE,
   outputBufferInitializationMode = null,
   destroyOutputParticleBuffers = null,
-  mechanicsMaterialBankWarmInputShaderBinding = null
+  mechanicsMaterialBankWarmInputShaderBinding = null,
+  authorityValidationStatus = 'not-observed',
+  authorityValidationFailureCount = null,
+  authorityValidationBuffer = null
 }) {
   const mechanicsMaterialBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
     mechanicsMaterialTable,
@@ -375,6 +426,9 @@ function outputEnvelope({
     retainedOutputParticleBuffers,
     readbackMode,
     outputBufferInitializationMode,
+    authorityValidationStatus,
+    authorityValidationFailureCount,
+    authorityValidationBuffer,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     destroyOutputParticleBuffers,
     scientificValidation: false,
@@ -397,24 +451,87 @@ export function refreshMlsMpmMechanicsCpu({
   const thermo = sourceThermo || sphParticleState.thermo;
   const source = sourceMechanics || mlsMpmParticleState.mechanics;
   const mechanics = new Float32Array(source);
+  let authorityValidationFailed = false;
   for (let index = 0; index < sphParticleState.particleCount; index += 1) {
     const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
     const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
     const mechanicsOffset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
-    if (!(finiteNumber(state[stateOffset + 3], 0) > 0)) continue;
-    const materialId = thermo[thermoOffset];
-    const phaseId = thermo[thermoOffset + 1];
-    const phaseMechanics = findMechanicsMaterialPhaseRecord(mechanicsMaterialTable, materialId, phaseId);
-    if (phaseMechanics.status !== 1) continue;
-    const restDensity = finiteNumber(thermo[thermoOffset + 3], 0) > 0
-      ? finiteNumber(thermo[thermoOffset + 3], 0)
-      : phaseMechanics.restDensityKgPerM3;
-    const restVolumeM3 = restDensity > 0
-      ? Math.max(finiteNumber(state[stateOffset + 3], 0), 0) / restDensity
-      : 0;
-    if (shouldResetMechanicsForPhaseChange(mechanics, mechanicsOffset, phaseMechanics, restVolumeM3)) {
-      resetMechanicsDeformation(mechanics, mechanicsOffset);
+    const massKg = Number(state[stateOffset + 3]);
+    if (massKg === 0) continue;
+    if (!Number.isFinite(massKg) || massKg < 0) {
+      authorityValidationFailed = true;
+      break;
     }
+    const materialId = Number(thermo[thermoOffset]);
+    const phaseId = Number(thermo[thermoOffset + 1]);
+    if (!Number.isFinite(materialId) || !Number.isFinite(phaseId)) {
+      authorityValidationFailed = true;
+      break;
+    }
+    const phaseMechanics = findMechanicsMaterialPhaseRecord(mechanicsMaterialTable, materialId, phaseId);
+    const phaseMechanicsValues = [
+      phaseMechanics.restDensityKgPerM3,
+      phaseMechanics.effectiveBulkModulusPa,
+      phaseMechanics.shearModulusPa,
+      phaseMechanics.lameLambdaPa,
+      phaseMechanics.soundSpeedMPerS,
+      phaseMechanics.eosModelId,
+      phaseMechanics.solidFlag,
+      phaseMechanics.status,
+      phaseMechanics.dynamicViscosityPaS,
+      phaseMechanics.surfaceTensionNPerM
+    ];
+    const restDensity = Number(thermo[thermoOffset + 3]);
+    if (
+      phaseMechanics.status !== 1
+      || !phaseMechanicsValues.every(Number.isFinite)
+      || !Number.isFinite(restDensity)
+      || !(restDensity > 0)
+      || !mechanicsAuthorityRowFinite(mechanics, mechanicsOffset)
+    ) {
+      authorityValidationFailed = true;
+      break;
+    }
+    const restVolumeM3 = massKg / restDensity;
+    const previousVolumeRatioJ = Number(mechanics[mechanicsOffset + 18]);
+    const previousRestVolumeM3 = Number(mechanics[mechanicsOffset + 19]);
+    const previousCurrentVolumeM3 = previousVolumeRatioJ * previousRestVolumeM3;
+    const previousVolumeAuthorityValid = previousVolumeRatioJ > 0
+      && previousRestVolumeM3 > 0
+      && Number.isFinite(previousCurrentVolumeM3)
+      && previousCurrentVolumeM3 > 0
+      && Math.round(mechanics[mechanicsOffset + 21]) === 1
+      && Math.round(mechanics[mechanicsOffset + 27]) === 1
+      && determinantMatchesVolumeRatio(
+        mechanics,
+        mechanicsOffset,
+        previousVolumeRatioJ
+      );
+    if (
+      !(restVolumeM3 > 0)
+      || !Number.isFinite(restVolumeM3)
+      || !previousVolumeAuthorityValid
+    ) {
+      authorityValidationFailed = true;
+      break;
+    }
+    const currentVolumeM3 = previousCurrentVolumeM3;
+    const nextVolumeRatioJ = currentVolumeM3 / restVolumeM3;
+    if (!(nextVolumeRatioJ > 0) || !Number.isFinite(nextVolumeRatioJ)) {
+      authorityValidationFailed = true;
+      break;
+    }
+    if (shouldResetMechanicsForPhaseChange(mechanics, mechanicsOffset, phaseMechanics, restVolumeM3)) {
+      resetMechanicsDeformation(mechanics, mechanicsOffset, nextVolumeRatioJ);
+    } else {
+      rescaleMechanicsDeformation(
+        mechanics,
+        mechanicsOffset,
+        previousVolumeRatioJ,
+        nextVolumeRatioJ
+      );
+    }
+    mechanics[mechanicsOffset + 18] = nextVolumeRatioJ;
     mechanics[mechanicsOffset + 19] = restDensity > 0
       ? restVolumeM3
       : 0;
@@ -428,16 +545,34 @@ export function refreshMlsMpmMechanicsCpu({
     mechanics[mechanicsOffset + 27] = phaseMechanics.status;
     mechanics[mechanicsOffset + 29] = phaseMechanics.dynamicViscosityPaS;
     mechanics[mechanicsOffset + 30] = phaseMechanics.surfaceTensionNPerM;
+    if (
+      !mechanicsAuthorityRowFinite(mechanics, mechanicsOffset)
+      || !determinantMatchesVolumeRatio(
+        mechanics,
+        mechanicsOffset,
+        nextVolumeRatioJ
+      )
+    ) {
+      authorityValidationFailed = true;
+      break;
+    }
   }
+  const publishedMechanics = authorityValidationFailed
+    ? new Float32Array(source)
+    : mechanics;
   return outputEnvelope({
     backend: 'cpu-reference',
     sphParticleState,
     mlsMpmParticleState,
     mechanicsMaterialTable,
-    mechanics,
-    mechanicsBufferByteLength: mechanics.byteLength,
+    mechanics: publishedMechanics,
+    mechanicsBufferByteLength: publishedMechanics.byteLength,
     retainedOutputParticleBuffers: false,
-    readbackMode: FULL_READBACK_MODE
+    readbackMode: FULL_READBACK_MODE,
+    authorityValidationStatus: authorityValidationFailed
+      ? 'mechanics-refresh-authority-rejected'
+      : 'mechanics-refresh-authority-accepted',
+    authorityValidationFailureCount: authorityValidationFailed ? 1 : 0
   });
 }
 
@@ -506,8 +641,20 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     phaseRecordCount: mechanicsMaterialTable.phaseRecordCount,
     materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount
   }));
-  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-mechanics-refresh.v4',
+  const authorityValidationBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+    size: Uint32Array.BYTES_PER_ELEMENT,
+    usage: GPU_BUFFER_USAGE.STORAGE
+      | GPU_BUFFER_USAGE.COPY_DST
+      | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  device.queue.writeBuffer(
+    authorityValidationBuffer,
+    0,
+    new Uint32Array([0])
+  );
+  const refreshPipeline = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-mls-mpm-mechanics-refresh.v5-transactional-main',
     label: 'ulg-mls-mpm-mechanics-refresh',
     code: mlsMpmMechanicsRefreshWgsl,
     entryPoint: 'main',
@@ -518,20 +665,43 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       computeBufferBinding(3, 'read-only-storage'),
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'uniform'),
-      computeBufferBinding(6, 'read-only-storage')
+      computeBufferBinding(6, 'read-only-storage'),
+      computeBufferBinding(7, 'storage')
     ]
   });
-  const bindGroup = device.createBindGroup({
-    layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: stateBuffer } },
-      { binding: 1, resource: { buffer: thermoBuffer } },
-      { binding: 2, resource: { buffer: mechanicsBuffer } },
-      { binding: 3, resource: { buffer: materialPhaseBuffer } },
-      { binding: 4, resource: { buffer: outMechanicsBuffer } },
-      { binding: 5, resource: { buffer: paramsBuffer } },
-      { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } }
+  const commitPipeline = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-mls-mpm-mechanics-refresh.v5-transactional-commit',
+    label: 'ulg-mls-mpm-mechanics-refresh-commit',
+    code: mlsMpmMechanicsRefreshWgsl,
+    entryPoint: 'commit_or_restore',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'uniform'),
+      computeBufferBinding(6, 'read-only-storage'),
+      computeBufferBinding(7, 'storage')
     ]
+  });
+  const bindGroupEntries = [
+    { binding: 0, resource: { buffer: stateBuffer } },
+    { binding: 1, resource: { buffer: thermoBuffer } },
+    { binding: 2, resource: { buffer: mechanicsBuffer } },
+    { binding: 3, resource: { buffer: materialPhaseBuffer } },
+    { binding: 4, resource: { buffer: outMechanicsBuffer } },
+    { binding: 5, resource: { buffer: paramsBuffer } },
+    { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } },
+    { binding: 7, resource: { buffer: authorityValidationBuffer } }
+  ];
+  const bindGroup = device.createBindGroup({
+    layout: refreshPipeline.bindGroupLayout,
+    entries: bindGroupEntries
+  });
+  const commitBindGroup = device.createBindGroup({
+    layout: commitPipeline.bindGroupLayout,
+    entries: bindGroupEntries
   });
   const mechanics = new Float32Array();
   const cleanup = () => {
@@ -541,6 +711,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     if (localMaterialPhaseUpload) destroyMlsMpmMechanicsMaterialPhaseUpload(localMaterialPhaseUpload);
     materialBankWarmInputBinding.destroy?.();
     paramsBuffer.destroy?.();
+    authorityValidationBuffer.destroy?.();
     if (!retainOutputParticleBuffers) outMechanicsBuffer.destroy?.();
   };
   const result = outputEnvelope({
@@ -562,6 +733,9 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       shaderRowCount: materialBankWarmInputBinding.rowCount,
       bufferSource: materialBankWarmInputBinding.bufferSource
     },
+    authorityValidationStatus:
+      'mechanics-refresh-authority-validation-gpu-resident',
+    authorityValidationBuffer,
     destroyOutputParticleBuffers() {
       outMechanicsBuffer.destroy?.();
     }
@@ -576,10 +750,17 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
     encode(encoder) {
       const pass = encoder.beginComputePass();
-      pass.setPipeline(pipeline);
+      pass.setPipeline(refreshPipeline.pipeline);
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
       pass.end();
+      const commitPass = encoder.beginComputePass();
+      commitPass.setPipeline(commitPipeline.pipeline);
+      commitPass.setBindGroup(0, commitBindGroup);
+      commitPass.dispatchWorkgroups(
+        Math.ceil(sphParticleState.particleCount / 64)
+      );
+      commitPass.end();
     },
     cleanupSubmittedWork: cleanup
   };
@@ -593,9 +774,24 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
   stage.encode(encoder);
   device.queue.submit([encoder.finish()]);
   if (!noFullReadback) {
-    stage.result.mechanics = new Float32Array(
-      await readBuffer(device, stage.mechanicsBuffer, mlsMpmParticleState.mechanics.byteLength)
-    );
+    const [mechanicsBytes, validationBytes] = await Promise.all([
+      readBuffer(
+        device,
+        stage.mechanicsBuffer,
+        mlsMpmParticleState.mechanics.byteLength
+      ),
+      readBuffer(
+        device,
+        stage.result.authorityValidationBuffer,
+        Uint32Array.BYTES_PER_ELEMENT
+      )
+    ]);
+    stage.result.mechanics = new Float32Array(mechanicsBytes);
+    const failureCount = new Uint32Array(validationBytes)[0];
+    stage.result.authorityValidationFailureCount = failureCount;
+    stage.result.authorityValidationStatus = failureCount === 0
+      ? 'mechanics-refresh-authority-accepted'
+      : 'mechanics-refresh-authority-rejected';
   }
   if (noFullReadback) {
     deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);

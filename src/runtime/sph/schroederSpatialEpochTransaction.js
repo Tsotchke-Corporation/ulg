@@ -25,6 +25,7 @@ import {
   validateSchroederSpatialPhaseVolumeReceiptDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeReceipt.js';
 import {
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_REFLUX_ROUTE_WORDS,
   validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeInterfaceProposal.js';
 import {
@@ -348,6 +349,164 @@ export function validateSchroederSpatialEpochTransactionSourceFamily(
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve the exact submitted S9-A/S9-B/S9-C authority for one mechanics
+ * level.  Downstream transport code receives no bare-buffer escape hatch:
+ * every returned buffer remains tied to the immutable transaction snapshot.
+ */
+export function resolveSchroederSpatialPhaseVolumeTransportAuthority(
+  transaction,
+  {
+    generation = transaction?.generation ?? null,
+    selectedLevel,
+    mechanicsFieldView
+  } = {}
+) {
+  const authority = authorityFor(transaction);
+  if (
+    authority.state !== SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE
+    || !authority.admittedReaders.has(
+      SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G
+    )
+    || authority.admittedReaders.has(
+      SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P
+    )
+  ) {
+    throw transactionError(
+      'Phase-volume transport requires the active epoch after exact P2G admission and before G2P admission',
+      'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LIFECYCLE'
+    );
+  }
+  if (
+    authority.phaseVolumeInterfaceProposalAuthoritative !== true
+    || authority.twoLevelAuthoritative !== true
+    || !authority.twoLevel
+  ) {
+    throw transactionError(
+      'Phase-volume transport requires an authoritative two-level S9-C transaction',
+      'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_AUTHORITY'
+    );
+  }
+  if (
+    generation !== authority.generation
+    || !generationMatchesSnapshot(authority, generation)
+    || !phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation)
+  ) {
+    throw transactionError(
+      'Phase-volume transport generation no longer matches the transaction snapshot',
+      'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY'
+    );
+  }
+  const twoLevel = authority.twoLevel;
+  const levelIndex = selectedLevel === twoLevel.fineLevel
+    ? 0
+    : selectedLevel === twoLevel.coarseLevel
+      ? 1
+      : -1;
+  if (levelIndex < 0) {
+    throw transactionError(
+      'Phase-volume transport selectedLevel is not one of the authoritative mechanics levels',
+      'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LEVEL'
+    );
+  }
+  const mechanicsLevelView = twoLevel.mechanicsLevelViews[levelIndex];
+  const fieldView = twoLevel.mechanicsFieldViews[levelIndex];
+  const moment = twoLevel.phaseVolumeMoments[levelIndex];
+  const receipt = twoLevel.phaseVolumeReceipts[levelIndex];
+  const proposal = authority.generationSnapshot.phaseVolumeInterfaceProposal;
+  if (
+    mechanicsFieldView !== fieldView
+    || mechanicsLevelView?.selectedLevel !== selectedLevel
+    || mechanicsLevelView?.mechanicsFieldView !== fieldView
+    || mechanicsLevelView?.phaseVolumeMoment !== moment
+    || mechanicsLevelView?.phaseVolumeReceipt !== receipt
+    || proposal?.finePhaseVolumeMoment !== twoLevel.phaseVolumeMoments[0]
+    || proposal?.coarsePhaseVolumeMoment !== twoLevel.phaseVolumeMoments[1]
+    || proposal?.fineReceipt !== twoLevel.phaseVolumeReceipts[0]
+    || proposal?.coarseReceipt !== twoLevel.phaseVolumeReceipts[1]
+    || proposal?.fineMechanicsFieldView !== twoLevel.mechanicsFieldViews[0]
+    || proposal?.coarseMechanicsFieldView !== twoLevel.mechanicsFieldViews[1]
+    || proposal?.layout?.refluxRouteRowWords
+      !== SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_REFLUX_ROUTE_WORDS
+    || proposal?.layout?.refluxRouteCapacity
+      !== proposal?.fineFieldCapacity
+    || proposal?.parentFieldView !== twoLevel.parentFieldView
+    || proposal?.parentFieldViewBuffer
+      !== twoLevel.parentFieldView.parentFieldViewBuffer
+    || moment?.mechanicsFieldView !== fieldView
+    || receipt?.phaseVolumeMoment !== moment
+    || receipt?.parentPhaseVolumeMoment !== moment
+    || receipt?.mechanicsFieldView !== fieldView
+  ) {
+    throw transactionError(
+      'Phase-volume transport lost exact level, moment, receipt, or field lineage',
+      'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY'
+    );
+  }
+  const localHeadOffsetWords = levelIndex === 0
+    ? proposal.layout.fineLocalHeadOffsetWords
+    : proposal.layout.coarseLocalHeadOffsetWords;
+  const fieldCapacity = levelIndex === 0
+    ? proposal.fineFieldCapacity
+    : proposal.coarseFieldCapacity;
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-phase-volume-transport-authority.v1',
+    status: 'schroeder-spatial-phase-volume-transport-authority-ready',
+    generation,
+    generationId: authority.generationId,
+    epochIdentity: authority.epochIdentity,
+    selectedLevel,
+    levelIndex,
+    levelRole: levelIndex === 0 ? 'fine' : 'coarse',
+    fieldCapacity,
+    mechanicsLevelView,
+    mechanicsFieldView: fieldView,
+    mechanicsFieldViewBuffer: fieldView.fieldViewBuffer,
+    phaseVolumeMoment: moment,
+    phaseVolumeMomentControlBuffer: moment.controlBuffer,
+    phaseVolumeMomentBuffer: moment.momentBuffer,
+    finePhaseVolumeMoment: twoLevel.phaseVolumeMoments[0],
+    finePhaseVolumeMomentControlBuffer:
+      twoLevel.phaseVolumeMoments[0].controlBuffer,
+    finePhaseVolumeMomentBuffer:
+      twoLevel.phaseVolumeMoments[0].momentBuffer,
+    coarsePhaseVolumeMoment: twoLevel.phaseVolumeMoments[1],
+    coarsePhaseVolumeMomentControlBuffer:
+      twoLevel.phaseVolumeMoments[1].controlBuffer,
+    coarsePhaseVolumeMomentBuffer:
+      twoLevel.phaseVolumeMoments[1].momentBuffer,
+    phaseVolumeReceipt: receipt,
+    phaseVolumeReceiptControlBuffer: receipt.controlBuffer,
+    finePhaseVolumeReceipt: twoLevel.phaseVolumeReceipts[0],
+    finePhaseVolumeReceiptControlBuffer:
+      twoLevel.phaseVolumeReceipts[0].controlBuffer,
+    coarsePhaseVolumeReceipt: twoLevel.phaseVolumeReceipts[1],
+    coarsePhaseVolumeReceiptControlBuffer:
+      twoLevel.phaseVolumeReceipts[1].controlBuffer,
+    fineMechanicsFieldView: twoLevel.mechanicsFieldViews[0],
+    fineMechanicsFieldViewBuffer:
+      twoLevel.mechanicsFieldViews[0].fieldViewBuffer,
+    coarseMechanicsFieldView: twoLevel.mechanicsFieldViews[1],
+    coarseMechanicsFieldViewBuffer:
+      twoLevel.mechanicsFieldViews[1].fieldViewBuffer,
+    phaseVolumeInterfaceProposal: proposal,
+    phaseVolumeInterfaceProposalControlBuffer: proposal.controlBuffer,
+    phaseVolumeInterfaceLocalHeadBuffer: proposal.localHeadBuffer,
+    phaseVolumeInterfaceRefluxRouteBuffer: proposal.refluxRouteBuffer,
+    phaseVolumeInterfaceRefluxRouteCapacity:
+      proposal.layout.refluxRouteCapacity,
+    phaseVolumeInterfaceRefluxRouteRowWords:
+      proposal.layout.refluxRouteRowWords,
+    localHeadOffsetWords,
+    phaseVolumeInterfaceLocalHeadOffsetWords: localHeadOffsetWords,
+    parentFieldView: twoLevel.parentFieldView,
+    parentFieldViewBuffer: twoLevel.parentFieldView.parentFieldViewBuffer,
+    fineLevel: twoLevel.fineLevel,
+    coarseLevel: twoLevel.coarseLevel,
+    twoLevel: true
+  });
 }
 
 function gridDescriptorMatches(view, grid) {
@@ -2148,11 +2307,11 @@ export function createSchroederSpatialEpochTransaction({
     activeRankView,
     phaseVolumeReceipt,
     phaseVolumeReceiptRuntime,
-    phaseVolumeReceiptPolicy: 'read-only-future-law-eligibility-only',
+    phaseVolumeReceiptPolicy: 'read-only-law-and-transport-eligibility',
     phaseVolumeInterfaceProposal,
     phaseVolumeInterfaceProposalRuntime,
     phaseVolumeInterfaceProposalPolicy:
-      'read-only-interface-topology-future-operator-only',
+      'read-only-interface-topology-transport-authority',
     epochIdentity: authority.epochIdentity,
     sourceBuffers,
     get state() {

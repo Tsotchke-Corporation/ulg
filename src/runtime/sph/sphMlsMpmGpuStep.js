@@ -40,6 +40,15 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_G2P_CLAIMED,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_CONSUMED,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_CROSS_LEVEL,
   SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
   SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_MAGIC,
   SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS,
@@ -302,7 +311,7 @@ export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY = 'final-only';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE = 'none';
 const P2G_ACCUMULATOR_COMPONENTS = 4;
 export const MECHANICS_FIELD_P2G_STENCIL_SIZE = 27;
-export const MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS = 8;
+export const MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS = 12;
 export const COMPACT_MECHANICS_PREFLIGHT_ENTRY_POINTS = Object.freeze([
   Object.freeze({ id: 'header', entryPoint: 'preflight_compact_mechanics_view' }),
   Object.freeze({ id: 'owner', entryPoint: 'preflight_compact_mechanics_owner_identity' }),
@@ -319,6 +328,7 @@ export const MECHANICS_FIELD_PREFLIGHT_ENTRY_POINTS = Object.freeze([
 export const FUSED_SINGLE_LEVEL_MECHANICS_FIELD_G2P_RECEIPT_ENTRY_POINTS =
   Object.freeze([
     Object.freeze({ id: 'claim', entryPoint: 'claim_g2p_energy_receipt' }),
+    Object.freeze({ id: 'measure', entryPoint: 'measure_g2p_energy_receipt' }),
     Object.freeze({ id: 'consume-field', entryPoint: 'consume_g2p_energy_receipt' })
   ]);
 export const SCHROEDER_MECHANICAL_DEFERRED_ENTRY_POINTS = Object.freeze([
@@ -4306,7 +4316,7 @@ function createMechanicsFieldP2gProjectionWgsl(sourceWgsl) {
   mechanics_field_expected_mutation_ordinal: u32,
   mechanics_field_output_mutation_ordinal: u32,
   mechanics_field_expected_state_encoding: u32,
-  mechanics_field_mutation_pad0: u32,
+  pressure_required_consumer_mask: u32,
 };`,
     'mechanics field mutation parameter fields'
   );
@@ -4350,8 +4360,9 @@ const P2G_FIELD_KEY_WORDS: u32 = 4u;
 const P2G_FIELD_ACCUMULATOR_WORDS: u32 = 8u;
 const P2G_FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS}u;
 const P2G_FIELD_STATE_WORDS: u32 = 8u;
+const P2G_FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const P2G_FIELD_STENCIL_SIZE: u32 = 27u;
-const P2G_FIELD_CONTRIBUTION_ROWS: u32 = 2u;
+const P2G_FIELD_CONTRIBUTION_ROWS: u32 = 3u;
 const P2G_FIELD_INVALID_INDEX: u32 = 0xffffffffu;
 const P2G_FIELD_RECEIPT_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC}u;
 const P2G_FIELD_RECEIPT_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION}u;
@@ -4362,6 +4373,16 @@ const P2G_FIELD_RECEIPT_READY_ADMITTED: u32 = ${
 const P2G_FIELD_RECEIPT_PHASE_EMPTY: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_EMPTY}u;
 const P2G_FIELD_RECEIPT_PHASE_P2G_FINALIZED: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_P2G_FINALIZED}u;
 const P2G_FIELD_RECEIPT_PHASE_CONSUMED: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_CONSUMED}u;
+const P2G_PRESSURE_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC}u;
+const P2G_PRESSURE_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION}u;
+const P2G_PRESSURE_LAW_EXACT: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G}u;
+const P2G_PRESSURE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY
+  | SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED
+}u;
+const P2G_PRESSURE_FAIL_CLOSED: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_FAIL_CLOSED}u;
+const P2G_PRESSURE_CONSUMER_LOCAL: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL}u;
+const P2G_PRESSURE_CONSUMER_CROSS_LEVEL: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_CROSS_LEVEL}u;
 
 fn p2g_field_word(index: u32) -> u32 {
   return bitcast<u32>(atomicLoad(&grid_accumulators[index]));
@@ -4373,6 +4394,32 @@ fn p2g_field_store_word(index: u32, value: u32) {
 
 fn p2g_field_receipt_offset() -> u32 {
   return p2g_field_word(30u) - P2G_FIELD_RECEIPT_WORDS;
+}
+
+fn p2g_field_pressure_offset() -> u32 {
+  return p2g_field_word(30u)
+    + p2g_field_word(32u) * P2G_FIELD_STATE_WORDS;
+}
+
+fn p2g_pressure_receipt_seal(
+  field_count: u32,
+  source_mutation_ordinal: u32,
+  required_mask: u32
+) -> u32 {
+  return P2G_PRESSURE_MAGIC
+    ^ P2G_PRESSURE_VERSION
+    ^ P2G_PRESSURE_READY_ADMITTED
+    ^ P2G_PRESSURE_LAW_EXACT
+    ^ bitcast<u32>(params.ambient_pressure_pa)
+    ^ bitcast<u32>(params.internal_pressure_scale)
+    ^ field_count
+    ^ source_mutation_ordinal
+    ^ required_mask
+    ^ p2g_field_word(3u)
+    ^ p2g_field_word(8u)
+    ^ p2g_field_word(9u)
+    ^ p2g_field_word(10u)
+    ^ p2g_field_word(38u);
 }
 
 fn p2g_field_receipt_reusable() -> bool {
@@ -4403,6 +4450,12 @@ fn p2g_field_reject() {
     p2g_field_store_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u, 0u);
     p2g_field_store_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u, 0u);
     p2g_field_store_word(59u, ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u);
+    let state_offset = p2g_field_word(30u);
+    if (state_offset >= P2G_FIELD_RECEIPT_WORDS
+        && state_offset <= arrayLength(&grid_accumulators)) {
+      let receipt = state_offset - P2G_FIELD_RECEIPT_WORDS;
+      p2g_field_store_word(receipt + 26u, P2G_PRESSURE_FAIL_CLOSED);
+    }
   }
   compact_mechanics_view_reject();
 }
@@ -4418,6 +4471,8 @@ fn p2g_field_view_structurally_admitted() -> bool {
   let field_capacity = p2g_field_word(32u);
   let field_count = p2g_field_word(34u);
   let capacity_words = p2g_field_word(42u);
+  let pressure_offset = state_offset
+    + field_capacity * P2G_FIELD_STATE_WORDS;
   return p2g_field_word(0u) == P2G_FIELD_MAGIC
     && p2g_field_word(1u) == P2G_FIELD_VERSION
     && flags == P2G_FIELD_READY_ADMITTED
@@ -4455,6 +4510,8 @@ fn p2g_field_view_structurally_admitted() -> bool {
     && p2g_field_word(33u)
       <= arrayLength(&product_events) / P2G_FIELD_CONTRIBUTION_ROWS
     && field_count <= field_capacity
+    && p2g_field_word(41u)
+      == pressure_offset + field_count * P2G_FIELD_PRESSURE_WORDS
     && descriptor_offset <= key_offset
     && key_offset <= accumulator_offset
     && accumulator_offset <= state_offset
@@ -4464,7 +4521,14 @@ fn p2g_field_view_structurally_admitted() -> bool {
       + P2G_FIELD_RECEIPT_WORDS
     && capacity_words <= bound_words
     && state_offset <= capacity_words
-    && field_capacity <= (capacity_words - state_offset) / P2G_FIELD_STATE_WORDS;
+    && field_capacity
+      <= (capacity_words - state_offset) / P2G_FIELD_STATE_WORDS
+    && pressure_offset >= state_offset
+    && pressure_offset <= capacity_words
+    && field_capacity
+      <= (capacity_words - pressure_offset) / P2G_FIELD_PRESSURE_WORDS
+    && capacity_words
+      == pressure_offset + field_capacity * P2G_FIELD_PRESSURE_WORDS;
 }
 
 fn p2g_field_mutation_current() -> bool {
@@ -4533,13 +4597,13 @@ fn p2g_field_clear_particle_contributions(particle_index: u32) {
       stencil_ordinal = stencil_ordinal + 1u) {
     let candidate_index = first_candidate + stencil_ordinal;
     let row = candidate_index * P2G_FIELD_CONTRIBUTION_ROWS;
-    if (row + 1u >= arrayLength(&product_events)) {
+    if (row + 2u >= arrayLength(&product_events)) {
       p2g_field_reject();
       return;
     }
-    // Row 1.w is an exact normal-f32 publish marker. Clearing that row makes
-    // stale row-0 payloads unobservable without a full buffer clear pass.
-    product_events[row + 1u] = vec4<f32>(0.0);
+    // Row 2.w is an exact normal-f32 publish marker. Clearing that row makes
+    // every stale payload row unobservable without a full buffer clear pass.
+    product_events[row + 2u] = vec4<f32>(0.0);
   }
 }
 
@@ -4549,7 +4613,9 @@ fn p2g_field_store_contribution(
   node_index: u32,
   mass: f32,
   momentum: vec3<f32>,
-  mass_gradient: vec3<f32>
+  mass_gradient: vec3<f32>,
+  represented_volume_m3: f32,
+  pressure_volume_moment_pa_m3: f32
 ) {
   let field_index = p2g_field_find(particle_index, stencil_ordinal, node_index);
   if (field_index == P2G_FIELD_INVALID_INDEX) {
@@ -4566,7 +4632,11 @@ fn p2g_field_store_contribution(
         p2g_field_finite(mass_gradient.x),
         p2g_field_finite(mass_gradient.y),
         p2g_field_finite(mass_gradient.z)
-      ))) {
+      ))
+      || !(represented_volume_m3 > 0.0)
+      || !p2g_field_finite(represented_volume_m3)
+      || !(pressure_volume_moment_pa_m3 >= 0.0)
+      || !p2g_field_finite(pressure_volume_moment_pa_m3)) {
     p2g_field_reject();
     return;
   }
@@ -4575,13 +4645,17 @@ fn p2g_field_store_contribution(
   let row = candidate_index * P2G_FIELD_CONTRIBUTION_ROWS;
   if (candidate_index >= p2g_field_word(33u)
       || candidate_index == P2G_FIELD_INVALID_INDEX
-      || row + 1u >= arrayLength(&product_events)) {
+      || row + 2u >= arrayLength(&product_events)) {
     p2g_field_reject();
     return;
   }
   product_events[row] = vec4<f32>(mass, momentum);
-  product_events[row + 1u] = vec4<f32>(
-    mass_gradient,
+  product_events[row + 1u] = vec4<f32>(mass_gradient, 0.0);
+  // Publish last so a stale or torn three-row record is never observable.
+  product_events[row + 2u] = vec4<f32>(
+    represented_volume_m3,
+    pressure_volume_moment_pa_m3,
+    0.0,
     1.0
   );
 }
@@ -4672,7 +4746,9 @@ fn p2g_weight_derivative_at(weights_coordinate: f32, offset: i32) -> f32 {
           node_index,
           weight * pos_mass.w,
           weight * particle_momentum,
-          pos_mass.w * weight_gradient
+          pos_mass.w * weight_gradient,
+          weight * volume,
+          weight * volume * resolved_absolute_pressure_pa
         );`,
     'mechanics field P2G particle deposit'
   );
@@ -4703,6 +4779,8 @@ fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var mass = 0.0;
   var momentum = vec3<f32>(0.0);
   var mass_gradient = vec3<f32>(0.0);
+  var represented_volume_m3 = 0.0;
+  var pressure_volume_moment_pa_m3 = 0.0;
   var contribution_count = 0u;
   var previous_candidate = P2G_FIELD_INVALID_INDEX;
   var sorted_position = first_sorted_position;
@@ -4735,7 +4813,8 @@ fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row = candidate_index * P2G_FIELD_CONTRIBUTION_ROWS;
     let contribution0 = product_events[row];
     let contribution1 = product_events[row + 1u];
-    let contribution_published = contribution1.w;
+    let contribution2 = product_events[row + 2u];
+    let contribution_published = contribution2.w;
     if (contribution_published != 0.0) {
       if (contribution_published != 1.0
           || !p2g_field_finite(contribution0.x)
@@ -4750,6 +4829,11 @@ fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
             p2g_field_finite(contribution1.y),
             p2g_field_finite(contribution1.z)
           ))
+          || !(contribution2.x > 0.0)
+          || !p2g_field_finite(contribution2.x)
+          || !(contribution2.y >= 0.0)
+          || !p2g_field_finite(contribution2.y)
+          || contribution2.z != 0.0
           || contribution_count == P2G_FIELD_INVALID_INDEX) {
         p2g_field_reject();
         return;
@@ -4757,6 +4841,10 @@ fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let next_mass = mass + contribution0.x;
       let next_momentum = momentum + contribution0.yzw;
       let next_mass_gradient = mass_gradient + contribution1.xyz;
+      let next_represented_volume_m3 =
+        represented_volume_m3 + contribution2.x;
+      let next_pressure_volume_moment_pa_m3 =
+        pressure_volume_moment_pa_m3 + contribution2.y;
       if (!p2g_field_finite(next_mass) || next_mass < 0.0
           || !all(vec3<bool>(
             p2g_field_finite(next_momentum.x),
@@ -4767,13 +4855,20 @@ fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
             p2g_field_finite(next_mass_gradient.x),
             p2g_field_finite(next_mass_gradient.y),
             p2g_field_finite(next_mass_gradient.z)
-          ))) {
+          ))
+          || !(next_represented_volume_m3 > 0.0)
+          || !p2g_field_finite(next_represented_volume_m3)
+          || !(next_pressure_volume_moment_pa_m3 >= 0.0)
+          || !p2g_field_finite(next_pressure_volume_moment_pa_m3)) {
         p2g_field_reject();
         return;
       }
       mass = next_mass;
       momentum = next_momentum;
       mass_gradient = next_mass_gradient;
+      represented_volume_m3 = next_represented_volume_m3;
+      pressure_volume_moment_pa_m3 =
+        next_pressure_volume_moment_pa_m3;
       contribution_count = contribution_count + 1u;
     }
     sorted_position = sorted_position + 1u;
@@ -4789,6 +4884,31 @@ fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
     state_base + 7u,
     select(0u, contribution_count, mass > 0.0)
   );
+  let absolute_pressure_pa =
+    pressure_volume_moment_pa_m3 / represented_volume_m3;
+  if (!(absolute_pressure_pa >= 0.0)
+      || !p2g_field_finite(absolute_pressure_pa)
+      || !(mass > 0.0)
+      || contribution_count == 0u) {
+    p2g_field_reject();
+    return;
+  }
+  let pressure_base =
+    p2g_field_pressure_offset() + field_index * P2G_FIELD_PRESSURE_WORDS;
+  p2g_field_store_word(
+    pressure_base,
+    bitcast<u32>(pressure_volume_moment_pa_m3)
+  );
+  p2g_field_store_word(
+    pressure_base + 1u,
+    bitcast<u32>(represented_volume_m3)
+  );
+  p2g_field_store_word(
+    pressure_base + 2u,
+    bitcast<u32>(absolute_pressure_pa)
+  );
+  // Count publishes the immutable row last.
+  p2g_field_store_word(pressure_base + 3u, contribution_count);
 }
 `,
     'mechanics field P2G finalize'
@@ -4816,11 +4936,16 @@ fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let accumulator_base = p2g_field_word(28u)
     + field_index * P2G_FIELD_ACCUMULATOR_WORDS;
   let state_base = p2g_field_word(30u) + field_index * P2G_FIELD_STATE_WORDS;
+  let pressure_base =
+    p2g_field_pressure_offset() + field_index * P2G_FIELD_PRESSURE_WORDS;
   for (var word = 0u; word < P2G_FIELD_ACCUMULATOR_WORDS; word = word + 1u) {
     atomicStore(&grid_accumulators[accumulator_base + word], 0);
   }
   for (var word = 0u; word < P2G_FIELD_STATE_WORDS; word = word + 1u) {
     atomicStore(&grid_accumulators[state_base + word], 0);
+  }
+  for (var word = 0u; word < P2G_FIELD_PRESSURE_WORDS; word = word + 1u) {
+    atomicStore(&grid_accumulators[pressure_base + word], 0);
   }
   if (field_index == 0u) {
     p2g_field_store_word(43u, p2g_field_word(34u) * P2G_FIELD_ACCUMULATOR_WORDS);
@@ -4945,6 +5070,15 @@ fn seal_mechanics_field_momentum_state() {
     p2g_field_reject();
     return;
   }
+  let allowed_pressure_consumers =
+    P2G_PRESSURE_CONSUMER_LOCAL
+      | P2G_PRESSURE_CONSUMER_CROSS_LEVEL;
+  if (params.pressure_required_consumer_mask == 0u
+      || (params.pressure_required_consumer_mask
+        & ~allowed_pressure_consumers) != 0u) {
+    p2g_field_reject();
+    return;
+  }
   p2g_field_store_word(
     59u,
     ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT}u
@@ -4960,6 +5094,37 @@ fn seal_mechanics_field_momentum_state() {
     receipt + 5u, params.mechanics_field_output_mutation_ordinal
   );
   p2g_field_store_word(receipt + 6u, p2g_field_word(34u));
+  p2g_field_store_word(receipt + 24u, P2G_PRESSURE_MAGIC);
+  p2g_field_store_word(receipt + 25u, P2G_PRESSURE_VERSION);
+  p2g_field_store_word(receipt + 26u, P2G_PRESSURE_READY_ADMITTED);
+  p2g_field_store_word(receipt + 27u, P2G_PRESSURE_LAW_EXACT);
+  p2g_field_store_word(
+    receipt + 28u,
+    bitcast<u32>(params.ambient_pressure_pa)
+  );
+  p2g_field_store_word(
+    receipt + 29u,
+    bitcast<u32>(params.internal_pressure_scale)
+  );
+  p2g_field_store_word(receipt + 30u, p2g_field_word(34u));
+  p2g_field_store_word(
+    receipt + 31u,
+    params.mechanics_field_output_mutation_ordinal
+  );
+  p2g_field_store_word(
+    receipt + 32u,
+    params.pressure_required_consumer_mask
+  );
+  p2g_field_store_word(receipt + 33u, 0u);
+  p2g_field_store_word(receipt + 34u, 0u);
+  p2g_field_store_word(
+    receipt + 35u,
+    p2g_pressure_receipt_seal(
+      p2g_field_word(34u),
+      params.mechanics_field_output_mutation_ordinal,
+      params.pressure_required_consumer_mask
+    )
+  );
   // Publish the reusable receipt phase last, after every identity/count word.
   p2g_field_store_word(
     receipt + 3u, P2G_FIELD_RECEIPT_PHASE_P2G_FINALIZED
@@ -4971,19 +5136,12 @@ fn seal_mechanics_field_momentum_state() {
 function createSingleLevelMechanicsFieldP2gProjectionWgsl(sourceWgsl) {
   return replaceRequiredWgsl(
     sourceWgsl,
-    `  p2g_field_store_word(
-    state_base + 7u,
-    select(0u, contribution_count, mass > 0.0)
-  );
-}`,
-    `  p2g_field_store_word(
-    state_base + 7u,
-    select(0u, contribution_count, mass > 0.0)
-  );
+    '  p2g_field_store_word(pressure_base + 3u, contribution_count);',
+    `  p2g_field_store_word(pressure_base + 3u, contribution_count);
   // P2G contributions live in the transient deterministic reduction buffer;
-  // the ordinary fused single-level field accumulator bank therefore remains
-  // zero and is immediately reusable for contact heat without another clear.
-}`,
+  // the ordinary fused single-level field accumulator bank remains a
+  // separate mutable heat/work ledger while these pressure rows stay
+  // immutable through local transport and G2P.`,
     'single-level mechanics field P2G finalize heat clear'
   );
 }
@@ -5019,6 +5177,7 @@ const G2P_FIELD_READY_ADMITTED: u32 = ${
 const G2P_FIELD_DESCRIPTOR_WORDS: u32 = 32u;
 const G2P_FIELD_KEY_WORDS: u32 = 4u;
 const G2P_FIELD_STATE_WORDS: u32 = 8u;
+const G2P_FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const G2P_FIELD_ACCUMULATOR_WORDS: u32 = 8u;
 const G2P_FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS}u;
 const G2P_FIELD_RECEIPT_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC}u;
@@ -5034,6 +5193,17 @@ const G2P_FIELD_RECEIPT_FAIL_CLOSED: u32 = ${
 const G2P_FIELD_RECEIPT_ENERGY_READY: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_ENERGY_READY}u;
 const G2P_FIELD_RECEIPT_G2P_CLAIMED: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_G2P_CLAIMED}u;
 const G2P_FIELD_RECEIPT_CONSUMED: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_CONSUMED}u;
+const G2P_FIELD_PRESSURE_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC}u;
+const G2P_FIELD_PRESSURE_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION}u;
+const G2P_FIELD_PRESSURE_LAW_EXACT: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G}u;
+const G2P_FIELD_PRESSURE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY
+  | SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED
+}u;
+const G2P_FIELD_PRESSURE_FAIL_CLOSED: u32 = ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY
+  | SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_FAIL_CLOSED
+}u;
 const G2P_FIELD_INVALID_INDEX: u32 = 0xffffffffu;
 const G2P_REFLUX_MAGIC: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_MAGIC}u;
 const G2P_REFLUX_VERSION: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_VERSION}u;
@@ -5129,10 +5299,36 @@ fn g2p_field_receipt_addressable() -> bool {
       <= arrayLength(&mechanics_field_view) - G2P_FIELD_RECEIPT_WORDS;
 }
 
+fn g2p_field_pressure_offset() -> u32 {
+  return g2p_field_load(30u)
+    + g2p_field_load(32u) * G2P_FIELD_STATE_WORDS;
+}
+
+fn g2p_field_pressure_receipt_seal() -> u32 {
+  let receipt = g2p_field_receipt_offset();
+  return G2P_FIELD_PRESSURE_MAGIC
+    ^ G2P_FIELD_PRESSURE_VERSION
+    ^ G2P_FIELD_PRESSURE_READY_ADMITTED
+    ^ G2P_FIELD_PRESSURE_LAW_EXACT
+    ^ g2p_field_load(receipt + 28u)
+    ^ g2p_field_load(receipt + 29u)
+    ^ g2p_field_load(receipt + 30u)
+    ^ g2p_field_load(receipt + 31u)
+    ^ g2p_field_load(receipt + 32u)
+    ^ g2p_field_load(3u)
+    ^ g2p_field_load(8u)
+    ^ g2p_field_load(9u)
+    ^ g2p_field_load(10u)
+    ^ g2p_field_load(38u);
+}
+
 fn g2p_field_receipt_structural_core() -> bool {
   if (!g2p_field_receipt_addressable()) { return false; }
   let state_offset = g2p_field_load(30u);
   let receipt = g2p_field_receipt_offset();
+  let pressure_required = g2p_field_load(receipt + 32u);
+  let pressure_claimed = g2p_field_load(receipt + 33u);
+  let pressure_consumed = g2p_field_load(receipt + 34u);
   return state_offset >= G2P_FIELD_RECEIPT_WORDS
     && state_offset == g2p_field_load(28u)
       + g2p_field_load(32u) * G2P_FIELD_ACCUMULATOR_WORDS
@@ -5141,7 +5337,19 @@ fn g2p_field_receipt_structural_core() -> bool {
     && g2p_field_load(receipt + 1u) == G2P_FIELD_RECEIPT_VERSION
     && g2p_field_load(receipt + 2u) == G2P_FIELD_RECEIPT_READY_ADMITTED
     && g2p_field_load(receipt + 5u) == g2p_field_load(63u)
-    && g2p_field_load(receipt + 6u) == g2p_field_load(34u);
+    && g2p_field_load(receipt + 6u) == g2p_field_load(34u)
+    && g2p_field_load(receipt + 24u) == G2P_FIELD_PRESSURE_MAGIC
+    && g2p_field_load(receipt + 25u) == G2P_FIELD_PRESSURE_VERSION
+    && g2p_field_load(receipt + 26u)
+      == G2P_FIELD_PRESSURE_READY_ADMITTED
+    && g2p_field_load(receipt + 27u) == G2P_FIELD_PRESSURE_LAW_EXACT
+    && g2p_field_load(receipt + 30u) == g2p_field_load(34u)
+    && g2p_field_load(receipt + 31u) <= g2p_field_load(receipt + 5u)
+    && pressure_required != 0u
+    && pressure_claimed == pressure_required
+    && pressure_consumed == pressure_required
+    && g2p_field_load(receipt + 35u)
+      == g2p_field_pressure_receipt_seal();
 }
 
 fn g2p_field_receipt_structural(phase: u32) -> bool {
@@ -5153,6 +5361,7 @@ fn g2p_receipt_reject(replay: bool, skipped: bool, duplicate: bool) {
   if (g2p_field_receipt_addressable()) {
     let receipt = g2p_field_receipt_offset();
     g2p_field_store(receipt + 2u, G2P_FIELD_RECEIPT_FAIL_CLOSED);
+    g2p_field_store(receipt + 26u, G2P_FIELD_PRESSURE_FAIL_CLOSED);
   }
   if (g2p_reflux_present()) {
     atomicOr(
@@ -5239,6 +5448,8 @@ fn claim_g2p_energy_receipt() {
     }
   }
   g2p_field_store(receipt + 10u, 0u);
+  g2p_field_store(receipt + 18u, 0u);
+  g2p_field_store(receipt + 19u, 0u);
   loop {
     let field_claim = atomicCompareExchangeWeak(
       &mechanics_field_view[receipt + 3u],
@@ -5271,6 +5482,31 @@ fn g2p_field_specific_energy(field_index: u32, field_mass: f32) -> f32 {
     return 0.0;
   }
   return heat_j / field_mass;
+}
+
+fn g2p_field_pressure_specific_energy(
+  field_index: u32,
+  field_mass: f32
+) -> f32 {
+  if (!(field_mass > 0.0)
+      || !g2p_field_receipt_structural(G2P_FIELD_RECEIPT_G2P_CLAIMED)) {
+    g2p_receipt_reject(false, true, false);
+    return 0.0;
+  }
+  let accumulator = g2p_field_load(28u)
+    + field_index * G2P_FIELD_ACCUMULATOR_WORDS;
+  let pressure_internal_compensation_j =
+    bitcast<f32>(g2p_field_load(accumulator + 3u));
+  if (pressure_internal_compensation_j
+        != pressure_internal_compensation_j
+      || abs(pressure_internal_compensation_j) > 3.402823466e+38) {
+    if (g2p_reflux_present()) {
+      atomicOr(&cross_level_reflux[2u], G2P_REFLUX_NONFINITE);
+    }
+    g2p_receipt_reject(false, false, false);
+    return 0.0;
+  }
+  return pressure_internal_compensation_j / field_mass;
 }
 
 fn g2p_field_route_specific_energy(field_index: u32, field_mass: f32) -> f32 {
@@ -5429,9 +5665,12 @@ fn g2p_field_view_admitted_core() -> bool {
       == ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT}u
     && g2p_field_load(63u) == params.schroeder_spatial_pad0
     && field_count <= field_capacity
-    && capacity_words <= words
+    && capacity_words == words
     && state_offset <= capacity_words
-    && field_capacity <= (capacity_words - state_offset) / G2P_FIELD_STATE_WORDS;
+    && field_capacity <= 357913941u
+    && capacity_words - state_offset
+      == field_capacity
+        * (G2P_FIELD_STATE_WORDS + G2P_FIELD_PRESSURE_WORDS);
 }
 
 fn g2p_field_view_admitted_for_claim() -> bool {
@@ -5495,13 +5734,57 @@ fn g2p_scale_close(left: f32, right: f32, count: u32) -> bool {
   return abs(left - right) <= tolerance;
 }
 
+fn g2p_field_absolute_pressure(
+  field_index: u32
+) -> vec2<f32> {
+  if (field_index >= g2p_field_load(34u)) {
+    return vec2<f32>(0.0, 0.0);
+  }
+  let row =
+    g2p_field_pressure_offset() + field_index * G2P_FIELD_PRESSURE_WORDS;
+  if (row < g2p_field_pressure_offset()
+      || row + G2P_FIELD_PRESSURE_WORDS
+        > arrayLength(&mechanics_field_view)) {
+    return vec2<f32>(0.0, 0.0);
+  }
+  let pressure_volume_moment = bitcast<f32>(g2p_field_load(row));
+  let represented_volume = bitcast<f32>(g2p_field_load(row + 1u));
+  let absolute_pressure = bitcast<f32>(g2p_field_load(row + 2u));
+  let contribution_count = g2p_field_load(row + 3u);
+  let valid = represented_volume > 0.0
+    && absolute_pressure >= 0.0
+    && contribution_count > 0u
+    && pressure_volume_moment == pressure_volume_moment
+    && represented_volume == represented_volume
+    && absolute_pressure == absolute_pressure
+    && abs(pressure_volume_moment) <= 3.402823466e+38
+    && abs(represented_volume) <= 3.402823466e+38
+    && abs(absolute_pressure) <= 3.402823466e+38
+    && g2p_scale_close(
+      pressure_volume_moment,
+      represented_volume * absolute_pressure,
+      max(2u, contribution_count)
+    );
+  return vec2<f32>(
+    select(0.0, absolute_pressure, valid),
+    select(0.0, 1.0, valid)
+  );
+}
+
+
 fn g2p_saturating_product(left: u32, right: u32) -> u32 {
   if (left == 0u || right == 0u) { return 0u; }
-  // Slice-7 supports r <= 4, so every evidence product uses at most r + 1.
+  // Cross-level mechanics supports r <= 4, so every evidence product uses at
+  // most r + 1.
   // Keep the malformed-input guard division-free; some Vulkan Tint/SPIR-V
   // stacks have crashed while lowering a variable unsigned divisor here.
   if (right > 5u || left > 0x33333333u) { return 0xffffffffu; }
   return left * right;
+}
+
+fn g2p_saturating_add(left: u32, right: u32) -> u32 {
+  if (left > 0xffffffffu - right) { return 0xffffffffu; }
+  return left + right;
 }
 
 @compute @workgroup_size(64)
@@ -5525,23 +5808,38 @@ fn measure_g2p_energy_receipt(
     return;
   }
   let delta_j = mass * (next - prior);
-  let n_epsilon = min(
+  // This differences stored f32 specific internal energy, so its error is
+  // about ulp(u) per particle regardless of how small the deposit is. Bound it
+  // against the state it was differenced from, one-sided: a deposit may not
+  // remove internal energy beyond that representation floor. An exact
+  // measured-vs-expected equality is not recoverable at this conditioning and
+  // must not be gated on here; the exact accounting is enforced separately by
+  // the published-vs-consumed heat and pressure-compensation checks.
+  let measure_n_epsilon = min(
     0.25,
     f32(max(1u, params.particle_count)) * 5.960464477539063e-8
   );
-  let gamma_n = n_epsilon / max(1.0e-20, 1.0 - n_epsilon);
-  let tolerance = max(
+  let measure_gamma_n =
+    measure_n_epsilon / max(1.0e-20, 1.0 - measure_n_epsilon);
+  let measure_tolerance = max(
     8.0 * 1.175494351e-38,
-    gamma_n * mass * (abs(prior) + abs(next))
+    measure_gamma_n * mass * (abs(prior) + abs(next))
   );
-  if (delta_j < -tolerance || delta_j != delta_j
+  if (delta_j < -measure_tolerance
+      || delta_j != delta_j
       || abs(delta_j) > 3.402823466e+38) {
     g2p_receipt_reject(false, false, false);
     return;
   }
-  if (mass > 0.0 && g2p_reflux_present()) {
-    if (!g2p_atomic_add_f32_reflux(84u, max(0.0, delta_j))
-        || !g2p_reflux_increment_checked(94u)) {
+  if (mass > 0.0) {
+    if (!g2p_atomic_add_f32_field(
+        g2p_field_receipt_offset() + 19u,
+        delta_j
+      )) {
+      g2p_receipt_reject(false, false, false);
+      return;
+    }
+    if (g2p_reflux_present() && !g2p_reflux_increment_checked(94u)) {
       g2p_receipt_reject(false, false, false);
     }
   }
@@ -5557,11 +5855,67 @@ fn consume_g2p_energy_receipt() {
   let receipt = g2p_field_receipt_offset();
   let published_field_heat = bitcast<f32>(g2p_field_load(receipt + 9u));
   let consumed_field_heat = bitcast<f32>(g2p_field_load(receipt + 10u));
-  if (!g2p_scale_close(
+  let published_pressure_internal_compensation =
+    bitcast<f32>(g2p_field_load(receipt + 17u));
+  let consumed_pressure_internal_compensation =
+    bitcast<f32>(g2p_field_load(receipt + 18u));
+  let measured_particle_internal_energy_delta =
+    bitcast<f32>(g2p_field_load(receipt + 19u));
+  // Fine route heat is included in the field accumulator. Terminal coarse
+  // route heat is deliberately published through reflux row8 instead, so its
+  // already-measured transpose (H115) must participate in this receipt close.
+  var consumed_coarse_reflux_heat = 0.0;
+  if (g2p_reflux_present() && g2p_selected_is_coarse()) {
+    consumed_coarse_reflux_heat =
+      bitcast<f32>(g2p_reflux_load(115u));
+  }
+  // This close compares sums assembled by field-row reduction, 27-point
+  // transpose interpolation, and particle receipt reduction. Particle count
+  // alone is not a valid rounding bound. Cross-level H94 is the measured
+  // contribution count; the local fallback conservatively counts one
+  // interpolation plus one particle reduction per stencil sample and every
+  // published field row.
+  let local_energy_evidence_count = g2p_saturating_add(
+    select(
+      0xffffffffu,
+      params.particle_count * 28u,
+      params.particle_count <= 0x09249249u
+    ),
+    g2p_field_load(34u)
+  );
+  var energy_evidence_count = local_energy_evidence_count;
+  if (g2p_reflux_present()) {
+    energy_evidence_count = max(
+      energy_evidence_count,
+      g2p_reflux_load(94u)
+    );
+  }
+  // The exact accounting gates are published-vs-consumed: both sides come from
+  // the same well-conditioned accumulators. The particle-side measurement is
+  // a state difference whose error is ulp(u) per particle, so an exact
+  // measured-vs-expected equality is unreachable here and is bounded
+  // one-sided per particle in measure_g2p_energy_receipt instead. Its
+  // finiteness is still required before it is published.
+  if (measured_particle_internal_energy_delta
+        != measured_particle_internal_energy_delta
+      || abs(measured_particle_internal_energy_delta) > 3.402823466e+38
+      || !g2p_scale_close(
       published_field_heat,
       consumed_field_heat,
-      params.particle_count
+      energy_evidence_count
+    ) || !g2p_scale_close(
+      published_pressure_internal_compensation,
+      consumed_pressure_internal_compensation,
+      energy_evidence_count
     )) {
+    g2p_receipt_reject(false, false, false);
+    return;
+  }
+  if (g2p_reflux_present()
+      && !g2p_atomic_add_f32_reflux(
+        84u,
+        consumed_field_heat + consumed_coarse_reflux_heat
+      )) {
     g2p_receipt_reject(false, false, false);
     return;
   }
@@ -5787,6 +6141,22 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
         if (!(field_mass > 0.0) || field_status == 0u) {
           continue;
         }
+        let field_pressure = g2p_field_absolute_pressure(field_index);
+        if (field_pressure.y != 1.0) {
+          sampled_pressure_valid = false;
+          g2p_spatial_reject(17u);
+          continue;
+        }
+        let field_pressure_bits = bitcast<u32>(field_pressure.x);
+        if (!sampled_pressure_initialized) {
+          sampled_pressure_initialized = true;
+          sampled_pressure_common_bits = field_pressure_bits;
+        } else if (field_pressure_bits != sampled_pressure_common_bits) {
+          sampled_pressure_uniform = false;
+        }
+        sampled_absolute_pressure =
+          sampled_absolute_pressure + weight * field_pressure.x;
+        sampled_pressure_weight = sampled_pressure_weight + weight;
         sampled_weight = sampled_weight + weight;
         let grid_velocity = vec3<f32>(
           bitcast<f32>(g2p_field_load(state_base + 1u)),
@@ -5796,6 +6166,8 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
         let field_specific_energy = g2p_field_specific_energy(
           field_index, field_mass
         );
+        let field_pressure_specific_energy =
+          g2p_field_pressure_specific_energy(field_index, field_mass);
         let field_route_specific_energy = g2p_field_route_specific_energy(
           field_index, field_mass
         );
@@ -5803,10 +6175,17 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
           field_index, field_mass
         );
         sampled_internal_energy_delta = sampled_internal_energy_delta
-          + weight * (field_specific_energy + reflux_specific_energy);
+          + weight * (
+            field_specific_energy
+              + field_pressure_specific_energy
+              + reflux_specific_energy
+          );
         sampled_field_internal_energy_delta =
           sampled_field_internal_energy_delta
           + weight * field_specific_energy;
+        sampled_pressure_internal_energy_delta =
+          sampled_pressure_internal_energy_delta
+          + weight * field_pressure_specific_energy;
         sampled_field_route_internal_energy_delta =
           sampled_field_route_internal_energy_delta
           + weight * field_route_specific_energy;
@@ -5824,21 +6203,49 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
   // sum_p m_p * sum_i(w_pi * E_i/m_i) == sum_i E_i.
   var sampled_internal_energy_delta = 0.0;
   var sampled_field_internal_energy_delta = 0.0;
+  var sampled_pressure_internal_energy_delta = 0.0;
   var sampled_field_route_internal_energy_delta = 0.0;
-  var sampled_route_internal_energy_delta = 0.0;`,
+  var sampled_route_internal_energy_delta = 0.0;
+  var sampled_absolute_pressure = 0.0;
+  var sampled_pressure_weight = 0.0;
+  var sampled_pressure_common_bits = 0u;
+  var sampled_pressure_initialized = false;
+  var sampled_pressure_uniform = true;
+  var sampled_pressure_valid = true;`,
     'mechanics field G2P reflux energy accumulator'
   );
   const withEnergyDeposit = replaceRequiredWgsl(
     withEnergyAccumulator,
     '  out_sph_state[state_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, vel_u.w);',
-    `  let next_internal_energy = vel_u.w + sampled_internal_energy_delta;
+    `  var resolved_absolute_pressure = 0.0;
+  if (sampled_pressure_initialized && sampled_pressure_weight > 0.0) {
+    if (sampled_pressure_uniform) {
+      // Preserve an exactly uniform/reference pressure bitwise. This avoids
+      // turning log(P/Pref) into a one-ULP non-identity in the thermal pass.
+      resolved_absolute_pressure =
+        bitcast<f32>(sampled_pressure_common_bits);
+    } else {
+      resolved_absolute_pressure =
+        sampled_absolute_pressure / sampled_pressure_weight;
+    }
+  }
+  let next_internal_energy = vel_u.w + sampled_internal_energy_delta;
   if (next_internal_energy != next_internal_energy
       || abs(next_internal_energy) > 3.402823466e+38
       || next_internal_energy < 0.0
+      || !sampled_pressure_valid
+      || !sampled_pressure_initialized
+      || !(sampled_pressure_weight > 0.0)
+      || resolved_absolute_pressure != resolved_absolute_pressure
+      || resolved_absolute_pressure < 0.0
+      || abs(resolved_absolute_pressure) > 3.402823466e+38
       || sampled_field_internal_energy_delta
         != sampled_field_internal_energy_delta
       || abs(sampled_field_internal_energy_delta) > 3.402823466e+38
       || sampled_field_internal_energy_delta < 0.0
+      || sampled_pressure_internal_energy_delta
+        != sampled_pressure_internal_energy_delta
+      || abs(sampled_pressure_internal_energy_delta) > 3.402823466e+38
       || sampled_field_route_internal_energy_delta
         != sampled_field_route_internal_energy_delta
       || abs(sampled_field_route_internal_energy_delta) > 3.402823466e+38
@@ -5853,6 +6260,14 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
   if (!g2p_atomic_add_f32_field(
       g2p_field_receipt_offset() + 10u,
       pos_mass.w * sampled_field_internal_energy_delta
+    )) {
+    g2p_receipt_reject(false, false, false);
+    g2p_copy_input_particle(state_base, mechanics_base);
+    return;
+  }
+  if (!g2p_atomic_add_f32_field(
+      g2p_field_receipt_offset() + 18u,
+      pos_mass.w * sampled_pressure_internal_energy_delta
     )) {
     g2p_receipt_reject(false, false, false);
     g2p_copy_input_particle(state_base, mechanics_base);
@@ -5878,8 +6293,16 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
   );`,
     'mechanics field G2P reflux internal-energy deposit'
   );
-  return replaceRequiredWgsl(
+  const withPressurePublication = replaceRequiredWgsl(
     withEnergyDeposit,
+    '  out_mls_mechanics[mechanics_base + 7u] = row7;',
+    `  out_mls_mechanics[mechanics_base + 7u] = vec4<f32>(
+    resolved_absolute_pressure, row7.y, row7.z, row7.w
+  );`,
+    'mechanics field G2P resolved pressure publication'
+  );
+  return replaceRequiredWgsl(
+    withPressurePublication,
     '    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);',
     `    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);
     // Canonical final rollback is the only place that can see receipt-stage
@@ -5967,11 +6390,62 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
 }`,
     'single-level mechanics field energy admission hoist'
   );
-  const withSingleLevelSample = replaceRequiredWgsl(
+  const withHoistedPressureEnergyAdmission = replaceRequiredWgsl(
     withHoistedEnergyAdmission,
+    `fn g2p_field_pressure_specific_energy(
+  field_index: u32,
+  field_mass: f32
+) -> f32 {
+  if (!(field_mass > 0.0)
+      || !g2p_field_receipt_structural(G2P_FIELD_RECEIPT_G2P_CLAIMED)) {
+    g2p_receipt_reject(false, true, false);
+    return 0.0;
+  }
+  let accumulator = g2p_field_load(28u)
+    + field_index * G2P_FIELD_ACCUMULATOR_WORDS;
+  let pressure_internal_compensation_j =
+    bitcast<f32>(g2p_field_load(accumulator + 3u));
+  if (pressure_internal_compensation_j
+        != pressure_internal_compensation_j
+      || abs(pressure_internal_compensation_j) > 3.402823466e+38) {
+    if (g2p_reflux_present()) {
+      atomicOr(&cross_level_reflux[2u], G2P_REFLUX_NONFINITE);
+    }
+    g2p_receipt_reject(false, false, false);
+    return 0.0;
+  }
+  return pressure_internal_compensation_j / field_mass;
+}`,
+    `fn g2p_field_pressure_specific_energy(
+  field_index: u32,
+  field_mass: f32
+) -> f32 {
+  // Admission and receipt phase were authenticated once before the stencil.
+  if (!(field_mass > 0.0)) {
+    g2p_receipt_reject(false, true, false);
+    return 0.0;
+  }
+  let accumulator = g2p_field_load(28u)
+    + field_index * G2P_FIELD_ACCUMULATOR_WORDS;
+  let pressure_internal_compensation_j =
+    bitcast<f32>(g2p_field_load(accumulator + 3u));
+  if (pressure_internal_compensation_j
+        != pressure_internal_compensation_j
+      || abs(pressure_internal_compensation_j) > 3.402823466e+38) {
+    g2p_receipt_reject(false, false, false);
+    return 0.0;
+  }
+  return pressure_internal_compensation_j / field_mass;
+}`,
+    'single-level mechanics field pressure-energy admission hoist'
+  );
+  const withSingleLevelSample = replaceRequiredWgsl(
+    withHoistedPressureEnergyAdmission,
     `        let field_specific_energy = g2p_field_specific_energy(
           field_index, field_mass
         );
+        let field_pressure_specific_energy =
+          g2p_field_pressure_specific_energy(field_index, field_mass);
         let field_route_specific_energy = g2p_field_route_specific_energy(
           field_index, field_mass
         );
@@ -5979,10 +6453,17 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
           field_index, field_mass
         );
         sampled_internal_energy_delta = sampled_internal_energy_delta
-          + weight * (field_specific_energy + reflux_specific_energy);
+          + weight * (
+            field_specific_energy
+              + field_pressure_specific_energy
+              + reflux_specific_energy
+          );
         sampled_field_internal_energy_delta =
           sampled_field_internal_energy_delta
           + weight * field_specific_energy;
+        sampled_pressure_internal_energy_delta =
+          sampled_pressure_internal_energy_delta
+          + weight * field_pressure_specific_energy;
         sampled_field_route_internal_energy_delta =
           sampled_field_route_internal_energy_delta
           + weight * field_route_specific_energy;
@@ -5995,53 +6476,42 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
         let field_specific_energy = g2p_field_specific_energy(
           field_index, field_mass
         );
+        let field_pressure_specific_energy =
+          g2p_field_pressure_specific_energy(field_index, field_mass);
         sampled_internal_energy_delta = sampled_internal_energy_delta
-          + weight * field_specific_energy;
+          + weight * (
+            field_specific_energy + field_pressure_specific_energy
+          );
         sampled_field_internal_energy_delta =
           sampled_field_internal_energy_delta
-          + weight * field_specific_energy;`,
+          + weight * field_specific_energy;
+        sampled_pressure_internal_energy_delta =
+          sampled_pressure_internal_energy_delta
+          + weight * field_pressure_specific_energy;`,
     'single-level mechanics field G2P sample'
   );
-  const withSingleLevelAccumulator = replaceRequiredWgsl(
+  const withSingleLevelAccumulators = replaceRequiredWgsl(
     withSingleLevelSample,
-    `  var sampled_internal_energy_delta = 0.0;
-  var sampled_field_internal_energy_delta = 0.0;
-  var sampled_field_route_internal_energy_delta = 0.0;
+    `  var sampled_field_route_internal_energy_delta = 0.0;
   var sampled_route_internal_energy_delta = 0.0;`,
-    `  var sampled_internal_energy_delta = 0.0;
-  var sampled_field_internal_energy_delta = 0.0;`,
-    'single-level mechanics field G2P energy accumulators'
+    '',
+    'single-level mechanics field route accumulators'
   );
-  const withSingleLevelDeposit = replaceRequiredWgsl(
-    withSingleLevelAccumulator,
-    `  let next_internal_energy = vel_u.w + sampled_internal_energy_delta;
-  if (next_internal_energy != next_internal_energy
-      || abs(next_internal_energy) > 3.402823466e+38
-      || next_internal_energy < 0.0
-      || sampled_field_internal_energy_delta
-        != sampled_field_internal_energy_delta
-      || abs(sampled_field_internal_energy_delta) > 3.402823466e+38
-      || sampled_field_internal_energy_delta < 0.0
-      || sampled_field_route_internal_energy_delta
+  const withSingleLevelValidation = replaceRequiredWgsl(
+    withSingleLevelAccumulators,
+    `      || sampled_field_route_internal_energy_delta
         != sampled_field_route_internal_energy_delta
       || abs(sampled_field_route_internal_energy_delta) > 3.402823466e+38
       || sampled_field_route_internal_energy_delta < 0.0
       || sampled_route_internal_energy_delta != sampled_route_internal_energy_delta
       || abs(sampled_route_internal_energy_delta) > 3.402823466e+38
-      || sampled_route_internal_energy_delta < 0.0) {
-    g2p_spatial_reject(17u);
-    g2p_copy_input_particle(state_base, mechanics_base);
-    return;
-  }
-  if (!g2p_atomic_add_f32_field(
-      g2p_field_receipt_offset() + 10u,
-      pos_mass.w * sampled_field_internal_energy_delta
-    )) {
-    g2p_receipt_reject(false, false, false);
-    g2p_copy_input_particle(state_base, mechanics_base);
-    return;
-  }
-  if (g2p_reflux_present()) {
+      || sampled_route_internal_energy_delta < 0.0`,
+    '',
+    'single-level mechanics field route validation'
+  );
+  const withSingleLevelDeposit = replaceRequiredWgsl(
+    withSingleLevelValidation,
+    `  if (g2p_reflux_present()) {
     let consumed_route_j = pos_mass.w * sampled_route_internal_energy_delta;
     let consumed_local_j = pos_mass.w * max(
       0.0,
@@ -6056,35 +6526,9 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
       return;
     }
   }
-  out_sph_state[state_base + 1u] = vec4<f32>(
-    velocity.x, velocity.y, velocity.z, next_internal_energy
-  );`,
-    `  let next_internal_energy = vel_u.w + sampled_internal_energy_delta;
-  if (next_internal_energy != next_internal_energy
-      || abs(next_internal_energy) > 3.402823466e+38
-      || next_internal_energy < 0.0
-      || sampled_field_internal_energy_delta
-        != sampled_field_internal_energy_delta
-      || abs(sampled_field_internal_energy_delta) > 3.402823466e+38
-      || sampled_field_internal_energy_delta < 0.0) {
-    g2p_spatial_reject(17u);
-    g2p_copy_input_particle(state_base, mechanics_base);
-    return;
-  }
-  // The local receipt remains exact in single-level mode: every joule
-  // published by the field is transposed to particles and consumed once.
-  if (!g2p_atomic_add_f32_field(
-      g2p_field_receipt_offset() + 10u,
-      pos_mass.w * sampled_field_internal_energy_delta
-    )) {
-    g2p_receipt_reject(false, false, false);
-    g2p_copy_input_particle(state_base, mechanics_base);
-    return;
-  }
-  out_sph_state[state_base + 1u] = vec4<f32>(
-    velocity.x, velocity.y, velocity.z, next_internal_energy
-  );`,
-    'single-level mechanics field G2P energy deposit'
+`,
+    '',
+    'single-level mechanics field route deposit'
   );
   return replaceRequiredWgsl(
     withSingleLevelDeposit,
@@ -6136,6 +6580,7 @@ const FIELD_READY_ADMITTED: u32 = ${
 }u;
 const FIELD_KEY_WORDS: u32 = 4u;
 const FIELD_STATE_WORDS: u32 = 8u;
+const FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const FIELD_ACCUMULATOR_WORDS: u32 = 8u;
 const FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS}u;
 const FIELD_RECEIPT_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC}u;
@@ -6153,6 +6598,15 @@ const FIELD_RECEIPT_PHASE_HEAT_CLEARING: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIE
 const FIELD_RECEIPT_PHASE_HEAT_BUILDING: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_HEAT_BUILDING}u;
 const FIELD_RECEIPT_PHASE_ENERGY_READY: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_ENERGY_READY}u;
 const FIELD_RECEIPT_DEFER_SEAL: u32 = 1u;
+const FIELD_PRESSURE_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC}u;
+const FIELD_PRESSURE_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION}u;
+const FIELD_PRESSURE_LAW_EXACT: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G}u;
+const FIELD_PRESSURE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY
+  | SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED
+}u;
+const FIELD_PRESSURE_FAIL_CLOSED: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_FAIL_CLOSED}u;
+const FIELD_PRESSURE_CONSUMER_LOCAL: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL}u;
 
 fn field_word(index: u32) -> u32 {
   return atomicLoad(&field_view[index]);
@@ -6166,9 +6620,50 @@ fn field_receipt_offset() -> u32 {
   return field_word(30u) - FIELD_RECEIPT_WORDS;
 }
 
+fn field_pressure_offset() -> u32 {
+  return field_word(30u)
+    + field_word(32u) * FIELD_STATE_WORDS;
+}
+
+fn field_pressure_receipt_seal() -> u32 {
+  let receipt = field_receipt_offset();
+  return FIELD_PRESSURE_MAGIC
+    ^ FIELD_PRESSURE_VERSION
+    ^ FIELD_PRESSURE_READY_ADMITTED
+    ^ FIELD_PRESSURE_LAW_EXACT
+    ^ field_word(receipt + 28u)
+    ^ field_word(receipt + 29u)
+    ^ field_word(receipt + 30u)
+    ^ field_word(receipt + 31u)
+    ^ field_word(receipt + 32u)
+    ^ field_word(3u)
+    ^ field_word(8u)
+    ^ field_word(9u)
+    ^ field_word(10u)
+    ^ field_word(38u);
+}
+
+fn field_pressure_receipt_admitted() -> bool {
+  let receipt = field_receipt_offset();
+  let required = field_word(receipt + 32u);
+  let claimed = field_word(receipt + 33u);
+  let consumed = field_word(receipt + 34u);
+  return field_word(receipt + 24u) == FIELD_PRESSURE_MAGIC
+    && field_word(receipt + 25u) == FIELD_PRESSURE_VERSION
+    && field_word(receipt + 26u) == FIELD_PRESSURE_READY_ADMITTED
+    && field_word(receipt + 27u) == FIELD_PRESSURE_LAW_EXACT
+    && field_word(receipt + 30u) == field_word(34u)
+    && field_word(receipt + 31u) == params.pad_u1
+    && (required & FIELD_PRESSURE_CONSUMER_LOCAL) != 0u
+    && (claimed & ~required) == 0u
+    && (consumed & ~claimed) == 0u
+    && field_word(receipt + 35u) == field_pressure_receipt_seal();
+}
+
 fn field_receipt_reject() {
   let receipt = field_receipt_offset();
   field_store(receipt + 2u, FIELD_RECEIPT_FAIL_CLOSED);
+  field_store(receipt + 26u, FIELD_PRESSURE_FAIL_CLOSED);
   field_store(2u, ${
     SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
     | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
@@ -6215,6 +6710,7 @@ fn field_heat_add(field_index: u32, heat_j: f32) -> bool {
 }
 
 fn field_structurally_admitted() -> bool {
+  let pressure_offset = field_pressure_offset();
   return arrayLength(&field_view) >= ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u
     && field_word(0u) == FIELD_MAGIC
     && field_word(1u) == FIELD_VERSION
@@ -6230,6 +6726,12 @@ fn field_structurally_admitted() -> bool {
     && field_word(30u) == field_word(28u)
       + field_word(32u) * FIELD_ACCUMULATOR_WORDS
       + FIELD_RECEIPT_WORDS
+    && pressure_offset >= field_word(30u)
+    && pressure_offset <= field_word(42u)
+    && field_word(42u)
+      == pressure_offset + field_word(32u) * FIELD_PRESSURE_WORDS
+    && field_word(41u)
+      == pressure_offset + field_word(34u) * FIELD_PRESSURE_WORDS
     && field_word(42u) <= arrayLength(&field_view);
 }
 
@@ -6266,7 +6768,7 @@ fn begin_heat_receipt() {
   // has been cleared. Cross-level metadata is installed by the reflux owner.
   field_store(receipt + 4u, 0u);
   field_store(receipt + 7u, 0u);
-  for (var word = 8u; word < FIELD_RECEIPT_WORDS; word = word + 1u) {
+  for (var word = 8u; word < 24u; word = word + 1u) {
     field_store(receipt + word, 0u);
   }
 }
@@ -6315,6 +6817,7 @@ fn claim_velocity_state() {
       || field_word(59u)
         != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT}u
       || !field_receipt_admitted(FIELD_RECEIPT_PHASE_HEAT_BUILDING)
+      || !field_pressure_receipt_admitted()
       || params.pad_u2 != params.pad_u1 + 1u) {
     return;
   }
@@ -6328,6 +6831,14 @@ fn claim_velocity_state() {
     if (claimed.old_value != params.pad_u1) { return; }
   }
   field_store(field_receipt_offset() + 5u, params.pad_u2);
+  let pressure_claims = atomicOr(
+    &field_view[field_receipt_offset() + 33u],
+    FIELD_PRESSURE_CONSUMER_LOCAL
+  );
+  if ((pressure_claims & FIELD_PRESSURE_CONSUMER_LOCAL) != 0u) {
+    field_receipt_reject();
+    return;
+  }
   field_store(
     59u,
     ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u
@@ -6650,11 +7161,27 @@ fn summarize_heat_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let accumulator = field_word(28u)
     + field_index * FIELD_ACCUMULATOR_WORDS;
   let heat_j = bitcast<f32>(field_word(accumulator));
+  let pressure_internal_compensation_j =
+    bitcast<f32>(field_word(accumulator + 3u));
+  let ambient_impulse = vec3<f32>(
+    bitcast<f32>(field_word(accumulator + 4u)),
+    bitcast<f32>(field_word(accumulator + 5u)),
+    bitcast<f32>(field_word(accumulator + 6u))
+  );
+  let ambient_external_work_j =
+    bitcast<f32>(field_word(accumulator + 7u));
   let contribution_count = field_word(accumulator + 1u);
   let state = field_word(30u) + field_index * FIELD_STATE_WORDS;
   let mass = bitcast<f32>(field_word(state));
   if (!(heat_j >= 0.0) || heat_j != heat_j
       || abs(heat_j) > 3.402823466e+38
+      || pressure_internal_compensation_j
+        != pressure_internal_compensation_j
+      || abs(pressure_internal_compensation_j) > 3.402823466e+38
+      || any(ambient_impulse != ambient_impulse)
+      || any(abs(ambient_impulse) > vec3<f32>(3.402823466e+38))
+      || ambient_external_work_j != ambient_external_work_j
+      || abs(ambient_external_work_j) > 3.402823466e+38
       || !(mass >= 0.0) || mass != mass
       || abs(mass) > 3.402823466e+38) {
     field_receipt_reject();
@@ -6662,6 +7189,23 @@ fn summarize_heat_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   let receipt = field_receipt_offset();
   if (!field_atomic_add_f32(receipt + 8u, heat_j)) {
+    field_receipt_reject();
+    return;
+  }
+  if (!field_atomic_add_f32(
+      receipt + 16u,
+      pressure_internal_compensation_j
+    )) {
+    field_receipt_reject();
+    return;
+  }
+  if (!field_atomic_add_f32(receipt + 20u, ambient_impulse.x)
+      || !field_atomic_add_f32(receipt + 21u, ambient_impulse.y)
+      || !field_atomic_add_f32(receipt + 22u, ambient_impulse.z)
+      || !field_atomic_add_f32(
+        receipt + 23u,
+        ambient_external_work_j
+      )) {
     field_receipt_reject();
     return;
   }
@@ -6681,21 +7225,55 @@ fn summarize_heat_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn seal_velocity_state() {
   if (!field_operation_admitted(
       ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u
-    ) || !field_receipt_admitted(FIELD_RECEIPT_PHASE_HEAT_BUILDING)) {
+    ) || !field_receipt_admitted(FIELD_RECEIPT_PHASE_HEAT_BUILDING)
+      || !field_pressure_receipt_admitted()) {
     if (field_structurally_admitted()) { field_receipt_reject(); }
     return;
   }
   let receipt = field_receipt_offset();
   let total_heat_j = bitcast<f32>(field_word(receipt + 8u));
+  let total_pressure_internal_compensation_j =
+    bitcast<f32>(field_word(receipt + 16u));
+  let total_ambient_impulse = vec3<f32>(
+    bitcast<f32>(field_word(receipt + 20u)),
+    bitcast<f32>(field_word(receipt + 21u)),
+    bitcast<f32>(field_word(receipt + 22u))
+  );
+  let total_ambient_external_work_j =
+    bitcast<f32>(field_word(receipt + 23u));
   if (!(total_heat_j >= 0.0) || total_heat_j != total_heat_j
-      || abs(total_heat_j) > 3.402823466e+38) {
+      || abs(total_heat_j) > 3.402823466e+38
+      || total_pressure_internal_compensation_j
+        != total_pressure_internal_compensation_j
+      || abs(total_pressure_internal_compensation_j) > 3.402823466e+38
+      || any(total_ambient_impulse != total_ambient_impulse)
+      || any(abs(total_ambient_impulse) > vec3<f32>(3.402823466e+38))
+      || total_ambient_external_work_j != total_ambient_external_work_j
+      || abs(total_ambient_external_work_j) > 3.402823466e+38) {
+    field_receipt_reject();
+    return;
+  }
+  let pressure_claimed = field_word(receipt + 33u);
+  let pressure_consumed = field_word(receipt + 34u);
+  if ((pressure_claimed & FIELD_PRESSURE_CONSUMER_LOCAL) == 0u
+      || (pressure_consumed & FIELD_PRESSURE_CONSUMER_LOCAL) != 0u) {
     field_receipt_reject();
     return;
   }
   field_store(receipt + 9u, bitcast<u32>(total_heat_j));
   field_store(
+    receipt + 17u,
+    bitcast<u32>(total_pressure_internal_compensation_j)
+  );
+  field_store(
     59u,
     ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT}u
+  );
+  // Publish local pressure consumption only after transport, contact, and all
+  // energy/ambient summaries have validated successfully.
+  field_store(
+    receipt + 34u,
+    pressure_consumed | FIELD_PRESSURE_CONSUMER_LOCAL
   );
   if ((params.receipt_mode_flags & FIELD_RECEIPT_DEFER_SEAL) == 0u) {
     field_store(receipt + 3u, FIELD_RECEIPT_PHASE_ENERGY_READY);
@@ -6768,7 +7346,9 @@ export function createFusedP2gParamsArray(
   ambientPressurePa = 0,
   externalGaugePressurePa = 0,
   externalGaugePressureEnabled = false,
-  mechanicsFieldMutation = null
+  mechanicsFieldMutation = null,
+  pressureRequiredConsumerMask =
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL
 ) {
   const filterEnabled = schroederLevelFilter?.enabled === true;
   const activeNodeFilterEnabled = schroederActiveNodeFilter?.enabled === true;
@@ -6875,6 +7455,10 @@ export function createFusedP2gParamsArray(
   view.setUint32(152, Math.max(0, Math.round(finiteNumber(
     mechanicsFieldMutation?.expectedEncoding,
     0
+  ))), true);
+  view.setUint32(156, Math.max(0, Math.round(finiteNumber(
+    pressureRequiredConsumerMask,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL
   ))), true);
   return buffer;
 }
@@ -9326,11 +9910,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     }
     let mechanicsFieldPostG2pPass = null;
     if (mechanicsFieldViewEnabled) {
-      // This resident path always binds the explicit 16-byte no-reflux
-      // sentinel. Cross-level particle-energy measurement and fine/coarse
-      // receipt consumers belong to the authoritative fused-substep path;
-      // encoding them here only scans every particle and submits two known
-      // no-op passes. The local field heat equality remains sealed below.
+      // This resident path binds the explicit 16-byte no-reflux sentinel.
+      // Measure the signed particle energy change before consuming the
+      // independent heat and pressure-work receipt channels.
       const consumeFieldEnergyReceiptPass = encoder.beginComputePass();
       mechanicsFieldPostG2pPass = consumeFieldEnergyReceiptPass;
       consumeFieldEnergyReceiptPass.setPipeline(
@@ -9339,6 +9921,16 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       consumeFieldEnergyReceiptPass.setBindGroup(
         0,
         mechanicsFieldG2pReceiptBindGroups[1]
+      );
+      consumeFieldEnergyReceiptPass.dispatchWorkgroups(
+        Math.max(1, Math.ceil(particleCount / 64))
+      );
+      consumeFieldEnergyReceiptPass.setPipeline(
+        mechanicsFieldG2pReceiptPipelineInfos[2].pipeline
+      );
+      consumeFieldEnergyReceiptPass.setBindGroup(
+        0,
+        mechanicsFieldG2pReceiptBindGroups[2]
       );
       consumeFieldEnergyReceiptPass.dispatchWorkgroups(1);
     }

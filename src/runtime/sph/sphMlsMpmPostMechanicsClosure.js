@@ -22,8 +22,8 @@ export const MLS_MPM_POST_MECHANICS_CLOSURE_STAGE_ORDER = Object.freeze([
   'thermal-phase',
   'reaction-discovery',
   'reaction-product',
-  'mechanics-constitutive-refresh',
-  'phase-carrier-transfer-v2'
+  'phase-carrier-transfer-v2',
+  'mechanics-constitutive-refresh'
 ]);
 
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -730,6 +730,11 @@ export function resolveMlsMpmPostMechanicsContinuation({
     ]),
     mechanics: select([
       {
+        stage: 'mechanics-constitutive-refresh',
+        buffer: mechanicsRefreshOutput.mechanicsBuffer,
+        ownedByClosure: mechanicsRefreshOutput.ownsMechanicsBuffer === true
+      },
+      {
         stage: 'phase-carrier-transfer-v2',
         buffer: phaseCarrierOutput.mechanicsBuffer,
         ownedByClosure: componentOwnershipValue(
@@ -737,11 +742,6 @@ export function resolveMlsMpmPostMechanicsContinuation({
           'mechanics',
           phaseCarrierOutput.mechanicsBuffer
         )
-      },
-      {
-        stage: 'mechanics-constitutive-refresh',
-        buffer: mechanicsRefreshOutput.mechanicsBuffer,
-        ownedByClosure: mechanicsRefreshOutput.ownsMechanicsBuffer === true
       },
       {
         stage: 'reaction-product',
@@ -1663,54 +1663,9 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     reactionOutputComponentMutations(reactionStep);
   const reactionMutatesParticles = reactionComponentMutations.any;
   const reactionOutput = retainedReactionOutputBuffers(reactionStep);
-  const mechanicsRefreshSourceStateBuffer = (
-    reactionComponentMutations.state ? reactionOutput.stateBuffer : null
-  ) || thermalOutput.stateBuffer
-    || farForceOutput.stateBuffer
-    || postMechanicsParticleBuffers.stateBuffer;
-  const mechanicsRefreshSourceThermoBuffer = (
-    reactionComponentMutations.thermo ? reactionOutput.thermoBuffer : null
-  ) || thermalOutput.thermoBuffer
-    || sphParticleUpload?.thermoBuffer;
-  const mechanicsRefreshSourceMechanicsBuffer = (
-    reactionComponentMutations.mechanics ? reactionOutput.mechanicsBuffer : null
-  ) || postMechanicsParticleBuffers.mechanicsBuffer;
-  if (
-    (thermalStep || reactionMutatesParticles)
-    && mechanicsMaterialTable
-    && typeof mechanicsRefreshRunner === 'function'
-    && stageEligible
-    && mechanicsRefreshSourceStateBuffer
-    && mechanicsRefreshSourceThermoBuffer
-    && mechanicsRefreshSourceMechanicsBuffer
-  ) {
-    mechanicsRefreshStep = await timedStage(
-      'mechanicsRefresh',
-      () => mechanicsRefreshRunner({
-        device,
-        sphParticleState,
-        mlsMpmParticleState,
-        mechanicsMaterialTable,
-        sphParticleUpload,
-        mlsMpmParticleUpload,
-        sourceStateBuffer: mechanicsRefreshSourceStateBuffer,
-        sourceThermoBuffer: mechanicsRefreshSourceThermoBuffer,
-        sourceMechanicsBuffer: mechanicsRefreshSourceMechanicsBuffer,
-        preferWebGpu,
-        retainOutputParticleBuffers: true,
-        readbackMode,
-        ...mechanicsRefreshOptions
-      })
-    );
-    executedStageOrder.push('mechanics-constitutive-refresh');
-  }
-
   const phaseCarrierPlan = sphParticleUpload?.phaseCarrierPlan
     || sphParticleState?.phaseCarrierPlan
     || null;
-  const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(
-    mechanicsRefreshStep
-  );
   const phaseCarrierSourceStateBuffer = (
     reactionComponentMutations.state ? reactionOutput.stateBuffer : null
   ) || thermalOutput.stateBuffer
@@ -1720,11 +1675,9 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     reactionComponentMutations.thermo ? reactionOutput.thermoBuffer : null
   ) || thermalOutput.thermoBuffer
     || sphParticleUpload?.thermoBuffer;
-  const phaseCarrierSourceMechanicsBuffer = mechanicsRefreshOutput.mechanicsBuffer
-    || (reactionComponentMutations.mechanics
-      ? reactionOutput.mechanicsBuffer
-      : null)
-    || postMechanicsParticleBuffers.mechanicsBuffer;
+  const phaseCarrierSourceMechanicsBuffer = (
+    reactionComponentMutations.mechanics ? reactionOutput.mechanicsBuffer : null
+  ) || postMechanicsParticleBuffers.mechanicsBuffer;
   if (
     phaseCarrierPlanReady(phaseCarrierPlan)
     && thermalStep
@@ -1754,6 +1707,54 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       })
     );
     executedStageOrder.push('phase-carrier-transfer-v2');
+  }
+
+  const phaseCarrierOutput = retainedPhaseCarrierTransferOutputBuffers(
+    phaseCarrierTransferStep
+  );
+  const mechanicsRefreshSourceStateBuffer = phaseCarrierOutput.stateBuffer || (
+    reactionComponentMutations.state ? reactionOutput.stateBuffer : null
+  ) || thermalOutput.stateBuffer
+    || farForceOutput.stateBuffer
+    || postMechanicsParticleBuffers.stateBuffer;
+  const mechanicsRefreshSourceThermoBuffer = phaseCarrierOutput.thermoBuffer || (
+    reactionComponentMutations.thermo ? reactionOutput.thermoBuffer : null
+  ) || thermalOutput.thermoBuffer
+    || sphParticleUpload?.thermoBuffer;
+  const mechanicsRefreshSourceMechanicsBuffer =
+    phaseCarrierOutput.mechanicsBuffer
+    || (reactionComponentMutations.mechanics
+      ? reactionOutput.mechanicsBuffer
+      : null)
+    || postMechanicsParticleBuffers.mechanicsBuffer;
+  if (
+    (thermalStep || reactionMutatesParticles)
+    && mechanicsMaterialTable
+    && typeof mechanicsRefreshRunner === 'function'
+    && stageEligible
+    && mechanicsRefreshSourceStateBuffer
+    && mechanicsRefreshSourceThermoBuffer
+    && mechanicsRefreshSourceMechanicsBuffer
+  ) {
+    mechanicsRefreshStep = await timedStage(
+      'mechanicsRefresh',
+      () => mechanicsRefreshRunner({
+        device,
+        sphParticleState,
+        mlsMpmParticleState,
+        mechanicsMaterialTable,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        sourceStateBuffer: mechanicsRefreshSourceStateBuffer,
+        sourceThermoBuffer: mechanicsRefreshSourceThermoBuffer,
+        sourceMechanicsBuffer: mechanicsRefreshSourceMechanicsBuffer,
+        preferWebGpu,
+        retainOutputParticleBuffers: true,
+        readbackMode,
+        ...mechanicsRefreshOptions
+      })
+    );
+    executedStageOrder.push('mechanics-constitutive-refresh');
   }
 
   let continuation = resolveMlsMpmPostMechanicsContinuation({

@@ -758,7 +758,10 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       lameLambdaPa: constitutive.lameLambdaPa,
       soundSpeedMPerS: constitutive.soundSpeedMPerS,
       eosModelId: constitutive.eosModelId,
-      hydrostaticPressurePa: Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
+      resolvedAbsolutePressurePa:
+        Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
+      hydrostaticPressurePa:
+        Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
       dynamicViscosityPaS: constitutive.dynamicViscosityPaS,
       surfaceTensionNPerM: constitutive.surfaceTensionNPerM,
       phaseVolumeReferenceMassKg
@@ -1002,6 +1005,10 @@ export function decodeMlsMpmGpuParticleRows(packed) {
       soundSpeedMPerS: packed.mechanics[offset + 25],
       eosModelId: packed.mechanics[offset + 26],
       constitutiveStatus: packed.mechanics[offset + 27],
+      resolvedAbsolutePressurePa: packed.mechanics[offset + 28],
+      // Deprecated alias: this lane carries resolved absolute pressure
+      // after G2P, not hydrostatic pressure. Kept so existing readers do
+      // not break while callers migrate.
       hydrostaticPressurePa: packed.mechanics[offset + 28],
       dynamicViscosityPaS: packed.mechanics[offset + 29],
       surfaceTensionNPerM: packed.mechanics[offset + 30],

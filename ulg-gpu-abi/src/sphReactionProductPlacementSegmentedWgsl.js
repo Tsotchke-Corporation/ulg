@@ -1,6 +1,7 @@
 import {
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_MAGIC,
+  SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS,
   SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION,
@@ -12,15 +13,17 @@ export const SPH_REACTION_PRODUCT_PLACEMENT_DIRECT_VALUE_ROWS = 3;
 export const SPH_REACTION_PRODUCT_PLACEMENT_EVENT_PLAN_ROWS = 2;
 export const SPH_REACTION_PRODUCT_PLACEMENT_SUMMARY_VALUE_ROWS = 9;
 export const SPH_REACTION_PRODUCT_PLACEMENT_LAW = Object.freeze({
-  schema: 'peercompute.ulg.sph-reaction-product-placement-law.v3',
+  schema: 'peercompute.ulg.sph-reaction-product-placement-law.v4',
   mutationOrder:
     'stable-event-plan-then-conserving-capture-segment-reduction-then-disjoint-direct-pair-hyperedges',
   captureReductionOrder:
     'stable-radix-equal-key-order-hillis-steele-fixed-binary-topology',
+  captureEnergyLaw:
+    'mass-momentum-total-energy-reduction-with-relative-kinetic-energy-thermalization',
   directPairSelection:
     'stable-last-admitted-product-event-per-disjoint-reacting-pair',
-  deliberateChangeFromV2:
-    'direct-pair routing observes the fully aggregated capture state instead of nonlinear ascending-event interleaving'
+  deliberateChangeFromV3:
+    'all placement geometry and mutations preserve authoritative current volume V0*J'
 });
 
 const PARAMS = /* wgsl */ `
@@ -141,9 +144,21 @@ fn preflight_segmented_placement(@builtin(local_invocation_id) local_id: vec3<u3
 `;
 
 const EVENT_GEOMETRY = /* wgsl */ `
-fn reactant_radius(pos_mass: vec4<f32>, thermo0: vec4<f32>) -> f32 {
-  if (!(pos_mass.w > 0.0) || !(thermo0.w > 0.0)) { return 0.0; }
-  return pow(max(3.0 * pos_mass.w / (12.5663706 * thermo0.w), 1.0e-30), 1.0 / 3.0);
+fn reactant_current_volume(index: u32) -> f32 {
+  let volume_row = frozen_mechanics[index * params.mechanics_stride_vec4 + 4u];
+  let current_volume = volume_row.z * volume_row.w;
+  return select(
+    0.0,
+    current_volume,
+    volume_row.z > 0.0 && volume_row.w > 0.0
+      && finite_scalar(current_volume) && current_volume > 0.0
+  );
+}
+
+fn reactant_radius(index: u32) -> f32 {
+  let current_volume = reactant_current_volume(index);
+  if (!(current_volume > 0.0)) { return 0.0; }
+  return pow(max(current_volume * 0.238732414637843, 1.0e-30), 1.0 / 3.0);
 }
 
 fn gas_target(
@@ -158,24 +173,18 @@ fn gas_target(
   }
   let source_state0 = frozen_state[source_index * params.state_stride_vec4];
   let partner_state0 = frozen_state[partner_index * params.state_stride_vec4];
-  let source_thermo0 = frozen_thermo[source_index * params.thermo_stride_vec4];
-  let partner_thermo0 = frozen_thermo[partner_index * params.thermo_stride_vec4];
-  let source_radius = reactant_radius(source_state0, source_thermo0);
-  let partner_radius = reactant_radius(partner_state0, partner_thermo0);
+  let source_current_volume = reactant_current_volume(source_index);
+  let partner_current_volume = reactant_current_volume(partner_index);
+  let source_radius = reactant_radius(source_index);
+  let partner_radius = reactant_radius(partner_index);
   if (!(source_radius > 0.0) || !(partner_radius > 0.0) || !support_fits_box(product_radius)) {
     return vec4<f32>(fallback_position, 0.0);
   }
-  let source_liquid = source_thermo0.y >= 1.5 && source_thermo0.y < 2.5;
-  let partner_liquid = partner_thermo0.y >= 1.5 && partner_thermo0.y < 2.5;
-  let source_condensed = source_thermo0.y > 0.5 && source_thermo0.y < 2.5;
-  let partner_condensed = partner_thermo0.y > 0.5 && partner_thermo0.y < 2.5;
   var host_is_source = source_index < partner_index;
-  if (source_liquid != partner_liquid) {
-    host_is_source = source_liquid;
-  } else if (source_condensed != partner_condensed) {
-    host_is_source = source_condensed;
-  } else if (abs(source_thermo0.w - partner_thermo0.w) > 1.0e-6) {
-    host_is_source = source_thermo0.w > partner_thermo0.w;
+  let source_current_density = source_state0.w / source_current_volume;
+  let partner_current_density = partner_state0.w / partner_current_volume;
+  if (abs(source_current_density - partner_current_density) > 1.0e-6) {
+    host_is_source = source_current_density > partner_current_density;
   }
   let host_position = select(partner_state0.xyz, source_state0.xyz, host_is_source);
   let free_position = select(source_state0.xyz, partner_state0.xyz, host_is_source);
@@ -197,7 +206,7 @@ export const sphReactionProductPlacementPlanWgsl = /* wgsl */ `
 ${PARAMS}
 @group(0) @binding(0) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> frozen_state: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> frozen_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> frozen_mechanics: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> decisions: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> capture_keys: array<u32>;
 @group(0) @binding(6) var<storage, read_write> capture_values: array<vec4<f32>>;
@@ -260,9 +269,10 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     && capture_f <= f32(params.particle_count)
     && spare_f <= f32(params.particle_count)
     && decision.x == capture_f && decision.w == spare_f;
-  let event_valid = payload_finite && valid_term && row4.z == 1.0 && row7.z == 1.0
+  let payload_valid = payload_finite && valid_term && row4.z == 1.0 && row7.z == 1.0
     && row0.w >= 0.0 && row3.x >= 0.0 && row3.y >= 0.0
     && row2.w > 0.0 && row4.y > 0.0 && row5.w >= 0.0
+    && (row3.y <= 0.0 || row5.w > 0.0)
     && pair_valid && decision_indices_valid;
   var support_radius = 0.05;
   if (row5.w > 0.0) {
@@ -270,7 +280,7 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   var routed_position = row0.xyz;
   var route_planned = false;
-  if (event_valid && phase_is_gas(row2.w) && pair_valid) {
+  if (payload_valid && phase_is_gas(row2.w) && pair_valid) {
     let gas_route = gas_target(u32(source_f), u32(partner_f), row0.xyz, support_radius);
     if (gas_route.w > 0.0) {
       routed_position = gas_route.xyz;
@@ -278,6 +288,25 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
   let unplaced_mass = max(row3.y, 0.0);
+  let speed_squared = dot(row5.xyz, row5.xyz);
+  let specific_total_energy = row4.w + 0.5 * speed_squared;
+  let mass_position = routed_position * unplaced_mass;
+  let mass_momentum = row5.xyz * unplaced_mass;
+  let total_energy = specific_total_energy * unplaced_mass;
+  let temperature_moment = row4.x * unplaced_mass;
+  let rest_volume = unplaced_mass / max(row4.y, 1.0e-20);
+  let derived_moments_valid = finite_scalar(speed_squared)
+    && finite_scalar(specific_total_energy)
+    && finite_vec3(mass_position)
+    && finite_vec3(mass_momentum)
+    && finite_scalar(total_energy)
+    && finite_scalar(temperature_moment)
+    && finite_scalar(rest_volume)
+    && (unplaced_mass <= 0.0 || (
+      rest_volume > 0.0
+      && row5.w > 0.0
+    ));
+  let event_valid = payload_valid && derived_moments_valid;
   var disposition = 8.0;
   var merge_slot = params.particle_count;
   var spare_slot = params.particle_count;
@@ -314,13 +343,16 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   capture_keys[event] = merge_slot;
   let value_base = event * ${SPH_REACTION_PRODUCT_PLACEMENT_CAPTURE_VALUE_ROWS}u;
   capture_values[value_base] = vec4<f32>(1.0, f32(event + 1u), 0.0, 0.0);
-  capture_values[value_base + 1u] = vec4<f32>(unplaced_mass, routed_position * unplaced_mass);
-  capture_values[value_base + 2u] = vec4<f32>(row5.xyz * unplaced_mass, row4.w * unplaced_mass);
+  capture_values[value_base + 1u] = vec4<f32>(unplaced_mass, mass_position);
+  // The fourth lane is total energy, not internal energy. The capture apply
+  // subtracts the merged COM kinetic energy so relative motion is converted
+  // to heat instead of being deleted.
+  capture_values[value_base + 2u] = vec4<f32>(mass_momentum, total_energy);
   capture_values[value_base + 3u] = vec4<f32>(
-    row4.x * unplaced_mass,
-    unplaced_mass / max(row4.y, 1.0e-20),
+    temperature_moment,
+    rest_volume,
     max(decisions[event].y, 0.0),
-    unplaced_mass
+    row5.w
   );
   capture_values[value_base + 4u] = vec4<f32>(row0.xyz, support_radius);
   capture_values[value_base + 5u] = vec4<f32>(routed_position, select(0.0, 1.0, route_planned));
@@ -467,11 +499,25 @@ fn apply_unique_events_and_emit_summaries(@builtin(global_invocation_id) global_
   );
   next_thermo[thermo_base + 2u] = vec4<f32>(plan1.w, 1.0, 1.0, plan1.w);
   let mechanics_base = slot * params.mechanics_stride_vec4;
-  next_mechanics[mechanics_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  next_mechanics[mechanics_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  next_mechanics[mechanics_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  let rest_volume = unplaced_mass / max(row4.y, 1.0e-20);
+  let current_volume = max(row5.w, 0.0);
+  let deformation_j = current_volume / max(rest_volume, 1.0e-20);
+  let deformation_scale = pow(max(deformation_j, 1.0e-20), 1.0 / 3.0);
+  if (!(rest_volume > 0.0) || !(current_volume > 0.0)
+    || !(deformation_j > 0.0) || !finite_scalar(rest_volume)
+    || !finite_scalar(current_volume) || !finite_scalar(deformation_j)
+    || !finite_scalar(deformation_scale)) {
+    atomicOr(
+      &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+      ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.VOLUME_AUTHORITY}u
+    );
+    return;
+  }
+  next_mechanics[mechanics_base] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
+  next_mechanics[mechanics_base + 1u] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
+  next_mechanics[mechanics_base + 2u] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
   next_mechanics[mechanics_base + 3u] = vec4<f32>(0.0);
-  next_mechanics[mechanics_base + 4u] = vec4<f32>(0.0, 0.0, 1.0, unplaced_mass / max(row4.y, 1.0e-20));
+  next_mechanics[mechanics_base + 4u] = vec4<f32>(0.0, 0.0, deformation_j, rest_volume);
   next_mechanics[mechanics_base + 5u] = vec4<f32>(row7.y, row7.z, row6.x, row6.y);
   next_mechanics[mechanics_base + 6u] = vec4<f32>(row6.z, row6.w, row7.x, row7.z);
   next_mechanics[mechanics_base + 7u] = vec4<f32>(0.0);
@@ -544,7 +590,7 @@ fn reduce_capture_segments(@builtin(global_invocation_id) global_id: vec3<u32>) 
     current3.x + prior3.x,
     current3.y + prior3.y,
     max(current3.z, prior3.z),
-    max(current3.w, prior3.w)
+    current3.w + prior3.w
   );
   if (choose_prior_metadata) {
     output_values[out + 4u] = input_values[left + 4u];
@@ -610,27 +656,94 @@ fn apply_capture_segment_tails(@builtin(global_invocation_id) global_id: vec3<u3
   let state0 = next_state[state_base];
   let state1 = next_state[state_base + 1u];
   let total_mass = state0.w + aggregate1.x;
-  if (!(state0.w > 0.0) || !(aggregate1.x > 0.0) || !(total_mass > 0.0)) { return; }
+  if (!(state0.w > 0.0) || !(aggregate1.x > 0.0) || !(total_mass > 0.0)
+    || !finite_vec4(state0) || !finite_vec4(state1)
+    || !finite_vec4(aggregate0) || !finite_vec4(aggregate1)
+    || !finite_vec4(aggregate2) || !finite_vec4(aggregate3)
+    || !finite_scalar(total_mass)) {
+    atomicOr(
+      &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+      ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.CONSERVATION_MOMENT}u
+    );
+    return;
+  }
   let inv_mass = 1.0 / total_mass;
   var position_out = (state0.xyz * state0.w + aggregate1.yzw) * inv_mass;
   let velocity_out = (state1.xyz * state0.w + aggregate2.xyz) * inv_mass;
-  let internal_out = (state1.w * state0.w + aggregate2.w) * inv_mass;
+  let destination_total_energy =
+    state0.w * (state1.w + 0.5 * dot(state1.xyz, state1.xyz));
+  let merged_total_energy = destination_total_energy + aggregate2.w;
+  let internal_out = (
+    merged_total_energy
+    - 0.5 * total_mass * dot(velocity_out, velocity_out)
+  ) * inv_mass;
   let mechanics_base = key * params.mechanics_stride_vec4;
   let mechanics4 = next_mechanics[mechanics_base + 4u];
-  let merged_volume = mechanics4.w + aggregate3.y;
   let thermo_base = key * params.thermo_stride_vec4;
   let thermo0 = next_thermo[thermo_base];
+  let merged_current_volume = mechanics4.z * mechanics4.w + aggregate3.w;
+  let merged_rest_volume = mechanics4.w + aggregate3.y;
+  let merged_j = merged_current_volume / max(merged_rest_volume, 1.0e-20);
+  let deformation_scale = pow(
+    max(merged_j / max(mechanics4.z, 1.0e-20), 1.0e-20),
+    1.0 / 3.0
+  );
+  if (!(mechanics4.z > 0.0) || !(mechanics4.w > 0.0)
+    || !(aggregate3.y > 0.0) || !(aggregate3.w > 0.0)
+    || !(merged_rest_volume > 0.0) || !(merged_current_volume > 0.0)
+    || !(merged_j > 0.0) || !finite_scalar(merged_rest_volume)
+    || !finite_scalar(merged_current_volume) || !finite_scalar(merged_j)
+    || !finite_scalar(deformation_scale)
+    || !finite_vec3(position_out)
+    || !finite_vec3(velocity_out)
+    || !finite_scalar(destination_total_energy)
+    || !finite_scalar(merged_total_energy)
+    || !finite_scalar(internal_out)
+    || !finite_vec4(thermo0)
+    || !finite_vec4(mechanics4)) {
+    atomicOr(
+      &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+      ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.CONSERVATION_MOMENT}u
+    );
+    return;
+  }
   let temperature_out = (thermo0.z * state0.w + aggregate3.x) * inv_mass;
+  if (!finite_scalar(temperature_out)) {
+    atomicOr(
+      &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+      ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.CONSERVATION_MOMENT}u
+    );
+    return;
+  }
   let selected4 = reduced_values[value + 4u];
   let selected5 = reduced_values[value + 5u];
   if (phase_is_gas(thermo0.y) && selected5.w > 0.0) {
-    let routed = route_merged_gas(selected4.xyz, selected5.xyz, selected4.w, merged_volume, position_out);
+    let routed = route_merged_gas(
+      selected4.xyz,
+      selected5.xyz,
+      selected4.w,
+      merged_current_volume,
+      position_out
+    );
     if (routed.w > 0.0) { position_out = routed.xyz; }
   }
   next_state[state_base] = vec4<f32>(position_out, total_mass);
   next_state[state_base + 1u] = vec4<f32>(velocity_out, internal_out);
   next_thermo[thermo_base] = vec4<f32>(thermo0.xy, temperature_out, thermo0.w);
-  next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics4.xyz, merged_volume);
+  next_mechanics[mechanics_base] =
+    next_mechanics[mechanics_base] * deformation_scale;
+  next_mechanics[mechanics_base + 1u] =
+    next_mechanics[mechanics_base + 1u] * deformation_scale;
+  let deformation_row2 = next_mechanics[mechanics_base + 2u];
+  next_mechanics[mechanics_base + 2u] = vec4<f32>(
+    deformation_row2.x * deformation_scale,
+    deformation_row2.yzw
+  );
+  next_mechanics[mechanics_base + 4u] = vec4<f32>(
+    mechanics4.xy,
+    merged_j,
+    merged_rest_volume
+  );
   let selected_event = u32(max(aggregate0.y, 1.0)) - 1u;
   if (selected_event < params.event_row_count) {
     let summary_base = selected_event * ${SPH_REACTION_PRODUCT_PLACEMENT_SUMMARY_VALUE_ROWS}u;
@@ -765,12 +878,15 @@ ${PARAMS}
 
 ${MERGE_ROUTE}
 
-fn rest_volume(index: u32) -> f32 {
+fn current_volume(index: u32) -> f32 {
   let mechanics4 = next_mechanics[index * params.mechanics_stride_vec4 + 4u];
-  if (mechanics4.w > 0.0) { return mechanics4.w; }
-  let state0 = next_state[index * params.state_stride_vec4];
-  let thermo0 = next_thermo[index * params.thermo_stride_vec4];
-  return select(0.0, state0.w / max(thermo0.w, 1.0e-20), state0.w > 0.0 && thermo0.w > 0.0);
+  let volume = mechanics4.z * mechanics4.w;
+  return select(
+    0.0,
+    volume,
+    mechanics4.z > 0.0 && mechanics4.w > 0.0
+      && finite_scalar(volume) && volume > 0.0
+  );
 }
 
 @compute @workgroup_size(64)
@@ -847,8 +963,15 @@ fn apply_direct_pair_hyperedge_tails(@builtin(global_invocation_id) global_id: v
   let partner_state0 = next_state[partner_base];
   var applied = false;
   if (source_matches && partner_matches) {
-    let source_volume = rest_volume(source);
-    let partner_volume = rest_volume(partner);
+    let source_volume = current_volume(source);
+    let partner_volume = current_volume(partner);
+    if (!(source_volume > 0.0) || !(partner_volume > 0.0)) {
+      atomicOr(
+        &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+        ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.VOLUME_AUTHORITY}u
+      );
+      return;
+    }
     let source_radius = pow(max(source_volume * 0.238732414637843, 1.0e-30), 1.0 / 3.0);
     let partner_radius = pow(max(partner_volume * 0.238732414637843, 1.0e-30), 1.0 / 3.0);
     let midpoint = 0.5 * (source_state0.xyz + partner_state0.xyz);
@@ -866,7 +989,20 @@ fn apply_direct_pair_hyperedge_tails(@builtin(global_invocation_id) global_id: v
     let destination = select(partner, source, source_matches);
     let destination_base = destination * params.state_stride_vec4;
     let state0 = next_state[destination_base];
-    let routed = route_merged_gas(state0.xyz, aggregate2.xyz, aggregate2.w, rest_volume(destination), state0.xyz);
+    if (!(current_volume(destination) > 0.0)) {
+      atomicOr(
+        &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
+        ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.VOLUME_AUTHORITY}u
+      );
+      return;
+    }
+    let routed = route_merged_gas(
+      state0.xyz,
+      aggregate2.xyz,
+      aggregate2.w,
+      current_volume(destination),
+      state0.xyz
+    );
     if (routed.w > 0.0) {
       next_state[destination_base] = vec4<f32>(routed.xyz, state0.w);
       applied = true;
@@ -1035,6 +1171,7 @@ fn finalize_segmented_placement_receipt(@builtin(local_invocation_id) local_id: 
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeAdmitted}]) == 1u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierPassCount}]) == 1u
     && classifier_partition == active_count
+    && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierRejectedCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierUnknownCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.ssCellVisitCount}])
       <= atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.ssMemberVisitCount}])
@@ -1060,6 +1197,7 @@ fn finalize_segmented_placement_receipt(@builtin(local_invocation_id) local_id: 
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.sparePlacementEventCount}])
       == atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.spareAssignedCount}])
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.fallbackEventCount}]) == 0u
+    && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.rejectedEventCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.unknownDispositionCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.serialConflictFoldPassCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.serialConflictFoldEventCount}]) == 0u

@@ -13602,6 +13602,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
   macroBoundaryLevelAssignmentRunner = runSchroederLevelAssignmentWebGpu,
   macroBoundaryRunnerOptions = {},
   refreshRuntime = null,
+  phaseVolumeInterfaceTransportEnabled = false,
   mechanicsEpochMode =
     SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_LEGACY_PROPOSALS
 } = {}) {
@@ -13621,6 +13622,22 @@ export function createSchroederTwoLevelCanonicalEpochController({
       'Canonical two-level epoch controller requires the mounted initial two-level generation and transaction'
     );
     error.code = 'ERR_SCHROEDER_TWO_LEVEL_INITIAL_EPOCH';
+    throw error;
+  }
+  if (typeof phaseVolumeInterfaceTransportEnabled !== 'boolean') {
+    throw new TypeError(
+      'phaseVolumeInterfaceTransportEnabled must be a boolean'
+    );
+  }
+  if (
+    phaseVolumeInterfaceTransportEnabled
+    && initialTransaction.phaseVolumeInterfaceProposalAuthoritative !== true
+  ) {
+    const error = new TypeError(
+      'Canonical phase-volume transport requires an authoritative initial S9-C transaction'
+    );
+    error.code =
+      'ERR_SCHROEDER_TWO_LEVEL_INITIAL_PHASE_VOLUME_TRANSPORT_AUTHORITY';
     throw error;
   }
   const fusedPrivate = mechanicsEpochMode
@@ -14596,6 +14613,12 @@ export function createSchroederTwoLevelCanonicalEpochController({
           refreshedAssignment = runtime.encode(encoder, {
             priorLevelAssignment: prior.levelAssignment,
             currentSphParticleUpload: refreshedSphParticleUpload,
+            ...(phaseVolumeInterfaceTransportEnabled
+              ? {
+                  currentMlsMpmParticleUpload:
+                    refreshedMlsMpmParticleUpload
+                }
+              : {}),
             physicsTick: refreshPhysicsTick,
             physicsSubstep: refreshPhysicsSubstep,
             refreshMode:
@@ -14715,6 +14738,8 @@ export function createSchroederTwoLevelCanonicalEpochController({
           selectedLevel: resolvedFineLevel,
           mechanicsGrid: fineMechanicsGrid,
           mechanicsLevels: levelSpecs,
+          phaseVolumeInterfaceProposalEnabled:
+            phaseVolumeInterfaceTransportEnabled,
           ...(directArenaCount == null ? {} : { directArenaCount }),
           gpuTimestampRecorder
         });
@@ -14744,6 +14769,8 @@ export function createSchroederTwoLevelCanonicalEpochController({
           // terminal post-mechanics E* changes reader requirements, not the
           // hierarchy authority: FAR must authenticate the E* aggregate view.
           twoLevelAuthoritative: true,
+          phaseVolumeInterfaceProposalAuthoritative:
+            phaseVolumeInterfaceTransportEnabled,
           ...(epochKind === 'post-mechanics'
             ? { requiredReaderIds: resolvedConsumerReaderIds }
             : {}),
@@ -15214,6 +15241,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
         schema: this.schema,
         status: `schroeder-two-level-canonical-epoch-controller-${lifecycleStatus}`,
         mechanicsEpochMode,
+        phaseVolumeInterfaceTransportEnabled,
         proposalBuildCount,
         epochCount: epochs.length,
         epochKinds: Object.freeze(epochs.map((epoch) => epoch.kind)),
@@ -16087,6 +16115,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   });
   const twoLevelAuthoritative = enableTwoLevelMechanics
     && twoLevelMechanicsAuthority === 'authoritative';
+  const resolvedSpatialEpochArenaCount = twoLevelAuthoritative
+    ? Math.max(4, Number(spatialEpochArenaCount ?? 4))
+    : spatialEpochArenaCount;
+  if (
+    resolvedSpatialEpochArenaCount != null
+    && (
+      !Number.isInteger(resolvedSpatialEpochArenaCount)
+      || resolvedSpatialEpochArenaCount < 1
+      || resolvedSpatialEpochArenaCount > 8
+    )
+  ) {
+    throw new RangeError('spatialEpochArenaCount must be an integer in [1, 8]');
+  }
   const ownsResolvedSpatialEpochGeneration = !spatialEpochGeneration;
   const spatialMechanicsGridSpec = createMlsMpmGridSpec({
     boxDimsM,
@@ -16151,9 +16192,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
                       }
                     ]
                   : null,
-                ...(spatialEpochArenaCount == null
+                phaseVolumeInterfaceProposalEnabled: twoLevelAuthoritative,
+                ...(resolvedSpatialEpochArenaCount == null
                   ? {}
-                  : { directArenaCount: spatialEpochArenaCount }),
+                  : {
+                      directArenaCount:
+                        resolvedSpatialEpochArenaCount
+                    }),
                 gpuTimestampRecorder
               });
               if (
@@ -16603,6 +16648,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       sphParticleUpload,
       mlsMpmParticleUpload,
       twoLevelAuthoritative,
+      phaseVolumeInterfaceProposalAuthoritative: twoLevelAuthoritative,
       enabledConsumerReaderIds,
       consumerSupportProfileIds
     });
@@ -16638,16 +16684,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         },
         boxDimsM,
         gpuTimestampRecorder,
-        directArenaCount: spatialEpochArenaCount,
+        directArenaCount: resolvedSpatialEpochArenaCount,
         spatialEpochGenerationRunner,
+        phaseVolumeInterfaceTransportEnabled: true,
         mechanicsEpochMode:
           SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_FUSED_PRIVATE
       });
   }
   // Two-level mechanics: observation mode runs the coupled step beside the
   // resident authority path with telemetry only; authoritative mode replaces
-  // the resident mechanics entirely (sidecars are not yet available on this
-  // path). Particle-storage materialization composes with authority: the
+  // resident mechanics and carries S9 interface transport plus the shared
+  // post-mechanics closure. Particle-storage materialization composes with authority: the
   // storage chain merges/splits from the step's INPUT configuration and its
   // adopted buffers supersede the coupled step's mechanics outputs for the
   // continuation - the same topology-step precedence the single-level
@@ -16720,6 +16767,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       gravityMPerS2,
       internalPressureScale: residentStepOptions.internalPressureScale ?? 1,
       ambientPressurePa: residentStepOptions.ambientPressurePa ?? 0,
+      ambientReferenceDensityKgPerM3:
+        residentStepOptions.ambientReferenceDensityKgPerM3 ?? 1.2041,
+      mechanicsMaterialTable:
+        residentStepOptions.mechanicsMaterialTable ?? null,
+      mechanicsMaterialPhaseUpload:
+        residentStepOptions.mechanicsRefreshOptions
+          ?.mechanicsMaterialPhaseUpload ?? null,
+      phaseVolumePressureScale:
+        residentStepOptions.phaseVolumePressureScale ?? 1,
+      phaseVolumeDragScale:
+        residentStepOptions.phaseVolumeDragScale ?? 1,
+      phaseVolumeMaxImpulseFraction:
+        residentStepOptions.phaseVolumeMaxImpulseFraction ?? 0.5,
+      phaseVolumeInterfaceTransportEnabled: twoLevelAuthoritative,
       // Exact 2:1 authoritative coupling always advances the fine level with
       // at least two substeps. Observation-only diagnostics may still request
       // one shared-dt step to compare the operators directly.
@@ -18662,6 +18723,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         resolvedTwoLevelMechanics?.fineSubstepCount ?? null,
       twoLevelAuthoritativeCommitVerified:
         resolvedTwoLevelMechanics?.authoritativeCommitVerified === true,
+      phaseVolumeInterfaceTransport:
+        resolvedTwoLevelMechanics?.phaseVolumeInterfaceTransport ?? null,
+      internalEnergyTransferStatus:
+        resolvedTwoLevelMechanics?.internalEnergyTransferStatus ?? null,
+      refluxEvidenceStatus:
+        resolvedTwoLevelMechanics?.refluxEvidenceStatus ?? null,
       sidecars: twoLevelPostMechanicsClosure
         ? 'shared-post-mechanics-closure'
         : 'none-two-level-mechanics-only',
@@ -19970,6 +20037,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       invariantQuantities: Array.from(
         resolvedTwoLevelMechanics.invariantQuantities || []
       ),
+      phaseVolumeInterfaceTransport:
+        resolvedTwoLevelMechanics.phaseVolumeInterfaceTransport ?? null,
+      internalEnergyTransferStatus:
+        resolvedTwoLevelMechanics.internalEnergyTransferStatus ?? null,
+      refluxEvidenceStatus:
+        resolvedTwoLevelMechanics.refluxEvidenceStatus ?? null,
       conservation: resolvedTwoLevelMechanics.conservation,
       conservativeTransferStatus: resolvedTwoLevelMechanics.conservativeTransferStatus
     } : null,
@@ -20142,7 +20215,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     activeNodeConsumerStatus:
       'active-node-list-published-for-render-lod-and-spatial-directory-production',
     spatialEpochConsumerStatus: twoLevelAuthoritative
-      ? 'canonical-spatial-directory-not-consumed-two-level-authoritative-path'
+      ? 'canonical-spatial-directory-consumed-by-two-level-authoritative-mechanics'
       : (resolvedSpatialEpochGeneration?.selected === true
           ? 'canonical-spatial-directory-forwarded-to-resident-p2g'
           : 'canonical-spatial-directory-not-selected-resident-uses-level-assignment-fallback'),

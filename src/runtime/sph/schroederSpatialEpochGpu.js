@@ -551,6 +551,9 @@ export function resolveSchroederSpatialDirectoryLevelAssignmentSource(
   // V0*J lineage. A fresh macro-boundary classifier remains admissible.
   const frozenFineRefresh = source.refreshMode === 'frozen-fine-substep'
     || source.levelClassificationMode === 'frozen-macro-step-no-reclassification';
+  const frozenFineRefreshMechanicsReproved = frozenFineRefresh === true
+    && source.sourceMechanicsProvenanceStatus
+      === 'schroeder-frozen-level-assignment-refresh-current-mechanics-v0j-ready';
   const sourceCount = exactU32OrNull(source.particleCount);
   const expectedCount = particleCount == null ? sourceCount : exactU32OrNull(particleCount);
   const strideFloats = exactU32OrNull(source.assignmentStrideFloats);
@@ -584,13 +587,15 @@ export function resolveSchroederSpatialDirectoryLevelAssignmentSource(
   const sourceMechanicsAdmitted = Boolean(
     sourceMechanicsCandidate
     && source.sourceMechanicsBufferBorrowed === true
-    && frozenFineRefresh !== true
+    && (frozenFineRefresh !== true || frozenFineRefreshMechanicsReproved)
     && sourceMechanicsMismatch.mismatch !== true
     && (!Number.isFinite(sourceMechanicsByteLength)
       || sourceMechanicsByteLength >= requiredMechanicsBytes)
   );
   const sourceMechanicsProvenanceStatus = sourceMechanicsAdmitted
-    ? 'schroeder-spatial-directory-source-mechanics-v0j-ready'
+    ? frozenFineRefreshMechanicsReproved
+      ? 'schroeder-spatial-directory-source-mechanics-v0j-frozen-refresh-current-ready'
+      : 'schroeder-spatial-directory-source-mechanics-v0j-ready'
     : sourceMechanicsCandidate == null
       ? 'schroeder-spatial-directory-source-mechanics-v0j-unavailable'
       : sourceMechanicsMismatch.mismatch === true
@@ -2541,6 +2546,7 @@ function directPhaseVolumeMomentRuntime(device, entry, mechanicsFieldView) {
   const arenaCount = entry.directArenaCount ?? DIRECT_SPATIAL_EPOCH_ARENA_COUNT;
   const runtimeCacheLimit = 4;
   const key = [
+    mechanicsFieldView.selectedLevel,
     mechanicsFieldView.sourceCapacity,
     mechanicsFieldView.fieldCapacity
   ].join(':');
@@ -2589,6 +2595,7 @@ function directPhaseVolumeReceiptRuntime(device, entry, phaseVolumeMoment) {
   const arenaCount = entry.directArenaCount ?? DIRECT_SPATIAL_EPOCH_ARENA_COUNT;
   const runtimeCacheLimit = 4;
   const key = [
+    phaseVolumeMoment.selectedLevel,
     phaseVolumeMoment.sourceCapacity,
     phaseVolumeMoment.fieldCapacity
   ].join(':');
@@ -2954,9 +2961,10 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   // deliberately diagnostic-only: it exists solely to take same-source GPU
   // timestamp A/B evidence while preserving the preceding S9-A sidecar.
   phaseVolumeReceiptEnabled = true,
-  // S9-C is topology-only and intentionally opt-in until its separate timing
-  // evidence is established.  It has no physics or render consumer in this
-  // mount, so enabling it must never change material state.
+  // S9-C remains an immutable topology artifact. Authoritative two-level
+  // mechanics enables it so transaction-authenticated grid/workspace stages
+  // can consume its sealed local heads and reflux routes; this builder itself
+  // does not mutate material state.
   phaseVolumeInterfaceProposalEnabled = false,
   gpuTimestampRecorder = null
 } = {}) {
@@ -3101,8 +3109,12 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
     && source.sourceMechanicsBuffer
     && source.sourceMechanicsBufferBorrowed === true
-    && source.sourceMechanicsProvenanceStatus
-      === 'schroeder-spatial-directory-source-mechanics-v0j-ready'
+    && (
+      source.sourceMechanicsProvenanceStatus
+        === 'schroeder-spatial-directory-source-mechanics-v0j-ready'
+      || source.sourceMechanicsProvenanceStatus
+        === 'schroeder-spatial-directory-source-mechanics-v0j-frozen-refresh-current-ready'
+    )
     && webGpuBufferMatchesDevice(source.sourceMechanicsBuffer, device)
   );
   if (phaseVolumeInterfaceProposalEnabled && !phaseVolumeMomentSourceAdmitted) {

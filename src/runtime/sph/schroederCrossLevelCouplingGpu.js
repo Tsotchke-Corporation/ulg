@@ -63,6 +63,9 @@ import {
   MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
 } from './sphGridGpuKernel.js';
 import {
+  uploadedMechanicsMaterialPhaseRecordsMatch
+} from './sphMechanicsRefreshGpuKernel.js';
+import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -1748,6 +1751,13 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   gravityMPerS2 = [0, -9.80665, 0],
   internalPressureScale = 1,
   ambientPressurePa = 0,
+  mechanicsMaterialTable = null,
+  mechanicsMaterialPhaseUpload = null,
+  ambientReferenceDensityKgPerM3 = 1.2041,
+  phaseVolumePressureScale = 1,
+  phaseVolumeDragScale = 1,
+  phaseVolumeMaxImpulseFraction = 0.5,
+  phaseVolumeInterfaceTransportEnabled = false,
   fineSubstepCount = 1,
   gridSpecFactory,
   p2gRunner,
@@ -1788,6 +1798,11 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   if (!levelAssignment) {
     throw new TypeError('runSchroederTwoLevelMechanicsStepWebGpu requires a Schroeder level assignment');
   }
+  if (typeof phaseVolumeInterfaceTransportEnabled !== 'boolean') {
+    throw new TypeError(
+      'phaseVolumeInterfaceTransportEnabled must be a boolean'
+    );
+  }
   let activeCanonicalEpoch = canonicalEpochController?.initialEpoch ?? null;
   if (canonicalEpochController && (
     !activeCanonicalEpoch
@@ -1824,6 +1839,25 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     throw new TypeError(
       'canonicalEpochController initial epoch does not match the supplied two-level authority'
     );
+  }
+  if (phaseVolumeInterfaceTransportEnabled && (
+    !activeCanonicalEpoch
+    || activeCanonicalEpoch.transaction
+      ?.phaseVolumeInterfaceProposalAuthoritative !== true
+    || canonicalEpochController?.summary?.()
+      .phaseVolumeInterfaceTransportEnabled !== true
+    || !uploadedMechanicsMaterialPhaseRecordsMatch(
+      mechanicsMaterialPhaseUpload,
+      mechanicsMaterialTable,
+      device
+    )
+  )) {
+    const error = new TypeError(
+      'Phase-volume interface transport requires a matching S9-C canonical controller and same-device mechanics material upload'
+    );
+    error.code =
+      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_TRANSPORT_AUTHORITY';
+    throw error;
   }
   const identityRequired = sphParticleUpload?.identityRequired === true
     || sphParticleStateRequiresExplicitIdentity(sphParticleState);
@@ -2317,7 +2351,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       currentMlsUpload,
       particleContinuation = null,
       fineTransaction = null,
-      terminalTransaction = null
+      terminalTransaction = null,
+      crossLevelPressureConsumer = false
     }) => {
       const projection = await p2gRunner({
         device,
@@ -2333,6 +2368,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         internalPressureScale,
         ambientPressurePa,
         mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+        pressureCrossLevelConsumerRequired: crossLevelPressureConsumer,
         retainGridBuffer: false,
         readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
         ...canonicalMechanicsArgs(),
@@ -2439,14 +2475,24 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       runtime,
       execution,
       fineGridUpdate,
-      fineTransaction
+      fineTransaction,
+      schroederSpatialEpochTransaction = null
     }) => {
       const encoder = device.createCommandEncoder();
       const correctedGridUpdate = runtime.encodeFineCorrection(encoder, execution, {
         fineGridUpdate,
         deltaScale: 1,
         maxCorrectionMPerS: 0,
-        fusedFineSubstepTransaction: fineTransaction
+        fusedFineSubstepTransaction: fineTransaction,
+        schroederSpatialEpochTransaction,
+        mechanicsMaterialTable,
+        mechanicsMaterialPhaseUpload,
+        ambientPressurePa,
+        phaseVolumePressureScale,
+        phaseVolumeDragScale,
+        phaseVolumeMaxImpulseFraction,
+        phaseVolumeInterfaceTransportRequired:
+          phaseVolumeInterfaceTransportEnabled
       });
       try {
         device.queue.submit([encoder.finish()]);
@@ -2617,14 +2663,21 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         currentSphUpload,
         currentMlsUpload,
         particleContinuation: activeParticleContinuation,
-        fineTransaction
+        fineTransaction,
+        // The parent workspace claims and consumes CROSS_LEVEL on this fine
+        // field during the fine correction.
+        crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled
       });
       const coarsePredictorProjection = await runProjection({
         selectedLevel: coarseLevel,
         gridSpacingM: coarseDx,
         projectionDt: predictorThetaDt,
         currentSphUpload,
-        currentMlsUpload
+        currentMlsUpload,
+        // The parent workspace authenticates and claims these coarse pressure
+        // rows for the cross-level operator, so they must be published with
+        // CROSS_LEVEL declared required.
+        crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled
       });
       const workspace = await submitWorkspacePredictors({
         parentFieldView,
@@ -2642,6 +2695,19 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         dt: dtFine,
         gravityMPerS2,
         boxDimsM,
+        ambientPressurePa,
+        ambientReferenceDensityKgPerM3,
+        mechanicsMaterialTable,
+        mechanicsMaterialPhaseUpload,
+        schroederSpatialEpochTransaction:
+          phaseVolumeInterfaceTransportEnabled
+            ? priorCanonicalEpoch.transaction
+            : null,
+        phaseVolumePressureScale,
+        phaseVolumeDragScale,
+        phaseVolumeMaxImpulseFraction,
+        phaseVolumeInterfaceTransportRequired:
+          phaseVolumeInterfaceTransportEnabled,
         mechanicsFieldEnergyReceipt: { deferSeal: true },
         retainUpdatedGridBuffer: false,
         readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
@@ -2650,7 +2716,11 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       const correctedFineGridUpdate = submitFineCorrection({
         ...workspace,
         fineGridUpdate,
-        fineTransaction
+        fineTransaction,
+        schroederSpatialEpochTransaction:
+          phaseVolumeInterfaceTransportEnabled
+            ? priorCanonicalEpoch.transaction
+            : null
       });
       lastFineGridUpdate = correctedFineGridUpdate;
       canonicalEpochController.admitG2p(priorCanonicalEpoch);
@@ -2918,7 +2988,10 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       currentSphUpload,
       currentMlsUpload,
       particleContinuation: activeParticleContinuation,
-      terminalTransaction
+      terminalTransaction,
+      // Terminal publication folds the reflux correction into this coarse
+      // field, so it is a cross-level pressure consumer and must declare it.
+      crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled
     });
     const terminalGridUpdate = await gridUpdateRunner({
       device,
@@ -2928,6 +3001,19 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       dt: dtSeconds,
       gravityMPerS2,
       boxDimsM,
+      ambientPressurePa,
+      ambientReferenceDensityKgPerM3,
+      mechanicsMaterialTable,
+      mechanicsMaterialPhaseUpload,
+      schroederSpatialEpochTransaction:
+        phaseVolumeInterfaceTransportEnabled
+          ? activeCanonicalEpoch.transaction
+          : null,
+      phaseVolumePressureScale,
+      phaseVolumeDragScale,
+      phaseVolumeMaxImpulseFraction,
+      phaseVolumeInterfaceTransportRequired:
+        phaseVolumeInterfaceTransportEnabled,
       mechanicsFieldEnergyReceipt: { deferSeal: true },
       retainUpdatedGridBuffer: false,
       readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
@@ -3248,9 +3334,28 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       authoritativeCommitVerified: false,
       authoritativeCommitStatus: 'pending-post-mechanics-closure',
       internalEnergyTransferStatus:
-        'nonnegative-reflux-kinetic-loss-deposited-by-transpose-g2p',
+        phaseVolumeInterfaceTransportEnabled
+          ? 'signed-pressure-compensation-plus-nonnegative-drag-causal-heat-deposited-by-transpose-g2p'
+          : 'nonnegative-reflux-kinetic-loss-deposited-by-transpose-g2p',
       refluxEvidenceStatus:
-        'gpu-measured-equal-opposite-linear-angular-energy-ledger',
+        phaseVolumeInterfaceTransportEnabled
+          ? 'gpu-measured-equal-opposite-linear-angular-pressure-drag-energy-ledger'
+          : 'gpu-measured-equal-opposite-linear-angular-energy-ledger',
+      phaseVolumeInterfaceTransport: Object.freeze({
+        enabled: phaseVolumeInterfaceTransportEnabled,
+        pressureScale: Math.max(
+          0,
+          finiteNumber(phaseVolumePressureScale, 1)
+        ),
+        dragScale: Math.max(0, finiteNumber(phaseVolumeDragScale, 1)),
+        maxImpulseFraction: Math.max(
+          0,
+          finiteNumber(phaseVolumeMaxImpulseFraction, 0.5)
+        ),
+        ambientBoundaryEvidence: phaseVolumeInterfaceTransportEnabled
+          ? 'sealed-external-impulse-and-work'
+          : 'disabled-phase-volume-interface-transport'
+      }),
       internalPressureScale,
       ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),
       ambientPressureAppliedInStressProjection: p2gProjections.length > 0

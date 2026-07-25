@@ -10645,6 +10645,15 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     let currentThermoBuffer = sphParticleUpload.thermoBuffer;
     let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
     let separationScratch = null;
+    // Every separation scratch this sequence allocates, not just the live one.
+    // encodeMlsMpmParticleSeparationPasses reuses the scratch it is handed only
+    // while the bin plan shape is unchanged; when a substep changes the plan it
+    // allocates a fresh set and returns it. Tracking only the latest one leaked
+    // every superseded set, which is roughly two megabytes of bins per miss.
+    // They cannot be destroyed at the point of replacement because passes
+    // already encoded on this encoder still reference them, so they are held
+    // until after submit.
+    const separationScratchSets = new Set();
     const separationMaxPairRestDistanceM = maxSeparationRestDistanceM(
       mlsMpmParticleState?.mechanics,
       particleCount
@@ -10786,6 +10795,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         scratch: separationScratch
       });
       separationScratch = separation.scratch;
+      if (separationScratch) separationScratchSets.add(separationScratch);
       currentStateBuffer = outStateBuffer;
       currentMechanicsBuffer = outMechanicsBuffer;
       finalStateBuffer = outStateBuffer;
@@ -10839,7 +10849,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     }
     device.queue.submit([encoder.finish()]);
     for (const stage of sidecarEncoderStages) stage.markSubmittedWork?.();
-    for (const transientBuffer of separationScratch?.transientBuffers || []) transientBuffer.destroy?.();
+    for (const scratchSet of separationScratchSets) {
+      for (const transientBuffer of scratchSet?.transientBuffers || []) {
+        transientBuffer.destroy?.();
+      }
+    }
+    separationScratchSets.clear();
+    separationScratch = null;
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     stageMs.fusedMechanicsSequence = Math.max(0, nowMs() - sequenceEncodeStartMs);

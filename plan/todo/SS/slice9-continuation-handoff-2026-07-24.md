@@ -1450,3 +1450,108 @@ Method note for whoever picks this up: run visual A/B at the *scenario's own*
 batch/step budget. A short-horizon probe is not evidence about a leak, and this
 session produced a confidently wrong conclusion by treating it as though it
 were.
+
+## The memory leak: found and fixed
+
+**Symptom.** With `schroederTwoLevel` on, GPU memory ramps linearly to the
+device ceiling. Sampled during `standard-water-cycle` at 4x512:
+
+```text
+flags off  peak 2256 MiB  growth  +457 MiB   bounded
+flags on   peak 14624 MiB growth +12825 MiB  1799 -> 2293 -> 3027 -> ... -> 14624
+```
+
+That is ~356 MiB every two seconds until `vkAllocateMemory` returns
+`VK_ERROR_OUT_OF_DEVICE_MEMORY`. It reaches the ceiling near the end of a
+4x512 run on a 16 GiB card, which is why the matrix (with its own dev server
+and a second Chrome) tipped over while a bare probe sometimes did not.
+
+**Bisect.** By flag, using memory growth rather than pass/fail as the signal --
+pass/fail is far too coarse and reported "good" for leaking configurations:
+
+```text
+level only          peak 2251  growth  +453   clean
+level+crossLevel    peak 2238  growth  +440   clean
+level+twoLevel      peak 8505  growth +6707   LEAKS
+```
+
+**Instrumentation.** `scratch/probe-gpu-buffer-leak.mjs` wraps
+`GPUDevice.createBuffer` and `GPUBuffer.destroy` via an init script, tallies
+live buffers by label, and captures allocation stacks for a watched label. It
+named the buffer and the call sites outright:
+
+```text
+8022 MiB  +4044 live   ulg-mls-mpm-separation-bins
+  at encodeMlsMpmParticleSeparationPasses (sphG2pGpuKernel.js:2522)
+  at runMlsMpmG2pWebGpu (sphG2pGpuKernel.js:3459)
+  at runSchroederTwoLevelMechanicsStepWebGpu (schroederCrossLevelCouplingGpu.js:3714 and :3890)
+```
+
+**Root cause.** `runMlsMpmG2pWebGpu` hands its separation bins to a
+post-separation thermal bin authority -- thermal conduction reuses those bins --
+and on doing so deletes the buffer from its own allocation ledger, because
+ownership has transferred. Its `cleanup` therefore deliberately does not free
+them; the authority's holder must. The only code that releases an authority is
+`sphMlsMpmPostMechanicsClosure.js`, which sees just the step's final
+reconstruction.
+
+`runSchroederTwoLevelMechanicsStepWebGpu` runs G2P once per fine substep plus a
+coarse terminal, and never referenced `postSeparationThermalBinAuthority` at
+all. Every one of those authorities was abandoned: bins removed from G2P's
+ledger, never handed to a closure, never freed. Roughly two megabytes per G2P
+call, several calls per step, forever.
+
+Single-level runs one G2P whose reconstruction does reach the closure, which is
+why the leak is exactly gated on `schroederTwoLevel`.
+
+**Fix.** Register each fine substep's and the coarse terminal's authority with
+the module's existing `trackCleanup`, releasing through
+`releasePostSeparationThermalBinAuthorityAfterQueue`. That call is queue-fenced
+and idempotent (`if (record.releaseScheduled || record.destroyed) return false`),
+so a downstream owner that also releases is unaffected.
+
+A second, latent leak of the same shape was fixed in `sphMlsMpmGpuStep.js`: the
+fused sequence loop threads one `separationScratch` across substeps and destroys
+only the final one, so any substep that changed the bin-plan shape orphaned the
+superseded scratch. All allocated sets are now tracked and freed after submit.
+
+**Result.**
+
+```text
+live separation-bins   +4044 growing  ->  flat at ~718
+GPU peak / growth      14624 / +12825 ->  2361 / +567   (flags off: 2256 / +457)
+matrix water-cycle     oom 23615, lost 2  ->  oom 0, lost 0
+matrix iron-ice        oom  2214, lost 2  ->  oom 0, lost 0
+```
+
+Suite stays at 1987 tests, 1958 passing, 0 failing.
+
+**Performance is unchanged by this.** Re-running the paired campaign after the
+fix gives median p50 +416.5% and p95 +253.7%, against +403.7% / +263.2% before.
+The leak was not what makes Slice 9 slow; the 4-5x is algorithmic and is still
+Slice 10 work.
+
+## Newly visible once the OOM stopped masking it
+
+With memory no longer exhausting, the matrix reaches a real verdict on the two
+scenarios, and it is not clean:
+
+```text
+standard-water-cycle       bad   max-speed>50
+standard-iron-ice-quench   bad   max-speed>50, min-J<0.1
+```
+
+These are **not** caused by the leak fix. Disabling only the two release calls
+and re-running the same scenarios reproduces them alongside the OOM:
+
+```text
+releases disabled  iron-ice    maxSpeed 78.31  minJ 0.00087   oom  2214
+releases disabled  water-cycle maxSpeed  1.09  minJ 0         oom 23615
+```
+
+So `max-speed>50` and `min-J<0.1` are pre-existing Slice 9 stability problems
+that the out-of-memory failure was hiding. Baseline at 7454ac9 on the same
+scenarios is clean (maxSpeed 4.63 and 1.09, minJ 0.98 and 1.00), so they are a
+genuine Slice 9 regression and the next thing to run down: particles reaching
+78 m/s and J collapsing to 8.7e-4 is a blown-up integration, not a threshold
+that wants recalibrating.

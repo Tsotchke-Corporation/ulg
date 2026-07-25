@@ -43,6 +43,9 @@ import {
   directSchroederSpatialParentFieldMechanicsWorkspaceGpu
 } from './schroederSpatialParentFieldMechanicsWorkspaceGpu.js';
 import {
+  releasePostSeparationThermalBinAuthorityAfterQueue
+} from './sphPostSeparationThermalBinAuthority.js';
+import {
   abandonSchroederFusedMechanicsPendingClosureAfter,
   abortSchroederTwoLevelMacroAuthorityAfter,
   createSchroederCanonicalParticleContinuation,
@@ -3739,6 +3742,23 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       substepG2p.mechanicsBuffer,
       () => substepG2p.mechanicsBuffer?.destroy?.()
     );
+    // Each G2P hands its separation bins to a post-separation thermal bin
+    // authority and drops them from its own allocation ledger, so G2P will not
+    // free them -- the authority's holder must. Only the step's final
+    // reconstruction reaches the post-mechanics closure that does that, so
+    // every fine substep's authority was abandoned here, leaking its bins
+    // buffer for the lifetime of the device. Release is idempotent and
+    // queue-fenced, so scheduling it against this step's cleanup is safe even
+    // if a downstream consumer also releases.
+    const substepThermalBins = substepG2p.postSeparationThermalBinAuthority;
+    if (substepThermalBins) {
+      trackCleanup(substepThermalBins, () => {
+        releasePostSeparationThermalBinAuthorityAfterQueue(
+          substepThermalBins,
+          { device }
+        );
+      });
+    }
     lastFineG2p = substepG2p;
     if (activeCanonicalEpoch) {
       const nextUploads = createCanonicalTwoLevelSubstepUploads({
@@ -3912,6 +3932,19 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     coarseG2p.mechanicsBuffer,
     () => coarseG2p.mechanicsBuffer?.destroy?.()
   );
+  // The coarse terminal's bins are abandoned for the same reason as each fine
+  // substep's: this step does not hand its reconstruction to the post-mechanics
+  // closure, so nothing downstream owns the authority. Release is queue-fenced
+  // and idempotent, so a later owner that does release it is unaffected.
+  const coarseThermalBins = coarseG2p.postSeparationThermalBinAuthority;
+  if (coarseThermalBins) {
+    trackCleanup(coarseThermalBins, () => {
+      releasePostSeparationThermalBinAuthorityAfterQueue(
+        coarseThermalBins,
+        { device }
+      );
+    });
+  }
   if (activeCanonicalEpoch) {
     finalCanonicalUploads = createCanonicalTwoLevelSubstepUploads({
       sphParticleState,

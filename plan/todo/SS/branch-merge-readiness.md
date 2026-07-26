@@ -84,21 +84,56 @@ Once it could measure, it confirmed the gel fix: final tallness **0.016**
 (limit 0.8), footprint fill **0.814** (floor 0.15), peak tallness 1.754 while
 the drop was still falling. Water spreads and flattens.
 
+## On branch `prof0-wiring` (worktree `/home/cos/projects/ulg-s9-bisect`)
+
+Held off the main branch only because the merge-gate matrix is serving from the
+main worktree and editing source mid-run would make its scenarios inconsistent.
+**Merge these back once the matrix finishes.**
+
+| Commit | What |
+| --- | --- |
+| `ed056df` | PROF-0 wired into the fused sequence's five passes |
+| `bd42821` | Bind groups memoized on buffer identity |
+| `598d6e9` | Profiling request plumbed; `stageGpuMs` surfaced on the result |
+| `595ea5b` | Accumulator-clear bind group memoized and gated |
+
+### The per-substep bind-group finding
+
+The fused sequence built **five bind groups inside** `for (let index = 0; index
+< count; index += 1)`. At the default 256-step batch that is ~1280
+driver-validated `createBindGroup` calls per sequence, now under a dozen.
+
+- One (`gridUpdate`) was fully loop-invariant and is hoisted.
+- Three rotate and are memoized **on buffer identity, never on `pingIndex`** —
+  a parity key would be *wrong*, because the thermal and mechanics-refresh
+  stages substitute `currentStateBuffer` / `currentThermoBuffer` /
+  `currentMechanicsBuffer` mid-loop without following parity.
+- One (`activeAccumulatorClear`) was additionally built on every substep even
+  when `useActiveGrid` was false and nothing consumed it.
+
+A lexical detector for `createBindGroup` inside a loop was run over the other
+hot files (`schroederCrossLevelCouplingGpu`, `sphThermalGpuKernel`,
+`schroederHierarchyGpu`, `sphGridGpuKernel`, `sphRenderGpuKernel`,
+`schroederFusedFineSubstepGpu`) and found none. The detector was self-checked
+against the pre-fix file, where it correctly reports all five — so that is a
+true negative, not a broken scan. **The pattern was localized to the fused
+sequence.**
+
+No performance claim is attached to any of it yet. The matrix holds the GPU, and
+measuring under contention is trap 2 below.
+
 ## Open
 
 1. **Merge gate matrix** — `ULG_VISUAL_MATRIX_RUN_ID=merge-gate-02`, artifacts
-   under `/home/cos/ulg-probe-artifacts/`.
-2. **PROF-0 wiring.** The profiler exists and is tested but is not attached to
-   the fused sequence's pass sites (`sphMlsMpmGpuStep.js` ~10715-10790). Until
-   it is, `p2gGridProjection`, `gridUpdate`, `g2pReconstruction`, `thermalStep`,
-   `reactionStep`, `mechanicsRefresh`, `phaseCarrierTransfer` and
-   `schroederFarForceDeltaFusion` are assigned a **literal 0** because their
-   work is inside `fusedMechanicsSequence`. Those zeros are not measurements.
-3. **Bind-group memo for p2g/g2p.** They *look* parity-keyed via
-   `pingIndex = index % 2`, but `currentStateBuffer`, `currentThermoBuffer` and
-   `currentMechanicsBuffer` are also substituted mid-loop by the thermal stage
-   and the mechanics-refresh stage, so a parity cache would be **wrong**. Needs
-   a memo keyed on actual buffer identity.
+   under `/home/cos/ulg-probe-artifacts/`. `standard-water-cycle` and
+   `standard-iron-ice-quench` good so far.
+2. **Measure.** After merging `prof0-wiring`, benchmark current branch against
+   `7454ac9` (`/home/cos/projects/ulg-s9-baseline`). Prior arms: kernelsWallMs
+   4348.8 baseline vs 17424.2 regressed. Nothing may contend for the GPU.
+3. **Device negotiation for timestamps is untested on hardware.**
+   `webGpuDeviceDescriptorForResidentSph({ timestampProfilingRequested })`
+   exists in `webgpuDeviceLimits.js` but no caller has ever passed true, so an
+   end-to-end profiled run needs that switch thrown and verified.
 4. **Priority 3 sparsity** — the payback step. Not started.
 
 ## Two measurement traps, both hit

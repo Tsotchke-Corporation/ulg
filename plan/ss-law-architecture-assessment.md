@@ -160,3 +160,102 @@ phase change. The reaction, optical, and electronic paths were not audited; I
 do not know whether they share the pattern or already carry tighter contracts.
 I also have not read Eshkol's IR closely enough to judge how tractable a WGSL
 backend would be — that is the input needed before choosing (1) over (2).
+
+---
+
+## Addendum, 2026-07-25: Eshkol's IR read, and what it changes
+
+The assessment above closed by saying the missing input for choosing between
+option (1) (WGSL backend in Eshkol) and option (2) (descriptor layer in
+`ulg-gpu-abi`) was a proper read of Eshkol's IR. That read is now done, and it
+moves option (1) from "compiler project" to "tractable, with an in-repo
+precedent".
+
+### What Eshkol's compilation pipeline actually looks like
+
+There is **no retargetable IR**. `lib/backend/llvm_codegen.cpp` is 39,850 lines
+going from the frontend AST straight to LLVM, and `CodegenContext` — the shared
+context all 35 `*_codegen.cpp` units are built on — takes
+`llvm::LLVMContext&`, `llvm::Module&`, and `llvm::IRBuilder<>&` in its
+constructor. The codegen units are LLVM-bound by construction, so "add WGSL as
+another target behind the existing emitters" is not available.
+
+**But there is already a second, non-LLVM target.** `lib/backend/xla/` emits
+StableHLO/MLIR for tensor operations, and it is *small*:
+
+```text
+lib/backend/xla/stablehlo_emitter.cpp    561 lines
+lib/backend/xla/xla_codegen.cpp        1,168 lines
+                                       -----
+                                       1,729 lines
+```
+
+against the 39,850-line LLVM backend. It is a narrow, domain-specific emitter
+that covers the operations it needs (`emitAdd`, `emitMultiply`, dot dimension
+numbers, and so on) and nothing else.
+
+### Why that changes the recommendation
+
+The earlier framing assumed a WGSL backend meant compiling the Eshkol *language*
+to WGSL — a second 40k-line emitter. It does not. What ULG needs compiled is a
+**restricted declarative subset**: law and closure kernels, which are
+arithmetic over declared lanes with no closures, no allocation, no control flow
+beyond bounded loops. That is the same shape and scale as the StableHLO
+emitter, and it now has a working in-repo precedent to copy rather than a design
+to invent.
+
+So the ranking becomes:
+
+1. **Still do option (3) first** — narrow the `Agents.md` charter to what Eshkol
+   does today. It is nearly free and it stops the documented architecture from
+   promising a safety net that does not exist.
+2. **Option (2) remains the near-term work**, and is now explicitly the
+   *specification* step for (1) rather than a competing design. The lane
+   descriptors, the paired represented-volume type, and the law descriptor are
+   the declarative input a WGSL emitter would consume. Building them in
+   `ulg-gpu-abi` first means the schema is validated against real laws before
+   any compiler work starts.
+3. **Option (1) is a follow-on, not a rewrite** — a StableHLO-sized WGSL
+   emitter over the law descriptor from (2).
+
+### The performance argument for the same structure
+
+This is not only a correctness story. The Slice 10 performance items are all
+blocked on the same missing declaration:
+
+- **15 of 87 compute entry points in `ulg-gpu-abi/src/wgsl.js` are
+  `@workgroup_size(1)`** — fully serialised kernels, including `compact_rows`,
+  `prefix`, and `place_product_events`. They are serial because each was written
+  by hand against whatever it happened to need; nothing declares that a stage is
+  a scan, a compaction, or a scatter, which is exactly the information that
+  would let a generator emit a parallel implementation instead.
+- **The SS tree is queried per law stage rather than once per step.** With no
+  law descriptor there is nothing that states which view a law needs, so no
+  scheduler can hoist the shared query, batch stages that want the same view, or
+  prove two stages are independent enough to fuse.
+- The measured 4x frame-time regression and the all-pairs `stage_transport` sit
+  in the same category: hand-written stages that cannot be reasoned about
+  mechanically.
+
+A law descriptor of the form
+`{ id, view, reads[], writes[], accumulates[], stage }` is the minimum input
+that makes hoisting, fusion, and parallel-pattern selection *derivable* rather
+than hand-maintained. That is the same artifact option (1) would compile — which
+is why (2) is worth doing whether or not (1) ever happens.
+
+### Evidence added since the original assessment
+
+Two more defects landed in the interval, both the same failure mode:
+
+- **The gel bug.** Artificial viscosity was folded into the material's
+  `dynamicViscosityPaS` lane, which P2G uses as the coefficient of a *traceless
+  deviatoric* stress. Nothing declared what that lane meant, so a
+  compression-stabilising term was added to a shear-only stress and water ran
+  at ~2000 Pa.s against a physical 0.001. A lane whose physical meaning is
+  declared once cannot absorb a term that does not belong to it.
+- **The phase-materialisation blow-up.** `V0` from the target phase's rest
+  density combined with `J` from the source's current volume in a single
+  expression. A paired represented-volume type makes that unconstructible.
+
+Both are in the table at the top of this document's argument: contracts in
+prose, re-implemented per consumer.

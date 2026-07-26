@@ -302,6 +302,50 @@ measuring under contention is trap 2 below.
 4. **Priority 3 sparsity** — the payback step. Not started, but now located
    exactly.
 
+### Priority 3: unique active-node compaction — scoped, primitive already exists
+
+The remaining half of Priority 3. sol-critic P0: "The active-node list currently
+permits one active row per particle." Confirmed literally --
+`schroederHierarchyGpu.js` sizes it as
+
+```js
+const activeNodeByteLength = Math.max(
+  4, particleCount * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+);
+```
+
+and there is **no tile-key or dedup logic anywhere in the file**. So the count is
+genuinely per-particle, not merely over-allocated.
+
+That distinction decides the approach. The candidate arena could be byte-bounded
+because dropping candidates degrades neighbour coverage gracefully and can be
+reported. **Byte-bounding the active-node list would drop particles entirely**,
+so the only correct fix is real compaction.
+
+**The hard part already exists.** `src/runtime/webgpuRadixScanUnique.js` exports
+`createWebGpuStableRadixScanUnique(device, ...)` -- a stable GPU radix sort with
+scan and unique -- and five modules already use it
+(`schroederSpatialEpochGpu`, `schroederSpatialMechanicalProposalsGpu`,
+`schroederSpatialMechanicsFieldViewGpu`,
+`schroederSpatialReactionProductPlacementGpu`, `sphSpatialGasLedgerEosGpu`).
+
+Shape of the work:
+
+1. derive a tile key per particle from position and selected level (the tile
+   geometry is already computed for `tileCellCount` / `minTileSpacingM`);
+2. run the existing stable radix unique over those keys to get sorted unique
+   tile keys, their run counts, and a per-particle index into the unique list;
+3. emit one active-node row per unique key rather than per particle, and size
+   `activeNodeByteLength` by the unique count;
+4. keep the per-particle index so every consumer can still reach its node in
+   O(1) -- consumers currently index by particle and must not have to change;
+5. publish the compaction ratio as evidence, the same way the arena publishes
+   its overflow.
+
+Stability matters for the same reason it does elsewhere here: an unstable sort
+makes the active-node ordering vary run to run, which would make every
+downstream epoch and receipt comparison non-reproducible.
+
 ### Priority 3: where the 4 KiB per particle actually comes from
 
 `src/runtime/sph/schroederHierarchyGpu.js:4498`:

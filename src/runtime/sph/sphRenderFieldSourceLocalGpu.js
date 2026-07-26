@@ -225,23 +225,25 @@ fn quantize(value: f32, scale: f32) -> u32 {
   return u32(clamp(value * scale, 0.0, f32(MAX_U32_SAFE)));
 }
 
+// Single-instruction accumulation. This was a compare-exchange retry loop,
+// which is the wrong primitive for a metaball field: many particles write the
+// same cells by construction, so the loop is maximally contended and every
+// thread spins. At the measured working set -- about 1331 cells per particle
+// across 6 lanes -- that is tens of millions of contended retries per field.
+//
+// atomicAdd is one hardware operation and still returns the previous value, so
+// overflow is detected without a loop. It wraps rather than saturating on
+// overflow, which is acceptable precisely because overflow already invalidates
+// the field for presentation: sourceLocalUsableForPresentation is false, and a
+// wrapped lane inside an already-rejected field changes nothing.
 fn saturating_add(
   destination: ptr<storage, atomic<u32>, read_write>,
   overflow: ptr<storage, atomic<u32>, read_write>,
   value: u32
 ) {
-  var observed = atomicLoad(destination);
-  loop {
-    if (observed > MAX_U32_SAFE - value) {
-      atomicStore(overflow, 1u);
-      return;
-    }
-    let replacement = observed + value;
-    let exchange = atomicCompareExchangeWeak(destination, observed, replacement);
-    if (exchange.exchanged) {
-      return;
-    }
-    observed = exchange.old_value;
+  let previous = atomicAdd(destination, value);
+  if (previous > MAX_U32_SAFE - value) {
+    atomicStore(overflow, 1u);
   }
 }
 
@@ -446,15 +448,10 @@ fn saturating_add(
   overflow: ptr<storage, atomic<u32>, read_write>,
   value: u32
 ) {
-  var observed = atomicLoad(destination);
-  loop {
-    if (observed > MAX_U32_SAFE - value) {
-      atomicStore(overflow, 1u);
-      return;
-    }
-    let exchange = atomicCompareExchangeWeak(destination, observed, observed + value);
-    if (exchange.exchanged) { return; }
-    observed = exchange.old_value;
+  // Single-instruction accumulation; see the note on the particle splat's copy.
+  let previous = atomicAdd(destination, value);
+  if (previous > MAX_U32_SAFE - value) {
+    atomicStore(overflow, 1u);
   }
 }
 

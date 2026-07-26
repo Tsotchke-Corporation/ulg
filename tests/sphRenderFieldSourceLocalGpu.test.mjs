@@ -214,7 +214,17 @@ test('generic source-local shadow builder emits standard v1 field rows without a
   assert.ok(shaderModules.some((module) => /render_phase_weight/.test(module.code)));
   assert.ok(shaderModules.some((module) => /particle_radius_scale/.test(module.code)));
   assert.ok(shaderModules.some((module) => /row1\.z \* value/.test(module.code)));
-  assert.ok(shaderModules.some((module) => /atomicCompareExchangeWeak/.test(module.code)));
+  // Accumulation must be atomic and must detect overflow. It deliberately uses
+  // atomicAdd rather than a compare-exchange retry loop: a metaball field is
+  // maximally contended -- many particles write the same cells by construction
+  // -- so a CAS loop makes every thread spin. atomicAdd is one instruction and
+  // still returns the previous value, which is what the overflow check reads.
+  assert.ok(shaderModules.some((module) => /atomicAdd\(destination, value\)/.test(module.code)));
+  assert.ok(shaderModules.some((module) => /atomicStore\(overflow, 1u\)/.test(module.code)));
+  assert.ok(
+    !shaderModules.some((module) => /atomicCompareExchangeWeak/.test(module.code)),
+    'the contended accumulation path must not reintroduce a CAS retry loop'
+  );
   assert.ok(!shaderModules.some((module) => /for \(var particle_index/.test(module.code)));
   assert.match(SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING.sphRenderFieldSourceLocalSplatWgsl, /phase_partitioned_metaball_strength/);
   assert.match(SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING.sphRenderFieldSourceLocalResolveWgsl, /mean_temperature_k/);

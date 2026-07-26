@@ -182,130 +182,40 @@ The likely size is also modest: each wasted thread costs scheduling plus one
 per kernel per substep, not a bandwidth wall. Worth doing for the memory
 footprint -- 4.5x on every per-slot array -- more than for the frame time.
 
-## FIELD-0 is written and never wired
+## FIELD-0: all three parity gaps closed and verified
 
-sol-critic P0 calls the dense render-field gather "the largest clear
-redundant-calculation target": one invocation per surface cell, each scanning
-every particle, `S * 884,736 * N` visits -- 8.85 billion for one surface at
-10,000 particles. Its recommended replacement is a particle-parallel splat,
-estimated at 140,976 / 432,000 / 3,456,000 visits.
+`sphRenderFieldSourceLocalGpu.js` is the particle-parallel splat sol-critic
+recommends in place of the dense `S * 884,736 * N` gather. It existed, was
+tested, was wired to nothing, and declared three not-yet-implemented refusals.
+All three are now closed **with numeric verification against the dense gather**
+on native Vulkan (`ULG_RUN_NATIVE_RENDER_SOURCE_LOCAL=1`, 12/12, 0 skipped):
 
-**That replacement already exists.** `src/runtime/sph/sphRenderFieldSourceLocalGpu.js`
-is particle-parallel (`if (particle_index >= params.particle_count ...)`) and
-scatters into a small `radius_cells` neighbourhood -- exactly the splat shape.
+| gap | how it was closed | evidence |
+| --- | --- | --- |
+| velocity smear | four-pass sequence: moments -> reduce -> smeared re-splat -> resolve | single particle matches to 4.6e-5; two diverging particles engage the correction and still land within 1e-3 |
+| product events | dedicated splat pass mirroring the gather's admission rule | density and palette within 1e-3 |
+| successor lineage | runs the dense path's own authentication rather than exempting itself | provenance only, changes no cell |
 
-It is not used. Its modes are `shadow`, `diagnostic-no-readback` and
-`disabled`; there is no production mode, and the only importer in the entire
-repository is `tests/sphRenderFieldSourceLocalGpu.test.mjs`. Nothing under
-`src/` references it.
+### Two mistakes the parity gate caught, both mine
 
-**But it is not nearly production-ready**, and its own admissibility check says
-so. `sphRenderFieldSourceLocalGpu.js` refuses with these reasons:
+**The gate as it stood would have passed a broken implementation.** It compared
+only the base case and exercised none of the three paths. Extending it is what
+found everything below.
 
-| reason | meaning |
-| --- | --- |
-| `shadow-parity-requires-full-readback` | parity only checkable with a full readback |
-| `velocity-smear-parity-not-yet-implemented` | any `renderSmearDtS > 0` unsupported |
-| `product-event-parity-not-yet-implemented` | product events unsupported |
-| `successor-lineage-parity-not-yet-implemented` | Schroeder spatial source family unsupported |
+**`device.queue.writeBuffer` is queue-ordered, not encoder-ordered.** The first
+smear implementation rewrote one uniform's `splat_phase` word between passes.
+Both writes land before the command buffer executes, so both passes read the
+last phase written: density doubled (1186.41 -> 2372.82) because both ran as the
+primary phase, while the smear offset stayed zero because the moments phase
+never ran. Each phase now owns its uniform buffer and bind group.
 
-So the splat covers the base case only. Wiring it to production as it stands
-would silently drop velocity smear, product events and successor lineage --
-three real features -- which is exactly the kind of "add laws, never remove
-one" violation `Agents.md` prohibits.
+**A single particle cannot test dispersion.** `<|v|^2> - |<v>|^2` is zero by
+construction for one particle, so the original arm proved only that the sequence
+does not corrupt an uncorrected field. The second arm places two nearby
+particles with opposing velocities and asserts the correction actually engages.
 
-FIELD-0 is therefore: kernel written and tested for the simple case, three
-declared parity gaps to close, then a production mode, consumer wiring, and an
-equivalence gate against the gather before the gather can be retired. That is
-substantial work, not a wiring job. Priority 1 is unblocked now that 0B is
-green, and this is the largest remaining win in the system.
-
-### Why velocity smear is the structurally hard gap
-
-Worth writing down because it is not obvious from the refusal string, and it
-dictates the shape of the whole splat design.
-
-The splash-shard smear is **per-cell, two-pass, and gather-shaped**. Pass one
-accumulates velocity moments for a cell, weighted by that cell's positive
-metaball values; the cell's velocity dispersion follows; pass two re-samples
-every contributing metaball at the smeared distance
-`dist^2 + (sigma_v * dt)^2`. A cell-parallel gather gets this for free because
-one invocation already sees every particle contributing to its cell.
-
-A particle-parallel splat does not: no single particle knows the dispersion of
-any cell it scatters into. Parity therefore needs three sparse passes, not one:
-
-1. **splat moments** — scatter `w`, `w * v` and `w * |v|^2` into per-cell
-   accumulators (atomics, or a fixed-point integer encoding if float atomics are
-   unavailable);
-2. **reduce** — one invocation per touched cell computes `sigma_v` from those
-   moments;
-3. **splat density** — scatter again, each particle reading the destination
-   cell's `sigma_v` to offset its distance.
-
-That is still vastly cheaper than `S * 884,736 * N`, and it keeps the
-correction exact rather than approximating it. Note the ordering constraint:
-pass 3 reads what pass 2 wrote, so they cannot be fused, and pass 1 must
-complete for every particle before pass 2 runs on any cell.
-
-Product events and successor lineage are additional source families feeding the
-same field; once the three-pass structure exists they are additional splat
-inputs rather than new algorithms.
-
-## Testing against the live dev server on 5174
-
-A vite dev server runs on **5174 over HTTPS** from this worktree
-(`https://dadbox.tail5c077c.ts.net:5174/`, or `https://127.0.0.1:5174` locally).
-Vite's watcher keeps it current -- verified by fetching a module through it and
-finding symbols added minutes earlier.
-
-Point the probe at it instead of letting it spawn a throwaway server:
-
-```
-NODE_TLS_REJECT_UNAUTHORIZED=0 \
-ULG_PROBE_BASE_URL='https://127.0.0.1:5174' \
-ULG_PROBE_VIEWPORT_WIDTH=1280 ULG_PROBE_VIEWPORT_HEIGHT=800 \
-ULG_SPH_VISUAL_CAPTURE=1 ULG_PROBE_FRAME_EVERY=1 \
-ULG_PROBE_FRAME_DIR=<dir> ULG_PROBE_URL='/?...' \
-ULG_PROBE_CHROMIUM_ARGS='--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer --ignore-certificate-errors' \
-node scripts/sph-long-horizon-probe.mjs
-```
-
-Two things that waste a run if missed: it is **https**, so plain `curl` against
-`http://…:5174` returns nothing and looks like a dead server; and without
-`ULG_PROBE_VIEWPORT_*` the frames come out 176x132, too small to judge anything.
-
-## Visual checks at t0 / t-mid / t-final
-
-Gate status is an aggregate and does not see "strange but passing". Frames are
-captured by the matrix already (`ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1`, under
-`<run>/<scenario>-frames/`); **look at them**, at least the initial frame, a
-mid-run batch, and the final one.
-
-Read the `post-probe-composited-page` frame rather than the `resident-batch`
-crops. The crops are a 767x480 window on a 1280x800 canvas and cut off the
-bottom of the container, which makes settled material look as though it has
-vanished off-screen.
-
-Two things looked wrong on `standard-iron-ice-quench` and neither was:
-
-- **A blob apparently suspended in mid-air.** In the composited frame its
-  screen position falls inside the floor quad at the far corner of the box --
-  it is an ice fragment resting on the floor, thrown clear by the impact, not
-  something stuck. It also moves between batches 8 and 10.
-- **The iron base "disappearing".** It is dark blue-grey on a dark background
-  and ends up under the ice pile; the faint dark rim below the white mound in
-  the final composited frame is it.
-
-One hypothesis raised and **disproved**, recorded so it is not raised again:
-placeholder slots were suspected of rendering. They really are indistinguishable
-from live particles except by mass -- 1,512 of 1,944 render rows carry zero mass
-while still carrying a genuine material id, phase and `status: 1`, and the spare
-product slots all sit at the box centre -- and neither the gather nor the splat
-checks mass. But adding the guard produced a **byte-identical frame** and
-`surfaceDrawMs` of 70.6 ms against 67.7 ms without it, so it fixes nothing and
-costs slightly more. It was reverted rather than kept as a plausible-sounding
-change with no evidence behind it.
+Still shadow mode. Making the splat the production render-field path is the
+remaining step, and now has a parity gate behind it.
 
 ## Landed on this branch
 

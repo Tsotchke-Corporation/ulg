@@ -217,6 +217,41 @@ particles with opposing velocities and asserts the correction actually engages.
 Still shadow mode. Making the splat the production render-field path is the
 remaining step, and now has a parity gate behind it.
 
+## PROF-0 end-to-end: three hops wired, chain still breaks
+
+The switch reaches further than it did and still does not produce a number.
+Wired so far, each one genuinely missing:
+
+1. `sphPhaseScene.js` computed `enableResidentGpuTimestampProfiling` from the
+   mount's flag and never passed it on -- the resident step options now carry
+   `residentGpuTimestampProfilingRequested`.
+2. The fused sequence built its `stageTiming` *before* reading the profiler, so
+   the read was moved ahead of it and `stageGpuMs` / `gpuTimestampProfile` added.
+3. The resident-step envelope rebuilds `stageTiming` field by field rather than
+   spreading it, so anything the fused sequence adds is dropped unless listed --
+   both fields are now forwarded.
+4. `sph-long-horizon-probe.mjs` `compactStageTiming` likewise rebuilds field by
+   field; it now carries `stageGpuMs`, `gpuTimestampProfileStatus` and
+   `gpuTimestampProfiledPassCount`.
+
+After all four the probe reports `gpuTimestampProfileStatus: null`. That value
+is diagnostic: the profiler always returns a status string when it runs, so
+**null means the profile object itself never arrived**, not that profiling was
+inert. Another layer between the fused sequence and the envelope is still
+dropping it, or the executed path is not the fused sequence that was
+instrumented.
+
+Finding the next hop: log `Object.keys(stageTiming)` at the envelope
+(`sphMlsMpmGpuStep.js` ~22531, `const stageTiming = finalStep.stageTiming || {}`)
+during a profiled run. If `gpuTimestampProfile` is absent there, the break is
+upstream in the fused sequence; if present, it is downstream of the envelope.
+
+The pattern is worth naming, because it is the same defect three times in one
+chain: **every layer here rebuilds `stageTiming` field by field instead of
+spreading it**, so each new field must be added at every layer or it vanishes
+silently. That is why a flag can be read correctly at the top and produce
+nothing at the bottom.
+
 ## Built and not wired: a standing inventory
 
 This keeps happening, so here is the list rather than another one-off

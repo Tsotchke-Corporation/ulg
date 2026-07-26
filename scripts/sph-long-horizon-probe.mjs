@@ -3267,6 +3267,14 @@ async function runBrowserProbe({
       const compactStageTiming = (stageTiming) => stageTiming ? {
         totalMs: finiteOrNull(stageTiming.totalMs),
         stageMs: { ...(stageTiming.stageMs || {}) },
+        // PROF-0. Device execution time per stage, next to the host-timeline
+        // stageMs. Null when profiling is inert; gpuTimestampProfileStatus says
+        // which of "not requested", "unsupported by device" or "read failed"
+        // applies, so an absent measurement is never read as a measured zero.
+        stageGpuMs: stageTiming.stageGpuMs ? { ...stageTiming.stageGpuMs } : null,
+        gpuTimestampProfileStatus: stageTiming.gpuTimestampProfile?.status ?? null,
+        gpuTimestampProfiledPassCount:
+          stageTiming.gpuTimestampProfile?.profiledPassCount ?? null,
         queueFenceMs: { ...(stageTiming.queueFenceMs || {}) },
         queueFenceStatus: { ...(stageTiming.queueFenceStatus || {}) },
         queueFenceMethod: { ...(stageTiming.queueFenceMethod || {}) },

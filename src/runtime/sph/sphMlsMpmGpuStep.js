@@ -11237,10 +11237,21 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       }
       stageMs.compactSummary = Math.max(0, nowMs() - compactSummaryStartMs);
     }
+    // PROF-0. Read after submit so the queries have resolved. Returns a status
+    // and a null stage map when profiling is inert, so a consumer can always
+    // tell "not measured" from "measured as zero" -- the distinction the
+    // literal-0 stageMs entries below destroy.
+    const gpuTimestampProfile = await gpuTimestampProfiler.read();
+    gpuTimestampProfiler.destroy();
     const stageTiming = {
       schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
       totalMs: Math.max(0, nowMs() - stageTimingStartMs),
       stageMs: { ...stageMs },
+      // Device execution time beside the host-timeline stageMs, whose
+      // fused-sequence entries are literal zeros because that work is encoded
+      // inside fusedMechanicsSequence. Null when profiling is inert.
+      stageGpuMs: gpuTimestampProfile?.stageGpuMs ?? null,
+      gpuTimestampProfile: gpuTimestampProfile ?? null,
       queueFenceMs: {
         compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
         fusedMechanicsSequence: fusedMechanicsSequenceQueueFenceMs
@@ -11297,12 +11308,6 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
-    // PROF-0. Read after submit so the queries have resolved. Returns a status
-    // and a null stage map when profiling is inert, so a consumer can always
-    // tell "not measured" from "measured as zero" -- the distinction the
-    // literal-0 stageMs entries below destroy.
-    const gpuTimestampProfile = await gpuTimestampProfiler.read();
-    gpuTimestampProfiler.destroy();
     const finalStep = await residentStepEnvelope({
       sphParticleState: finalSourceSphParticleState,
       mlsMpmParticleState: finalSourceMlsMpmParticleState,
@@ -22788,6 +22793,11 @@ function createMlsMpmMechanicsChildStageKernelEvidence(execution = {}, {
       schema: stageTiming.schema || null,
       totalMs: finiteNumber(stageTiming.totalMs, 0),
       stageMs: { ...stageMs },
+      // PROF-0. This envelope rebuilds stageTiming field by field rather than
+      // spreading it, so anything the fused sequence adds has to be listed
+      // here or it is silently dropped on the way to a consumer.
+      stageGpuMs: stageTiming.stageGpuMs ?? null,
+      gpuTimestampProfile: stageTiming.gpuTimestampProfile ?? null,
       readbackMode: stageTiming.requestedReadbackMode || finalStep.readbackMode || null,
       mechanicsOnlyEntrypoint: stageTiming.mechanicsOnlyEntrypoint === true
     },

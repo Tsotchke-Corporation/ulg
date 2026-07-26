@@ -217,150 +217,45 @@ particles with opposing velocities and asserts the correction actually engages.
 Still shadow mode. Making the splat the production render-field path is the
 remaining step, and now has a parity gate behind it.
 
-## PROF-0 end-to-end: three hops wired, chain still breaks
+## PROF-0: found the break -- it was instrumented into the wrong function
 
-The switch reaches further than it did and still does not produce a number.
-Wired so far, each one genuinely missing:
+The switch was plumbed correctly through four layers and still produced nothing,
+because the profiler was never in the code that runs.
 
-1. `sphPhaseScene.js` computed `enableResidentGpuTimestampProfiling` from the
-   mount's flag and never passed it on -- the resident step options now carry
-   `residentGpuTimestampProfilingRequested`.
-2. The fused sequence built its `stageTiming` *before* reading the profiler, so
-   the read was moved ahead of it and `stageGpuMs` / `gpuTimestampProfile` added.
-3. The resident-step envelope rebuilds `stageTiming` field by field rather than
-   spreading it, so anything the fused sequence adds is dropped unless listed --
-   both fields are now forwarded.
-4. `sph-long-horizon-probe.mjs` `compactStageTiming` likewise rebuilds field by
-   field; it now carries `stageGpuMs`, `gpuTimestampProfileStatus` and
-   `gpuTimestampProfiledPassCount`.
+A marker field added unconditionally to the fused *sequence*'s `stageTiming`
+never reached the probe either, which isolated it immediately: that object is
+not what surfaces. The surfaced timing reports
+`fusedResidentSequence: null, fusedResidentMechanics: true`.
 
-After all four the probe reports `gpuTimestampProfileStatus: null`. That value
-is diagnostic: the profiler always returns a status string when it runs, so
-**null means the profile object itself never arrived**, not that profiling was
-inert. Another layer between the fused sequence and the envelope is still
-dropping it, or the executed path is not the fused sequence that was
-instrumented.
+**The executing path is `runFusedNoFullMlsMpmMechanicsWebGpu` (line ~8830). The
+profiler was wired into `runFusedNoFullMlsMpmMechanicsSequenceWebGpu` (line
+~10265).** The names differ by one word, both are fused, both take the same
+options, and the URL flag is `residentFuseSequence=1` -- which selects neither
+of them by name. Nothing about the symptom pointed at the mistake; only the
+marker did.
 
-Finding the next hop: log `Object.keys(stageTiming)` at the envelope
-(`sphMlsMpmGpuStep.js` ~22531, `const stageTiming = finalStep.stageTiming || {}`)
-during a profiled run. If `gpuTimestampProfile` is absent there, the break is
-upstream in the fused sequence; if present, it is downstream of the envelope.
+The four hops wired earlier are all still necessary and are kept:
 
-The pattern is worth naming, because it is the same defect three times in one
-chain: **every layer here rebuilds `stageTiming` field by field instead of
-spreading it**, so each new field must be added at every layer or it vanishes
-silently. That is why a flag can be read correctly at the top and produce
-nothing at the bottom.
+1. `sphPhaseScene` computed the flag and never forwarded it;
+2. the fused sequence built `stageTiming` before reading the profiler;
+3. the resident-step envelope rebuilds `stageTiming` field by field, dropping
+   anything not explicitly listed;
+4. the probe's `compactStageTiming` does the same.
 
-## Rule: the render path stays GPU-resident end to end
+What remains is to instrument the passes in
+`runFusedNoFullMlsMpmMechanicsWebGpu` -- its encoder is at ~9630, its submit at
+~9953, and its compute passes are the `preflightPass`, `validationPass`,
+`p2gPass` and `g2pPass` in the 9600-9950 range.
 
-No CPU readback on the rendering path. Not the field, not per-frame evidence,
-not "just four bytes" -- a four-byte `mapAsync` is still a GPU->CPU fence every
-frame. Readback belongs to explicit diagnostic cadences, never to the hot loop.
+An attempt at that instrumentation was reverted rather than left half-applied.
+Editing by string match in a 30k-line file put the profiler read into an
+unrelated function 6,000 lines away, because the same `device.queue.submit`
+line appears many times at the same indentation. Redo it by line range within
+the function bounds, and verify with the marker before wiring anything else.
 
-**Where this stood when the rule was written.** The full-field readback in
-`sphRenderFieldSourceLocalGpu.js` is *older than* the FIELD-0 work: it is
-present at `d7f7238:988`, before any of it. It existed because the module was
-shadow-only and shadow parity genuinely requires reading the field back to
-compare against the dense gather. Production mode inherited it for one commit,
-which is most of why the production splat measured 68x slower, and it is now
-gated off.
-
-Current posture, measured on a production matrix run:
-
-- `requestedReadbackMode: no-full-readback` on 36 of 36 samples;
-- `normalHotLoopReadbackFree: true` on **48 of 53** samples.
-
-The five that are not readback-free are the outstanding item. The likely source
-is the `final-only` compact summary, whose `compactSummaryMapAsync` was measured
-at 133 ms in an earlier probe -- acceptable at a final-only cadence, not
-acceptable if it ever moves into the loop.
-
-Production source-local now reads nothing at all. Even the overflow word is
-behind an opt-in `overflowEvidenceReadback`, because overflow is a property of
-the surface configuration rather than of frame-to-frame motion and belongs on a
-diagnostic cadence. `sourceLocalOverflow` reports `null` rather than `false`
-when it was not read, and `sourceLocalOverflowEvidence` says which case applies,
-so an unread flag can never be mistaken for a clean one.
-
-The one readback added by this work is the PROF-0 timestamp query: fixed-size,
-off by default, and only when profiling is explicitly requested -- the category
-the GPU-native rule permits.
-
-## CORRECTION: the splat production path produces no geometry
-
-Every performance number reported for the source-local production arm is void.
-The pipeline does not render:
-
-| arm | triangles | vertices | h2o surface samples |
-| --- | --- | --- | --- |
-| dense gather | 466,033 | 1,398,099 | 4 |
-| source-local splat | **0** | **0** | **0** |
-
-So "68x slower", "5.6x slower after atomicAdd", and the smear-cost isolation
-were all measuring a field that produces no surface. They are not comparisons of
-two pipelines; they are a working pipeline against a broken one.
-
-What survives, because it was verified independently rather than by these runs:
-
-- the native parity arm still passes 12/12, so the splat's *field values* match
-  the dense gather within 1e-3 -- the field is right, something downstream of it
-  is not;
-- the readback removal is correct on its own terms: a full field map per frame
-  violates the GPU-residency rule whatever the timing says;
-- the atomicAdd replacement is correct on its own terms: a CAS retry loop is the
-  wrong primitive for a maximally contended metaball accumulation, and parity
-  confirms it produces the same field.
-
-The open question is why marching cubes extracts nothing from a field that
-parity says is correct. Leading candidate: production writes into the caller's
-pooled buffer, and the surface adapter is either reading a different buffer or
-never told the field is ready -- the source-local result reports
-`retainFieldRowsBuffer` and surface-table state that the dense path sets up
-differently.
-
-`surfaceDrawMs` collapsing to 0.1 ms in the splat arm was the visible symptom
-and was misread as the field build moving stages. Marching cubes cannot cost
-nothing; a near-zero surface stage means it did not run.
-
-## FIELD-0 measured in production: the splat is slower, not faster
-
-The splat now has a production mode and the scene can route the visible render
-field through it behind `?sourceLocalField=1`, defaulting off. Measured on
-hardware against the live server, same scenario, 4 batches x 128 steps:
-
-| arm | renderRefresh total | dominant stages |
-| --- | --- | --- |
-| dense gather | **38.90 ms** | surfaceDraw 20.70, pressureInterface 6.10 |
-| source-local splat | **2640.90 ms** | renderField 1905.10, materialInterface 716.90 |
-
-**68x slower.** This contradicts the premise the whole item rests on -- sol-critic
-estimates the splat at 140,976 visits against the gather's 8.85 billion.
-
-The first number this produced was `surfaceDrawMs` dropping from 4.14 ms to
-0.02 ms, which looks like a 200x win and is not one: the field build simply
-moved out of `surfaceDrawMs` into `renderFieldMs`. Reading one stage rather than
-the total would have reported a large speedup for a large regression.
-
-Not yet attributed. The result carries none of the source-local diagnostics --
-`sourceLocalStrategy`, `sourceLocalOverflow`, `sourceLocalEstimatedCellVisits`,
-`sourceLocalFallbackReason` are all absent from the probe output -- so it is not
-even established whether the splat ran or silently fell back. Surfacing those
-through the render-field result is the prerequisite for diagnosing this, and is
-the same field-by-field-rebuild problem documented above for `stageTiming`.
-
-Leading hypotheses, in order:
-
-1. the scene passes a non-zero `renderSmearDtS`, which triggers the four-pass
-   sequence -- four dispatches plus two resolves per field instead of two;
-2. the scene's `readbackMode` for the visible field forces a full readback per
-   frame, which shadow mode needed for parity and production must not do;
-3. `maxSplatCellsPerSource` defaults large enough that each particle walks a
-   big neighbourhood, making the splat dense in practice.
-
-The flag stays off until this is understood. A verified-correct field that costs
-68x is not an improvement, and the parity work behind it is still sound -- what
-is wrong is the cost, not the output.
+**This is the gating dependency for FIELD-0.** `renderFieldMs` is host enqueue
+time, so the dense-versus-splat comparison is not answerable without GPU
+timestamps.
 
 ## Built and not wired: a standing inventory
 

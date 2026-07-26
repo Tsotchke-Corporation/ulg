@@ -2071,9 +2071,13 @@ export function summarizeResidentStageOrderExecution(execution = null) {
     status: execution?.status || finalStep?.status || null,
     backend: execution?.backend || finalStep?.backend || null,
     readbackMode: execution?.readbackMode || finalStep?.readbackMode || null,
-    normalHotLoopReadbackFree: Boolean(
-      execution?.normalHotLoopReadbackFree ?? finalStep?.normalHotLoopReadbackFree
-    ),
+    // Null, not false, when neither source reported it. Boolean() turned an
+    // absent measurement into "a readback happened", which is the same failure
+    // as reporting 0 ms for a timestamp query the device never wrote: it reads
+    // as a measured bad result rather than as no result. Every "not readback
+    // free" sample in the 2026-07-26 probe campaign was this, not a readback.
+    normalHotLoopReadbackFree:
+      execution?.normalHotLoopReadbackFree ?? finalStep?.normalHotLoopReadbackFree ?? null,
     continuedFromResidentState: Boolean(execution?.continuedFromResidentState),
     continuationAvailable: Boolean(execution?.continuationAvailable),
     stepCount: execution?.stepCount ?? null,

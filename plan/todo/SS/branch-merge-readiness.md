@@ -337,6 +337,51 @@ refresh, both captured by `sph-long-horizon-probe.mjs`. Kept separate from
 execution, the other brackets a whole stage including submit latency. Merging
 them would make a reader unable to tell which they were looking at.
 
+## GPU residency: audited by counting, not by reading code (2026-07-26)
+
+The standing rule is that nothing reads back to the CPU in the hot loop and the
+field stays GPU-resident all the way through rendering. The runtime has ~140
+static `mapAsync` sites, nearly all gated behind a readback mode, so counting
+them statically proves nothing either way.
+
+`ULG_PROBE_TRACE_NATIVE_BUFFER_MAP=1` wraps `GPUBuffer.prototype.mapAsync` and
+tallies calls by buffer label into every probe sample. A per-frame readback is
+one whose count rises between consecutive samples. Production config, 10
+batches:
+
+```
+startup   4  optical-lookup, presentation-diff x2, offscreen-validation
+per batch 1  ulg-sph-authoritative-checkpoint-N-compact-readback
+end       1  presentation-diff-3
+          --
+total    15
+```
+
+**Zero per-frame readbacks.** The one recurring call is the authoritative
+checkpoint's compact evidence record -- `(20 + 64*29) * 4 = 7,504 bytes`, fixed
+size regardless of particle count -- and it lives in
+`scripts/sph-authoritative-gpu-checkpoint.mjs`, a probe, not the runtime. That
+is the GPU-native validation design working as intended, not a leak.
+
+### What *was* broken was the other direction
+
+The audit was prompted by the right question asked about the wrong direction.
+Nothing was reading back; something was **uploading**. The source-local
+accumulator was a 49 MB host allocation and host-to-device upload per frame
+(see FIELD-0 above), and seven other buffers uploaded zeros into memory WebGPU
+had already zeroed. "GPU-resident" has to mean both directions, and only the
+readback direction had a name, a flag and a gate.
+
+### `normalHotLoopReadbackFree` was reporting absence as failure
+
+The earlier note that "5 of 53 samples are not readback-free" was wrong, and the
+error is worth keeping: the demo mount built that field with `Boolean(...)`, so a
+summary with `available: false` and every field null reported
+`normalHotLoopReadbackFree: false` -- an absent measurement rendered as a
+measured bad result. All 12 such samples in the 2026-07-26 campaign were this.
+It now reports `null` when neither source claimed anything. Same failure mode as
+a timestamp query reporting 0 ms for a pass the device never wrote.
+
 ## Built and not wired: a standing inventory
 
 This keeps happening, so here is the list rather than another one-off

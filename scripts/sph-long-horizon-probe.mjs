@@ -2016,6 +2016,46 @@ async function runBrowserProbe({
         installQueueFenceTrace();
       });
     }
+    // "We never want CPU readbacks" is a claim about the running frame, and the
+    // runtime has ~140 static mapAsync sites most of which are gated. Counting
+    // them by hand proves nothing. This tallies the calls that actually happen,
+    // by buffer label, so a per-frame readback shows up as a count that climbs
+    // with the frame number instead of staying at its startup value.
+    if (process.env.ULG_PROBE_TRACE_NATIVE_BUFFER_MAP === '1') {
+      await page.addInitScript(() => {
+        let mapTraceInstallAttempts = 0;
+        const installMapTrace = () => {
+          const prototype = globalThis.GPUBuffer?.prototype;
+          const original = prototype?.mapAsync;
+          if (!prototype || typeof original !== 'function') {
+            mapTraceInstallAttempts += 1;
+            if (mapTraceInstallAttempts < 200) setTimeout(installMapTrace, 10);
+            return;
+          }
+          if (prototype.__ulgBufferMapTraceInstalled) return;
+          Object.defineProperty(prototype, '__ulgBufferMapTraceInstalled', {
+            value: true,
+            configurable: true
+          });
+          const tally = new Map();
+          globalThis.__ulgBufferMapTally = () => Object.fromEntries(
+            [...tally.entries()].sort((a, b) => b[1] - a[1])
+          );
+          globalThis.__ulgBufferMapTotal = () => [...tally.values()]
+            .reduce((sum, count) => sum + count, 0);
+          Object.defineProperty(prototype, 'mapAsync', {
+            configurable: true,
+            writable: true,
+            value(...args) {
+              const key = this.label || '(unlabelled)';
+              tally.set(key, (tally.get(key) ?? 0) + 1);
+              return original.apply(this, args);
+            }
+          });
+        };
+        installMapTrace();
+      });
+    }
     if (process.env.ULG_PROBE_TRACE_NATIVE_DEVICE_DESTROY === '1') {
       await page.addInitScript(() => {
         let deviceDestroyTraceInstallAttempts = 0;
@@ -5312,6 +5352,12 @@ async function runBrowserProbe({
             residentGpuQueueStageStats: renderState.residentGpuQueueStageStats ?? null,
             residentGpuQueueStageSpanCount:
               finiteOrNull(renderState.residentGpuQueueStageSpanCount),
+            // Cumulative mapAsync tally, present only under
+            // ULG_PROBE_TRACE_NATIVE_BUFFER_MAP=1. A per-frame readback is one
+            // whose count rises between consecutive samples.
+            nativeBufferMapTally: typeof globalThis.__ulgBufferMapTally === 'function'
+              ? globalThis.__ulgBufferMapTally()
+              : null,
             renderRefreshTotalMs: finiteOrNull(renderState.renderRefreshTotalMs),
             renderRefreshDeviceAcquireMs: finiteOrNull(renderState.renderRefreshDeviceAcquireMs),
             renderRefreshRenderRowsMs: finiteOrNull(renderState.renderRefreshRenderRowsMs),

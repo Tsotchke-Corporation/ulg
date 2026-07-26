@@ -252,6 +252,29 @@ Product events and successor lineage are additional source families feeding the
 same field; once the three-pass structure exists they are additional splat
 inputs rather than new algorithms.
 
+## Testing against the live dev server on 5174
+
+A vite dev server runs on **5174 over HTTPS** from this worktree
+(`https://dadbox.tail5c077c.ts.net:5174/`, or `https://127.0.0.1:5174` locally).
+Vite's watcher keeps it current -- verified by fetching a module through it and
+finding symbols added minutes earlier.
+
+Point the probe at it instead of letting it spawn a throwaway server:
+
+```
+NODE_TLS_REJECT_UNAUTHORIZED=0 \
+ULG_PROBE_BASE_URL='https://127.0.0.1:5174' \
+ULG_PROBE_VIEWPORT_WIDTH=1280 ULG_PROBE_VIEWPORT_HEIGHT=800 \
+ULG_SPH_VISUAL_CAPTURE=1 ULG_PROBE_FRAME_EVERY=1 \
+ULG_PROBE_FRAME_DIR=<dir> ULG_PROBE_URL='/?...' \
+ULG_PROBE_CHROMIUM_ARGS='--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer --ignore-certificate-errors' \
+node scripts/sph-long-horizon-probe.mjs
+```
+
+Two things that waste a run if missed: it is **https**, so plain `curl` against
+`http://…:5174` returns nothing and looks like a dead server; and without
+`ULG_PROBE_VIEWPORT_*` the frames come out 176x132, too small to judge anything.
+
 ## Visual checks at t0 / t-mid / t-final
 
 Gate status is an aggregate and does not see "strange but passing". Frames are

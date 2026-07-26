@@ -287,6 +287,42 @@ The one readback added by this work is the PROF-0 timestamp query: fixed-size,
 off by default, and only when profiling is explicitly requested -- the category
 the GPU-native rule permits.
 
+## CORRECTION: the splat production path produces no geometry
+
+Every performance number reported for the source-local production arm is void.
+The pipeline does not render:
+
+| arm | triangles | vertices | h2o surface samples |
+| --- | --- | --- | --- |
+| dense gather | 466,033 | 1,398,099 | 4 |
+| source-local splat | **0** | **0** | **0** |
+
+So "68x slower", "5.6x slower after atomicAdd", and the smear-cost isolation
+were all measuring a field that produces no surface. They are not comparisons of
+two pipelines; they are a working pipeline against a broken one.
+
+What survives, because it was verified independently rather than by these runs:
+
+- the native parity arm still passes 12/12, so the splat's *field values* match
+  the dense gather within 1e-3 -- the field is right, something downstream of it
+  is not;
+- the readback removal is correct on its own terms: a full field map per frame
+  violates the GPU-residency rule whatever the timing says;
+- the atomicAdd replacement is correct on its own terms: a CAS retry loop is the
+  wrong primitive for a maximally contended metaball accumulation, and parity
+  confirms it produces the same field.
+
+The open question is why marching cubes extracts nothing from a field that
+parity says is correct. Leading candidate: production writes into the caller's
+pooled buffer, and the surface adapter is either reading a different buffer or
+never told the field is ready -- the source-local result reports
+`retainFieldRowsBuffer` and surface-table state that the dense path sets up
+differently.
+
+`surfaceDrawMs` collapsing to 0.1 ms in the splat arm was the visible symptom
+and was misread as the field build moving stages. Marching cubes cannot cost
+nothing; a near-zero surface stage means it did not run.
+
 ## FIELD-0 measured in production: the splat is slower, not faster
 
 The splat now has a production mode and the scene can route the visible render

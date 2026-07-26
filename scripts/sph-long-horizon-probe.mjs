@@ -10261,6 +10261,40 @@ function analyzeTimeline(timeline, {
       || sample.sourceMarkedStale
     ))
     .length;
+  // SURF-0. Attribute staleness to the condition that fired. The three are
+  // independent and imply different repairs: a generation mismatch means the
+  // render bridge is reading a superseded storage generation, retainedPrevious
+  // means the previous frame's draw was deliberately kept because a new one was
+  // not admissible, and sourceMarkedStale means the producer itself disclaimed
+  // the row. Collapsing them hides which one to fix.
+  const residentRenderSourceStaleBreakdown = {
+    generationMismatch: residentRenderSourceSamples
+      .filter((sample) => sample.generationMatchesCurrent === false).length,
+    retainedPrevious: residentRenderSourceSamples
+      .filter((sample) => sample.retainedPrevious === true).length,
+    sourceMarkedStale: residentRenderSourceSamples
+      .filter((sample) => sample.sourceMarkedStale === true).length,
+    generationUnknown: residentRenderSourceSamples
+      .filter((sample) => sample.generationMatchesCurrent == null).length
+  };
+  const residentRenderSourceRetentionReasonCounts = {};
+  for (const sample of residentRenderSourceSamples) {
+    const reason = String(sample.retentionReason || '').trim();
+    if (!reason) continue;
+    residentRenderSourceRetentionReasonCounts[reason] =
+      (residentRenderSourceRetentionReasonCounts[reason] || 0) + 1;
+  }
+  // One compact row per sample, in order, so the first bad frame is visible
+  // rather than inferred from an aggregate.
+  const residentRenderSourceSampleTrace = residentRenderSourceSamples
+    .map((sample, index) => ({
+      index,
+      nextStep: Number.isFinite(sample.nextStep) ? sample.nextStep : null,
+      generationMatchesCurrent: sample.generationMatchesCurrent ?? null,
+      retainedPrevious: sample.retainedPrevious === true,
+      sourceMarkedStale: sample.sourceMarkedStale === true,
+      retentionReason: sample.retentionReason ?? null
+    }));
   const residentRenderSourceNextStepSeries = residentRenderSourceSamples
     .map((sample) => sample.nextStep)
     .filter(Number.isFinite);
@@ -11610,6 +11644,13 @@ function analyzeTimeline(timeline, {
     residentRenderSourceSampleCount: residentRenderSourceSamples.length,
     residentRenderSourceCurrentSampleCount,
     residentRenderSourceStaleSampleCount,
+    // SURF-0. residentRenderSourceStaleSampleCount collapses three independent
+    // causes into one number, which is enough to fail a gate and not enough to
+    // fix one. These attribute each stale sample to the condition that actually
+    // fired, so a repair can be aimed rather than guessed.
+    residentRenderSourceStaleBreakdown,
+    residentRenderSourceRetentionReasonCounts,
+    residentRenderSourceSampleTrace,
     residentRenderSourceNextStepSeries,
     residentRenderSourceNextTimeSeries,
     residentRenderSourceStepDelta,

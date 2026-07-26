@@ -69,16 +69,30 @@ exists" readiness wait, not the physics loop. Confirmed at the default 240 s
 budget and again at 900 s (`ULG_BENCH_TIMEOUT_MS`), on this branch and on
 `7454ac9`.
 
-This is **not** an application scaling limit. Driving
-`sph-long-horizon-probe.mjs` directly at the same particle count
-(`dropn=13&basen=13`, ~4.4k particles) reaches readiness and runs. The
-difference is the extra URL parameters the benchmark appends beyond that base
-scenario — `renderUseCase=same-device-interactive` and the rest of its harness
-configuration. So the blocker is in the benchmark's own scenario setup, and it
-is bounded: bisect the benchmark's added parameters against the working direct
-probe URL to find which one stalls startup. Until that is done the benchmark
-has no reach above 1024 particles, which is exactly the range where the
-mechanisms below would become visible.
+This **is** an application-level limit, and it reproduces outside the
+benchmark. Driving `sph-long-horizon-probe.mjs` directly with
+`ULG_PROBE_URL='...&dropn=13&basen=13'` (~4.4k particles) also never reaches
+readiness. It is not caused by the benchmark's extra URL parameters either:
+appending all eight of them (`renderUseCase`, `lawt`, `lawr`, `lawv`, `lawst`,
+`visualCapture`, `surfaceDraw`, `blob`) to a *small* scenario still starts
+normally. Particle count is the variable.
+
+It reproduces on `7454ac9` as well, so it is pre-existing and not introduced by
+this branch — but "pre-existing" is not "acceptable": **the application cannot
+start a scenario of roughly 4.4k particles**, against a stated ambition of
+planetary scale.
+
+This is now the top blocker for answering the performance question at all,
+because 1024 particles is the only size that runs, and a 4 KiB-per-particle
+reservation cannot show up at 1024.
+
+Method note, recorded because it cost a wrong conclusion: the probe reads
+`ULG_PROBE_URL`. An earlier pass here used `ULG_PROBE_SCENARIO_URL`, which the
+probe ignores, so those runs silently exercised the default small scenario and
+appeared to prove the application was fine at 4.4k. Two commits in this file
+asserted that before the variable name was checked. If a scaling probe succeeds
+suspiciously easily, verify the particle count in its output rather than the
+command you thought you ran.
 
 So the previously reported 4x (kernelsWallMs 4348.8 vs 17424.2) **is not
 reproducible with this benchmark at any particle count where both arms run**.

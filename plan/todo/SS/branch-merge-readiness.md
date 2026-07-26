@@ -252,6 +252,38 @@ Product events and successor lineage are additional source families feeding the
 same field; once the three-pass structure exists they are additional splat
 inputs rather than new algorithms.
 
+## Visual checks at t0 / t-mid / t-final
+
+Gate status is an aggregate and does not see "strange but passing". Frames are
+captured by the matrix already (`ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1`, under
+`<run>/<scenario>-frames/`); **look at them**, at least the initial frame, a
+mid-run batch, and the final one.
+
+Read the `post-probe-composited-page` frame rather than the `resident-batch`
+crops. The crops are a 767x480 window on a 1280x800 canvas and cut off the
+bottom of the container, which makes settled material look as though it has
+vanished off-screen.
+
+Two things looked wrong on `standard-iron-ice-quench` and neither was:
+
+- **A blob apparently suspended in mid-air.** In the composited frame its
+  screen position falls inside the floor quad at the far corner of the box --
+  it is an ice fragment resting on the floor, thrown clear by the impact, not
+  something stuck. It also moves between batches 8 and 10.
+- **The iron base "disappearing".** It is dark blue-grey on a dark background
+  and ends up under the ice pile; the faint dark rim below the white mound in
+  the final composited frame is it.
+
+One hypothesis raised and **disproved**, recorded so it is not raised again:
+placeholder slots were suspected of rendering. They really are indistinguishable
+from live particles except by mass -- 1,512 of 1,944 render rows carry zero mass
+while still carrying a genuine material id, phase and `status: 1`, and the spare
+product slots all sit at the box centre -- and neither the gather nor the splat
+checks mass. But adding the guard produced a **byte-identical frame** and
+`surfaceDrawMs` of 70.6 ms against 67.7 ms without it, so it fixes nothing and
+costs slightly more. It was reverted rather than kept as a plausible-sounding
+change with no evidence behind it.
+
 ## Landed on this branch
 
 | Commit | What |

@@ -20,11 +20,64 @@ the spatial refactor at all (`sphPhaseCarrierTransferGpu.js` does not exist
 there). Discarding this branch would discard the chosen architecture, not a
 failed experiment.
 
-## Decision: preserve, merge deliberately
+## Decision: preserve. The merge blockers are weaker than believed.
 
-Preserve. Do **not** merge until the priority ordering in
-`plan/todo/sol-critic.md` is satisfied, because the branch carries a measured
-~4x frame-time regression whose payback step has not landed.
+Preserve — that was never in doubt once the branch turned out to be Slices 0-9
+rather than one slice. What changed on 2026-07-26 is the case for *withholding*
+the merge. Both stated blockers were re-measured and neither survived intact.
+
+### Blocker 1: production presentation — CLEARED
+
+`sol-critic.md` records "Production native surface | failed/blocking" on all
+seven scenarios, with **109 submissions referencing a destroyed indirect
+buffer**. Re-run on this branch (`merge-gate-02`, artifacts under
+`/home/cos/ulg-probe-artifacts/`):
+
+| scenario | status | issues | destroyed-buffer submits |
+| --- | --- | --- | --- |
+| standard-water-cycle | good | [] | 0 |
+| standard-iron-ice-quench | good | [] | 0 |
+| standard-sodium-water | good | [] | 0 |
+| standard-cesium-fluorine | good | [] | 0 |
+| random-elements-ba-pb | good | [] | 0 |
+| random-elements-bk-lr | good | [] | 0 |
+| random-elements-fr-fe | good | [] | 0 |
+
+**7/7 good, zero issues, zero destroyed-buffer submissions.** Priority 0B is
+satisfied on this branch.
+
+### Blocker 2: the ~4x regression — NOT REPRODUCED
+
+`scripts/sph-performance-benchmark.mjs`, this branch vs `7454ac9`, same device,
+nothing else holding the GPU:
+
+| metric | baseline `7454ac9` | branch | delta |
+| --- | --- | --- | --- |
+| residentStepsKernelsWallMs | 57.5 | 54.9 | **-4.5%** |
+| residentStepsWallMs | 59.6 | 57.2 | -4.0% |
+| probeBatchWallMs | 94.5 | 95.2 | +0.7% |
+| physicsStepsPerSecond | 170.6 | 169.3 | -0.7% |
+| `performanceGate.status` | pass | **pass** | |
+
+At 1024 particles the branch is at parity or slightly ahead, and its own
+performance gate passes.
+
+**Above 1024 there is no comparison to make.** At 4096 and at 10000 particles
+*both* arms fail identically — `page.waitForFunction` timeout at
+`sph-long-horizon-probe.mjs:2062`, the initial "particle state or driver
+exists" readiness wait, not the physics loop. Confirmed at the default 240 s
+budget and again at 900 s (`ULG_BENCH_TIMEOUT_MS`). The app does not reach
+readiness at 4096 particles on this machine at `7454ac9` either, so this is a
+pre-existing scaling limit rather than anything this branch introduced — and it
+is worth its own investigation.
+
+So the previously reported 4x (kernelsWallMs 4348.8 vs 17424.2) **is not
+reproducible with this benchmark at any particle count where both arms run**.
+Note also that one arm of that original campaign was already invalidated by the
+`/tmp` worktree defect recorded in the Slice 9 handoff. Treat the 4x as
+unconfirmed rather than as fixed: the mechanisms below are real and still
+unaddressed, they simply do not show at 1024 particles, which is exactly where
+a 4 KiB-per-particle reservation would not show.
 
 **Why it is slower than what it replaced** — the mechanism is documented, not
 mysterious:
@@ -84,18 +137,14 @@ Once it could measure, it confirmed the gel fix: final tallness **0.016**
 (limit 0.8), footprint fill **0.814** (floor 0.15), peak tallness 1.754 while
 the drop was still falling. Water spreads and flattens.
 
-## On branch `prof0-wiring` (worktree `/home/cos/projects/ulg-s9-bisect`)
+## PROF-0 and the bind-group work (merged 2026-07-26)
 
-Held off the main branch only because the merge-gate matrix is serving from the
-main worktree and editing source mid-run would make its scenarios inconsistent.
-**Merge these back once the matrix finishes.**
-
-| Commit | What |
-| --- | --- |
-| `ed056df` | PROF-0 wired into the fused sequence's five passes |
-| `bd42821` | Bind groups memoized on buffer identity |
-| `598d6e9` | Profiling request plumbed; `stageGpuMs` surfaced on the result |
-| `595ea5b` | Accumulator-clear bind group memoized and gated |
+Developed on `prof0-wiring` in the `ulg-s9-bisect` worktree so the merge-gate
+matrix could keep serving from the main worktree uninterrupted, then
+fast-forwarded in: `ed056df`, `bd42821`, `598d6e9`, `595ea5b`, `7dceb6a`,
+`3b87b4a`. A `node_modules` symlink rode along from that worktree and was
+removed in `1879d9c` -- it had materialised as a self-referential link that
+replaced the real dependency tree.
 
 ### The per-substep bind-group finding
 

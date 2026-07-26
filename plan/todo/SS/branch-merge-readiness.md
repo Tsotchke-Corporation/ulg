@@ -163,9 +163,24 @@ few silently drops particles. So the design has to be:
 A host-side bound refreshed from the compact summary is **not** safe on its own:
 a companion activated this substep would be skipped until the next readback.
 
-Bound the win before building it: set `phaseLaneCount = 1` and benchmark at 50k.
-That is not a shippable change -- it removes phase-transition capacity -- but it
-puts a ceiling on what compaction can recover.
+The bounding experiment was run and **did not yield a number**: with
+`phaseLaneCount = 1` the 50k scenario reports `status: bad` with no kernel
+timing, because removing the companion lanes removes the phase-transition
+capacity the scenario actually uses. A ceiling measurement needs a scenario with
+no phase transitions rather than a build with no capacity for them.
+
+**More important, and it reframes the priority: this inflation is not an SS
+refactor cost.** `appendPhaseCarrierLanes` lives in `sphPhaseDemo.js`, which
+`7454ac9` shares unchanged, so the baseline dispatches over exactly the same
+19,772 slots. It cannot explain any regression between the two, and compaction
+would speed up both arms equally. It is a general optimisation, not a merge
+concern -- which is consistent with the branch measuring only 4.3% off baseline
+at 48,778 particles despite 77.8% of threads being dead in both arms.
+
+The likely size is also modest: each wasted thread costs scheduling plus one
+16-byte load, so at 15,378 dead threads that is roughly 246 KB of extra traffic
+per kernel per substep, not a bandwidth wall. Worth doing for the memory
+footprint -- 4.5x on every per-slot array -- more than for the frame time.
 
 ## Landed on this branch
 

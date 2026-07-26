@@ -98,14 +98,25 @@ reservation cannot show up at 1024.
 A sharp cliff between 3456 and 4394 is a hard limit being crossed, not a
 gradual slowdown — and 4096 falls between them.
 
-Unverified lead: `src/runtime/thermoPreflight.js:82` defaults
-`particleResolution.h2o` to **4096** (fe 2048, gas 8192), and this scenario is
-h2o/h2o. The magnitude coincidence is suggestive but causation is **not**
-established — that value is a scenario-descriptor default feeding
-`representedEntities`, and nothing yet shows it gates startup. Next step is to
-raise it and re-run N=13; if startup succeeds, that is the limit, and the fe
-default of 2048 predicts an even lower cliff for iron scenarios, which is a
-cheap confirming test.
+**Lead raised and refuted.** `src/runtime/thermoPreflight.js:82` defaults
+`particleResolution.h2o` to 4096 (fe 2048, gas 8192), and the stalling scenario
+was h2o/h2o — a tempting magnitude coincidence. If that cap were causal, an
+fe/fe scenario with its 2048 default should stall *lower*. It does not:
+
+| scenario | 2662 particles | 4394 particles |
+| --- | --- | --- |
+| h2o/h2o | ready | stalls |
+| fe/fe | ready | stalls |
+
+Identical. The cliff is **material-independent**, so `particleResolution` is
+not the limit and the thermo preflight is exonerated.
+
+That rules out the material/thermo descriptors and points at something
+structural that scales with particle count alone — a buffer size, a dispatch
+or binding limit, or a grid/field allocation. The next probe should capture the
+browser console during a stalled N=13 run rather than reason from constants;
+the stall is at the "particle state or driver exists" wait, so whatever fails
+happens during scene construction and should log there.
 
 Method note, recorded because it cost a wrong conclusion: the probe reads
 `ULG_PROBE_URL`. An earlier pass here used `ULG_PROBE_SCENARIO_URL`, which the

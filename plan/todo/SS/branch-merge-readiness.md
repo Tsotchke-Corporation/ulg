@@ -62,14 +62,23 @@ nothing else holding the GPU:
 At 1024 particles the branch is at parity or slightly ahead, and its own
 performance gate passes.
 
-**Above 1024 there is no comparison to make.** At 4096 and at 10000 particles
-*both* arms fail identically — `page.waitForFunction` timeout at
+**Above 1024 the benchmark cannot produce a comparison.** At 4096 and at 10000
+particles *both* arms fail identically — `page.waitForFunction` timeout at
 `sph-long-horizon-probe.mjs:2062`, the initial "particle state or driver
 exists" readiness wait, not the physics loop. Confirmed at the default 240 s
-budget and again at 900 s (`ULG_BENCH_TIMEOUT_MS`). The app does not reach
-readiness at 4096 particles on this machine at `7454ac9` either, so this is a
-pre-existing scaling limit rather than anything this branch introduced — and it
-is worth its own investigation.
+budget and again at 900 s (`ULG_BENCH_TIMEOUT_MS`), on this branch and on
+`7454ac9`.
+
+This is **not** an application scaling limit. Driving
+`sph-long-horizon-probe.mjs` directly at the same particle count
+(`dropn=13&basen=13`, ~4.4k particles) reaches readiness and runs. The
+difference is the extra URL parameters the benchmark appends beyond that base
+scenario — `renderUseCase=same-device-interactive` and the rest of its harness
+configuration. So the blocker is in the benchmark's own scenario setup, and it
+is bounded: bisect the benchmark's added parameters against the working direct
+probe URL to find which one stalls startup. Until that is done the benchmark
+has no reach above 1024 particles, which is exactly the range where the
+mechanisms below would become visible.
 
 So the previously reported 4x (kernelsWallMs 4348.8 vs 17424.2) **is not
 reproducible with this benchmark at any particle count where both arms run**.

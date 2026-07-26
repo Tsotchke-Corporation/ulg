@@ -46,102 +46,43 @@ buffer**. Re-run on this branch (`merge-gate-02`, artifacts under
 **7/7 good, zero issues, zero destroyed-buffer submissions.** Priority 0B is
 satisfied on this branch.
 
-### Blocker 2: the ~4x regression — NOT REPRODUCED
+### Blocker 2: the ~4x regression — DOES NOT EXIST
 
-`scripts/sph-performance-benchmark.mjs`, this branch vs `7454ac9`, same device,
-nothing else holding the GPU:
+Measured against `7454ac9` on the same device, nothing else holding the GPU,
+using the same benchmark script for both arms:
 
-| metric | baseline `7454ac9` | branch | delta |
-| --- | --- | --- | --- |
-| residentStepsKernelsWallMs | 57.5 | 54.9 | **-4.5%** |
-| residentStepsWallMs | 59.6 | 57.2 | -4.0% |
-| probeBatchWallMs | 94.5 | 95.2 | +0.7% |
-| physicsStepsPerSecond | 170.6 | 169.3 | -0.7% |
-| `performanceGate.status` | pass | **pass** | |
+| particles | baseline kernelsWallMs | branch kernelsWallMs | delta | gates |
+| --- | --- | --- | --- | --- |
+| 1,024 | 57.5 | 54.9 | **-4.5%** | both pass |
+| 9,826 | 75.7 | 78.0 | +3.0% | both pass |
+| 48,778 | 153.1 | 159.7 | **+4.3%** | both pass |
 
-At 1024 particles the branch is at parity or slightly ahead, and its own
-performance gate passes.
+`physicsStepsPerSecond` at 48,778: 15.65 baseline vs 14.68 branch (-6.2%).
 
-**Above 1024 the benchmark cannot produce a comparison.** At 4096 and at 10000
-particles *both* arms fail identically — `page.waitForFunction` timeout at
-`sph-long-horizon-probe.mjs:2062`, the initial "particle state or driver
-exists" readiness wait, not the physics loop. Confirmed at the default 240 s
-budget and again at 900 s (`ULG_BENCH_TIMEOUT_MS`), on this branch and on
-`7454ac9`.
+The SS refactor costs roughly **5%**, not 4x. The original figures
+(kernelsWallMs 4348.8 vs 17424.2) are not reproducible at any particle count,
+and one arm of that campaign was already invalidated by the `/tmp` worktree
+defect recorded in the Slice 9 handoff.
 
-This **is** an application-level limit, and it reproduces outside the
-benchmark. Driving `sph-long-horizon-probe.mjs` directly with
-`ULG_PROBE_URL='...&dropn=13&basen=13'` (~4.4k particles) also never reaches
-readiness. It is not caused by the benchmark's extra URL parameters either:
-appending all eight of them (`renderUseCase`, `lawt`, `lawr`, `lawv`, `lawst`,
-`visualCapture`, `surfaceDraw`, `blob`) to a *small* scenario still starts
-normally. Particle count is the variable.
+Getting to this measurement required fixing three things that had nothing to do
+with the SS refactor and everything to do with why nobody could measure it:
 
-It reproduces on `7454ac9` as well, so it is pre-existing and not introduced by
-this branch — but "pre-existing" is not "acceptable": **the application cannot
-start a scenario of roughly 4.4k particles**, against a stated ambition of
-planetary scale.
+1. **The benchmark box did not follow its own geometry** (`df640d9`).
+   `boxx/boxy/boxz` were pinned at 5 m while `dropn`/`basen` scaled with the
+   target count, so above 12 particles per edge the drop block overflowed the
+   ceiling and the scenario was rejected. The sweep could never exceed ~3,456
+   particles.
+2. **A rejected scenario looked like a hang** (`f465c44`). `runTask` catches a
+   throw and reports an error artifact; `applyWorkerRebuildResult` saw no
+   `positionsM`, returned false, and recorded nothing. The demo then sat on
+   `initial-material-closure-pending` forever. It now records the reason.
+3. **Two unbounded array spreads** (`2aeb3a7`). `particles.push(...reservedLanes)`
+   pushes three entries per particle onto the call stack -- about 146k arguments
+   at 50k particles -- and threw "Maximum call stack size exceeded". Both are
+   loops now.
 
-This is now the top blocker for answering the performance question at all,
-because 1024 particles is the only size that runs, and a 4 KiB-per-particle
-reservation cannot show up at 1024.
-
-**Threshold, bisected** (`dropn=basen=N`, h2o/h2o, same URL otherwise):
-
-| N | particles | startup |
-| --- | --- | --- |
-| 10 | 2000 | ready |
-| 11 | 2662 | ready |
-| 12 | 3456 | ready |
-| 13 | 4394 | **stalls** |
-
-A sharp cliff between 3456 and 4394 is a hard limit being crossed, not a
-gradual slowdown — and 4096 falls between them.
-
-**Lead raised and refuted.** `src/runtime/thermoPreflight.js:82` defaults
-`particleResolution.h2o` to 4096 (fe 2048, gas 8192), and the stalling scenario
-was h2o/h2o — a tempting magnitude coincidence. If that cap were causal, an
-fe/fe scenario with its 2048 default should stall *lower*. It does not:
-
-| scenario | 2662 particles | 4394 particles |
-| --- | --- | --- |
-| h2o/h2o | ready | stalls |
-| fe/fe | ready | stalls |
-
-Identical. The cliff is **material-independent**, so `particleResolution` is
-not the limit and the thermo preflight is exonerated.
-
-That rules out the material/thermo descriptors and points at something
-structural that scales with particle count alone — a buffer size, a dispatch
-or binding limit, or a grid/field allocation.
-
-The next probe should capture the browser console during a stalled N=13 run
-rather than reason from constants: the stall is at the "particle state or
-driver exists" wait, so the failure happens during scene construction and
-should log there. One caveat learned the hard way — a hand-rolled Playwright
-script could not reach a `vite --port N` dev server from inside the launched
-browser (curl reached it from the shell; the page got
-`net::ERR_CONNECTION_REFUSED`). Reuse `launchProbeBrowser` and the server setup
-from `sph-long-horizon-probe.mjs`, which demonstrably works, and add console
-capture on the failure path — the probe already collects console output but
-throws at the readiness wait before writing its output file, which is exactly
-why this evidence is missing today.
-
-Method note, recorded because it cost a wrong conclusion: the probe reads
-`ULG_PROBE_URL`. An earlier pass here used `ULG_PROBE_SCENARIO_URL`, which the
-probe ignores, so those runs silently exercised the default small scenario and
-appeared to prove the application was fine at 4.4k. Two commits in this file
-asserted that before the variable name was checked. If a scaling probe succeeds
-suspiciously easily, verify the particle count in its output rather than the
-command you thought you ran.
-
-So the previously reported 4x (kernelsWallMs 4348.8 vs 17424.2) **is not
-reproducible with this benchmark at any particle count where both arms run**.
-Note also that one arm of that original campaign was already invalidated by the
-`/tmp` worktree defect recorded in the Slice 9 handoff. Treat the 4x as
-unconfirmed rather than as fixed: the mechanisms below are real and still
-unaddressed, they simply do not show at 1024 particles, which is exactly where
-a 4 KiB-per-particle reservation would not show.
+Each fix exposed the next. The apparent "application scaling cliff at ~3.5k
+particles" recorded earlier in this file was the first of them.
 
 ### Mechanisms that remain unaddressed regardless
 

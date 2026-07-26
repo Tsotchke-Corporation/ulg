@@ -326,11 +326,12 @@ test('generic source-local builder routes normal no-readback and product inputs 
     particleCount: 1,
     renderSmearDtS: 1 / 60
   });
-  // Velocity smear falls back to the dense gather: the four-pass source-local
-  // implementation exists but fails its native parity arm, so it is not
-  // admitted.
-  assert.equal(smearResult.sourceLocalStrategy, 'dense-fallback');
-  assert.equal(smearResult.sourceLocalFallbackReason, 'velocity-smear-parity-not-yet-implemented');
+  // Velocity smear runs source-local through the four-pass sequence, verified
+  // against the dense gather by the native parity arm.
+  assert.equal(smearResult.sourceLocalStrategy, 'shadow');
+  assert.ok(!smearResult.sourceLocalFallbackReason);
+  const smearPasses = smearInput.dispatches.filter((e) => /source-local/.test(e.label));
+  assert.equal(smearPasses.length, 4, 'smear needs splat, resolve, splat, resolve');
   // Without smear the sequence must stay at the original two passes, so a
   // scene that does not need the correction pays nothing for it.
   const noSmearInput = fakeComputeDevice();
@@ -510,10 +511,50 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           }
           return { density, palette, temperature };
         };
+        // A single particle has zero dispersion by construction
+        // (<|v|^2> - |<v>|^2 = 0), so the arm above proves the four-pass
+        // sequence does not corrupt anything but never exercises the
+        // correction. Two nearby particles with opposing velocities give a
+        // bridging cell real dispersion, which is the case the whole mechanism
+        // exists for.
+        const divergingRows = new Float32Array(render.SPH_GPU_RENDER_ROW_FLOATS * 2);
+        divergingRows.set(rows, 0);
+        divergingRows.set(rows, render.SPH_GPU_RENDER_ROW_FLOATS);
+        divergingRows[render.SPH_GPU_RENDER_ROW_FLOATS + 0] = 2.9;
+        divergingRows[17] = 4; divergingRows[18] = 0; divergingRows[19] = 0;
+        divergingRows[render.SPH_GPU_RENDER_ROW_FLOATS + 17] = -4;
+        divergingRows[render.SPH_GPU_RENDER_ROW_FLOATS + 18] = 0;
+        divergingRows[render.SPH_GPU_RENDER_ROW_FLOATS + 19] = 0;
+        const divergingShared = {
+          ...shared,
+          renderRows: divergingRows,
+          particleCount: 2,
+          renderSmearDtS: 1 / 60
+        };
+        const divergingShadow = await sourceLocal.buildSphRenderFieldSourceLocalWebGpu({
+          ...divergingShared,
+          maxSplatCellsPerSource: 4096
+        });
+        const divergingDense = await render.buildSphRenderFieldWebGpu(divergingShared);
+        const divergingDelta = compareFields(divergingDense, divergingShadow);
+        let maxDivergingSmearSq = 0;
+        for (let offset = 0; offset < divergingShadow.fieldRows.length; offset += 8) {
+          maxDivergingSmearSq = Math.max(maxDivergingSmearSq, divergingShadow.fieldRows[offset + 5]);
+        }
         const smearDelta = compareFields(smearDense, smearShadow);
         // Isolates the failure: does smear change the dense field at all, and
         // does it change ours? If ours is unchanged, our correction is inert.
         const denseSmearEffect = compareFields(dense, smearDense);
+        // smear_sq is published into lane 5 of each cell (second vec4, .y), so
+        // the correction itself is directly observable rather than inferred.
+        let maxSmearSq = 0;
+        let maxShadowDensity = 0;
+        let maxSmearShadowDensity = 0;
+        for (let offset = 0; offset < smearShadow.fieldRows.length; offset += 8) {
+          maxSmearSq = Math.max(maxSmearSq, smearShadow.fieldRows[offset + 5]);
+          maxShadowDensity = Math.max(maxShadowDensity, shadow.fieldRows[offset]);
+          maxSmearShadowDensity = Math.max(maxSmearShadowDensity, smearShadow.fieldRows[offset]);
+        }
         const shadowSmearEffect = compareFields(shadow, smearShadow);
         const productDelta = compareFields(productDense, productShadow);
         let maxDensityAbs = 0;
@@ -566,6 +607,11 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           diagnosticDestroyedBufferCount,
           smearDelta,
           denseSmearEffect,
+          maxSmearSq,
+          divergingDelta,
+          maxDivergingSmearSq,
+          maxShadowDensity,
+          maxSmearShadowDensity,
           shadowSmearEffect,
           smearStrategy: smearShadow.sourceLocalStrategy,
           productDelta,
@@ -609,9 +655,29 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
   // 'shadow' strategy and the 1e-3 tolerances used above -- this arm is the
   // gate that caught the implementation perturbing a field the dense path
   // leaves untouched.
-  assert.equal(native.smearStrategy, 'dense-fallback');
-  assert.equal(native.smearDelta.density, 0);
-  assert.equal(native.smearDelta.palette, 0);
+  assert.equal(native.smearStrategy, 'shadow');
+  // Single particle: zero dispersion, so the four-pass sequence must reproduce
+  // the dense field exactly rather than perturb it.
+  assert.ok(
+    native.smearDelta.density <= 1e-3,
+    `smearDelta=${JSON.stringify(native.smearDelta)} maxSmearSq=${native.maxSmearSq} shadowDensity=${native.maxShadowDensity} smearShadowDensity=${native.maxSmearShadowDensity}`
+  );
+  assert.ok(native.smearDelta.palette <= 1e-3, JSON.stringify(native.smearDelta));
+
+  // Two diverging particles: the correction must actually engage, and still
+  // land on the dense field.
+  assert.ok(
+    native.maxDivergingSmearSq > 0,
+    `dispersion never engaged: maxDivergingSmearSq=${native.maxDivergingSmearSq}`
+  );
+  assert.ok(
+    native.divergingDelta.density <= 1e-3,
+    `diverging density ${JSON.stringify(native.divergingDelta)} smearSq=${native.maxDivergingSmearSq}`
+  );
+  assert.ok(
+    native.divergingDelta.palette <= 1e-3,
+    `diverging palette ${JSON.stringify(native.divergingDelta)}`
+  );
   assert.ok(native.productDelta.palette <= 1e-3, `product palette ${JSON.stringify(native.productDelta)}`);
 });
 

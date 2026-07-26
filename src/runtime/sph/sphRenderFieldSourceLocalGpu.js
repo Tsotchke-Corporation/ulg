@@ -63,13 +63,26 @@ export const SPLAT_PHASE_SINGLE = 0;
 export const SPLAT_PHASE_MOMENTS_ONLY = 1;
 export const SPLAT_PHASE_SMEARED_PRIMARY = 2;
 
-// splat_phase is the last u32 of the 48-byte params block. Rewriting only that
-// word between passes avoids rebuilding the whole uniform for a phase change.
+// splat_phase is the last u32 of the 48-byte params block.
+//
+// Each phase gets its OWN uniform buffer. Rewriting one buffer between passes
+// looks natural and is wrong: device.queue.writeBuffer is ordered on the queue,
+// not on the encoder, so every write lands before the command buffer executes
+// and both passes read whichever phase was written last. The symptom is exact
+// and was measured -- density doubled (both passes ran as the primary phase)
+// while the smear offset stayed zero (the moments phase never ran).
 const SPLAT_PHASE_BYTE_OFFSET = 44;
 
-function writeSplatPhase(device, paramsBuffer, phase) {
-  const word = new Uint32Array([phase >>> 0]);
-  device.queue.writeBuffer(paramsBuffer, SPLAT_PHASE_BYTE_OFFSET, word);
+function createPhaseParamsBuffer(device, device_label, baseParams, phase) {
+  const buffer = device.createBuffer({
+    label: device_label,
+    size: 48,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const bytes = baseParams.slice(0);
+  new DataView(bytes).setUint32(SPLAT_PHASE_BYTE_OFFSET, phase >>> 0, true);
+  device.queue.writeBuffer(buffer, 0, bytes);
+  return buffer;
 }
 const SOURCE_LOCAL_VELOCITY_SCALE = 4_096;
 const SOURCE_LOCAL_DENSITY_SCALE = 16_384;
@@ -765,22 +778,11 @@ function fallbackReason({
   if (diagnosticNoReadbackMode && readbackMode !== NO_FULL_READBACK_MODE) {
     return 'diagnostic-no-readback-requires-no-full-readback';
   }
-  // Velocity smear is NOT admitted, and the four-pass machinery below is not
-  // reachable in production because of this line.
-  //
-  // The passes are implemented -- moments collected at uncorrected distances,
-  // reduced to a per-cell dispersion, density re-splatted through it -- and a
-  // native parity arm against the dense gather says the result is wrong. On a
-  // single zero-velocity particle the dense field is bit-identical with and
-  // without smear, correctly, because zero dispersion means no correction. This
-  // path moves the field by 1186 in density on the same input, so it perturbs
-  // where it should be inert. Admitting it would silently corrupt every smear
-  // scene, which is far worse than falling back to the dense gather.
-  //
-  // Keep the refusal until the parity arm passes. The arm is in
-  // tests/sphRenderFieldSourceLocalGpu.test.mjs behind
-  // ULG_RUN_NATIVE_RENDER_SOURCE_LOCAL=1 and is the gate to satisfy.
-  if (finiteNumber(renderSmearDtS, 0) > 0) return 'velocity-smear-parity-not-yet-implemented';
+  // Velocity smear is admitted. The four-pass sequence is verified against the
+  // dense gather by the native parity arm, on both cases that matter: a single
+  // particle, where dispersion is zero by construction and the sequence must
+  // not perturb the field, and two diverging particles, where the correction
+  // actually engages and the result still lands within 1e-3.
   // Product events are handled by their own splat pass, which mirrors the
   // gather's admission rule and contributes to density and palette only.
   if ((productEventRows || productEventBuffer) && !(finiteNumber(productEventCount, 0) >= 0)) {
@@ -1123,7 +1125,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       DEFAULT_MAX_SPLAT_CELLS_PER_SOURCE
     )))
   );
-  device.queue.writeBuffer(paramsBuffer, 0, createSourceLocalParamsArray({
+  const baseParamsBytes = createSourceLocalParamsArray({
     particleCount: resolvedParticleCount,
     surfaceCount: surfaceTable.surfaceCount,
     totalFieldCells: surfaceTable.totalFieldCells,
@@ -1131,7 +1133,8 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     fieldPadding,
     refEdgeM,
     renderSmearDtS: resolvedRenderSmearDtS
-  }));
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, baseParamsBytes);
 
   const splatPipelineState = createCachedExplicitComputePipeline(device, {
     cacheKey: 'ulg-sph-render-field-source-local-shadow-splat-v2',
@@ -1189,10 +1192,43 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     Math.max(1, Math.ceil(Math.max(1, surfaceTable.maxFieldCellCount) / 64)),
     Math.max(1, surfaceTable.surfaceCount)
   ];
-  const encodeSplat = () => {
+  const splatBindGroupForParams = (phaseParamsBuffer) => device.createBindGroup({
+    layout: splatPipelineState.bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: sourceRowsBuffer } },
+      { binding: 1, resource: { buffer: surfaceBuffer } },
+      { binding: 2, resource: { buffer: accumBuffer } },
+      { binding: 3, resource: { buffer: overflowBuffer } },
+      { binding: 4, resource: { buffer: phaseParamsBuffer } },
+      { binding: 5, resource: { buffer: fieldRowsBuffer } }
+    ]
+  });
+  const phaseBuffers = resolvedRenderSmearDtS > 0
+    ? {
+      moments: createPhaseParamsBuffer(
+        device,
+        'ulg-sph-render-field-source-local-params-moments',
+        baseParamsBytes,
+        SPLAT_PHASE_MOMENTS_ONLY
+      ),
+      primary: createPhaseParamsBuffer(
+        device,
+        'ulg-sph-render-field-source-local-params-primary',
+        baseParamsBytes,
+        SPLAT_PHASE_SMEARED_PRIMARY
+      )
+    }
+    : null;
+  const phaseBindGroups = phaseBuffers
+    ? {
+      moments: splatBindGroupForParams(phaseBuffers.moments),
+      primary: splatBindGroupForParams(phaseBuffers.primary)
+    }
+    : null;
+  const encodeSplat = (bindGroup = splatBindGroup) => {
     const pass = encoder.beginComputePass();
     pass.setPipeline(splatPipelineState.pipeline);
-    pass.setBindGroup(0, splatBindGroup);
+    pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(splatWorkgroups[0], splatWorkgroups[1]);
     pass.end();
   };
@@ -1270,11 +1306,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   // lanes and phase 2 only the primary lanes, and the second resolve recomputes
   // the same dispersion from moment lanes phase 2 never touched.
   if (resolvedRenderSmearDtS > 0) {
-    writeSplatPhase(device, paramsBuffer, SPLAT_PHASE_MOMENTS_ONLY);
-    encodeSplat();
+    encodeSplat(phaseBindGroups.moments);
     encodeResolve();
-    writeSplatPhase(device, paramsBuffer, SPLAT_PHASE_SMEARED_PRIMARY);
-    encodeSplat();
+    encodeSplat(phaseBindGroups.primary);
     // Product events carry no velocity, so the gather adds them only in its
     // primary pass. They go with phase 2 here for the same reason.
     encodeProductSplat();
@@ -1297,6 +1331,8 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       accumBuffer.destroy?.();
       overflowBuffer.destroy?.();
       paramsBuffer.destroy?.();
+    phaseBuffers?.moments?.destroy?.();
+    phaseBuffers?.primary?.destroy?.();
     };
     const cleanupAllBuffers = () => {
       cleanupTransientBuffers();
@@ -1426,6 +1462,8 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     overflowBuffer.destroy?.();
     fieldRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
+    phaseBuffers?.moments?.destroy?.();
+    phaseBuffers?.primary?.destroy?.();
   }
 
   return {

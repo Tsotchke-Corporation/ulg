@@ -217,45 +217,48 @@ particles with opposing velocities and asserts the correction actually engages.
 Still shadow mode. Making the splat the production render-field path is the
 remaining step, and now has a parity gate behind it.
 
-## PROF-0: found the break -- it was instrumented into the wrong function
+## PROF-0 reframed: the interface exists with 17 consumers and no producer
 
-The switch was plumbed correctly through four layers and still produced nothing,
-because the profiler was never in the code that runs.
+Three ticks were spent plumbing `stageGpuMs` by hand through layer after layer,
+each of which rebuilds its timing object field by field and drops anything not
+explicitly listed. That was the wrong approach, and the reason only became clear
+after chasing the chain to the end.
 
-A marker field added unconditionally to the fused *sequence*'s `stageTiming`
-never reached the probe either, which isolated it immediately: that object is
-not what surfaces. The surfaced timing reports
-`fusedResidentSequence: null, fusedResidentMechanics: true`.
+**`gpuTimestampRecorder` is already a contract with consumers throughout the
+runtime and no implementation anywhere.** 17 modules reference it across 51 call
+sites -- `sphMlsMpmGpuStep`, `webgpuRadixScanUnique`, `schroederSpatialEpochGpu`,
+`schroederSpatialMechanicalProposalsGpu`,
+`schroederSpatialReactionProductPlacementGpu`, `sphMlsMpmPostMechanicsClosure`
+and more. Every one guards on `recorder?.active === true` and then calls
+`measureQueueStage(descriptor, runStage)` or `beginEncoderSpan(...)`.
 
-**The executing path is `runFusedNoFullMlsMpmMechanicsWebGpu` (line ~8830). The
-profiler was wired into `runFusedNoFullMlsMpmMechanicsSequenceWebGpu` (line
-~10265).** The names differ by one word, both are fused, both take the same
-options, and the URL flag is `residentFuseSequence=1` -- which selects neither
-of them by name. Nothing about the symptom pointed at the mistake; only the
-marker did.
+Nothing ever constructs one. `schroederGpuTimestampRecorder` is a scene
+parameter defaulting to `null`, forwarded once, and there is no factory in the
+tree. So every consumer takes its inert branch, forever.
 
-The four hops wired earlier are all still necessary and are kept:
+Critically, `timedStage` in `runMlsMpmResidentStepWithOptionalWebGpu` -- the
+wrapper that invokes the fused-mechanics call that actually executes -- already
+routes through `measureQueueStage`. The instrumentation point that was hunted
+for across three ticks was already there.
 
-1. `sphPhaseScene` computed the flag and never forwarded it;
-2. the fused sequence built `stageTiming` before reading the profiler;
-3. the resident-step envelope rebuilds `stageTiming` field by field, dropping
-   anything not explicitly listed;
-4. the probe's `compactStageTiming` does the same.
+So `createSphGpuTimestampProfiler` is not redundant; it is the missing producer,
+built to the wrong shape. The work is to make it satisfy the
+`gpuTimestampRecorder` contract -- `active`, `measureQueueStage`,
+`beginEncoderSpan` -- and supply it from the scene when
+`?residentGpuTimestampProfile=1` is set. Then 51 call sites light up at once
+instead of one hand-plumbed field.
 
-What remains is to instrument the passes in
-`runFusedNoFullMlsMpmMechanicsWebGpu` -- its encoder is at ~9630, its submit at
-~9953, and its compute passes are the `preflightPass`, `validationPass`,
-`p2gPass` and `g2pPass` in the 9600-9950 range.
+This also means the earlier hand-plumbing should be removed rather than
+extended: `stageGpuMs`/`gpuTimestampProfile` threaded through the fused
+sequence, the envelope and the probe are all redundant once the recorder exists,
+and each is a field-by-field rebuild waiting to drop a field.
 
-An attempt at that instrumentation was reverted rather than left half-applied.
-Editing by string match in a 30k-line file put the profiler read into an
-unrelated function 6,000 lines away, because the same `device.queue.submit`
-line appears many times at the same indentation. Redo it by line range within
-the function bounds, and verify with the marker before wiring anything else.
+The diagnostic scaffolding used to find this -- marker fields in the fused
+mechanics results and in the surfacing `stageTiming` -- was reverted; it served
+its purpose and does not belong in the tree.
 
-**This is the gating dependency for FIELD-0.** `renderFieldMs` is host enqueue
-time, so the dense-versus-splat comparison is not answerable without GPU
-timestamps.
+**Still the gating dependency for FIELD-0**: `renderFieldMs` is host enqueue
+time, so dense versus splat is unanswerable without real GPU timing.
 
 ## Built and not wired: a standing inventory
 

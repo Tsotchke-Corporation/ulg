@@ -121,6 +121,7 @@ import {
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import { createSphGpuTimestampProfiler } from './sphGpuTimestampProfiler.js';
 import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
@@ -10295,7 +10296,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   thermalMaterialTable = null,
   thermalStepOptions = {},
   mechanicsMaterialTable = null,
-  mechanicsRefreshOptions = {}
+  mechanicsRefreshOptions = {},
+  // PROF-0. Off by default: timestamp queries require the device to have been
+  // created with the 'timestamp-query' feature, and resolving them costs a
+  // small readback that the hot loop should not pay unprofiled.
+  residentGpuTimestampProfilingRequested = false
 }) {
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   if (
@@ -10641,6 +10646,21 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     if (typeof encoder.clearBuffer !== 'function') {
       throw new Error('Fused resident mechanics sequence requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
+    // PROF-0. The stageMs entries for the stages encoded below are assigned a
+    // literal 0 further down, because their work lives inside this sequence.
+    // Timestamp queries are the only way to attribute it. Inert unless the
+    // device was created with 'timestamp-query'; see the module header.
+    //
+    // Five profiled passes per substep. read() sums by stage name, so the
+    // result is total GPU time per stage across the whole sequence rather than
+    // a single substep's sample. Capacity is bounded so a long batch declines
+    // and reports an overflow count instead of aliasing query indices.
+    const gpuTimestampProfiler = createSphGpuTimestampProfiler({
+      device,
+      enabled: residentGpuTimestampProfilingRequested === true,
+      capacity: Math.min(2000, Math.max(8, count * 5 + 8)),
+      label: 'ulg-mls-mpm-fused-sequence'
+    });
     let currentStateBuffer = sphParticleUpload.stateBuffer;
     let currentThermoBuffer = sphParticleUpload.thermoBuffer;
     let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
@@ -10727,7 +10747,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         })
         : null;
       if (activeGridDispatch.useActiveGrid) {
-        const accumulatorClearPass = encoder.beginComputePass();
+        const accumulatorClearPass = encoder.beginComputePass(
+          gpuTimestampProfiler.passDescriptorExtras('accumulatorClear')
+        );
         accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
         accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
         dispatchActiveGridComputePass(
@@ -10739,12 +10761,16 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       } else {
         encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
       }
-      const p2gPass = encoder.beginComputePass();
+      const p2gPass = encoder.beginComputePass(
+        gpuTimestampProfiler.passDescriptorExtras('p2gGridProjection')
+      );
       p2gPass.setPipeline(p2gPipeline);
       p2gPass.setBindGroup(0, p2gBindGroup);
       p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
       p2gPass.end();
-      const p2gFinalizePass = encoder.beginComputePass();
+      const p2gFinalizePass = encoder.beginComputePass(
+        gpuTimestampProfiler.passDescriptorExtras('p2gFinalize')
+      );
       p2gFinalizePass.setPipeline(p2gFinalizePipeline);
       p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
       dispatchActiveGridComputePass(
@@ -10754,7 +10780,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       );
       p2gFinalizePass.end();
 
-      const gridUpdatePass = encoder.beginComputePass();
+      const gridUpdatePass = encoder.beginComputePass(
+        gpuTimestampProfiler.passDescriptorExtras('gridUpdate')
+      );
       gridUpdatePass.setPipeline(gridUpdatePipeline);
       gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
       dispatchActiveGridComputePass(
@@ -10779,7 +10807,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
         ]
       });
-      const g2pPass = encoder.beginComputePass();
+      const g2pPass = encoder.beginComputePass(
+        gpuTimestampProfiler.passDescriptorExtras('g2pReconstruction')
+      );
       g2pPass.setPipeline(g2pPipeline);
       g2pPass.setBindGroup(0, g2pBindGroup);
       g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
@@ -10853,6 +10883,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         currentMechanicsBuffer = mechanicsRefreshStage.mechanicsBuffer;
       }
     }
+    // Must be encoded on this encoder, after the profiled passes and before
+    // finish(). No-op when profiling is inert.
+    gpuTimestampProfiler.resolve(encoder);
     device.queue.submit([encoder.finish()]);
     for (const stage of sidecarEncoderStages) stage.markSubmittedWork?.();
     for (const scratchSet of separationScratchSets) {
@@ -11243,6 +11276,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    // PROF-0. Read after submit so the queries have resolved. Returns a status
+    // and a null stage map when profiling is inert, so a consumer can always
+    // tell "not measured" from "measured as zero" -- the distinction the
+    // literal-0 stageMs entries below destroy.
+    const gpuTimestampProfile = await gpuTimestampProfiler.read();
+    gpuTimestampProfiler.destroy();
     const finalStep = await residentStepEnvelope({
       sphParticleState: finalSourceSphParticleState,
       mlsMpmParticleState: finalSourceMlsMpmParticleState,
@@ -11351,6 +11390,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       for (const stage of sidecarEncoderStages) stage.cleanupSubmittedWork?.();
       for (const buffer of temporaryBuffers) buffer.destroy?.();
     });
+    // Attached rather than threaded through residentStepEnvelope: the envelope
+    // has a wide signature already, and this is diagnostic evidence rather than
+    // step state. stageGpuMs sits alongside the envelope's stageMs so a reader
+    // can compare host enqueue time against device execution time directly.
+    if (finalStep && typeof finalStep === 'object' && Object.isExtensible(finalStep)) {
+      finalStep.stageGpuMs = gpuTimestampProfile.stageGpuMs ?? null;
+      finalStep.gpuTimestampProfile = gpuTimestampProfile;
+    }
     returned = true;
     return finalStep;
   } finally {

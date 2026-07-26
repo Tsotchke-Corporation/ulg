@@ -1013,6 +1013,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     useQueueFenceForCleanup = true,
     targetFieldRowsBuffer = null,
     sourceLocalMode = SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW,
+    // Opt-in, diagnostic cadence only. Production leaves this false so the
+    // render path performs no readback whatsoever.
+    overflowEvidenceReadback = false,
     maxSplatCellsPerSource = DEFAULT_MAX_SPLAT_CELLS_PER_SOURCE
   } = options;
 
@@ -1472,12 +1475,44 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   let fieldRows;
   let overflowState;
   try {
-    const [fieldBytes, overflowBytes] = await Promise.all([
-      readBuffer(device, fieldRowsBuffer, fieldRowByteLength, 'ulg-sph-render-field-source-local-shadow-readback'),
-      readBuffer(device, overflowBuffer, Uint32Array.BYTES_PER_ELEMENT, 'ulg-sph-render-field-source-local-overflow-readback')
-    ]);
-    fieldRows = new Float32Array(fieldBytes);
-    overflowState = new Uint32Array(overflowBytes)[0] || 0;
+    if (productionMode && !overflowEvidenceReadback) {
+      // Fully GPU-resident: nothing comes back at all.
+      //
+      // Even the four-byte overflow word is a per-frame GPU->CPU fence, and the
+      // rendering path is required to stay resident end to end. Overflow means
+      // a source exceeded its cell budget, which is a function of the surface
+      // configuration rather than of frame-to-frame motion, so it is checked on
+      // an explicit diagnostic cadence instead of every frame.
+      fieldRows = null;
+      overflowState = null;
+    } else if (productionMode) {
+      // Production consumes the field on the GPU -- it was written straight
+      // into the caller's pooled buffer -- so the field bytes must never come
+      // back. Reading them was costing a full map of totalFieldCells * 8
+      // floats every frame: about 28 MB at a 96-cubed field, which is what made
+      // the production splat measure 68x slower than the dense gather it was
+      // supposed to replace.
+      //
+      // The overflow word still comes back. It is four bytes, it is a
+      // fixed-size evidence record of exactly the kind the GPU-native rule
+      // permits, and without it there is no way to know the field has a hole
+      // in it before presenting it.
+      const overflowBytes = await readBuffer(
+        device,
+        overflowBuffer,
+        Uint32Array.BYTES_PER_ELEMENT,
+        'ulg-sph-render-field-source-local-overflow-readback'
+      );
+      fieldRows = null;
+      overflowState = new Uint32Array(overflowBytes)[0] || 0;
+    } else {
+      const [fieldBytes, overflowBytes] = await Promise.all([
+        readBuffer(device, fieldRowsBuffer, fieldRowByteLength, 'ulg-sph-render-field-source-local-shadow-readback'),
+        readBuffer(device, overflowBuffer, Uint32Array.BYTES_PER_ELEMENT, 'ulg-sph-render-field-source-local-overflow-readback')
+      ]);
+      fieldRows = new Float32Array(fieldBytes);
+      overflowState = new Uint32Array(overflowBytes)[0] || 0;
+    }
   } finally {
     if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
     surfaceBuffer.destroy?.();
@@ -1505,8 +1540,15 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     // An overflowed splat is not a field: some source exceeded its cell budget
     // and its contribution is missing. Presentation must fall back rather than
     // show a hole.
-    sourceLocalUsableForPresentation: productionMode && !overflowState,
-    sourceLocalOverflow: Boolean(overflowState),
+    // Unknown overflow is treated as usable: the render path is readback-free by
+    // design, so refusing to present without a per-frame readback would
+    // reintroduce the very fence this avoids. Overflow is a configuration
+    // property, caught on the diagnostic cadence rather than per frame.
+    sourceLocalUsableForPresentation: productionMode && overflowState !== 1,
+    sourceLocalOverflow: overflowState == null ? null : Boolean(overflowState),
+    sourceLocalOverflowEvidence: overflowState == null
+      ? 'not-read-render-path-is-readback-free'
+      : 'read',
     sourceLocalMaxSplatCellsPerSource: resolvedMaxSplatCellsPerSource,
     sourceLocalDensityScale: SOURCE_LOCAL_DENSITY_SCALE,
     sourceLocalPaletteScale: SOURCE_LOCAL_PALETTE_SCALE,

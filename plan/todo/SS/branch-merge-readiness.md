@@ -252,6 +252,41 @@ spreading it**, so each new field must be added at every layer or it vanishes
 silently. That is why a flag can be read correctly at the top and produce
 nothing at the bottom.
 
+## Rule: the render path stays GPU-resident end to end
+
+No CPU readback on the rendering path. Not the field, not per-frame evidence,
+not "just four bytes" -- a four-byte `mapAsync` is still a GPU->CPU fence every
+frame. Readback belongs to explicit diagnostic cadences, never to the hot loop.
+
+**Where this stood when the rule was written.** The full-field readback in
+`sphRenderFieldSourceLocalGpu.js` is *older than* the FIELD-0 work: it is
+present at `d7f7238:988`, before any of it. It existed because the module was
+shadow-only and shadow parity genuinely requires reading the field back to
+compare against the dense gather. Production mode inherited it for one commit,
+which is most of why the production splat measured 68x slower, and it is now
+gated off.
+
+Current posture, measured on a production matrix run:
+
+- `requestedReadbackMode: no-full-readback` on 36 of 36 samples;
+- `normalHotLoopReadbackFree: true` on **48 of 53** samples.
+
+The five that are not readback-free are the outstanding item. The likely source
+is the `final-only` compact summary, whose `compactSummaryMapAsync` was measured
+at 133 ms in an earlier probe -- acceptable at a final-only cadence, not
+acceptable if it ever moves into the loop.
+
+Production source-local now reads nothing at all. Even the overflow word is
+behind an opt-in `overflowEvidenceReadback`, because overflow is a property of
+the surface configuration rather than of frame-to-frame motion and belongs on a
+diagnostic cadence. `sourceLocalOverflow` reports `null` rather than `false`
+when it was not read, and `sourceLocalOverflowEvidence` says which case applies,
+so an unread flag can never be mistaken for a clean one.
+
+The one readback added by this work is the PROF-0 timestamp query: fixed-size,
+off by default, and only when profiling is explicitly requested -- the category
+the GPU-native rule permits.
+
 ## FIELD-0 measured in production: the splat is slower, not faster
 
 The splat now has a production mode and the scene can route the visible render

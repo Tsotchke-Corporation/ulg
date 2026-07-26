@@ -182,6 +182,29 @@ The likely size is also modest: each wasted thread costs scheduling plus one
 per kernel per substep, not a bandwidth wall. Worth doing for the memory
 footprint -- 4.5x on every per-slot array -- more than for the frame time.
 
+## FIELD-0 is written and never wired
+
+sol-critic P0 calls the dense render-field gather "the largest clear
+redundant-calculation target": one invocation per surface cell, each scanning
+every particle, `S * 884,736 * N` visits -- 8.85 billion for one surface at
+10,000 particles. Its recommended replacement is a particle-parallel splat,
+estimated at 140,976 / 432,000 / 3,456,000 visits.
+
+**That replacement already exists.** `src/runtime/sph/sphRenderFieldSourceLocalGpu.js`
+is particle-parallel (`if (particle_index >= params.particle_count ...)`) and
+scatters into a small `radius_cells` neighbourhood -- exactly the splat shape.
+
+It is not used. Its modes are `shadow`, `diagnostic-no-readback` and
+`disabled`; there is no production mode, and the only importer in the entire
+repository is `tests/sphRenderFieldSourceLocalGpu.test.mjs`. Nothing under
+`src/` references it.
+
+So FIELD-0 is much closer to done than "not started": the kernel is written and
+under test, and what is missing is a production mode, consumer wiring, and an
+equivalence gate proving the splat field matches the gathered field within
+tolerance before the gather is retired. Priority 1 is unblocked now that 0B is
+green, so this is the next substantive piece of work.
+
 ## Landed on this branch
 
 | Commit | What |

@@ -353,11 +353,28 @@ test('generic source-local builder routes normal no-readback and product inputs 
     productEventRows: new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
     productEventCount: 1
   });
-  assert.equal(productResult.backend, 'webgpu');
-  assert.equal(productResult.sourceLocalStrategy, 'dense-fallback');
-  assert.equal(productResult.sourceLocalFallbackReason, 'product-event-parity-not-yet-implemented');
-  assert.ok(!productInput.dispatches.some((entry) => /source-local/.test(entry.label)));
-  assert.ok(productInput.dispatches.some((entry) => entry.label === 'ulg-sph-render-field'));
+  // Product events used to force the dense fallback. They now have their own
+  // splat pass, so the field is built source-local: particle splat, product
+  // splat, resolve.
+  assert.equal(productResult.sourceLocalStrategy, 'shadow');
+  assert.ok(!productResult.sourceLocalFallbackReason);
+  const productLabels = productInput.dispatches
+    .filter((entry) => /source-local/.test(entry.label))
+    .map((entry) => entry.label);
+  assert.equal(productLabels.length, 3);
+  assert.match(productLabels[1], /product-splat/, 'product events splat after the particles');
+  assert.ok(!productInput.dispatches.some((entry) => entry.label === 'ulg-sph-render-field'));
+
+  // With no events the product pass must not be encoded at all.
+  const noProductInput = fakeComputeDevice();
+  await buildSphRenderFieldSourceLocalWebGpu({
+    device: noProductInput.device,
+    renderRows: renderRowsForSurface(surfaceTable),
+    surfaceTable,
+    particleCount: 1,
+    productEventCount: 0
+  });
+  assert.ok(!noProductInput.dispatches.some((entry) => /product-splat/.test(entry.label)));
 });
 
 test('native Vulkan source-local shadow compiles and stays close to dense phase-volume/PBR lanes', {

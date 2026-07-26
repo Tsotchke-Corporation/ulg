@@ -18,6 +18,7 @@ import {
 import {
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
   SPH_GPU_RENDER_ROW_FLOATS,
+  SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   buildSphRenderFieldWebGpu
 } from './sphRenderGpuKernel.js';
 
@@ -368,6 +369,154 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+// Product events are a second source family feeding the same field. Each
+// admitted event contributes one metaball at the surface's own strength -- not
+// radius-scaled like a particle -- into density and palette only. The gather
+// adds them after its particle pass and never gives them temperature or
+// velocity, so neither does this.
+const sphRenderFieldSourceLocalProductSplatWgsl = `
+struct SourceLocalProductParams {
+  product_event_count: u32,
+  surface_count: u32,
+  total_field_cells: u32,
+  max_splat_cells_per_source: u32,
+  field_padding: f32,
+  ref_edge_m: f32,
+  density_scale: f32,
+  palette_scale: f32,
+};
+
+@group(0) @binding(0) var<storage, read> product_events: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> accum: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> overflow_state: array<atomic<u32>>;
+@group(0) @binding(4) var<uniform> params: SourceLocalProductParams;
+
+const PRODUCT_EVENT_VEC4_STRIDE: u32 = 8u;
+const MAX_U32_SAFE: u32 = 4294967040u;
+const ACCUM_LANES: u32 = 13u;
+
+fn accum_index(field_cell_index: u32, lane: u32) -> u32 {
+  return field_cell_index * ACCUM_LANES + lane;
+}
+
+fn field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
+  return z * resolution * resolution + y * resolution + x;
+}
+
+fn quantize(value: f32, scale: f32) -> u32 {
+  return u32(clamp(value * scale, 0.0, f32(MAX_U32_SAFE)));
+}
+
+fn smooth_palette_weight(ratio: f32) -> f32 {
+  let t = clamp(ratio, 0.0, 1.0);
+  return 1.0 - t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn saturating_add(
+  destination: ptr<storage, atomic<u32>, read_write>,
+  overflow: ptr<storage, atomic<u32>, read_write>,
+  value: u32
+) {
+  var observed = atomicLoad(destination);
+  loop {
+    if (observed > MAX_U32_SAFE - value) {
+      atomicStore(overflow, 1u);
+      return;
+    }
+    let exchange = atomicCompareExchangeWeak(destination, observed, observed + value);
+    if (exchange.exchanged) { return; }
+    observed = exchange.old_value;
+  }
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let event_index = global_id.x;
+  let surface_index = global_id.y;
+  if (event_index >= params.product_event_count || surface_index >= params.surface_count) {
+    return;
+  }
+  let e0 = product_events[event_index * PRODUCT_EVENT_VEC4_STRIDE];
+  let e1 = product_events[event_index * PRODUCT_EVENT_VEC4_STRIDE + 1u];
+  let e2 = product_events[event_index * PRODUCT_EVENT_VEC4_STRIDE + 2u];
+  let e3 = product_events[event_index * PRODUCT_EVENT_VEC4_STRIDE + 3u];
+  let e4 = product_events[event_index * PRODUCT_EVENT_VEC4_STRIDE + 4u];
+  let status = e4.z;
+  let material_id = e1.x;
+  let phase_id = e2.w;
+  let unplaced_mass_kg = e3.y;
+  let s0 = render_surfaces[surface_index * 4u];
+  let s1 = render_surfaces[surface_index * 4u + 1u];
+  let s2 = render_surfaces[surface_index * 4u + 2u];
+  // Same admission as the gather: placed events only, with mass still to
+  // place, matching material, and a phase that either matches or is unset.
+  if (status != 1.0 || !(unplaced_mass_kg > 0.0) || material_id != s0.x) { return; }
+  if (phase_id > 0.0 && phase_id != s0.y) { return; }
+
+  let field_offset = u32(s0.z);
+  let field_cell_count = u32(s0.w);
+  let resolution = max(u32(s1.x), 1u);
+  let subtract = max(s1.z, 1.0e-12);
+  let strength = s1.w;
+  let support_norm = sqrt(max(strength / subtract - 0.000001, 0.0));
+  let span = 1.0 - 2.0 * params.field_padding;
+  let ref_edge = max(params.ref_edge_m, 1.0e-12);
+  let inv_resolution = 1.0 / f32(resolution);
+  let radius_cells = min(
+    i32(resolution) - 1,
+    i32(ceil(support_norm * f32(resolution))) + 1
+  );
+  let span_cells = radius_cells * 2 + 1;
+  if (span_cells * span_cells * span_cells > i32(params.max_splat_cells_per_source)) {
+    atomicStore(&overflow_state[0u], 1u);
+    return;
+  }
+  let event_position = vec3<f32>(
+    clamp(params.field_padding + (e0.x / ref_edge) * span, 0.001, 0.999),
+    clamp(params.field_padding + (e0.y / ref_edge) * span, 0.001, 0.999),
+    clamp(params.field_padding + (e0.z / ref_edge) * span, 0.001, 0.999)
+  );
+  let center = vec3<i32>(
+    i32(clamp(floor(event_position.x * f32(resolution)), 0.0, f32(resolution - 1u))),
+    i32(clamp(floor(event_position.y * f32(resolution)), 0.0, f32(resolution - 1u))),
+    i32(clamp(floor(event_position.z * f32(resolution)), 0.0, f32(resolution - 1u)))
+  );
+  let color = vec3<f32>(s2.y, s2.z, s2.w);
+
+  for (var dz = -radius_cells; dz <= radius_cells; dz = dz + 1) {
+    let z_i = center.z + dz;
+    if (z_i < 0 || z_i >= i32(resolution)) { continue; }
+    for (var dy = -radius_cells; dy <= radius_cells; dy = dy + 1) {
+      let y_i = center.y + dy;
+      if (y_i < 0 || y_i >= i32(resolution)) { continue; }
+      for (var dx = -radius_cells; dx <= radius_cells; dx = dx + 1) {
+        let x_i = center.x + dx;
+        if (x_i < 0 || x_i >= i32(resolution)) { continue; }
+        let cell = vec3<f32>(
+          f32(x_i) * inv_resolution,
+          f32(y_i) * inv_resolution,
+          f32(z_i) * inv_resolution
+        );
+        let delta = cell - event_position;
+        let dist2 = dot(delta, delta);
+        let value = strength / (0.000001 + dist2) - subtract;
+        if (value <= 0.0) { continue; }
+        let local_cell = field_index_3d(u32(x_i), u32(y_i), u32(z_i), resolution);
+        if (local_cell >= field_cell_count) { continue; }
+        let out_index = field_offset + local_cell;
+        if (out_index >= params.total_field_cells) { continue; }
+        let palette_weight = smooth_palette_weight(sqrt(dist2) / max(support_norm, 1.0e-6));
+        saturating_add(&accum[accum_index(out_index, 0u)], &overflow_state[0u], quantize(value, params.density_scale));
+        saturating_add(&accum[accum_index(out_index, 1u)], &overflow_state[0u], quantize(color.x * palette_weight, params.palette_scale));
+        saturating_add(&accum[accum_index(out_index, 2u)], &overflow_state[0u], quantize(color.y * palette_weight, params.palette_scale));
+        saturating_add(&accum[accum_index(out_index, 3u)], &overflow_state[0u], quantize(color.z * palette_weight, params.palette_scale));
+      }
+    }
+  }
+}
+`;
+
 const sphRenderFieldSourceLocalResolveWgsl = `
 struct SourceLocalParams {
   particle_count: u32,
@@ -517,6 +666,27 @@ function createSourceLocalParamsArray({
   return buffer;
 }
 
+function createSourceLocalProductParamsArray({
+  productEventCount,
+  surfaceCount,
+  totalFieldCells,
+  maxSplatCellsPerSource,
+  fieldPadding,
+  refEdgeM
+}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, productEventCount, true);
+  view.setUint32(4, surfaceCount, true);
+  view.setUint32(8, totalFieldCells, true);
+  view.setUint32(12, maxSplatCellsPerSource, true);
+  view.setFloat32(16, fieldPadding, true);
+  view.setFloat32(20, refEdgeM, true);
+  view.setFloat32(24, SOURCE_LOCAL_DENSITY_SCALE, true);
+  view.setFloat32(28, SOURCE_LOCAL_PALETTE_SCALE, true);
+  return buffer;
+}
+
 async function readBuffer(device, sourceBuffer, byteLength, label) {
   const readBuffer = device.createBuffer({
     label,
@@ -588,8 +758,10 @@ function fallbackReason({
   // re-splatted through it. Admitting it here is what lets shadow mode compare
   // the result against the gather -- the refusal previously made that
   // comparison impossible, so parity could never be established either way.
-  if (productEventRows || productEventBuffer || finiteNumber(productEventCount, 0) > 0) {
-    return 'product-event-parity-not-yet-implemented';
+  // Product events are handled by their own splat pass, which mirrors the
+  // gather's admission rule and contributes to density and palette only.
+  if ((productEventRows || productEventBuffer) && !(finiteNumber(productEventCount, 0) >= 0)) {
+    return 'product-event-count-required';
   }
   if (schroederSpatialSourceFamily) return 'successor-lineage-parity-not-yet-implemented';
   if (targetFieldRowsBuffer) return 'shadow-mode-does-not-publish-pooled-output';
@@ -809,7 +981,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     0
   )));
   const resolvedProductEventCount = Math.max(0, Math.round(finiteNumber(
-    productEventCount ?? 0,
+    productEventCount ?? (productEventRows?.length
+      ? productEventRows.length / SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+      : 0),
     0
   )));
   const reason = fallbackReason({
@@ -957,6 +1131,64 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     pass.dispatchWorkgroups(splatWorkgroups[0], splatWorkgroups[1]);
     pass.end();
   };
+  // Product events feed the same field as a second source family. Everything
+  // here is built only when there is at least one event, so a scene without
+  // reactions allocates no buffer and compiles no pipeline for them.
+  let encodeProductSplat = () => {};
+  if (resolvedProductEventCount > 0) {
+    const productSourceBuffer = productEventBuffer || writeStorageBuffer(
+      device,
+      'ulg-sph-render-field-source-local-product-events',
+      productEventRows,
+      GPU_BUFFER_USAGE.COPY_SRC
+    );
+    const productParamsBuffer = device.createBuffer({
+      label: 'ulg-sph-render-field-source-local-product-params',
+      size: 32,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    device.queue.writeBuffer(productParamsBuffer, 0, createSourceLocalProductParamsArray({
+      productEventCount: resolvedProductEventCount,
+      surfaceCount: surfaceTable.surfaceCount,
+      totalFieldCells: surfaceTable.totalFieldCells,
+      maxSplatCellsPerSource: resolvedMaxSplatCellsPerSource,
+      fieldPadding,
+      refEdgeM
+    }));
+    const productPipelineState = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-sph-render-field-source-local-product-splat-v1',
+      label: 'ulg-sph-render-field-source-local-product-splat',
+      code: sphRenderFieldSourceLocalProductSplatWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(4, 'uniform')
+      ]
+    });
+    const productBindGroup = device.createBindGroup({
+      layout: productPipelineState.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: productSourceBuffer } },
+        { binding: 1, resource: { buffer: surfaceBuffer } },
+        { binding: 2, resource: { buffer: accumBuffer } },
+        { binding: 3, resource: { buffer: overflowBuffer } },
+        { binding: 4, resource: { buffer: productParamsBuffer } }
+      ]
+    });
+    encodeProductSplat = () => {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(productPipelineState.pipeline);
+      pass.setBindGroup(0, productBindGroup);
+      pass.dispatchWorkgroups(
+        Math.max(1, Math.ceil(resolvedProductEventCount / 64)),
+        Math.max(1, surfaceTable.surfaceCount)
+      );
+      pass.end();
+    };
+  }
   const encodeResolve = () => {
     const pass = encoder.beginComputePass();
     pass.setPipeline(resolvePipelineState.pipeline);
@@ -978,9 +1210,13 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     encodeResolve();
     writeSplatPhase(device, paramsBuffer, SPLAT_PHASE_SMEARED_PRIMARY);
     encodeSplat();
+    // Product events carry no velocity, so the gather adds them only in its
+    // primary pass. They go with phase 2 here for the same reason.
+    encodeProductSplat();
     encodeResolve();
   } else {
     encodeSplat();
+    encodeProductSplat();
     encodeResolve();
   }
 

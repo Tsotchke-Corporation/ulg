@@ -1092,7 +1092,11 @@ test('ambient water demo particles pack and step as liquid MLS-MPM material', ()
   assert.ok(rows.every((row) => row.shearModulusPa === 0));
   assert.ok(rows.every((row) => row.lameLambdaPa === 0));
   assert.ok(rows.every((row) => row.eosModelId === 1));
-  assert.ok(rows.every((row) => row.dynamicViscosityPaS > 0));
+  // Physical shear viscosity only; water's closure supplies none, so this is 0.
+  // The artificial stabilizer is a compression-gated bulk term in P2G now, not
+  // a shear viscosity, because a shear coefficient this large made liquids
+  // creep like a gel instead of flowing.
+  assert.ok(rows.every((row) => row.dynamicViscosityPaS === 0));
 
   driver.step();
   for (const particle of driver.demo.state.particles) {

@@ -157,16 +157,14 @@ export function mechanicsMaterialPhaseRecord(material, properties, phase, {
     ? gasSoundSpeedMPerS(properties, phase, { soundSpeedScale: soundScale, minGasSoundSpeedMPerS })
     : (restDensity > 0 && bulk > 0 ? Math.sqrt(bulk / restDensity) : 0);
   const closureViscosityPaS = Math.max(finiteNumber(phase?.dynamicViscosityPaS, 0), 0);
-  const artificialViscosityPaS = viscosityEnabled && phaseName === 'liquid'
-    ? Math.max(
-      restDensity
-        * soundSpeed
-        * finiteNumber(viscosityLengthM, 0)
-        * finiteNumber(mlsMpmArtificialViscosityAlpha, DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA),
-      0
-    )
-    : 0;
-  const dynamicViscosityPaS = viscosityEnabled ? closureViscosityPaS + artificialViscosityPaS : 0;
+  // Physical shear viscosity only. The artificial alpha*rho*c*h term used to be
+  // added here, but this lane feeds a traceless deviatoric stress, so it acted
+  // purely against shear and never against compression -- the opposite of what
+  // a shock-stabilizing artificial viscosity is for. For water it produced
+  // about 2000 Pa.s against a physical 0.001, so liquids crept rather than
+  // flowed. The artificial term now lives in the P2G shader as a bulk pressure
+  // gated on div(v) < 0, driven by params.artificial_bulk_viscosity_alpha.
+  const dynamicViscosityPaS = viscosityEnabled ? closureViscosityPaS : 0;
   const surfaceTensionNPerM = surfaceTensionEnabled
     ? Math.max(finiteNumber(phase?.surfaceTensionNPerM, 0), 0)
     : 0;

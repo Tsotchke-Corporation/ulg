@@ -8566,6 +8566,20 @@ struct P2gProjectionParams {
   schroeder_spatial_pad2: u32,
 };
 
+// Monaghan artificial-viscosity coefficient, applied as a BULK term under
+// compression at its use site below -- never as shear viscosity.
+//
+// Baked as a constant rather than carried in P2gProjectionParams on purpose.
+// The three params pads are aliased to different meanings in different derived
+// variants -- pad0 is the spatial-evidence flag, pad1 is sourceRowLayoutId in
+// the mechanics-field variant, pad2 is completionOrdinal there and an epoch
+// cross-check in the base -- so no pad is free in every variant, and growing
+// the struct shifts the fields that createActiveGridP2gProjectionWgsl and
+// createMechanicsFieldP2gProjectionWgsl append after it. Making this
+// host-configurable again means extending the struct and updating all three
+// writers together.
+const ARTIFICIAL_BULK_VISCOSITY_ALPHA: f32 = 0.04;
+
 struct StressRows {
   x: vec3<f32>,
   y: vec3<f32>,
@@ -9063,8 +9077,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         0.0,
         params.ambient_pressure_pa + pressure
       );
+      // row7.y is the material's PHYSICAL shear viscosity. Artificial
+      // viscosity is deliberately not folded into it: the deviatoric terms
+      // below are traceless, so anything added to row7.y resists shear and
+      // does nothing in compression -- the exact opposite of what a
+      // shock-stabilizing artificial viscosity is for. Folding alpha*rho*c*h
+      // into it gave water ~2000 Pa.s of shear viscosity against a physical
+      // 0.001, roughly two million times too much: thicker than molasses,
+      // which is why liquids crept instead of flowing.
       let dynamic_viscosity = max(row7.y, 0.0);
       let div_third = (c00 + c11 + c22) / 3.0;
+      // The artificial term therefore appears here, as a bulk pressure gated
+      // on compression: zeta = alpha * rho * c * h, p = -zeta * div(v) when
+      // div(v) < 0. It damps acoustic oscillation without opposing shear.
+      //
+      // It is deliberately NOT folded into resolved_absolute_pressure_pa
+      // above: that lane carries thermodynamic pressure authority, and a
+      // numerical stabilizer is not a physical pressure.
+      let velocity_divergence = 3.0 * div_third;
+      let artificial_bulk_viscosity = ARTIFICIAL_BULK_VISCOSITY_ALPHA
+        * density
+        * max(row6.y, 0.0)
+        * params.grid_spacing_m;
+      let artificial_bulk_pressure = select(
+        0.0,
+        -artificial_bulk_viscosity * velocity_divergence,
+        velocity_divergence < 0.0
+      );
+      let total_pressure = pressure + artificial_bulk_pressure;
       let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
       let visc11 = 2.0 * dynamic_viscosity * (c11 - div_third);
       let visc22 = 2.0 * dynamic_viscosity * (c22 - div_third);
@@ -9072,9 +9112,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let visc02 = dynamic_viscosity * (c02 + c20);
       let visc12 = dynamic_viscosity * (c12 + c21);
       sigma = StressRows(
-        vec3<f32>(-pressure + visc00, visc01, visc02),
-        vec3<f32>(visc01, -pressure + visc11, visc12),
-        vec3<f32>(visc02, visc12, -pressure + visc22)
+        vec3<f32>(-total_pressure + visc00, visc01, visc02),
+        vec3<f32>(visc01, -total_pressure + visc11, visc12),
+        vec3<f32>(visc02, visc12, -total_pressure + visc22)
       );
     }
     if (params.external_gauge_pressure_enabled != 0u) {

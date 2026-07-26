@@ -448,7 +448,12 @@ test('MLS-MPM GPU mechanics buffer packs identity mechanics before the first ste
   assert.equal(h2o.dynamicViscosityPaS, 0);
   assert.equal(h2o.surfaceTensionNPerM, 0);
   assert.ok(h2o.phaseVolumeReferenceMassKg > 0);
-  assert.ok(fe.dynamicViscosityPaS > 0);
+  // This lane is the PHYSICAL shear viscosity. It reads 0 whenever the closure
+  // does not supply one; the artificial alpha*rho*c*h term is no longer folded
+  // in here, because this lane drives a traceless deviatoric stress and so
+  // acted only against shear. It is applied in P2G as a compression-gated bulk
+  // pressure instead, from packed.mlsMpmArtificialViscosityAlpha below.
+  assert.equal(fe.dynamicViscosityPaS, 0);
   assert.equal(fe.surfaceTensionNPerM, 0);
   assert.ok(fe.phaseVolumeReferenceMassKg > 0);
   assert.ok(packed.viscosityEnabled);

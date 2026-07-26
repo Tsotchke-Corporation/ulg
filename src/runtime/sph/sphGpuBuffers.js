@@ -321,17 +321,21 @@ function dynamicViscosityPaSForPhase(phase, phaseProperties, {
   viscosityLengthM
 } = {}) {
   if (!viscosityEnabled) return 0;
-  const closureViscosityPaS = Math.max(finiteNumber(phaseProperties?.dynamicViscosityPaS, 0), 0);
-  const artificialViscosityPaS = phase === 'liquid'
-    ? Math.max(
-      finiteNumber(restDensityKgPerM3, 0)
-        * finiteNumber(soundSpeedMPerS, 0)
-        * finiteNumber(viscosityLengthM, 0)
-        * finiteNumber(mlsMpmArtificialViscosityAlpha, DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA),
-      0
-    )
-    : 0;
-  return closureViscosityPaS + artificialViscosityPaS;
+  // PHYSICAL shear viscosity only.
+  //
+  // This lane lands in mechanics row 29 and is read by the P2G shader as the
+  // coefficient of a traceless deviatoric stress, so whatever goes here acts
+  // purely against shear and never against compression. Folding the artificial
+  // alpha*rho*c*h term in here therefore gave water about 2000 Pa.s of shear
+  // viscosity against a physical 0.001 -- roughly two million times too much,
+  // thicker than molasses -- so liquids crept instead of flowing and settled
+  // into a mound rather than a flat free surface.
+  //
+  // Artificial viscosity is a shock/acoustic stabilizer and belongs in the
+  // compressive part of the stress. It is applied in the P2G shader as a bulk
+  // pressure gated on div(v) < 0, driven by
+  // params.artificial_bulk_viscosity_alpha.
+  return Math.max(finiteNumber(phaseProperties?.dynamicViscosityPaS, 0), 0);
 }
 
 function constitutivePropertiesFor(particle, properties, eq, options) {

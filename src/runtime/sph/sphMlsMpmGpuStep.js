@@ -10693,6 +10693,30 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         { binding: 3, resource: { buffer: pressureRowsBuffer } }
       ]
     });
+    // Bind groups below are rebuilt every substep, but their buffer sets take
+    // only a handful of distinct values: the three "current" buffers rotate
+    // through the ping-pong pair, plus the substitutions the thermal and
+    // mechanics-refresh stages make mid-loop. Memoise on the identity of the
+    // referenced buffers, NOT on `pingIndex` -- a parity key would be wrong,
+    // because those stage substitutions do not follow parity.
+    const bindGroupMemo = [];
+    const memoizedBindGroup = (layout, buffers, buildEntries) => {
+      for (const entry of bindGroupMemo) {
+        if (entry.layout !== layout || entry.buffers.length !== buffers.length) continue;
+        let same = true;
+        for (let i = 0; i < buffers.length; i += 1) {
+          if (entry.buffers[i] !== buffers[i]) { same = false; break; }
+        }
+        if (same) return entry.bindGroup;
+      }
+      const bindGroup = device.createBindGroup({ layout, entries: buildEntries() });
+      // Bounded so an unexpected rotation pattern degrades to the old
+      // behaviour rather than growing a cache without limit.
+      if (bindGroupMemo.length < 32) {
+        bindGroupMemo.push({ layout, buffers: buffers.slice(), bindGroup });
+      }
+      return bindGroup;
+    };
     for (let index = 0; index < count; index += 1) {
       if (index === count - 1) {
         finalSourceStateBuffer = currentStateBuffer;
@@ -10702,9 +10726,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       const pingIndex = index % 2;
       const outStateBuffer = statePingBuffers[pingIndex];
       const outMechanicsBuffer = mechanicsPingBuffers[pingIndex];
-      const p2gBindGroup = device.createBindGroup({
-        layout: p2gBindGroupLayout,
-        entries: [
+      const p2gEntries = () => [
           { binding: 0, resource: { buffer: currentStateBuffer } },
           { binding: 1, resource: { buffer: currentThermoBuffer } },
           { binding: 2, resource: { buffer: currentMechanicsBuffer } },
@@ -10714,22 +10736,20 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 6, resource: { buffer: gridBuffer } },
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
           { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
-        ]
-      });
-      const p2gFinalizeBindGroup = device.createBindGroup({
-        layout: p2gFinalizeBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: currentStateBuffer } },
-          { binding: 1, resource: { buffer: currentThermoBuffer } },
-          { binding: 2, resource: { buffer: currentMechanicsBuffer } },
-          { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
-          { binding: 4, resource: { buffer: p2gParamsBuffer } },
-          { binding: 5, resource: { buffer: productEventBuffer } },
-          { binding: 6, resource: { buffer: gridBuffer } },
-          { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-          { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
-        ]
-      });
+        ];
+      // Both groups reference the same nine buffers; only the layout differs,
+      // and the memo keys on layout as well as buffers.
+      const p2gMemoBuffers = [
+        currentStateBuffer, currentThermoBuffer, currentMechanicsBuffer,
+        p2gAccumulatorBuffer, p2gParamsBuffer, productEventBuffer,
+        gridBuffer, schroederAssignmentBuffer, schroederActiveNodeBuffer
+      ];
+      const p2gBindGroup = memoizedBindGroup(
+        p2gBindGroupLayout, p2gMemoBuffers, p2gEntries
+      );
+      const p2gFinalizeBindGroup = memoizedBindGroup(
+        p2gFinalizeBindGroupLayout, p2gMemoBuffers, p2gEntries
+      );
       const activeAccumulatorClearBindGroup = activeAccumulatorClearPipelineInfo
         ? device.createBindGroup({
           layout: activeAccumulatorClearPipelineInfo.bindGroupLayout,
@@ -10792,9 +10812,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       );
       gridUpdatePass.end();
 
-      const g2pBindGroup = device.createBindGroup({
-        layout: g2pBindGroupLayout,
-        entries: [
+      const g2pBindGroup = memoizedBindGroup(
+        g2pBindGroupLayout,
+        [
+          currentStateBuffer, currentThermoBuffer, currentMechanicsBuffer,
+          updatedGridBuffer, outStateBuffer, outMechanicsBuffer,
+          g2pParamsBuffer, schroederAssignmentBuffer
+        ],
+        () => [
           { binding: 0, resource: { buffer: currentStateBuffer } },
           { binding: 1, resource: { buffer: currentThermoBuffer } },
           { binding: 2, resource: { buffer: currentMechanicsBuffer } },
@@ -10806,7 +10831,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           // the compacted active-node list).
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
         ]
-      });
+      );
       const g2pPass = encoder.beginComputePass(
         gpuTimestampProfiler.passDescriptorExtras('g2pReconstruction')
       );

@@ -1512,7 +1512,10 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     }
   } finally {
     if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
-    surfaceBuffer.destroy?.();
+    // Production hands the surface table and the field to the marching-cubes
+    // adapter, so neither may be destroyed here -- the consumer reads them
+    // after this function returns.
+    if (!productionMode) surfaceBuffer.destroy?.();
     accumBuffer.destroy?.();
     overflowBuffer.destroy?.();
     if (ownsFieldRowsBuffer) fieldRowsBuffer.destroy?.();
@@ -1586,16 +1589,25 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     sourceLocalSplatPipelineCacheStatus: splatPipelineState.cacheStatus,
     sourceLocalResolvePipelineCacheStatus: resolvePipelineState.cacheStatus,
     renderFieldDeferredCleanup: false,
-    renderFieldReadback: true,
-    fullReadbackPerformed: true,
-    normalHotLoopReadbackFree: false,
-    fieldRowsBufferRetained: false,
-    fieldRowsBufferByteLength: 0,
-    fieldRowsBufferBorrowed: false,
-    fieldRowsBufferReused: false,
+    // These were hardcoded for a shadow-only module, which never had a consumer.
+    // In production they are the handoff: the marching-cubes adapter reads
+    // sourceRenderField.fieldRowsBuffer, and with it absent it extracted
+    // nothing -- a field that parity proved correct produced zero triangles.
+    renderFieldReadback: !productionMode,
+    fullReadbackPerformed: !productionMode,
+    normalHotLoopReadbackFree: productionMode,
+    fieldRowsBuffer: productionMode ? fieldRowsBuffer : null,
+    fieldRowsBufferRetained: productionMode,
+    fieldRowsBufferByteLength: productionMode ? fieldRowByteLength : 0,
+    fieldRowsBufferBorrowed: productionMode,
+    fieldRowsBufferReused: productionMode,
+    // The pooled buffer belongs to the caller, so the result never claims it.
     fieldRowsBufferOwnedByResult: false,
-    surfaceBufferRetained: false,
-    surfaceBufferByteLength: 0,
+    surfaceBufferRetained: productionMode,
+    surfaceBufferByteLength: productionMode
+      ? (surfaceTable.records?.byteLength ?? 0)
+      : 0,
+    surfaceBuffer: productionMode ? surfaceBuffer : null,
     schroederSpatialLineageMode: 'non-schroeder-shadow',
     schroederSpatialSourceFamily: null,
     scientificValidation: false,

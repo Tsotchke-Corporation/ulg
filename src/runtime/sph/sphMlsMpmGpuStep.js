@@ -28584,6 +28584,11 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       // stays inert and says so if it was not.
       residentGpuTimestampProfilingRequested:
         args.residentGpuTimestampProfilingRequested === true
+        // The demo mount already reads ?residentGpuTimestampProfile=1 and uses
+        // it to negotiate the device feature, under the name
+        // residentGpuTimestampProfiling. Accept that spelling too so the same
+        // switch drives both once the mount-to-step hop is connected.
+        || args.residentGpuTimestampProfiling === true
     });
     const nextSphParticleState = cloneSphParticleStateForNext(sphParticleState, finalStep);
     const nextMlsMpmParticleState = cloneMlsMpmParticleStateForNext(mlsMpmParticleState, finalStep);

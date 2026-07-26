@@ -349,8 +349,9 @@ struct SourceLocalParams {
   density_scale: f32,
   palette_scale: f32,
   temperature_scale: f32,
-  _pad0: f32,
-  _pad1: f32,
+  // Must mirror the splat struct exactly: both bind the same uniform buffer.
+  render_smear_dt_s: f32,
+  velocity_scale: f32,
   _pad2: f32,
 };
 
@@ -394,8 +395,39 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     temperature_weighted / max(temperature_weight, 1.0e-6),
     temperature_weight > 0.0
   );
+  // Splash-shard smear: per-cell velocity dispersion from the moment lanes.
+  //
+  // sigma_v^2 = <|v|^2> - |<v>|^2, with both means weighted by the same
+  // positive metaball value the density uses, so lane 0 is the weight. The
+  // signed components arrive split into positive and negative halves because
+  // the accumulator is unsigned; recombining is a subtraction.
+  //
+  // The gather applies the correction as dist^2 + (sigma_v * dt)^2 in
+  // normalized field units, so the dispersion is converted with the same
+  // span/ref_edge scale the splat uses for positions. Dispersion is zero for a
+  // coherent or single-particle cell, so only cells bridging diverging
+  // droplets are corrected -- matching the gather's behaviour exactly.
+  var smear_sq = 0.0;
+  if (params.render_smear_dt_s > 0.0 && density > 0.0) {
+    let inv_velocity_scale = 1.0 / max(params.velocity_scale, 1.0);
+    let mean_v = vec3<f32>(
+      (f32(atomicLoad(&accum[accum_index(out_index, 6u)]))
+        - f32(atomicLoad(&accum[accum_index(out_index, 7u)]))) * inv_velocity_scale,
+      (f32(atomicLoad(&accum[accum_index(out_index, 8u)]))
+        - f32(atomicLoad(&accum[accum_index(out_index, 9u)]))) * inv_velocity_scale,
+      (f32(atomicLoad(&accum[accum_index(out_index, 10u)]))
+        - f32(atomicLoad(&accum[accum_index(out_index, 11u)]))) * inv_velocity_scale
+    ) / density;
+    let mean_v2 = (f32(atomicLoad(&accum[accum_index(out_index, 12u)])) * inv_velocity_scale)
+      / density;
+    let variance = max(mean_v2 - dot(mean_v, mean_v), 0.0);
+    let span = 1.0 - 2.0 * params.field_padding;
+    let normalized_sigma = sqrt(variance) * span / max(params.ref_edge_m, 1.0e-12);
+    let smear = normalized_sigma * params.render_smear_dt_s;
+    smear_sq = smear * smear;
+  }
   render_field_cells[out_index * 2u] = vec4<f32>(density, palette);
-  render_field_cells[out_index * 2u + 1u] = vec4<f32>(mean_temperature_k, 0.0, 0.0, 0.0);
+  render_field_cells[out_index * 2u + 1u] = vec4<f32>(mean_temperature_k, smear_sq, 0.0, 0.0);
 }
 `;
 

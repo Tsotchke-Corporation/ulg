@@ -523,3 +523,34 @@ test('velocity moments are gated on a non-zero smear interval', () => {
   assert.match(sphRenderFieldSourceLocalSplatWgsl, /quantize\(max\(-vw\.x, 0\.0\)/);
   assert.match(sphRenderFieldSourceLocalSplatWgsl, /quantize\(max\(-vw\.z, 0\.0\)/);
 });
+
+test('splat and resolve params structs stay identical', () => {
+  // Both shaders bind the same uniform buffer, so any divergence in field
+  // order or count silently misreads every scalar after the first difference.
+  const { sphRenderFieldSourceLocalSplatWgsl, sphRenderFieldSourceLocalResolveWgsl } =
+    SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
+  const structOf = (source) => {
+    const match = /struct SourceLocalParams \{([\s\S]*?)\};/.exec(source);
+    assert.ok(match, 'SourceLocalParams must be declared');
+    return match[1]
+      .split('\n')
+      .map((line) => line.replace(/\/\/.*$/, '').trim())
+      .filter(Boolean);
+  };
+  assert.deepEqual(
+    structOf(sphRenderFieldSourceLocalSplatWgsl),
+    structOf(sphRenderFieldSourceLocalResolveWgsl)
+  );
+});
+
+test('the dispersion reduce is weighted and clamped non-negative', () => {
+  const { sphRenderFieldSourceLocalResolveWgsl } = SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
+  // sigma_v^2 = <|v|^2> - |<v>|^2 can go slightly negative from fixed-point
+  // rounding; a negative variance would produce NaN through sqrt.
+  assert.match(
+    sphRenderFieldSourceLocalResolveWgsl,
+    /max\(mean_v2 - dot\(mean_v, mean_v\), 0\.0\)/
+  );
+  // Zero smear interval must leave the correction exactly off.
+  assert.match(sphRenderFieldSourceLocalResolveWgsl, /var smear_sq = 0\.0;/);
+});

@@ -19,8 +19,12 @@ import {
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
   SPH_GPU_RENDER_ROW_FLOATS,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+  validateSphRenderRowsSuccessorSourceLineage,
   buildSphRenderFieldWebGpu
 } from './sphRenderGpuKernel.js';
+import {
+  resolveSchroederSpatialSuccessorSourceFamily
+} from './schroederSpatialSuccessorSourceFamily.js';
 
 /**
  * A deliberately non-production source-local render-field builder.
@@ -763,7 +767,17 @@ function fallbackReason({
   if ((productEventRows || productEventBuffer) && !(finiteNumber(productEventCount, 0) >= 0)) {
     return 'product-event-count-required';
   }
-  if (schroederSpatialSourceFamily) return 'successor-lineage-parity-not-yet-implemented';
+  // Successor lineage is a provenance requirement rather than field maths: the
+  // dense path authenticates that the render rows really came from the named
+  // Schroeder spatial source family before it will build a field from them.
+  // The source-local path now performs the same validation (below), so the only
+  // thing it still refuses is the combination the dense path also refuses --
+  // branded successor rows arriving together with an unauthenticated
+  // product-event source.
+  if (schroederSpatialSourceFamily
+    && (productEventRows || productEventBuffer || finiteNumber(productEventCount, 0) > 0)) {
+    return 'successor-lineage-forbids-unauthenticated-product-events';
+  }
   if (targetFieldRowsBuffer) return 'shadow-mode-does-not-publish-pooled-output';
   if (diagnosticNoReadbackMode && !retainFieldRowsBuffer) {
     return 'diagnostic-no-readback-requires-retained-field-buffer';
@@ -1050,6 +1064,38 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
+  if (schroederSpatialSourceFamily) {
+    // Same checks, same order, same error text as the dense builder. A weaker
+    // check here would make the source-local path a way to bypass successor
+    // authentication rather than an equivalent implementation of it.
+    if (
+      renderRowsSource?.schroederSpatialSourceFamily !== schroederSpatialSourceFamily
+      || renderRowsSource?.particleCount !== resolvedParticleCount
+      || renderRowsBuffer == null
+    ) {
+      throw new TypeError(
+        'successor render field requires exact branded render rows and no unauthenticated product-event source'
+      );
+    }
+    resolveSchroederSpatialSuccessorSourceFamily(
+      schroederSpatialSourceFamily,
+      { device, particleCount: resolvedParticleCount }
+    );
+    if (!validateSphRenderRowsSuccessorSourceLineage(
+      renderRowsSource,
+      {
+        device,
+        sourceFamily: schroederSpatialSourceFamily,
+        particleCount: resolvedParticleCount,
+        renderRowsBuffer,
+        renderRows: renderRowsBuffer ? null : renderRows
+      }
+    )) {
+      throw new TypeError(
+        'successor render field requires module-authenticated render-row derivation'
+      );
+    }
+  }
   const resolvedRenderSmearDtS = Math.max(0, finiteNumber(renderSmearDtS, 0));
   const resolvedMaxSplatCellsPerSource = Math.max(
     1,

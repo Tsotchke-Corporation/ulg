@@ -143,6 +143,22 @@ function renderRowsForSurface(surfaceTable) {
   return rows;
 }
 
+function singleSurfaceTable() {
+  return buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'water-liquid',
+      material: 'H2O',
+      phase: 'liquid',
+      renderKey: 'H2O',
+      resolution: 8,
+      isolation: 80,
+      subtract: 24,
+      radiusNorm: 0.05,
+      colorLinear: [0.2, 0.6, 1]
+    }
+  ]);
+}
+
 test('generic source-local shadow builder emits standard v1 field rows without a dense particle loop', async () => {
   const surfaceTable = buildSphRenderFieldSurfaceTable([
     {
@@ -625,4 +641,44 @@ test('phase constants match the values the shader branches on', () => {
   assert.equal(SPLAT_PHASE_SINGLE, 0);
   assert.equal(SPLAT_PHASE_MOMENTS_ONLY, 1);
   assert.equal(SPLAT_PHASE_SMEARED_PRIMARY, 2);
+});
+
+test('successor lineage is authenticated, not bypassed, on the source-local path', async () => {
+  // The dense builder refuses to build a field from branded successor rows it
+  // cannot authenticate. If the source-local path accepted them instead, it
+  // would be a way around that check rather than an equivalent of it.
+  const input = fakeComputeDevice();
+  const surfaceTable = singleSurfaceTable();
+  await assert.rejects(
+    () => buildSphRenderFieldSourceLocalWebGpu({
+      device: input.device,
+      renderRows: renderRowsForSurface(surfaceTable),
+      surfaceTable,
+      particleCount: 1,
+      schroederSpatialSourceFamily: { id: 'unbranded-family' },
+      renderRowsSource: null
+    }),
+    /successor render field requires exact branded render rows/
+  );
+});
+
+test('successor lineage still refuses unauthenticated product events', async () => {
+  // Matches the dense path, which rejects the combination outright.
+  const input = fakeComputeDevice();
+  const surfaceTable = singleSurfaceTable();
+  // The source-local path declines the combination and hands off to the dense
+  // builder, which refuses it outright. Refusing everywhere is the point: the
+  // fallback must not become a way to get the forbidden combination built.
+  await assert.rejects(
+    () => buildSphRenderFieldSourceLocalWebGpu({
+      device: input.device,
+      renderRows: renderRowsForSurface(surfaceTable),
+      surfaceTable,
+      particleCount: 1,
+      schroederSpatialSourceFamily: { id: 'branded-family' },
+      productEventCount: 1,
+      productEventRows: new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS)
+    }),
+    /no unauthenticated product-event source/
+  );
 });

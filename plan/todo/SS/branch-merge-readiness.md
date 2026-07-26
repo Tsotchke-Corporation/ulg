@@ -84,33 +84,61 @@ with the SS refactor and everything to do with why nobody could measure it:
 Each fix exposed the next. The apparent "application scaling cliff at ~3.5k
 particles" recorded earlier in this file was the first of them.
 
-### Mechanisms that remain unaddressed regardless
+### Mechanisms that remain unaddressed
 
-These are real and documented, and none of them is fixed. They are simply not
-visible at 1024 particles, which is the largest count where the benchmark
-currently runs at all:
+None of these is fixed. The 50k measurement shows they cost about 5% today, not
+4x -- but they are real, and they set the memory ceiling rather than the current
+frame time.
 
 1. **No hierarchy in cost yet.** sol-critic P0: the active-node list "permits
    one active row per particle". One node per particle is N with tree overhead
    on top, not N log N. Unique-node compaction is Priority 3.
 2. **Worst-case candidate reservation.** 64 candidate rows x 64 bytes per queue
-   row = **4 KiB per active particle**, ~4 GiB at 1M particles before useful
-   state. This is also what made the matrix OOM.
+   row = 4 KiB per active particle, ~4 GiB at 1M particles before useful state
+   (`schroederHierarchyGpu.js:4498`).
 3. **Cross-level work built and not consumed.** P1: cross-level candidates "can
    remain observational/unconsumed", and the artifact chain is "rebuilt and
    separately submitted each substep".
-4. **The unification has not happened.** The plan asks for "one persistent,
-   multi-resolution neighbor artifact shared by mechanics, thermal, reaction and
-   contact consumers". Until then consumers can still reach the exhaustive `N*N`
+4. **The unification has not happened.** One persistent multi-resolution
+   neighbor artifact shared by mechanics, thermal, reaction and contact
+   consumers. Until then consumers can still reach the exhaustive `N*N`
    fallback.
 
-These are the down payment whose creditor has not yet been paid. The original
-framing still holds as a **test**, but it has to be run somewhere the cost can
-appear: once the readiness limit above 1024 particles is understood and the
-benchmark can run at 10k+, compare against `7454ac9` there. If the branch is
-materially slower at a count where a per-particle reservation actually bites,
-the two-level path is not earning its overhead and should be reconsidered
-rather than deepened. At 1024 particles that test has no power.
+### 5. Measured 2026-07-26: 77.8% of dispatched GPU threads do nothing
+
+`appendPhaseCarrierLanes` reserves a full companion copy of every particle for
+each of 3 non-primary phase lanes, then `spareProductSlotCount` adds another
+12.5%. A 4,394-particle scenario therefore allocates **19,772 slots**, and every
+particle-parallel kernel dispatches over all of them:
+
+```
+p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)))
+```
+
+where `particleCount` is the slot count. Measured directly on the state buffer:
+
+| | count |
+| --- | --- |
+| slots | 19,772 |
+| slots with mass > 0 | 4,394 |
+| **wasted threads** | **77.8%** |
+
+The companions are created with `massKg: 0`, so the P2G guard
+`if (!(pos_mass.w > 0.0)) { return; }` exits them after a single vec4 load.
+That is why the cost is bounded -- it is scheduling plus one 16-byte read per
+wasted thread, not full physics -- and it is consistent with the branch being
+only ~5% off baseline rather than several times slower.
+
+It is still 4.5x the threads, 4.5x the state-buffer traffic on that first load,
+and 4.5x the memory footprint of every per-slot array (which is separately what
+made the view state 41 MB, see the transport codec).
+
+The fix is compaction, not removal: companion slots must keep stable identities
+because a phase transition materialises one. The shape is a compacted live-index
+buffer plus indirect dispatch over the live count, which is the same mechanism
+`dispatchActiveGridComputePass` already uses for active grid nodes. Bounding the
+experiment first is cheap: set `phaseLaneCount = 1` and benchmark at 50k to put
+a ceiling on the available win before committing to the refactor.
 
 ## Landed on this branch
 

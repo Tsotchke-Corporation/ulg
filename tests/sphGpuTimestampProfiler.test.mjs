@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   createSphGpuTimestampProfiler,
+  createSphGpuQueueStageRecorder,
   SPH_FUSED_SEQUENCE_UNATTRIBUTED_STAGES
 } from '../src/runtime/sph/sphGpuTimestampProfiler.js';
 
@@ -142,4 +143,51 @@ test('the unattributed stage list names the stages the fused path reports as zer
     );
   }
   assert.ok(Object.isFrozen(SPH_FUSED_SEQUENCE_UNATTRIBUTED_STAGES));
+});
+
+test('the queue-stage recorder satisfies the gpuTimestampRecorder contract', () => {
+  // 17 modules and 51 call sites consume this contract and nothing implemented
+  // it, so every consumer took its inert branch permanently.
+  const recorder = createSphGpuQueueStageRecorder({
+    device: { queue: { onSubmittedWorkDone: async () => {} } }
+  });
+  assert.equal(recorder.active, true);
+  assert.equal(typeof recorder.measureQueueStage, 'function');
+  assert.equal(typeof recorder.beginEncoderSpan, 'function');
+  assert.equal(typeof recorder.endEncoderSpan, 'function');
+  assert.equal(typeof recorder.discardEncoderSpans, 'function');
+});
+
+test('measureQueueStage fences around the stage and attributes GPU time', async () => {
+  const fences = [];
+  const device = { queue: { onSubmittedWorkDone: async () => { fences.push(1); } } };
+  const recorder = createSphGpuQueueStageRecorder({ device });
+  const result = await recorder.measureQueueStage(
+    { stage: 'fusedMechanics', producerId: 'p' },
+    async () => 'stage-result'
+  );
+  assert.equal(result, 'stage-result');
+  // One fence before and one after: without the leading fence the measurement
+  // would include work already in flight from earlier stages.
+  assert.equal(fences.length, 2);
+  assert.equal(recorder.spanCount(), 1);
+  assert.ok('fusedMechanics' in recorder.stageGpuMs());
+});
+
+test('an inert recorder still runs the stage and reports itself inactive', async () => {
+  const recorder = createSphGpuQueueStageRecorder({ device: null });
+  assert.equal(recorder.active, false);
+  assert.equal(await recorder.measureQueueStage({ stage: 's' }, async () => 42), 42);
+  assert.equal(recorder.spanCount(), 0);
+});
+
+test('encoder spans are inert rather than fabricated', async () => {
+  // Current WebGPU has no encoder.writeTimestamp; timestamps come only from
+  // timestampWrites on a pass descriptor. Returning null is honest, and every
+  // consumer already guards on it.
+  const recorder = createSphGpuQueueStageRecorder({
+    device: { queue: { onSubmittedWorkDone: async () => {} } }
+  });
+  assert.equal(recorder.encoderSpansSupported, false);
+  assert.equal(recorder.beginEncoderSpan({}, { stage: 'sort' }), null);
 });

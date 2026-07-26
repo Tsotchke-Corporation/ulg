@@ -14,6 +14,7 @@ import {
   SPLAT_PHASE_SINGLE,
   SPLAT_PHASE_MOMENTS_ONLY,
   SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION,
+  SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW,
   SPLAT_PHASE_SMEARED_PRIMARY
 } from '../src/runtime/sph/sphRenderFieldSourceLocalGpu.js';
 
@@ -29,6 +30,7 @@ function fakeComputeDevice() {
   const bindGroups = [];
   const dispatches = [];
   const submissions = [];
+  const bufferClears = [];
   let mapAsyncCalls = 0;
 
   const device = {
@@ -111,6 +113,12 @@ function fakeComputeDevice() {
           };
         },
         copyBufferToBuffer() {},
+        // Real WebGPU encoders have this. Without it here the builder silently
+        // takes its zero-fill upload fallback and the test would be measuring
+        // the path production does not use.
+        clearBuffer(buffer, offset = 0, size = null) {
+          bufferClears.push({ label: buffer?.label ?? null, offset, size });
+        },
         finish() {
           return { finished: true };
         }
@@ -125,6 +133,7 @@ function fakeComputeDevice() {
     bindGroups,
     dispatches,
     submissions,
+    bufferClears,
     get mapAsyncCalls() {
       return mapAsyncCalls;
     }
@@ -174,7 +183,7 @@ test('generic source-local shadow builder emits standard v1 field rows without a
       colorLinear: [0.2, 0.6, 1]
     }
   ]);
-  const { device, buffers, shaderModules, bindGroups, dispatches, submissions } = fakeComputeDevice();
+  const { device, buffers, shaderModules, bindGroups, dispatches, submissions, bufferClears } = fakeComputeDevice();
   const result = await buildSphRenderFieldSourceLocalWebGpu({
     device,
     renderRows: renderRowsForSurface(surfaceTable),
@@ -228,7 +237,55 @@ test('generic source-local shadow builder emits standard v1 field rows without a
   assert.ok(!shaderModules.some((module) => /for \(var particle_index/.test(module.code)));
   assert.match(SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING.sphRenderFieldSourceLocalSplatWgsl, /phase_partitioned_metaball_strength/);
   assert.match(SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING.sphRenderFieldSourceLocalResolveWgsl, /mean_temperature_k/);
-  assert.ok(buffers.filter((buffer) => /source-local/.test(buffer.label)).every((buffer) => buffer.destroyed));
+  // Every transient source-local buffer is released except the accumulator,
+  // which is pooled on purpose: it is ~49 MB at production field sizes and
+  // rebuilding it per frame was a per-frame host allocation and upload.
+  const transientSourceLocal = buffers.filter(
+    (buffer) => /source-local/.test(buffer.label) && !/source-local-accum/.test(buffer.label)
+  );
+  assert.ok(transientSourceLocal.length > 0);
+  assert.ok(transientSourceLocal.every((buffer) => buffer.destroyed));
+  const accum = buffers.find((buffer) => buffer.label === 'ulg-sph-render-field-source-local-accum');
+  assert.equal(accum.destroyed, false);
+  // Retained but not stale: it is zeroed on the device at the head of the
+  // encoder, so the next build does not read the previous build's counts.
+  assert.ok(bufferClears.some((clear) => clear.label === 'ulg-sph-render-field-source-local-accum'));
+  // And zeroed on the device, not by uploading zeros from the host.
+  assert.deepEqual(accum.writes, []);
+});
+
+test('the accumulator is allocated once per device and reused across builds', async () => {
+  // The regression this pins: the accumulator was created from a zero-filled
+  // Uint32Array on every build. At 884,736 cells and 14 lanes that is a 49 MB
+  // host allocation plus a 49 MB upload per frame, and it grew with every lane
+  // added for the velocity smear.
+  const fake = fakeComputeDevice();
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    { surfaceKey: 'h2o|liquid', material: 'h2o', phase: 'liquid', resolution: 4 }
+  ], { boxDimsM: [1, 1, 1] });
+  const buildOnce = () => buildSphRenderFieldSourceLocalWebGpu({
+    device: fake.device,
+    renderRows: new Float32Array(SPH_GPU_RENDER_ROW_FLOATS),
+    surfaceTable,
+    particleCount: 1,
+    fieldPadding: 0,
+    refEdgeM: 1,
+    sourceLocalMode: SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW
+  });
+  const first = await buildOnce();
+  const second = await buildOnce();
+  const accums = fake.buffers.filter((buffer) => /source-local-accum/.test(buffer.label));
+  assert.equal(accums.length, 1, 'the second build must not allocate a second accumulator');
+  assert.equal(first.sourceLocalAccumBufferPooled, true);
+  assert.equal(second.sourceLocalAccumBufferPooled, true);
+  assert.equal(first.sourceLocalAccumClearMethod, 'encoder-clear-buffer');
+  assert.equal(second.sourceLocalAccumClearMethod, 'encoder-clear-buffer');
+  // One clear per build: reuse without a clear would accumulate frame on frame.
+  assert.equal(
+    fake.bufferClears.filter((clear) => /source-local-accum/.test(clear.label)).length,
+    2
+  );
+  assert.deepEqual(accums[0].writes, [], 'the accumulator must never be filled from the host');
 });
 
 test('generic source-local diagnostic retains an owned no-readback field behind queue-fenced leases', async () => {
@@ -284,7 +341,9 @@ test('generic source-local diagnostic retains an owned no-readback field behind 
   ]);
   await fake.device.queue.onSubmittedWorkDone();
   await Promise.resolve();
-  assert.equal(fake.buffers.find((buffer) => buffer.label === 'ulg-sph-render-field-source-local-accum').destroyed, true);
+  // Pooled, so retained across builds rather than destroyed; the head-of-encoder
+  // clear is what keeps it correct. See the reuse test above.
+  assert.equal(fake.buffers.find((buffer) => buffer.label === 'ulg-sph-render-field-source-local-accum').destroyed, false);
   assert.equal(result.fieldRowsBuffer.destroyed, false);
   assert.equal(result.surfaceBuffer.destroyed, false);
   assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);

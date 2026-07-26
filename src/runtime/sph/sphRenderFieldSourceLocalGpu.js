@@ -654,6 +654,66 @@ function assertRenderFieldSurfaceTable(surfaceTable) {
   }
 }
 
+// The atomic accumulator is totalFieldCells * ACCUM_LANES u32 -- about 49 MB
+// at 884,736 cells and 14 lanes. Allocating it from a zero-filled Uint32Array
+// per build meant a 49 MB host allocation and a 49 MB host-to-device upload
+// every frame, which is the opposite of keeping the field GPU-resident, and it
+// got worse each time a lane was added. The buffer is now created once per
+// device and zeroed on the device with clearBuffer.
+const sourceLocalAccumBufferPool = new WeakMap();
+
+function acquireSourceLocalAccumBuffer(device, byteLength) {
+  const size = Math.max(4, byteLength);
+  const pooled = sourceLocalAccumBufferPool.get(device) ?? null;
+  if (pooled && !pooled.inUse && pooled.byteLength >= size) {
+    pooled.inUse = true;
+    return { buffer: pooled.buffer, pooled: true, byteLength: size };
+  }
+  if (pooled?.inUse) {
+    // Re-entrant build (a comparison run encoding while another is live). Give
+    // it a private buffer rather than letting two encoders scatter into one.
+    return {
+      buffer: device.createBuffer({
+        label: 'ulg-sph-render-field-source-local-accum-private',
+        size,
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      }),
+      pooled: false,
+      byteLength: size
+    };
+  }
+  pooled?.buffer?.destroy?.();
+  const buffer = device.createBuffer({
+    label: 'ulg-sph-render-field-source-local-accum',
+    size,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  sourceLocalAccumBufferPool.set(device, { buffer, byteLength: size, inUse: true });
+  return { buffer, pooled: true, byteLength: size };
+}
+
+function releaseSourceLocalAccumBuffer(device, handle) {
+  if (!handle) return;
+  if (!handle.pooled) {
+    handle.buffer?.destroy?.();
+    return;
+  }
+  const pooled = sourceLocalAccumBufferPool.get(device);
+  if (pooled?.buffer === handle.buffer) pooled.inUse = false;
+}
+
+// A pooled buffer holds the previous build's counts, so it must be zeroed
+// before the splat scatters into it. clearBuffer does that on the device;
+// without it the field would accumulate across frames.
+function encodeSourceLocalAccumClear(encoder, device, handle) {
+  if (typeof encoder.clearBuffer === 'function') {
+    encoder.clearBuffer(handle.buffer, 0, handle.byteLength);
+    return 'encoder-clear-buffer';
+  }
+  device.queue.writeBuffer(handle.buffer, 0, new Uint32Array(handle.byteLength / 4));
+  return 'queue-write-zero-fill';
+}
+
 function writeStorageBuffer(device, label, data, extraUsage = 0) {
   const byteLength = Math.max(4, data.byteLength);
   const buffer = device.createBuffer({
@@ -1079,11 +1139,11 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     surfaceTable.records,
     GPU_BUFFER_USAGE.COPY_SRC
   );
-  const accumBuffer = writeStorageBuffer(
+  const accumHandle = acquireSourceLocalAccumBuffer(
     device,
-    'ulg-sph-render-field-source-local-accum',
-    new Uint32Array(surfaceTable.totalFieldCells * SOURCE_LOCAL_ACCUM_LANES)
+    surfaceTable.totalFieldCells * SOURCE_LOCAL_ACCUM_LANES * 4
   );
+  const accumBuffer = accumHandle.buffer;
   const overflowBuffer = writeStorageBuffer(
     device,
     'ulg-sph-render-field-source-local-overflow',
@@ -1207,6 +1267,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   });
 
   const encoder = device.createCommandEncoder();
+  const accumClearMethod = encodeSourceLocalAccumClear(encoder, device, accumHandle);
   const splatWorkgroups = [
     Math.max(1, Math.ceil(resolvedParticleCount / 64)),
     Math.max(1, surfaceTable.surfaceCount)
@@ -1351,7 +1412,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       if (transientCleanupDone) return;
       transientCleanupDone = true;
       if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
-      accumBuffer.destroy?.();
+      releaseSourceLocalAccumBuffer(device, accumHandle);
       overflowBuffer.destroy?.();
       paramsBuffer.destroy?.();
     phaseBuffers?.moments?.destroy?.();
@@ -1441,6 +1502,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
         : 'pipeline-cache-miss',
       sourceLocalSplatPipelineCacheStatus: splatPipelineState.cacheStatus,
       sourceLocalResolvePipelineCacheStatus: resolvePipelineState.cacheStatus,
+      sourceLocalAccumBufferPooled: accumHandle.pooled,
+      sourceLocalAccumBufferByteLength: accumHandle.byteLength,
+      sourceLocalAccumClearMethod: accumClearMethod,
       renderFieldDeferredCleanup,
       renderFieldReadback: false,
       fullReadbackPerformed: false,
@@ -1516,7 +1580,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     // adapter, so neither may be destroyed here -- the consumer reads them
     // after this function returns.
     if (!productionMode) surfaceBuffer.destroy?.();
-    accumBuffer.destroy?.();
+    releaseSourceLocalAccumBuffer(device, accumHandle);
     overflowBuffer.destroy?.();
     if (ownsFieldRowsBuffer) fieldRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
@@ -1588,6 +1652,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       : 'pipeline-cache-miss',
     sourceLocalSplatPipelineCacheStatus: splatPipelineState.cacheStatus,
     sourceLocalResolvePipelineCacheStatus: resolvePipelineState.cacheStatus,
+    sourceLocalAccumBufferPooled: accumHandle.pooled,
+    sourceLocalAccumBufferByteLength: accumHandle.byteLength,
+    sourceLocalAccumClearMethod: accumClearMethod,
     renderFieldDeferredCleanup: false,
     // These were hardcoded for a shadow-only module, which never had a consumer.
     // In production they are the handoff: the marching-cubes adapter reads

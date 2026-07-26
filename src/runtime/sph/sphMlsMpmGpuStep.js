@@ -22797,6 +22797,8 @@ function createMlsMpmMechanicsChildStageKernelEvidence(execution = {}, {
       // spreading it, so anything the fused sequence adds has to be listed
       // here or it is silently dropped on the way to a consumer.
       stageGpuMs: stageTiming.stageGpuMs ?? null,
+      queueStageGpuMs: stageTiming.queueStageGpuMs ?? null,
+      queueStageGpuStats: stageTiming.queueStageGpuStats ?? null,
       gpuTimestampProfile: stageTiming.gpuTimestampProfile ?? null,
       readbackMode: stageTiming.requestedReadbackMode || finalStep.readbackMode || null,
       mechanicsOnlyEntrypoint: stageTiming.mechanicsOnlyEntrypoint === true
@@ -26406,6 +26408,18 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
     stageMs: { ...stageMs },
+    // PROF-0. Device-side cost per stage from the queue-stage recorder. This is
+    // deliberately not merged into stageGpuMs: that comes from pass-level
+    // timestamp queries and measures pass execution, while this brackets a
+    // whole stage with queue fences and therefore also includes submit latency
+    // -- and the fences serialise the pipeline, so the numbers are not
+    // interchangeable. Null when profiling was not requested.
+    queueStageGpuMs: gpuTimestampRecorder?.active === true
+      ? gpuTimestampRecorder.stageGpuMs()
+      : null,
+    queueStageGpuStats: gpuTimestampRecorder?.active === true
+      ? (gpuTimestampRecorder.stageGpuStats?.() ?? null)
+      : null,
     queueFenceMs: {
       compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
     },
@@ -27756,6 +27770,11 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
   fusedActiveGridSafetyCells = undefined,
   sidecarFusionPlan = null,
   sidecarAwareDirectRunnerContract = null,
+  // PROF-0. The caller has always passed this; the destructuring dropped it,
+  // so the sidecar path -- which is the one that actually runs fusedMechanics
+  // when a thermal sidecar is present -- was invisible to the recorder while
+  // every other resident stage was measured.
+  gpuTimestampRecorder = null,
   onResidentStageProgress = null
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
@@ -27814,7 +27833,15 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     const startMs = nowMs();
     markStageProgress('thermal-sidecar-direct-runner-stage-started', { stage: name });
     try {
-      const result = await runStage();
+      const result = gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.measureQueueStage === 'function'
+        ? await gpuTimestampRecorder.measureQueueStage({
+            producerId: `mls-mpm-thermal-sidecar-direct:${name}`,
+            stage: name,
+            spanClass: 'resident-queue-stage',
+            sequenceIndex
+          }, runStage)
+        : await runStage();
       markStageProgress('thermal-sidecar-direct-runner-stage-complete', {
         stage: name,
         elapsedMs: recordStageMs(name, startMs)
@@ -28006,6 +28033,13 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
     stageMs: { ...stageMs },
+    // PROF-0. Same contract as the resident step's stageTiming above.
+    queueStageGpuMs: gpuTimestampRecorder?.active === true
+      ? gpuTimestampRecorder.stageGpuMs()
+      : null,
+    queueStageGpuStats: gpuTimestampRecorder?.active === true
+      ? (gpuTimestampRecorder.stageGpuStats?.() ?? null)
+      : null,
     queueFenceMs: {
       compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
     },

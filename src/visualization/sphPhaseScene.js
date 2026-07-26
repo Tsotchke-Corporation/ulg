@@ -152,6 +152,9 @@ import {
   SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION
 } from '../runtime/sph/sphRenderFieldSourceLocalGpu.js';
 import {
+  createSphGpuQueueStageRecorder
+} from '../runtime/sph/sphGpuTimestampProfiler.js';
+import {
   buildSphMaterialInterfaceSourceFieldLocalWebGpu
 } from '../runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js';
 import {
@@ -12350,6 +12353,28 @@ export function createSphPhaseScene(container, {
   const scene = new Three.Scene();
   scene.userData.sphResidentGpuTimestampProfilingRequested =
     enableResidentGpuTimestampProfiling;
+  // PROF-0. The gpuTimestampRecorder contract has 17 consumer modules and 51
+  // call sites across the resident and Schroeder paths, and nothing in the tree
+  // ever constructed one, so every consumer took its inert branch permanently.
+  // This is the missing producer. It brackets each stage with
+  // queue.onSubmittedWorkDone, which serialises the pipeline and therefore
+  // changes the thing it measures -- it exists only while
+  // ?residentGpuTimestampProfile=1 is set, and never in a production frame.
+  let sphResidentGpuQueueStageRecorder = null;
+  let sphResidentGpuQueueStageRecorderDevice = null;
+  const resolveResidentGpuQueueStageRecorder = (device = null) => {
+    if (!enableResidentGpuTimestampProfiling || !device) return null;
+    if (sphResidentGpuQueueStageRecorder
+      && sphResidentGpuQueueStageRecorderDevice === device) {
+      return sphResidentGpuQueueStageRecorder;
+    }
+    sphResidentGpuQueueStageRecorderDevice = device;
+    sphResidentGpuQueueStageRecorder = createSphGpuQueueStageRecorder({
+      device,
+      label: 'ulg-sph-scene-resident-queue-stage-recorder'
+    });
+    return sphResidentGpuQueueStageRecorder;
+  };
   let sceneLightingMode = normalizeSphSceneLightingMode(lightingMode);
   let sceneLightingProfile = resolveSphSceneLightingProfile(sceneLightingMode);
   scene.environmentIntensity = sceneLightingProfile.environmentIntensity;
@@ -33246,6 +33271,13 @@ fn main(
               // the feature and nothing ever writes a timestamp.
               residentGpuTimestampProfilingRequested:
                 enableResidentGpuTimestampProfiling,
+              // The pass-level profiler above times compute passes it owns.
+              // This recorder times whole stages -- including the ones assembled
+              // from several passes plus a submit -- by fencing on the queue,
+              // which is the only measurement that covers the enqueue-to-idle
+              // interval the host clock mistakes for the stage cost.
+              gpuTimestampRecorder:
+                resolveResidentGpuQueueStageRecorder(resolvedDeviceResult?.device ?? null),
               sphParticleState: currentSphParticleState,
               mlsMpmParticleState: currentMlsMpmParticleState,
               sphParticleUpload: currentSphParticleUpload,
@@ -33377,7 +33409,8 @@ fn main(
               enableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
               twoLevelMechanicsAuthority: requestedSchroederTwoLevelMechanicsAuthority,
               twoLevelFineSubstepCount: requestedSchroederTwoLevelFineSubstepCount,
-              gpuTimestampRecorder: schroederGpuTimestampRecorder,
+              gpuTimestampRecorder: schroederGpuTimestampRecorder
+                ?? resolveResidentGpuQueueStageRecorder(resolvedDeviceResult?.device ?? null),
               ...(requestedSchroederMinLevel !== null ? { minLevel: requestedSchroederMinLevel } : {}),
               ...(requestedSchroederMaxLevel !== null ? { maxLevel: requestedSchroederMaxLevel } : {}),
               ...(requestedSchroederTileCellCount !== null ? { tileCellCount: requestedSchroederTileCellCount } : {}),
@@ -40377,30 +40410,46 @@ fn main(
             targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null
             });
           };
-          const timedBuildRenderFieldForRows = async () => {
+          // PROF-0. renderFieldMs and its neighbours are host enqueue times.
+          // That is why FIELD-0's dense-versus-source-local question stayed
+          // unanswerable: the dense gather reported about 1.1 ms for roughly
+          // 131M cell visits, which is not a plausible device cost, and work
+          // that only moved between stages read as a speedup. When the
+          // queue-stage recorder is active each render stage is fenced on both
+          // sides, so device cost lands in renderRefreshStageGpuMs and cannot
+          // migrate from one stage into another unnoticed.
+          const renderRefreshStageRecorder = resolveResidentGpuQueueStageRecorder(
+            resolvedDeviceResult?.device ?? null
+          );
+          const timedRenderRefreshStage = async (key, stage, runStage) => {
             const startedAtMs = nowMs();
             try {
-              return await buildRenderFieldForRows();
+              return renderRefreshStageRecorder?.active === true
+                ? await renderRefreshStageRecorder.measureQueueStage({
+                  stage,
+                  producerId: `sph-render-refresh:${stage}`,
+                  spanClass: 'render-refresh-queue-stage'
+                }, runStage)
+                : await runStage();
             } finally {
-              renderRefreshMarkStage('renderFieldMs', startedAtMs);
+              renderRefreshMarkStage(key, startedAtMs);
             }
           };
-          const timedSummarizeRenderFieldSurfaces = async (options) => {
-            const startedAtMs = nowMs();
-            try {
-              return await summarizeSphRenderFieldSurfacesWebGpu(options);
-            } finally {
-              renderRefreshMarkStage('renderFieldSurfaceSummaryMs', startedAtMs);
-            }
-          };
-          const timedBuildPhysicsMaterialInterfaceField = async (options) => {
-            const startedAtMs = nowMs();
-            try {
-              return await buildSphPhysicsMaterialInterfaceFieldWebGpu(options);
-            } finally {
-              renderRefreshMarkStage('materialInterfaceMs', startedAtMs);
-            }
-          };
+          const timedBuildRenderFieldForRows = async () => timedRenderRefreshStage(
+            'renderFieldMs',
+            'renderField',
+            buildRenderFieldForRows
+          );
+          const timedSummarizeRenderFieldSurfaces = async (options) => timedRenderRefreshStage(
+            'renderFieldSurfaceSummaryMs',
+            'renderFieldSurfaceSummary',
+            () => summarizeSphRenderFieldSurfacesWebGpu(options)
+          );
+          const timedBuildPhysicsMaterialInterfaceField = async (options) => timedRenderRefreshStage(
+            'materialInterfaceMs',
+            'materialInterface',
+            () => buildSphPhysicsMaterialInterfaceFieldWebGpu(options)
+          );
         const renderFieldHasPositiveDensity = (execution) => {
           if (!(execution?.fieldRows instanceof Float32Array) || execution.fieldRows.length === 0) return true;
           for (let index = 0; index < execution.fieldRows.length; index += 4) {
@@ -43205,6 +43254,15 @@ fn main(
       sphResidentRenderState.renderRefreshDeviceAcquireMs = renderRefreshStageMs.deviceAcquireMs ?? null;
       sphResidentRenderState.renderRefreshRenderRowsMs = renderRefreshStageMs.renderRowsMs ?? null;
       sphResidentRenderState.renderRefreshRenderFieldMs = renderRefreshStageMs.renderFieldMs ?? null;
+      // PROF-0. Device-side cost for every stage the recorder fenced, in both
+      // the physics step and this render refresh. Null when profiling was not
+      // requested, so an absent measurement never reads as a zero one.
+      sphResidentRenderState.residentGpuQueueStageStats =
+        sphResidentGpuQueueStageRecorder?.active === true
+          ? sphResidentGpuQueueStageRecorder.stageGpuStats()
+          : null;
+      sphResidentRenderState.residentGpuQueueStageSpanCount =
+        sphResidentGpuQueueStageRecorder?.spanCount() ?? null;
       sphResidentRenderState.renderRefreshRenderFieldSurfaceSummaryMs =
         renderRefreshStageMs.renderFieldSurfaceSummaryMs ?? null;
       sphResidentRenderState.renderRefreshMaterialInterfaceMs = renderRefreshStageMs.materialInterfaceMs ?? null;

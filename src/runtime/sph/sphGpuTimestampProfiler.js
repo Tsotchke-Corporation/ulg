@@ -250,3 +250,92 @@ export const SPH_FUSED_SEQUENCE_UNATTRIBUTED_STAGES = Object.freeze([
   'phaseCarrierTransfer',
   'schroederFarForceDeltaFusion'
 ]);
+
+/**
+ * Adapter presenting the profiler as the `gpuTimestampRecorder` the runtime
+ * already expects.
+ *
+ * That contract has 17 consumer modules and 51 call sites -- sphMlsMpmGpuStep,
+ * webgpuRadixScanUnique, schroederSpatialEpochGpu and others -- and no
+ * implementation anywhere. Every consumer guards on `active === true` and then
+ * takes its inert branch, permanently, because nothing ever constructs a
+ * recorder. This is the missing producer.
+ *
+ * `measureQueueStage` is the method that matters here. It wraps a stage and
+ * measures GPU *completion* with a queue fence, which is the honest answer to
+ * "how long did the device take", as opposed to the host enqueue time that
+ * `stageMs` records and that made a 1.1 ms dense field build look plausible.
+ *
+ * Encoder spans are deliberately inert. Current WebGPU has no
+ * `encoder.writeTimestamp`; timestamps can only be written by `timestampWrites`
+ * on a pass descriptor. `beginEncoderSpan` therefore returns null rather than
+ * pretending, and every consumer already handles a null span. Pass-level timing
+ * comes from `createSphGpuTimestampProfiler` itself.
+ *
+ * Fences serialise the queue, so this is a diagnostic mode and must stay off by
+ * default.
+ */
+export function createSphGpuQueueStageRecorder({
+  device = null,
+  enabled = true,
+  label = 'ulg-sph-gpu-queue-stage-recorder'
+} = {}) {
+  const usable = Boolean(enabled === true && device?.queue?.onSubmittedWorkDone);
+  /** @type {{stage: string, gpuMs: number, producerId: string|null}[]} */
+  const spans = [];
+
+  return {
+    schema: 'peercompute.ulg.sph-gpu-queue-stage-recorder.v0',
+    label,
+    active: usable,
+    encoderSpansSupported: false,
+    async measureQueueStage(descriptor, runStage) {
+      if (!usable) return runStage();
+      // Fence first so the measurement excludes work already in flight.
+      await device.queue.onSubmittedWorkDone();
+      const startedMs = (globalThis.performance ?? Date).now();
+      const result = await runStage();
+      await device.queue.onSubmittedWorkDone();
+      const gpuMs = Math.max(0, ((globalThis.performance ?? Date).now()) - startedMs);
+      spans.push({
+        stage: String(descriptor?.stage ?? 'unknown'),
+        producerId: descriptor?.producerId ?? null,
+        gpuMs
+      });
+      return result;
+    },
+    // Inert by necessity, not by choice; see the note above.
+    beginEncoderSpan() { return null; },
+    endEncoderSpan() {},
+    discardEncoderSpans() {},
+    stageGpuMs() {
+      const totals = {};
+      for (const span of spans) {
+        totals[span.stage] = (totals[span.stage] ?? 0) + span.gpuMs;
+      }
+      return totals;
+    },
+    // Totals alone are not comparable across stages that run a different
+    // number of times per frame -- the render field builds once while the
+    // mechanics stages run per substep. Counts travel with the totals so a
+    // reader can take the mean instead of mistaking cadence for cost.
+    stageGpuStats() {
+      const stats = {};
+      for (const span of spans) {
+        const entry = stats[span.stage] ?? (stats[span.stage] = {
+          totalMs: 0,
+          count: 0,
+          maxMs: 0,
+          meanMs: 0
+        });
+        entry.totalMs += span.gpuMs;
+        entry.count += 1;
+        entry.maxMs = Math.max(entry.maxMs, span.gpuMs);
+        entry.meanMs = entry.totalMs / entry.count;
+      }
+      return stats;
+    },
+    spanCount() { return spans.length; },
+    reset() { spans.length = 0; }
+  };
+}

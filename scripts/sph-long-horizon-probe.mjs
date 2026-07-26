@@ -5306,6 +5306,12 @@ async function runBrowserProbe({
             rendererOwnedDevice: renderState.rendererOwnedDevice ?? null,
             renderRefreshTiming: renderState.renderRefreshTiming ?? null,
             renderRefreshStageMs: renderState.renderRefreshStageMs ?? null,
+            // PROF-0. Device-side stage cost, present only under
+            // ?residentGpuTimestampProfile=1. Every renderRefresh*Ms above is
+            // host enqueue time, which is why they cannot settle FIELD-0.
+            residentGpuQueueStageStats: renderState.residentGpuQueueStageStats ?? null,
+            residentGpuQueueStageSpanCount:
+              finiteOrNull(renderState.residentGpuQueueStageSpanCount),
             renderRefreshTotalMs: finiteOrNull(renderState.renderRefreshTotalMs),
             renderRefreshDeviceAcquireMs: finiteOrNull(renderState.renderRefreshDeviceAcquireMs),
             renderRefreshRenderRowsMs: finiteOrNull(renderState.renderRefreshRenderRowsMs),

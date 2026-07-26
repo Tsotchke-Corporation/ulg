@@ -45,7 +45,9 @@ import {
   runSphThermalStepCpu,
   runSphThermalStepWebGpu,
   runSphThermalStepWithOptionalWebGpu,
-  uploadSphThermalResponseGraphBuffers
+  uploadSphThermalResponseGraphBuffers,
+  resolveThermalMaxPairSupportM,
+  SPH_THERMAL_PHASE_RESPONSE_FLOATS
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 
 const closures = createReferenceMaterialClosures();
@@ -1580,4 +1582,47 @@ test('SPH thermal isolated hot particle cools along the Stefan-Boltzmann curve',
     Math.abs(giantPacked.thermo[2] - ambientK) < 5,
     `after two giant steps temperature must converge onto ambient, got ${giantPacked.thermo[2]}`
   );
+});
+
+test('thermal max pair support is memoised per state buffer', () => {
+  // The scan is O(N) and used to run while constructing every GPU stage.
+  const count = 4096;
+  const state = new Float32Array(count * SPH_GPU_PARTICLE_STATE_FLOATS);
+  const thermo = new Float32Array(count * SPH_GPU_PARTICLE_THERMO_FLOATS);
+  for (let i = 0; i < count; i += 1) {
+    state[i * SPH_GPU_PARTICLE_STATE_FLOATS + 3] = 1;
+    thermo[i * SPH_GPU_PARTICLE_THERMO_FLOATS] = 1;
+  }
+  const responses = new Float32Array(SPH_THERMAL_PHASE_RESPONSE_FLOATS);
+  responses[0] = 1; responses[8] = 900; responses[9] = 1000;
+  const particleState = { state, thermo, particleCount: count };
+  const table = { responses };
+  const first = resolveThermalMaxPairSupportM(particleState, table);
+  assert.ok(first > 0);
+  // Same buffer and count must return the identical value without rescanning.
+  assert.equal(resolveThermalMaxPairSupportM(particleState, table), first);
+});
+
+test('thermal max pair support never narrows for the same state buffer', () => {
+  // A stale CPU mirror that reports smaller masses must not shrink the
+  // neighbour scan radius: narrowing silently drops radiation pairs, while
+  // widening only costs extra cells.
+  const count = 32;
+  const state = new Float32Array(count * SPH_GPU_PARTICLE_STATE_FLOATS);
+  const thermo = new Float32Array(count * SPH_GPU_PARTICLE_THERMO_FLOATS);
+  for (let i = 0; i < count; i += 1) {
+    state[i * SPH_GPU_PARTICLE_STATE_FLOATS + 3] = 8;
+    thermo[i * SPH_GPU_PARTICLE_THERMO_FLOATS] = 1;
+  }
+  const responses = new Float32Array(SPH_THERMAL_PHASE_RESPONSE_FLOATS);
+  responses[0] = 1; responses[8] = 900; responses[9] = 1000;
+  const table = { responses };
+  const wide = resolveThermalMaxPairSupportM({ state, thermo, particleCount: count }, table);
+  // Shrink every mass, and change the count so the memo fast path is bypassed.
+  for (let i = 0; i < count; i += 1) state[i * SPH_GPU_PARTICLE_STATE_FLOATS + 3] = 0.001;
+  const afterShrink = resolveThermalMaxPairSupportM(
+    { state, thermo, particleCount: count - 1 },
+    table
+  );
+  assert.equal(afterShrink, wide, 'support radius must not narrow');
 });

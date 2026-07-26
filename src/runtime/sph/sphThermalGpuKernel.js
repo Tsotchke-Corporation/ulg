@@ -2691,12 +2691,28 @@ export function destroySphThermalResponseGraphBuffers(buffers) {
 // the per-pair support itself is computed in-kernel from each pair's rest
 // densities. CPU copies may be stale under GPU-resident continuation — a
 // stale mass bound only widens/narrows the scan, never breaks pair symmetry.
+// Memoised per state buffer, and monotone non-decreasing.
+//
+// Two problems with rescanning every time. It is an O(N) CPU walk performed
+// while constructing each GPU stage, which serialises graph construction on the
+// host; and the CPU mirrors it reads can be stale under GPU-resident
+// continuation, in which case a low bound *narrows* the neighbour scan and
+// silently drops radiation pairs. Widening is harmless -- more cells inspected
+// -- so the cached value is only ever raised, never lowered. A stale mirror can
+// then cost a little extra scan work but can no longer lose a pair.
+//
+// Keyed on the state typed array identity: a genuinely new particle buffer gets
+// a fresh scan, while the repeated calls within one step share one.
+const thermalMaxPairSupportCache = new WeakMap();
+
 export function resolveThermalMaxPairSupportM(sphParticleState, phaseResponseTable) {
   const state = sphParticleState?.state;
   const thermo = sphParticleState?.thermo;
   const responses = phaseResponseTable?.responses;
   const count = Math.max(0, Math.round(Number(sphParticleState?.particleCount) || 0));
   if (!state?.length || !thermo?.length || !responses?.length || count === 0) return 0;
+  const memo = thermalMaxPairSupportCache.get(state);
+  if (memo && memo.count === count) return memo.supportM;
   const minDensityByMaterial = new Map();
   for (let offset = 0; offset + 9 < responses.length; offset += SPH_THERMAL_PHASE_RESPONSE_FLOATS) {
     const materialId = Math.round(responses[offset]);
@@ -2719,7 +2735,13 @@ export function resolveThermalMaxPairSupportM(sphParticleState, phaseResponseTab
   }
   // Radiation pairs interact out to RADIATION_PAIR_RANGE_RADII * (r_i + r_j);
   // the neighbor structure must reach that far, not just contact range.
-  return maxRadiusM > 0 ? SPH_THERMAL_RADIATION_PAIR_RANGE_RADII * 2 * maxRadiusM : 0;
+  const supportM = maxRadiusM > 0
+    ? SPH_THERMAL_RADIATION_PAIR_RANGE_RADII * 2 * maxRadiusM
+    : 0;
+  const cached = thermalMaxPairSupportCache.get(state);
+  const monotoneM = cached?.supportM > supportM ? cached.supportM : supportM;
+  thermalMaxPairSupportCache.set(state, { supportM: monotoneM, count });
+  return monotoneM;
 }
 
 const THERMAL_PARAMS_BYTES = 144;

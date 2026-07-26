@@ -49,6 +49,11 @@ export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK =
   'diagnostic-no-readback';
 export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DISABLED = 'disabled';
 
+// Production: publish into the caller's pooled field-rows buffer and be usable
+// for presentation. Distinct from 'shadow', which allocates its own buffer and
+// exists to be compared against the dense gather.
+export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION = 'production';
+
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const SOURCE_LOCAL_KERNEL_SCOPE = 'sph-render-field-source-local-shadow-splat';
@@ -771,7 +776,10 @@ function fallbackReason({
   const shadowMode = sourceLocalMode === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW;
   const diagnosticNoReadbackMode = sourceLocalMode
     === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK;
-  if (!shadowMode && !diagnosticNoReadbackMode) return 'source-local-mode-not-supported';
+  const productionMode = sourceLocalMode === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION;
+  if (!shadowMode && !diagnosticNoReadbackMode && !productionMode) {
+    return 'source-local-mode-not-supported';
+  }
   if (shadowMode && readbackMode !== FULL_READBACK_MODE) {
     return 'shadow-parity-requires-full-readback';
   }
@@ -799,7 +807,15 @@ function fallbackReason({
     && (productEventRows || productEventBuffer || finiteNumber(productEventCount, 0) > 0)) {
     return 'successor-lineage-forbids-unauthenticated-product-events';
   }
-  if (targetFieldRowsBuffer) return 'shadow-mode-does-not-publish-pooled-output';
+  // Only production publishes into a caller-owned pooled buffer. Shadow builds
+  // its own so a comparison against the dense field cannot disturb what the
+  // renderer is showing.
+  if (targetFieldRowsBuffer && !productionMode) {
+    return 'shadow-mode-does-not-publish-pooled-output';
+  }
+  if (productionMode && !targetFieldRowsBuffer) {
+    return 'production-requires-a-pooled-field-rows-target';
+  }
   if (diagnosticNoReadbackMode && !retainFieldRowsBuffer) {
     return 'diagnostic-no-readback-requires-retained-field-buffer';
   }
@@ -1074,12 +1090,19 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     new Uint32Array(1),
     GPU_BUFFER_USAGE.COPY_SRC
   );
-  const fieldRowsBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-render-field-source-local-cells',
-    new Float32Array(surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  // Production writes straight into the caller's pooled buffer; every other
+  // mode allocates its own so a comparison run cannot disturb what the renderer
+  // is currently presenting.
+  const productionMode = sourceLocalMode === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION;
+  const ownsFieldRowsBuffer = !productionMode;
+  const fieldRowsBuffer = productionMode
+    ? targetFieldRowsBuffer
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-render-field-source-local-cells',
+      new Float32Array(surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS),
+      GPU_BUFFER_USAGE.COPY_SRC
+    );
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-render-field-source-local-params',
     size: 48,
@@ -1337,7 +1360,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     const cleanupAllBuffers = () => {
       cleanupTransientBuffers();
       surfaceBuffer.destroy?.();
-      fieldRowsBuffer.destroy?.();
+      if (ownsFieldRowsBuffer) fieldRowsBuffer.destroy?.();
     };
     let queueCompletionStatus = 'not-submitted';
     let queueCompletionMethod = null;
@@ -1460,7 +1483,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     surfaceBuffer.destroy?.();
     accumBuffer.destroy?.();
     overflowBuffer.destroy?.();
-    fieldRowsBuffer.destroy?.();
+    if (ownsFieldRowsBuffer) fieldRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
     phaseBuffers?.moments?.destroy?.();
     phaseBuffers?.primary?.destroy?.();
@@ -1468,14 +1491,21 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
 
   return {
     schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
-    backend: 'webgpu-source-local-shadow',
-    status: overflowState ? 'render-field-shadow-overflow' : 'render-field-shadow-built',
+    backend: productionMode
+      ? 'webgpu-source-local'
+      : 'webgpu-source-local-shadow',
+    status: overflowState
+      ? (productionMode ? 'render-field-source-local-overflow' : 'render-field-shadow-overflow')
+      : (productionMode ? 'render-field-source-local-built' : 'render-field-shadow-built'),
     kernelScope: SOURCE_LOCAL_KERNEL_SCOPE,
     sourceLocalSchema: SPH_RENDER_FIELD_SOURCE_LOCAL_SCHEMA,
-    sourceLocalStrategy: 'shadow',
-    sourceLocalShadowOnly: true,
+    sourceLocalStrategy: productionMode ? 'production' : 'shadow',
+    sourceLocalShadowOnly: !productionMode,
     sourceLocalEligible: !overflowState,
-    sourceLocalUsableForPresentation: false,
+    // An overflowed splat is not a field: some source exceeded its cell budget
+    // and its contribution is missing. Presentation must fall back rather than
+    // show a hole.
+    sourceLocalUsableForPresentation: productionMode && !overflowState,
     sourceLocalOverflow: Boolean(overflowState),
     sourceLocalMaxSplatCellsPerSource: resolvedMaxSplatCellsPerSource,
     sourceLocalDensityScale: SOURCE_LOCAL_DENSITY_SCALE,

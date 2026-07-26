@@ -13,6 +13,7 @@ import {
   SOURCE_LOCAL_ACCUM_LANES,
   SPLAT_PHASE_SINGLE,
   SPLAT_PHASE_MOMENTS_ONLY,
+  SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION,
   SPLAT_PHASE_SMEARED_PRIMARY
 } from '../src/runtime/sph/sphRenderFieldSourceLocalGpu.js';
 
@@ -801,4 +802,64 @@ test('successor lineage still refuses unauthenticated product events', async () 
     }),
     /no unauthenticated product-event source/
   );
+});
+
+test('production mode publishes into the caller pooled buffer and is presentable', async () => {
+  const input = fakeComputeDevice();
+  const surfaceTable = singleSurfaceTable();
+  const pooled = input.device.createBuffer({
+    label: 'pooled-field-rows',
+    size: surfaceTable.totalFieldCells * 8 * 4,
+    usage: 0
+  });
+  const result = await buildSphRenderFieldSourceLocalWebGpu({
+    device: input.device,
+    renderRows: renderRowsForSurface(surfaceTable),
+    surfaceTable,
+    particleCount: 1,
+    sourceLocalMode: SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION,
+    targetFieldRowsBuffer: pooled
+  });
+  assert.equal(result.sourceLocalStrategy, 'production');
+  assert.equal(result.sourceLocalShadowOnly, false);
+  assert.equal(result.sourceLocalUsableForPresentation, true);
+  assert.equal(result.backend, 'webgpu-source-local');
+  // The pooled buffer belongs to the caller and must survive the builder.
+  assert.ok(!pooled.destroyed, 'a caller-owned buffer must not be destroyed');
+});
+
+test('production without a pooled target is refused rather than silently allocating', async () => {
+  const input = fakeComputeDevice();
+  const surfaceTable = singleSurfaceTable();
+  const result = await buildSphRenderFieldSourceLocalWebGpu({
+    device: input.device,
+    renderRows: renderRowsForSurface(surfaceTable),
+    surfaceTable,
+    particleCount: 1,
+    sourceLocalMode: SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION
+  });
+  assert.equal(result.sourceLocalStrategy, 'dense-fallback');
+  assert.equal(result.sourceLocalFallbackReason, 'production-requires-a-pooled-field-rows-target');
+});
+
+test('shadow mode still refuses a pooled target', async () => {
+  // Shadow exists to be compared against the dense gather; writing into the
+  // renderer's live buffer would disturb what is being presented.
+  const input = fakeComputeDevice();
+  const surfaceTable = singleSurfaceTable();
+  const result = await buildSphRenderFieldSourceLocalWebGpu({
+    device: input.device,
+    renderRows: renderRowsForSurface(surfaceTable),
+    surfaceTable,
+    particleCount: 1,
+    // Correctly sized: an undersized buffer would be rejected by the dense
+    // fallback instead, which would test the wrong thing.
+    targetFieldRowsBuffer: input.device.createBuffer({
+      label: 't',
+      size: surfaceTable.totalFieldCells * 8 * 4,
+      usage: 0
+    })
+  });
+  assert.equal(result.sourceLocalFallbackReason, 'shadow-mode-does-not-publish-pooled-output');
+  assert.equal(result.sourceLocalStrategy, 'dense-fallback');
 });

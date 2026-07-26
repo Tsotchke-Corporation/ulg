@@ -10,7 +10,10 @@ import {
   SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING,
   SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK,
   buildSphRenderFieldSourceLocalWebGpu,
-  SOURCE_LOCAL_ACCUM_LANES
+  SOURCE_LOCAL_ACCUM_LANES,
+  SPLAT_PHASE_SINGLE,
+  SPLAT_PHASE_MOMENTS_ONLY,
+  SPLAT_PHASE_SMEARED_PRIMARY
 } from '../src/runtime/sph/sphRenderFieldSourceLocalGpu.js';
 
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_RENDER_SOURCE_LOCAL === '1';
@@ -307,10 +310,39 @@ test('generic source-local builder routes normal no-readback and product inputs 
     particleCount: 1,
     renderSmearDtS: 1 / 60
   });
-  assert.equal(smearResult.backend, 'webgpu');
-  assert.equal(smearResult.sourceLocalStrategy, 'dense-fallback');
-  assert.equal(smearResult.sourceLocalFallbackReason, 'velocity-smear-parity-not-yet-implemented');
-  assert.ok(!smearInput.dispatches.some((entry) => /source-local/.test(entry.label)));
+  // Velocity smear used to force the dense fallback. It is now implemented as
+  // a four-pass sequence -- moments, reduce, smeared re-splat, resolve -- so it
+  // stays on the source-local path.
+  assert.equal(smearResult.sourceLocalStrategy, 'shadow');
+  assert.ok(!smearResult.sourceLocalFallbackReason, 'smear must no longer report a fallback reason');
+  const smearSourceLocalPasses = smearInput.dispatches
+    .filter((entry) => /source-local/.test(entry.label));
+  assert.equal(
+    smearSourceLocalPasses.length,
+    4,
+    'smear needs two splats and two resolves; the correction is per-cell and a scattering particle cannot compute it in one pass'
+  );
+  const smearLabels = smearSourceLocalPasses.map((entry) => entry.label);
+  assert.match(smearLabels[0], /splat/);
+  assert.match(smearLabels[1], /resolve/);
+  assert.match(smearLabels[2], /splat/);
+  assert.match(smearLabels[3], /resolve/);
+
+  // Without smear the sequence must stay at the original two passes, so a
+  // scene that does not need the correction pays nothing for it.
+  const noSmearInput = fakeComputeDevice();
+  const noSmearResult = await buildSphRenderFieldSourceLocalWebGpu({
+    device: noSmearInput.device,
+    renderRows: renderRowsForSurface(surfaceTable),
+    surfaceTable,
+    particleCount: 1,
+    renderSmearDtS: 0
+  });
+  assert.equal(noSmearResult.sourceLocalStrategy, 'shadow');
+  assert.equal(
+    noSmearInput.dispatches.filter((entry) => /source-local/.test(entry.label)).length,
+    2
+  );
 
   const productInput = fakeComputeDevice();
   const productResult = await buildSphRenderFieldSourceLocalWebGpu({
@@ -516,8 +548,8 @@ test('velocity moments are gated on a non-zero smear interval', () => {
   const { sphRenderFieldSourceLocalSplatWgsl } = SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
   assert.match(
     sphRenderFieldSourceLocalSplatWgsl,
-    /if \(params\.render_smear_dt_s > 0\.0\) \{/,
-    'velocity-moment accumulation must be gated on render_smear_dt_s'
+    /if \(params\.render_smear_dt_s > 0\.0 && params\.splat_phase != 2u\) \{/,
+    'moments accumulate only when smear is on, and never during the phase that consumes them'
   );
   // Signed components must be split, not clamped: the accumulator is unsigned.
   assert.match(sphRenderFieldSourceLocalSplatWgsl, /quantize\(max\(-vw\.x, 0\.0\)/);
@@ -553,4 +585,27 @@ test('the dispersion reduce is weighted and clamped non-negative', () => {
   );
   // Zero smear interval must leave the correction exactly off.
   assert.match(sphRenderFieldSourceLocalResolveWgsl, /var smear_sq = 0\.0;/);
+});
+
+test('the smear phases partition the accumulator lanes without overlap', () => {
+  // Phase 1 must write only the moment lanes and phase 2 only the primary
+  // lanes. If either wrote both, the four-pass sequence would double-count,
+  // because nothing is cleared between the passes.
+  const { sphRenderFieldSourceLocalSplatWgsl } = SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
+  assert.match(
+    sphRenderFieldSourceLocalSplatWgsl,
+    /if \(params\.splat_phase != 1u\) \{/,
+    'primary lanes must be skipped during the moments-only phase'
+  );
+  assert.match(
+    sphRenderFieldSourceLocalSplatWgsl,
+    /params\.splat_phase == 2u\n?\s*\);/,
+    'the smear offset must only be applied in the consuming phase'
+  );
+});
+
+test('phase constants match the values the shader branches on', () => {
+  assert.equal(SPLAT_PHASE_SINGLE, 0);
+  assert.equal(SPLAT_PHASE_MOMENTS_ONLY, 1);
+  assert.equal(SPLAT_PHASE_SMEARED_PRIMARY, 2);
 });

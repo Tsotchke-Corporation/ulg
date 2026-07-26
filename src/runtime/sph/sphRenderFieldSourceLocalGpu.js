@@ -52,6 +52,20 @@ const SOURCE_LOCAL_KERNEL_SCOPE = 'sph-render-field-source-local-shadow-splat';
 // and negative halves per axis (the accumulator is unsigned), 12 weighted
 // speed-squared. Must match ACCUM_LANES in both shader strings.
 export const SOURCE_LOCAL_ACCUM_LANES = 13;
+
+// Splat phases. See the splat_phase comment in SourceLocalParams.
+export const SPLAT_PHASE_SINGLE = 0;
+export const SPLAT_PHASE_MOMENTS_ONLY = 1;
+export const SPLAT_PHASE_SMEARED_PRIMARY = 2;
+
+// splat_phase is the last u32 of the 48-byte params block. Rewriting only that
+// word between passes avoids rebuilding the whole uniform for a phase change.
+const SPLAT_PHASE_BYTE_OFFSET = 44;
+
+function writeSplatPhase(device, paramsBuffer, phase) {
+  const word = new Uint32Array([phase >>> 0]);
+  device.queue.writeBuffer(paramsBuffer, SPLAT_PHASE_BYTE_OFFSET, word);
+}
 const SOURCE_LOCAL_VELOCITY_SCALE = 4_096;
 const SOURCE_LOCAL_DENSITY_SCALE = 16_384;
 const SOURCE_LOCAL_PALETTE_SCALE = 16_384;
@@ -89,7 +103,10 @@ struct SourceLocalParams {
   // entirely, so a scene without smear pays no extra atomics.
   render_smear_dt_s: f32,
   velocity_scale: f32,
-  _pad2: f32,
+  // 0 = single pass, everything (smear disabled).
+  // 1 = velocity moments only, uncorrected distances.
+  // 2 = density/palette/temperature only, corrected by each cell's smear.
+  splat_phase: u32,
 };
 
 @group(0) @binding(0) var<storage, read> render_rows: array<vec4<f32>>;
@@ -97,6 +114,9 @@ struct SourceLocalParams {
 @group(0) @binding(2) var<storage, read_write> accum: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> overflow_state: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> params: SourceLocalParams;
+// Phase 2 reads the smear offset the resolve pass published per cell. Bound in
+// every phase so one bind-group layout serves all of them.
+@group(0) @binding(5) var<storage, read> published_field: array<vec4<f32>>;
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 const MAX_U32_SAFE: u32 = 4294967040u;
@@ -300,28 +320,38 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           f32(z_i) * inv_resolution
         );
         let delta = cell - particle;
-        let dist2 = dot(delta, delta);
-        let value = particle_strength / (0.000001 + dist2) - subtract;
-        if (value <= 0.0) { continue; }
         let local_cell = field_index_3d(u32(x_i), u32(y_i), u32(z_i), resolution);
         if (local_cell >= field_cell_count) { continue; }
         let out_index = field_offset + local_cell;
         if (out_index >= params.total_field_cells) { continue; }
+        // Phase 2 re-samples at the smeared distance the resolve pass derived
+        // for this cell. Phases 0 and 1 use the raw distance, which is what the
+        // gather's uncorrected pass does when it collects its moments.
+        let smear_sq = select(
+          0.0,
+          published_field[out_index * 2u + 1u].y,
+          params.splat_phase == 2u
+        );
+        let dist2 = dot(delta, delta) + smear_sq;
+        let value = particle_strength / (0.000001 + dist2) - subtract;
+        if (value <= 0.0) { continue; }
         let palette_weight = smooth_palette_weight(
           sqrt(dist2) / max(particle_support_norm, 1.0e-6)
         );
+        if (params.splat_phase != 1u) {
         saturating_add(&accum[accum_index(out_index, 0u)], &overflow_state[0u], quantize(value, params.density_scale));
         saturating_add(&accum[accum_index(out_index, 1u)], &overflow_state[0u], quantize(color.x * palette_weight, params.palette_scale));
         saturating_add(&accum[accum_index(out_index, 2u)], &overflow_state[0u], quantize(color.y * palette_weight, params.palette_scale));
         saturating_add(&accum[accum_index(out_index, 3u)], &overflow_state[0u], quantize(color.z * palette_weight, params.palette_scale));
         saturating_add(&accum[accum_index(out_index, 4u)], &overflow_state[0u], quantize(row1.z * value, params.temperature_scale));
         saturating_add(&accum[accum_index(out_index, 5u)], &overflow_state[0u], quantize(value, params.temperature_scale));
+        }
         // Velocity moments for the splash-shard smear, weighted by the same
         // positive metaball value the gather uses. The accumulator is
         // unsigned, so each signed component is split into its positive and
         // negative halves and recombined at resolve; a bias constant would
         // need a max-speed assumption this has no way to justify.
-        if (params.render_smear_dt_s > 0.0) {
+        if (params.render_smear_dt_s > 0.0 && params.splat_phase != 2u) {
           let vel = vec3<f32>(row4.y, row4.z, row4.w);
           let vw = vel * value;
           saturating_add(&accum[accum_index(out_index, 6u)], &overflow_state[0u], quantize(max(vw.x, 0.0), params.velocity_scale));
@@ -352,7 +382,10 @@ struct SourceLocalParams {
   // Must mirror the splat struct exactly: both bind the same uniform buffer.
   render_smear_dt_s: f32,
   velocity_scale: f32,
-  _pad2: f32,
+  // 0 = single pass, everything (smear disabled).
+  // 1 = velocity moments only, uncorrected distances.
+  // 2 = density/palette/temperature only, corrected by each cell's smear.
+  splat_phase: u32,
 };
 
 @group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
@@ -480,6 +513,7 @@ function createSourceLocalParamsArray({
   // without smear pays none of their atomics.
   view.setFloat32(36, Math.max(0, finiteNumber(renderSmearDtS, 0)), true);
   view.setFloat32(40, SOURCE_LOCAL_VELOCITY_SCALE, true);
+  view.setUint32(44, SPLAT_PHASE_SINGLE, true);
   return buffer;
 }
 
@@ -549,7 +583,11 @@ function fallbackReason({
   if (diagnosticNoReadbackMode && readbackMode !== NO_FULL_READBACK_MODE) {
     return 'diagnostic-no-readback-requires-no-full-readback';
   }
-  if (finiteNumber(renderSmearDtS, 0) > 0) return 'velocity-smear-parity-not-yet-implemented';
+  // Velocity smear is implemented as of the phased splat: moments are collected
+  // at uncorrected distances, reduced to a per-cell dispersion, and the density
+  // re-splatted through it. Admitting it here is what lets shadow mode compare
+  // the result against the gather -- the refusal previously made that
+  // comparison impossible, so parity could never be established either way.
   if (productEventRows || productEventBuffer || finiteNumber(productEventCount, 0) > 0) {
     return 'product-event-parity-not-yet-implemented';
   }
@@ -838,6 +876,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
+  const resolvedRenderSmearDtS = Math.max(0, finiteNumber(renderSmearDtS, 0));
   const resolvedMaxSplatCellsPerSource = Math.max(
     1,
     Math.min(16_777_216, Math.round(finiteNumber(
@@ -852,11 +891,11 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     maxSplatCellsPerSource: resolvedMaxSplatCellsPerSource,
     fieldPadding,
     refEdgeM,
-    renderSmearDtS
+    renderSmearDtS: resolvedRenderSmearDtS
   }));
 
   const splatPipelineState = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-render-field-source-local-shadow-splat-v1',
+    cacheKey: 'ulg-sph-render-field-source-local-shadow-splat-v2',
     label: 'ulg-sph-render-field-source-local-shadow-splat',
     code: sphRenderFieldSourceLocalSplatWgsl,
     entryPoint: 'main',
@@ -865,7 +904,8 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'storage'),
-      computeBufferBinding(4, 'uniform')
+      computeBufferBinding(4, 'uniform'),
+      computeBufferBinding(5, 'read-only-storage')
     ]
   });
   const splatBindGroup = device.createBindGroup({
@@ -875,7 +915,8 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       { binding: 1, resource: { buffer: surfaceBuffer } },
       { binding: 2, resource: { buffer: accumBuffer } },
       { binding: 3, resource: { buffer: overflowBuffer } },
-      { binding: 4, resource: { buffer: paramsBuffer } }
+      { binding: 4, resource: { buffer: paramsBuffer } },
+      { binding: 5, resource: { buffer: fieldRowsBuffer } }
     ]
   });
   const resolvePipelineState = createCachedExplicitComputePipeline(device, {
@@ -901,22 +942,47 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   });
 
   const encoder = device.createCommandEncoder();
-  const splatPass = encoder.beginComputePass();
-  splatPass.setPipeline(splatPipelineState.pipeline);
-  splatPass.setBindGroup(0, splatBindGroup);
-  splatPass.dispatchWorkgroups(
+  const splatWorkgroups = [
     Math.max(1, Math.ceil(resolvedParticleCount / 64)),
     Math.max(1, surfaceTable.surfaceCount)
-  );
-  splatPass.end();
-  const resolvePass = encoder.beginComputePass();
-  resolvePass.setPipeline(resolvePipelineState.pipeline);
-  resolvePass.setBindGroup(0, resolveBindGroup);
-  resolvePass.dispatchWorkgroups(
+  ];
+  const resolveWorkgroups = [
     Math.max(1, Math.ceil(Math.max(1, surfaceTable.maxFieldCellCount) / 64)),
     Math.max(1, surfaceTable.surfaceCount)
-  );
-  resolvePass.end();
+  ];
+  const encodeSplat = () => {
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(splatPipelineState.pipeline);
+    pass.setBindGroup(0, splatBindGroup);
+    pass.dispatchWorkgroups(splatWorkgroups[0], splatWorkgroups[1]);
+    pass.end();
+  };
+  const encodeResolve = () => {
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(resolvePipelineState.pipeline);
+    pass.setBindGroup(0, resolveBindGroup);
+    pass.dispatchWorkgroups(resolveWorkgroups[0], resolveWorkgroups[1]);
+    pass.end();
+  };
+  // Without smear this is the original splat/resolve pair. With smear the
+  // correction is per-cell and cannot be computed by a scattering particle, so
+  // it takes four passes: collect moments at uncorrected distances, reduce them
+  // to a per-cell offset, re-splat density through that offset, resolve again.
+  //
+  // No clearing is needed between them because phase 1 writes only the moment
+  // lanes and phase 2 only the primary lanes, and the second resolve recomputes
+  // the same dispersion from moment lanes phase 2 never touched.
+  if (resolvedRenderSmearDtS > 0) {
+    writeSplatPhase(device, paramsBuffer, SPLAT_PHASE_MOMENTS_ONLY);
+    encodeSplat();
+    encodeResolve();
+    writeSplatPhase(device, paramsBuffer, SPLAT_PHASE_SMEARED_PRIMARY);
+    encodeSplat();
+    encodeResolve();
+  } else {
+    encodeSplat();
+    encodeResolve();
+  }
 
   const diagnosticNoReadback = sourceLocalMode
     === SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK;

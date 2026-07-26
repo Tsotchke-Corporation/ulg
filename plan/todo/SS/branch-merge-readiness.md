@@ -199,11 +199,26 @@ It is not used. Its modes are `shadow`, `diagnostic-no-readback` and
 repository is `tests/sphRenderFieldSourceLocalGpu.test.mjs`. Nothing under
 `src/` references it.
 
-So FIELD-0 is much closer to done than "not started": the kernel is written and
-under test, and what is missing is a production mode, consumer wiring, and an
-equivalence gate proving the splat field matches the gathered field within
-tolerance before the gather is retired. Priority 1 is unblocked now that 0B is
-green, so this is the next substantive piece of work.
+**But it is not nearly production-ready**, and its own admissibility check says
+so. `sphRenderFieldSourceLocalGpu.js` refuses with these reasons:
+
+| reason | meaning |
+| --- | --- |
+| `shadow-parity-requires-full-readback` | parity only checkable with a full readback |
+| `velocity-smear-parity-not-yet-implemented` | any `renderSmearDtS > 0` unsupported |
+| `product-event-parity-not-yet-implemented` | product events unsupported |
+| `successor-lineage-parity-not-yet-implemented` | Schroeder spatial source family unsupported |
+
+So the splat covers the base case only. Wiring it to production as it stands
+would silently drop velocity smear, product events and successor lineage --
+three real features -- which is exactly the kind of "add laws, never remove
+one" violation `Agents.md` prohibits.
+
+FIELD-0 is therefore: kernel written and tested for the simple case, three
+declared parity gaps to close, then a production mode, consumer wiring, and an
+equivalence gate against the gather before the gather can be retired. That is
+substantial work, not a wiring job. Priority 1 is unblocked now that 0B is
+green, and this is the largest remaining win in the system.
 
 ## Landed on this branch
 

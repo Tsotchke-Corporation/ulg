@@ -182,7 +182,56 @@ The likely size is also modest: each wasted thread costs scheduling plus one
 per kernel per substep, not a bandwidth wall. Worth doing for the memory
 footprint -- 4.5x on every per-slot array -- more than for the frame time.
 
-## FIELD-0: all three parity gaps closed and verified
+## FIELD-0: DONE — splat is the default as of 2026-07-26
+
+Measured with the PROF-0 queue-stage recorder on native Vulkan, same scenario,
+same device, `n=15` builds per arm, **identical output in both arms (466,033
+triangles, 1,398,099 vertices)**:
+
+| | device render-field per build | renderRefreshTotalMs |
+| --- | --- | --- |
+| dense gather | 24.3 ms median | 40.8 ms median |
+| source-local splat | **3.8 ms median** | **16.7 ms median** |
+
+6.4x on the stage, 2.4x at the total. The total is the number that matters --
+every other render stage is unchanged, so this is not work moving between
+stages, which is the trap that produced two wrong reports earlier on this task.
+
+Visual parity across t0/tmid/tfinal at 960x720, four paired runs: several frames
+byte-identical, mean channel delta <= 0.019/255, at most 0.07% of pixels differ
+by more than 2 levels, all of them on silhouette edges -- a ~1e-3 field
+difference moving an isosurface boundary across a pixel. Full unit suite green
+with the default flipped: 1999 pass, 0 fail.
+
+### What was actually slow was not the algorithm
+
+First measurement said the splat was **4.6x slower** than the gather. The cause
+was not the splat: the atomic accumulator, `totalFieldCells * ACCUM_LANES` u32,
+was built from a zero-filled `Uint32Array` on every build. At 884,736 cells and
+14 lanes that is a **49 MB host allocation and a 49 MB host-to-device upload per
+frame**, and it grew every time a lane was added for the velocity smear. It is
+now allocated once per device and zeroed on the device with `clearBuffer`.
+
+That turned out to be an instance of a general pattern, not a one-off:
+`writeStorageBuffer(device, label, new Float32Array(N))` uploads N bytes of
+zeros into a buffer WebGPU has **already** zero-initialised. Seven more sites
+had it, including the dense path's own 28 MB `ulg-sph-render-field-cells` and
+the material-interface source-local buffers. `createZeroedStorageBuffer` in
+`sphRenderGpuKernel.js` and `sphMaterialInterfaceSourceFieldLocalGpu.js`
+replaces them. The dense arm's numbers above are measured **after** that fix, so
+the comparison is fair -- dense was already short-circuiting its own site via
+the scene's pooled `targetFieldRowsBuffer`, and did not get faster.
+
+### One unexplained failure, recorded rather than dismissed
+
+Across the measurement campaign the splat arm died once with "Execution context
+was destroyed" on an 8-batch 960x720 run. It did not reproduce: 6 subsequent
+splat runs at the same and larger settings passed, GPU memory peaked at 2.7 GiB
+of 16 GiB, and paired A/B runs were 4/4 clean on both arms. This error string
+has previously traced to environment (tmpfs exhaustion), not product. Not
+attributed to the splat, not claimed clean either.
+
+## FIELD-0 parity: all three gaps closed and verified
 
 `sphRenderFieldSourceLocalGpu.js` is the particle-parallel splat sol-critic
 recommends in place of the dense `S * 884,736 * N` gather. It existed, was
@@ -259,6 +308,34 @@ its purpose and does not belong in the tree.
 
 **Still the gating dependency for FIELD-0**: `renderFieldMs` is host enqueue
 time, so dense versus splat is unanswerable without real GPU timing.
+
+### PROF-0 producer landed 2026-07-26 (`b2098f5`)
+
+`createSphGpuQueueStageRecorder` in `sphGpuTimestampProfiler.js` is the missing
+producer. It brackets a stage with `queue.onSubmittedWorkDone()` fences, which
+is the only measurement available for a stage assembled from several passes plus
+a submit. Supplied by `sphPhaseScene.js` under `?residentGpuTimestampProfile=1`
+only -- the fences serialise the pipeline, so it changes what it measures and
+must never run in a production frame.
+
+Encoder spans are deliberately inert (`beginEncoderSpan()` returns `null`).
+Current WebGPU has no `encoder.writeTimestamp`; timestamps come only from
+`timestampWrites` on a pass descriptor. Every consumer already guards on null,
+so declaring none is honest and costs nothing.
+
+Wiring it exposed a second dropped hop: `runThermalSidecarDirectResidentStep-
+WithOptionalWebGpu` -- the runner that actually executes `fusedMechanics` when a
+thermal sidecar is present -- was passed `gpuTimestampRecorder` by its caller and
+dropped it in the destructuring, while defining its own `timedStage` that never
+consulted it. Two independent instances of the same failure mode in one
+contract.
+
+Surfacing: `stageTiming.queueStageGpuMs` / `.queueStageGpuStats` on the resident
+step, `sphResidentRenderState.residentGpuQueueStageStats` for the render
+refresh, both captured by `sph-long-horizon-probe.mjs`. Kept separate from
+`stageGpuMs`, which is pass-level timestamp-query data: one measures pass
+execution, the other brackets a whole stage including submit latency. Merging
+them would make a reader unable to tell which they were looking at.
 
 ## Built and not wired: a standing inventory
 

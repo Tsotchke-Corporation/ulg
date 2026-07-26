@@ -392,6 +392,18 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+// WebGPU zero-initialises every buffer it creates, so passing a zero-filled
+// typed array to writeStorageBuffer allocates N bytes on the host and uploads
+// them over the bus to overwrite zeros with zeros. At field sizes that is tens
+// of megabytes per frame. Use this wherever the initial contents are zero.
+function createZeroedStorageBuffer(device, label, byteLength, extraUsage = 0) {
+  return device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
+  });
+}
+
 function createSourceFieldParamsArray({
   particleCount,
   productEventCount,
@@ -605,22 +617,22 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     surfaceTable.records,
     GPU_BUFFER_USAGE.COPY_SRC
   );
-  const densityAccumBuffer = writeStorageBuffer(
+  const densityAccumBuffer = createZeroedStorageBuffer(
     device,
     'ulg-sph-material-interface-source-local-density-atomic',
-    new Uint32Array(surfaceTable.totalFieldCells),
+    surfaceTable.totalFieldCells * Uint32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.COPY_SRC
   );
-  const sourceIndexAccumBuffer = writeStorageBuffer(
+  const sourceIndexAccumBuffer = createZeroedStorageBuffer(
     device,
     'ulg-sph-material-interface-source-local-source-index-atomic',
-    new Uint32Array(surfaceTable.totalFieldCells),
+    surfaceTable.totalFieldCells * Uint32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.COPY_SRC
   );
-  const fieldRowsBuffer = targetFieldRowsBuffer || writeStorageBuffer(
+  const fieldRowsBuffer = targetFieldRowsBuffer || createZeroedStorageBuffer(
     device,
     'ulg-sph-material-interface-source-local-field-cells',
-    new Float32Array(surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS),
+    surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const paramsBuffer = device.createBuffer({

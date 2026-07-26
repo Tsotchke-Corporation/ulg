@@ -1073,6 +1073,21 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+// WebGPU zero-initialises every buffer it creates, so passing a zero-filled
+// typed array to writeStorageBuffer allocates N bytes on the host and uploads
+// them over the bus to overwrite zeros with zeros. At field sizes that is tens
+// of megabytes per frame. Use this wherever the initial contents are zero.
+function createZeroedStorageBuffer(device, label, byteLength, extraUsage = 0) {
+  const size = Math.max(4, byteLength);
+  assertWebGpuBufferSizeFitsDevice(device, label, size);
+  assertWebGpuStorageBufferBindingSizeFitsDevice(device, label, size);
+  return device.createBuffer({
+    label,
+    size,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
+  });
+}
+
 function webGpuDeviceMaxBufferSize(device) {
   const value = Number(device?.limits?.maxBufferSize);
   return Number.isFinite(value) && value > 0 ? value : null;
@@ -2657,10 +2672,10 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     'ulg-sph-interface-render-surfaces',
     renderField.surfaceTable.records
   );
-  const sourceIndexFieldInputBuffer = borrowedSourceIndexFieldBuffer || writeStorageBuffer(
+  const sourceIndexFieldInputBuffer = borrowedSourceIndexFieldBuffer || createZeroedStorageBuffer(
     device,
     'ulg-sph-interface-source-index-disabled',
-    new Uint32Array(Math.max(1, totalFieldCells))
+    Math.max(1, totalFieldCells) * Uint32Array.BYTES_PER_ELEMENT
   );
   const candidateRowsBuffer = device.createBuffer({
     label: 'ulg-sph-interface-compact-candidates',
@@ -4320,10 +4335,10 @@ export async function buildSphRenderMarchingCubeCellsWebGpu({
     'ulg-sph-marching-cube-render-surfaces',
     renderField.surfaceTable.records
   );
-  const cellRowsBuffer = writeStorageBuffer(
+  const cellRowsBuffer = createZeroedStorageBuffer(
     device,
     'ulg-sph-marching-cube-cells',
-    new Float32Array(candidateCount * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS),
+    candidateCount * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const paramsBuffer = device.createBuffer({
@@ -6610,10 +6625,10 @@ export async function buildSphRenderFieldWebGpu({
     surfaceTable.records
   );
   const fieldRowsBufferBorrowed = Boolean(targetFieldRowsBuffer);
-  const fieldRowsBuffer = targetFieldRowsBuffer || writeStorageBuffer(
+  const fieldRowsBuffer = targetFieldRowsBuffer || createZeroedStorageBuffer(
     device,
     'ulg-sph-render-field-cells',
-    new Float32Array(surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS),
+    surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const paramsBuffer = device.createBuffer({
@@ -7214,10 +7229,10 @@ export async function extractSphRenderRowsWebGpu({
         ? packedMaterialBankParticleSizeRows
         : new Float32Array(16)
     );
-  const renderRowsBuffer = writeStorageBuffer(
+  const renderRowsBuffer = createZeroedStorageBuffer(
     device,
     'ulg-sph-render-rows',
-    new Float32Array(sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS),
+    sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const renderRowsByteLength = sphParticleState.particleCount

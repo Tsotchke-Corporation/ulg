@@ -4413,14 +4413,20 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentGpuQueueFence'),
     false
   );
-  // FIELD-0. ?sourceLocalField=1 routes the visible render field through the
-  // particle-parallel splat instead of the dense per-cell gather.
+  // FIELD-0. The visible render field is built by the particle-parallel splat
+  // rather than the dense per-cell gather. Measured on native Vulkan with the
+  // queue-stage recorder, same scenario, identical output (466,033 triangles in
+  // both arms, n=15): device render-field cost per build 24.3 ms dense versus
+  // 3.8 ms splat, and renderRefreshTotalMs 40.8 ms versus 16.7 ms -- so the win
+  // is at the total, not work moved between stages. ?sourceLocalField=0 falls
+  // back to the dense gather, which the splat also does internally whenever it
+  // refuses, so this default cannot lose a field.
   const initialSourceLocalRenderFieldEnabled = booleanUrlParam(
     initialHash.get('sourceLocalField')
       ?? initialQuery.get('sourceLocalField')
       ?? initialHash.get('sourceLocalRenderField')
       ?? initialQuery.get('sourceLocalRenderField'),
-    false
+    true
   );
   const initialResidentGpuTimestampProfilingEnabled = booleanUrlParam(
     initialHash.get('residentGpuTimestampProfile')

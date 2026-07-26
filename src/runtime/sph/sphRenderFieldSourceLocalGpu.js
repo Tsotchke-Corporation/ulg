@@ -725,6 +725,18 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+// WebGPU zero-initialises every buffer it creates, so passing a zero-filled
+// typed array to writeStorageBuffer allocates N bytes on the host and uploads
+// them over the bus to overwrite zeros with zeros. At field sizes that is tens
+// of megabytes per frame. Use this wherever the initial contents are zero.
+function createZeroedStorageBuffer(device, label, byteLength, extraUsage = 0) {
+  return device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | extraUsage
+  });
+}
+
 function createSourceLocalParamsArray({
   particleCount,
   surfaceCount,
@@ -1157,10 +1169,10 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   const ownsFieldRowsBuffer = !productionMode;
   const fieldRowsBuffer = productionMode
     ? targetFieldRowsBuffer
-    : writeStorageBuffer(
+    : createZeroedStorageBuffer(
       device,
       'ulg-sph-render-field-source-local-cells',
-      new Float32Array(surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS),
+      surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
       GPU_BUFFER_USAGE.COPY_SRC
     );
   const paramsBuffer = device.createBuffer({

@@ -12267,10 +12267,13 @@ export function createSphPhaseScene(container, {
   preferWebGpuOpticalLookup = true,
   residentGpuTimestampProfiling = false,
   // FIELD-0. Route the visible render field through the particle-parallel
-  // source-local splat instead of the dense per-cell gather. Off by default:
-  // the splat's parity against the gather is verified, but the swap changes the
-  // hot path and should be measured before it becomes the default.
-  sourceLocalRenderField = false,
+  // source-local splat instead of the dense per-cell gather. On by default as
+  // of 2026-07-26: parity against the gather is verified numerically, and the
+  // swap is now measured rather than assumed -- device render-field cost per
+  // build 24.3 ms dense versus 3.8 ms splat, renderRefreshTotalMs 40.8 versus
+  // 16.7, identical 466,033-triangle output, n=15. Pass false to force the
+  // dense gather; the splat also falls back to it internally on any refusal.
+  sourceLocalRenderField = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   residentSurfaceDrawDiagnosticMode = 'auto',
   backgroundColor = SPH_SCENE_BACKGROUND_COLOR_DEFAULT,

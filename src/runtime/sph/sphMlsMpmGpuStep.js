@@ -10658,6 +10658,21 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       mlsMpmParticleState?.mechanics,
       particleCount
     );
+    // Hoisted out of the substep loop. All four of its buffers -- gridBuffer,
+    // updatedGridBuffer, gridUpdateParamsBuffer, pressureRowsBuffer -- are
+    // created once for the whole sequence and never reassigned inside the loop,
+    // so this bind group was identical on every iteration. Building it per
+    // substep cost `count` driver-validated createBindGroup calls per sequence
+    // (256 for a default batch) to produce the same object each time.
+    const gridUpdateBindGroup = device.createBindGroup({
+      layout: gridUpdateBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: gridBuffer } },
+        { binding: 1, resource: { buffer: updatedGridBuffer } },
+        { binding: 2, resource: { buffer: gridUpdateParamsBuffer } },
+        { binding: 3, resource: { buffer: pressureRowsBuffer } }
+      ]
+    });
     for (let index = 0; index < count; index += 1) {
       if (index === count - 1) {
         finalSourceStateBuffer = currentStateBuffer;
@@ -10739,15 +10754,6 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       );
       p2gFinalizePass.end();
 
-      const gridUpdateBindGroup = device.createBindGroup({
-        layout: gridUpdateBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: gridBuffer } },
-          { binding: 1, resource: { buffer: updatedGridBuffer } },
-          { binding: 2, resource: { buffer: gridUpdateParamsBuffer } },
-          { binding: 3, resource: { buffer: pressureRowsBuffer } }
-        ]
-      });
       const gridUpdatePass = encoder.beginComputePass();
       gridUpdatePass.setPipeline(gridUpdatePipeline);
       gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);

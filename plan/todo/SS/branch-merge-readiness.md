@@ -86,6 +86,27 @@ This is now the top blocker for answering the performance question at all,
 because 1024 particles is the only size that runs, and a 4 KiB-per-particle
 reservation cannot show up at 1024.
 
+**Threshold, bisected** (`dropn=basen=N`, h2o/h2o, same URL otherwise):
+
+| N | particles | startup |
+| --- | --- | --- |
+| 10 | 2000 | ready |
+| 11 | 2662 | ready |
+| 12 | 3456 | ready |
+| 13 | 4394 | **stalls** |
+
+A sharp cliff between 3456 and 4394 is a hard limit being crossed, not a
+gradual slowdown — and 4096 falls between them.
+
+Unverified lead: `src/runtime/thermoPreflight.js:82` defaults
+`particleResolution.h2o` to **4096** (fe 2048, gas 8192), and this scenario is
+h2o/h2o. The magnitude coincidence is suggestive but causation is **not**
+established — that value is a scenario-descriptor default feeding
+`representedEntities`, and nothing yet shows it gates startup. Next step is to
+raise it and re-run N=13; if startup succeeds, that is the limit, and the fe
+default of 2048 predicts an even lower cliff for iron scenarios, which is a
+cheap confirming test.
+
 Method note, recorded because it cost a wrong conclusion: the probe reads
 `ULG_PROBE_URL`. An earlier pass here used `ULG_PROBE_SCENARIO_URL`, which the
 probe ignores, so those runs silently exercised the default small scenario and

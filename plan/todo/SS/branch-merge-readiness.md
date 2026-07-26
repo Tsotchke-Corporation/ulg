@@ -220,6 +220,38 @@ equivalence gate against the gather before the gather can be retired. That is
 substantial work, not a wiring job. Priority 1 is unblocked now that 0B is
 green, and this is the largest remaining win in the system.
 
+### Why velocity smear is the structurally hard gap
+
+Worth writing down because it is not obvious from the refusal string, and it
+dictates the shape of the whole splat design.
+
+The splash-shard smear is **per-cell, two-pass, and gather-shaped**. Pass one
+accumulates velocity moments for a cell, weighted by that cell's positive
+metaball values; the cell's velocity dispersion follows; pass two re-samples
+every contributing metaball at the smeared distance
+`dist^2 + (sigma_v * dt)^2`. A cell-parallel gather gets this for free because
+one invocation already sees every particle contributing to its cell.
+
+A particle-parallel splat does not: no single particle knows the dispersion of
+any cell it scatters into. Parity therefore needs three sparse passes, not one:
+
+1. **splat moments** — scatter `w`, `w * v` and `w * |v|^2` into per-cell
+   accumulators (atomics, or a fixed-point integer encoding if float atomics are
+   unavailable);
+2. **reduce** — one invocation per touched cell computes `sigma_v` from those
+   moments;
+3. **splat density** — scatter again, each particle reading the destination
+   cell's `sigma_v` to offset its distance.
+
+That is still vastly cheaper than `S * 884,736 * N`, and it keeps the
+correction exact rather than approximating it. Note the ordering constraint:
+pass 3 reads what pass 2 wrote, so they cannot be fused, and pass 1 must
+complete for every particle before pass 2 runs on any cell.
+
+Product events and successor lineage are additional source families feeding the
+same field; once the three-pass structure exists they are additional splat
+inputs rather than new algorithms.
+
 ## Landed on this branch
 
 | Commit | What |

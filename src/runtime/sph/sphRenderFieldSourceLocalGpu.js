@@ -56,7 +56,7 @@ const SOURCE_LOCAL_KERNEL_SCOPE = 'sph-render-field-source-local-shadow-splat';
 // temperature-weighted and weight, 6-11 velocity moments split into positive
 // and negative halves per axis (the accumulator is unsigned), 12 weighted
 // speed-squared. Must match ACCUM_LANES in both shader strings.
-export const SOURCE_LOCAL_ACCUM_LANES = 13;
+export const SOURCE_LOCAL_ACCUM_LANES = 14;
 
 // Splat phases. See the splat_phase comment in SourceLocalParams.
 export const SPLAT_PHASE_SINGLE = 0;
@@ -125,7 +125,7 @@ struct SourceLocalParams {
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 const MAX_U32_SAFE: u32 = 4294967040u;
-const ACCUM_LANES: u32 = 13u;
+const ACCUM_LANES: u32 = 14u;
 
 fn render_row0(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_ROW_VEC4_STRIDE];
@@ -366,6 +366,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           saturating_add(&accum[accum_index(out_index, 10u)], &overflow_state[0u], quantize(max(vw.z, 0.0), params.velocity_scale));
           saturating_add(&accum[accum_index(out_index, 11u)], &overflow_state[0u], quantize(max(-vw.z, 0.0), params.velocity_scale));
           saturating_add(&accum[accum_index(out_index, 12u)], &overflow_state[0u], quantize(dot(vel, vel) * value, params.velocity_scale));
+          // The moments need their own weight lane. The density lane cannot
+          // serve as one: during the moments-only phase it is deliberately not
+          // written, so the resolve would divide by zero and the correction
+          // would silently vanish -- which is exactly what the first parity run
+          // against the dense gather caught.
+          saturating_add(&accum[accum_index(out_index, 13u)], &overflow_state[0u], quantize(value, params.velocity_scale));
         }
       }
     }
@@ -398,7 +404,7 @@ struct SourceLocalProductParams {
 
 const PRODUCT_EVENT_VEC4_STRIDE: u32 = 8u;
 const MAX_U32_SAFE: u32 = 4294967040u;
-const ACCUM_LANES: u32 = 13u;
+const ACCUM_LANES: u32 = 14u;
 
 fn accum_index(field_cell_index: u32, lane: u32) -> u32 {
   return field_cell_index * ACCUM_LANES + lane;
@@ -546,7 +552,7 @@ struct SourceLocalParams {
 @group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: SourceLocalParams;
 
-const ACCUM_LANES: u32 = 13u;
+const ACCUM_LANES: u32 = 14u;
 
 fn surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
@@ -594,7 +600,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // coherent or single-particle cell, so only cells bridging diverging
   // droplets are corrected -- matching the gather's behaviour exactly.
   var smear_sq = 0.0;
-  if (params.render_smear_dt_s > 0.0 && density > 0.0) {
+  let moment_weight = f32(atomicLoad(&accum[accum_index(out_index, 13u)]))
+    / max(params.velocity_scale, 1.0);
+  if (params.render_smear_dt_s > 0.0 && moment_weight > 0.0) {
     let inv_velocity_scale = 1.0 / max(params.velocity_scale, 1.0);
     let mean_v = vec3<f32>(
       (f32(atomicLoad(&accum[accum_index(out_index, 6u)]))
@@ -603,9 +611,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         - f32(atomicLoad(&accum[accum_index(out_index, 9u)]))) * inv_velocity_scale,
       (f32(atomicLoad(&accum[accum_index(out_index, 10u)]))
         - f32(atomicLoad(&accum[accum_index(out_index, 11u)]))) * inv_velocity_scale
-    ) / density;
+    ) / moment_weight;
     let mean_v2 = (f32(atomicLoad(&accum[accum_index(out_index, 12u)])) * inv_velocity_scale)
-      / density;
+      / moment_weight;
     let variance = max(mean_v2 - dot(mean_v, mean_v), 0.0);
     let span = 1.0 - 2.0 * params.field_padding;
     let normalized_sigma = sqrt(variance) * span / max(params.ref_edge_m, 1.0e-12);
@@ -757,11 +765,22 @@ function fallbackReason({
   if (diagnosticNoReadbackMode && readbackMode !== NO_FULL_READBACK_MODE) {
     return 'diagnostic-no-readback-requires-no-full-readback';
   }
-  // Velocity smear is implemented as of the phased splat: moments are collected
-  // at uncorrected distances, reduced to a per-cell dispersion, and the density
-  // re-splatted through it. Admitting it here is what lets shadow mode compare
-  // the result against the gather -- the refusal previously made that
-  // comparison impossible, so parity could never be established either way.
+  // Velocity smear is NOT admitted, and the four-pass machinery below is not
+  // reachable in production because of this line.
+  //
+  // The passes are implemented -- moments collected at uncorrected distances,
+  // reduced to a per-cell dispersion, density re-splatted through it -- and a
+  // native parity arm against the dense gather says the result is wrong. On a
+  // single zero-velocity particle the dense field is bit-identical with and
+  // without smear, correctly, because zero dispersion means no correction. This
+  // path moves the field by 1186 in density on the same input, so it perturbs
+  // where it should be inert. Admitting it would silently corrupt every smear
+  // scene, which is far worse than falling back to the dense gather.
+  //
+  // Keep the refusal until the parity arm passes. The arm is in
+  // tests/sphRenderFieldSourceLocalGpu.test.mjs behind
+  // ULG_RUN_NATIVE_RENDER_SOURCE_LOCAL=1 and is the gate to satisfy.
+  if (finiteNumber(renderSmearDtS, 0) > 0) return 'velocity-smear-parity-not-yet-implemented';
   // Product events are handled by their own splat pass, which mirrors the
   // gather's admission rule and contributes to density and palette only.
   if ((productEventRows || productEventBuffer) && !(finiteNumber(productEventCount, 0) >= 0)) {

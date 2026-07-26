@@ -326,24 +326,11 @@ test('generic source-local builder routes normal no-readback and product inputs 
     particleCount: 1,
     renderSmearDtS: 1 / 60
   });
-  // Velocity smear used to force the dense fallback. It is now implemented as
-  // a four-pass sequence -- moments, reduce, smeared re-splat, resolve -- so it
-  // stays on the source-local path.
-  assert.equal(smearResult.sourceLocalStrategy, 'shadow');
-  assert.ok(!smearResult.sourceLocalFallbackReason, 'smear must no longer report a fallback reason');
-  const smearSourceLocalPasses = smearInput.dispatches
-    .filter((entry) => /source-local/.test(entry.label));
-  assert.equal(
-    smearSourceLocalPasses.length,
-    4,
-    'smear needs two splats and two resolves; the correction is per-cell and a scattering particle cannot compute it in one pass'
-  );
-  const smearLabels = smearSourceLocalPasses.map((entry) => entry.label);
-  assert.match(smearLabels[0], /splat/);
-  assert.match(smearLabels[1], /resolve/);
-  assert.match(smearLabels[2], /splat/);
-  assert.match(smearLabels[3], /resolve/);
-
+  // Velocity smear falls back to the dense gather: the four-pass source-local
+  // implementation exists but fails its native parity arm, so it is not
+  // admitted.
+  assert.equal(smearResult.sourceLocalStrategy, 'dense-fallback');
+  assert.equal(smearResult.sourceLocalFallbackReason, 'velocity-smear-parity-not-yet-implemented');
   // Without smear the sequence must stay at the original two passes, so a
   // scene that does not need the correction pays nothing for it.
   const noSmearInput = fakeComputeDevice();
@@ -480,6 +467,55 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           useQueueFenceForCleanup: true,
           maxSplatCellsPerSource: 4096
         });
+        // The base arm above exercises none of the three parity paths that were
+        // previously refused, so each gets its own arm compared against the
+        // dense field built with the same inputs. Without these, the four-pass
+        // smear and the product-event splat are only structurally tested.
+        const smearShared = { ...shared, renderSmearDtS: 1 / 60 };
+        const smearShadow = await sourceLocal.buildSphRenderFieldSourceLocalWebGpu({
+          ...smearShared,
+          maxSplatCellsPerSource: 4096
+        });
+        const smearDense = await render.buildSphRenderFieldWebGpu(smearShared);
+        const productRows = new Float32Array(render.SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS);
+        productRows[0] = 5; productRows[1] = 5; productRows[2] = 5;
+        productRows[4] = 1;   // materialId, matching the surface
+        productRows[11] = 0;  // phaseId unset -> admitted by both paths
+        productRows[13] = 1;  // unplacedMassKg
+        productRows[18] = 1;  // status: placed
+        const productShared = {
+          ...shared,
+          productEventRows: productRows,
+          productEventCount: 1
+        };
+        const productShadow = await sourceLocal.buildSphRenderFieldSourceLocalWebGpu({
+          ...productShared,
+          maxSplatCellsPerSource: 4096
+        });
+        const productDense = await render.buildSphRenderFieldWebGpu(productShared);
+        const compareFields = (a, b) => {
+          let density = 0;
+          let palette = 0;
+          let temperature = 0;
+          for (let offset = 0; offset < a.fieldRows.length; offset += 8) {
+            density = Math.max(density, Math.abs(a.fieldRows[offset] - b.fieldRows[offset]));
+            for (let lane = 1; lane <= 3; lane += 1) {
+              palette = Math.max(palette, Math.abs(
+                a.fieldRows[offset + lane] - b.fieldRows[offset + lane]
+              ));
+            }
+            temperature = Math.max(temperature, Math.abs(
+              a.fieldRows[offset + 4] - b.fieldRows[offset + 4]
+            ));
+          }
+          return { density, palette, temperature };
+        };
+        const smearDelta = compareFields(smearDense, smearShadow);
+        // Isolates the failure: does smear change the dense field at all, and
+        // does it change ours? If ours is unchanged, our correction is inert.
+        const denseSmearEffect = compareFields(dense, smearDense);
+        const shadowSmearEffect = compareFields(shadow, smearShadow);
+        const productDelta = compareFields(productDense, productShadow);
         let maxDensityAbs = 0;
         let maxPaletteAbs = 0;
         let maxTemperatureAbs = 0;
@@ -528,6 +564,12 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           diagnosticLeaseCountBeforeRelease,
           diagnosticDestroyBlockedByLease,
           diagnosticDestroyedBufferCount,
+          smearDelta,
+          denseSmearEffect,
+          shadowSmearEffect,
+          smearStrategy: smearShadow.sourceLocalStrategy,
+          productDelta,
+          productStrategy: productShadow.sourceLocalStrategy,
           maxDensityAbs,
           maxPaletteAbs,
           maxTemperatureAbs
@@ -559,6 +601,18 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
   assert.ok(native.maxDensityAbs <= 1e-3, JSON.stringify(native));
   assert.ok(native.maxPaletteAbs <= 1e-3, JSON.stringify(native));
   assert.ok(native.maxTemperatureAbs <= 2, JSON.stringify(native));
+
+  assert.equal(native.productStrategy, 'shadow', 'product events must not fall back to dense');
+  assert.ok(native.productDelta.density <= 1e-3, `product density ${JSON.stringify(native.productDelta)}`);
+  // Velocity smear is refused, so it must land on the dense gather and match it
+  // exactly. When the four-pass implementation is fixed, flip this to the
+  // 'shadow' strategy and the 1e-3 tolerances used above -- this arm is the
+  // gate that caught the implementation perturbing a field the dense path
+  // leaves untouched.
+  assert.equal(native.smearStrategy, 'dense-fallback');
+  assert.equal(native.smearDelta.density, 0);
+  assert.equal(native.smearDelta.palette, 0);
+  assert.ok(native.productDelta.palette <= 1e-3, `product palette ${JSON.stringify(native.productDelta)}`);
 });
 
 test('accumulator lane count matches between both shaders and the host', () => {

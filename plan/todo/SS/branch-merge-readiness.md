@@ -79,8 +79,11 @@ unconfirmed rather than as fixed: the mechanisms below are real and still
 unaddressed, they simply do not show at 1024 particles, which is exactly where
 a 4 KiB-per-particle reservation would not show.
 
-**Why it is slower than what it replaced** — the mechanism is documented, not
-mysterious:
+### Mechanisms that remain unaddressed regardless
+
+These are real and documented, and none of them is fixed. They are simply not
+visible at 1024 particles, which is the largest count where the benchmark
+currently runs at all:
 
 1. **No hierarchy in cost yet.** sol-critic P0: the active-node list "permits
    one active row per particle". One node per particle is N with tree overhead
@@ -96,10 +99,13 @@ mysterious:
    contact consumers". Until then consumers can still reach the exhaustive `N*N`
    fallback.
 
-The regression is a down payment with a named creditor. **Merge gate:** if
-Priority 3 lands and the branch is still materially slower than `7454ac9` on the
-same device, the two-level path is not earning its overhead and should be
-reconsidered rather than deepened.
+These are the down payment whose creditor has not yet been paid. The original
+framing still holds as a **test**, but it has to be run somewhere the cost can
+appear: once the readiness limit above 1024 particles is understood and the
+benchmark can run at 10k+, compare against `7454ac9` there. If the branch is
+materially slower at a count where a per-particle reservation actually bites,
+the two-level path is not earning its overhead and should be reconsidered
+rather than deepened. At 1024 particles that test has no power.
 
 ## Landed on this branch
 

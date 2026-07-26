@@ -28582,7 +28582,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       thermalMaterialTable: args.thermalMaterialTable,
       thermalStepOptions: args.thermalStepOptions ?? {},
       mechanicsMaterialTable: args.mechanicsMaterialTable,
-      mechanicsRefreshOptions: args.mechanicsRefreshOptions ?? {}
+      mechanicsRefreshOptions: args.mechanicsRefreshOptions ?? {},
+      // PROF-0. Opt-in per run. The device must also have been created with
+      // 'timestamp-query' (webgpuDeviceLimits.js negotiates it); the profiler
+      // stays inert and says so if it was not.
+      residentGpuTimestampProfilingRequested:
+        args.residentGpuTimestampProfilingRequested === true
     });
     const nextSphParticleState = cloneSphParticleStateForNext(sphParticleState, finalStep);
     const nextMlsMpmParticleState = cloneMlsMpmParticleStateForNext(mlsMpmParticleState, finalStep);
@@ -28611,6 +28616,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
       backend: finalStep.backend || 'webgpu',
       status: 'resident-steps-executed',
+      // PROF-0. Device execution time per stage, next to the host-timeline
+      // stageMs. Null when profiling was inert; gpuTimestampProfile.status says
+      // which of "not requested", "unsupported by device" or "read failed"
+      // applies, so an absent measurement is never mistaken for a zero one.
+      stageGpuMs: finalStep.stageGpuMs ?? null,
+      gpuTimestampProfile: finalStep.gpuTimestampProfile ?? null,
       stepCount: count,
       completedStepCount: count,
       compactSummaryMode: resolvedCompactSummaryMode,

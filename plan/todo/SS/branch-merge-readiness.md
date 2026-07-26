@@ -134,11 +134,38 @@ and 4.5x the memory footprint of every per-slot array (which is separately what
 made the view state 41 MB, see the transport codec).
 
 The fix is compaction, not removal: companion slots must keep stable identities
-because a phase transition materialises one. The shape is a compacted live-index
-buffer plus indirect dispatch over the live count, which is the same mechanism
-`dispatchActiveGridComputePass` already uses for active grid nodes. Bounding the
-experiment first is cheap: set `phaseLaneCount = 1` and benchmark at 50k to put
-a ceiling on the available win before committing to the refactor.
+because a phase transition materialises one.
+
+**Measured, and it makes the fix much cheaper than a general index buffer: the
+live particles are perfectly contiguous at the front of the slot array.** On an
+h2o/fe scenario at 19,772 slots, live slots are exactly `[0, 4394)` -- first
+zero-mass slot at 4394, last live slot at 4393, and zero live slots after the
+first dead one. `appendPhaseCarrierLanes` appends companions after the live
+particles and spare product slots after those, so the initial layout is
+naturally sorted.
+
+So the initial-state fix is a bound, not an index: dispatch
+`ceil(liveCount / 64)` instead of `ceil(slotCount / 64)`.
+
+**The correctness constraint is what makes this non-trivial.** Liveness stops
+being contiguous during a run: a phase transition materialises a companion slot
+and reaction placement fills a spare, both far above the initial live range.
+Dispatching over a *superset* of live slots is always safe; dispatching over too
+few silently drops particles. So the design has to be:
+
+- kernels that can **activate** a slot (phase carrier transfer, reaction
+  placement) keep dispatching over the full slot range;
+- kernels that only **process** live particles (P2G, finalize, grid update,
+  G2P) dispatch over a high-water bound that activating kernels raise with an
+  atomic max, consumed as indirect dispatch args -- the same mechanism
+  `dispatchActiveGridComputePass` already uses for active grid nodes.
+
+A host-side bound refreshed from the compact summary is **not** safe on its own:
+a companion activated this substep would be skipped until the next readback.
+
+Bound the win before building it: set `phaseLaneCount = 1` and benchmark at 50k.
+That is not a shippable change -- it removes phase-transition capacity -- but it
+puts a ceiling on what compaction can recover.
 
 ## Landed on this branch
 

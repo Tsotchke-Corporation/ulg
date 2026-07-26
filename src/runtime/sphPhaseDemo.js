@@ -1674,7 +1674,12 @@ function appendPhaseCarrierLanes(particles) {
     particles[lineageIndex].phaseCarrierLane = 0;
     particles[lineageIndex].phaseCarrierTargetPhaseId = 1;
   }
-  particles.push(...reservedLanes);
+  // Appended in a loop, not spread. reservedLanes holds (phaseLaneCount - 1)
+  // entries per particle -- three times the live count -- so at a 50k-particle
+  // scenario this spread was pushing about 146k arguments onto the call stack
+  // and throwing "Maximum call stack size exceeded". The worker reported that
+  // as a failed rebuild, which the demo then waited on forever.
+  for (const lane of reservedLanes) particles.push(lane);
   return Object.freeze({
     schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
     status: 'phase-lane-capacity-ready',
@@ -3326,8 +3331,15 @@ function uniformGaugePressureStressEvidence({
       sourceCellCount: 0
     };
   }
-  const minAbsolutePressurePa = Math.min(...cellPressuresPa);
-  const maxAbsolutePressurePa = Math.max(...cellPressuresPa);
+  // Reduced rather than spread: cellPressuresPa has one entry per occupied gas
+  // cell and grows with the scenario, so Math.min(...) is a call-stack hazard
+  // at the same scale as the phase-lane append above.
+  let minAbsolutePressurePa = Infinity;
+  let maxAbsolutePressurePa = -Infinity;
+  for (const pressurePa of cellPressuresPa) {
+    if (pressurePa < minAbsolutePressurePa) minAbsolutePressurePa = pressurePa;
+    if (pressurePa > maxAbsolutePressurePa) maxAbsolutePressurePa = pressurePa;
+  }
   const spanPa = maxAbsolutePressurePa - minAbsolutePressurePa;
   const tolerancePa = Math.max(1e-3, Math.max(Math.abs(minAbsolutePressurePa), Math.abs(maxAbsolutePressurePa)) * 1e-6);
   const eligible = spanPa <= tolerancePa;

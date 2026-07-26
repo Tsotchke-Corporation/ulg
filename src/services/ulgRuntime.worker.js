@@ -24,6 +24,7 @@ import {
   createSphLocalCachePersistence
 } from '../runtime/sph/sphLocalClosureCache.js';
 import { runCarrierRuntimeWithOptionalWebGpu } from '../runtime/webgpuCarrierKernel.js';
+import { packSphPhaseViewStateForTransport } from '../runtime/sphPhaseViewStateTransport.js';
 
 let workerId = null;
 let manifest = null;
@@ -536,7 +537,12 @@ async function runSphPhaseRebuildTask(task, record) {
   });
   postTaskResult(task.rootTaskId, {
     artifact,
-    viewState,
+    // The per-slot object arrays here dominate this payload -- about 41 MB at
+    // 4394 particles -- and structured-cloning them across the worker boundary
+    // is what stalls startup above roughly 3.5k particles. Packing is lossless
+    // and shape-preserving; the main thread unpacks to exactly the same arrays,
+    // so no consumer sees a different view state.
+    viewState: packSphPhaseViewStateForTransport(viewState),
     preflight,
     totals: viewState.totals,
     phaseMassSummary: viewState.phaseMassSummary,

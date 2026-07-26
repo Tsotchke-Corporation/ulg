@@ -2059,11 +2059,52 @@ async function runBrowserProbe({
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     await ensureProbeSphPhaseOverlay(page, { timeoutMs });
     preProbeSnapshots.push(await collectBrowserSnapshot(page, 'overlay-ready'));
-    await page.waitForFunction(() => {
-      const overlay = document.querySelector('#sph-phase-overlay');
-      const scene = overlay?.__sphScene;
-      return Boolean(scene?.getSphGpuParticleState?.()?.schema || overlay?.__sphDriver);
-    }, null, { timeout: timeoutMs });
+    try {
+      await page.waitForFunction(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const scene = overlay?.__sphScene;
+        return Boolean(scene?.getSphGpuParticleState?.()?.schema || overlay?.__sphDriver);
+      }, null, { timeout: timeoutMs });
+    } catch (readinessError) {
+      // This wait is where a scenario that is simply too large for the current
+      // build fails, and a bare Playwright timeout says nothing about why. The
+      // console has already been captured; without flushing it here it is
+      // discarded at exactly the moment it is the only evidence there is.
+      const readinessState = await page.evaluate(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const scene = overlay?.__sphScene;
+        return {
+          overlayPresent: Boolean(overlay),
+          scenePresent: Boolean(scene),
+          driverPresent: Boolean(overlay?.__sphDriver),
+          particleStateSchema: scene?.getSphGpuParticleState?.()?.schema ?? null,
+          statusText: document.querySelector('#sph-status')?.textContent?.slice(0, 200) ?? null,
+          devicePreflightStatus: overlay?.__sphRendererWebGpuDevicePreflight?.status ?? null,
+          devicePreflightReason: overlay?.__sphRendererWebGpuDevicePreflight?.reason ?? null,
+          simulationAdmission: overlay?.__sphSimulationRuntimeAdmission ?? null,
+          pendingPresentation: overlay?.__sphPendingPresentation?.reason ?? null,
+          // How far the ulg-runtime worker rebuild actually got. progress is
+          // 0.2 after cache lookup, 0.65 after createSphPhaseDemo, 1 after the
+          // static-table stage, so a stuck value names the stage.
+          rebuildWorker: overlay?.__sphPhaseRebuildWorker ?? null,
+          cpuClosureTask: overlay?.__sphCpuClosureTask ?? null,
+          workerRebuildError: overlay?.__sphPhaseRebuildWorkerError ?? null
+        };
+      }).catch((evaluateError) => ({ evaluateError: String(evaluateError?.message || evaluateError) }));
+      const consoleTail = consoleCapture.entries.slice(-25)
+        .map((entry) => `[${entry.type ?? entry.kind}] ${String(entry.text).slice(0, 300)}`);
+      const pageErrorTail = consoleCapture.pageErrors.slice(-10)
+        .map((entry) => `[pageerror] ${String(entry.text).slice(0, 300)}`);
+      const detail = [
+        'particle-state readiness wait failed',
+        `state: ${JSON.stringify(readinessState)}`,
+        `pageErrors(${consoleCapture.pageErrors.length}):`,
+        ...pageErrorTail,
+        `consoleTail(${consoleCapture.entries.length} total):`,
+        ...consoleTail
+      ].join('\n');
+      throw new Error(`${readinessError?.message || readinessError}\n${detail}`);
+    }
     preProbeSnapshots.push(await collectBrowserSnapshot(page, 'particle-state-ready'));
     const playText = await page.locator('#sph-play').textContent({ timeout: timeoutMs }).catch(() => '');
     if (/Pause/i.test(playText || '')) {

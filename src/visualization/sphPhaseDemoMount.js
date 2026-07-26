@@ -95,6 +95,7 @@ import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.j
 import { RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE } from '../runtime/webgpuDeviceLimits.js';
 import { materialDerivationSummary } from '../runtime/material/propertyProvenance.js';
 import { MOLECULAR_ELECTRONIC_BANDS_BANK } from '../runtime/material/referenceBankAnchoring.js';
+import { unpackSphPhaseViewStateFromTransport } from '../runtime/sphPhaseViewStateTransport.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const PHYSICAL_LAW_GROUPS = Object.freeze([
@@ -11864,8 +11865,35 @@ export async function mountSphPhaseDemoOverlay({
   function applyWorkerRebuildResult(result, generation) {
     const artifact = result?.artifact || null;
     const outputs = artifact?.outputs || result?.outputs || {};
-    const viewState = result?.viewState || outputs.viewState;
+    // The worker packs the per-slot object arrays columnar for transport; this
+    // restores exactly the arrays createSphPhaseViewState produced. Safe on an
+    // unpacked value, so an older worker build still works.
+    const viewState = unpackSphPhaseViewStateFromTransport(
+      result?.viewState || outputs.viewState
+    );
     if (!viewState?.positionsM || generation !== workerRebuildGeneration) {
+      // A worker task that throws is reported as an error artifact, which lands
+      // here with no positionsM and used to be discarded silently -- the app
+      // then waited on initial-material-closure-pending forever with nothing
+      // to show for it. Record why, so a failed rebuild is diagnosable instead
+      // of looking like a hang.
+      if (generation === workerRebuildGeneration && !viewState?.positionsM) {
+        const outputError = outputs?.error
+          ?? artifact?.outputs?.error
+          ?? artifact?.validation?.blockers?.join?.(', ')
+          ?? result?.error?.message
+          ?? (viewState ? 'worker rebuild returned a view state without positionsM' : 'worker rebuild returned no view state');
+        overlay.__sphPhaseRebuildWorkerError = {
+          schema: 'peercompute.ulg.sph-phase-rebuild-worker-error.v0',
+          generation,
+          reason: String(outputError).slice(0, 800),
+          artifactStatus: artifact?.execution?.status ?? null,
+          validationStatus: artifact?.validation?.status ?? null,
+          updatedAtMs: performance.now()
+        };
+        renderStatus();
+        updateWarningBanner();
+      }
       return false;
     }
     driver = null;

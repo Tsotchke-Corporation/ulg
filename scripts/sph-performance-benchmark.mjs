@@ -344,6 +344,22 @@ export function scenarioUrlForCount(targetCount) {
   });
   const ironBaseHeightM = benchmarkIronBaseHeightM
     ?? (iceBaseHeightM + baseBlockEdgeM);
+  // The box has to contain the bodies the sweep generates. It was fixed at
+  // 5 m on every axis while dropn/basen scale with the target particle count,
+  // so above 12 particles per edge the drop block -- which sits on top of the
+  // base -- ran past the ceiling and the worker rejected the scenario:
+  //
+  //   Initial body 'drop' is outside container axis 1:
+  //   [2.6000000000000005, 5.2] is not within [0, 5]
+  //
+  // That rejection surfaced as a startup hang rather than an error, so the
+  // sweep looked like an application scaling cliff at roughly 3.5k particles
+  // and could not measure above it. The box now follows the geometry, with the
+  // 5 m floor preserved so small counts keep their existing scenario exactly.
+  const requiredHeightM = ironBaseHeightM + baseBlockEdgeM;
+  const requiredWidthM = baseBlockEdgeM;
+  const boxHeightM = Math.max(5, Math.ceil((requiredHeightM * 1.1) * 10) / 10);
+  const boxWidthM = Math.max(5, Math.ceil((requiredWidthM * 1.5) * 10) / 10);
   const params = new URLSearchParams({
     drop: dropMaterial,
     base: baseMaterial,
@@ -351,9 +367,9 @@ export function scenarioUrlForCount(targetCount) {
     baset: String(baseTemperatureK),
     iceh: String(iceBaseHeightM),
     ironh: String(ironBaseHeightM),
-    boxx: '5',
-    boxy: '5',
-    boxz: '5',
+    boxx: String(boxWidthM),
+    boxy: String(boxHeightM),
+    boxz: String(boxWidthM),
     dropn: String(edge),
     basen: String(edge),
     mech: 'mlsmpm',

@@ -113,10 +113,19 @@ not the limit and the thermo preflight is exonerated.
 
 That rules out the material/thermo descriptors and points at something
 structural that scales with particle count alone — a buffer size, a dispatch
-or binding limit, or a grid/field allocation. The next probe should capture the
-browser console during a stalled N=13 run rather than reason from constants;
-the stall is at the "particle state or driver exists" wait, so whatever fails
-happens during scene construction and should log there.
+or binding limit, or a grid/field allocation.
+
+The next probe should capture the browser console during a stalled N=13 run
+rather than reason from constants: the stall is at the "particle state or
+driver exists" wait, so the failure happens during scene construction and
+should log there. One caveat learned the hard way — a hand-rolled Playwright
+script could not reach a `vite --port N` dev server from inside the launched
+browser (curl reached it from the shell; the page got
+`net::ERR_CONNECTION_REFUSED`). Reuse `launchProbeBrowser` and the server setup
+from `sph-long-horizon-probe.mjs`, which demonstrably works, and add console
+capture on the failure path — the probe already collects console output but
+throws at the readiness wait before writing its output file, which is exactly
+why this evidence is missing today.
 
 Method note, recorded because it cost a wrong conclusion: the probe reads
 `ULG_PROBE_URL`. An earlier pass here used `ULG_PROBE_SCENARIO_URL`, which the

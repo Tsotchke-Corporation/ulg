@@ -33,9 +33,27 @@ solvers that exist. It is an inventory, not a type.
 
 ## What does not exist
 
-There is no interface that says what a physics law *is*: what it may read, what
-it may write, how it publishes, how it proves it ran. Slice 4 of the SS plan
-promised exactly this —
+> **Correction, 2026-07-25.** The claim originally made here — "there is no
+> interface that says what a physics law is" — is **wrong**, and the error
+> mattered. The **Law Adapter Contract** is specified at
+> `plan/todo/SS/schroeder-tree-and-algorithm-plan.md:129`, and it is strictly
+> richer than the descriptor this document goes on to propose: it additionally
+> requires scale range and chart assumptions, aggregate traversal admissibility
+> **with error bounds**, conserved quantities and residual outputs, and a
+> fallback policy, across seven named adapter modes.
+>
+> The real gap is narrower and different in kind: **the contract was specified
+> and never enforced as a type.** Laws are still hand-wired, so nothing checks a
+> law against its own declaration. That is what produces the defect class
+> catalogued below — but "a specified contract is unenforced" and "no design
+> exists" call for different work, and only the first is true.
+>
+> The rest of this section is retained as written, with that correction applied
+> to its conclusion.
+
+There is no *enforced* interface for what a physics law is: what it may read,
+what it may write, how it publishes, how it proves it ran. Slice 4 of the SS
+plan promised the producer for it —
 
 > Slice 4 - First-class law-DAG producer and epoch scheduler
 > - Make laws propose deltas against immutable membership.
@@ -44,7 +62,8 @@ promised exactly this —
 imported by exactly one physics file, `sphThermalGpuKernel.js`. Every other law
 is wired case by case.
 
-So the spatial side is designed and the law side is convention.
+So the spatial side is designed and enforced, while the law side is designed
+but left to convention.
 
 ## The evidence
 

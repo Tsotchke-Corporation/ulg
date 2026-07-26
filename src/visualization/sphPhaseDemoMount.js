@@ -4413,6 +4413,15 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentGpuQueueFence'),
     false
   );
+  // FIELD-0. ?sourceLocalField=1 routes the visible render field through the
+  // particle-parallel splat instead of the dense per-cell gather.
+  const initialSourceLocalRenderFieldEnabled = booleanUrlParam(
+    initialHash.get('sourceLocalField')
+      ?? initialQuery.get('sourceLocalField')
+      ?? initialHash.get('sourceLocalRenderField')
+      ?? initialQuery.get('sourceLocalRenderField'),
+    false
+  );
   const initialResidentGpuTimestampProfilingEnabled = booleanUrlParam(
     initialHash.get('residentGpuTimestampProfile')
       ?? initialQuery.get('residentGpuTimestampProfile')
@@ -7174,6 +7183,7 @@ export async function mountSphPhaseDemoOverlay({
     rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
     residentGpuTimestampProfiling:
       initialResidentGpuTimestampProfilingEnabled,
+    sourceLocalRenderField: initialSourceLocalRenderFieldEnabled,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode(),
     backgroundColor: backgroundColorOf(),

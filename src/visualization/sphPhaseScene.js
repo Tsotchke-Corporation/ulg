@@ -148,6 +148,10 @@ import {
   summarizeSphRenderFieldSurfacesWebGpu
 } from '../runtime/sph/sphRenderGpuKernel.js';
 import {
+  buildSphRenderFieldSourceLocalWebGpu,
+  SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION
+} from '../runtime/sph/sphRenderFieldSourceLocalGpu.js';
+import {
   buildSphMaterialInterfaceSourceFieldLocalWebGpu
 } from '../runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js';
 import {
@@ -12259,6 +12263,11 @@ export function createSphPhaseScene(container, {
   rendererWebGpuDeviceResult = null,
   preferWebGpuOpticalLookup = true,
   residentGpuTimestampProfiling = false,
+  // FIELD-0. Route the visible render field through the particle-parallel
+  // source-local splat instead of the dense per-cell gather. Off by default:
+  // the splat's parity against the gather is verified, but the swap changes the
+  // hot path and should be measured before it becomes the default.
+  sourceLocalRenderField = false,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   residentSurfaceDrawDiagnosticMode = 'auto',
   backgroundColor = SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
@@ -12282,6 +12291,7 @@ export function createSphPhaseScene(container, {
   const enableResidentGpuTimestampProfiling = Boolean(
     residentGpuTimestampProfiling
   );
+  const enableSourceLocalRenderField = Boolean(sourceLocalRenderField);
   const requestedThreeWebGpuPresentation = Boolean(rendererWebGpuPresentation);
   const requestedThreeWebGpuSurfaceBufferPresentation = Boolean(rendererWebGpuSurfaceBufferPresentation);
   const resolvedMaterialInterfaceSurfaceTablePolicy = resolveMaterialInterfaceSurfaceTablePolicy(
@@ -40329,7 +40339,17 @@ fn main(
               && renderRowsExecution?.schroederSpatialSourceFamily
                 === schroederSpatialSourceFamily
             );
-            return buildSphRenderFieldWebGpu({
+            // FIELD-0. The source-local builder falls back to the dense gather
+            // internally whenever it refuses, forwarding the same options, so
+            // this swap cannot lose a field -- the worst case is the cost we
+            // already pay.
+            const buildRenderField = enableSourceLocalRenderField
+              ? (options) => buildSphRenderFieldSourceLocalWebGpu({
+                ...options,
+                sourceLocalMode: SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION
+              })
+              : buildSphRenderFieldWebGpu;
+            return buildRenderField({
             device: resolvedDeviceResult.device,
             renderRows: renderRowsExecution.renderRows,
             renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,

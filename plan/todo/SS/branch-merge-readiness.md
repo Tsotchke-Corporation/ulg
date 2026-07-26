@@ -252,6 +252,45 @@ spreading it**, so each new field must be added at every layer or it vanishes
 silently. That is why a flag can be read correctly at the top and produce
 nothing at the bottom.
 
+## FIELD-0 measured in production: the splat is slower, not faster
+
+The splat now has a production mode and the scene can route the visible render
+field through it behind `?sourceLocalField=1`, defaulting off. Measured on
+hardware against the live server, same scenario, 4 batches x 128 steps:
+
+| arm | renderRefresh total | dominant stages |
+| --- | --- | --- |
+| dense gather | **38.90 ms** | surfaceDraw 20.70, pressureInterface 6.10 |
+| source-local splat | **2640.90 ms** | renderField 1905.10, materialInterface 716.90 |
+
+**68x slower.** This contradicts the premise the whole item rests on -- sol-critic
+estimates the splat at 140,976 visits against the gather's 8.85 billion.
+
+The first number this produced was `surfaceDrawMs` dropping from 4.14 ms to
+0.02 ms, which looks like a 200x win and is not one: the field build simply
+moved out of `surfaceDrawMs` into `renderFieldMs`. Reading one stage rather than
+the total would have reported a large speedup for a large regression.
+
+Not yet attributed. The result carries none of the source-local diagnostics --
+`sourceLocalStrategy`, `sourceLocalOverflow`, `sourceLocalEstimatedCellVisits`,
+`sourceLocalFallbackReason` are all absent from the probe output -- so it is not
+even established whether the splat ran or silently fell back. Surfacing those
+through the render-field result is the prerequisite for diagnosing this, and is
+the same field-by-field-rebuild problem documented above for `stageTiming`.
+
+Leading hypotheses, in order:
+
+1. the scene passes a non-zero `renderSmearDtS`, which triggers the four-pass
+   sequence -- four dispatches plus two resolves per field instead of two;
+2. the scene's `readbackMode` for the visible field forces a full readback per
+   frame, which shadow mode needed for parity and production must not do;
+3. `maxSplatCellsPerSource` defaults large enough that each particle walks a
+   big neighbourhood, making the splat dense in practice.
+
+The flag stays off until this is understood. A verified-correct field that costs
+68x is not an improvement, and the parity work behind it is still sound -- what
+is wrong is the cost, not the output.
+
 ## Built and not wired: a standing inventory
 
 This keeps happening, so here is the list rather than another one-off

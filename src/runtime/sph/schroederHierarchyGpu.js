@@ -501,6 +501,11 @@ export const SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS = Object.freeze(
   { bit: 32, reason: 'shock-or-high-gradient-pressure-reserved' }
 ]);
 export const DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET = 64;
+
+// Ceiling on the neighbour-candidate arena, independent of particle count.
+// 256 MiB is generous for the scenes this runs today and still bounded, which
+// the previous per-particle reservation was not.
+export const DEFAULT_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ARENA_BYTE_BUDGET = 256 * 1024 * 1024;
 export const SCHROEDER_FAR_LAW_GRAVITY_MASK = 8;
 export const SCHROEDER_FAR_LAW_RADIATION_MASK = 16;
 export const SCHROEDER_FAR_LAW_PLASMA_MASK = 32;
@@ -1254,6 +1259,11 @@ export function createSchroederLawNeighborCandidateParamsArray({
   sourceCandidateSpanStrideFloats = SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS,
   stateStrideFloats = SPH_GPU_PARTICLE_STATE_FLOATS,
   candidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
+  // Rows per queue entry the arena can actually hold. The plan sets this below
+  // candidateBudget when the byte cap binds; the kernel must use it, because
+  // writing candidateBudget rows into a smaller arena runs past the end of the
+  // buffer.
+  admittedCandidateBudget = null,
   enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   activeNodeIndexEnabled = false,
   activeNodeIndexBucketCount = 0,
@@ -1286,7 +1296,7 @@ export function createSchroederLawNeighborCandidateParamsArray({
     SPH_GPU_PARTICLE_STATE_FLOATS
   ))), true);
   view.setUint32(28, Math.max(1, Math.round(finiteNumber(
-    candidateBudget,
+    admittedCandidateBudget ?? candidateBudget,
     DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET
   ))), true);
   view.setUint32(32, Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK))), true);
@@ -4437,6 +4447,7 @@ export function createSchroederLawNeighborCandidatePlan({
   sphParticleUpload = null,
   particleCount = null,
   candidateBudget = lawQueue?.candidateBudget ?? DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
+  candidateArenaByteBudget = DEFAULT_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ARENA_BYTE_BUDGET,
   enabledLawMask = lawQueue?.enabledLawMask ?? SCHROEDER_LOCAL_LAW_QUEUE_MASK
 } = {}) {
   assertLawQueueInput(lawQueue);
@@ -4496,10 +4507,44 @@ export function createSchroederLawNeighborCandidatePlan({
     DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET
   )));
   const resolvedLawMask = Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK)));
-  const neighborCandidateCount = lawQueueCount * resolvedCandidateBudget;
+  // Byte-bounded candidate arena.
+  //
+  // This used to be lawQueueCount * candidateBudget rows unconditionally: a
+  // fixed worst-case reservation of 64 rows x 64 bytes = 4 KiB for every queue
+  // row, which reaches roughly 4 GiB at a million particles before any useful
+  // state exists. sol-critic's Priority 3 asks for a byte-bounded arena with
+  // published overflow evidence instead of a reservation that scales with
+  // particle count times a constant nobody measured.
+  //
+  // The budget is still honoured whenever it fits. When it does not, the arena
+  // is capped and the shortfall is reported rather than silently truncated --
+  // sol-critic is explicit that a bounded cap must say what it dropped, because
+  // silent truncation reads as "covered everything" when it did not.
+  const candidateRowByteLength =
+    SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const requestedNeighborCandidateCount = lawQueueCount * resolvedCandidateBudget;
+  const neighborCandidateArenaByteBudget = Math.max(
+    candidateRowByteLength,
+    Math.round(finiteNumber(
+      candidateArenaByteBudget,
+      DEFAULT_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ARENA_BYTE_BUDGET
+    ))
+  );
+  const arenaRowCapacity = Math.max(
+    1,
+    Math.floor(neighborCandidateArenaByteBudget / candidateRowByteLength)
+  );
+  const neighborCandidateCount = Math.min(requestedNeighborCandidateCount, arenaRowCapacity);
+  const neighborCandidateArenaBound =
+    neighborCandidateCount < requestedNeighborCandidateCount;
+  // Rows per queue entry actually available once the cap binds. The kernel must
+  // use this, not resolvedCandidateBudget, or it will write past the arena.
+  const admittedCandidateBudget = lawQueueCount > 0
+    ? Math.max(1, Math.floor(neighborCandidateCount / lawQueueCount))
+    : resolvedCandidateBudget;
   const neighborCandidateByteLength = Math.max(
     4,
-    neighborCandidateCount * SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    neighborCandidateCount * candidateRowByteLength
   );
   const sourceCandidateSpanCount = resolvedParticleCount;
   const sourceCandidateSpanByteLength = Math.max(
@@ -4535,6 +4580,19 @@ export function createSchroederLawNeighborCandidatePlan({
     lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
     activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
     neighborCandidateCount,
+    // Overflow evidence for the byte-bounded arena. admittedCandidateBudget is
+    // what a kernel may actually use per queue row; when it drops below
+    // candidateBudget the cap has bound, and droppedCandidateCount says by how
+    // many rows. Publishing this is the difference between a bounded arena and
+    // a silent truncation, which sol-critic explicitly forbids.
+    admittedCandidateBudget,
+    candidateArenaByteBudget: neighborCandidateArenaByteBudget,
+    candidateArenaBound: neighborCandidateArenaBound,
+    requestedNeighborCandidateCount,
+    droppedCandidateCount: Math.max(
+      0,
+      requestedNeighborCandidateCount - neighborCandidateCount
+    ),
     neighborCandidateRowLayout: [...SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT],
     neighborCandidateStrideFloats: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
     neighborCandidateStrideBytes: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,

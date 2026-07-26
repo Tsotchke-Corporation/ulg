@@ -11438,3 +11438,85 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
     assert.equal(borrowedReplacement.destroyCount, 0);
   }
 });
+
+test('the neighbour candidate arena is byte-bounded instead of scaling with particle count', () => {
+  // It used to be lawQueueCount * candidateBudget rows unconditionally: 4 KiB
+  // per queue row, about 4 GiB at a million particles before any useful state.
+  const n = 1_000_000;
+  const plan = createSchroederLawNeighborCandidatePlan({
+    lawQueue: { schema: ULG_SCHROEDER_LAW_QUEUE_SCHEMA, activeNodeCount: n, lawQueueCount: n },
+    activeNodeList: {
+      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+      activeCandidateCount: n,
+      particleCount: n
+    },
+    particleCount: n
+  });
+  assert.ok(
+    plan.neighborCandidateByteLength <= plan.candidateArenaByteBudget,
+    'arena must respect its byte budget'
+  );
+  assert.ok(
+    plan.neighborCandidateByteLength < 512 * 1024 * 1024,
+    `arena should be bounded, got ${plan.neighborCandidateByteLength} bytes`
+  );
+});
+
+test('a bound arena publishes what it dropped rather than truncating silently', () => {
+  const n = 1_000_000;
+  const plan = createSchroederLawNeighborCandidatePlan({
+    lawQueue: { schema: ULG_SCHROEDER_LAW_QUEUE_SCHEMA, activeNodeCount: n, lawQueueCount: n },
+    activeNodeList: {
+      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+      activeCandidateCount: n,
+      particleCount: n
+    },
+    particleCount: n
+  });
+  assert.equal(plan.candidateArenaBound, true);
+  assert.ok(plan.droppedCandidateCount > 0, 'dropped rows must be reported');
+  assert.equal(
+    plan.requestedNeighborCandidateCount - plan.neighborCandidateCount,
+    plan.droppedCandidateCount
+  );
+  assert.ok(plan.admittedCandidateBudget < plan.candidateBudget);
+});
+
+test('the kernel receives the admitted budget, not the requested one', () => {
+  // Writing candidateBudget rows into an arena sized for fewer runs past the
+  // end of the buffer, so the params must carry the admitted value.
+  const n = 1_000_000;
+  const plan = createSchroederLawNeighborCandidatePlan({
+    lawQueue: { schema: ULG_SCHROEDER_LAW_QUEUE_SCHEMA, activeNodeCount: n, lawQueueCount: n },
+    activeNodeList: {
+      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+      activeCandidateCount: n,
+      particleCount: n
+    },
+    particleCount: n
+  });
+  const params = new DataView(createSchroederLawNeighborCandidateParamsArray(plan));
+  const budgetInParams = params.getUint32(28, true);
+  assert.equal(budgetInParams, plan.admittedCandidateBudget);
+  assert.ok(
+    budgetInParams * n <= plan.neighborCandidateCount,
+    'the kernel must not be able to write past the arena'
+  );
+});
+
+test('an unbound arena honours the full candidate budget', () => {
+  // Small scenes must be unaffected by the cap.
+  const n = 1000;
+  const plan = createSchroederLawNeighborCandidatePlan({
+    lawQueue: { schema: ULG_SCHROEDER_LAW_QUEUE_SCHEMA, activeNodeCount: n, lawQueueCount: n },
+    activeNodeList: {
+      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+      activeCandidateCount: n,
+      particleCount: n
+    },
+    particleCount: n
+  });
+  assert.equal(plan.candidateArenaBound, false);
+  assert.equal(plan.droppedCandidateCount, 0);
+  assert.equal(plan.admittedCandidateBudget, plan.candidateBudget);
+});

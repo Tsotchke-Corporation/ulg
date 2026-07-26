@@ -10967,6 +10967,10 @@ function analyzeTimeline(timeline, {
   let lastH2oLiquidSurfaceHeightM = null;
   let lastH2oLiquidSurfaceTallnessRatio = null;
   let lastH2oLiquidSurfaceFootprintFillRatio = null;
+  // Which evidence the free-surface ratios came from. 'scene-node-mesh' is the
+  // three.js path; 'resident-cohort-particle-bounds' is the native path, where
+  // no CPU-side mesh exists to measure. Never left implicit.
+  let liquidFreeSurfaceBoundsSource = null;
   if (!directResident && !residentSurfaceBufferHandoffAccepted) {
     const alphaTransparentRenderLayers = new Set(['vapor-surface', 'alpha-surface']);
     const knownSurfaceRenderLayers = new Set([
@@ -11146,6 +11150,7 @@ function analyzeTimeline(timeline, {
               ? tallnessRatio
               : Math.max(maxH2oLiquidSurfaceTallnessRatio, tallnessRatio);
             lastH2oLiquidSurfaceTallnessRatio = tallnessRatio;
+            liquidFreeSurfaceBoundsSource = 'scene-node-mesh';
           }
           if (Number.isFinite(footprintFillRatio)) {
             minH2oLiquidSurfaceFootprintFillRatio = minH2oLiquidSurfaceFootprintFillRatio == null
@@ -11480,6 +11485,67 @@ function analyzeTimeline(timeline, {
       issues.push(`liquid-settle-final-drop-speed>${liquidSettledMaxFinalDropSpeedMPerS}`);
     }
   }
+  // SURF-0. The tallness and footprint ratios above are derived from three.js
+  // scene-node geometry via boundsFromGeometry, which reads
+  // geometry.attributes.position.array. On the native WebGPU surface path the
+  // vertices are GPU-resident and that attribute does not exist, so
+  // metric.surfaces.visible is empty and both ratios stay null -- the gate
+  // reported "missing" on every native run rather than measuring anything.
+  //
+  // Fall back to the resident cohort position bounds, which are already
+  // measured and carry status 'position-bounds-ready'. Those are particle
+  // positions rather than isosurface vertices, which for a free-surface check
+  // is the more direct evidence: tallness of the liquid body is a property of
+  // the physics, and the isosurface is a rendering of it. The substitution is
+  // recorded in liquidFreeSurfaceBoundsSource so it is never silent.
+  if (
+    !Number.isFinite(lastH2oLiquidSurfaceTallnessRatio)
+    && expectedLiquidH2oSameMaterial
+  ) {
+    const cohortUnionBounds = (metric) => {
+      const cohorts = metricCohortDiagnostics(metric) ?? metric?.initial?.cohortDiagnostics;
+      const parts = [cohorts?.base?.boundsM, cohorts?.drop?.boundsM]
+        .filter((entry) => entry?.status === 'position-bounds-ready'
+          && Array.isArray(entry.min) && Array.isArray(entry.max));
+      if (!parts.length) return null;
+      const min = [0, 1, 2].map((axis) => Math.min(...parts.map((p) => finiteMetric(p.min[axis]) ?? Infinity)));
+      const max = [0, 1, 2].map((axis) => Math.max(...parts.map((p) => finiteMetric(p.max[axis]) ?? -Infinity)));
+      if (!min.every(Number.isFinite) || !max.every(Number.isFinite)) return null;
+      return { min, max, size: [0, 1, 2].map((axis) => max[axis] - min[axis]) };
+    };
+    for (const metric of metrics) {
+      const bounds = cohortUnionBounds(metric);
+      if (!bounds) continue;
+      const heightM = finiteMetric(bounds.size[1]);
+      const footprintXM = finiteMetric(bounds.size[0]);
+      const footprintZM = finiteMetric(bounds.size[2]);
+      const horizontalExtentM = Math.max(1e-9, footprintXM ?? 0, footprintZM ?? 0);
+      const tallnessRatio = Number.isFinite(heightM) ? heightM / horizontalExtentM : null;
+      const footprintFillRatio = Number.isFinite(footprintXM) && Number.isFinite(footprintZM)
+        ? (footprintXM * footprintZM)
+          / Math.max(1e-9, Number(boxDimsM[0]) * Number(boxDimsM[2]))
+        : null;
+      if (Number.isFinite(heightM)) {
+        maxH2oLiquidSurfaceHeightM = maxH2oLiquidSurfaceHeightM == null
+          ? heightM
+          : Math.max(maxH2oLiquidSurfaceHeightM, heightM);
+        lastH2oLiquidSurfaceHeightM = heightM;
+      }
+      if (Number.isFinite(tallnessRatio)) {
+        maxH2oLiquidSurfaceTallnessRatio = maxH2oLiquidSurfaceTallnessRatio == null
+          ? tallnessRatio
+          : Math.max(maxH2oLiquidSurfaceTallnessRatio, tallnessRatio);
+        lastH2oLiquidSurfaceTallnessRatio = tallnessRatio;
+      }
+      if (Number.isFinite(footprintFillRatio)) {
+        minH2oLiquidSurfaceFootprintFillRatio = minH2oLiquidSurfaceFootprintFillRatio == null
+          ? footprintFillRatio
+          : Math.min(minH2oLiquidSurfaceFootprintFillRatio, footprintFillRatio);
+        lastH2oLiquidSurfaceFootprintFillRatio = footprintFillRatio;
+      }
+      liquidFreeSurfaceBoundsSource = 'resident-cohort-particle-bounds';
+    }
+  }
   if (!visualOnly && expectedLiquidH2oSameMaterial && expectLiquidFreeSurface) {
     if (!Number.isFinite(maxNextTimeS)) {
       issues.push('liquid-free-surface-missing-sim-time');
@@ -11741,6 +11807,7 @@ function analyzeTimeline(timeline, {
     minH2oLiquidSurfaceFootprintFillRatio,
     lastH2oLiquidSurfaceHeightM,
     lastH2oLiquidSurfaceTallnessRatio,
+    liquidFreeSurfaceBoundsSource,
     lastH2oLiquidSurfaceFootprintFillRatio,
     visibleSurfaceSampleCount,
     residentSurfaceBufferHandoffSampleCount,

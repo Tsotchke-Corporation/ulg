@@ -134,7 +134,41 @@ measuring under contention is trap 2 below.
    `webGpuDeviceDescriptorForResidentSph({ timestampProfilingRequested })`
    exists in `webgpuDeviceLimits.js` but no caller has ever passed true, so an
    end-to-end profiled run needs that switch thrown and verified.
-4. **Priority 3 sparsity** — the payback step. Not started.
+4. **Priority 3 sparsity** — the payback step. Not started, but now located
+   exactly.
+
+### Priority 3: where the 4 KiB per particle actually comes from
+
+`src/runtime/sph/schroederHierarchyGpu.js:4498`:
+
+```js
+const neighborCandidateCount = lawQueueCount * resolvedCandidateBudget;
+const neighborCandidateByteLength = Math.max(
+  4,
+  neighborCandidateCount * SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * 4
+);
+```
+
+with `DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET = 64` (line 503) and a
+64-byte candidate row. That is `lawQueueCount * 4096` bytes — a fixed
+worst-case reservation, not a measurement — and `lawQueueCount` is effectively
+one row per particle because the active-node list still permits one active row
+per particle. The two facts compound: **no compaction, times worst-case
+budget.**
+
+The work is therefore two coupled pieces, in this order:
+
+1. **Compact unique active nodes** so `lawQueueCount << particleCount`. Until
+   this lands the tree provides no hierarchical cost reduction at all, and every
+   later optimisation is multiplied by the wrong count.
+2. **Replace the fixed `* candidateBudget`** with a byte-bounded CSR arena:
+   count per row on the GPU, prefix-sum, allocate the actual total, fill in a
+   second pass, and publish overflow telemetry rather than silently truncating.
+   sol-critic is explicit that a bounded cap must `log()` what it dropped.
+
+Then consume cross-level candidates instead of leaving them observational, and
+publish the single shared multi-resolution neighbor artifact so the tree is
+queried once rather than once per law stage.
 
 ## Two measurement traps, both hit
 

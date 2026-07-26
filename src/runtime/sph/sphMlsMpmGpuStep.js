@@ -10750,22 +10750,18 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       const p2gFinalizeBindGroup = memoizedBindGroup(
         p2gFinalizeBindGroupLayout, p2gMemoBuffers, p2gEntries
       );
-      const activeAccumulatorClearBindGroup = activeAccumulatorClearPipelineInfo
-        ? device.createBindGroup({
-          layout: activeAccumulatorClearPipelineInfo.bindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: currentStateBuffer } },
-            { binding: 1, resource: { buffer: currentThermoBuffer } },
-            { binding: 2, resource: { buffer: currentMechanicsBuffer } },
-            { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
-            { binding: 4, resource: { buffer: p2gParamsBuffer } },
-            { binding: 5, resource: { buffer: productEventBuffer } },
-            { binding: 6, resource: { buffer: gridBuffer } },
-            { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-            { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
-          ]
-        })
-        : null;
+      // Same nine bindings as p2g, so it shares the entry builder and buffer
+      // key; the memo also keys on layout, so it does not collide. Gated on
+      // useActiveGrid as well: it was previously built on every substep even
+      // when the branch below never consumed it.
+      const activeAccumulatorClearBindGroup =
+        activeGridDispatch.useActiveGrid && activeAccumulatorClearPipelineInfo
+          ? memoizedBindGroup(
+            activeAccumulatorClearPipelineInfo.bindGroupLayout,
+            p2gMemoBuffers,
+            p2gEntries
+          )
+          : null;
       if (activeGridDispatch.useActiveGrid) {
         const accumulatorClearPass = encoder.beginComputePass(
           gpuTimestampProfiler.passDescriptorExtras('accumulatorClear')

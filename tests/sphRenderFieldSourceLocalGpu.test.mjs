@@ -9,7 +9,8 @@ import {
 import {
   SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING,
   SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DIAGNOSTIC_NO_READBACK,
-  buildSphRenderFieldSourceLocalWebGpu
+  buildSphRenderFieldSourceLocalWebGpu,
+  SOURCE_LOCAL_ACCUM_LANES
 } from '../src/runtime/sph/sphRenderFieldSourceLocalGpu.js';
 
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_RENDER_SOURCE_LOCAL === '1';
@@ -493,4 +494,32 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
   assert.ok(native.maxDensityAbs <= 1e-3, JSON.stringify(native));
   assert.ok(native.maxPaletteAbs <= 1e-3, JSON.stringify(native));
   assert.ok(native.maxTemperatureAbs <= 2, JSON.stringify(native));
+});
+
+test('accumulator lane count matches between both shaders and the host', () => {
+  // The lane count appears in the splat WGSL, the resolve WGSL, and the host
+  // buffer allocation. A mismatch does not fail to compile -- it silently
+  // misaligns every cell's channels, so pin all three together.
+  const { sphRenderFieldSourceLocalSplatWgsl, sphRenderFieldSourceLocalResolveWgsl } =
+    SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
+  const laneOf = (source) => {
+    const match = /const ACCUM_LANES: u32 = (\d+)u;/.exec(source);
+    assert.ok(match, 'ACCUM_LANES must be declared');
+    return Number(match[1]);
+  };
+  assert.equal(laneOf(sphRenderFieldSourceLocalSplatWgsl), SOURCE_LOCAL_ACCUM_LANES);
+  assert.equal(laneOf(sphRenderFieldSourceLocalResolveWgsl), SOURCE_LOCAL_ACCUM_LANES);
+});
+
+test('velocity moments are gated on a non-zero smear interval', () => {
+  // Scenes without smear must not pay the extra atomics.
+  const { sphRenderFieldSourceLocalSplatWgsl } = SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
+  assert.match(
+    sphRenderFieldSourceLocalSplatWgsl,
+    /if \(params\.render_smear_dt_s > 0\.0\) \{/,
+    'velocity-moment accumulation must be gated on render_smear_dt_s'
+  );
+  // Signed components must be split, not clamped: the accumulator is unsigned.
+  assert.match(sphRenderFieldSourceLocalSplatWgsl, /quantize\(max\(-vw\.x, 0\.0\)/);
+  assert.match(sphRenderFieldSourceLocalSplatWgsl, /quantize\(max\(-vw\.z, 0\.0\)/);
 });

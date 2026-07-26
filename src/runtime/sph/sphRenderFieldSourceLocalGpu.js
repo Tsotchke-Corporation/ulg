@@ -47,6 +47,12 @@ export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_DISABLED = 'disabled';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const SOURCE_LOCAL_KERNEL_SCOPE = 'sph-render-field-source-local-shadow-splat';
+// Accumulator lanes per field cell. 0 density, 1-3 palette RGB, 4-5
+// temperature-weighted and weight, 6-11 velocity moments split into positive
+// and negative halves per axis (the accumulator is unsigned), 12 weighted
+// speed-squared. Must match ACCUM_LANES in both shader strings.
+export const SOURCE_LOCAL_ACCUM_LANES = 13;
+const SOURCE_LOCAL_VELOCITY_SCALE = 4_096;
 const SOURCE_LOCAL_DENSITY_SCALE = 16_384;
 const SOURCE_LOCAL_PALETTE_SCALE = 16_384;
 // Temperature is a ratio of two atomically accumulated quantities.  A coarse
@@ -79,8 +85,10 @@ struct SourceLocalParams {
   density_scale: f32,
   palette_scale: f32,
   temperature_scale: f32,
-  _pad0: f32,
-  _pad1: f32,
+  // Splash-shard smear interval. Zero disables the velocity-moment lanes
+  // entirely, so a scene without smear pays no extra atomics.
+  render_smear_dt_s: f32,
+  velocity_scale: f32,
   _pad2: f32,
 };
 
@@ -92,7 +100,7 @@ struct SourceLocalParams {
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 const MAX_U32_SAFE: u32 = 4294967040u;
-const ACCUM_LANES: u32 = 6u;
+const ACCUM_LANES: u32 = 13u;
 
 fn render_row0(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_ROW_VEC4_STRIDE];
@@ -308,6 +316,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         saturating_add(&accum[accum_index(out_index, 3u)], &overflow_state[0u], quantize(color.z * palette_weight, params.palette_scale));
         saturating_add(&accum[accum_index(out_index, 4u)], &overflow_state[0u], quantize(row1.z * value, params.temperature_scale));
         saturating_add(&accum[accum_index(out_index, 5u)], &overflow_state[0u], quantize(value, params.temperature_scale));
+        // Velocity moments for the splash-shard smear, weighted by the same
+        // positive metaball value the gather uses. The accumulator is
+        // unsigned, so each signed component is split into its positive and
+        // negative halves and recombined at resolve; a bias constant would
+        // need a max-speed assumption this has no way to justify.
+        if (params.render_smear_dt_s > 0.0) {
+          let vel = vec3<f32>(row4.y, row4.z, row4.w);
+          let vw = vel * value;
+          saturating_add(&accum[accum_index(out_index, 6u)], &overflow_state[0u], quantize(max(vw.x, 0.0), params.velocity_scale));
+          saturating_add(&accum[accum_index(out_index, 7u)], &overflow_state[0u], quantize(max(-vw.x, 0.0), params.velocity_scale));
+          saturating_add(&accum[accum_index(out_index, 8u)], &overflow_state[0u], quantize(max(vw.y, 0.0), params.velocity_scale));
+          saturating_add(&accum[accum_index(out_index, 9u)], &overflow_state[0u], quantize(max(-vw.y, 0.0), params.velocity_scale));
+          saturating_add(&accum[accum_index(out_index, 10u)], &overflow_state[0u], quantize(max(vw.z, 0.0), params.velocity_scale));
+          saturating_add(&accum[accum_index(out_index, 11u)], &overflow_state[0u], quantize(max(-vw.z, 0.0), params.velocity_scale));
+          saturating_add(&accum[accum_index(out_index, 12u)], &overflow_state[0u], quantize(dot(vel, vel) * value, params.velocity_scale));
+        }
       }
     }
   }
@@ -335,7 +359,7 @@ struct SourceLocalParams {
 @group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: SourceLocalParams;
 
-const ACCUM_LANES: u32 = 6u;
+const ACCUM_LANES: u32 = 13u;
 
 fn surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
@@ -406,7 +430,8 @@ function createSourceLocalParamsArray({
   totalFieldCells,
   maxSplatCellsPerSource,
   fieldPadding,
-  refEdgeM
+  refEdgeM,
+  renderSmearDtS = 0
 }) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
@@ -419,6 +444,10 @@ function createSourceLocalParamsArray({
   view.setFloat32(24, SOURCE_LOCAL_DENSITY_SCALE, true);
   view.setFloat32(28, SOURCE_LOCAL_PALETTE_SCALE, true);
   view.setFloat32(32, SOURCE_LOCAL_TEMPERATURE_SCALE, true);
+  // Zero here switches the velocity-moment lanes off in the splat, so a scene
+  // without smear pays none of their atomics.
+  view.setFloat32(36, Math.max(0, finiteNumber(renderSmearDtS, 0)), true);
+  view.setFloat32(40, SOURCE_LOCAL_VELOCITY_SCALE, true);
   return buffer;
 }
 
@@ -758,7 +787,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   const accumBuffer = writeStorageBuffer(
     device,
     'ulg-sph-render-field-source-local-accum',
-    new Uint32Array(surfaceTable.totalFieldCells * 6)
+    new Uint32Array(surfaceTable.totalFieldCells * SOURCE_LOCAL_ACCUM_LANES)
   );
   const overflowBuffer = writeStorageBuffer(
     device,
@@ -790,7 +819,8 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     totalFieldCells: surfaceTable.totalFieldCells,
     maxSplatCellsPerSource: resolvedMaxSplatCellsPerSource,
     fieldPadding,
-    refEdgeM
+    refEdgeM,
+    renderSmearDtS
   }));
 
   const splatPipelineState = createCachedExplicitComputePipeline(device, {

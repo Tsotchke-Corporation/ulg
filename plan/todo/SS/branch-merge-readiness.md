@@ -322,12 +322,38 @@ because dropping candidates degrades neighbour coverage gracefully and can be
 reported. **Byte-bounding the active-node list would drop particles entirely**,
 so the only correct fix is real compaction.
 
-**The hard part already exists.** `src/runtime/webgpuRadixScanUnique.js` exports
-`createWebGpuStableRadixScanUnique(device, ...)` -- a stable GPU radix sort with
-scan and unique -- and five modules already use it
-(`schroederSpatialEpochGpu`, `schroederSpatialMechanicalProposalsGpu`,
-`schroederSpatialMechanicsFieldViewGpu`,
-`schroederSpatialReactionProductPlacementGpu`, `sphSpatialGasLedgerEosGpu`).
+**The compaction is already computed -- it is simply not consumed.** This is the
+same shape as FIELD-0: the artifact exists and nothing reads it.
+
+`src/runtime/webgpuRadixScanUnique.js` exports
+`createWebGpuStableRadixScanUnique(device, ...)`, a stable GPU radix sort with
+scan and unique. `schroederSpatialEpochGpu.js` already runs it over spatial keys
+and binds three outputs:
+
+| buffer | contents |
+| --- | --- |
+| `uniqueGroupIndexBySortedPositionBuffer` | which unique group each element belongs to |
+| `uniqueOffsetsBuffer` | where each unique run starts |
+| `uniqueEvidenceBuffer` | run evidence, including the unique count |
+
+And the key those groups are formed from is level-aware -- `emit_spatial_keys`
+in `ulg-gpu-abi/src/schroederSpatialEpochWgsl.js` derives it from the row's
+level and native spacing. **So the unique groups already are unique spatial
+cells at the selected level**, which is exactly what an active node is meant to
+be.
+
+So the remaining work is not writing a GPU compaction. It is deriving the
+active-node list from the epoch's existing unique groups instead of from the
+particle list: one row per unique group, `activeNodeByteLength` sized by the
+unique count, and `uniqueGroupIndexBySortedPosition` kept as the per-particle
+index so consumers still reach their node in O(1) without changing.
+
+The open question to settle first is whether the epoch's key granularity matches
+the active-node tile granularity exactly (`tileCellCount`, `supportInflateCells`,
+`minTileSpacingM`/`maxTileSpacingM`) or is finer. If finer, the active-node key
+needs to be a quantisation of the same input rather than the epoch key itself --
+in which case the same radix primitive runs again over the coarser key, which is
+still far less work than building compaction from nothing.
 
 Shape of the work:
 

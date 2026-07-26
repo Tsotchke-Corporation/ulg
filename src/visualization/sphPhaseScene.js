@@ -33228,6 +33228,14 @@ fn main(
             });
             const residentStepOptions = {
               ...baseOptions,
+              // PROF-0. The demo mount reads ?residentGpuTimestampProfile=1 and
+              // uses it to negotiate the 'timestamp-query' device feature at
+              // first acquisition, then forwards it here -- where it was
+              // computed into enableResidentGpuTimestampProfiling and then
+              // never passed on. Without this hop the URL parameter negotiates
+              // the feature and nothing ever writes a timestamp.
+              residentGpuTimestampProfilingRequested:
+                enableResidentGpuTimestampProfiling,
               sphParticleState: currentSphParticleState,
               mlsMpmParticleState: currentMlsMpmParticleState,
               sphParticleUpload: currentSphParticleUpload,

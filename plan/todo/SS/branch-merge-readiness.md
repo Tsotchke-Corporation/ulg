@@ -217,6 +217,44 @@ particles with opposing velocities and asserts the correction actually engages.
 Still shadow mode. Making the splat the production render-field path is the
 remaining step, and now has a parity gate behind it.
 
+## Built and not wired: a standing inventory
+
+This keeps happening, so here is the list rather than another one-off
+discovery. Modules under `src/` whose only importers are tests -- i.e. built,
+covered, and connected to nothing in production:
+
+| module | lines | what it is |
+| --- | --- | --- |
+| `runtime/mechanicsPromotionEvidence.js` | 1012 | mechanics stage-promotion evidence |
+| `runtime/material/MaterialRegistry.js` | 255 | resolve material properties through ClosureRegistry (demo plan P2/P3) |
+| `runtime/material/thermodynamicPreflight.js` | 132 | closure-backed thermodynamic preflight (P3) |
+| `runtime/md/propertyEstimators.js` | 125 | material-agnostic property estimators over MD samples |
+| `runtime/md/potentialFitting.js` | 85 | fit an interatomic potential to ab-initio energies -- the MoonLab/DFT bridge |
+| `runtime/md/pairPotential.js` | 66 | general interatomic pair-potential interface |
+| `runtime/md/mdInit.js` | 60 | deterministic MD initialisation |
+| `runtime/material/materialResolverManifest.js` | — | material resolver manifest |
+| `runtime/sph/sphRenderFieldSourceLocalGpu.js` | — | FIELD-0's splat (parity now passing, still shadow) |
+
+Reproduce with a resolver over relative imports across `src/`, `tests/` and
+`scripts/`, listing modules with test importers and no `src/` importer.
+
+Two of these are not incidental. **The entire `md/` cluster is the ULG thesis
+machinery** -- derive material properties from active microscopic dynamics
+instead of importing them -- and `MaterialRegistry` plus
+`thermodynamicPreflight` are the closure-backed resolution path from the same
+plan. A project whose first hard rule is "no material property is primitive"
+has the code for that rule written, tested, and disconnected. That is a large
+part of why `scientificValidation=false` and `fullPhysicsValidation=false` are
+still honest.
+
+Not every entry should be wired. `*Reference.js` modules are deliberate CPU
+oracles for tests. But the `md/` cluster, `MaterialRegistry`,
+`thermodynamicPreflight` and `mechanicsPromotionEvidence` all read as intended
+production paths.
+
+Wiring any of them changes physics inputs, so each needs its own before/after
+evidence rather than being switched on in a batch.
+
 ## Landed on this branch
 
 | Commit | What |

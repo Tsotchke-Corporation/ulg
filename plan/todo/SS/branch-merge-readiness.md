@@ -767,9 +767,42 @@ Evidence-first on purpose. Sizing an allocation by a ratio nobody measured on
 the real workload is how the candidate arena ended up reserving 4 KiB per
 particle.
 
-**Next increment** (not started): emit one row per unique group, give consumers
-the per-particle `u32` index so they still reach their node in O(1), and
-dispatch them over nodes instead of particles.
+#### Landed: the compacted list, the per-particle index, and a byte-identity proof
+
+`emitCompactedNodes: true` runs a second pass that scatters
+`nodeIndexByParticle[sortedIndices[p]] = groupIndex(p)` and copies each group's
+representative row into compacted slot `groupIndex`. It follows the spatial
+epoch's directory-assembly conventions rather than inventing its own, which
+matters for two details that are easy to get wrong and produce plausible-looking
+wrong neighbours:
+
+- `uniqueGroupIndexBySortedPosition` holds an **inclusive head count**, not a
+  group index. The group is `[p + 1] - 1`, falling back to `uniqueCount` at the
+  last position. Read as a group index it puts every particle on its
+  neighbour's node.
+- `uniqueOffsets[group]` is the sorted position that **heads** the group, so
+  `p == uniqueOffsets[group]` is the representative test.
+
+Rejected rows all share the sentinel group, so that slot is written canonically
+zero rather than copied from an arbitrary member -- copying would publish one
+rejected particle's position as the whole group's.
+
+**Verified on native Vulkan, 10,648 particles: `checkedParticleCount` 10,648,
+`mismatchedParticleCount` 0, `outOfRangeNodeIndexCount` 0.** Every particle's
+index lands on a compacted row byte-identical to its own in every geometry field
+(`levelId`, tile min/max, `tileSpacing`, `nativeDx`, `supportRadius`, `status`,
+`chartId`). That is the proof the AABB key captures everything a consumer reads;
+if it ever fails, the compaction has become lossy.
+
+Also fixed here, and it was latent in the evidence-only commit: the radix
+primitive refuses `releaseExecution` after submission -- that entry point is for
+a discarded encoder, and post-submission it wants `releaseExecutionAfter` with a
+fence. Releasing from inside a deferred cleanup is by definition
+post-submission, so it threw *inside a cleanup callback*, where there is no
+caller and it surfaces only as an unhandled rejection.
+
+**Next increment** (not started): switch consumers onto the per-particle index
+and dispatch them over nodes instead of particles.
 
 The design fork this hits, and its answer, because the plan above did not
 anticipate it: **a GPU-authored unique count cannot size a host-side

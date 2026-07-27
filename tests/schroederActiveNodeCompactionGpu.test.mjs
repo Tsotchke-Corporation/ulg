@@ -5,6 +5,7 @@ import {
   SCHROEDER_ACTIVE_NODE_COMPACTION_KEY_WORDS,
   SCHROEDER_ACTIVE_NODE_COMPACTION_SCHEMA,
   runSchroederActiveNodeCompactionEvidenceWebGpu,
+  schroederActiveNodeCompactionEmitWgsl,
   schroederActiveNodeCompactionKeyWgsl
 } from '../src/runtime/sph/schroederActiveNodeCompactionGpu.js';
 import {
@@ -101,4 +102,64 @@ test('a non-WebGPU device is refused', async () => {
     () => runSchroederActiveNodeCompactionEvidenceWebGpu({ device: {} }),
     /requires a WebGPU-like device/
   );
+});
+
+test('the emit kernel derives the group from an inclusive head count, not a raw index', () => {
+  // `sorted_group_indices` is an inclusive head count. Reading it as a group
+  // index directly would put every particle on its neighbour's node -- a bug
+  // that produces plausible geometry and wrong neighbours.
+  assert.match(
+    schroederActiveNodeCompactionEmitWgsl,
+    /inclusive_head_count = sorted_group_indices\[sorted_position \+ 1u\]/
+  );
+  assert.match(schroederActiveNodeCompactionEmitWgsl, /let group_index = inclusive_head_count - 1u/);
+  // The last sorted position has no successor to read, so it falls back to the
+  // unique count rather than reading off the end.
+  assert.match(schroederActiveNodeCompactionEmitWgsl, /var inclusive_head_count = unique_count/);
+});
+
+test('the representative is the group head, and only it writes a row', () => {
+  assert.match(
+    schroederActiveNodeCompactionEmitWgsl,
+    /if \(sorted_position != unique_offsets\[group_index\]\) \{\s*return;/
+  );
+});
+
+test('every particle gets an index, including non-representatives', () => {
+  // The scatter must happen before the head test returns, or only one particle
+  // per group would ever be given a node.
+  const scatterAt = schroederActiveNodeCompactionEmitWgsl.indexOf('node_index_by_particle[source_index]');
+  const headTestAt = schroederActiveNodeCompactionEmitWgsl.indexOf('unique_offsets[group_index]');
+  assert.ok(scatterAt > 0 && headTestAt > 0);
+  assert.ok(scatterAt < headTestAt, 'the scatter must precede the head early-return');
+});
+
+test('the sentinel group is written canonically zero, not from an arbitrary member', () => {
+  // Rejected rows share one group. Copying any one member would publish that
+  // particle's position as the whole group's.
+  assert.match(
+    schroederActiveNodeCompactionEmitWgsl,
+    /compacted_nodes\[target_at \+ word\] = 0\.0;/
+  );
+});
+
+test('the emit kernel bounds every index it trusts from the GPU', () => {
+  for (const guard of [
+    /source_index >= params\.row_count/,
+    /group_index >= unique_count/,
+    /group_index >= params\.node_capacity/,
+    /sorted_position >= params\.row_count/
+  ]) {
+    assert.match(schroederActiveNodeCompactionEmitWgsl, guard);
+  }
+});
+
+test('emitting is opt-in so measuring stays cheap', async () => {
+  const result = await runSchroederActiveNodeCompactionEvidenceWebGpu({
+    device: { createBuffer() {}, queue: { writeBuffer() {} } },
+    activeNodeBuffer: { label: 'empty' },
+    rowCount: 0
+  });
+  // The empty path returns before either pass, so it reports neither.
+  assert.equal(result.compactedNodesEmitted, undefined);
 });

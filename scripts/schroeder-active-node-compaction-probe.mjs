@@ -226,8 +226,65 @@ async function main() {
         gpuEvidence = await compaction.runSchroederActiveNodeCompactionEvidenceWebGpu({
           device,
           activeNodeList: activeNodes,
-          rowCount: particleCount
+          rowCount: particleCount,
+          emitCompactedNodes: true,
+          retainCompactedBuffers: true
         });
+
+        // The correctness proof the whole design rests on: every particle's
+        // index must land on a compacted row that is byte-identical to the row
+        // it had before. If that ever fails, the AABB key is not capturing
+        // everything a consumer reads and the compaction is lossy.
+        const readBack = async (buffer, byteLength, Ctor) => {
+          const staging = device.createBuffer({
+            label: 'compaction-verify-readback',
+            size: byteLength,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+          });
+          const encoder = device.createCommandEncoder();
+          encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
+          device.queue.submit([encoder.finish()]);
+          await staging.mapAsync(GPUMapMode.READ);
+          const out = new Ctor(staging.getMappedRange()).slice();
+          staging.unmap();
+          staging.destroy();
+          return out;
+        };
+        const compactedRows = await readBack(
+          gpuEvidence.compactedNodeBuffer,
+          particleCount * stride * Float32Array.BYTES_PER_ELEMENT,
+          Float32Array
+        );
+        const nodeIndex = await readBack(
+          gpuEvidence.nodeIndexByParticleBuffer,
+          particleCount * Uint32Array.BYTES_PER_ELEMENT,
+          Uint32Array
+        );
+        let mismatched = 0;
+        let outOfRange = 0;
+        let checked = 0;
+        for (let particle = 0; particle < particleCount; particle += 1) {
+          const at = particle * stride;
+          if (!(rows[at + 11] > 0)) continue;
+          checked += 1;
+          const node = nodeIndex[particle];
+          if (!(node < gpuEvidence.uniqueNodeCount)) { outOfRange += 1; continue; }
+          const nodeAt = node * stride;
+          // Position and particle id legitimately differ between members of a
+          // group; every field a consumer uses for geometry must not.
+          for (const field of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 15]) {
+            if (compactedRows[nodeAt + field] !== rows[at + field]) { mismatched += 1; break; }
+          }
+        }
+        gpuEvidence.verification = {
+          checkedParticleCount: checked,
+          mismatchedParticleCount: mismatched,
+          outOfRangeNodeIndexCount: outOfRange
+        };
+        gpuEvidence.releaseCompactedBuffers();
+        gpuEvidence.compactedNodeBuffer = null;
+        gpuEvidence.nodeIndexByParticleBuffer = null;
+        gpuEvidence.uniqueDispatchIndirectBuffer = null;
       } catch (error) {
         gpuEvidence = { status: 'threw', reason: error?.message || String(error) };
       }

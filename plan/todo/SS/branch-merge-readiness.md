@@ -203,6 +203,24 @@ by more than 2 levels, all of them on silhouette edges -- a ~1e-3 field
 difference moving an isosurface boundary across a pixel. Full unit suite green
 with the default flipped: 1999 pass, 0 fail.
 
+### Verified at scale 2026-07-26
+
+The 6.4x figure above is at 9,000 particles. Re-checked with the splat as the
+shipped default at three counts, `ss=1`:
+
+| particles | timeline | errors | triangles | frame validation | `renderFieldMs` |
+| --- | --- | --- | --- | --- | --- |
+| 9,000 | complete | 0 | 466,033 | passed | 1.2 ms |
+| 24,696 | complete | 0 | 466,033 | passed | 1.4 ms |
+| 52,488 | complete | 0 | 466,033 | passed | 1.2 ms |
+
+**The field build cost is flat across a 5.8x particle increase.** That is the
+scaling the splat was built for and the one the dense gather cannot have: a
+particle-parallel scatter costs particles x radius^3, while the gather costs
+cells x particles and therefore has to grow. `renderFieldMs` is host enqueue
+time, so treat the absolute numbers with the usual suspicion -- the flatness
+across a fixed metric is the claim, not the 1.2 ms.
+
 ### What was actually slow was not the algorithm
 
 First measurement said the splat was **4.6x slower** than the gather. The cause

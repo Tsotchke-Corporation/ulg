@@ -829,6 +829,39 @@ tile is the size of the whole domain** at these particle counts. Whether that
 tile sizing is itself right is a separate question this measurement raises and
 does not answer.
 
+#### The compaction's optimisation premise is falsified. It survives as a diagnostic.
+
+It was built to relieve bucket saturation at scale. Measured with the gates fixed
+and the sorted index on, `ss=1`, three particle counts:
+
+| particles | traversal mode | fallback ratio | unique nodes | compaction |
+| --- | --- | --- | --- | --- |
+| 9,000 | `sorted-radix-active-node-index` | 0 | 54 | 166.7x |
+| 24,696 | `sorted-radix-active-node-index` | 0.0045 | 96 | 257.2x |
+| 52,488 | `sorted-radix-active-node-index` | **0** | 112 | 468.6x |
+
+**Saturation never happens.** The sorted-radix index answers essentially every
+query to 52,488 particles, and the reason is visible in the node counts: the
+active-node population is nearly flat -- **54 -> 112 while particles go 9,000 ->
+52,488** -- because it is set by domain geometry, not particle count. So the
+compaction ratio *improves* with scale rather than becoming necessary, and the
+row count the index has to bucket barely moves.
+
+That is the premise this work was built on, and it does not hold. The
+compaction is **not** wired into any production path and should not be: there is
+no measured problem for it to solve.
+
+It stays in the tree as a **diagnostic**, not as a dormant optimisation, and it
+earned that: `uniqueNodeCount` is what produced the 54/96/112 series above, which
+is the measurement that explains why the sorted index scales. It runs only under
+`measureActiveNodeCompaction`, which is off unless the compact-diagnostic
+readback is requested.
+
+If a future scenario does saturate -- `exactFallbackScanRatio` climbing with
+`appliedTraversalIndexMode` stuck on a bucketed mode -- the emit path and its
+node->members CSR are already built and proven (`6f0c504`), with the field-10
+and binding-limit traps recorded below.
+
 #### Landed: the compaction key and its ratio, on the GPU, evidence only
 
 `src/runtime/sph/schroederActiveNodeCompactionGpu.js` emits the design-(a) key

@@ -1128,7 +1128,32 @@ is 2.25x and not 8.2x.
 
 It defaults to whatever `schroederLawNeighborCandidates` is doing, because that
 path is its only consumer -- building a radix sort per step for nothing would be
-pure overhead when the consumer is off.
+pure overhead when the consumer is off. **Confirmed no regression to the default
+configuration**: `ss=1` with the law-neighbour path off measures 1,689 ms before
+the gate removal and 1,665 ms after, i.e. unchanged.
+
+#### The result stated against the right baseline
+
+"2.25x faster" undersells it and measures the wrong thing. Against `ss=1` with
+the neighbour path *off* -- what the default actually runs -- the question is
+what enabling the neighbour search costs:
+
+| configuration | batch time | cost vs baseline |
+| --- | --- | --- |
+| law-neighbour off (default) | 1,677 ms | -- |
+| law-neighbour on, **no** sorted index | 3,890 ms | **+2,213 ms (2.32x)** |
+| law-neighbour on, sorted index | 1,728 ms | **+51 ms (1.03x)** |
+
+**The SS neighbour search went from more than doubling step time to costing 3%.**
+That is the thing Priority 3 was for: it makes the neighbour path affordable
+enough to turn on, rather than making an already-affordable path faster.
+
+**A caveat on all `batchMs` figures here.** Run-to-run variance on this machine
+is large -- the same configuration produced 1,689 ms and 392 ms on separate
+runs, and one sorted-index run measured 469 ms against a 1,728 ms median. Every
+number above is a median of medians across at least two runs, and the arms that
+matter were tight within themselves (3,832 / 3,926 / 3,890 and 1,728 / 1,728 /
+1,744). Single-run comparisons in this area should not be trusted.
 
 **This is what Priority 3 was really asking for**, and it needed no compaction
 rewrite. The compaction stays proven and relevant for genuine saturation at

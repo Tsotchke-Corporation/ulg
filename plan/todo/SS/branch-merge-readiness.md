@@ -660,12 +660,63 @@ particle list: one row per unique group, `activeNodeByteLength` sized by the
 unique count, and `uniqueGroupIndexBySortedPosition` kept as the per-particle
 index so consumers still reach their node in O(1) without changing.
 
-The open question to settle first is whether the epoch's key granularity matches
-the active-node tile granularity exactly (`tileCellCount`, `supportInflateCells`,
-`minTileSpacingM`/`maxTileSpacingM`) or is finer. If finer, the active-node key
-needs to be a quantisation of the same input rather than the epoch key itself --
-in which case the same radix primitive runs again over the coarser key, which is
-still far less work than building compaction from nothing.
+#### Settled 2026-07-26: the premise above is wrong. They do not match.
+
+The open question was whether the epoch's key granularity matches the
+active-node tile granularity. It does not, and the mismatch is not only
+granularity -- it is **shape**.
+
+The epoch key (`emit_spatial_keys`, `schroederSpatialEpochWgsl.js`) is
+
+```wgsl
+let cell_f = floor(position / native_spacing);
+```
+
+— one **point**, at one cell of the level's native spacing.
+
+An active-node row (`ulg-gpu-abi/src/wgsl.js`) is
+
+```wgsl
+let tile_spacing = ss_active_tile_spacing(native_dx);   // native_dx * tile_cell_count, clamped
+let min_tile = floor((position - vec3<f32>(expanded_support)) / tile_spacing);
+let max_tile = floor((position + vec3<f32>(expanded_support)) / tile_spacing);
+```
+
+— an **AABB of tiles**, at a spacing coarser by `tile_cell_count` (default 8)
+per axis and clamped by `minTileSpacingM`/`maxTileSpacingM`, inflated by the
+particle's support radius.
+
+So "the unique groups already are unique spatial cells at the selected level,
+which is exactly what an active node is meant to be" is **not true**. The epoch's
+unique groups cannot be consumed as active nodes:
+
+- they are 8x finer per axis, so one tile spans up to 512 epoch cells;
+- they are points, while an active node is a range. Two particles in the same
+  tile can still have different `min_tile`/`max_tile` because their support
+  boxes differ.
+
+That leaves two real designs, and the choice is a physics/cost trade rather than
+a plumbing decision:
+
+- **(a) Dedup on the AABB tuple** `(level, min_tile, max_tile)`. Exactly
+  equivalent to today -- no consumer changes, no over-approximation. Compaction
+  ratio depends on how uniform the support radii are, since two particles share
+  a row only if their inflated boxes round identically.
+- **(b) Dedup on the tile coordinate alone** and store the **union** of the
+  occupants' support boxes. This is one row per occupied tile, which is what
+  sol-critic P0 actually asks for. The union is a safe over-approximation --
+  supersets never drop particles -- but it widens each node's scan range, so it
+  trades allocation against neighbour-scan work. That trade has to be measured,
+  not assumed.
+
+Either way the existing stable radix primitive still does the sorting; what
+changes is the key, and the plan's step 1 ("derive a tile key per particle")
+remains correct. Step 3 is where (a) and (b) diverge.
+
+**Also settled: this cost is not paid in the default configuration.**
+`schroederEnableActiveNodeIndex` defaults to the Schroeder simulation flag,
+which the probe never sets, so none of the per-particle active-node allocation
+runs unless `ss=1`. Priority 3 must be measured with it on.
 
 Shape of the work:
 

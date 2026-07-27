@@ -505,6 +505,37 @@ Checkpoint evidence grew 8,272 -> 11,344 bytes to carry what these needed:
 constitutive branch, density, `trace(C)`, `det(F)`, `eosModelId`. Still
 fixed-size, still no per-particle readback.
 
+#### It also un-vacuated a third gate
+
+Full matrix after the fix: **3 of 7 fail, the same three scenarios as before.**
+But `standard-sodium-water` now fails `phase-volume-ratios-bounded` in addition
+to `hydrogen-rises`, and that check passed before.
+
+It was passing vacuously. Verified by reverting **only** the WGSL hunk, keeping
+the new instrumentation, and re-running the same scenario:
+
+| | gas `minJ` | gas `maxJ` | `phase-volume-ratios-bounded` |
+| --- | --- | --- | --- |
+| fix reverted | 1 | 1 | **pass** |
+| fix applied | 0.099609 | 0.099961 | **fail** |
+
+The check validates J against `[0.1, 1000]` for gas. With J pinned to exactly
+1.0 for every particle in every scenario it could not fail, whatever the
+mechanics did. That is the third vacuous gate found on this branch, after the
+two already recorded below.
+
+What it now reports is real and pre-existing: h2 reaction-product gas sits **at**
+the `G2P_MIN_VOLUME_RATIO_J = 0.1` floor from the moment it is created, i.e. held
+at 10x its rest density. Its rest volume is correct (0.0192 kg / 0.229 m3 =
+0.084 kg/m3 = h2 gas density), so this is the volume ratio, not V0. Condensed
+phases in the same run are healthy (Na solid `[0.9963, 1.0225]`, h2o liquid
+`[0.9808, 1.0339]`), and speeds stay calm (peak 1.72 m/s), so it is not driving
+an instability. Tracked as its own task.
+
+**Restoring the J=1.0 reset is not an available fix for it** -- that erases every
+particle's volumetric strain, removes the pressure gradient, and re-vacuates the
+gate.
+
 Corrects an earlier note here: "no gradient anywhere, min == max exactly" came
 from a single sample where the two coincided. The gradient is not zero, it is
 about 2,000x too small.

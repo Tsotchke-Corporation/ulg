@@ -2109,9 +2109,25 @@ async function runBrowserProbe({
               configurable: true,
               writable: true,
               value(descriptor, ...rest) {
-                // Unlabelled descriptors are the majority and a bare
-                // "(unlabelled)" bucket names nothing, so fall back to the
-                // caller's source position.
+                // Counts alone cannot say whether a per-substep allocation is
+                // worth removing. Wall time is what decides that, so the wrapper
+                // times the call as well as counting it.
+                const startedAt = performance.now();
+                try {
+                  return original.call(this, descriptor, ...rest);
+                } finally {
+                  const elapsed = performance.now() - startedAt;
+                  globalThis.__ulgDagBuildMs = (globalThis.__ulgDagBuildMs ?? 0) + elapsed;
+                  if (method === 'createBuffer') {
+                    globalThis.__ulgCreateBufferMs =
+                      (globalThis.__ulgCreateBufferMs ?? 0) + elapsed;
+                  }
+                  recordTally(descriptor, method);
+                }
+              }
+            });
+          }
+          function recordTally(descriptor, method) {
                 let key = `${method}:${descriptor?.label ?? ''}`;
                 if (!descriptor?.label) {
                   const stack = new Error().stack || '';
@@ -2120,9 +2136,6 @@ async function runBrowserProbe({
                   key = `${method}@${site}`;
                 }
                 tally.set(key, (tally.get(key) ?? 0) + 1);
-                return original.call(this, descriptor, ...rest);
-              }
-            });
           }
         };
         installDagTrace();
@@ -5449,6 +5462,8 @@ async function runBrowserProbe({
             nativeDagBuildTally: typeof globalThis.__ulgDagBuildTally === 'function'
               ? globalThis.__ulgDagBuildTally()
               : null,
+            nativeDagBuildMs: globalThis.__ulgDagBuildMs ?? null,
+            nativeCreateBufferMs: globalThis.__ulgCreateBufferMs ?? null,
             renderRefreshTotalMs: finiteOrNull(renderState.renderRefreshTotalMs),
             renderRefreshDeviceAcquireMs: finiteOrNull(renderState.renderRefreshDeviceAcquireMs),
             renderRefreshRenderRowsMs: finiteOrNull(renderState.renderRefreshRenderRowsMs),

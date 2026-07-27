@@ -474,6 +474,29 @@ reference different buffers each substep, because the substep **allocates new
 ones**. So the real item is per-substep buffer allocation, and bind-group
 caching only becomes worth revisiting once buffers are stable.
 
+#### CLOSED: the per-substep allocations are 0.3% of a batch. Not worth doing.
+
+The tracer now times each device-object call as well as counting it. Production
+config, `ss` off, 10 batches:
+
+| | per batch | share of batch |
+| --- | --- | --- |
+| `createBuffer`, 736 calls | 4.5 ms (6.1 us each) | **0.3%** |
+| all device-object creation | 14 ms | **1.0%** |
+| batch wall time | 1,463.6 ms | -- |
+
+**Eliminating every buffer, bind group and pipeline creation in the frame would
+recover about 1%.** The per-substep allocation churn that this section and
+sol-critic both treat as a cost is not one. Task closed on measurement rather
+than on effort.
+
+It also settles the bind-group cache reverted in `ad92d9a` retrospectively: even
+a cache with a 100% hit rate could not have recovered more than a fraction of
+that 1%, so reverting it for measuring 0% cost nothing real.
+
+The attempt below is kept because its failure mode is instructive for any future
+pooling in this path.
+
 **Attempted and reverted 2026-07-26: fence-deferred release cannot feed
 same-batch reuse.** A scratch pool for the three fused params buffers -- the
 safest possible subset, since `queue.writeBuffer` overwrites them completely on

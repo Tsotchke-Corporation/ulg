@@ -559,6 +559,34 @@ checkpoint, gives `dt*|div(v)|` for h2 gas of 7.4e-5 falling to 1.5e-5 -- agains
 the ~2.3 that collapsing J tenfold in one step would need -- and the gas
 divergence is mostly *positive*. Whatever sets J near 0.1 is not the mechanics.
 
+The volume lanes disagree with each other exactly. h2 gas holds at 9 particles
+while mass grows linearly into them:
+
+| | |
+| --- | --- |
+| `V0 = m/0.0838` | correct h2 gas rest density |
+| `Vcur/V0` | 0.0996 -- the mechanics say 10x compressed |
+| `Vrep/V0` | **1.000000** -- the represented lane says fully expanded |
+| `m/Vcur` | 0.838 kg/m3, 10x its own rest density |
+
+And because mass grows linearly, `1/S` is `dm/m`, so the exact fit decomposes:
+
+    J = 0.1 * (1 - 1/S) = 0.1 * m_prev/m_current = 0.1 * V0_old/V0_new
+
+**That is two writers composed** -- one resetting J to the 0.1 floor clamp, one
+applying the "conserve current volume across a mass change" scaling. Which is
+why changing either alone leaves the product looking identical, and why a
+third edit (admitting accreted mass at its rest volume in the refresh's else
+branch) also came back byte-identical: the transfer already syncs
+`row4.w = mass/rho` each step, so the refresh sees `rest_volume == row4.w` and
+the correction is zero. That edit was reverted too.
+
+A physical process would not land on an exact rational like 255/256. Aggregate
+checkpoints have gone as far as they can here; the next step is step-resolved
+per-particle tracing across the stage boundaries (`reaction -> mechanics ->
+phase`, `sphMlsMpmPostMechanicsClosure.js:291-315`) to find which boundary sets
+0.1 and which applies the mass ratio.
+
 ### Phase velocity locking is scenario-dependent
 
 Mean vertical velocity per phase (added this session) says the shared-grid

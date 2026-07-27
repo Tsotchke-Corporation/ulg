@@ -405,6 +405,55 @@ looked like confirmation but is **reaction** proposal migration
 (`schroederSpatialReactionDiscoveryProposalGpu.js:1908`), not phase-volume, and
 0 is correct for an h2o/h2o scenario.
 
+#### Root cause: the mechanics Jacobian never expands, and represented volume aliases it
+
+Two compounding defects, the first of which is upstream of SS entirely.
+
+**1. `volume_ratio_j == 1` for every particle in the migration set.** Decoding
+the summary's volume totals (rows 12 and 13):
+
+```
+rows=684  rest=8.15458   represented=8.15458   ratio=1.0000
+rows=684  rest=10.2532   represented=10.2532   ratio=1.0000
+rows=684  rest=12.6773   represented=12.6773   ratio=1.0000
+```
+
+`represented_volume` is `rest_volume * volume_ratio_j`, so a total ratio of
+exactly 1.0000 means **J is 1 for every row** -- the MLS-MPM deformation gradient
+registers no expansion at all. The totals grow (8.15 -> 12.68) so mass is
+entering the system; the ratio does not move. With `volume_ratio` pinned at 1 it
+can never reach the expansion threshold of 64, hence
+`steamExpansionCandidateCount: 0`.
+
+**2. `represented_volume` aliases `mechanics_volume`.** `ulg-gpu-abi/src/wgsl.js`:
+
+```wgsl
+let mechanics_volume_m3   = rest_volume_m3 * volume_ratio_j;   // 12527
+let source_volume_m3      = mechanics_volume_m3;               // 12586
+let represented_volume_m3 = mechanics_volume_m3;               // 12587
+```
+
+Both are the same quantity, so in the migration kernel
+`target_support = max(physical_support, source_support)` resolves to
+`source_support` and `level_delta` is **structurally 0**, independent of the
+data. Even if J did expand, the target level would track the source level.
+
+That contradicts this plan's own design statement: *"source assignment levels
+come from current mechanics volume, while represented phase volume drives the
+retained migration target level."* The two are meant to be distinct; in the code
+they are one variable. The whole point of gate 3 -- migrating levels **without**
+requiring 700x mechanical expansion -- depends on that separation existing.
+
+So defect 1 is why nothing triggers today, and defect 2 is why fixing 1 alone
+would not be enough.
+
+**Hypothesis worth testing, not yet a claim:** this may share a root cause with
+the four failing visual-matrix checks (task #10). If a phase change to gas never
+updates the mechanical volume, steam particles occupy liquid volume and would not
+rise buoyantly -- which is exactly `steam-rises` / `hydrogen-rises` failing. The
+matrix scenarios do not enable `ss=1`, so they would share the *mechanism*
+(phase change not updating J) rather than the SS code path.
+
 **Fourth instance of the pattern this session** -- after the law-neighbour index,
 the traversal ratios, and the thermal traversal mode: a diagnostic computed every
 step that nothing decoded, letting a gate read as satisfied.

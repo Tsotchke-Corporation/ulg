@@ -33159,6 +33159,16 @@ fn main(
                   maxTargetLevelId: summaryRow[9],
                   maxPositiveLevelDelta: summaryRow[10],
                   maxNegativeLevelDelta: summaryRow[11],
+                  // These two separate the two possible root causes of a zero
+                  // level delta: if represented/rest is ~1 the mechanics never
+                  // expands, and the defect is upstream in the EOS/phase change;
+                  // if it is large the expansion is real and the level mapping
+                  // is what fails to move.
+                  totalRestVolumeM3: summaryRow[12],
+                  totalRepresentedVolumeM3: summaryRow[13],
+                  representedOverRest: summaryRow[12] > 0
+                    ? summaryRow[13] / summaryRow[12]
+                    : null,
                   steamExpansionCandidateCount: summaryRow[18],
                   admittedUpdateCount: summaryRow[19],
                   visibleMigrationCount: summaryRow[21]

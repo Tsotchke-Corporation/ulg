@@ -819,11 +819,41 @@ is **0 Pa** -- vacuum -- so any pressure-dependent phase equilibrium evaluated
 for a product is being evaluated at vacuum. `csf`, `naoh` and `h2` are precisely
 the populations whose boiling and condensation behaviour the failing gates test.
 
-Candidate mechanism, **not yet confirmed**: products have row 7 explicitly
-zeroed at creation (`wgsl.js:1873`, `wgsl.js:4511`) and the transfer then
-preserves `old7.x` when it rewrites row 7. But the field-view G2P does write the
-lane, so the open question is why that write never lands for a product --
-whether products miss the field-view path, or something re-zeroes it each step.
+The stage tracer settles where it is *not* happening: products read 0 at closure
+input and no closure stage moves it, so the whole post-mechanics closure is
+exonerated and the field-view G2P -- the only writer of this lane -- never
+writes it for a product.
+
+**Copy-through rejection is ruled out, by J rather than by velocity.** A
+G2P-rejected particle takes `g2p_copy_input_particle`, which freezes its whole
+mechanics row. naoh's J oscillates across checkpoints -- 0.9749, 0.9500, 0.9710,
+0.9778, 0.9809, 0.9833, 0.9845, 0.9853, 0.9816, 0.9789 -- moving both up and
+down, which is live integration. The velocity argument used earlier was weak and
+should not be reused: naoh mass grows every step, so a frozen population would
+still show apparent motion from continuous re-materialization.
+
+So the G2P runs on products and resolves their pressure to **0**, which the
+uniform fast path returns exactly when every sampled node reads zero:
+
+```wgsl
+if (sampled_pressure_uniform) {
+  resolved_absolute_pressure = bitcast<f32>(sampled_pressure_common_bits);
+}
+```
+
+What that does **not** yet explain: the P2G deposit is
+`weight * volume * resolved_absolute_pressure_pa` with `volume = row4.w * row4.z`
+guarded positive, and both products have positive volume (h2: 0.229 * 0.0999 =
+0.0229; naoh: 0.0079 * 0.979 = 0.0078). The EOS returns
+`max(0, ambient + gauge)`, about 101325, not 0. A product should deposit a
+nonzero pressure and does not.
+
+Next instrument: the stage tracer cannot see inside one kernel. This needs
+per-node visibility across the P2G/G2P pair -- specifically whether
+`g2p_field_find` returns `G2P_FIELD_INVALID_INDEX` for a product's stencil
+entries. A field-view descriptor missing for newly created particles would
+produce exactly this signature *without* rejecting the particle, because a
+`g2p_field_find` failure only does `continue` for that node.
 
 Ruled out already, so they are not re-tried:
 

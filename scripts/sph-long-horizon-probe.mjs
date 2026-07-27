@@ -5426,6 +5426,8 @@ async function runBrowserProbe({
             // missed. Present only with the compact-diagnostic readback mode.
             schroederLawNeighborTraversal:
               renderState.schroederLawNeighborTraversal ?? null,
+            schroederActiveNodeCompaction:
+              renderState.schroederActiveNodeCompaction ?? null,
             residentGpuQueueStageStats: renderState.residentGpuQueueStageStats ?? null,
             residentGpuQueueStageSpanCount:
               finiteOrNull(renderState.residentGpuQueueStageSpanCount),

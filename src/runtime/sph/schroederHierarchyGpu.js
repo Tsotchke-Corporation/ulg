@@ -117,6 +117,10 @@ import {
   SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_QUERY_SOURCE_LAYOUT
 } from '../../../ulg-gpu-abi/src/schroederSpatialAggregateView.js';
 import {
+  SCHROEDER_ACTIVE_NODE_COMPACTION_SCHEMA,
+  runSchroederActiveNodeCompactionEvidenceWebGpu
+} from './schroederActiveNodeCompactionGpu.js';
+import {
   schroederHierarchyAggregateNodeBucketReduceWgsl,
   schroederHierarchyAggregateNodeReduceWgsl,
   schroederHierarchyAggregateWgsl,
@@ -15459,6 +15463,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   lawQueueCandidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   lawNeighborCandidateBudget = lawQueueCandidateBudget,
   lawNeighborCandidateReadbackMode = null,
+  // Priority 3 evidence only; see the call site.
+  measureActiveNodeCompaction = false,
   lawNeighborTraversalDiagnosticCounters = null,
   lawNeighborTraversalPolicyMode = SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
   lawNeighborTraversalPolicyFallbackScanRatioThreshold = DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD,
@@ -16171,6 +16177,31 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   registerPressureInterfaceOwnerScopeSetupArtifacts('active-node-list', resolvedActiveNodeList, activeNodeList, {
     expectedConsumers: ['legacy-law-topology', 'render']
   });
+  // Priority 3. Measured off-line at 710x-1,331x on synthetic lattices, which
+  // is not the same claim as "710x on the scenario you are running" -- and the
+  // fix only works if the compacted row count fits a 32-slot bucket. Opt-in,
+  // evidence-only: one extra key pass and a 40-byte readback, no allocation and
+  // no consumer changed. It exists so the ratio can be read on real data before
+  // the law-neighbour kernel is rebuilt around it.
+  let activeNodeCompaction = null;
+  if (measureActiveNodeCompaction && resolvedActiveNodeList?.activeNodeBuffer) {
+    try {
+      activeNodeCompaction = await runSchroederActiveNodeCompactionEvidenceWebGpu({
+        device,
+        activeNodeList: resolvedActiveNodeList,
+        rowCount: resolvedActiveNodeList.particleCount
+          ?? resolvedActiveNodeList.activeCandidateCount
+          ?? null
+      });
+    } catch (error) {
+      // A diagnostic must never take the step down with it.
+      activeNodeCompaction = {
+        schema: SCHROEDER_ACTIVE_NODE_COMPACTION_SCHEMA,
+        status: 'schroeder-active-node-compaction-failed',
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
   const twoLevelAuthoritative = enableTwoLevelMechanics
     && twoLevelMechanicsAuthority === 'authoritative';
   const resolvedSpatialEpochArenaCount = twoLevelAuthoritative
@@ -19517,6 +19548,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       lawQueueBufferByteLength: resolvedLawQueue.lawQueueBufferByteLength
         ?? resolvedLawQueue.lawQueueByteLength
         ?? 0
+    } : null,
+    // Priority 3 evidence: what the active-node list would compact to on this
+    // scenario, measured on its real rows rather than a synthetic lattice.
+    activeNodeCompaction: activeNodeCompaction ? {
+      schema: activeNodeCompaction.schema,
+      status: activeNodeCompaction.status,
+      reason: activeNodeCompaction.reason ?? null,
+      rowCount: activeNodeCompaction.rowCount ?? null,
+      admittedRowCount: activeNodeCompaction.admittedRowCount ?? null,
+      uniqueNodeCount: activeNodeCompaction.uniqueNodeCount ?? null,
+      compactionRatio: activeNodeCompaction.compactionRatio ?? null,
+      activeNodeByteLengthToday: activeNodeCompaction.activeNodeByteLengthToday ?? null,
+      activeNodeByteLengthCompacted: activeNodeCompaction.activeNodeByteLengthCompacted ?? null
     } : null,
     lawNeighborCandidates: resolvedLawNeighborCandidates ? {
       schema: resolvedLawNeighborCandidates.schema,

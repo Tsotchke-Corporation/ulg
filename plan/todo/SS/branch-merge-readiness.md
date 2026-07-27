@@ -959,6 +959,48 @@ The arithmetic that closes it, from the measured numbers:
 and it comes from the bucket index finally being able to answer -- not from
 making the scan faster.
 
+#### The real scenario compacts 166.7x, and that changes the sizing answer
+
+The 710x-1,331x above are synthetic lattices. `measureActiveNodeCompaction` now
+runs the same key over the **real** active-node rows and publishes the ratio
+through to the probe. On the `ss=1` scenario:
+
+```
+rowCount                       9000
+uniqueNodeCount                  54
+compactionRatio               166.7x
+activeNodeByteLengthToday    576000
+activeNodeByteLengthCompacted 39456
+```
+
+166.7x, not 710x -- real heterogeneity costs more than the synthetic mix did, as
+expected. But **54 against a 32-slot bucket is the number that matters, and 54
+does not fit 32.**
+
+Bucket geometry, from `activeNodeIndexBucketPlan`: `bucketCount` auto-scales as
+`ceil(nodeCount / 16)` rounded to a power of two, so aggregate capacity was
+never the problem -- 9,000 rows already get 1,024 buckets and 32,768 slots. The
+problem is **spatial concentration**: tile spacing is domain-sized at these
+counts (see the geometry note above), so essentially every row hashes to one
+bucket. 9,000 into 32 slots saturates 281x over, which is exactly what
+`bucketHitRatio: 0` reports.
+
+| | nodes | worst-case bucket | outcome |
+| --- | --- | --- | --- |
+| today, per-particle | 9,000 | 9,000 vs 32 | saturates 281x |
+| compacted, capacity 32 | 54 | 54 vs 32 | **still saturates** |
+| compacted, capacity 64 | 54 | 54 vs 64 | **fits**, 0.5 KiB total |
+| uncompacted, capacity 9,000 | 9,000 | fits | 9,000-slot scan == the exhaustive scan |
+
+**So compaction is necessary but not sufficient on its own: it needs
+`bucketSlotCapacity` raised to cover the compacted count.** That pairing is what
+makes it work, and the asymmetry is the whole point -- at 54 nodes a capacity of
+64 costs **0.5 KiB**, while at 9,000 rows the capacity that would be needed makes
+the bucket scan cost the same as the exhaustive scan it was meant to replace.
+
+Raising the capacity alone fixes nothing. Compacting alone fixes nothing here.
+Together they do.
+
 #### Configuration cannot fix it: both indices are enabled and neither is used
 
 The policy status is `traversal-policy-diagnostics-require-sorted-radix-index`,

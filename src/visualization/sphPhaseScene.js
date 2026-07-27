@@ -12370,6 +12370,7 @@ export function createSphPhaseScene(container, {
   // nothing ever surfaced the number, so "how often does the O(N) fallback
   // actually fire" stayed unanswerable while the answer was being computed.
   let sphResidentSchroederLawNeighborTraversal = null;
+  let sphResidentSchroederActiveNodeCompaction = null;
   const resolveResidentGpuQueueStageRecorder = (device = null) => {
     if (!enableResidentGpuTimestampProfiling || !device) return null;
     if (sphResidentGpuQueueStageRecorder
@@ -32175,6 +32176,7 @@ fn main(
       // produced no law-queue evidence at all, and without these two there was
       // no way to tell which of those it was.
       schroederLawNeighborTraversal: sphResidentSchroederLawNeighborTraversal,
+      schroederActiveNodeCompaction: sphResidentSchroederActiveNodeCompaction,
       schroederLawQueueEnabled: Boolean(schroederEnableLawQueue),
       schroederLawNeighborCandidatesEnabled: Boolean(schroederEnableLawNeighborCandidates),
       schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
@@ -33119,6 +33121,9 @@ fn main(
           step.schroederActiveNodeList = schroederResult.activeNodeList ?? null;
           step.schroederLawQueue = schroederResult.lawQueue ?? null;
           step.schroederLawNeighborCandidates = schroederResult.lawNeighborCandidates ?? null;
+          if (schroederResult.activeNodeCompaction) {
+            sphResidentSchroederActiveNodeCompaction = schroederResult.activeNodeCompaction;
+          }
           if (schroederResult.lawNeighborCandidates) {
             const traversal = schroederResult.lawNeighborCandidates;
             sphResidentSchroederLawNeighborTraversal = {
@@ -33495,6 +33500,9 @@ fn main(
                 ? { lawNeighborTraversalPolicyMode: schroederLawNeighborTraversalPolicyMode }
                 : {}),
               lawNeighborCandidateReadbackMode: schroederLawNeighborCandidateReadbackMode,
+              // Priority 3 evidence, rides the same diagnostic opt-in as the
+              // traversal counters so it costs nothing in a normal frame.
+              measureActiveNodeCompaction: Boolean(schroederLawNeighborCandidateReadbackMode),
               enableCrossLevelCoupling: Boolean(schroederEnableCrossLevelCoupling),
               enablePhaseVolumeMigration: Boolean(schroederEnablePhaseVolumeMigration),
               enableLawQueue: Boolean(schroederEnableLawQueue),

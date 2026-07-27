@@ -2071,6 +2071,63 @@ async function runBrowserProbe({
         installMapTrace();
       });
     }
+    // Per-substep DAG rebuilds. A bind group or pipeline rebuilt every substep
+    // is work proportional to the schedule rather than to the simulation, and
+    // the only way to tell a rebuild from a cache hit is to count the device
+    // calls that actually happen.
+    if (process.env.ULG_PROBE_TRACE_NATIVE_DAG_BUILDS === '1') {
+      await page.addInitScript(() => {
+        let dagTraceInstallAttempts = 0;
+        const installDagTrace = () => {
+          const prototype = globalThis.GPUDevice?.prototype;
+          if (!prototype || typeof prototype.createBindGroup !== 'function') {
+            dagTraceInstallAttempts += 1;
+            if (dagTraceInstallAttempts < 200) setTimeout(installDagTrace, 10);
+            return;
+          }
+          if (prototype.__ulgDagTraceInstalled) return;
+          Object.defineProperty(prototype, '__ulgDagTraceInstalled', {
+            value: true,
+            configurable: true
+          });
+          const tally = new Map();
+          globalThis.__ulgDagBuildTally = () => Object.fromEntries(
+            [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 24)
+          );
+          for (const method of [
+            'createBindGroup',
+            'createBindGroupLayout',
+            'createComputePipeline',
+            'createPipelineLayout',
+            'createShaderModule',
+            'createRenderPipeline',
+            'createBuffer'
+          ]) {
+            const original = prototype[method];
+            if (typeof original !== 'function') continue;
+            Object.defineProperty(prototype, method, {
+              configurable: true,
+              writable: true,
+              value(descriptor, ...rest) {
+                // Unlabelled descriptors are the majority and a bare
+                // "(unlabelled)" bucket names nothing, so fall back to the
+                // caller's source position.
+                let key = `${method}:${descriptor?.label ?? ''}`;
+                if (!descriptor?.label) {
+                  const stack = new Error().stack || '';
+                  const site = (stack.split('\n')[2] || '?').trim()
+                    .replace(/https?:\/\/[^ )]*\//, '');
+                  key = `${method}@${site}`;
+                }
+                tally.set(key, (tally.get(key) ?? 0) + 1);
+                return original.call(this, descriptor, ...rest);
+              }
+            });
+          }
+        };
+        installDagTrace();
+      });
+    }
     if (process.env.ULG_PROBE_TRACE_NATIVE_DEVICE_DESTROY === '1') {
       await page.addInitScript(() => {
         let deviceDestroyTraceInstallAttempts = 0;
@@ -5381,6 +5438,9 @@ async function runBrowserProbe({
               : null,
             nativeQueueFenceTotal: typeof globalThis.__ulgQueueFenceTotal === 'function'
               ? globalThis.__ulgQueueFenceTotal()
+              : null,
+            nativeDagBuildTally: typeof globalThis.__ulgDagBuildTally === 'function'
+              ? globalThis.__ulgDagBuildTally()
               : null,
             renderRefreshTotalMs: finiteOrNull(renderState.renderRefreshTotalMs),
             renderRefreshDeviceAcquireMs: finiteOrNull(renderState.renderRefreshDeviceAcquireMs),

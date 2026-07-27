@@ -404,6 +404,45 @@ cleanup on that device forever. The failure now releases the batch immediately
 and propagates to the registering caller, as it did when each registration made
 its own fence.
 
+### Per-substep DAG rebuilds: it is buffers, not bind groups
+
+`ULG_PROBE_TRACE_NATIVE_DAG_BUILDS=1` tallies `createBindGroup`,
+`createBindGroupLayout`, `createComputePipeline`, `createPipelineLayout`,
+`createShaderModule`, `createRenderPipeline` and `createBuffer` by label, and by
+caller source position when the descriptor is unlabelled. Production config,
+10 batches, 32 substeps each:
+
+- **~550 bind groups per batch**, at ~17 call sites, each site landing on
+  *exactly 32* -- one per substep.
+- **608 buffer allocations per batch**, across 19 labels, again 32 apiece:
+  `fused-p2g-grid-out`, `fused-p2g-grid-accumulators`, `fused-grid-update-out`,
+  `fused-g2p-state-out`, `fused-g2p-mechanics-out`, the three params buffers,
+  and the empty-placeholder buffers.
+- `ulg-sph-render-rows` was **recompiling its WGSL module and rebuilding both
+  layouts and its pipeline on every render refresh**, for a shader whose source
+  is a module constant. Fixed by routing it through
+  `createCachedExplicitComputePipeline`; it no longer appears per batch.
+
+**A bind-group cache does not fix the 550.** One was built, keyed on layout plus
+per-entry buffer identity, with tests covering ping-pong reuse, offset/size
+identity and bounded growth. Applied to the eight hottest sites it measured a
+**0% hit rate** -- 256 misses per batch, exactly 8 sites x 32 substeps -- and
+the total went 550 -> 553. It was reverted rather than shipped: a cache that
+never hits is dead code that reads as a live optimisation, which is the pattern
+the inventory below exists to stop.
+
+The reason it cannot hit is the second bullet. The bind groups genuinely
+reference different buffers each substep, because the substep **allocates new
+ones**. So the real item is per-substep buffer allocation, and bind-group
+caching only becomes worth revisiting once buffers are stable.
+
+Note the ownership hazard that makes the pooling non-trivial: `g2p-state-out`
+and `g2p-mechanics-out` are the next substep's inputs *and* can be retained by
+the render path across the sequence boundary. A naive two-deep pool would let
+substep N+2 overwrite a buffer the renderer is still reading -- which is
+plausibly related to the standing `resident-render-source-stale` probe issue,
+and must be settled before pooling, not after.
+
 ### `normalHotLoopReadbackFree` was reporting absence as failure
 
 The earlier note that "5 of 53 samples are not readback-free" was wrong, and the

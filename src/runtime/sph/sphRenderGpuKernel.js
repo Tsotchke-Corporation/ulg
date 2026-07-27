@@ -7265,10 +7265,14 @@ export async function extractSphRenderRowsWebGpu({
 	    materialBankParticleSizeRowCount
 	  }));
 
-  const module = device.createShaderModule({ label: 'ulg-sph-render-rows', code: sphRenderRowsWgsl });
-  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+  // Measured rebuilding its shader module, both layouts and its pipeline on
+  // every render refresh -- a WGSL compile per frame for a shader whose source
+  // is a module constant. The pipeline cache is keyed per device and per
+  // binding signature, so this is a pure cache hit after the first frame.
+  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-render-rows-v1',
     label: 'ulg-sph-render-rows',
-    module,
+    code: sphRenderRowsWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),

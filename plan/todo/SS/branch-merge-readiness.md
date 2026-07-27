@@ -947,6 +947,18 @@ the SS path, measured.** And the compaction is exactly the fix: at the measured
 32-slot bucket with room to spare. The bucket index would start hitting and the
 exhaustive scan would stop being reached, without touching the scan at all.
 
+The arithmetic that closes it, from the measured numbers:
+
+| | rows | vs 32-slot bucket | overlap tests/step |
+| --- | --- | --- | --- |
+| today | 9,000 | saturates **281x** over | 576,000 x 9,000 = **5,184,000,000** |
+| compacted 710x (heterogeneous) | 12.7 | fits | 576,000 x ~13 = **7,488,000** |
+| compacted 1,331x (uniform) | 6.8 | fits | fewer still |
+
+**~5.2 billion overlap tests per step becomes ~7.5 million, a 692x reduction**,
+and it comes from the bucket index finally being able to answer -- not from
+making the scan faster.
+
 Note also `traversal-policy-diagnostics-require-sorted-radix-index`: the policy
 is already asking for the sorted-radix escalation and not getting it. The
 compaction makes that escalation unnecessary rather than merely available.

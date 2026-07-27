@@ -33131,6 +33131,14 @@ fn main(
               traversalPolicyStatus: traversal.traversalPolicyStatus ?? null,
               appliedTraversalIndexMode: traversal.appliedTraversalIndexMode ?? null,
               diagnosticCountersAvailable: traversal.diagnosticCountersAvailable === true,
+              // The RESOLVED index state as the kernel saw it, not the scene
+              // flag. They disagree: the hierarchy nulls the bucket index when
+              // the compact mechanics view is active, so the scene can report
+              // the index enabled while the kernel was handed null.
+              resolvedActiveNodeIndexEnabled: traversal.activeNodeIndexEnabled === true,
+              resolvedActiveNodeSortedIndexEnabled:
+                traversal.activeNodeSortedIndexEnabled === true,
+              activeNodeIndexConsumerStatus: traversal.activeNodeIndexConsumerStatus ?? null,
               lawQueueCount: traversal.lawQueueCount ?? null,
               neighborCandidateCount: traversal.neighborCandidateCount ?? null,
               // Null, not zero, when the counters were not read back. The

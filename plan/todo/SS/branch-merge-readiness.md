@@ -959,7 +959,57 @@ The arithmetic that closes it, from the measured numbers:
 and it comes from the bucket index finally being able to answer -- not from
 making the scan faster.
 
-#### The real scenario compacts 166.7x, and that changes the sizing answer
+#### ROOT CAUSE: the compact mechanics view disables the bucket index outright
+
+Everything below about bucket saturation is **the wrong diagnosis**, and a cheap
+experiment killed it before the expensive rewrite was written. Raising
+`DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY` from 32 to **16,384** -- far
+above the 9,000 rows -- produced byte-identical diagnostics: `bucketHitRatio` 0,
+`exactFallbackScanRatio` 1, `bucketSelectedCount` 0. If saturation were the
+cause, that had to move. It did not.
+
+The actual cause is `schroederHierarchyGpu.js:16898`:
+
+```js
+const resolvedActiveNodeIndex = !enableActiveNodeIndex
+  || resolvedSpatialEpochGeneration?.mechanicsView     // <-- forces null
+  ? null
+  : activeNodeIndex || await activeNodeIndexRunner({ ... });
+```
+
+**When the compact mechanics view is active, the bucket index is nulled**, so
+the law-neighbour kernel is handed `activeNodeIndex: null`,
+`ss_neighbor_active_index_enabled()` returns false, the bucket is never
+consulted, and every query takes the exhaustive scan. Measured, with the
+resolved state now published next to the scene flag:
+
+| | value |
+| --- | --- |
+| scene flag `schroederActiveNodeIndexEnabled` | **true** |
+| resolved, as the kernel saw it | **false** |
+| `activeNodeIndexConsumerStatus` | `active-node-index-disabled-full-active-node-scan` |
+
+The runtime has a status string that names this state exactly. Nothing surfaced
+it, so a scene reporting "index enabled" was running with no index at all.
+
+**This is self-inflicted by this branch.** The compact mechanics view is Slice 6.
+It turns off the acceleration structure and forces the O(N) scan --
+576,000 x 9,000 = 5.18 billion overlap tests per step -- and the sorted radix
+index is nulled the same way.
+
+**What this means for the compaction work.** It is not the fix for *this*
+scenario: with 54 nodes and a 64-slot bucket, `resolvedActiveNodeIndex` would
+*still* be null and the scan would still run. The compaction remains correct and
+proven, and it is still needed for the saturation case at larger particle counts
+-- but the first thing to fix is the mutual exclusion between the mechanics view
+and the node index, which is a far smaller change and unblocks the scenario that
+actually runs.
+
+Next: find out why `mechanicsView` and the bucket index are exclusive. If the
+mechanics view simply reorders or re-bases rows, the index may only need
+rebuilding against the view rather than disabling.
+
+#### The real scenario compacts 166.7x, and this was the sizing answer under the wrong diagnosis
 
 The 710x-1,331x above are synthetic lattices. `measureActiveNodeCompaction` now
 runs the same key over the **real** active-node rows and publishes the ratio

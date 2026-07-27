@@ -773,23 +773,37 @@ fn write_phase_slot(
       rest_volume
     );
   } else {
+    // This branch is NOT a materialization. preserve_deformation already
+    // required that the template carries real mass in the target phase and that
+    // mechanics_model_matches_target, so the component is continuing in the
+    // same constitutive model rather than being created in a new one. The
+    // 1667x trap the block above documents cannot fire here: J is the
+    // template's own J for its own phase, never a cross-phase volume ratio, and
+    // it is not derived from aggregate.current_volume.
+    //
+    // Writing the materialization's volume_ratio_j (a hard 1.0) here instead
+    // renormalized every continuing particle back to zero volumetric strain
+    // once per step. Measured on the h2o drop scenario: J came back bit-exactly
+    // 1.0 for all 152 liquid particles while dt*div(v) reached 9.4e-4 and
+    // trace(C) reached -1.9 /s, so the strain was being erased as fast as the
+    // G2P produced it. With density then pinned to rest density, the Tait EOS
+    // returned exactly zero gauge pressure and resolvedAbsolutePressurePa
+    // collapsed to a flat 101325 Pa -- no hydrostatic gradient at all, and so
+    // no buoyancy for a generated gas cohort to rise on.
+    //
+    // V0 still retracks to the target's rest volume: V0 follows mass, J carries
+    // strain, and current volume is their product.
     let template_row0 = out_mechanics[target_index * 8u];
     let template_row1 = out_mechanics[target_index * 8u + 1u];
     let template_row2 = out_mechanics[target_index * 8u + 2u];
     let old4 = out_mechanics[target_index * 8u + 4u];
-    let deformation_scale = pow(
-      max(volume_ratio_j / max(old4.z, params.mass_epsilon), params.mass_epsilon),
-      1.0 / 3.0
-    );
-    out_mechanics[target_index * 8u] = template_row0 * deformation_scale;
-    out_mechanics[target_index * 8u + 1u] = template_row1 * deformation_scale;
-    out_mechanics[target_index * 8u + 2u] = vec4<f32>(
-      template_row2.x * deformation_scale,
-      template_row2.yzw
-    );
+    let preserved_volume_ratio_j = max(old4.z, params.mass_epsilon);
+    out_mechanics[target_index * 8u] = template_row0;
+    out_mechanics[target_index * 8u + 1u] = template_row1;
+    out_mechanics[target_index * 8u + 2u] = template_row2;
     out_mechanics[target_index * 8u + 4u] = vec4<f32>(
       old4.xy,
-      volume_ratio_j,
+      preserved_volume_ratio_j,
       rest_volume
     );
   }

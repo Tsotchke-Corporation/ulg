@@ -2118,6 +2118,17 @@ export function summarizeResidentStageOrderExecution(execution = null) {
         })()
       };
     })(),
+    // A/B'ing ss=1 showed the hydrostatic gradient collapse from 8,826 Pa to
+    // 2.3 Pa while the pressure lane's base moved from 0 to 101325. Code
+    // tracing could not separate "ambient differs" from "the stress term is
+    // near zero", so the resolved values are surfaced and compared directly.
+    ambientPressurePa: execution?.ambientPressurePa
+      ?? finalStep?.ambientPressurePa ?? null,
+    ambientPressureAppliedInStressProjection:
+      execution?.ambientPressureAppliedInStressProjection
+        ?? finalStep?.ambientPressureAppliedInStressProjection ?? null,
+    internalPressureScale: finalStep?.internalPressureScale
+      ?? execution?.internalPressureScale ?? null,
     continuedFromResidentState: Boolean(execution?.continuedFromResidentState),
     continuationAvailable: Boolean(execution?.continuationAvailable),
     stepCount: execution?.stepCount ?? null,

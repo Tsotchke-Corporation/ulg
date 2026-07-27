@@ -366,12 +366,18 @@ test('authoritative checkpoint upload pairs fail closed on torn mechanics genera
 
 test('checkpoint shader is general, fixed-capacity, and preserves raw phase fractions', () => {
   const words = createAuthoritativeGpuEvidenceWords(64);
-  // (20 global + 64 buckets x 32 words) x 4 bytes. The pin is on the record
+  // (20 global + 64 buckets x 44 words) x 4 bytes. The pin is on the record
   // being small and FIXED SIZE -- independent of particle count -- which is what
   // makes this readback compatible with the no-full-readback rule. It grew from
   // 7,504 when per-phase pressure (sample count, min, max) was added to answer
-  // why a 1000x density difference produces no buoyant separation.
-  assert.equal(words.byteLength, 8272);
+  // why a 1000x density difference produces no buoyant separation, and from
+  // 8,272 when the constitutive branch and density were added to separate
+  // "ss=1 takes a different EOS branch" from "ss=1 changes J", and from 9,296
+  // when trace(C) was added to test whether the per-step J increment clears the
+  // measured 1.19e-7 dead zone in the fluid path's cbrt(J)^3 round-trip (it
+  // clears it by ~7900x), and from 10,320 when det(F) was added to separate
+  // "J is overwritten" from "the F update never lands".
+  assert.equal(words.byteLength, 11344);
   assert.match(SPH_AUTHORITATIVE_GPU_CHECKPOINT_WGSL, /@compute @workgroup_size\(128\)/);
   assert.match(SPH_AUTHORITATIVE_GPU_CHECKPOINT_WGSL, /fn claim_bucket\(material_id: u32, phase_id: u32\)/);
   assert.match(SPH_AUTHORITATIVE_GPU_CHECKPOINT_WGSL, /@binding\(2\) var<storage, read> mechanics_rows/);

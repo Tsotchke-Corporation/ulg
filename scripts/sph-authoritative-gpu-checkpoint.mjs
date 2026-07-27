@@ -24,7 +24,7 @@ export const SPH_CHECKPOINT_CONDENSED_VOLUME_RATIO_CAP_J = 1.05;
 export const SPH_CHECKPOINT_GENERAL_VOLUME_RATIO_CAP_J = 64;
 export const SPH_CHECKPOINT_GAS_VOLUME_RATIO_CAP_J = 1000;
 export const SPH_CHECKPOINT_GLOBAL_WORDS = 20;
-export const SPH_CHECKPOINT_BUCKET_WORDS = 32;
+export const SPH_CHECKPOINT_BUCKET_WORDS = 44;
 
 export const SPH_CHECKPOINT_GLOBAL_WORD = Object.freeze({
   liveParticleCount: 0,
@@ -85,7 +85,40 @@ export const SPH_CHECKPOINT_BUCKET_WORD = Object.freeze({
   // from "it does and something else cancels it".
   pressureSampleCount: 29,
   minPressurePa: 30,
-  maxPressurePa: 31
+  maxPressurePa: 31,
+  // The constitutive branch and the density it is evaluated at. `ss=1` pins the
+  // liquid to exactly `ambientPressurePa` while `ss=0` produces a 0..8826 Pa
+  // gauge profile, with J reported as exactly 1 in BOTH arms. The two branches
+  // in the EOS behave differently at J == 1 -- the fluid branch returns ambient
+  // exactly, the corotated branch returns max(0, ambient - tr(sigma)/3) -- so
+  // the branch, not J, is the candidate discriminator. Density is carried
+  // alongside because the fluid branch reads it rather than J directly.
+  solidBranchCount: 32,
+  densitySampleCount: 33,
+  minDensityKgPerM3: 34,
+  maxDensityKgPerM3: 35,
+  // trace(C), the APIC velocity gradient's divergence. The fluid J update is
+  // J_{n+1} = J_n * det(I + dt*C) ~= J_n * (1 + dt*tr(C)), and the stored J is
+  // then round-tripped through `cbrt(J)^3`. That round-trip was MEASURED (see
+  // scripts/measure-cubic-root-roundtrip.mjs) to annihilate any |dJ| <= 1.19e-7
+  // while preserving 4.0e-6. So whether J can leave 1.0 at all depends entirely
+  // on whether dt*tr(C) clears that dead zone -- which is what this records.
+  divergenceSampleCount: 36,
+  minVelocityDivergencePerS: 37,
+  maxVelocityDivergencePerS: 38,
+  maxAbsVelocityDivergencePerS: 39,
+  // det(F) recomputed here from mechanics rows 0..2, alongside the stored J in
+  // row4.z. Both come from the SAME read of the same buffer, so comparing them
+  // separates the last two hypotheses for why J is bit-exactly 1.0 while
+  // dt*div(v) reaches 9.4e-4:
+  //   det(F) != 1, J == 1  -> J is overwritten independently of F
+  //   det(F) == 1, J == 1  -> the F update never lands despite nonzero C
+  // eosModelId rides along because every branch that could freeze J keys off it
+  // (`deformation_disabled` needs row6.z < 0.5, `condensed` needs 0.5..1.5).
+  detFSampleCount: 40,
+  minDetF: 41,
+  maxDetF: 42,
+  maxEosModelId: 43
 });
 
 const PHASE_BY_ID = Object.freeze({
@@ -353,7 +386,15 @@ export function createAuthoritativeGpuEvidenceWords(
     words[offset + SPH_CHECKPOINT_BUCKET_WORD.minVolumeRatioJ] = positiveInfinity;
     words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxVolumeRatioJ] = negativeInfinity;
     words[offset + SPH_CHECKPOINT_BUCKET_WORD.minPressurePa] = positiveInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.minDensityKgPerM3] = positiveInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.minVelocityDivergencePerS] = positiveInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.minDetF] = positiveInfinity;
     words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxPressurePa] = negativeInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxDensityKgPerM3] = negativeInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxVelocityDivergencePerS] = negativeInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxAbsVelocityDivergencePerS] = negativeInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxDetF] = negativeInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxEosModelId] = negativeInfinity;
   }
   return words;
 }
@@ -426,6 +467,34 @@ export function decodeAuthoritativeGpuEvidence({
       mechanicsSampleCount,
       minVolumeRatioJ: mechanicsSampleCount > 0
         ? finiteOrNull(wordFloat(words[offset + bucketWord.minVolumeRatioJ]))
+        : null,
+      solidBranchCount: words[offset + bucketWord.solidBranchCount],
+      detFSampleCount: words[offset + bucketWord.detFSampleCount],
+      minDetF: words[offset + bucketWord.detFSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.minDetF]))
+        : null,
+      maxDetF: words[offset + bucketWord.detFSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.maxDetF]))
+        : null,
+      maxEosModelId: words[offset + bucketWord.detFSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.maxEosModelId]))
+        : null,
+      divergenceSampleCount: words[offset + bucketWord.divergenceSampleCount],
+      minVelocityDivergencePerS: words[offset + bucketWord.divergenceSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.minVelocityDivergencePerS]))
+        : null,
+      maxVelocityDivergencePerS: words[offset + bucketWord.divergenceSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.maxVelocityDivergencePerS]))
+        : null,
+      maxAbsVelocityDivergencePerS: words[offset + bucketWord.divergenceSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.maxAbsVelocityDivergencePerS]))
+        : null,
+      densitySampleCount: words[offset + bucketWord.densitySampleCount],
+      minDensityKgPerM3: words[offset + bucketWord.densitySampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.minDensityKgPerM3]))
+        : null,
+      maxDensityKgPerM3: words[offset + bucketWord.densitySampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.maxDensityKgPerM3]))
         : null,
       pressureSampleCount: words[offset + bucketWord.pressureSampleCount],
       minPressurePa: words[offset + bucketWord.pressureSampleCount] > 0
@@ -571,6 +640,18 @@ struct MaterialPhaseBucket {
   pressure_sample_count: atomic<u32>,
   min_pressure_pa: atomic<u32>,
   max_pressure_pa: atomic<u32>,
+  solid_branch_count: atomic<u32>,
+  density_sample_count: atomic<u32>,
+  min_density_kg_per_m3: atomic<u32>,
+  max_density_kg_per_m3: atomic<u32>,
+  divergence_sample_count: atomic<u32>,
+  min_velocity_divergence_per_s: atomic<u32>,
+  max_velocity_divergence_per_s: atomic<u32>,
+  max_abs_velocity_divergence_per_s: atomic<u32>,
+  det_f_sample_count: atomic<u32>,
+  min_det_f: atomic<u32>,
+  max_det_f: atomic<u32>,
+  max_eos_model_id: atomic<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> state_rows: array<vec4<f32>>;
@@ -667,7 +748,15 @@ fn contribute_phase(
   represented_volume_m3: f32,
   volume_ratio_cap_hit: bool,
   pressure_valid: bool,
-  resolved_pressure_pa: f32
+  resolved_pressure_pa: f32,
+  solid_branch: bool,
+  density_valid: bool,
+  density_kg_per_m3: f32,
+  divergence_valid: bool,
+  velocity_divergence_per_s: f32,
+  det_f_valid: bool,
+  det_f: f32,
+  eos_model_id: f32
 ) {
   if (!(fraction > 1e-8)) { return; }
   atomicAdd(&global_words[4], 1u);
@@ -736,6 +825,29 @@ fn contribute_phase(
     atomic_min_f32(&buckets[index].min_pressure_pa, resolved_pressure_pa);
     atomic_max_f32(&buckets[index].max_pressure_pa, resolved_pressure_pa);
   }
+  if (solid_branch) {
+    atomicAdd(&buckets[index].solid_branch_count, 1u);
+  }
+  if (density_valid) {
+    atomicAdd(&buckets[index].density_sample_count, 1u);
+    atomic_min_f32(&buckets[index].min_density_kg_per_m3, density_kg_per_m3);
+    atomic_max_f32(&buckets[index].max_density_kg_per_m3, density_kg_per_m3);
+  }
+  if (det_f_valid) {
+    atomicAdd(&buckets[index].det_f_sample_count, 1u);
+    atomic_min_f32(&buckets[index].min_det_f, det_f);
+    atomic_max_f32(&buckets[index].max_det_f, det_f);
+    atomic_max_f32(&buckets[index].max_eos_model_id, eos_model_id);
+  }
+  if (divergence_valid) {
+    atomicAdd(&buckets[index].divergence_sample_count, 1u);
+    atomic_min_f32(&buckets[index].min_velocity_divergence_per_s, velocity_divergence_per_s);
+    atomic_max_f32(&buckets[index].max_velocity_divergence_per_s, velocity_divergence_per_s);
+    atomic_max_f32(
+      &buckets[index].max_abs_velocity_divergence_per_s,
+      abs(velocity_divergence_per_s)
+    );
+  }
 }
 
 @compute @workgroup_size(128)
@@ -751,6 +863,10 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
   let state1 = state_rows[state_base + 1u];
   let thermo0 = thermo_rows[thermo_base];
   let thermo1 = thermo_rows[thermo_base + 1u];
+  let mechanics0 = mechanics_rows[mechanics_base];
+  let mechanics1 = mechanics_rows[mechanics_base + 1u];
+  let mechanics2 = mechanics_rows[mechanics_base + 2u];
+  let mechanics3 = mechanics_rows[mechanics_base + 3u];
   let mechanics4 = mechanics_rows[mechanics_base + 4u];
   let mechanics5 = mechanics_rows[mechanics_base + 5u];
   let mechanics6 = mechanics_rows[mechanics_base + 6u];
@@ -786,6 +902,35 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
   // resolvedAbsolutePressurePa, mechanics float 28 = vec4 7 component 0.
   let resolved_pressure_pa = mechanics7.x;
   let pressure_valid = finite_f32(resolved_pressure_pa);
+  // Mirror the EOS's own branch test and density exactly (ulg-gpu-abi/src/wgsl.js
+  // "mechanics constitutive pressure"): volume is authoritative only when both
+  // stored V0 and J are finite-positive, the corotated branch is taken when
+  // solid_flag > 0.5 && shear modulus > 0, and the fluid branch divides mass by
+  // that same volume. Recomputing it here rather than reading a published flag
+  // keeps this evidence honest if the branch test ever moves.
+  let eos_volume_m3 = select(
+    0.0,
+    rest_volume_m3 * volume_ratio_j,
+    rest_volume_m3 > 0.0 && volume_ratio_j > 0.0
+  );
+  let solid_branch = eos_volume_m3 > 0.0 && solid_flag > 0.5 && mechanics5.w > 0.0;
+  let density_valid = eos_volume_m3 > 0.0 && finite_f32(mass_kg);
+  let density_kg_per_m3 = select(0.0, mass_kg / eos_volume_m3, density_valid);
+  // Mechanics rows 2..4 pack the APIC affine matrix as
+  //   row2 = (nf22, c00, c01, c02), row3 = (c10, c11, c12, c20),
+  //   row4 = (c21, c22, next_j, rest_volume)
+  // so the divergence is c00 + c11 + c22 = row2.y + row3.y + row4.y.
+  let velocity_divergence_per_s = mechanics2.y + mechanics3.y + mechanics4.y;
+  let divergence_valid = finite_f32(velocity_divergence_per_s);
+  // F is packed as row0 = (f00,f01,f02,f10), row1 = (f11,f12,f20,f21),
+  // row2.x = f22 -- the same unpacking the G2P integrator does.
+  let f00 = mechanics0.x; let f01 = mechanics0.y; let f02 = mechanics0.z;
+  let f10 = mechanics0.w; let f11 = mechanics1.x; let f12 = mechanics1.y;
+  let f20 = mechanics1.z; let f21 = mechanics1.w; let f22 = mechanics2.x;
+  let det_f = f00 * (f11 * f22 - f12 * f21)
+    - f01 * (f10 * f22 - f12 * f20)
+    + f02 * (f10 * f21 - f11 * f20);
+  let det_f_valid = finite_f32(det_f);
   let rest_density_kg_per_m3 = thermo0.w;
   let phase_volume_reference_mass_kg = mechanics7.w;
   var density_represented_volume_m3 = 0.0;
@@ -828,10 +973,10 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     atomic_max_f32(&global_words[13], residual);
     atomic_add_f32(&global_words[14], mass_kg * residual);
     if (residual > 1e-4) { atomicAdd(&global_words[11], 1u); }
-    contribute_phase(material_id, 1u, raw_fractions.x, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
-    contribute_phase(material_id, 2u, raw_fractions.y, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
-    contribute_phase(material_id, 3u, raw_fractions.z, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
-    contribute_phase(material_id, 4u, raw_fractions.w, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
+    contribute_phase(material_id, 1u, raw_fractions.x, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa, solid_branch, density_valid, density_kg_per_m3, divergence_valid, velocity_divergence_per_s, det_f_valid, det_f, eos_model_id);
+    contribute_phase(material_id, 2u, raw_fractions.y, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa, solid_branch, density_valid, density_kg_per_m3, divergence_valid, velocity_divergence_per_s, det_f_valid, det_f, eos_model_id);
+    contribute_phase(material_id, 3u, raw_fractions.z, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa, solid_branch, density_valid, density_kg_per_m3, divergence_valid, velocity_divergence_per_s, det_f_valid, det_f, eos_model_id);
+    contribute_phase(material_id, 4u, raw_fractions.w, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa, solid_branch, density_valid, density_kg_per_m3, divergence_valid, velocity_divergence_per_s, det_f_valid, det_f, eos_model_id);
   } else {
     atomicAdd(&global_words[11], 1u);
     atomicAdd(&global_words[12], 1u);

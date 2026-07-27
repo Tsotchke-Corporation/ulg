@@ -403,13 +403,41 @@ route is a **mixture rest density interpolated across the boiling plateau**, so
 per-particle inputs for that already exist: thermo carries
 `phaseFractionSolid/Liquid/Gas/Plasma` at fields 4-7.
 
-**Separately, and not explained by any of the above:** there is no hydrostatic
-pressure gradient anywhere. `resolvedAbsolutePressurePa` measures exactly
-101325 Pa with min == max across **both** phases, including a 0.5 m settled water
-column that should show roughly 5 kPa of variation on its own. Buoyancy needs a
-pressure gradient, and the liquid does not have one either. That is a
-pressure-solve question independent of the phase change, and it is the more
-likely blocker for `steam-rises`.
+### SS collapses the hydrostatic pressure gradient by ~2,100x
+
+Same scenario, same 2,048 steps, only `ss=1` (+ level/migration flags) differing.
+Per-phase `resolvedAbsolutePressurePa` from the checkpoint buckets:
+
+| | minP | maxP | gradient |
+| --- | --- | --- | --- |
+| **ss off** | 0 Pa | 8,825.99 Pa | **8,826 Pa** |
+| **ss on** | 101,324.97 Pa | 101,329.16 Pa | **4.2 Pa** |
+
+8,826 Pa is `rho*g*h` for a ~0.9 m water column to three figures, so the non-SS
+arm carries a correct hydrostatic gauge gradient. **With SS on it collapses to
+4.2 Pa** while the lane switches from gauge to absolute.
+
+`minVolumeRatioJ == maxVolumeRatioJ == 1` in *both* arms, so J is not the
+discriminator -- the earlier "J is pinned at 1" lead was a dead end.
+
+Two things are changing together and they need separating:
+
+1. the lane's *interpretation* -- 0-based gauge versus 101325-based absolute.
+   The `absolute_pressure_authority` param comment describes exactly this switch
+   and warns that "reading a gauge value as absolute would put deep water at a
+   few kPa absolute and boil it";
+2. the *gradient magnitude*, which an offset alone cannot explain. With
+   `resolved = max(0, ambient - tr(sigma)/3)`, an ambient shift moves the whole
+   field but preserves the spread. A spread of 4.2 Pa instead of 8,826 Pa means
+   **the stress term itself is near zero under SS**.
+
+(2) is the real finding: under SS the mechanics develops essentially no
+volumetric stress. That is what removes buoyancy, and it is an SS regression
+rather than a phase-change or EOS issue.
+
+Corrects an earlier note here: "no gradient anywhere, min == max exactly" came
+from a single sample where the two coincided. The gradient is not zero, it is
+about 2,000x too small.
 
 Note this also corrects the framing above: the phase change does not *fail* to
 expand the volume. It expands it immediately and completely, deliberately --

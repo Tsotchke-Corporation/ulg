@@ -632,6 +632,32 @@ that levels are assigned but that `representedOverRest` never moves; the
 expansion is carried entirely by rest volume, and rest volume is not what places
 particles.
 
+The gate 3 diagnosis is now confirmed at its source line. `wgsl.js:12586-12587`:
+
+```wgsl
+let source_volume_m3 = mechanics_volume_m3;
+let represented_volume_m3 = mechanics_volume_m3;
+```
+
+They are not merely equal in practice -- they are assigned from the same
+expression on adjacent lines, which is exactly what "in the code they are one
+variable" predicted. The support radius that selects the level is then
+`ss_volume_radius(source_volume_m3) * support_radius_scale`, so the level tracks
+mechanics volume and the represented-volume lane has no independent effect on
+it.
+
+One mechanism ruled out while looking: the support radius is **not** inherited
+from the source particle in this path. The transfer does inherit a radius --
+`sphPhaseCarrierTransferGpu.js:640`, `radius_cubed += pow(t2.w, 3.0) * fraction`
+-- but that feeds render and smoothing metadata, not level selection, which
+recomputes radius from volume. So a gas component's *level* does see its
+expansion.
+
+Which sharpens the question: the level responds, and the particles still do not
+move apart. Represented volume becomes a level, and never becomes **motion**. A
+parcel already at ambient pressure with nothing above it has no force acting to
+spread it, so the expansion stays a number on a row.
+
 Caveat on the run length, recorded so it is not mistaken for the cause: the
 configured horizon is 3.07 s (`sphPhaseScenarioPresets.js:61`, `batches: 12`,
 which overrides `ULG_VISUAL_MATRIX_BATCHES`), and at the observed 0.072 m/s

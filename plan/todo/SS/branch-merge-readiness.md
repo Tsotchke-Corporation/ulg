@@ -474,7 +474,28 @@ reference different buffers each substep, because the substep **allocates new
 ones**. So the real item is per-substep buffer allocation, and bind-group
 caching only becomes worth revisiting once buffers are stable.
 
-Note the ownership hazard that makes the pooling non-trivial: `g2p-state-out`
+**Attempted and reverted 2026-07-26: fence-deferred release cannot feed
+same-batch reuse.** A scratch pool for the three fused params buffers -- the
+safest possible subset, since `queue.writeBuffer` overwrites them completely on
+every acquire, so stale content is impossible by construction -- measured
+**exactly zero** reduction: 384 `createBuffer` per batch before and after.
+
+The reason is structural and applies to any pool built this way. Buffers are
+released from `deferSubmittedWorkCleanup`, i.e. after the submitted-work fence,
+while all 32 substeps of a batch are encoded back to back. Every acquire in the
+batch therefore happens before any release of that batch lands, and the pool is
+empty every time. Releasing earlier is not available either: a params buffer
+bound into a pass is live until the submit completes, which is precisely when
+the fence fires.
+
+So per-substep scratch cannot be pooled through the existing cleanup path. Doing
+it would require either encoding the substeps against a small ring of buffers
+chosen up front (bounded by how many substeps can be in flight), or hoisting the
+params out of the substep entirely by writing all 32 substeps' params into one
+buffer at distinct offsets and binding with a dynamic offset. The second is
+probably the real answer and is a different change from "pool the buffers".
+
+Note the ownership hazard that makes pooling the *output* buffers non-trivial: `g2p-state-out`
 and `g2p-mechanics-out` are the next substep's inputs *and* can be retained by
 the render path across the sequence boundary. A naive two-deep pool would let
 substep N+2 overwrite a buffer the renderer is still reading -- which is

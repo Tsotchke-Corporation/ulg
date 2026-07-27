@@ -872,15 +872,40 @@ step** yet varies between steps (0.9749, 0.9500, 0.9710, ...). Nothing in the
 closure moves it, so the mechanics core outside the closure does -- which a
 copy-through rejection could not do.
 
-Next instrument: the stage tracer cannot see inside one kernel. This needs
-per-node visibility across the P2G/G2P pair -- specifically whether
-`g2p_field_find` returns `G2P_FIELD_INVALID_INDEX` for a product's stencil
-entries. Note the P2G stores mass, momentum, volume and pressure in a *single*
-`p2g_field_store_contribution` call, so a node carrying mass but zero pressure
-cannot come from a partial deposit; and `selected_source_count`
-(`sphMlsMpmGpuStep.js:4164`) is worth checking against the live particle count,
-since a field view built over a selected subset would leave the rest without
-descriptors.
+**The deposit itself is zero, and it is the volume weight rather than the
+pressure value.** In `cesium-fluorine`, `csf` is 102 of 178 live particles --
+products *dominate* their own neighbourhood -- and still read 0. If a product
+deposited nonzero pressure, its own grid nodes would carry it and the G2P would
+read it straight back. So the P2G deposit is zero.
+
+The deposit is a single call, so the lanes cannot diverge:
+
+```wgsl
+p2g_field_store_contribution(
+  ..., weight * volume, weight * volume * resolved_absolute_pressure_pa)
+```
+
+A node carrying mass but no pressure is therefore impossible from a partial
+deposit. And the EOS cannot supply a zero: with `volume <= 0` it falls through
+to `max(params.ambient_pressure_pa, 0.0)` = 101325, and with `volume > 0` it
+returns `max(0, ambient + gauge)`. Neither path yields 0. That leaves the weight:
+
+```wgsl
+let volume = select(0.0, row4.w * row4.z, row4.w > 0.0 && row4.z > 0.0);
+```
+
+`weight * volume == 0` zeroes the volume *and* pressure accumulators together,
+and the normalized pressure comes out 0.
+
+**Next check, and it is a narrow one:** is `row4.w` or `row4.z` non-positive for
+products *at P2G time*? The checkpoint reads the post-closure buffer, where both
+are comfortably positive (h2: V0 0.229, J 0.0999; naoh: V0 0.0079, J 0.979), but
+the P2G reads the step *input* buffer -- a different point in the chain, and the
+one no instrument currently samples.
+
+The "products have no field descriptors" alternative is weakened: the field
+view's `sourceCount` is 684, the full slot capacity, not the live count (170) or
+the non-product count (152).
 
 Ruled out already, so they are not re-tried:
 

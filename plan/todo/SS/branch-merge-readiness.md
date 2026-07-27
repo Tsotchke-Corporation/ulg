@@ -596,6 +596,49 @@ per-particle tracing across the stage boundaries (`reaction -> mechanics ->
 phase`, `sphMlsMpmPostMechanicsClosure.js:291-315`) to find which boundary sets
 0.1 and which applies the mass ratio.
 
+### The steam scenarios fail because represented volume never becomes space
+
+This is the substantive blocker behind `steam-rises` and `steam-condenses`, and
+it is not buoyancy.
+
+On `standard-water-cycle` the gas represented volume grows correctly with the
+mass being evaporated, and J stays healthy at 0.999 -- the mechanics believe the
+gas sits at its own rest volume. But the particles carrying it never move apart:
+
+| t | gas mass | V0 represented | y-span | slab height V0 implies over the 25 m2 floor |
+| --- | --- | --- | --- | --- |
+| 1.536 | 0.409 | 0.51 m3 | 0.0001 m | 0.02 m |
+| 2.560 | 14.58 | 18.14 m3 | 0.042 m | 0.73 m |
+| 3.072 | 28.81 | **35.83 m3** | **0.124 m** | **1.43 m** |
+
+35.83 m3 in a layer 0.124 m thick would need **289 m2** of footprint. The box
+floor is 5x5 = **25 m2**. So the gas cannot be occupying the volume it reports,
+by at least 11.6x -- this is arithmetic, not a modelling judgement.
+
+The gas accumulates volume as a *number* while staying a thin film on the
+liquid surface. That accounts for every symptom at once: mean vy is ~0 because
+nothing pushes it, `yMax` creeps up only as more particles are added rather than
+as transport, and nothing ever reaches the cold ceiling to condense.
+
+It is the same two-lane disagreement seen on the h2 gas, in the opposite
+direction: there `Vrep/V0` was 1.000000 while the mechanics held the particle at
+10x rest density. Here the mechanics agree the gas is at rest volume and the
+*geometry* disagrees.
+
+**This is what SS level migration exists to fix** -- a component whose
+represented volume outgrows its level's cell should migrate coarser and occupy
+more space. Worth re-reading against the gate 3 finding above, which established
+that levels are assigned but that `representedOverRest` never moves; the
+expansion is carried entirely by rest volume, and rest volume is not what places
+particles.
+
+Caveat on the run length, recorded so it is not mistaken for the cause: the
+configured horizon is 3.07 s (`sphPhaseScenarioPresets.js:61`, `batches: 12`,
+which overrides `ULG_VISUAL_MATRIX_BATCHES`), and at the observed 0.072 m/s
+top-of-gas rate steam would need ~67 s to cross the 4.8 m to the ceiling. But
+the rate itself is the symptom above, so lengthening the run is not obviously
+sufficient.
+
 ### Phase velocity locking is scenario-dependent
 
 Mean vertical velocity per phase (added this session) says the shared-grid

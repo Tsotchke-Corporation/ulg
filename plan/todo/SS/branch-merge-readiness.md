@@ -804,6 +804,26 @@ caller and it surfaces only as an unhandled rejection.
 **Next increment** (not started): switch consumers onto the per-particle index
 and dispatch them over nodes instead of particles.
 
+Start with `runSchroederActiveNodeIndexWebGpu`, the bucket index. It is the
+cleanest first consumer because it already iterates rows *as nodes* rather than
+per particle -- `schroederHierarchyGpu.js:8216`,
+`dispatchWorkgroups(ceil(plan.activeNodeCount / WORKGROUP_SIZE))`, where
+`activeNodeCount` is the particle count today. The change is three edits:
+
+1. bind `compactedNodeBuffer` in place of the per-particle `activeNodeBuffer`;
+2. replace that dispatch with
+   `dispatchWorkgroupsIndirect(uniqueDispatchIndirectBuffer)`, so the row count
+   comes from the GPU and no readback is needed;
+3. wherever a consumer of the bucket index maps back to a particle, hop through
+   `nodeIndexByParticle[particle]` first.
+
+Its `params.row_count` bound also has to come from `uniqueEvidence[2]` rather
+than a host uniform, or the kernel will still guard against the particle count.
+
+**Verify with `ss=1`.** Every consumer touched here is on a path the default
+probe does not run, which is how the fence-coalescing regression got through a
+green suite and a clean production probe.
+
 The design fork this hits, and its answer, because the plan above did not
 anticipate it: **a GPU-authored unique count cannot size a host-side
 allocation.** The two obvious ways out are both bad -- read the count back

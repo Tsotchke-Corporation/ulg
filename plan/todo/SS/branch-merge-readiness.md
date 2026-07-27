@@ -493,6 +493,15 @@ a timestamp query reporting 0 ms for a pass the device never wrote.
 
 ## Built and not wired: a standing inventory
 
+**Added 2026-07-26**: `decodeSchroederLawNeighborTraversalDiagnostics` and
+`createSchroederLawNeighborTraversalPolicy`
+(`schroederHierarchyGpu.js:2512`, `:2527`) -- the pair that turns the GPU's
+traversal counters into `exactFallbackScanRatio` / `bucketPressureRatio` against
+their thresholds. Complete, tested, and called only from
+`tests/schroederHierarchyGpu.test.mjs`. Because of that, the N^2 fallback rate
+has never been observed in a running scene, and Priority 3's justification rests
+on it.
+
 This keeps happening, so here is the list rather than another one-off
 discovery. Modules under `src/` whose only importers are tests -- i.e. built,
 covered, and connected to nothing in production:
@@ -879,14 +888,36 @@ Two constraints on the wiring, both discovered in the code rather than assumed:
 - **Field 10 still needs the CSR.** A bucket hit returns a node; the neighbour
   particle comes from member enumeration, not from the row.
 
-**And the diagnostics to prove any of this already exist**:
-`exactFallbackScanRatio`, `bucketPressureRatio`, `exactFallbackScanCount`, with
-thresholds, computed in `schroederHierarchyGpu.js:2519-2604`. They are never
-observed, because the law-neighbour path is off by default
-(`schroederEnableLawNeighborCandidates`) and the probe does not enable it --
-`lawQueueProxyCount` is 0 in an `ss=1` run. **Measure the fallback ratio before
-doing the rewrite**: if buckets are not actually saturating in real scenarios,
-the win is theoretical.
+#### The fallback rate has never been measured, and cannot be as things stand
+
+This is the gating fact for all of the above, and it took tracing the whole
+chain to see:
+
+1. the GPU **does** increment `traversal_diagnostic_counters` --
+   `SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_EXACT_FALLBACK_SCANS` and friends;
+2. those counters are copied back **only when `!noFullReadback`**
+   (`schroederHierarchyGpu.js:8384`), a diagnostic mode production never uses;
+3. `decodeSchroederLawNeighborTraversalDiagnostics` and
+   `createSchroederLawNeighborTraversalPolicy` -- the pair that turns those
+   counters into `exactFallbackScanRatio` and `bucketPressureRatio` against
+   their thresholds -- **have no production caller at all.** Only
+   `tests/schroederHierarchyGpu.test.mjs` invokes them.
+
+So `exactFallbackScanRatio` has never been computed in a running scene. **The
+entire Priority 3 justification rests on an unmeasured quantity**: nobody knows
+how often the N^2 fallback actually fires, or whether buckets saturate in real
+scenarios at all.
+
+Same shape as `gpuTimestampRecorder` before PROF-0 -- a complete, tested
+diagnostic with no producer wired to it. It belongs on the inventory below.
+
+**Next action, and it is small:** invoke the decoder on the counters that already
+come back in the diagnostic mode and publish the ratios, then run a scenario with
+`schroederLawQueue=1&schroederLawNeighborCandidates=1`. Confirm the law queue
+actually runs first -- an `ss=1` run with those flags produced **zero**
+law-queue evidence anywhere in the artifact, so either the path is gated on
+something further or nothing about it is surfaced. Only rewrite if the ratio
+justifies it.
 
 **The former real target, the exhaustive fallback scan** -- kept for the
 self-skip trap it contains, which applies to any node-wise rewrite: The

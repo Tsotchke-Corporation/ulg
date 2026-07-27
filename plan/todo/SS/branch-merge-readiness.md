@@ -612,8 +612,20 @@ gas sits at its own rest volume. But the particles carrying it never move apart:
 | 3.072 | 28.81 | **35.83 m3** | **0.124 m** | **1.43 m** |
 
 35.83 m3 in a layer 0.124 m thick would need **289 m2** of footprint. The box
-floor is 5x5 = **25 m2**. So the gas cannot be occupying the volume it reports,
-by at least 11.6x -- this is arithmetic, not a modelling judgement.
+floor is 5x5 = **25 m2**.
+
+**Read that as a statement about particle centres, not about field extent.** The
+y-span above is the spread of particle *positions*. A component at a coarser
+level also spreads its influence through a wider support radius, and that is
+arguably the intended form of the expansion -- the design comment in the
+transfer says as much ("the expansion is sub-resolution"). At the measured
+volume a gas particle's own radius works out around 0.4 m, so the field extent
+is materially larger than the 0.124 m centre span. The support radius is not in
+the checkpoint, so this has not been measured directly.
+
+What survives that caveat is the conclusion that matters here: even inflating
+the 0.2 m top-of-gas by a ~0.4 m support gets nowhere near the ceiling at 5 m,
+so `steam-condenses` cannot fire on either reading.
 
 The gas accumulates volume as a *number* while staying a thin film on the
 liquid surface. That accounts for every symptom at once: mean vy is ~0 because
@@ -657,6 +669,16 @@ Which sharpens the question: the level responds, and the particles still do not
 move apart. Represented volume becomes a level, and never becomes **motion**. A
 parcel already at ambient pressure with nothing above it has no force acting to
 spread it, so the expansion stays a number on a row.
+
+The migration overlay confirms this directly (`wgsl.js:12729-12750`). When an
+update is admitted it assigns `level`, `native_dx` and `support_radius`, then
+derives `min_tile`/`max_tile` from `position +/- expanded_support`. **It never
+writes `position`.** Migration changes a particle's *resolution*, not its
+*location*, which is self-consistent with the sub-resolution design -- but it
+means nothing in this path can carry a parcel from the liquid surface to a
+ceiling 5 m away. Transport has to come from the velocity field, and the
+velocity field has no gradient to give it: the parcel is materialized at zero
+gauge pressure and sits in a uniform ambient.
 
 Caveat on the run length, recorded so it is not mistaken for the cause: the
 configured horizon is 3.07 s (`sphPhaseScenarioPresets.js:61`, `batches: 12`,

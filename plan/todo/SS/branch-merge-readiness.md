@@ -384,13 +384,37 @@ So the two known points are both bad:
 `aggregate.current_volume` is still accumulated and never read -- it is the
 residue of the reverted attempt, not an oversight to wire up.
 
-**What is actually needed is the middle**: a bounded expansion *rate* rather than
-an instantaneous jump between those two states. Candidate shapes, none tried --
-relax `rest_volume` toward the phase-equilibrium volume over a timescale instead
-of switching it in one step; or keep J = 1 and add an explicit bounded expansion
-source term gated on phase change. Both are real numerics work with a known
-instability on the other side, and the iron-ice-quench scenario is the regression
-test that any attempt has to survive.
+**And the middle path is already specified.** `a340072`'s message records that a
+*conditional* form was tried too -- conserve current volume only within the same
+lineage -- and "the resulting V0 flapping pumps energy in and holds the scenario
+near 100 m/s". It then names the actual requirement:
+
+> Strict `Vcurrent = V0 * J` still governs transport, mechanics refresh, and
+> split/merge. It cannot govern a phase-change materialization, where the
+> component's volume genuinely changes. **Making materialization conserve volume
+> too needs a two-phase mixture rest density through the plateau, not a clamp at
+> the split site.**
+
+So all three obvious approaches are ruled out by prior measurement -- preserve
+current volume (78 m/s), conditional preserve (100 m/s), and any rate limiter or
+source term at the split site, which is a clamp by another name. The remaining
+route is a **mixture rest density interpolated across the boiling plateau**, so
+`V0` evolves continuously through the transition instead of stepping. The
+per-particle inputs for that already exist: thermo carries
+`phaseFractionSolid/Liquid/Gas/Plasma` at fields 4-7.
+
+**Separately, and not explained by any of the above:** there is no hydrostatic
+pressure gradient anywhere. `resolvedAbsolutePressurePa` measures exactly
+101325 Pa with min == max across **both** phases, including a 0.5 m settled water
+column that should show roughly 5 kPa of variation on its own. Buoyancy needs a
+pressure gradient, and the liquid does not have one either. That is a
+pressure-solve question independent of the phase change, and it is the more
+likely blocker for `steam-rises`.
+
+Note this also corrects the framing above: the phase change does not *fail* to
+expand the volume. It expands it immediately and completely, deliberately --
+"the expansion is sub-resolution, so the component materializes already
+relaxed".
 
 ## SS plan audit against its own acceptance gates (2026-07-26)
 

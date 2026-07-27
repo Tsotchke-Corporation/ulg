@@ -2557,6 +2557,33 @@ function recordCanonicalAuthorityRestoreFold(topology) {
   return topology;
 }
 
+// Read-only "nothing here" bindings: a zero row that satisfies a shader binding
+// when the corresponding feature is off. Every one of these was allocated and
+// filled with zeros from the host on every substep -- measured at 32 apiece per
+// batch -- for contents that never vary and that no shader writes. WebGPU
+// zero-initialises a new buffer, so there is nothing to upload either.
+//
+// Safe to share where a real buffer would not be: nothing owns these, nothing
+// mutates them, and their contents are identical by construction. They are
+// deliberately excluded from every per-substep destroy list.
+const SHARED_ZERO_PLACEHOLDER_BUFFERS = new WeakMap();
+
+function sharedZeroPlaceholderBuffer(device, label, byteLength, usage) {
+  const size = Math.max(4, byteLength);
+  let byKey = SHARED_ZERO_PLACEHOLDER_BUFFERS.get(device);
+  if (!byKey) {
+    byKey = new Map();
+    SHARED_ZERO_PLACEHOLDER_BUFFERS.set(device, byKey);
+  }
+  const key = `${label}|${size}|${usage}`;
+  let buffer = byKey.get(key);
+  if (!buffer) {
+    buffer = device.createBuffer({ label, size, usage });
+    byKey.set(key, buffer);
+  }
+  return buffer;
+}
+
 function writeGpuBuffer(device, label, data, usage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST) {
   const byteLength = Math.max(4, data?.byteLength ?? 0);
   const buffer = device.createBuffer({ label, size: byteLength, usage });
@@ -7632,10 +7659,10 @@ function createFusedSchroederLevelAssignmentBinding({
     throw new RangeError('Fused resident mechanics Schroeder filtering requires the current level-assignment row layout');
   }
   if (!schroederLevelAssignment) {
-    const buffer = writeGpuBuffer(
+    const buffer = sharedZeroPlaceholderBuffer(
       device,
       `${labelPrefix}-empty-schroeder-level-assignments`,
-      new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS),
+      SCHROEDER_LEVEL_ASSIGNMENT_FLOATS * Float32Array.BYTES_PER_ELEMENT,
       GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
     );
     return {
@@ -7643,7 +7670,10 @@ function createFusedSchroederLevelAssignmentBinding({
       selectedLevel: 0,
       assignmentStrideFloats,
       assignmentBuffer: buffer,
-      ownsAssignmentBuffer: true,
+      // Shared per device now, so destroying it would pull the binding out
+      // from under every later substep. Only the dummy row is shared; the
+      // uploaded assignment buffer below is still owned per call.
+      ownsAssignmentBuffer: false,
       retainedAssignmentBuffer: false,
       assignmentBufferByteLength: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS * Float32Array.BYTES_PER_ELEMENT,
       assignmentBufferSource: 'dummy-schroeder-level-assignment-row',
@@ -8092,10 +8122,10 @@ export function createFusedSchroederActiveNodeBinding({
         `spatial authority was rejected before submission: ${rejectionStatus}`
       );
     }
-    const buffer = writeGpuBuffer(
+    const buffer = sharedZeroPlaceholderBuffer(
       device,
       `${labelPrefix}-empty-schroeder-spatial-directory`,
-      new Uint32Array(48),
+      48 * Uint32Array.BYTES_PER_ELEMENT,
       GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
     );
     return {
@@ -8125,7 +8155,8 @@ export function createFusedSchroederActiveNodeBinding({
       mechanicsFieldViewBuffer: null,
       mechanicsFieldViewIndirectDispatchBuffer: null,
       mechanicsFieldViewIndirectDispatchOffsetBytes: 0,
-      ownsActiveNodeBuffer: true,
+      // Shared per device; see the note on the dummy level assignments.
+      ownsActiveNodeBuffer: false,
       retainedActiveNodeBuffer: false,
       activeNodeBufferByteLength: 48 * Uint32Array.BYTES_PER_ELEMENT,
       activeNodeBufferSource: 'dummy-schroeder-spatial-directory',
@@ -9112,16 +9143,16 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
-  const productEventBuffer = writeGpuBuffer(
+  const productEventBuffer = sharedZeroPlaceholderBuffer(
     device,
     'ulg-mls-mpm-fused-empty-product-events',
-    new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
+    SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   );
-  const pressureRowsBuffer = writeGpuBuffer(
+  const pressureRowsBuffer = sharedZeroPlaceholderBuffer(
     device,
     'ulg-mls-mpm-fused-empty-pressure-force-rows',
-    new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
+    SPH_PRESSURE_INTERFACE_FORCE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   );
   const spatialAuthorityEvidenceReadbackBuffer = canonicalSpatialAuthority
@@ -9137,8 +9168,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     p2gParamsBuffer,
     gridUpdateParamsBuffer,
     g2pParamsBuffer,
-    productEventBuffer,
-    pressureRowsBuffer,
+    // productEventBuffer and pressureRowsBuffer are shared per device and
+    // deliberately absent here: destroying them would break later substeps.
     ...[spatialAuthorityEvidenceReadbackBuffer].filter(Boolean),
     ...(schroederLevelFilter.ownsAssignmentBuffer ? [schroederLevelFilter.assignmentBuffer] : []),
     ...(schroederActiveNodeFilter.ownsActiveNodeBuffer ? [schroederActiveNodeFilter.activeNodeBuffer] : []),

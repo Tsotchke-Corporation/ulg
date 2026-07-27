@@ -431,7 +431,18 @@ the total went 550 -> 553. It was reverted rather than shipped: a cache that
 never hits is dead code that reads as a live optimisation, which is the pattern
 the inventory below exists to stop.
 
-The reason it cannot hit is the second bullet. The bind groups genuinely
+**Landed: the zero-row placeholders are shared per device.** Seven of the 19
+buffer labels are read-only all-zero rows that stand in for a disabled feature --
+`fused-empty-product-events`, `fused-empty-pressure-force-rows`,
+`fused-empty-schroeder-level-assignments`, `fused-empty-schroeder-spatial-directory`
+and friends. Nothing owns them, nothing writes them, and their contents are
+identical by construction, so a per-device singleton is unambiguously safe where
+pooling a real buffer would not be. They are excluded from every per-substep
+destroy list and their `owns*Buffer` flags are false. Measured: **608 -> 384
+buffer allocations per batch**, total device-object creation 992 -> 768,
+identical 466,033-triangle output, full suite green.
+
+The reason a bind-group cache cannot hit is the second bullet. The bind groups genuinely
 reference different buffers each substep, because the substep **allocates new
 ones**. So the real item is per-substep buffer allocation, and bind-group
 caching only becomes worth revisiting once buffers are stable.

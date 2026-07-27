@@ -13889,20 +13889,33 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(execution.stepSummaries[0].fusedResidentSequence, true);
   assert.equal(device.submissions.length, 1);
   assert.equal(device.dispatches.length, 8);
-  assert.ok(device.createdBuffers.some((buffer) => (
-    buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments'
-    && buffer.destroyed
-  )));
-  assert.ok(device.createdBuffers.some((buffer) => (
-    buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-spatial-directory'
-    && buffer.destroyed
-  )));
+  // These two are read-only all-zero rows that stand in for a disabled feature.
+  // They are shared per device rather than rebuilt and destroyed per substep,
+  // so they are created exactly once and deliberately never destroyed --
+  // destroying one would pull the binding out from under every later substep.
+  for (const label of [
+    'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments',
+    'ulg-mls-mpm-fused-sequence-empty-schroeder-spatial-directory'
+  ]) {
+    const shared = device.createdBuffers.filter((buffer) => buffer.label === label);
+    assert.equal(shared.length, 1, `${label} must be allocated once, not per substep`);
+    assert.equal(shared[0].destroyed, false, `${label} is shared and must not be destroyed`);
+  }
   // 11 -> 10: the previous-grid EOS buffer is gone - its binding 9 pushed
   // P2G past the DEFAULT 8-storage-buffer per-stage limit and invalidated
-  // every P2G pipeline on default-limit devices.
-  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 10);
+  // every P2G pipeline on default-limit devices. 10 -> 8: the two shared
+  // zero-row placeholders above are no longer destroyed with the substep.
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 8);
   destroyMlsMpmResidentStepsBuffers(execution);
-  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
+  const undestroyed = device.createdBuffers.filter((buffer) => !buffer.destroyed);
+  assert.deepEqual(
+    undestroyed.map((buffer) => buffer.label).sort(),
+    [
+      'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments',
+      'ulg-mls-mpm-fused-sequence-empty-schroeder-spatial-directory'
+    ],
+    'only the shared zero-row placeholders outlive the execution'
+  );
 });
 
 test('MLS-MPM multi-step sequence rejects one canonical generation across position epochs', async () => {

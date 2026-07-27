@@ -713,6 +713,44 @@ Either way the existing stable radix primitive still does the sorting; what
 changes is the key, and the plan's step 1 ("derive a tile key per particle")
 remains correct. Step 3 is where (a) and (b) diverge.
 
+#### Measured 2026-07-26: take (a). (b) degenerates.
+
+`scripts/schroeder-active-node-compaction-probe.mjs` runs the real level
+assignment and active-node kernels on a real GPU over a uniform lattice, at the
+**shipped geometry defaults** (`targetSupportCells` 1.5, `supportRadiusScale` 1,
+`tileCellCount` 8, `supportInflateCells` 1), and reports both ratios plus what
+(b) costs in scan volume:
+
+| particles | (a) rows | (a) compaction | (b) rows | (b) compaction | (b) scan inflation |
+| --- | --- | --- | --- | --- | --- |
+| 4,096 | 8 | 512x | 1 | 4,096x | 1.66x |
+| 10,648 | 8 | 1,331x | 1 | 10,648x | 2.37x |
+| 32,768 | 27 | 1,214x | 1 | 32,768x | **5.94x** |
+
+**Design (a) gives 500-1,300x compaction with no over-approximation and no
+consumer change.** The unique AABB count is tiny because most particles' inflated
+support boxes round to the same tile range.
+
+**Design (b) is worse than it looks and gets worse with size.** It compacts to a
+single row, but that row's unioned support box then covers the whole domain, so
+every particle scans everything: scan inflation 1.66x -> 2.37x -> 5.94x as the
+lattice grows. That is the O(N^2) behaviour the hierarchy exists to avoid.
+sol-critic P0's wording ("one active row per particle" should become one per
+node) reads as (b); taken literally it would make things worse.
+
+Geometry context for why (b) collapses: at these defaults `nativeGridSpacingM`
+is 0.40 m against a 0.10 m particle spacing, so `tileSpacingM` is 3.20 m -- **a
+tile is the size of the whole domain** at these particle counts. Whether that
+tile sizing is itself right is a separate question this measurement raises and
+does not answer.
+
+Caveat on (a)'s ratio: the lattice is uniform, single-material, single-level, so
+every particle resolves to the same level and support radius. A scenario with
+several materials or an active phase transition will produce more distinct
+boxes, so 512-1,331x is an upper bound for (a), not a promise. The *ordering* of
+(a) over (b) does not depend on that -- (b)'s scan inflation is driven by domain
+extent, not by material variety.
+
 **Also settled: this cost is not paid in the default configuration.**
 `schroederEnableActiveNodeIndex` defaults to the Schroeder simulation flag,
 which the probe never sets, so none of the per-particle active-node allocation

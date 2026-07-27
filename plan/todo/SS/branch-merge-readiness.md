@@ -767,10 +767,40 @@ Evidence-first on purpose. Sizing an allocation by a ratio nobody measured on
 the real workload is how the candidate arena ended up reserving 4 KiB per
 particle.
 
-**Next increment** (not started): size `activeNodeByteLength` by the unique
-count, emit one row per unique group, and give consumers the per-particle
-`u32` index so they still reach their node in O(1). That one does touch every
-consumer, since they currently index active nodes by particle.
+**Next increment** (not started): emit one row per unique group, give consumers
+the per-particle `u32` index so they still reach their node in O(1), and
+dispatch them over nodes instead of particles.
+
+The design fork this hits, and its answer, because the plan above did not
+anticipate it: **a GPU-authored unique count cannot size a host-side
+allocation.** The two obvious ways out are both bad -- read the count back
+(breaks GPU residency) or allocate at a bounded capacity (and *dropping an
+active node drops a particle*, which is exactly why this could not be
+byte-bounded like the candidate arena).
+
+Neither is needed. `encodeSortUnique` already returns
+**`uniqueDispatchIndirectBuffer`**, a GPU-authored indirect dispatch sized by
+the unique count. So the sequence is:
+
+1. keep `activeNodeByteLength` at particle capacity for now -- no overflow risk,
+   no dropped nodes, no memory win yet;
+2. scatter `activeNodeIndexByParticle[sortedIndices[p]] = uniqueGroupIndex[p]`,
+   one small kernel, giving every consumer its O(1) hop;
+3. emit one compacted row per unique group from each group's representative;
+4. switch consumers from `dispatchWorkgroups(ceil(particleCount / 64))` to
+   `dispatchWorkgroupsIndirect(uniqueDispatchIndirectBuffer)`.
+
+That takes the **compute** from one node per particle to one per distinct node
+-- which is what "make two-level SS actually sparse" asks for -- with no
+readback and no capacity gamble. The **memory** win needs the allocation
+resized, which can follow once the ratio has been observed across real
+scenarios rather than one uniform lattice.
+
+Consumer surface is smaller than it looks: `node_offset` is derived in seven
+places in `ulg-gpu-abi/src/wgsl.js`, and only two derive it from
+`particle_index`. The other 75 `active_nodes[...]` reads all go through
+`node_offset`, so the indirection lands in those derivations rather than at
+every read.
 
 Caveat on (a)'s ratio: the lattice is uniform, single-material, single-level, so
 every particle resolves to the same level and support radius. A scenario with

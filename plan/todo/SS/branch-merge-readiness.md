@@ -363,12 +363,51 @@ Measured against `schroeder-tree-and-algorithm-plan.md`, not from memory.
 | --- | --- | --- |
 | 1. No full particle readback in the SS hot path | pass | measured: zero per-frame `mapAsync`; the only recurring call is a 7,504-byte probe record |
 | 2. Level from physical state, not UI role | pass | level kernel reads smoothing length, rest volume, density, volume ratio |
-| 3. 700x expansion -> ~3 levels without 700x particles | pass (unit) | `estimateSchroederLevelDeltaForVolumeRatio(700) === 3`; an estimator test, not end-to-end |
+| 3. 700x expansion -> ~3 levels without 700x particles | **FAILS end-to-end** | measured `maxPositiveLevelDelta: 0`, `steamExpansionCandidateCount: 0`; see below |
 | 4. Same-level conserves mass and constant velocity | pass | covered in tests |
 | 5. Cross-level residuals bounded | pass | covered in tests, unit + native |
 | 6. **Brute force is a diagnostic, not the primary route** | **was failing, now passes** | `exactFallbackScanRatio` was **1.0**; now 0, mode `sorted-radix-active-node-index` |
 | 7. Dense regions use Ocean-style atomic/tiled kernels | pass | 26 `atomicAdd`, 100 workgroup kernels in the ABI |
 | 8. PeerCompute epochs + StateManager admission | pass | epoch identity and admission machinery wired |
+
+### Gate 3 fails end to end, measured with its own instrument
+
+Gate 3's existing coverage is an estimator unit test
+(`estimateSchroederLevelDeltaForVolumeRatio(700) === 3` -- pure arithmetic, no
+particle migrates) and an e2e that enables
+`schroederPhaseVolumeMigration=1` and asserts **mass conservation**. Neither
+checks that a level ever changes.
+
+`SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT` is a purpose-built GPU
+instrument for exactly this gate -- row 10 is `maxPositiveLevelDelta`, row 18 is
+`steamExpansionCandidateCount`. The hierarchy publishes the raw row; **nothing
+decoded it**, so the gate's own measurement was one hop from visible. Decoded
+and surfaced now. A 700 K-floor water scenario with migration on, 10 batches:
+
+```
+migrationRowCount              684      admittedUpdateCount        177
+minSourceLevelId / max         0 / 0    minTargetLevelId / max     0 / 0
+maxPositiveLevelDelta            0      maxNegativeLevelDelta        0
+coarsenEligibleCount             0      refineRequiredCount          0
+steamExpansionCandidateCount     0      visibleMigrationCount        0
+```
+
+684 migration rows are produced and 177 admitted, and **no level changes** --
+every source and target level is 0. `steamExpansionCandidateCount: 0` places the
+failure **upstream of the level arithmetic**: the pipeline never identifies a
+steam-expansion candidate, so there is nothing for migration to act on. Nothing
+is eligible to coarsen or refine either.
+
+Confound checked and ruled out: gas does form in the run (`materialPhaseCount`
+goes 1 -> 2, `h2o|gas` present), so this is not "no steam, therefore no
+expansion". A separate wrong turn is also recorded: `migratedProposalCount: 0`
+looked like confirmation but is **reaction** proposal migration
+(`schroederSpatialReactionDiscoveryProposalGpu.js:1908`), not phase-volume, and
+0 is correct for an h2o/h2o scenario.
+
+**Fourth instance of the pattern this session** -- after the law-neighbour index,
+the traversal ratios, and the thermal traversal mode: a diagnostic computed every
+step that nothing decoded, letting a gate read as satisfied.
 
 **Gate 6 was silently inverted until this session.** The plan describes the
 sorted/radix index as "opt-in" and "future work"; what nobody had measured is

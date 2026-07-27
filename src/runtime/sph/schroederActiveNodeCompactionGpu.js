@@ -407,6 +407,12 @@ export async function runSchroederActiveNodeCompactionEvidenceWebGpu({
   const rowEvidence = new Uint32Array(rowEvidenceReadback.getMappedRange()).slice();
   rowEvidenceReadback.unmap();
 
+  // Gate 3 wants "a 700x phase-volume expansion can migrate about three
+  // hierarchy levels". The unique-node key already carries levelId as its first
+  // word, so the number of distinct levels in play falls out of the same sort
+  // for free -- and it is the only end-to-end measurement of that gate. Its
+  // existing tests are the estimator arithmetic and a mass-conservation e2e;
+  // neither checks that a level ever changes.
   const admittedRowCount = rowEvidence[0] ?? 0;
   const rejectedRowCount = rowEvidence[1] ?? 0;
   const rawUniqueCount = uniqueEvidence[UNIQUE_COUNT_WORD_INDEX] ?? 0;
@@ -450,9 +456,52 @@ export async function runSchroederActiveNodeCompactionEvidenceWebGpu({
     }
   });
 
+  // Distinct levels among the unique node keys. Word 0 of each key is the
+  // sign-flipped levelId, so reading the unique keys back gives the level span
+  // without another pass.
+  let levelSpan = null;
+  if (uniqueNodeCount > 0 && radixExecution?.uniqueKeysBuffer) {
+    try {
+      const levelReadback = device.createBuffer({
+        label: `${label}-unique-level-readback`,
+        size: Math.max(4, uniqueNodeCount * keyWordCount * Uint32Array.BYTES_PER_ELEMENT),
+        usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+      });
+      const levelEncoder = device.createCommandEncoder();
+      levelEncoder.copyBufferToBuffer(
+        radixExecution.uniqueKeysBuffer,
+        0,
+        levelReadback,
+        0,
+        uniqueNodeCount * keyWordCount * Uint32Array.BYTES_PER_ELEMENT
+      );
+      device.queue.submit([levelEncoder.finish()]);
+      await levelReadback.mapAsync(GPU_MAP_MODE_READ);
+      const keys = new Uint32Array(levelReadback.getMappedRange()).slice();
+      levelReadback.unmap();
+      levelReadback.destroy?.();
+      const levels = new Set();
+      for (let node = 0; node < uniqueNodeCount; node += 1) {
+        // Undo the order-preserving sign flip applied in the key kernel.
+        levels.add(((keys[node * keyWordCount] ^ 0x80000000) | 0));
+      }
+      const sorted = [...levels].sort((a, b) => a - b);
+      levelSpan = {
+        distinctLevelCount: sorted.length,
+        minLevel: sorted[0] ?? null,
+        maxLevel: sorted[sorted.length - 1] ?? null,
+        levelDelta: sorted.length ? sorted[sorted.length - 1] - sorted[0] : 0,
+        levels: sorted
+      };
+    } catch {
+      levelSpan = null;
+    }
+  }
+
   return {
     schema: SCHROEDER_ACTIVE_NODE_COMPACTION_SCHEMA,
     status: 'schroeder-active-node-compaction-measured',
+    levelSpan,
     rowCount: resolvedRowCount,
     admittedRowCount,
     rejectedRowCount,

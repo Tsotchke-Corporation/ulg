@@ -19583,6 +19583,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       admittedRowCount: activeNodeCompaction.admittedRowCount ?? null,
       uniqueNodeCount: activeNodeCompaction.uniqueNodeCount ?? null,
       compactionRatio: activeNodeCompaction.compactionRatio ?? null,
+      levelSpan: activeNodeCompaction.levelSpan ?? null,
       activeNodeByteLengthToday: activeNodeCompaction.activeNodeByteLengthToday ?? null,
       activeNodeByteLengthCompacted: activeNodeCompaction.activeNodeByteLengthCompacted ?? null
     } : null,

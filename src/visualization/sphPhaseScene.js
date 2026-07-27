@@ -12371,6 +12371,7 @@ export function createSphPhaseScene(container, {
   // actually fire" stayed unanswerable while the answer was being computed.
   let sphResidentSchroederLawNeighborTraversal = null;
   let sphResidentSchroederActiveNodeCompaction = null;
+  let sphResidentSchroederPhaseVolumeMigration = null;
   const resolveResidentGpuQueueStageRecorder = (device = null) => {
     if (!enableResidentGpuTimestampProfiling || !device) return null;
     if (sphResidentGpuQueueStageRecorder
@@ -32177,6 +32178,7 @@ fn main(
       // no way to tell which of those it was.
       schroederLawNeighborTraversal: sphResidentSchroederLawNeighborTraversal,
       schroederActiveNodeCompaction: sphResidentSchroederActiveNodeCompaction,
+      schroederPhaseVolumeMigration: sphResidentSchroederPhaseVolumeMigration,
       schroederLawQueueEnabled: Boolean(schroederEnableLawQueue),
       schroederLawNeighborCandidatesEnabled: Boolean(schroederEnableLawNeighborCandidates),
       schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
@@ -33123,6 +33125,52 @@ fn main(
           step.schroederLawNeighborCandidates = schroederResult.lawNeighborCandidates ?? null;
           if (schroederResult.activeNodeCompaction) {
             sphResidentSchroederActiveNodeCompaction = schroederResult.activeNodeCompaction;
+          }
+          // Gate 3 -- "a 700x phase-volume expansion can migrate about three
+          // hierarchy levels" -- has a purpose-built GPU instrument
+          // (SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT) whose row 10
+          // is maxPositiveLevelDelta. The hierarchy publishes the raw row and
+          // nothing decoded it, so the gate's own measurement was one hop from
+          // visible. Named here rather than shipped as a bare float array.
+          const phaseSummary = schroederResult.phaseVolumeDiagnosticSummary;
+          const summaryRow = Array.isArray(phaseSummary?.summaryRows)
+            ? phaseSummary.summaryRows
+            : null;
+          if (phaseSummary) {
+            sphResidentSchroederPhaseVolumeMigration = {
+              schema: 'peercompute.ulg.sph-phase-volume-migration-summary.v0',
+              status: phaseSummary.status ?? null,
+              diagnosticStatus: phaseSummary.diagnosticStatus ?? null,
+              readbackPolicy: phaseSummary.readbackPolicy ?? null,
+              compactSummaryReadbackPerformed:
+                phaseSummary.compactSummaryReadbackPerformed ?? null,
+              summaryRowCount: phaseSummary.summaryRowCount ?? null,
+              // Null rather than 0 when no row came back: "no migration" and
+              // "nobody read the counter" are opposite conclusions.
+              ...(summaryRow && summaryRow.length >= 22
+                ? {
+                  migrationRowCount: summaryRow[0],
+                  activeUpdateCount: summaryRow[1],
+                  coarsenEligibleCount: summaryRow[2],
+                  refineRequiredCount: summaryRow[3],
+                  minSourceLevelId: summaryRow[6],
+                  maxSourceLevelId: summaryRow[7],
+                  minTargetLevelId: summaryRow[8],
+                  maxTargetLevelId: summaryRow[9],
+                  maxPositiveLevelDelta: summaryRow[10],
+                  maxNegativeLevelDelta: summaryRow[11],
+                  steamExpansionCandidateCount: summaryRow[18],
+                  admittedUpdateCount: summaryRow[19],
+                  visibleMigrationCount: summaryRow[21]
+                }
+                : {
+                  migrationRowCount: null,
+                  maxPositiveLevelDelta: null,
+                  steamExpansionCandidateCount: null,
+                  admittedUpdateCount: null,
+                  visibleMigrationCount: null
+                })
+            };
           }
           if (schroederResult.lawNeighborCandidates) {
             const traversal = schroederResult.lawNeighborCandidates;

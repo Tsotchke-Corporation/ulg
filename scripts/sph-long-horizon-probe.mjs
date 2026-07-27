@@ -5441,6 +5441,8 @@ async function runBrowserProbe({
               renderState.schroederLawNeighborTraversal ?? null,
             schroederActiveNodeCompaction:
               renderState.schroederActiveNodeCompaction ?? null,
+            schroederPhaseVolumeMigration:
+              renderState.schroederPhaseVolumeMigration ?? null,
             residentGpuQueueStageStats: renderState.residentGpuQueueStageStats ?? null,
             residentGpuQueueStageSpanCount:
               finiteOrNull(renderState.residentGpuQueueStageSpanCount),

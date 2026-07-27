@@ -848,12 +848,35 @@ guarded positive, and both products have positive volume (h2: 0.229 * 0.0999 =
 `max(0, ambient + gauge)`, about 101325, not 0. A product should deposit a
 nonzero pressure and does not.
 
+**The SS level structure is not involved.** Re-run with `schroederTwoLevel`,
+`schroederCrossLevelCoupling` and `schroederPhaseVolumeMigration` all off, so the
+level-filtered G2P (`g2p_particle_enabled`) cannot be selecting anything out:
+
+| single level | P | J |
+| --- | --- | --- |
+| Na solid | 101324.98 .. 101325.02 | 0.99168 .. 1.01333 |
+| h2o liquid | 101341.83 .. 101406.02 | 0.98951 .. 1.03107 |
+| **naoh liquid** | **0.00** | 0.97098 .. 0.97403 |
+| **h2 gas** | **0.00** | 0.09987 |
+
+Both defects survive unchanged -- the dead product lane *and* the h2 J sitting
+at the clamp. Neither is a two-level or migration artifact.
+
+And the stage trace strengthens the not-rejected conclusion rather than
+weakening it: naoh's J is **constant across all five stage snapshots within a
+step** yet varies between steps (0.9749, 0.9500, 0.9710, ...). Nothing in the
+closure moves it, so the mechanics core outside the closure does -- which a
+copy-through rejection could not do.
+
 Next instrument: the stage tracer cannot see inside one kernel. This needs
 per-node visibility across the P2G/G2P pair -- specifically whether
 `g2p_field_find` returns `G2P_FIELD_INVALID_INDEX` for a product's stencil
-entries. A field-view descriptor missing for newly created particles would
-produce exactly this signature *without* rejecting the particle, because a
-`g2p_field_find` failure only does `continue` for that node.
+entries. Note the P2G stores mass, momentum, volume and pressure in a *single*
+`p2g_field_store_contribution` call, so a node carrying mass but zero pressure
+cannot come from a partial deposit; and `selected_source_count`
+(`sphMlsMpmGpuStep.js:4164`) is worth checking against the live particle count,
+since a field view built over a selected subset would leave the rest without
+descriptors.
 
 Ruled out already, so they are not re-tried:
 

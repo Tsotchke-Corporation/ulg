@@ -747,6 +747,52 @@ value, the pressure never leaves one atmosphere, the liquid pins at exactly
 373.09 K, and it boils indefinitely. **There is no feedback from accumulated
 vapour to the pressure that would end the phase change.**
 
+### A per-stage mechanics tracer, and what it settled
+
+`src/runtime/sph/sphStageMechanicsTracer.js`, opt-in via
+`?stageMechanicsTrace=1`. It runs the same reduction the authoritative
+checkpoint uses, once per stage, against that stage's own retained buffers --
+same fixed-size record, same decode, so a stage row is directly comparable to a
+checkpoint row, and no particles are read back. The trace lands at
+`timeline.metrics[].residentStep.stageMechanicsTrace`.
+
+It exists because the aggregate checkpoint reads one buffer -- whatever the
+closure leaves behind -- so it can say *that* a value is wrong and never *which
+stage wrote it*. Four speculative edits on the h2 gas J all returned
+byte-identical results, which is what that blind spot looks like from outside.
+
+One clean run settled both open lanes:
+
+| | input | thermal | reaction | transfer | refresh |
+| --- | --- | --- | --- | --- | --- |
+| h2 gas `J` | 0.1000 | 0.1000 | **0.0999** | 0.0999 | 0.0999 |
+| h2 gas `P` | 0 | 0 | 0 | 0 | 0 |
+| naoh `P` | 0 | 0 | 0 | 0 | 0 |
+| h2o liquid `P` | 101341.83 | 101341.83 | 101341.83 | 101341.83 | 101341.83 |
+
+So the `J = 0.1 * V0_old/V0_new` composition splits: **the 0.1 floor clamp
+arrives from upstream of the closure** (G2P / mechanics core -- it is already
+0.1000 at closure input) and **the mass-ratio scaling happens in the reaction
+stage**. Neither the transfer nor the refresh touches it, which is exactly why
+four edits to those two changed nothing. All four are reverted.
+
+And the product pressure lane is **already 0 at closure input**, so the
+field-view G2P never writes it for a product. The closure is exonerated for
+both.
+
+Two things the wiring itself taught, now in code comments:
+
+- The closure runs **thermal -> reaction -> phaseCarrierTransfer ->
+  mechanicsRefresh**. The refresh is the *last* writer of the mechanics buffer,
+  the reverse of how the stage list reads. Two earlier analyses on this page had
+  that backwards.
+- `residentStepEnvelope` builds a fresh result object rather than spreading its
+  input, and the probe whitelists `residentStep` again, so a new field must be
+  named at both hops. The tracer is constructed in the step rather than the
+  scene because only that scope has the resolved device -- one built in the
+  scene is handed a null device and silently disables itself, which is why it
+  now reports its own `disabledReason`.
+
 ### Lane 28 is dead for every reaction product
 
 `resolvedAbsolutePressurePa` reads **exactly 0.00** for every reaction product,

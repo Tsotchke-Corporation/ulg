@@ -747,6 +747,38 @@ value, the pressure never leaves one atmosphere, the liquid pins at exactly
 373.09 K, and it boils indefinitely. **There is no feedback from accumulated
 vapour to the pressure that would end the phase change.**
 
+### Lane 28 is dead for every reaction product
+
+`resolvedAbsolutePressurePa` reads **exactly 0.00** for every reaction product,
+and ~ambient for every original material. Final matrix run at HEAD:
+
+| scenario | material | product? | P (Pa) | J range |
+| --- | --- | --- | --- | --- |
+| sodium-water | h2o liquid | no | 101341.83 .. 101406.02 | 0.981 .. 1.021 |
+| sodium-water | Na solid | no | 101324.98 .. 101325.02 | 0.998 .. 1.022 |
+| sodium-water | **naoh liquid** | **yes** | **0.00** | 0.979 .. 0.989 |
+| sodium-water | **h2 gas** | **yes** | **0.00** | 0.0999 |
+| cesium-fluorine | Cs liquid | no | 101324.97 .. 101325.02 | 0.9998 .. 1.0001 |
+| cesium-fluorine | **csf liquid** | **yes** | **0.00** | 0.972 .. 1.047 |
+
+Not a sampling artifact -- `pressureSampleCount` equals `liveParticleCount` on
+every row, so the reduction ran over all of them. Not frozen mechanics either:
+the products carry real J variation (csf spans 0.972 to 1.047), so their
+deformation state is live. Only the pressure lane is dead.
+
+This lane is the thermodynamic pressure authority, and
+`sphPhaseCarrierTransferGpu.js:248` already warns that a wrong value there
+"would put deep water at a few kPa absolute and boil it". For products the value
+is **0 Pa** -- vacuum -- so any pressure-dependent phase equilibrium evaluated
+for a product is being evaluated at vacuum. `csf`, `naoh` and `h2` are precisely
+the populations whose boiling and condensation behaviour the failing gates test.
+
+Candidate mechanism, **not yet confirmed**: products have row 7 explicitly
+zeroed at creation (`wgsl.js:1873`, `wgsl.js:4511`) and the transfer then
+preserves `old7.x` when it rewrites row 7. But the field-view G2P does write the
+lane, so the open question is why that write never lands for a product --
+whether products miss the field-view path, or something re-zeroes it each step.
+
 ### Phase velocity locking is scenario-dependent
 
 Mean vertical velocity per phase (added this session) says the shared-grid

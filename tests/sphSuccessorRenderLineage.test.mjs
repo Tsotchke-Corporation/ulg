@@ -1987,9 +1987,6 @@ test('GPU successor surface publication reauthenticates after awaits and preserv
     /(still-active exact extraction lineage|does not match its authenticated successor extraction)/
   );
   assert.equal(releasedDuringBuild, true);
-  // Deferred cleanups share a queue fence; see the note in the marching-cubes
-  // adapter test. Every owned buffer is still released, one fence later.
-  for (let turn = 0; turn < 16; turn += 1) await Promise.resolve();
   const rejectedBuffers = harness.device.buffers.slice(bufferStart).filter(
     (buffer) => buffer.label?.startsWith('ulg-sph-extension-surface-')
   );

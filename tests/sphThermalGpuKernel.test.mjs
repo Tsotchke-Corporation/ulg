@@ -1231,10 +1231,8 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(device.destroyed.includes('ulg-sph-thermal-output-thermo'), false);
 
   device.resolveFence();
-  // Cleanups are coalesced onto a shared queue fence, so a batch registered
-  // while an earlier fence was in flight settles on the next one -- a fixed two
-  // microtask turns is no longer enough to drain them all.
-  for (let turn = 0; turn < 16; turn += 1) await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-state').length, 1);
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-thermo').length, 1);
@@ -1281,10 +1279,8 @@ test('SPH thermal map failure destroys readbacks and releases the arena after th
     2
   );
   device.resolveFence();
-  // Cleanups are coalesced onto a shared queue fence, so a batch registered
-  // while an earlier fence was in flight settles on the next one -- a fixed two
-  // microtask turns is no longer enough to drain them all.
-  for (let turn = 0; turn < 16; turn += 1) await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
   assert.ok(device.destroyed.includes('ulg-sph-thermal-output-state'));
   assert.ok(device.destroyed.includes('ulg-sph-thermal-output-thermo'));
   device.failMapAsync = false;
@@ -1464,10 +1460,8 @@ test('SPH thermal WebGPU binds full-row empty material-bank warm input sentinel'
   assert.equal(result.materialPropertyBankWarmInputConsumer.shaderRowCount, 0);
   result.destroyOutputParticleBuffers();
   device.resolveFence();
-  // Cleanups are coalesced onto a shared queue fence, so a batch registered
-  // while an earlier fence was in flight settles on the next one -- a fixed two
-  // microtask turns is no longer enough to drain them all.
-  for (let turn = 0; turn < 16; turn += 1) await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 });
 
 test('SPH thermal parity rejects state or thermo drift', () => {

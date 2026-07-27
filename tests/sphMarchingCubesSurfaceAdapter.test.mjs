@@ -1313,11 +1313,6 @@ test('ULG GPU builder retires every partial owned allocation on construction fai
       }),
       /injected/
     );
-    // Deferred cleanups share a queue fence, so a release registered while an
-    // earlier fence was in flight lands on the next one. The guarantee under
-    // test is unchanged -- every owned buffer released exactly once -- but it
-    // now takes one more fence round trip to observe.
-    for (let turn = 0; turn < 16; turn += 1) await Promise.resolve();
     const ownedBuffers = createdBuffers.filter((buffer) =>
       buffer.label?.startsWith('ulg-sph-extension-surface-'));
     assert.ok(ownedBuffers.length > 0, JSON.stringify(injectedFailure));

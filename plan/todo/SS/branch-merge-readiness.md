@@ -372,37 +372,46 @@ accumulator was a 49 MB host allocation and host-to-device upload per frame
 had already zeroed. "GPU-resident" has to mean both directions, and only the
 readback direction had a name, a flag and a gate.
 
-### Queue fences: 162 per batch, all from one call site
+### Queue fences: 162 per batch, and they cannot be coalesced — REVERTED
 
 Same method as the readback audit -- `ULG_PROBE_TRACE_NATIVE_QUEUE_FENCES=1` now
 tallies `onSubmittedWorkDone` by call site into every sample instead of only
 dumping stacks. Production config, 10 batches: **162 fences per batch, 161 of
 them from `deferSubmittedWorkCleanup` (`webgpuComputeLayout.js`)**, every one
-waiting for the same device idle point.
+waiting for the same device idle point. They are not host stalls -- that helper
+schedules cleanup on the fence rather than awaiting it.
 
-They were not host stalls -- that helper schedules cleanup on the fence rather
-than awaiting it -- but one fence per released buffer is browser bookkeeping and
-callback churn that scales with stage count, not with work.
+**Two coalescing schemes were built and both were reverted. Do not try a third
+without reading this.**
 
-Cleanups now share a fence, at most one in flight per device. The rule that
-keeps it safe: **a cleanup is never attached to a fence that already exists.**
-While a fence is in flight newcomers accumulate, and a fresh fence is created
-for them only once it resolves -- necessarily after all of them registered. The
-alternative (attach to the outstanding fence) would free buffers the device is
-still reading.
+1. *One fence in flight, newcomers wait for the next one.* Measured 162 per
+   batch down to 4. It also **broke every `ss=1` run**: "Thermal proposal arena
+   0 is still leased by generation 1". `schroederSpatialThermalProposalsGpu.js`
+   releases its arena lease through `deferSubmittedWorkCleanup`, so delaying a
+   release by one fence round trip let the next substep reach `acquire` before
+   the previous release had run. **Release latency is a correctness property
+   here, not a performance one.**
+2. *Batch per microtask turn* -- safe, since each cleanup's fence is created in
+   its own turn. Measured **no reduction at all**: 162 per batch, unchanged.
+   The 161 registrations are already spread across separate microtask turns by
+   the awaits between stages, so there is nothing in a turn to coalesce.
 
-Measured after: **1623 fences over the run, down to 43. Per batch, 162 -> 4.**
-Identical output (466,033 triangles), `renderRefreshTotalMs` median 5.70 -> 5.30,
-which is inside the noise at n=11 -- so this is a scaling-hazard and
-bookkeeping fix, **not a demonstrated speedup**, and should not be reported as
-one.
+So the helper is back to one fence per cleanup, with that rationale recorded on
+it. The tracer stays; it is how this was found and how the next attempt should
+be judged.
 
-Three existing tests failed on the change and two of them were right to. One
-caught a real bug it introduced: `onSubmittedWorkDone` can throw synchronously,
-and an early return with `inFlight` still set would have stranded every later
-cleanup on that device forever. The failure now releases the batch immediately
-and propagates to the registering caller, as it did when each registration made
-its own fence.
+**How the regression was caught, and how it nearly was not.** Every measurement
+in this campaign ran *without* `ss=1` -- the probe URL never set it, so
+`schroederActiveNodeIndexEnabled` was false and the Schroeder path was off
+entirely. The coalescing shipped green against a full unit suite and a clean
+production probe. It only surfaced when Priority 3 required turning SS on.
+**The default probe configuration does not exercise this branch's own feature.**
+Any change to shared runtime helpers has to be probed with `ss=1` as well.
+
+The failure was also nearly invisible: the probe recorded
+`phase: resident-batch-error` with `error: null`, and the message was in a
+separate `timeline.errors[]` array. Third instance in this campaign of a real
+failure surfacing as an absent value.
 
 ### Per-substep DAG rebuilds: it is buffers, not bind groups
 

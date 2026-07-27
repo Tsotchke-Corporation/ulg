@@ -2078,6 +2078,46 @@ export function summarizeResidentStageOrderExecution(execution = null) {
     // free" sample in the 2026-07-26 probe campaign was this, not a readback.
     normalHotLoopReadbackFree:
       execution?.normalHotLoopReadbackFree ?? finalStep?.normalHotLoopReadbackFree ?? null,
+    // SS unification check. The thermal law runs its own spatial path rather
+    // than the shared law-neighbour candidate artifact, and its binned-versus-
+    // exhaustive decision was computed on every step and surfaced nowhere --
+    // the same shape as the law-neighbour traversal ratios, which turned out to
+    // be 100% exhaustive once anyone could see them.
+    thermalTraversal: (() => {
+      const thermal = finalStep?.thermalStep || null;
+      if (!thermal) return null;
+      return {
+        schema: 'peercompute.ulg.sph-thermal-traversal-summary.v0',
+        lookupMode: thermal.thermalProposalLookupMode ?? null,
+        normalLookupBinned: thermal.thermalProposalNormalLookupBinned ?? null,
+        fallbackReason: thermal.thermalProposalFallbackReason ?? null,
+        exhaustiveConfiguredCount:
+          thermal.thermalProposalExhaustiveTraversalConfiguredCount ?? null,
+        exhaustivePotentialCount:
+          thermal.thermalProposalExhaustiveTraversalPotentialCount ?? null,
+        binnedTraversalCount: thermal.thermalProposalBinnedTraversalCount ?? null,
+        dispatchCount: thermal.thermalProposalDispatchCount ?? null,
+        // The canonical spatial producer is what actually runs; the classic
+        // fields above stay null when it does. These are the ones that say
+        // whether thermal shares SS's directory or builds its own.
+        canonical: (() => {
+          const c = thermal.canonicalThermalProposal || null;
+          if (!c) return null;
+          return {
+            status: c.status ?? null,
+            proposalMode: c.proposalMode ?? null,
+            directoryBuildCount: c.directoryBuildCount ?? null,
+            sharedGenerationDirectoryBuildCount:
+              c.sharedGenerationDirectoryBuildCount ?? null,
+            privateBuildCount: c.privateBuildCount ?? null,
+            fixedCandidateBuildCount: c.fixedCandidateBuildCount ?? null,
+            exhaustiveTraversalCount: c.exhaustiveTraversalCount ?? null,
+            readbackMode: c.readbackMode ?? null,
+            fullParticleReadbackPerformed: c.fullParticleReadbackPerformed ?? null
+          };
+        })()
+      };
+    })(),
     continuedFromResidentState: Boolean(execution?.continuedFromResidentState),
     continuationAvailable: Boolean(execution?.continuationAvailable),
     stepCount: execution?.stepCount ?? null,

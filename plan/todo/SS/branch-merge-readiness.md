@@ -355,6 +355,52 @@ refresh, both captured by `sph-long-horizon-probe.mjs`. Kept separate from
 execution, the other brackets a whole stage including submit latency. Merging
 them would make a reader unable to tell which they were looking at.
 
+## SS plan audit against its own acceptance gates (2026-07-26)
+
+Measured against `schroeder-tree-and-algorithm-plan.md`, not from memory.
+
+| gate | status | evidence |
+| --- | --- | --- |
+| 1. No full particle readback in the SS hot path | pass | measured: zero per-frame `mapAsync`; the only recurring call is a 7,504-byte probe record |
+| 2. Level from physical state, not UI role | pass | level kernel reads smoothing length, rest volume, density, volume ratio |
+| 3. 700x expansion -> ~3 levels without 700x particles | pass (unit) | `estimateSchroederLevelDeltaForVolumeRatio(700) === 3`; an estimator test, not end-to-end |
+| 4. Same-level conserves mass and constant velocity | pass | covered in tests |
+| 5. Cross-level residuals bounded | pass | covered in tests, unit + native |
+| 6. **Brute force is a diagnostic, not the primary route** | **was failing, now passes** | `exactFallbackScanRatio` was **1.0**; now 0, mode `sorted-radix-active-node-index` |
+| 7. Dense regions use Ocean-style atomic/tiled kernels | pass | 26 `atomicAdd`, 100 workgroup kernels in the ABI |
+| 8. PeerCompute epochs + StateManager admission | pass | epoch identity and admission machinery wired |
+
+**Gate 6 was silently inverted until this session.** The plan describes the
+sorted/radix index as "opt-in" and "future work"; what nobody had measured is
+that the opt-in never engaged, so brute force *was* the primary route for 100%
+of neighbour queries while the plan read as essentially complete.
+
+### Correction: the unification is further along than the mechanism list says
+
+An earlier reading of this file's own item #4 -- "one persistent
+multi-resolution neighbour artifact shared by mechanics, thermal, reaction and
+contact consumers" -- suggested only 2 of 4 consumers were unified, counting
+`neighborCandidate` references per module. **That count was misleading.** The
+consumers are on SS artifacts by different names:
+
+| consumer | artifact |
+| --- | --- |
+| reaction | `lawNeighborCandidates` (over active nodes) |
+| pressure / interface | `lawNeighborCandidates` |
+| thermal | SS spatial exact-near, `proposalMode: schroeder-spatial-exact-near-v2` |
+| mechanics | mechanics field view, from the spatial epoch |
+
+And thermal's use of it is **enforced, not merely observed**.
+`sphThermalGpuKernel.js:2828` rejects the proposal unless
+`sharedTraversalConsumerCount === 2`, `privateBuildCount === 0`,
+`fixedCandidateBuildCount === 0`, `exhaustiveTraversalCount === 0` and
+`fullParticleReadbackPerformed === false`. A live `ss=1` run completes with zero
+errors, so every one of those held.
+
+So no law consumer is on a private grid or on brute force. What is *not* true is
+the literal "one artifact": there are three shared SS artifacts rather than one.
+That is a consolidation question, not a correctness or cost one.
+
 ## Scenario matrix re-verified 2026-07-26 after all of this session's changes
 
 Everything landed this session -- the splat as the default render field, eight

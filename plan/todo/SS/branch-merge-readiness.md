@@ -894,12 +894,27 @@ places in `ulg-gpu-abi/src/wgsl.js`, and only two derive it from
 `node_offset`, so the indirection lands in those derivations rather than at
 every read.
 
-Caveat on (a)'s ratio: the lattice is uniform, single-material, single-level, so
-every particle resolves to the same level and support radius. A scenario with
-several materials or an active phase transition will produce more distinct
-boxes, so 512-1,331x is an upper bound for (a), not a promise. The *ordering* of
-(a) over (b) does not depend on that -- (b)'s scan inflation is driven by domain
-extent, not by material variety.
+#### The uniform-lattice caveat, resolved
+
+The first measurement used a uniform single-material lattice, which resolves
+every particle to one level and one support radius -- the best possible case for
+a key built from level and tile bounds, so 1,331x was an upper bound rather than
+a promise. `ULG_ACTIVE_NODE_COMPACTION_MIXED=1` gives half the lattice a
+different smoothing length (which resolves to a different level, the thing that
+actually splits the key), a different material and rest volume, and jitters
+every position by up to 40% of the spacing. Jitter is deterministic, not
+`Math.random`, so the ratio stays reproducible.
+
+| input | unique nodes | compaction | CSR coverage |
+| --- | --- | --- | --- |
+| uniform, one material | 8 | 1,331x | 10,648 / 0 double / 0 uncovered |
+| two materials, two levels, jittered | 15 | **710x** | 10,648 / 0 double / 0 uncovered |
+
+Heterogeneity roughly doubles the node count and halves the ratio. **710x on
+heterogeneous input is still three orders of magnitude**, and the CSR reaches
+every admitted particle exactly once in both cases, so the design holds. The
+ordering of (a) over (b) never depended on this -- (b)'s scan inflation is
+driven by domain extent, not material variety.
 
 **Also settled: this cost is not paid in the default configuration.**
 `schroederEnableActiveNodeIndex` defaults to the Schroeder simulation flag,

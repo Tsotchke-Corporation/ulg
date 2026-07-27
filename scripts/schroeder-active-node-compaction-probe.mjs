@@ -30,6 +30,12 @@ const OUTPUT = process.env.ULG_ACTIVE_NODE_COMPACTION_OUTPUT || null;
 // Particles per edge of the cubic lattice. 22^3 = 10,648, the same order as the
 // scenarios the rest of this campaign measured.
 const EDGE = Number.parseInt(process.env.ULG_ACTIVE_NODE_COMPACTION_EDGE || '22', 10);
+// A uniform single-material lattice resolves every particle to one level and one
+// support radius, which is the best possible case for a key built from level and
+// tile bounds. `mixed` gives half the lattice a different smoothing length and
+// jitters every position, so the reported ratio stops being an upper bound and
+// starts being a claim about heterogeneous input.
+const MIXED = process.env.ULG_ACTIVE_NODE_COMPACTION_MIXED === '1';
 
 async function main() {
   const { chromium } = await import('@playwright/test');
@@ -48,7 +54,7 @@ async function main() {
   try {
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    measured = await page.evaluate(async ({ edge }) => {
+    measured = await page.evaluate(async ({ edge, mixed }) => {
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
       const device = await adapter.requestDevice();
@@ -79,20 +85,29 @@ async function main() {
       for (let x = 0; x < edge; x += 1) {
         for (let y = 0; y < edge; y += 1) {
           for (let z = 0; z < edge; z += 1) {
+            // Deterministic jitter -- Math.random would make the ratio
+            // unreproducible run to run, which is the one property a
+            // measurement like this has to have.
+            const jitter = mixed
+              ? ((((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 1000) / 1000 - 0.5) * spacingM * 0.4
+              : 0;
+            const secondMaterial = mixed && ((x + y + z) % 2 === 0);
             const s = index * stateFloats;
-            state[s] = x * spacingM;
-            state[s + 1] = y * spacingM;
-            state[s + 2] = z * spacingM;
+            state[s] = x * spacingM + jitter;
+            state[s + 1] = y * spacingM + jitter;
+            state[s + 2] = z * spacingM - jitter;
             state[s + 3] = 1000;
             const t = index * thermoFloats;
-            thermo[t] = 1;
-            thermo[t + 1] = 2;
-            thermo[t + 3] = 1000;
-            thermo[t + 8] = smoothingLengthM;
+            thermo[t] = secondMaterial ? 2 : 1;
+            thermo[t + 1] = secondMaterial ? 1 : 2;
+            thermo[t + 3] = secondMaterial ? 7800 : 1000;
+            // A different smoothing length resolves to a different level, which
+            // is what actually splits the key.
+            thermo[t + 8] = secondMaterial ? smoothingLengthM * 2 : smoothingLengthM;
             thermo[t + 11] = spacingM / 2;
             const m = index * mechanicsFloats;
             mechanics[m + 18] = 1;
-            mechanics[m + 19] = 1;
+            mechanics[m + 19] = secondMaterial ? 8 : 1;
             // The level kernel admits a particle only when both of these read
             // 1.0; otherwise it takes the inactive branch with support 0.
             mechanics[m + 21] = 1;
@@ -371,7 +386,7 @@ async function main() {
         gpuEvidence,
         uncaptured
       };
-    }, { edge: EDGE });
+    }, { edge: EDGE, mixed: MIXED });
   } finally {
     await browser.close();
   }
@@ -380,6 +395,7 @@ async function main() {
     schema: 'peercompute.ulg.schroeder-active-node-compaction-probe.v0',
     baseUrl: BASE_URL,
     edge: EDGE,
+    mixed: MIXED,
     ...measured
   };
   const text = JSON.stringify(report, null, 2);

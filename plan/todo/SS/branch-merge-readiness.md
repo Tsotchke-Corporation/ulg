@@ -680,12 +680,34 @@ ceiling 5 m away. Transport has to come from the velocity field, and the
 velocity field has no gradient to give it: the parcel is materialized at zero
 gauge pressure and sits in a uniform ambient.
 
-Caveat on the run length, recorded so it is not mistaken for the cause: the
-configured horizon is 3.07 s (`sphPhaseScenarioPresets.js:61`, `batches: 12`,
-which overrides `ULG_VISUAL_MATRIX_BATCHES`), and at the observed 0.072 m/s
-top-of-gas rate steam would need ~67 s to cross the 4.8 m to the ceiling. But
-the rate itself is the symptom above, so lengthening the run is not obviously
-sufficient.
+#### Run length is not the cause -- tested directly at 4x
+
+The configured horizon is 3.07 s (`sphPhaseScenarioPresets.js:61`,
+`batches: 12`, which overrides `ULG_VISUAL_MATRIX_BATCHES`; drive
+`sph-long-horizon-probe.mjs` with the scenario URL instead). Run out to
+**12.29 s**:
+
+| t | gas mass | V0 represented | `yMax` | mean vy |
+| --- | --- | --- | --- | --- |
+| 3.072 | 28.8 kg | 35.8 m3 | 0.2343 | +0.004 |
+| 7.168 | 226.8 kg | 282.1 m3 | **0.2341** | -0.019 |
+| 12.288 | **518.5 kg** | **644.9 m3** | **0.2341** | **-0.023** |
+
+Three results, and none of them needs the support-radius caveat above:
+
+1. **`yMax` freezes at 0.2341 m from about t = 7 s.** The top of the gas stops
+   advancing entirely, however much more forms. Four times the horizon buys no
+   further transport, so the gate's run length is not what is failing.
+2. **V0 reaches 644.9 m3 inside a 5x5x5 = 125 m3 box** -- the represented volume
+   exceeds the *entire domain* by 5.16x. That is unphysical rather than merely
+   under-expanded, and no reading of support radius rescues it.
+3. **Mean vy is negative** (-0.023 m/s) and `yCen` drifts *down*, 0.1360 ->
+   0.1196. The gas sinks.
+
+Meanwhile 43% of the water boils off (1216 -> 697 kg) with nothing condensing.
+`steam-condenses` requires the final gas mass to fall 2% below its peak; the
+mass grows monotonically for the whole run. **Longer runs make this strictly
+worse, not better.**
 
 ### Phase velocity locking is scenario-dependent
 

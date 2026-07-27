@@ -125,8 +125,12 @@ import {
   runMlsMpmMechanicsG2pStageComputeTask,
   submitMlsMpmResidentStepComputeTask,
   submitMlsMpmResidentStepsComputeTask,
+  summarizeGpuTimestampRecorderQueueStages,
   summarizeMlsMpmResidentHotLoopBudget
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  schroederSpatialPhaseVolumeTransportWgsl
+} from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeTransportWgsl.js';
 import {
   MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL,
   MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
@@ -194,6 +198,144 @@ const RUN_NATIVE_PHASE_LINEAGE_SUMMARY =
   process.env.ULG_RUN_NATIVE_PHASE_LINEAGE_SUMMARY === '1';
 const NATIVE_PHASE_LINEAGE_SUMMARY_BASE_URL =
   process.env.ULG_PHASE_LINEAGE_SUMMARY_BASE_URL || 'https://127.0.0.1:5174/';
+
+test('mechanics-field indirect consumers authenticate and flatten public x/y dispatches', () => {
+  for (const wgsl of [
+    mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl,
+    mlsMpmMechanicsFieldGridUpdateWgsl,
+    schroederSpatialPhaseVolumeTransportWgsl
+  ]) {
+    assert.match(
+      wgsl,
+      /workgroup_id\.x \+ workgroup_id\.y \* (?:p2g_field_word\([\s\S]*?60u[\s\S]*?\)|field_(?:word|load)\(60u\)|dispatch_x)/
+    );
+    assert.match(
+      wgsl,
+      /dispatch_y == expected_y[\s\S]*(?:p2g_field_word|field_(?:word|load))\(44u\) == dispatch_x[\s\S]*(?:p2g_field_word|field_(?:word|load))\(45u\) == dispatch_y[\s\S]*(?:p2g_field_word|field_(?:word|load))\(46u\) == dispatch_z/
+    );
+  }
+
+  for (const entryPoint of [
+    'finalize_grid',
+    'clear_accumulators',
+    'validate_mechanics_field_keys'
+  ]) {
+    assert.match(
+      mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl,
+      new RegExp(
+        `fn ${entryPoint}\\([\\s\\S]*p2g_field_linear_invocation\\(local_id, workgroup_id\\)`
+      )
+    );
+  }
+  for (const entryPoint of [
+    'clear_heat_rows',
+    'main',
+    'contact_fields',
+    'summarize_heat_rows'
+  ]) {
+    assert.match(
+      mlsMpmMechanicsFieldGridUpdateWgsl,
+      new RegExp(
+        `fn ${entryPoint}\\([\\s\\S]*field_linear_invocation\\(local_id, workgroup_id\\)`
+      )
+    );
+  }
+  for (const entryPoint of [
+    'stage_transport',
+    'validate_staged_transport',
+    'commit_transport'
+  ]) {
+    assert.match(
+      schroederSpatialPhaseVolumeTransportWgsl,
+      new RegExp(
+        `fn ${entryPoint}\\([\\s\\S]*field_linear_invocation\\(local_id, workgroup_id\\)`
+      )
+    );
+  }
+});
+
+test('active timestamp-query span recorders explicitly omit synchronous queue summaries', () => {
+  const summary = summarizeGpuTimestampRecorderQueueStages({
+    schema: 'peercompute.ulg.test-span-recorder.v0',
+    recorderKind: 'timestamp-query-span',
+    active: true,
+    encoderSpansSupported: true,
+    beginEncoderSpan() {},
+    endEncoderSpan() {},
+    async measureQueueStage(_descriptor, runner) {
+      return runner();
+    }
+  });
+
+  assert.equal(
+    summary.status,
+    'gpu-timestamp-recorder-stage-summary-unavailable'
+  );
+  assert.equal(summary.stageGpuMs, null);
+  assert.equal(summary.stageGpuStats, null);
+  assert.equal(summary.recorderKind, 'timestamp-query-span');
+  assert.equal(summary.capabilities.measureQueueStage, true);
+  assert.equal(summary.capabilities.encoderSpans, true);
+  assert.equal(summary.capabilities.stageGpuMs, false);
+  assert.equal(summary.capabilities.stageGpuStats, false);
+});
+
+test('queue-stage recorder summaries are captured only through declared methods', () => {
+  const stageGpuMs = { fusedMechanicsSequence: 2.5 };
+  const stageGpuStats = {
+    fusedMechanicsSequence: {
+      totalMs: 2.5,
+      count: 1,
+      maxMs: 2.5,
+      meanMs: 2.5
+    }
+  };
+  const summary = summarizeGpuTimestampRecorderQueueStages({
+    schema: 'peercompute.ulg.test-queue-recorder.v0',
+    recorderKind: 'queue-fence-stage-summary',
+    active: true,
+    encoderSpansSupported: false,
+    stageGpuMs: () => stageGpuMs,
+    stageGpuStats: () => stageGpuStats
+  });
+
+  assert.equal(
+    summary.status,
+    'gpu-timestamp-recorder-stage-summary-ready'
+  );
+  assert.equal(summary.stageGpuMs, stageGpuMs);
+  assert.equal(summary.stageGpuStats, stageGpuStats);
+  assert.equal(summary.capabilities.encoderSpans, false);
+  assert.equal(summary.capabilities.stageGpuMs, true);
+  assert.equal(summary.capabilities.stageGpuStats, true);
+});
+
+test('inactive or invalid recorder summaries return null instead of fabricated zero', () => {
+  const inactive = summarizeGpuTimestampRecorderQueueStages({
+    active: false,
+    stageGpuMs() {
+      throw new Error('inactive summary method must not be called');
+    },
+    stageGpuStats() {
+      throw new Error('inactive summary method must not be called');
+    }
+  });
+  assert.equal(inactive.status, 'gpu-timestamp-recorder-inactive');
+  assert.equal(inactive.stageGpuMs, null);
+  assert.equal(inactive.stageGpuStats, null);
+
+  const invalid = summarizeGpuTimestampRecorderQueueStages({
+    active: true,
+    stageGpuMs: () => 0,
+    stageGpuStats: () => 0
+  });
+  assert.equal(
+    invalid.status,
+    'gpu-timestamp-recorder-stage-summary-invalid'
+  );
+  assert.equal(invalid.stageGpuMs, null);
+  assert.equal(invalid.stageGpuStats, null);
+});
 
 test('mechanics-field contact requires interface authority for mixed noncondensed pairs and defers all-noncondensed pairs to EOS', () => {
   const classify = (left, right) =>

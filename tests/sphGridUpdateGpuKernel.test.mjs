@@ -30,6 +30,53 @@ import {
   tagWebGpuBufferDevice,
   webGpuDeviceId
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  mlsMpmMechanicsFieldGridUpdateWgsl
+} from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  schroederSpatialPhaseVolumeTransportWgsl
+} from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeTransportWgsl.js';
+
+test('mechanics-field grid and transport kernels consume authenticated 2D indirect rows', () => {
+  for (const wgsl of [
+    mlsMpmMechanicsFieldGridUpdateWgsl,
+    schroederSpatialPhaseVolumeTransportWgsl
+  ]) {
+    assert.match(
+      wgsl,
+      /let expected_y = [\s\S]*dispatch_y == expected_y[\s\S]*field_(?:word|load)\(44u\) == dispatch_x[\s\S]*field_(?:word|load)\(45u\) == dispatch_y[\s\S]*field_(?:word|load)\(46u\) == dispatch_z/
+    );
+    assert.match(
+      wgsl,
+      /workgroup_id\.x \+ workgroup_id\.y \* field_(?:word|load)\(60u\)/
+    );
+  }
+  for (const entryPoint of [
+    'clear_heat_rows',
+    'main',
+    'contact_fields',
+    'summarize_heat_rows'
+  ]) {
+    assert.match(
+      mlsMpmMechanicsFieldGridUpdateWgsl,
+      new RegExp(
+        `fn ${entryPoint}\\([\\s\\S]*field_linear_invocation\\(local_id, workgroup_id\\)`
+      )
+    );
+  }
+  for (const entryPoint of [
+    'stage_transport',
+    'validate_staged_transport',
+    'commit_transport'
+  ]) {
+    assert.match(
+      schroederSpatialPhaseVolumeTransportWgsl,
+      new RegExp(
+        `fn ${entryPoint}\\([\\s\\S]*field_linear_invocation\\(local_id, workgroup_id\\)`
+      )
+    );
+  }
+});
 
 test('direct resident pressure admission requires exact same-device queue authority', () => {
   const solver = pressureInterfaceForceSolverFixture({

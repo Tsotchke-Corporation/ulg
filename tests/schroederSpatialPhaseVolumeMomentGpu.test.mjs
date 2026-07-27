@@ -305,6 +305,14 @@ test('phase-volume moment ABI keeps a separate bounded scratch arena and strict 
   assert.match(wgsl, /mechanics_rows\[mechanics_offset \+ RAW_VOLUME_RATIO_J_WORD\]/);
   assert.match(wgsl, /mechanics_rows\[mechanics_offset \+ RAW_REST_VOLUME_WORD\]/);
   assert.match(wgsl, /@binding\(2\) var<storage, read> mechanics_field/);
+  assert.match(
+    wgsl,
+    /fn mechanics_field_dispatch_shape_admitted\(field_count: u32\)[\s\S]*dispatch_y == expected_y[\s\S]*mechanics_field\[44u\] == dispatch_x[\s\S]*mechanics_field\[45u\] == dispatch_y[\s\S]*mechanics_field\[46u\] == dispatch_z/
+  );
+  assert.doesNotMatch(
+    wgsl,
+    /mechanics_field\[60u\] == group_count[\s\S]*mechanics_field\[61u\] == 1u[\s\S]*mechanics_field\[62u\] == 1u/
+  );
   assert.match(wgsl, /MOMENT_STATUS_FAIL_CLOSED/);
   assert.doesNotMatch(wgsl, /rest_density|phase_volume_reference|render_radius/i);
   assert.doesNotMatch(wgsl, /candidate_field_indices|field_ranges/);

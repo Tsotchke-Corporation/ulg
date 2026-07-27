@@ -47,6 +47,30 @@ function positiveInteger(value, label, max = 0xffff_ffff) {
   return number;
 }
 
+function dispatchShapeForInvocationCount(
+  invocationCount,
+  workgroupSize,
+  maxComputeWorkgroupsPerDimension,
+  label
+) {
+  const count = positiveInteger(invocationCount, `${label} invocationCount`);
+  const width = positiveInteger(workgroupSize, `${label} workgroupSize`, 1024);
+  const maxDimension = positiveInteger(
+    maxComputeWorkgroupsPerDimension,
+    `${label} maxComputeWorkgroupsPerDimension`
+  );
+  const groupCount = Math.ceil(count / width);
+  const x = Math.min(groupCount, maxDimension);
+  const y = Math.ceil(groupCount / x);
+  if (y > maxDimension) {
+    throw new RangeError(
+      `${label} dispatch requires ${groupCount} workgroups beyond `
+      + `${maxDimension}x${maxDimension}`
+    );
+  }
+  return Object.freeze([x, y, 1]);
+}
+
 function assertDevice(device) {
   if (
     !device?.createBuffer
@@ -69,7 +93,11 @@ function createOwnedBuffer(device, label, size, usage) {
   return tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
 }
 
-function fieldParamsData(plan, parentExecution) {
+function fieldParamsData(plan, parentExecution, {
+  sourceDispatchWorkgroups,
+  candidateDispatchWorkgroups,
+  dispatchXLimit
+}) {
   const data = new ArrayBuffer(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PARAMS_BYTES);
   const view = new DataView(data);
   const u32 = (offset, value) => view.setUint32(offset, Number(value) >>> 0, true);
@@ -117,9 +145,14 @@ function fieldParamsData(plan, parentExecution) {
   u32(156, parentExecution.nodeCapacity);
   u32(160, SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE);
   u32(164, 27);
-  // Legacy route-control fields are reserved in ABI v2 but the production
-  // construction is now one exact direct radix path.
-  for (let offset = 168; offset <= 188; offset += 4) u32(offset, 0);
+  // The former route-control words are retained inside the same private
+  // 192-byte parameter ABI and now authenticate direct 2D dispatch shapes.
+  u32(168, sourceDispatchWorkgroups[0]);
+  u32(172, candidateDispatchWorkgroups[0]);
+  u32(176, dispatchXLimit);
+  u32(180, sourceDispatchWorkgroups[1]);
+  u32(184, candidateDispatchWorkgroups[1]);
+  u32(188, 0);
   return data;
 }
 
@@ -234,7 +267,8 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
   );
   const maxComputeWorkgroupsPerDimension = positiveInteger(
     device.limits?.maxComputeWorkgroupsPerDimension ?? 65535,
-    'device.limits.maxComputeWorkgroupsPerDimension'
+    'device.limits.maxComputeWorkgroupsPerDimension',
+    65535
   );
   const candidateKeyByteLength = template.layout.candidateCapacity
     * FIELD_RADIX_KEY_WORDS
@@ -253,21 +287,18 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       throw new RangeError(`${role} requires ${byteLength} bytes beyond device capacity`);
     }
   }
-  const sourceWorkgroups = Math.ceil(
-    resolvedMaxSourceCount / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
+  dispatchShapeForInvocationCount(
+    resolvedMaxSourceCount,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+    maxComputeWorkgroupsPerDimension,
+    'mechanics field source'
   );
-  const candidateWorkgroups = Math.ceil(
-    template.layout.candidateCapacity
-      / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
+  dispatchShapeForInvocationCount(
+    template.layout.candidateCapacity,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+    maxComputeWorkgroupsPerDimension,
+    'mechanics field candidate'
   );
-  if (
-    sourceWorkgroups > maxComputeWorkgroupsPerDimension
-    || candidateWorkgroups > maxComputeWorkgroupsPerDimension
-  ) {
-    throw new RangeError(
-      'mechanics field view x-dispatch exceeds maxComputeWorkgroupsPerDimension'
-    );
-  }
   const module = device.createShaderModule({
     label: `${label}-shader`,
     code: schroederSpatialMechanicsFieldViewWgsl
@@ -584,6 +615,18 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         sourceCount: plan.sourceCount,
         candidateCount: plan.candidateCount
       };
+      const sourceDispatchWorkgroups = dispatchShapeForInvocationCount(
+        plan.sourceCount,
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+        maxComputeWorkgroupsPerDimension,
+        'mechanics field source'
+      );
+      const candidateDispatchWorkgroups = dispatchShapeForInvocationCount(
+        plan.candidateCount,
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+        maxComputeWorkgroupsPerDimension,
+        'mechanics field candidate'
+      );
       encoder.clearBuffer(
         arena.fieldViewBuffer,
         0,
@@ -607,9 +650,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         encoder,
         pipelines.emit,
         emitBindGroup,
-        [Math.max(1, Math.ceil(
-          plan.sourceCount / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
-        )), 1, 1],
+        sourceDispatchWorkgroups,
         `${label}EmitCandidates`,
         gpuTimestampRecorder,
         {
@@ -665,9 +706,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         encoder,
         pipelines.materializeStencilMap,
         stencilMapBindGroup,
-        [Math.max(1, Math.ceil(
-          plan.candidateCount / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
-        )), 1, 1],
+        candidateDispatchWorkgroups,
         `${label}MaterializeStencilMap`,
         gpuTimestampRecorder,
         {
@@ -681,9 +720,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         encoder,
         pipelines.assemble,
         assembleBindGroup,
-        [Math.max(1, Math.ceil(
-          plan.candidateCount / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
-        )), 1, 1],
+        candidateDispatchWorkgroups,
         `${label}AssembleKeys`,
         gpuTimestampRecorder,
         {
@@ -710,7 +747,11 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       device.queue.writeBuffer(
         arena.paramsBuffer,
         0,
-        fieldParamsData(plan, parentMechanicsView)
+        fieldParamsData(plan, parentMechanicsView, {
+          sourceDispatchWorkgroups,
+          candidateDispatchWorkgroups,
+          dispatchXLimit: maxComputeWorkgroupsPerDimension
+        })
       );
       const execution = {
         ...plan,
@@ -737,6 +778,30 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         radixGateCount: 0,
         forceRadixFallbackRequested: forceRadixFallback,
         constructionRoutePolicy: 'gpu-authenticated-direct-exact-radix',
+        directDispatchLinearization:
+          'linearGroup=workgroup.x+workgroup.y*dispatchX',
+        sourceDispatchWorkgroups,
+        candidateDispatchWorkgroups,
+        maxComputeWorkgroupsPerDimension,
+        constructionDispatchEvidence: Object.freeze({
+          workgroupSize:
+            SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+          linearization:
+            'linearGroup=workgroup.x+workgroup.y*dispatchX',
+          maxComputeWorkgroupsPerDimension,
+          sourceInvocationCount: plan.sourceCount,
+          sourceWorkgroups: sourceDispatchWorkgroups,
+          candidateInvocationCount: plan.candidateCount,
+          candidateWorkgroups: candidateDispatchWorkgroups,
+          authenticatedByGpuFinalizer: true
+        }),
+        consumerDispatchWorkgroupSize:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+        consumerDispatchDimensions: 2,
+        consumerDispatchLinearization:
+          'linearGroup=workgroup.x+workgroup.y*dispatchX',
+        consumerDispatchCapacityPolicy:
+          'gpu-finalized-device-limit-bounded-x-y-zero-on-reject',
         fieldViewBuffer: arena.fieldViewBuffer,
         indirectDispatchBuffer: arena.fieldViewBuffer,
         indirectDispatchOffsetBytes:
@@ -2013,6 +2078,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     gridDims: template.gridDims,
     gridShift: template.gridShift,
     gridSpacingM: template.gridSpacingM,
+    maxComputeWorkgroupsPerDimension,
     arenaCount: resolvedArenaCount,
     layout: template.layout,
     releaseFencePolicy: 'runtime-owned-current-queue-at-invocation',

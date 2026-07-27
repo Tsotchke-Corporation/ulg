@@ -2272,7 +2272,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
           : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl)
       : mlsMpmP2gGridProjectionWgsl;
     const p2gVariant = mechanicsFieldViewEnabled
-      ? `canonical-spatial-mechanics-field-deterministic-reduction.v3.${
+      ? `canonical-spatial-mechanics-field-deterministic-reduction.v4.${
         observeCanonicalSpatialAuthority === true ? 'observed' : 'unobserved'}`
       : canonicalSpatialAuthority
       ? `canonical-spatial-epoch.v10.${observeCanonicalSpatialAuthority === true
@@ -2605,6 +2605,20 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     projection.mechanicsFieldViewExecution = mechanicsFieldViewEnabled
       ? mechanicsFieldBinding.mechanicsFieldViewExecution
       : null;
+    projection.mechanicsFieldIndirectDispatchDimensions =
+      mechanicsFieldViewEnabled ? 2 : 0;
+    projection.mechanicsFieldIndirectDispatchLinearization =
+      mechanicsFieldViewEnabled
+        ? 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+        : null;
+    projection.mechanicsFieldSourceDispatchWorkgroups =
+      mechanicsFieldViewEnabled
+        ? mechanicsFieldExecution.sourceDispatchWorkgroups
+        : null;
+    projection.mechanicsFieldCandidateDispatchWorkgroups =
+      mechanicsFieldViewEnabled
+        ? mechanicsFieldExecution.candidateDispatchWorkgroups
+        : null;
     projection.mechanicsFieldMutationInputOrdinal =
       mechanicsFieldMutationToken?.expectedOrdinal ?? null;
     projection.mechanicsFieldMutationOutputOrdinal =

@@ -5,13 +5,20 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_UNIQUE_STATUS_READY,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
-  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY,
+  ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,
+  validateSchroederSpatialMechanicsFieldViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
   schroederSpatialMechanicsFieldViewWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldViewWgsl.js';
+import {
+  createSchroederSpatialMechanicsFieldViewGpu
+} from '../src/runtime/sph/schroederSpatialMechanicsFieldViewGpu.js';
 import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
   runSchroederSpatialEpochGenerationWebGpu
@@ -62,7 +69,9 @@ function createFakeEncoder() {
   };
 }
 
-function createFakeDevice() {
+function createFakeDevice({
+  limits: limitOverrides = {}
+} = {}) {
   const buffers = [];
   const bindGroups = [];
   const submissions = [];
@@ -80,7 +89,8 @@ function createFakeDevice() {
       maxUniformBufferBindingSize: 64 * 1024,
       maxStorageBuffersPerShaderStage: 10,
       maxComputeWorkgroupsPerDimension: 65535,
-      minUniformBufferOffsetAlignment: 256
+      minUniformBufferOffsetAlignment: 256,
+      ...limitOverrides
     },
     queue: {
       writeBuffer(buffer, offset, data) {
@@ -305,6 +315,190 @@ test('packed mechanics-field scratch keys preserve public x4 order and fail clos
   assert.match(
     schroederSpatialMechanicsFieldViewWgsl,
     /field_store\(destination_key, node_index\);[\s\S]*field_store\(destination_key \+ 3u, continuity_domain_id\);/
+  );
+});
+
+test('mechanics-field direct kernels flatten authenticated two-dimensional dispatches', () => {
+  assert.equal(
+    ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,
+    'peercompute.ulg.schroeder-spatial-mechanics-field-view.v5'
+  );
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC, 0x53464635);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION, 5);
+  assert.match(
+    schroederSpatialMechanicsFieldViewWgsl,
+    /let linear_group = workgroup_id\.x \+ workgroup_id\.y \* dispatch_x/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewWgsl,
+    /fn emit_field_candidates\([\s\S]*params\.source_dispatch_x/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewWgsl,
+    /fn materialize_stencil_field_indices\([\s\S]*params\.candidate_dispatch_x/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewWgsl,
+    /fn assemble_field_keys\([\s\S]*params\.candidate_dispatch_x/
+  );
+  assert.doesNotMatch(
+    schroederSpatialMechanicsFieldViewWgsl,
+    /fn (?:emit_field_candidates|materialize_stencil_field_indices|assemble_field_keys)\([^)]*global_invocation_id/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewWgsl,
+    /let consumer_group_count = field_group_count\(field_count\);[\s\S]*let dispatch_x = field_dispatch_x\(consumer_group_count\);[\s\S]*let dispatch_y = field_dispatch_y\(consumer_group_count, dispatch_x\);/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewWgsl,
+    /field_store\(44u, dispatch_x\);[\s\S]*field_store\(45u, dispatch_y\);[\s\S]*field_store\(46u, dispatch_z\);[\s\S]*field_store\(FIELD_DISPATCH_OFFSET_WORDS, dispatch_x\);[\s\S]*field_store\(FIELD_DISPATCH_OFFSET_WORDS \+ 1u, dispatch_y\);[\s\S]*field_store\(FIELD_DISPATCH_OFFSET_WORDS \+ 2u, dispatch_z\);/
+  );
+});
+
+test('mechanics-field runtime partitions direct work and publishes x/y evidence under a small device limit', async () => {
+  const device = createFakeDevice({
+    limits: { maxComputeWorkgroupsPerDimension: 4 }
+  });
+  const particleCount = 10;
+  const levelAssignment = createLevelAssignment(device, particleCount);
+  const identityBuffer = device.createBuffer({
+    label: 'mechanics-field-2d-identity-source',
+    size: particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount,
+    particleIdentityBuffer: identityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 2 * 2 * 2,
+      gridDims: [2, 2, 2],
+      gridShift: 1,
+      gridSpacingM: 0.25
+    }
+  });
+
+  assert.equal(generation.ready, true, generation.reason);
+  const field = generation.mechanicsFieldView;
+  assert.deepEqual(field.sourceDispatchWorkgroups, [1, 1, 1]);
+  assert.deepEqual(field.candidateDispatchWorkgroups, [4, 2, 1]);
+  assert.equal(field.maxComputeWorkgroupsPerDimension, 4);
+  assert.equal(
+    field.directDispatchLinearization,
+    'linearGroup=workgroup.x+workgroup.y*dispatchX'
+  );
+  assert.equal(field.consumerDispatchDimensions, 2);
+  assert.equal(field.consumerDispatchWorkgroupSize, 64);
+  assert.equal(
+    field.consumerDispatchLinearization,
+    'linearGroup=workgroup.x+workgroup.y*dispatchX'
+  );
+  assert.deepEqual(field.constructionDispatchEvidence, {
+    workgroupSize: 64,
+    linearization: 'linearGroup=workgroup.x+workgroup.y*dispatchX',
+    maxComputeWorkgroupsPerDimension: 4,
+    sourceInvocationCount: particleCount,
+    sourceWorkgroups: field.sourceDispatchWorkgroups,
+    candidateInvocationCount: particleCount * 27,
+    candidateWorkgroups: field.candidateDispatchWorkgroups,
+    authenticatedByGpuFinalizer: true
+  });
+  assert.equal(
+    validateSchroederSpatialMechanicsFieldViewDescriptor(field).admitted,
+    true
+  );
+  for (const malformed of [
+    {
+      ...field,
+      sourceDispatchWorkgroups: [2, 1, 1]
+    },
+    {
+      ...field,
+      candidateDispatchWorkgroups: [4, 1, 1]
+    },
+    {
+      ...field,
+      consumerDispatchDimensions: 1
+    },
+    {
+      ...field,
+      constructionDispatchEvidence: {
+        ...field.constructionDispatchEvidence,
+        authenticatedByGpuFinalizer: false
+      }
+    }
+  ]) {
+    assert.equal(
+      validateSchroederSpatialMechanicsFieldViewDescriptor(malformed).status,
+      'schroeder-spatial-mechanics-field-view-rejected-layout'
+    );
+  }
+
+  const fieldPasses = device.encoders.flatMap(({ events }) => (
+    events.filter(({ kind, descriptor }) => (
+      kind === 'pass' && descriptor.label?.includes('mechanics-field-view')
+    ))
+  ));
+  const directDispatchBySuffix = Object.fromEntries(
+    fieldPasses
+      .filter(({ descriptor }) => (
+        /(?:EmitCandidates|MaterializeStencilMap|AssembleKeys)$/.test(
+          descriptor.label
+        )
+      ))
+      .map(({ descriptor, commands }) => [
+        ['EmitCandidates', 'MaterializeStencilMap', 'AssembleKeys'].find(
+          (suffix) => descriptor.label.endsWith(suffix)
+        ),
+        commands.at(-1)?.dispatch
+      ])
+  );
+  assert.deepEqual(directDispatchBySuffix, {
+    EmitCandidates: [1, 1, 1],
+    MaterializeStencilMap: [4, 2, 1],
+    AssembleKeys: [4, 2, 1]
+  });
+
+  const paramsBuffer = field.ownerRuntime.allocationEntries().find(
+    ({ role, arenaIndex }) => (
+      role === 'mechanics-field-params' && arenaIndex === field.arenaIndex
+    )
+  ).buffer;
+  const paramsWrite = device.writes.find(({ buffer }) => buffer === paramsBuffer);
+  const paramsWords = new Uint32Array(
+    paramsWrite.data.buffer,
+    paramsWrite.data.byteOffset,
+    paramsWrite.data.byteLength / 4
+  );
+  assert.deepEqual(
+    Array.from(paramsWords.slice(42, 48)),
+    [1, 4, 4, 1, 2, 0]
+  );
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+});
+
+test('mechanics-field runtime rejects only work beyond two-dimensional dispatch capacity', () => {
+  const device = createFakeDevice({
+    limits: { maxComputeWorkgroupsPerDimension: 2 }
+  });
+  assert.throws(
+    () => createSchroederSpatialMechanicsFieldViewGpu(device, {
+      maxSourceCount: 16,
+      gridNodeCount: 8,
+      gridDims: [2, 2, 2],
+      gridShift: 1,
+      gridSpacingM: 0.25,
+      arenaCount: 1
+    }),
+    /mechanics field candidate dispatch requires 7 workgroups beyond 2x2/
   );
 });
 
@@ -714,7 +908,10 @@ test('mechanics-field construction is one exact direct packed-radix topology', a
     paramsWrite.data.byteOffset,
     paramsWrite.data.byteLength / 4
   );
-  assert.deepEqual(Array.from(paramsWords.slice(42, 48)), [0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(
+    Array.from(paramsWords.slice(42, 48)),
+    [72, 1944, 65535, 1, 1, 0]
+  );
 
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
   assert.equal(await generation.releasePromise, true);
@@ -769,6 +966,7 @@ test('mechanics-field build publishes complete nested GPU timestamp substage spa
     begins.map(({ descriptor }) => descriptor.producerId),
     [
       'schroeder-spatial-generation-command-encoder',
+      'schroeder-spatial-active-source-view-build',
       'schroeder-spatial-directory-prepare',
       'schroeder-spatial-key-emission',
       'webgpu-stable-radix-sort',

@@ -1935,56 +1935,56 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       computeBufferBinding(2, 'uniform')
     ];
     const beginHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-begin-heat.v4',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-begin-heat.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-begin-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'begin_heat_receipt',
       bindings
     });
     const clearHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-clear-heat.v4',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-clear-heat.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-clear-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'clear_heat_rows',
       bindings
     });
     const buildHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-build-heat.v4',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-build-heat.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-build-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'begin_heat_build',
       bindings
     });
     const main = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field.v4',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'main',
       bindings
     });
     const claim = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-claim.v5',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-claim.v6',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-claim',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'claim_velocity_state',
       bindings
     });
     const contact = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-contact.v4',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-contact.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-contact',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'contact_fields',
       bindings
     });
     const summarizeHeat = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-summarize-heat.v4',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-summarize-heat.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-summarize-heat',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'summarize_heat_rows',
       bindings
     });
     const seal = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-seal-velocity.v4',
+      cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-seal-velocity.v5',
       label: 'ulg-mls-mpm-grid-update-mechanics-field-seal-velocity',
       code: mlsMpmMechanicsFieldGridUpdateWgsl,
       entryPoint: 'seal_velocity_state',
@@ -2002,7 +2002,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     ];
     const transportStage = phaseVolumeTransportAuthority
       ? createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-schroeder-phase-volume-transport.stage.v3',
+          cacheKey: 'ulg-schroeder-phase-volume-transport.stage.v4',
           label: 'ulg-schroeder-phase-volume-transport-stage',
           code: schroederSpatialPhaseVolumeTransportWgsl,
           entryPoint: 'stage_transport',
@@ -2011,7 +2011,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       : null;
     const transportValidate = phaseVolumeTransportAuthority
       ? createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-schroeder-phase-volume-transport.validate-staged.v3',
+          cacheKey: 'ulg-schroeder-phase-volume-transport.validate-staged.v4',
           label: 'ulg-schroeder-phase-volume-transport-validate-staged',
           code: schroederSpatialPhaseVolumeTransportWgsl,
           entryPoint: 'validate_staged_transport',
@@ -2020,7 +2020,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       : null;
     const transportCommit = phaseVolumeTransportAuthority
       ? createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-schroeder-phase-volume-transport.commit.v3',
+          cacheKey: 'ulg-schroeder-phase-volume-transport.commit.v4',
           label: 'ulg-schroeder-phase-volume-transport-commit',
           code: schroederSpatialPhaseVolumeTransportWgsl,
           entryPoint: 'commit_transport',
@@ -2235,6 +2235,13 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     update.status = 'submitted-unverified';
     update.fieldStateUpdateSubmittedInPlace = true;
     update.fieldStateUpdatedInPlace = false;
+    update.mechanicsFieldIndirectDispatchDimensions = 2;
+    update.mechanicsFieldIndirectDispatchLinearization =
+      'linearGroup=workgroup.x+workgroup.y*dispatchX';
+    update.mechanicsFieldSourceDispatchWorkgroups =
+      fieldExecution.sourceDispatchWorkgroups;
+    update.mechanicsFieldCandidateDispatchWorkgroups =
+      fieldExecution.candidateDispatchWorkgroups;
     update.mechanicsFieldEnergyReceipt = Object.freeze({
       schema: 'peercompute.ulg.schroeder-mechanics-field-energy-receipt.v3',
       status: receiptModeFlags === 0

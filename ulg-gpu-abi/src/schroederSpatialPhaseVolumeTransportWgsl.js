@@ -165,6 +165,9 @@ const FIELD_STATE_EMPTY: u32 = ${u32(
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY
 )};
 const FIELD_KEY_WORDS: u32 = 4u;
+const FIELD_WORKGROUP_SIZE: u32 = ${u32(
+  SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE
+)};
 const FIELD_ACCUMULATOR_WORDS: u32 = 8u;
 const FIELD_STATE_WORDS: u32 = 8u;
 const FIELD_PRESSURE_WORDS: u32 = ${u32(
@@ -319,6 +322,46 @@ fn field_store(word: u32, value: u32) {
   atomicStore(&field_view[word], value);
 }
 
+fn field_dispatch_shape_admitted() -> bool {
+  let field_count = field_load(34u);
+  let group_count = field_count / FIELD_WORKGROUP_SIZE
+    + select(0u, 1u, field_count % FIELD_WORKGROUP_SIZE != 0u);
+  let dispatch_x = field_load(60u);
+  let dispatch_y = field_load(61u);
+  let dispatch_z = field_load(62u);
+  if (field_count == 0u) {
+    return dispatch_x == 0u
+      && dispatch_y == 0u
+      && dispatch_z == 0u
+      && field_load(44u) == 0u
+      && field_load(45u) == 0u
+      && field_load(46u) == 0u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > group_count
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  let expected_y = group_count / dispatch_x
+    + select(0u, 1u, group_count % dispatch_x != 0u);
+  return dispatch_y == expected_y
+    && field_load(44u) == dispatch_x
+    && field_load(45u) == dispatch_y
+    && field_load(46u) == dispatch_z;
+}
+
+fn field_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>
+) -> u32 {
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * field_load(60u);
+  return linear_group * FIELD_WORKGROUP_SIZE + local_id.x;
+}
+
 fn field_receipt_offset() -> u32 {
   return field_load(30u) - FIELD_RECEIPT_WORDS;
 }
@@ -381,6 +424,9 @@ fn reject_transport() {
     );
   }
   field_store(2u, FIELD_FAIL_CLOSED);
+  field_store(44u, 0u);
+  field_store(45u, 0u);
+  field_store(46u, 0u);
   field_store(60u, 0u);
   field_store(61u, 0u);
   field_store(62u, 0u);
@@ -529,6 +575,7 @@ fn field_admitted() -> bool {
     && field_pressure_offset()
       + params.field_capacity * FIELD_PRESSURE_WORDS
       == arrayLength(&field_view)
+    && field_dispatch_shape_admitted()
     && field_receipt_admitted()
     && field_pressure_receipt_admitted()
     && proposal_admitted()
@@ -1127,9 +1174,10 @@ fn transport_balance_tolerance(sum_abs: f32, operation_count: u32) -> f32 {
 
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE})
 fn stage_transport(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
-  let first = global_id.x;
+  let first = field_linear_invocation(local_id, workgroup_id);
   if (!field_admitted() || !scratch_admitted()) {
     reject_scratch();
     return;
@@ -1187,9 +1235,10 @@ fn stage_transport(
 
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE})
 fn validate_staged_transport(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
-  let field_index = global_id.x;
+  let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_admitted() || !scratch_admitted()) {
     reject_scratch();
     return;
@@ -1203,9 +1252,10 @@ fn validate_staged_transport(
 
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE})
 fn commit_transport(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
-  let field_index = global_id.x;
+  let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!scratch_admitted()
       || scratch_load(SCRATCH_FAILURE_WORD) != 0u) {
     if (field_index == 0u) { reject_transport(); }

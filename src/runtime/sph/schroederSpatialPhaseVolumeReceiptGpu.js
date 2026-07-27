@@ -281,10 +281,19 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
   }
   const maxComputeWorkgroupsPerDimension = positiveInteger(
     device.limits?.maxComputeWorkgroupsPerDimension ?? 65535,
-    'device.limits.maxComputeWorkgroupsPerDimension'
+    'device.limits.maxComputeWorkgroupsPerDimension',
+    65535
   );
   if (layout.sourceGroupCapacity > maxComputeWorkgroupsPerDimension) {
     throw new RangeError('phase-volume receipt source dispatch exceeds the WebGPU limit');
+  }
+  if (
+    layout.fieldGroupCapacity
+      > maxComputeWorkgroupsPerDimension * maxComputeWorkgroupsPerDimension
+  ) {
+    throw new RangeError(
+      'phase-volume receipt field dispatch exceeds the WebGPU two-dimensional limit'
+    );
   }
 
   const module = device.createShaderModule({
@@ -701,6 +710,14 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         readbackPerformed: false,
         fullParticleReadbackRequired: false,
         fullParticleReadbackPerformed: false,
+        mechanicsFieldDispatchDimensions: 2,
+        mechanicsFieldDispatchWorkgroupSize:
+          SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE,
+        mechanicsFieldDispatchLinearization:
+          'linearGroup=workgroup.x+workgroup.y*dispatchX',
+        mechanicsFieldDispatchCapacityWorkgroups:
+          plan.layout.fieldGroupCapacity,
+        maxComputeWorkgroupsPerDimension,
         diagnosticOnly: true,
         stateMutationAllowed: false,
         submitPerformed: false,
@@ -975,6 +992,7 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
     deviceId,
     maxSourceCount: resolvedMaxSourceCount,
     fieldCapacity: resolvedFieldCapacity,
+    maxComputeWorkgroupsPerDimension,
     arenaCount: resolvedArenaCount,
     layout,
     pipelineCount: Object.keys(pipelines).length,

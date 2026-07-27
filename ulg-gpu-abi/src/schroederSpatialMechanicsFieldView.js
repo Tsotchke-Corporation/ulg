@@ -1,8 +1,8 @@
 export const ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-mechanics-field-view.v4';
+  'peercompute.ulg.schroeder-spatial-mechanics-field-view.v5';
 
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC = 0x53464634;
-export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION = 4;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC = 0x53464635;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION = 5;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS = 64;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DESCRIPTOR_WORDS = 32;
@@ -197,6 +197,29 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ABI = Object.freeze({
     'solid-initial-body-domain;non-solid-material-continuum-domain-zero',
   construction:
     'gpu-authenticated-particle-stencil-packed-u32x3-stable-radix-scan-unique-to-public-u32x4',
+  constructionDispatch: Object.freeze({
+    directLinearization:
+      'linearGroup=workgroup.x+workgroup.y*dispatchX',
+    sourceShape:
+      'ceil(sourceCount/64) workgroups partitioned over device-limit-bounded x/y',
+    candidateShape:
+      'ceil(candidateCount/64) workgroups partitioned over device-limit-bounded x/y',
+    capacityPolicy:
+      'reject only beyond maxComputeWorkgroupsPerDimension squared',
+    evidence:
+      'runtime publishes immutable source/candidate x-y-z workgroup shapes'
+  }),
+  consumerDispatch: Object.freeze({
+    indirectRowWords:
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS,
+    shape:
+      'ceil(fieldCount/64) workgroups partitioned over producer-device-limit-bounded x/y with z=1',
+    linearization:
+      'linearGroup=workgroup.x+workgroup.y*dispatchX;invocation=linearGroup*64+local.x',
+    authentication:
+      'header-dispatch-row-equals-indirect-row;nonzero-shape-is-minimal-y-and-completely-covers-fieldCount',
+    failClosed: 'zero-x-y-z'
+  }),
   constructionEvidenceStatusWord: 53,
   constructionEvidenceStatuses: Object.freeze({
     ready: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_UNIQUE_STATUS_READY,
@@ -240,6 +263,67 @@ function integer(value, label, min = 0, max = UINT32_MAX) {
     throw new RangeError(`${label} must be an integer in [${min}, ${max}]`);
   }
   return number;
+}
+
+function exactTwoDimensionalDispatchShape(
+  invocationCount,
+  workgroupSize,
+  maxComputeWorkgroupsPerDimension
+) {
+  const groupCount = Math.ceil(invocationCount / workgroupSize);
+  const x = Math.min(groupCount, maxComputeWorkgroupsPerDimension);
+  return [x, Math.ceil(groupCount / x), 1];
+}
+
+function dispatchTelemetryAdmitted(view) {
+  const workgroupSize = Number(view?.consumerDispatchWorkgroupSize);
+  const maxDimension = Number(view?.maxComputeWorkgroupsPerDimension);
+  if (
+    workgroupSize !== SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
+    || !Number.isInteger(maxDimension)
+    || maxDimension < 1
+    || maxDimension > 65535
+    || view?.consumerDispatchDimensions !== 2
+    || view?.directDispatchLinearization
+      !== 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+    || view?.consumerDispatchLinearization
+      !== 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+  ) {
+    return false;
+  }
+  for (const [shape, count] of [
+    [view.sourceDispatchWorkgroups, view.sourceCount],
+    [view.candidateDispatchWorkgroups, view.candidateCount]
+  ]) {
+    if (
+      (!Array.isArray(shape) && !ArrayBuffer.isView(shape))
+      || shape.length !== 3
+      || !shape.every((value) => Number.isInteger(value) && value >= 1)
+      || shape[0] > maxDimension
+      || shape[1] > maxDimension
+      || shape[2] !== 1
+    ) {
+      return false;
+    }
+    const expected = exactTwoDimensionalDispatchShape(
+      count,
+      workgroupSize,
+      maxDimension
+    );
+    if (shape.some((value, axis) => value !== expected[axis])) {
+      return false;
+    }
+  }
+  const evidence = view.constructionDispatchEvidence;
+  return evidence?.workgroupSize === workgroupSize
+    && evidence?.linearization
+      === 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+    && evidence?.maxComputeWorkgroupsPerDimension === maxDimension
+    && evidence?.sourceInvocationCount === view.sourceCount
+    && evidence?.sourceWorkgroups === view.sourceDispatchWorkgroups
+    && evidence?.candidateInvocationCount === view.candidateCount
+    && evidence?.candidateWorkgroups === view.candidateDispatchWorkgroups
+    && evidence?.authenticatedByGpuFinalizer === true;
 }
 
 function finitePositive(value, label) {
@@ -604,6 +688,7 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
       !== expectedLayout.pressureCapacityWords
     || view.layout?.wordLength !== expectedLayout.wordLength
     || view.layout?.byteLength !== expectedLayout.byteLength
+    || !dispatchTelemetryAdmitted(view)
   ) {
     return {
       admitted: false,

@@ -651,6 +651,79 @@ function nowMs() {
     : Date.now();
 }
 
+/**
+ * Capture the optional synchronous queue-stage summary interface without
+ * assuming that every active GPU timestamp recorder implements it.
+ *
+ * Timestamp-query span recorders resolve asynchronously and intentionally do
+ * not expose `stageGpuMs()` / `stageGpuStats()`. Queue-fence recorders do. The
+ * shared runtime accepts both recorder kinds, so `active` alone is not a method
+ * capability contract.
+ */
+export function summarizeGpuTimestampRecorderQueueStages(
+  gpuTimestampRecorder = null
+) {
+  const provided = gpuTimestampRecorder !== null
+    && gpuTimestampRecorder !== undefined;
+  const active = gpuTimestampRecorder?.active === true;
+  const capabilities = {
+    measureQueueStage:
+      typeof gpuTimestampRecorder?.measureQueueStage === 'function',
+    encoderSpans: Boolean(
+      gpuTimestampRecorder?.encoderSpansSupported !== false
+      && typeof gpuTimestampRecorder?.beginEncoderSpan === 'function'
+      && typeof gpuTimestampRecorder?.endEncoderSpan === 'function'
+    ),
+    stageGpuMs: typeof gpuTimestampRecorder?.stageGpuMs === 'function',
+    stageGpuStats: typeof gpuTimestampRecorder?.stageGpuStats === 'function'
+  };
+  let stageGpuMs = null;
+  let stageGpuStats = null;
+  let stageGpuMsValid = false;
+  let stageGpuStatsValid = false;
+  if (active && capabilities.stageGpuMs) {
+    const value = gpuTimestampRecorder.stageGpuMs();
+    stageGpuMsValid = Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+    );
+    stageGpuMs = stageGpuMsValid ? value : null;
+  }
+  if (active && capabilities.stageGpuStats) {
+    const value = gpuTimestampRecorder.stageGpuStats();
+    stageGpuStatsValid = Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+    );
+    stageGpuStats = stageGpuStatsValid ? value : null;
+  }
+  const status = !provided
+    ? 'gpu-timestamp-recorder-not-provided'
+    : !active
+      ? 'gpu-timestamp-recorder-inactive'
+      : !capabilities.stageGpuMs && !capabilities.stageGpuStats
+        ? 'gpu-timestamp-recorder-stage-summary-unavailable'
+        : (
+            capabilities.stageGpuMs !== stageGpuMsValid
+            || capabilities.stageGpuStats !== stageGpuStatsValid
+          )
+          ? 'gpu-timestamp-recorder-stage-summary-invalid'
+          : !capabilities.stageGpuMs || !capabilities.stageGpuStats
+            ? 'gpu-timestamp-recorder-stage-summary-partial'
+            : 'gpu-timestamp-recorder-stage-summary-ready';
+  return {
+    status,
+    recorderSchema: gpuTimestampRecorder?.schema ?? null,
+    recorderKind: gpuTimestampRecorder?.recorderKind ?? null,
+    active,
+    capabilities,
+    stageGpuMs,
+    stageGpuStats
+  };
+}
+
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -3237,9 +3310,9 @@ function createMechanicsFieldViewIndirectDispatchArgs(
     usage: GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_DST
   });
   return {
-    schema: 'peercompute.ulg.mls-mpm-mechanics-field-view-indirect-dispatch.v1',
+    schema: 'peercompute.ulg.mls-mpm-mechanics-field-view-indirect-dispatch.v2',
     status: 'gpu-authored-mechanics-field-view-indirect-dispatch-ready',
-    source: 'ss-spatial-mechanics-field-view-v1',
+    source: 'ss-spatial-mechanics-field-view-v5',
     buffer,
     ownsBuffer: true,
     bufferByteLength: COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT,
@@ -3254,6 +3327,18 @@ function createMechanicsFieldViewIndirectDispatchArgs(
     workgroupCountY: null,
     workgroupCountZ: null,
     workgroupSize: 64,
+    dispatchDimensions: 2,
+    dispatchLinearization:
+      'linearGroup=workgroup.x+workgroup.y*dispatchX',
+    sourceDispatchWorkgroups:
+      schroederSpatialDirectory.mechanicsFieldViewExecution
+        ?.sourceDispatchWorkgroups ?? null,
+    candidateDispatchWorkgroups:
+      schroederSpatialDirectory.mechanicsFieldViewExecution
+        ?.candidateDispatchWorkgroups ?? null,
+    maxComputeWorkgroupsPerDimension:
+      schroederSpatialDirectory.mechanicsFieldViewExecution
+        ?.maxComputeWorkgroupsPerDimension ?? null,
     activeGridNodeCount: null,
     activeGridNodeCountKnown: false,
     activeGridNodeCapacity:
@@ -3348,6 +3433,18 @@ function activeGridIndirectDispatchDescriptor(indirectDispatchArgs) {
     workgroupCountY: indirectDispatchArgs.workgroupCountY,
     workgroupCountZ: indirectDispatchArgs.workgroupCountZ,
     workgroupSize: indirectDispatchArgs.workgroupSize,
+    dispatchDimensions: indirectDispatchArgs.dispatchDimensions ?? 1,
+    dispatchLinearization: indirectDispatchArgs.dispatchLinearization ?? null,
+    sourceDispatchWorkgroups:
+      indirectDispatchArgs.sourceDispatchWorkgroups
+        ? [...indirectDispatchArgs.sourceDispatchWorkgroups]
+        : null,
+    candidateDispatchWorkgroups:
+      indirectDispatchArgs.candidateDispatchWorkgroups
+        ? [...indirectDispatchArgs.candidateDispatchWorkgroups]
+        : null,
+    maxComputeWorkgroupsPerDimension:
+      indirectDispatchArgs.maxComputeWorkgroupsPerDimension ?? null,
     activeGridNodeCount: indirectDispatchArgs.activeGridNodeCount,
     activeGridNodeCountKnown: indirectDispatchArgs.activeGridNodeCountKnown !== false,
     activeGridNodeCapacity: indirectDispatchArgs.activeGridNodeCapacity
@@ -3384,6 +3481,42 @@ function attachActiveGridIndirectDispatchTopology(dispatchTopology, indirectDisp
     dispatchTopology[stageId].indirectDispatchUsed = descriptor.indirectDispatchUsed;
     dispatchTopology[stageId].indirectDispatchArgsBufferByteLength = descriptor.bufferByteLength;
     dispatchTopology[stageId].indirectDispatchWorkgroupCountX = descriptor.workgroupCountX;
+  }
+  return dispatchTopology;
+}
+
+function attachMechanicsFieldIndirectDispatchTopology(
+  dispatchTopology,
+  indirectDispatchArgs
+) {
+  if (!dispatchTopology || !indirectDispatchArgs) return dispatchTopology;
+  const descriptor = activeGridIndirectDispatchDescriptor(
+    indirectDispatchArgs
+  );
+  dispatchTopology.mechanicsField.indirectDispatch = descriptor;
+  for (const stageId of [
+    'p2gAccumulatorClear',
+    'p2gFinalize',
+    'gridUpdate'
+  ]) {
+    if (!dispatchTopology[stageId]) continue;
+    dispatchTopology[stageId].dispatchSubmissionMode =
+      descriptor.dispatchMode;
+    dispatchTopology[stageId].indirectDispatchReady = true;
+    dispatchTopology[stageId].indirectDispatchUsed =
+      descriptor.indirectDispatchUsed;
+    dispatchTopology[stageId].indirectDispatchArgsBufferByteLength =
+      descriptor.bufferByteLength;
+    dispatchTopology[stageId].indirectDispatchWorkgroupCountX =
+      descriptor.workgroupCountX;
+    dispatchTopology[stageId].indirectDispatchWorkgroupCountY =
+      descriptor.workgroupCountY;
+    dispatchTopology[stageId].indirectDispatchWorkgroupCountZ =
+      descriptor.workgroupCountZ;
+    dispatchTopology[stageId].indirectDispatchDimensions =
+      descriptor.dispatchDimensions;
+    dispatchTopology[stageId].indirectDispatchLinearization =
+      descriptor.dispatchLinearization;
   }
   return dispatchTopology;
 }
@@ -4391,6 +4524,7 @@ const P2G_FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RE
 const P2G_FIELD_STATE_WORDS: u32 = 8u;
 const P2G_FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const P2G_FIELD_STENCIL_SIZE: u32 = 27u;
+const P2G_FIELD_WORKGROUP_SIZE: u32 = 64u;
 const P2G_FIELD_CONTRIBUTION_ROWS: u32 = 3u;
 const P2G_FIELD_INVALID_INDEX: u32 = 0xffffffffu;
 const P2G_FIELD_RECEIPT_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC}u;
@@ -4419,6 +4553,59 @@ fn p2g_field_word(index: u32) -> u32 {
 
 fn p2g_field_store_word(index: u32, value: u32) {
   atomicStore(&grid_accumulators[index], bitcast<i32>(value));
+}
+
+fn p2g_field_dispatch_shape_admitted() -> bool {
+  let field_count = p2g_field_word(34u);
+  let group_count = field_count / P2G_FIELD_WORKGROUP_SIZE
+    + select(
+      0u,
+      1u,
+      field_count % P2G_FIELD_WORKGROUP_SIZE != 0u
+    );
+  let dispatch_x = p2g_field_word(
+    ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u
+  );
+  let dispatch_y = p2g_field_word(
+    ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u
+  );
+  let dispatch_z = p2g_field_word(
+    ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u
+  );
+  if (field_count == 0u) {
+    return dispatch_x == 0u
+      && dispatch_y == 0u
+      && dispatch_z == 0u
+      && p2g_field_word(44u) == 0u
+      && p2g_field_word(45u) == 0u
+      && p2g_field_word(46u) == 0u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > group_count
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  let expected_y = group_count / dispatch_x
+    + select(0u, 1u, group_count % dispatch_x != 0u);
+  return dispatch_y == expected_y
+    && p2g_field_word(44u) == dispatch_x
+    && p2g_field_word(45u) == dispatch_y
+    && p2g_field_word(46u) == dispatch_z;
+}
+
+fn p2g_field_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>
+) -> u32 {
+  let dispatch_x = p2g_field_word(
+    ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u
+  );
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * dispatch_x;
+  return linear_group * P2G_FIELD_WORKGROUP_SIZE + local_id.x;
 }
 
 fn p2g_field_receipt_offset() -> u32 {
@@ -4475,6 +4662,9 @@ fn p2g_field_reject() {
         | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE}u)
     );
     p2g_field_store_word(34u, 0u);
+    p2g_field_store_word(44u, 0u);
+    p2g_field_store_word(45u, 0u);
+    p2g_field_store_word(46u, 0u);
     p2g_field_store_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u, 0u);
     p2g_field_store_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u, 0u);
     p2g_field_store_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u, 0u);
@@ -4557,7 +4747,8 @@ fn p2g_field_view_structurally_admitted() -> bool {
     && field_capacity
       <= (capacity_words - pressure_offset) / P2G_FIELD_PRESSURE_WORDS
     && capacity_words
-      == pressure_offset + field_capacity * P2G_FIELD_PRESSURE_WORDS;
+      == pressure_offset + field_capacity * P2G_FIELD_PRESSURE_WORDS
+    && p2g_field_dispatch_shape_admitted();
 }
 
 fn p2g_field_mutation_current() -> bool {
@@ -4786,8 +4977,11 @@ fn p2g_weight_derivative_at(weights_coordinate: f32, offset: i32) -> f32 {
     '@compute @workgroup_size(64)\nfn finalize_grid',
     '\n\nfn compact_mechanics_view_word',
     `@compute @workgroup_size(64)
-fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let field_index = global_id.x;
+fn finalize_grid(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let field_index = p2g_field_linear_invocation(local_id, workgroup_id);
   if (!p2g_field_view_admitted() || field_index >= p2g_field_word(34u)) {
     return;
   }
@@ -4957,8 +5151,11 @@ fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
   atomicStore(&grid_accumulators[accumulator_base + 3u], 0);
 }`,
     `@compute @workgroup_size(64)
-fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let field_index = global_id.x;
+fn clear_accumulators(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let field_index = p2g_field_linear_invocation(local_id, workgroup_id);
   if (!p2g_field_view_admitted() || field_index >= p2g_field_word(34u)) {
     return;
   }
@@ -5044,32 +5241,21 @@ fn preflight_mechanics_field_header() {
 @compute @workgroup_size(1)
 fn preflight_mechanics_field_layout() {
   if (!preflight_mechanics_field_continue()) { return; }
-  let field_count = p2g_field_word(34u);
-  let expected_dispatch_x = field_count / 64u
-    + select(0u, 1u, field_count % 64u != 0u);
-  let expected_dispatch_yz = select(0u, 1u, field_count > 0u);
   if (p2g_field_word(35u) != 0u
       || p2g_field_word(37u) != 0u
       || p2g_field_word(43u) != 0u
-      || p2g_field_word(44u) != expected_dispatch_x
-      || p2g_field_word(45u) != expected_dispatch_yz
-      || p2g_field_word(46u) != expected_dispatch_yz
-      || p2g_field_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u)
-        != expected_dispatch_x
-      || p2g_field_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u)
-        != expected_dispatch_yz
-      || p2g_field_word(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u)
-        != expected_dispatch_yz) {
+      || !p2g_field_dispatch_shape_admitted()) {
     p2g_field_reject();
   }
 }
 
 @compute @workgroup_size(64)
 fn validate_mechanics_field_keys(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
   if (!preflight_mechanics_field_continue()) { return; }
-  let field_index = global_id.x;
+  let field_index = p2g_field_linear_invocation(local_id, workgroup_id);
   let field_count = p2g_field_word(34u);
   if (field_index >= field_count) { return; }
   let key_offset = p2g_field_word(26u) + field_index * P2G_FIELD_KEY_WORDS;
@@ -6609,6 +6795,7 @@ const FIELD_READY_ADMITTED: u32 = ${
 }u;
 const FIELD_KEY_WORDS: u32 = 4u;
 const FIELD_STATE_WORDS: u32 = 8u;
+const FIELD_WORKGROUP_SIZE: u32 = 64u;
 const FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
 const FIELD_ACCUMULATOR_WORDS: u32 = 8u;
 const FIELD_RECEIPT_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS}u;
@@ -6643,6 +6830,46 @@ fn field_word(index: u32) -> u32 {
 
 fn field_store(index: u32, value: u32) {
   atomicStore(&field_view[index], value);
+}
+
+fn field_dispatch_shape_admitted() -> bool {
+  let field_count = field_word(34u);
+  let group_count = field_count / FIELD_WORKGROUP_SIZE
+    + select(0u, 1u, field_count % FIELD_WORKGROUP_SIZE != 0u);
+  let dispatch_x = field_word(60u);
+  let dispatch_y = field_word(61u);
+  let dispatch_z = field_word(62u);
+  if (field_count == 0u) {
+    return dispatch_x == 0u
+      && dispatch_y == 0u
+      && dispatch_z == 0u
+      && field_word(44u) == 0u
+      && field_word(45u) == 0u
+      && field_word(46u) == 0u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > group_count
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  let expected_y = group_count / dispatch_x
+    + select(0u, 1u, group_count % dispatch_x != 0u);
+  return dispatch_y == expected_y
+    && field_word(44u) == dispatch_x
+    && field_word(45u) == dispatch_y
+    && field_word(46u) == dispatch_z;
+}
+
+fn field_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>
+) -> u32 {
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * field_word(60u);
+  return linear_group * FIELD_WORKGROUP_SIZE + local_id.x;
 }
 
 fn field_receipt_offset() -> u32 {
@@ -6697,6 +6924,9 @@ fn field_receipt_reject() {
     SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
     | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
   }u);
+  field_store(44u, 0u);
+  field_store(45u, 0u);
+  field_store(46u, 0u);
   field_store(60u, 0u);
   field_store(61u, 0u);
   field_store(62u, 0u);
@@ -6761,7 +6991,8 @@ fn field_structurally_admitted() -> bool {
       == pressure_offset + field_word(32u) * FIELD_PRESSURE_WORDS
     && field_word(41u)
       == pressure_offset + field_word(34u) * FIELD_PRESSURE_WORDS
-    && field_word(42u) <= arrayLength(&field_view);
+    && field_word(42u) <= arrayLength(&field_view)
+    && field_dispatch_shape_admitted();
 }
 
 fn field_operation_admitted(encoding: u32) -> bool {
@@ -6803,8 +7034,11 @@ fn begin_heat_receipt() {
 }
 
 @compute @workgroup_size(64)
-fn clear_heat_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let field_index = global_id.x;
+fn clear_heat_rows(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_structurally_admitted()
       || !field_receipt_admitted(FIELD_RECEIPT_PHASE_HEAT_CLEARING)
       || field_index >= field_word(34u)) { return; }
@@ -6929,8 +7163,11 @@ fn field_wall_corrected_normal_velocity(
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let field_index = global_id.x;
+fn main(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_operation_admitted(
       ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u
     ) || field_index >= field_word(34u)) { return; }
@@ -7092,8 +7329,11 @@ fn field_contact_pair_policy(left_key: u32, right_key: u32) -> u32 {
 }
 
 @compute @workgroup_size(64)
-fn contact_fields(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let first = global_id.x;
+fn contact_fields(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let first = field_linear_invocation(local_id, workgroup_id);
   let field_count = field_word(34u);
   if (!field_operation_admitted(
       ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u
@@ -7181,8 +7421,11 @@ fn contact_fields(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
-fn summarize_heat_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let field_index = global_id.x;
+fn summarize_heat_rows(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_operation_admitted(
       ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u
     ) || !field_receipt_admitted(FIELD_RECEIPT_PHASE_HEAT_BUILDING)
@@ -8237,6 +8480,18 @@ export function createFusedSchroederActiveNodeBinding({
     mechanicsFieldViewLayout: mechanicsFieldViewEnabled
       ? mechanicsFieldView.layout
       : null,
+    mechanicsFieldSourceDispatchWorkgroups: mechanicsFieldViewEnabled
+      ? mechanicsFieldView.sourceDispatchWorkgroups
+      : null,
+    mechanicsFieldCandidateDispatchWorkgroups: mechanicsFieldViewEnabled
+      ? mechanicsFieldView.candidateDispatchWorkgroups
+      : null,
+    mechanicsFieldIndirectDispatchDimensions:
+      mechanicsFieldViewEnabled ? 2 : 0,
+    mechanicsFieldIndirectDispatchLinearization:
+      mechanicsFieldViewEnabled
+        ? 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+        : null,
     ownsActiveNodeBuffer: false,
     retainedActiveNodeBuffer: true,
     activeNodeBufferByteLength: execution.layout?.byteLength
@@ -8307,6 +8562,18 @@ function fusedSchroederActiveNodeFilterMetadata(filter = null) {
       filter?.mechanicsFieldViewIndirectDispatchOffsetBytes ?? 0,
     mechanicsFieldViewFieldCapacity:
       filter?.mechanicsFieldViewLayout?.fieldCapacity ?? 0,
+    mechanicsFieldSourceDispatchWorkgroups:
+      filter?.mechanicsFieldSourceDispatchWorkgroups
+        ? [...filter.mechanicsFieldSourceDispatchWorkgroups]
+        : null,
+    mechanicsFieldCandidateDispatchWorkgroups:
+      filter?.mechanicsFieldCandidateDispatchWorkgroups
+        ? [...filter.mechanicsFieldCandidateDispatchWorkgroups]
+        : null,
+    mechanicsFieldIndirectDispatchDimensions:
+      filter?.mechanicsFieldIndirectDispatchDimensions ?? 0,
+    mechanicsFieldIndirectDispatchLinearization:
+      filter?.mechanicsFieldIndirectDispatchLinearization ?? null,
     retainedActiveNodeBuffer: filter?.retainedActiveNodeBuffer === true,
     activeNodeBufferByteLength: filter?.activeNodeBufferByteLength ?? 0,
     activeNodeBufferSource: filter?.activeNodeBufferSource ?? null
@@ -9249,7 +9516,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: mechanicsFieldViewEnabled
-        ? `ulg-mls-mpm-p2g-grid-projection.mechanics-field.deterministic-reduce.v4.${p2gVariant}`
+        ? `ulg-mls-mpm-p2g-grid-projection.mechanics-field.deterministic-reduce.v5.${p2gVariant}`
         : (compactMechanicsViewEnabled
         ? `ulg-mls-mpm-p2g-grid-projection.compact-mechanics.scatter.v10.${p2gVariant}`
         : (activeGridDispatch.useActiveGrid
@@ -9268,7 +9535,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: mechanicsFieldViewEnabled
-        ? `ulg-mls-mpm-p2g-grid-projection.mechanics-field.finalize.v3.${p2gVariant}`
+        ? `ulg-mls-mpm-p2g-grid-projection.mechanics-field.finalize.v4.${p2gVariant}`
         : (compactMechanicsViewEnabled
         ? `ulg-mls-mpm-p2g-grid-projection.compact-mechanics.finalize.v10.${p2gVariant}`
         : (activeGridDispatch.useActiveGrid
@@ -9304,7 +9571,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       for (const stage of MECHANICS_FIELD_PREFLIGHT_ENTRY_POINTS) {
         mechanicsFieldPreflightPipelineInfos.push(
           createCachedExplicitComputePipeline(device, {
-            cacheKey: `ulg-mls-mpm-p2g-grid-projection.mechanics-field.preflight-${stage.id}.v3.${p2gVariant}`,
+            cacheKey: `ulg-mls-mpm-p2g-grid-projection.mechanics-field.preflight-${stage.id}.v4.${p2gVariant}`,
             label: `ulg-mls-mpm-mechanics-field-view-preflight-${stage.id}`,
             code: p2gCode,
             entryPoint: stage.entryPoint,
@@ -9324,7 +9591,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       : null;
     const mechanicsFieldValidationPipelineInfo = mechanicsFieldViewEnabled
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: `ulg-mls-mpm-p2g-grid-projection.mechanics-field.validate-keys.v3.${p2gVariant}`,
+        cacheKey: `ulg-mls-mpm-p2g-grid-projection.mechanics-field.validate-keys.v4.${p2gVariant}`,
         label: 'ulg-mls-mpm-mechanics-field-view-validate-keys',
         code: p2gCode,
         entryPoint: 'validate_mechanics_field_keys',
@@ -9333,7 +9600,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       : null;
     const mechanicsFieldP2gSealPipelineInfo = mechanicsFieldViewEnabled
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: `ulg-mls-mpm-p2g-grid-projection.mechanics-field.seal-momentum.v3.${p2gVariant}`,
+        cacheKey: `ulg-mls-mpm-p2g-grid-projection.mechanics-field.seal-momentum.v4.${p2gVariant}`,
         label: 'ulg-mls-mpm-mechanics-field-seal-momentum-state',
         code: p2gCode,
         entryPoint: 'seal_mechanics_field_momentum_state',
@@ -9408,7 +9675,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       : null;
     const { pipeline: gridUpdatePipeline, bindGroupLayout: gridUpdateBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: mechanicsFieldViewEnabled
-        ? 'ulg-mls-mpm-grid-update.mechanics-field.v3'
+        ? 'ulg-mls-mpm-grid-update.mechanics-field.v4'
         : (compactMechanicsViewEnabled
         ? 'ulg-mls-mpm-grid-update.compact-mechanics.v3'
         : (activeGridDispatch.useActiveGrid
@@ -9465,7 +9732,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     });
     const mechanicsFieldGridUpdateClaimPipelineInfo = mechanicsFieldViewEnabled
       ? createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-claim.v5',
+          cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-claim.v6',
           label: 'ulg-mls-mpm-grid-update-mechanics-field-claim',
           code: mlsMpmMechanicsFieldGridUpdateWgsl,
           entryPoint: 'claim_velocity_state',
@@ -9481,7 +9748,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           ['build-heat', 'begin_heat_build'],
           ['summarize-heat', 'summarize_heat_rows']
         ].map(([stage, entryPoint]) => createCachedExplicitComputePipeline(device, {
-          cacheKey: `ulg-mls-mpm-grid-update.mechanics-field-${stage}.v4`,
+          cacheKey: `ulg-mls-mpm-grid-update.mechanics-field-${stage}.v5`,
           label: `ulg-mls-mpm-grid-update-mechanics-field-${stage}`,
           code: mlsMpmMechanicsFieldGridUpdateWgsl,
           entryPoint,
@@ -9522,7 +9789,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         : null;
     const mechanicsFieldContactPipelineInfo = mechanicsFieldViewEnabled
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-contact.v4',
+        cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-contact.v5',
         label: 'ulg-mls-mpm-grid-update-mechanics-field-contact',
         code: mlsMpmMechanicsFieldGridUpdateWgsl,
         entryPoint: 'contact_fields',
@@ -9534,7 +9801,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       : null;
     const mechanicsFieldVelocitySealPipelineInfo = mechanicsFieldViewEnabled
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-seal-velocity.v4',
+        cacheKey: 'ulg-mls-mpm-grid-update.mechanics-field-seal-velocity.v5',
         label: 'ulg-mls-mpm-grid-update-mechanics-field-seal-velocity',
         code: mlsMpmMechanicsFieldGridUpdateWgsl,
         entryPoint: 'seal_velocity_state',
@@ -9996,8 +10263,15 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       schroederActiveNodeFilter.gpuAdmissionStatus = spatialAuthorityEvidence.status;
       schroederActiveNodeFilter.gpuFallbackObserved = !spatialAuthorityEvidence.admitted;
     }
+    attachMechanicsFieldIndirectDispatchTopology(
+      dispatchTopology,
+      mechanicsFieldIndirectDispatchArgs
+    );
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
+    const mechanicsFieldIndirectDispatch = activeGridIndirectDispatchDescriptor(
+      mechanicsFieldIndirectDispatchArgs
+    );
     const webgpuStatus = {
       status: 'webgpu-executed-no-full-readback',
       reason: 'Fused WebGPU MLS-MPM P2G/grid-update/G2P executed without full readback'
@@ -10065,6 +10339,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       schroederActiveNodeFilterStatus: 'superseded-by-canonical-spatial-directory',
       activeGridDispatch,
       activeGridIndirectDispatch,
+      mechanicsFieldIndirectDispatch,
       mechanicsFieldMode: mechanicsFieldViewEnabled
         ? MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
         : MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
@@ -10126,6 +10401,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       fusedResidentMechanics: true,
       activeGridDispatch,
       activeGridIndirectDispatch,
+      mechanicsFieldIndirectDispatch,
       mechanicsFieldMode: mechanicsFieldViewEnabled
         ? MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
         : MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
@@ -10235,7 +10511,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       },
       fusedResidentMechanics: true,
       activeGridDispatch,
-      activeGridIndirectDispatch
+      activeGridIndirectDispatch,
+      mechanicsFieldIndirectDispatch
     };
     const result = {
       schema: 'peercompute.ulg.mls-mpm-fused-mechanics-step.v0',
@@ -10243,6 +10520,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       status: 'fused-mechanics-webgpu-executed-no-full-readback',
       activeGridDispatch,
       activeGridIndirectDispatch,
+      mechanicsFieldIndirectDispatch,
       dispatchTopology,
       p2gGridProjection,
       gridUpdate,
@@ -26453,6 +26731,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     residentQueueFenceStatus = 'complete';
     residentQueueFenceMethod = 'queue.onSubmittedWorkDone';
   }
+  const queueStageGpuSummary = summarizeGpuTimestampRecorderQueueStages(
+    gpuTimestampRecorder
+  );
   const stageTiming = {
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
@@ -26463,12 +26744,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     // whole stage with queue fences and therefore also includes submit latency
     // -- and the fences serialise the pipeline, so the numbers are not
     // interchangeable. Null when profiling was not requested.
-    queueStageGpuMs: gpuTimestampRecorder?.active === true
-      ? gpuTimestampRecorder.stageGpuMs()
-      : null,
-    queueStageGpuStats: gpuTimestampRecorder?.active === true
-      ? (gpuTimestampRecorder.stageGpuStats?.() ?? null)
-      : null,
+    queueStageGpuMs: queueStageGpuSummary.stageGpuMs,
+    queueStageGpuStats: queueStageGpuSummary.stageGpuStats,
+    queueStageGpuSummaryStatus: queueStageGpuSummary.status,
+    queueStageGpuRecorderSchema: queueStageGpuSummary.recorderSchema,
+    queueStageGpuRecorderKind: queueStageGpuSummary.recorderKind,
+    queueStageGpuRecorderCapabilities: queueStageGpuSummary.capabilities,
     queueFenceMs: {
       compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
     },
@@ -28079,17 +28360,20 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     }
   }
 
+  const queueStageGpuSummary = summarizeGpuTimestampRecorderQueueStages(
+    gpuTimestampRecorder
+  );
   const stageTiming = {
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
     stageMs: { ...stageMs },
     // PROF-0. Same contract as the resident step's stageTiming above.
-    queueStageGpuMs: gpuTimestampRecorder?.active === true
-      ? gpuTimestampRecorder.stageGpuMs()
-      : null,
-    queueStageGpuStats: gpuTimestampRecorder?.active === true
-      ? (gpuTimestampRecorder.stageGpuStats?.() ?? null)
-      : null,
+    queueStageGpuMs: queueStageGpuSummary.stageGpuMs,
+    queueStageGpuStats: queueStageGpuSummary.stageGpuStats,
+    queueStageGpuSummaryStatus: queueStageGpuSummary.status,
+    queueStageGpuRecorderSchema: queueStageGpuSummary.recorderSchema,
+    queueStageGpuRecorderKind: queueStageGpuSummary.recorderKind,
+    queueStageGpuRecorderCapabilities: queueStageGpuSummary.capabilities,
     queueFenceMs: {
       compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
     },

@@ -1362,6 +1362,19 @@ test('non-transaction mechanics-field P2G rejects particle-family drift before a
   fixture.mlsMpmParticleState.particleCount = 1;
   const projection = await runCoarseP2gProducer(fixture);
   assert.equal(projection.mechanicsFieldViewExecution, field);
+  assert.equal(projection.mechanicsFieldIndirectDispatchDimensions, 2);
+  assert.equal(
+    projection.mechanicsFieldIndirectDispatchLinearization,
+    'linearGroup=workgroup.x+workgroup.y*dispatchX'
+  );
+  assert.equal(
+    projection.mechanicsFieldSourceDispatchWorkgroups,
+    field.sourceDispatchWorkgroups
+  );
+  assert.equal(
+    projection.mechanicsFieldCandidateDispatchWorkgroups,
+    field.candidateDispatchWorkgroups
+  );
   assert.equal(
     projection.mechanicsFieldP2gReductionMode,
     'stable-radix-ordered-field-reduction'
@@ -2599,6 +2612,19 @@ test('fused coarse-terminal WebGPU grid update is exact, claimed, and retry-safe
     assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
     assert.equal(update.mechanicsFieldMutationInputOrdinal, 1);
     assert.equal(update.mechanicsFieldMutationOutputOrdinal, 2);
+    assert.equal(update.mechanicsFieldIndirectDispatchDimensions, 2);
+    assert.equal(
+      update.mechanicsFieldIndirectDispatchLinearization,
+      'linearGroup=workgroup.x+workgroup.y*dispatchX'
+    );
+    assert.equal(
+      update.mechanicsFieldSourceDispatchWorkgroups,
+      p2gProjection.mechanicsFieldViewExecution.sourceDispatchWorkgroups
+    );
+    assert.equal(
+      update.mechanicsFieldCandidateDispatchWorkgroups,
+      p2gProjection.mechanicsFieldViewExecution.candidateDispatchWorkgroups
+    );
     assert.equal(update.fusedCoarseTerminalTransaction, terminalTransaction);
     assert.equal(update.terminalMicroepochAuthority, terminal.successorMicroepoch);
     assert.equal(update.sourceParticleContinuation, terminal.continuation);

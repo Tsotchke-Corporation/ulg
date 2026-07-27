@@ -352,6 +352,18 @@ test('S9-C ABI is capacity-dispatched and keeps live field counts GPU-only', () 
     wgsl,
     /\(\*receipt\)\[29u\] == source_capacity_groups \+ 2u \* field_capacity_groups/
   );
+  assert.match(
+    wgsl,
+    /fn field_dispatch_shape_admitted\([\s\S]*dispatch_y == expected_y[\s\S]*\(\*field_view\)\[44u\] == dispatch_x[\s\S]*\(\*field_view\)\[45u\] == dispatch_y[\s\S]*\(\*field_view\)\[46u\] == dispatch_z/
+  );
+  assert.match(
+    wgsl,
+    /field_dispatch_shape_admitted\(field_view, field_count\)/
+  );
+  assert.doesNotMatch(
+    wgsl,
+    /\(\*field_view\)\[60u\] == group_count\(field_count\)[\s\S]*\(\*field_view\)\[61u\] == 1u[\s\S]*\(\*field_view\)\[62u\] == 1u/
+  );
 });
 
 test('S9-C one-level proposal is a read-only, same-encoder artifact with no host field count', () => {
@@ -621,7 +633,7 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       field[38] = completionOrdinal;
       field[39] = 1;
       field[40] = 1;
-      // v4 required words bound the immutable pressure tail that follows the
+      // v5 required words bound the immutable pressure tail that follows the
       // full state-capacity bank, matching the mechanics-field producer.
       field[41] =
         fieldLayout.pressureOffsetWords

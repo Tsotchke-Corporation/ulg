@@ -199,6 +199,52 @@ fn group_count(count: u32) -> u32 {
     + select(0u, 1u, count % RECEIPT_WORKGROUP_SIZE != 0u);
 }
 
+fn mechanics_field_dispatch_shape_admitted(field_count: u32) -> bool {
+  let expected_group_count = group_count(field_count);
+  let dispatch_x = mechanics_field[60u];
+  let dispatch_y = mechanics_field[61u];
+  let dispatch_z = mechanics_field[62u];
+  if (field_count == 0u) {
+    return dispatch_x == 0u
+      && dispatch_y == 0u
+      && dispatch_z == 0u
+      && mechanics_field[44u] == 0u
+      && mechanics_field[45u] == 0u
+      && mechanics_field[46u] == 0u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > expected_group_count
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  let expected_y = expected_group_count / dispatch_x
+    + select(
+      0u,
+      1u,
+      expected_group_count % dispatch_x != 0u
+    );
+  return dispatch_y == expected_y
+    && mechanics_field[44u] == dispatch_x
+    && mechanics_field[45u] == dispatch_y
+    && mechanics_field[46u] == dispatch_z;
+}
+
+fn mechanics_field_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>
+) -> u32 {
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * mechanics_field[60u];
+  return linear_group * RECEIPT_WORKGROUP_SIZE + local_id.x;
+}
+
+fn mechanics_field_linear_group(workgroup_id: vec3<u32>) -> u32 {
+  return workgroup_id.x + workgroup_id.y * mechanics_field[60u];
+}
+
 fn control_store(word: u32, value: u32) {
   atomicStore(&receipt_control[word], value);
 }
@@ -300,7 +346,6 @@ fn mechanics_field_header_admitted() -> bool {
   if (arrayLength(&mechanics_field) < FIELD_HEADER_WORDS) { return false; }
   let status = mechanics_field[2u];
   let field_count = mechanics_field[34u];
-  let dispatch_x = group_count(field_count);
   if (
     mechanics_field[0u] != FIELD_MAGIC
     || mechanics_field[1u] != FIELD_VERSION
@@ -335,18 +380,13 @@ fn mechanics_field_header_admitted() -> bool {
     || mechanics_field[39u] != 1u
     || mechanics_field[42u] > arrayLength(&mechanics_field)
     || mechanics_field[43u] != 0u
-    || mechanics_field[44u] != dispatch_x
-    || mechanics_field[45u] != 1u
-    || mechanics_field[46u] != 1u
+    || !mechanics_field_dispatch_shape_admitted(field_count)
     || mechanics_field[54u] != params.source_count
     || mechanics_field[55u] != 1u
     || mechanics_field[56u] != 1u
     || mechanics_field[57u] != 1u
     || mechanics_field[58u] != 0u
     || mechanics_field[59u] != 0u
-    || mechanics_field[60u] != dispatch_x
-    || mechanics_field[61u] != 1u
-    || mechanics_field[62u] != 1u
     || mechanics_field[63u] != 0u
   ) { return false; }
 
@@ -378,7 +418,7 @@ fn mechanics_field_header_admitted() -> bool {
     return false;
   }
 
-  // Mechanics-field view v4 appends immutable pressure rows after the
+  // Mechanics-field view v5 appends immutable pressure rows after the
   // state-capacity bank. The pressure offset is derived here exactly the way
   // the producer derives it, so required/capacity words bound the pressure
   // tail rather than the state tail.
@@ -581,11 +621,11 @@ fn reduce_phase_volume_receipt_sources(
 
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE})
 fn reduce_phase_volume_receipt_fields(
-  @builtin(global_invocation_id) global_id: vec3<u32>,
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
-  let field_index = global_id.x;
+  let field_index =
+    mechanics_field_linear_invocation(local_id, workgroup_id);
   let field_count = admitted_field_count();
   var local_sum = vec4<f32>(0.0);
   var local_condition = vec4<f32>(0.0);
@@ -637,8 +677,11 @@ fn reduce_phase_volume_receipt_fields(
     stride = stride / 2u;
   }
   if (local_id.x == 0u) {
-    partials[params.field_partial_offset_vec4 + workgroup_id.x] = field_sums[0u];
-    partials[params.field_conditioning_offset_vec4 + workgroup_id.x] = condition_sums[0u];
+    let linear_group = mechanics_field_linear_group(workgroup_id);
+    if (linear_group < group_count(field_count)) {
+      partials[params.field_partial_offset_vec4 + linear_group] = field_sums[0u];
+      partials[params.field_conditioning_offset_vec4 + linear_group] = condition_sums[0u];
+    }
   }
 }
 

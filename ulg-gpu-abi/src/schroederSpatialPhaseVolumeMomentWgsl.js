@@ -155,6 +155,36 @@ fn record_invalid_lineage() {
   atomicAdd(&control[CONTROL_INVALID_LINEAGE], 1u);
 }
 
+fn mechanics_field_dispatch_shape_admitted(field_count: u32) -> bool {
+  let group_count = field_count / MOMENT_WORKGROUP_SIZE
+    + select(0u, 1u, field_count % MOMENT_WORKGROUP_SIZE != 0u);
+  let dispatch_x = mechanics_field[60u];
+  let dispatch_y = mechanics_field[61u];
+  let dispatch_z = mechanics_field[62u];
+  if (field_count == 0u) {
+    return dispatch_x == 0u
+      && dispatch_y == 0u
+      && dispatch_z == 0u
+      && mechanics_field[44u] == 0u
+      && mechanics_field[45u] == 0u
+      && mechanics_field[46u] == 0u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > group_count
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  let expected_y = group_count / dispatch_x
+    + select(0u, 1u, group_count % dispatch_x != 0u);
+  return dispatch_y == expected_y
+    && mechanics_field[44u] == dispatch_x
+    && mechanics_field[45u] == dispatch_y
+    && mechanics_field[46u] == dispatch_z;
+}
+
 fn field_identity_admitted() -> bool {
   if (arrayLength(&mechanics_field) < FIELD_HEADER_WORDS) { return false; }
   if (
@@ -192,18 +222,13 @@ fn field_identity_admitted() -> bool {
   let field_count = mechanics_field[34u];
   let descriptor_offset = mechanics_field[24u];
   let key_offset = mechanics_field[26u];
-  let expected_dispatch_x = field_count / MOMENT_WORKGROUP_SIZE
-    + select(0u, 1u, field_count % MOMENT_WORKGROUP_SIZE != 0u);
-  let expected_dispatch_yz = select(0u, 1u, field_count > 0u);
   if (
     field_count > params.field_capacity
     || descriptor_offset > mechanics_field[42u]
     || params.source_count > (mechanics_field[42u] - descriptor_offset) / FIELD_DESCRIPTOR_WORDS
     || key_offset > mechanics_field[42u]
     || field_count > (mechanics_field[42u] - key_offset) / FIELD_KEY_WORDS
-    || mechanics_field[60u] != expected_dispatch_x
-    || mechanics_field[61u] != expected_dispatch_yz
-    || mechanics_field[62u] != expected_dispatch_yz
+    || !mechanics_field_dispatch_shape_admitted(field_count)
   ) { return false; }
   return true;
 }

@@ -49,12 +49,12 @@ struct MechanicsFieldViewParams {
   parent_node_capacity: u32,
   workgroup_size: u32,
   stencil_size: u32,
-  route_control_words: u32,
-  route_dispatch_offset_words: u32,
-  route_dispatch_count: u32,
-  radix_gate_offset_words: u32,
-  radix_gate_count: u32,
-  route_capacity_words: u32,
+  source_dispatch_x: u32,
+  candidate_dispatch_x: u32,
+  dispatch_x_limit: u32,
+  source_dispatch_y: u32,
+  candidate_dispatch_y: u32,
+  reserved_dispatch0: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_rows: array<f32>;
@@ -99,6 +99,31 @@ fn field_finite_f32(value: f32) -> bool {
 
 fn field_integral_f32(value: f32) -> bool {
   return field_finite_f32(value) && value == trunc(value);
+}
+
+fn field_group_count(invocation_count: u32) -> u32 {
+  let width = max(params.workgroup_size, 1u);
+  return invocation_count / width
+    + select(0u, 1u, invocation_count % width != 0u);
+}
+
+fn field_dispatch_x(group_count: u32) -> u32 {
+  return min(group_count, max(params.dispatch_x_limit, 1u));
+}
+
+fn field_dispatch_y(group_count: u32, dispatch_x: u32) -> u32 {
+  let width = max(dispatch_x, 1u);
+  return group_count / width
+    + select(0u, 1u, group_count % width != 0u);
+}
+
+fn field_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>,
+  dispatch_x: u32
+) -> u32 {
+  let linear_group = workgroup_id.x + workgroup_id.y * dispatch_x;
+  return linear_group * params.workgroup_size + local_id.x;
 }
 
 fn field_store(word: u32, value: u32) {
@@ -244,8 +269,15 @@ fn field_source_admitted(source_index: u32) -> bool {
 }
 
 @compute @workgroup_size(64)
-fn emit_field_candidates(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let source_index = global_id.x;
+fn emit_field_candidates(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let source_index = field_linear_invocation(
+    local_id,
+    workgroup_id,
+    params.source_dispatch_x
+  );
   if (source_index >= params.source_count) {
     return;
   }
@@ -404,9 +436,14 @@ fn field_parent_contains_node(node_index: u32) -> bool {
 
 @compute @workgroup_size(64)
 fn materialize_stencil_field_indices(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
-  let sorted_position = global_id.x;
+  let sorted_position = field_linear_invocation(
+    local_id,
+    workgroup_id,
+    params.candidate_dispatch_x
+  );
   if (
     sorted_position >= params.candidate_count
     || sorted_position >= arrayLength(&sorted_candidate_indices)
@@ -455,8 +492,15 @@ fn materialize_stencil_field_indices(
 }
 
 @compute @workgroup_size(64)
-fn assemble_field_keys(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let field_index = global_id.x;
+fn assemble_field_keys(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let field_index = field_linear_invocation(
+    local_id,
+    workgroup_id,
+    params.candidate_dispatch_x
+  );
   let field_count = field_unique_count_without_sentinel();
   if (field_index >= field_count || field_index >= params.field_capacity) {
     return;
@@ -516,8 +560,22 @@ fn field_reject(flags: u32) {
 }
 
 fn field_layout_admitted() -> bool {
+  let source_group_count = field_group_count(params.source_count);
+  let candidate_group_count = field_group_count(params.candidate_count);
+  let expected_source_dispatch_x = field_dispatch_x(source_group_count);
+  let expected_candidate_dispatch_x = field_dispatch_x(candidate_group_count);
   return field_parent_admitted()
+    && params.workgroup_size == 64u
     && params.stencil_size == 27u
+    && params.dispatch_x_limit > 0u
+    && params.source_dispatch_x == expected_source_dispatch_x
+    && params.source_dispatch_y
+      == field_dispatch_y(source_group_count, expected_source_dispatch_x)
+    && params.source_dispatch_y <= params.dispatch_x_limit
+    && params.candidate_dispatch_x == expected_candidate_dispatch_x
+    && params.candidate_dispatch_y
+      == field_dispatch_y(candidate_group_count, expected_candidate_dispatch_x)
+    && params.candidate_dispatch_y <= params.dispatch_x_limit
     && params.key_words == FIELD_KEY_WORDS
     && params.descriptor_words == FIELD_DESCRIPTOR_WORDS
     && params.accumulator_words == FIELD_ACCUMULATOR_WORDS
@@ -536,9 +594,10 @@ fn field_publish(
   unique_count: u32,
   unique_status: u32
 ) {
-  let dispatch_x = field_count / params.workgroup_size
-    + select(0u, 1u, field_count % params.workgroup_size != 0u);
-  let dispatch_yz = select(0u, 1u, field_count > 0u);
+  let consumer_group_count = field_group_count(field_count);
+  let dispatch_x = field_dispatch_x(consumer_group_count);
+  let dispatch_y = field_dispatch_y(consumer_group_count, dispatch_x);
+  let dispatch_z = select(0u, 1u, field_count > 0u);
   field_store(0u, FIELD_MAGIC);
   field_store(1u, FIELD_VERSION);
   field_store(2u, FIELD_STATUS_READY | FIELD_STATUS_ADMITTED);
@@ -593,8 +652,8 @@ fn field_publish(
     field_store(receipt_offset + word, 0u);
   }
   field_store(44u, dispatch_x);
-  field_store(45u, dispatch_yz);
-  field_store(46u, dispatch_yz);
+  field_store(45u, dispatch_y);
+  field_store(46u, dispatch_z);
   field_store(47u, PARENT_MAGIC);
   field_store(48u, PARENT_VERSION);
   field_store(49u, params.parent_node_capacity);
@@ -609,8 +668,8 @@ fn field_publish(
   field_store(58u, 0u);
   field_store(59u, 0u);
   field_store(FIELD_DISPATCH_OFFSET_WORDS, dispatch_x);
-  field_store(FIELD_DISPATCH_OFFSET_WORDS + 1u, dispatch_yz);
-  field_store(FIELD_DISPATCH_OFFSET_WORDS + 2u, dispatch_yz);
+  field_store(FIELD_DISPATCH_OFFSET_WORDS + 1u, dispatch_y);
+  field_store(FIELD_DISPATCH_OFFSET_WORDS + 2u, dispatch_z);
   // Mutable mechanics operations authenticate every in-place transition with
   // this monotonically increasing generation-local ordinal. Word 38 retains
   // the immutable topology build completion ordinal.

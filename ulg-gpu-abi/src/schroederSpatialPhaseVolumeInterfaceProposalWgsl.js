@@ -40,7 +40,8 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY,
-  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
 } from './schroederSpatialMechanicsFieldView.js';
 import {
   SCHROEDER_SPATIAL_MECHANICS_VIEW_MAGIC,
@@ -185,6 +186,9 @@ const RAW_REST_VOLUME_WORD: u32 = 19u;
 
 const FIELD_MAGIC: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC)};
 const FIELD_VERSION: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION)};
+const FIELD_WORKGROUP_SIZE: u32 = ${u32(
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
+)};
 const FIELD_HEADER_WORDS: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS)};
 const FIELD_KEY_WORDS: u32 = ${u32(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS)};
 const FIELD_DESCRIPTOR_WORDS: u32 = 32u;
@@ -403,6 +407,39 @@ fn receipt_admitted(
     && (*receipt)[59u] == seal;
 }
 
+fn field_dispatch_shape_admitted(
+  field_view: ptr<storage, array<u32>, read>,
+  field_count: u32
+) -> bool {
+  let group_count = field_count / FIELD_WORKGROUP_SIZE
+    + select(0u, 1u, field_count % FIELD_WORKGROUP_SIZE != 0u);
+  let dispatch_x = (*field_view)[60u];
+  let dispatch_y = (*field_view)[61u];
+  let dispatch_z = (*field_view)[62u];
+  if (field_count == 0u) {
+    return dispatch_x == 0u
+      && dispatch_y == 0u
+      && dispatch_z == 0u
+      && (*field_view)[44u] == 0u
+      && (*field_view)[45u] == 0u
+      && (*field_view)[46u] == 0u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > group_count
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  let expected_y = group_count / dispatch_x
+    + select(0u, 1u, group_count % dispatch_x != 0u);
+  return dispatch_y == expected_y
+    && (*field_view)[44u] == dispatch_x
+    && (*field_view)[45u] == dispatch_y
+    && (*field_view)[46u] == dispatch_z;
+}
+
 fn field_admitted(
   field_view: ptr<storage, array<u32>, read>,
   field_capacity: u32,
@@ -425,7 +462,7 @@ fn field_admitted(
   let state_offset = (*field_view)[30u];
   let required_words = (*field_view)[41u];
   let capacity_words = (*field_view)[42u];
-  // Mechanics-field view v4 appends immutable pressure rows after the
+  // Mechanics-field view v5 appends immutable pressure rows after the
   // state-capacity bank. The pressure offset is always derived from the
   // state bank, never uploaded as a separate word, so required/capacity
   // words now bound the pressure tail rather than the state tail.
@@ -496,9 +533,6 @@ fn field_admitted(
     && (*field_view)[42u] >= (*field_view)[41u]
     && (*field_view)[42u] <= arrayLength(field_view)
     && (*field_view)[43u] == 0u
-    && (*field_view)[44u] == group_count(field_count)
-    && (*field_view)[45u] == 1u
-    && (*field_view)[46u] == 1u
     && (*field_view)[47u] == FIELD_PARENT_MECHANICS_MAGIC
     && (*field_view)[48u] == FIELD_PARENT_MECHANICS_VERSION
     && (*field_view)[50u] == params.generation_id
@@ -510,9 +544,7 @@ fn field_admitted(
     && (*field_view)[57u] == 1u
     && (*field_view)[58u] == 0u
     && (*field_view)[59u] == 0u
-    && (*field_view)[60u] == group_count(field_count)
-    && (*field_view)[61u] == 1u
-    && (*field_view)[62u] == 1u
+    && field_dispatch_shape_admitted(field_view, field_count)
     && (*field_view)[63u] == 0u;
 }
 

@@ -36,7 +36,9 @@ function deferred() {
   return { promise, resolve };
 }
 
-function createFakeDevice() {
+function createFakeDevice({
+  limits: limitOverrides = {}
+} = {}) {
   const createdBuffers = [];
   const shaderModules = [];
   const pipelines = [];
@@ -49,7 +51,8 @@ function createFakeDevice() {
       maxStorageBuffersPerShaderStage: 8,
       maxBufferSize: 256 * 1024 * 1024,
       maxStorageBufferBindingSize: 256 * 1024 * 1024,
-      maxComputeWorkgroupsPerDimension: 65535
+      maxComputeWorkgroupsPerDimension: 65535,
+      ...limitOverrides
     },
     queue: {
       writeBuffer(buffer, offset, data) { writes.push({ buffer, offset, data }); }
@@ -269,9 +272,55 @@ test('S9-B receipt ABI v2 fixes a separate seven-storage-binding selected-source
     createSchroederSpatialPhaseVolumeReceiptWgsl(layout),
     /@group\(0\) @binding\(7\) var<storage, read> source_assignments/
   );
+  const wgsl = createSchroederSpatialPhaseVolumeReceiptWgsl(layout);
+  assert.match(
+    wgsl,
+    /fn mechanics_field_dispatch_shape_admitted\(field_count: u32\)[\s\S]*dispatch_y == expected_y[\s\S]*mechanics_field\[44u\] == dispatch_x[\s\S]*mechanics_field\[45u\] == dispatch_y[\s\S]*mechanics_field\[46u\] == dispatch_z/
+  );
+  assert.match(
+    wgsl,
+    /workgroup_id\.x \+ workgroup_id\.y \* mechanics_field\[60u\]/
+  );
+  assert.match(
+    wgsl,
+    /fn reduce_phase_volume_receipt_fields\([\s\S]*mechanics_field_linear_invocation\(local_id, workgroup_id\)[\s\S]*linear_group < group_count\(field_count\)/
+  );
+  assert.doesNotMatch(
+    wgsl,
+    /fn reduce_phase_volume_receipt_fields\([^)]*global_invocation_id/
+  );
   assert.equal(
     publicGpuAbi.ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA,
     ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA
+  );
+});
+
+test('S9-B receipt admits only field work that fits the public 2D dispatch envelope', () => {
+  const accepted = createFakeDevice({
+    limits: { maxComputeWorkgroupsPerDimension: 2 }
+  });
+  const acceptedRuntime = createSchroederSpatialPhaseVolumeReceiptGpu(
+    accepted.device,
+    {
+      maxSourceCount: 5,
+      fieldCapacity: 5 * 27,
+      arenaCount: 1
+    }
+  );
+  assert.equal(acceptedRuntime.layout.fieldGroupCapacity, 3);
+  assert.equal(acceptedRuntime.maxComputeWorkgroupsPerDimension, 2);
+  assert.equal(acceptedRuntime.destroy(), true);
+
+  const rejected = createFakeDevice({
+    limits: { maxComputeWorkgroupsPerDimension: 2 }
+  });
+  assert.throws(
+    () => createSchroederSpatialPhaseVolumeReceiptGpu(rejected.device, {
+      maxSourceCount: 10,
+      fieldCapacity: 10 * 27,
+      arenaCount: 1
+    }),
+    /field dispatch exceeds the WebGPU two-dimensional limit/
   );
 });
 
@@ -304,6 +353,17 @@ test('S9-B receipt binds only exact live S9-A evidence and never writes borrowed
   assert.equal(execution.storageBindingCount, 7);
   assert.equal(execution.readbackPerformed, false);
   assert.equal(execution.fullParticleReadbackPerformed, false);
+  assert.equal(execution.mechanicsFieldDispatchDimensions, 2);
+  assert.equal(execution.mechanicsFieldDispatchWorkgroupSize, 64);
+  assert.equal(
+    execution.mechanicsFieldDispatchLinearization,
+    'linearGroup=workgroup.x+workgroup.y*dispatchX'
+  );
+  assert.equal(
+    execution.mechanicsFieldDispatchCapacityWorkgroups,
+    execution.layout.fieldGroupCapacity
+  );
+  assert.equal(execution.maxComputeWorkgroupsPerDimension, 65535);
   assert.equal(execution.diagnosticOnly, true);
   assert.equal(execution.stateMutationAllowed, false);
   assert.equal(execution.gpuBufferCreationCountDuringEncode, 0);

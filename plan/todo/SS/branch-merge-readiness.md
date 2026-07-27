@@ -447,6 +447,31 @@ requiring 700x mechanical expansion -- depends on that separation existing.
 So defect 1 is why nothing triggers today, and defect 2 is why fixing 1 alone
 would not be enough.
 
+**Not a time problem.** Re-run at 12 batches x 512 steps -- **6,144 steps**, the
+same depth the visual matrix uses -- and `representedOverRest` is *exactly* 1 in
+all eleven samples while `activeUpdateCount` climbs 177 -> 295. The system is
+evolving; the volume ratio never moves.
+
+**And `volumeRatioJ` is not a dead field.** G2P writes it:
+`out_mls_mechanics[mechanics_base + 4u] = vec4<f32>(c21, c22, next_j, row4.w)`
+with `next_j = det3(F)` (`wgsl.js:8522`, `:10861`), clamped to
+`[0.1, 64]`, or `[0.1, 1000]` under the gas EOS. Neither cap binds -- J is
+nowhere near either.
+
+So J is live, written every step from the deformation gradient determinant, and
+holds at exactly 1.0 for 6,144 steps. That is what a **volume-preserving**
+deformation update produces: the velocity gradient carries no volumetric strain.
+Stated as the observation rather than a mechanism claim -- confirming it means
+checking whether the constitutive/EOS path can ever impose volumetric strain on
+a phase change, which is the open question below.
+
+**The design tension this exposes.** Gate 3 needs represented volume to grow
+~700x on a phase change *without* 700x particles. But represented volume is
+`rest_volume * J`, J comes only from mechanical deformation, and the deformation
+is volume-preserving. There is no path from "this particle became steam" to
+"its represented volume is now 1,600x" -- which is exactly the separation the
+plan calls for and the code does not implement.
+
 **Hypothesis worth testing, not yet a claim:** this may share a root cause with
 the four failing visual-matrix checks (task #10). If a phase change to gas never
 updates the mechanical volume, steam particles occupy liquid volume and would not

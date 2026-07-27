@@ -779,6 +779,16 @@ preserves `old7.x` when it rewrites row 7. But the field-view G2P does write the
 lane, so the open question is why that write never lands for a product --
 whether products miss the field-view path, or something re-zeroes it each step.
 
+Ruled out already, so they are not re-tried:
+
+| candidate | why not |
+| --- | --- |
+| sampling artifact | `pressureSampleCount` == `liveParticleCount` on every row |
+| invalid mechanics | `mechanicsProblemParticleCount` and `invalidMechanicsParticleCount` are 0 everywhere |
+| products' mechanics are dead | their J varies for real -- csf spans 0.972 .. 1.047 |
+| G2P copy-through rejection | rejection freezes velocity too, and naoh's mean vy evolves -1.697 -> -0.015 |
+| `twoLevelMechanicsCoverageComplete: false` | **false lead** -- that is a benchmark-side config-agreement conjunction (`sph-performance-benchmark.mjs:3557`) over authority requested vs observed, substep counts, step status and commit verification, not per-particle coverage. In `observation` mode its being false is expected. |
+
 ### Phase velocity locking is scenario-dependent
 
 Mean vertical velocity per phase (added this session) says the shared-grid

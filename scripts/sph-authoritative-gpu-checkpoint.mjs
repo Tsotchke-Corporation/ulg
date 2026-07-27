@@ -24,7 +24,7 @@ export const SPH_CHECKPOINT_CONDENSED_VOLUME_RATIO_CAP_J = 1.05;
 export const SPH_CHECKPOINT_GENERAL_VOLUME_RATIO_CAP_J = 64;
 export const SPH_CHECKPOINT_GAS_VOLUME_RATIO_CAP_J = 1000;
 export const SPH_CHECKPOINT_GLOBAL_WORDS = 20;
-export const SPH_CHECKPOINT_BUCKET_WORDS = 29;
+export const SPH_CHECKPOINT_BUCKET_WORDS = 32;
 
 export const SPH_CHECKPOINT_GLOBAL_WORD = Object.freeze({
   liveParticleCount: 0,
@@ -78,7 +78,14 @@ export const SPH_CHECKPOINT_BUCKET_WORD = Object.freeze({
   phaseWeightedRestVolumeM3: 25,
   phaseWeightedCurrentVolumeM3: 26,
   phaseWeightedRepresentedVolumeM3: 27,
-  volumeRatioCapBoundaryContributionCount: 28
+  volumeRatioCapBoundaryContributionCount: 28,
+  // resolvedAbsolutePressurePa (mechanics field 28). Added to answer why a
+  // 1000x density difference produces no buoyant separation: without a per-phase
+  // pressure there is no way to tell "the EOS never builds expansion pressure"
+  // from "it does and something else cancels it".
+  pressureSampleCount: 29,
+  minPressurePa: 30,
+  maxPressurePa: 31
 });
 
 const PHASE_BY_ID = Object.freeze({
@@ -345,6 +352,8 @@ export function createAuthoritativeGpuEvidenceWords(
     words[offset + SPH_CHECKPOINT_BUCKET_WORD.temperatureMaxK] = negativeInfinity;
     words[offset + SPH_CHECKPOINT_BUCKET_WORD.minVolumeRatioJ] = positiveInfinity;
     words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxVolumeRatioJ] = negativeInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.minPressurePa] = positiveInfinity;
+    words[offset + SPH_CHECKPOINT_BUCKET_WORD.maxPressurePa] = negativeInfinity;
   }
   return words;
 }
@@ -417,6 +426,13 @@ export function decodeAuthoritativeGpuEvidence({
       mechanicsSampleCount,
       minVolumeRatioJ: mechanicsSampleCount > 0
         ? finiteOrNull(wordFloat(words[offset + bucketWord.minVolumeRatioJ]))
+        : null,
+      pressureSampleCount: words[offset + bucketWord.pressureSampleCount],
+      minPressurePa: words[offset + bucketWord.pressureSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.minPressurePa]))
+        : null,
+      maxPressurePa: words[offset + bucketWord.pressureSampleCount] > 0
+        ? finiteOrNull(wordFloat(words[offset + bucketWord.maxPressurePa]))
         : null,
       maxVolumeRatioJ: mechanicsSampleCount > 0
         ? finiteOrNull(wordFloat(words[offset + bucketWord.maxVolumeRatioJ]))
@@ -552,6 +568,9 @@ struct MaterialPhaseBucket {
   phase_weighted_current_volume_m3: atomic<u32>,
   phase_weighted_represented_volume_m3: atomic<u32>,
   volume_ratio_cap_boundary_contribution_count: atomic<u32>,
+  pressure_sample_count: atomic<u32>,
+  min_pressure_pa: atomic<u32>,
+  max_pressure_pa: atomic<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> state_rows: array<vec4<f32>>;
@@ -646,7 +665,9 @@ fn contribute_phase(
   rest_volume_m3: f32,
   current_volume_m3: f32,
   represented_volume_m3: f32,
-  volume_ratio_cap_hit: bool
+  volume_ratio_cap_hit: bool,
+  pressure_valid: bool,
+  resolved_pressure_pa: f32
 ) {
   if (!(fraction > 1e-8)) { return; }
   atomicAdd(&global_words[4], 1u);
@@ -710,6 +731,11 @@ fn contribute_phase(
       atomicAdd(&buckets[index].volume_ratio_cap_boundary_contribution_count, 1u);
     }
   }
+  if (pressure_valid) {
+    atomicAdd(&buckets[index].pressure_sample_count, 1u);
+    atomic_min_f32(&buckets[index].min_pressure_pa, resolved_pressure_pa);
+    atomic_max_f32(&buckets[index].max_pressure_pa, resolved_pressure_pa);
+  }
 }
 
 @compute @workgroup_size(128)
@@ -757,6 +783,9 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
   let current_volume_m3 = rest_volume_m3 * max(volume_ratio_j, 1e-6);
   let solid_flag = mechanics5.x;
   let eos_model_id = mechanics6.z;
+  // resolvedAbsolutePressurePa, mechanics float 28 = vec4 7 component 0.
+  let resolved_pressure_pa = mechanics7.x;
+  let pressure_valid = finite_f32(resolved_pressure_pa);
   let rest_density_kg_per_m3 = thermo0.w;
   let phase_volume_reference_mass_kg = mechanics7.w;
   var density_represented_volume_m3 = 0.0;
@@ -799,10 +828,10 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     atomic_max_f32(&global_words[13], residual);
     atomic_add_f32(&global_words[14], mass_kg * residual);
     if (residual > 1e-4) { atomicAdd(&global_words[11], 1u); }
-    contribute_phase(material_id, 1u, raw_fractions.x, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit);
-    contribute_phase(material_id, 2u, raw_fractions.y, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit);
-    contribute_phase(material_id, 3u, raw_fractions.z, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit);
-    contribute_phase(material_id, 4u, raw_fractions.w, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit);
+    contribute_phase(material_id, 1u, raw_fractions.x, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
+    contribute_phase(material_id, 2u, raw_fractions.y, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
+    contribute_phase(material_id, 3u, raw_fractions.z, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
+    contribute_phase(material_id, 4u, raw_fractions.w, mass_kg, state0.y, thermo0.z, state1.w, state1.xyz, speed_valid, speed_m_per_s, mechanics_valid, volume_ratio_j, rest_volume_m3, current_volume_m3, represented_volume_m3, volume_ratio_cap_hit, pressure_valid, resolved_pressure_pa);
   } else {
     atomicAdd(&global_words[11], 1u);
     atomicAdd(&global_words[12], 1u);

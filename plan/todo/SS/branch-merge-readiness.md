@@ -355,6 +355,43 @@ refresh, both captured by `sph-long-horizon-probe.mjs`. Kept separate from
 execution, the other brackets a whole stage including submit latency. Merging
 them would make a reader unable to tell which they were looking at.
 
+## Task #10: the obvious fix is known-bad and is pinned against
+
+`sphPhaseCarrierTransferGpu.js:747` hardcodes `let volume_ratio_j = 1.0;` on a
+phase transition while `rest_volume` jumps to the new phase's density. That is
+why `resolvedAbsolutePressurePa` measures **exactly 101325 Pa with zero variance
+for every particle of both phases** -- a particle declared to be at its own rest
+density produces no EOS pressure deviation, so there is no gradient, so there is
+no buoyancy and no expansion.
+
+**Do not "fix" it by preserving current volume.** That was tried and reverted,
+and `tests/sphPhaseCarrierTransferGpu.test.mjs:246-253` pins both halves against
+it with the reason:
+
+> deriving J from the source's current volume against a target rest volume
+> asserts a gas component at liquid density -- roughly the full 1667x
+> liquid/gas ratio as overpressure, with `F = diag(J^(1/3))` at J of about
+> 1/1667. On iron-ice-quench that drove the water to **78 m/s** and collapsed J
+> to 8.7e-4.
+
+So the two known points are both bad:
+
+| J on phase change | consequence |
+| --- | --- |
+| `1.0` (today) | no expansion pressure at all; steam never rises |
+| `V_current / V_rest` | 1667x overpressure; 78 m/s blowup, J collapse |
+
+`aggregate.current_volume` is still accumulated and never read -- it is the
+residue of the reverted attempt, not an oversight to wire up.
+
+**What is actually needed is the middle**: a bounded expansion *rate* rather than
+an instantaneous jump between those two states. Candidate shapes, none tried --
+relax `rest_volume` toward the phase-equilibrium volume over a timescale instead
+of switching it in one step; or keep J = 1 and add an explicit bounded expansion
+source term gated on phase change. Both are real numerics work with a known
+instability on the other side, and the iron-ice-quench scenario is the regression
+test that any attempt has to survive.
+
 ## SS plan audit against its own acceptance gates (2026-07-26)
 
 Measured against `schroeder-tree-and-algorithm-plan.md`, not from memory.

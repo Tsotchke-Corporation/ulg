@@ -12253,6 +12253,10 @@ export function resolveNativeSurfaceTemperatureRetirement({
 }
 
 export function createSphPhaseScene(container, {
+  // Opt-in per-stage mechanics tracing (sphStageMechanicsTracer.js). Off by
+  // default: every snapshot is an extra submit plus a fixed-size map, which
+  // serializes the post-mechanics stage pipeline.
+  stageMechanicsTraceEnabled = false,
   boxEdgeM = 10,
   boxDimsM = null,
   surfaceRadiusM = null,
@@ -31296,6 +31300,7 @@ fn main(
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
+          stageMechanicsTraceEnabled,
           readbackMode: requestedReadbackMode,
           thermalMaterialTable: effectiveThermalMaterialTable,
           mechanicsMaterialTable: mlsMpmMechanicsMaterialTable,
@@ -32811,6 +32816,7 @@ fn main(
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
+          stageMechanicsTraceEnabled,
           readbackMode: requestedReadbackMode,
           thermalMaterialTable: effectiveThermalMaterialTable,
           mechanicsMaterialTable: mlsMpmMechanicsMaterialTable,

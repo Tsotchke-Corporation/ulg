@@ -250,6 +250,7 @@ import {
   summarizeResidentBufferLeaseLedger
 } from '../residentBufferLease.js';
 import { schroederHierarchyArtifactBufferLifecycle } from './schroederHierarchyArtifactLedger.js';
+import { createSphStageMechanicsTracer } from './sphStageMechanicsTracer.js';
 import {
   SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_MODE,
   SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_STATUS,
@@ -24628,6 +24629,10 @@ function buildNextParticleUploads({
 }
 
 async function residentStepEnvelope({
+  // Opt-in per-stage mechanics trace. This envelope builds a fresh result
+  // object rather than spreading its input, so anything not named here is
+  // dropped on the way out.
+  stageMechanicsTrace = null,
   sphParticleState,
   mlsMpmParticleState,
   sphParticleUpload = null,
@@ -25146,6 +25151,7 @@ async function residentStepEnvelope({
   return {
     schema: ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
     stepSchema: ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
+    stageMechanicsTrace,
     backend,
     status: backend === 'webgpu' ? 'resident-step-webgpu-executed' : 'resident-step-cpu-or-fallback',
     kernelScope: STEP_SCOPE,
@@ -25570,6 +25576,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   mechanicsMaterialTable = null,
   mechanicsRefreshRunner = runMlsMpmMechanicsRefreshWithOptionalWebGpu,
   mechanicsRefreshOptions = {},
+  // Opt-in per-stage mechanics tracing; see sphStageMechanicsTracer.js. The
+  // tracer is built HERE rather than by the caller because only this scope has
+  // the resolved device -- the scene assembles its options object before device
+  // resolution, so a tracer constructed there is handed a null device and
+  // silently disables itself.
+  stageMechanicsTraceEnabled = false,
   phaseCarrierTransferRunner = runSphPhaseCarrierTransferWebGpu,
   phaseCarrierTransferOptions = {},
   schroederFarForceDeltaFusionRunner = runSchroederFarForceDeltaFusionWebGpu,
@@ -26122,6 +26134,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   stageMs.phaseCarrierTransfer = 0;
   const postMechanicsClosure = await runMlsMpmPostMechanicsClosureWebGpu({
     device: resolvedDevice,
+    stageMechanicsTracer: createSphStageMechanicsTracer({
+      device: resolvedDevice,
+      particleCount: sphParticleState?.particleCount ?? 0,
+      enabled: stageMechanicsTraceEnabled
+    }),
     sphParticleState,
     mlsMpmParticleState,
     sphParticleUpload,
@@ -26305,7 +26322,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     thermalStep,
     reactionStep,
     mechanicsRefreshStep,
-    phaseCarrierTransferStep
+    phaseCarrierTransferStep,
+    stageMechanicsTrace
   } = postMechanicsClosure;
   if (ownedSpatialProposalThermalResponseGraphUpload) {
     const upload = ownedSpatialProposalThermalResponseGraphUpload;
@@ -26524,6 +26542,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     reactionStep,
     mechanicsRefreshStep,
     phaseCarrierTransferStep,
+    stageMechanicsTrace: stageMechanicsTrace ?? null,
     inputResidentProductMass: residentProductMass,
     compactGpuSummary,
     dt: dtSeconds,

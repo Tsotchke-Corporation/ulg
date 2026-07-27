@@ -1398,6 +1398,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   afterThermalStep = null,
   afterReactionDiscoveryProposal = null,
   beforeReactionStep = null,
+  // Opt-in per-stage mechanics snapshots. Off by default: each snapshot is an
+  // extra submit plus a fixed-size map, which serializes this stage pipeline.
+  // See sphStageMechanicsTracer.js for why aggregate evidence alone cannot say
+  // which stage wrote a lane.
+  stageMechanicsTracer = null,
   afterReactionStep = null
 } = {}) {
   if (!postMechanicsParticleBuffers || typeof postMechanicsParticleBuffers !== 'object') {
@@ -1509,6 +1514,24 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     }));
     executedStageOrder.push('thermal-phase');
   }
+  const traceStageMechanics = async (stage, stateBuffer, thermoBuffer, mechanicsBuffer) => {
+    if (typeof stageMechanicsTracer?.snapshot !== 'function') return;
+    await stageMechanicsTracer.snapshot({
+      stage,
+      stateBuffer: stateBuffer || null,
+      thermoBuffer: thermoBuffer || null,
+      mechanicsBuffer: mechanicsBuffer || null
+    });
+  };
+  // The closure's INPUT, before any of its stages run. Without this the trace
+  // can only say the closure did not change a value, not whether the value
+  // arrived already wrong.
+  await traceStageMechanics(
+    'post-mechanics-closure-input',
+    postMechanicsParticleBuffers?.stateBuffer,
+    sphParticleUpload?.thermoBuffer,
+    postMechanicsParticleBuffers?.mechanicsBuffer
+  );
   releasePostSeparationThermalBins();
   if (typeof afterThermalStep === 'function') {
     await afterThermalStep({
@@ -1519,6 +1542,14 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   }
 
   const thermalOutput = retainedThermalOutputBuffers(thermalStep);
+  // Thermal runs between the closure input and the reaction, and the h2 gas J
+  // moves 0.1000 -> 0.0999 across that span, so the two are worth separating.
+  await traceStageMechanics(
+    'thermal-phase',
+    thermalOutput.stateBuffer || postMechanicsParticleBuffers?.stateBuffer,
+    thermalOutput.thermoBuffer || sphParticleUpload?.thermoBuffer,
+    postMechanicsParticleBuffers?.mechanicsBuffer
+  );
   const reactionSourceStateBuffer = thermalOutput.stateBuffer
     || farForceOutput.stateBuffer
     || postMechanicsParticleBuffers.stateBuffer;
@@ -1678,6 +1709,14 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   const phaseCarrierSourceMechanicsBuffer = (
     reactionComponentMutations.mechanics ? reactionOutput.mechanicsBuffer : null
   ) || postMechanicsParticleBuffers.mechanicsBuffer;
+  // The next stage's source triple is this stage's output, so the existing
+  // chaining already names the post-reaction state exactly.
+  await traceStageMechanics(
+    'reaction-product',
+    phaseCarrierSourceStateBuffer,
+    phaseCarrierSourceThermoBuffer,
+    phaseCarrierSourceMechanicsBuffer
+  );
   if (
     phaseCarrierPlanReady(phaseCarrierPlan)
     && thermalStep
@@ -1727,6 +1766,12 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       ? reactionOutput.mechanicsBuffer
       : null)
     || postMechanicsParticleBuffers.mechanicsBuffer;
+  await traceStageMechanics(
+    'phase-carrier-transfer-v2',
+    mechanicsRefreshSourceStateBuffer,
+    mechanicsRefreshSourceThermoBuffer,
+    mechanicsRefreshSourceMechanicsBuffer
+  );
   if (
     (thermalStep || reactionMutatesParticles)
     && mechanicsMaterialTable
@@ -1756,6 +1801,17 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     );
     executedStageOrder.push('mechanics-constitutive-refresh');
   }
+  // The refresh emits mechanics only, so it is paired with the state and thermo
+  // it ran against. This is the LAST writer of the mechanics buffer -- the
+  // closure runs thermal -> reaction -> transfer -> refresh, which is not the
+  // order the stage list reads.
+  await traceStageMechanics(
+    'mechanics-constitutive-refresh',
+    mechanicsRefreshSourceStateBuffer,
+    mechanicsRefreshSourceThermoBuffer,
+    retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep).mechanicsBuffer
+      || mechanicsRefreshSourceMechanicsBuffer
+  );
 
   let continuation = resolveMlsMpmPostMechanicsContinuation({
     postMechanicsParticleBuffers,
@@ -1799,6 +1855,17 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     backend: postMechanicsBackend,
     authoritativeStageOrder: MLS_MPM_POST_MECHANICS_CLOSURE_STAGE_ORDER,
     executedStageOrder: Object.freeze([...executedStageOrder]),
+    // Reports its own absence rather than returning null, so a missing trace
+    // says whether the tracer never reached this closure or reached it disabled.
+    stageMechanicsTrace: typeof stageMechanicsTracer?.result === 'function'
+      ? stageMechanicsTracer.result()
+      : {
+        schema: 'peercompute.ulg.sph-stage-mechanics-trace.v0',
+        status: stageMechanicsTracer
+          ? 'stage-mechanics-trace-tracer-malformed'
+          : 'stage-mechanics-trace-tracer-absent',
+        stages: []
+      },
     schroederFarForceDeltaFusion,
     thermalStep,
     reactionStep,

@@ -5369,6 +5369,9 @@ async function runBrowserProbe({
             ambientPressureEvidence: residentStep.ambientPressureEvidence
               ? { ...residentStep.ambientPressureEvidence }
               : null,
+            // Per-stage mechanics snapshots. Null unless stageMechanicsTrace=1;
+            // fixed-size per stage, not per particle.
+            stageMechanicsTrace: residentStep.stageMechanicsTrace ?? null,
             particlePingPong: residentStep.particlePingPong ? {
               sourceStep: residentStep.particlePingPong.sourceStep ?? null,
               nextStep: residentStep.particlePingPong.nextStep ?? null,
@@ -9233,6 +9236,9 @@ async function runDirectResidentProbe({
           : null,
         ambientPressureAppliedInStressProjection:
           step.ambientPressureAppliedInStressProjection === true,
+        // Per-stage mechanics snapshots. Null unless stageMechanicsTrace=1;
+        // the record is fixed-size per stage, not per particle.
+        stageMechanicsTrace: step.stageMechanicsTrace ?? null,
         stageStatus: step.stageStatus ? { ...step.stageStatus } : null,
         stageBackends: step.stageBackends ? { ...step.stageBackends } : null,
         particlePingPong: step.particlePingPong ? {

@@ -397,6 +397,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'schroederActiveNodeSortedIndexPolicy',
   'schroederCrossLevelCoupling',
   'schroederLawQueue',
+  'stageMechanicsTrace',
   'schroederLawNeighbors',
   'schroederLawNeighborCandidates',
   'schroederParticleStorageMaterialization',
@@ -2122,6 +2123,10 @@ export function summarizeResidentStageOrderExecution(execution = null) {
     // 2.3 Pa while the pressure lane's base moved from 0 to 101325. Code
     // tracing could not separate "ambient differs" from "the stress term is
     // near zero", so the resolved values are surfaced and compared directly.
+    // Per-stage mechanics snapshots, when the diagnostic flag is set. Null in
+    // every normal run.
+    stageMechanicsTrace: finalStep?.stageMechanicsTrace
+      ?? execution?.stageMechanicsTrace ?? null,
     ambientPressurePa: execution?.ambientPressurePa
       ?? finalStep?.ambientPressurePa ?? null,
     ambientPressureAppliedInStressProjection:
@@ -4675,6 +4680,15 @@ export async function mountSphPhaseDemoOverlay({
     initialUrlOrSchroederPolicyValue(
       ['schroederLawQueue'],
       ['enableLawQueue', 'lawQueue', 'schroederEnableLawQueue']
+    ),
+    false
+  );
+  // Diagnostic only. Serializes the post-mechanics stage pipeline, so it is
+  // never on by default and never on in a timing run.
+  const initialStageMechanicsTraceEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['stageMechanicsTrace'],
+      ['stageMechanicsTrace', 'schroederStageMechanicsTrace']
     ),
     false
   );
@@ -7242,6 +7256,7 @@ export async function mountSphPhaseDemoOverlay({
   }
   let sceneBoxDimsM = driver?.demo.box.dimensionsM ?? boxDimensionsFromControls();
   let scene = createSphPhaseScene(sceneContainer, {
+    stageMechanicsTraceEnabled: initialStageMechanicsTraceEnabled,
     boxDimsM: sceneBoxDimsM,
     surfaceRadiusScale: blobScaleOf(),
     preserveDrawingBuffer: preserveDrawingBufferForCapture,
@@ -11786,6 +11801,7 @@ export async function mountSphPhaseDemoOverlay({
     scene.dispose();
     sceneBoxDimsM = nextDims;
     scene = createSphPhaseScene(sceneContainer, {
+      stageMechanicsTraceEnabled: initialStageMechanicsTraceEnabled,
       boxDimsM: nextDims,
       surfaceRadiusScale: blobScaleOf(),
       preserveDrawingBuffer: preserveDrawingBufferForCapture,

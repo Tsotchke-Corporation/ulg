@@ -372,6 +372,38 @@ accumulator was a 49 MB host allocation and host-to-device upload per frame
 had already zeroed. "GPU-resident" has to mean both directions, and only the
 readback direction had a name, a flag and a gate.
 
+### Queue fences: 162 per batch, all from one call site
+
+Same method as the readback audit -- `ULG_PROBE_TRACE_NATIVE_QUEUE_FENCES=1` now
+tallies `onSubmittedWorkDone` by call site into every sample instead of only
+dumping stacks. Production config, 10 batches: **162 fences per batch, 161 of
+them from `deferSubmittedWorkCleanup` (`webgpuComputeLayout.js`)**, every one
+waiting for the same device idle point.
+
+They were not host stalls -- that helper schedules cleanup on the fence rather
+than awaiting it -- but one fence per released buffer is browser bookkeeping and
+callback churn that scales with stage count, not with work.
+
+Cleanups now share a fence, at most one in flight per device. The rule that
+keeps it safe: **a cleanup is never attached to a fence that already exists.**
+While a fence is in flight newcomers accumulate, and a fresh fence is created
+for them only once it resolves -- necessarily after all of them registered. The
+alternative (attach to the outstanding fence) would free buffers the device is
+still reading.
+
+Measured after: **1623 fences over the run, down to 43. Per batch, 162 -> 4.**
+Identical output (466,033 triangles), `renderRefreshTotalMs` median 5.70 -> 5.30,
+which is inside the noise at n=11 -- so this is a scaling-hazard and
+bookkeeping fix, **not a demonstrated speedup**, and should not be reported as
+one.
+
+Three existing tests failed on the change and two of them were right to. One
+caught a real bug it introduced: `onSubmittedWorkDone` can throw synchronously,
+and an early return with `inFlight` still set would have stranded every later
+cleanup on that device forever. The failure now releases the batch immediately
+and propagates to the registering caller, as it did when each registration made
+its own fence.
+
 ### `normalHotLoopReadbackFree` was reporting absence as failure
 
 The earlier note that "5 of 53 samples are not readback-free" was wrong, and the

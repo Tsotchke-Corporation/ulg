@@ -2004,11 +2004,26 @@ async function runBrowserProbe({
             value: true,
             configurable: true
           });
+          // Tallied by call site as well as logged. A stack dump per fence
+          // shows where fences come from; only a count that rises per frame
+          // shows which ones are a per-frame bubble rather than setup.
+          const fenceTally = new Map();
+          globalThis.__ulgQueueFenceTally = () => Object.fromEntries(
+            [...fenceTally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 24)
+          );
+          globalThis.__ulgQueueFenceTotal = () => [...fenceTally.values()]
+            .reduce((sum, count) => sum + count, 0);
           Object.defineProperty(prototype, 'onSubmittedWorkDone', {
             configurable: true,
             writable: true,
             value(...args) {
-              console.error('[ulg-native-queue-fence-trace]', new Error().stack || 'stack unavailable');
+              const stack = new Error().stack || 'stack unavailable';
+              // Second frame is the caller; the first is this wrapper.
+              const site = (stack.split('\n')[2] || stack.split('\n')[1] || '?').trim();
+              fenceTally.set(site, (fenceTally.get(site) ?? 0) + 1);
+              if (globalThis.__ulgQueueFenceStackLog === true) {
+                console.error('[ulg-native-queue-fence-trace]', stack);
+              }
               return original.apply(this, args);
             }
           });
@@ -5357,6 +5372,15 @@ async function runBrowserProbe({
             // whose count rises between consecutive samples.
             nativeBufferMapTally: typeof globalThis.__ulgBufferMapTally === 'function'
               ? globalThis.__ulgBufferMapTally()
+              : null,
+            // Same shape for queue fences, under
+            // ULG_PROBE_TRACE_NATIVE_QUEUE_FENCES=1. Every fence is a point
+            // where the host stops and waits for the device to go idle.
+            nativeQueueFenceTally: typeof globalThis.__ulgQueueFenceTally === 'function'
+              ? globalThis.__ulgQueueFenceTally()
+              : null,
+            nativeQueueFenceTotal: typeof globalThis.__ulgQueueFenceTotal === 'function'
+              ? globalThis.__ulgQueueFenceTotal()
               : null,
             renderRefreshTotalMs: finiteOrNull(renderState.renderRefreshTotalMs),
             renderRefreshDeviceAcquireMs: finiteOrNull(renderState.renderRefreshDeviceAcquireMs),

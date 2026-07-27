@@ -508,6 +508,10 @@ fixed-size, still no per-particle readback.
 #### It also un-vacuated a third gate
 
 Full matrix after the fix: **3 of 7 fail, the same three scenarios as before.**
+Re-verified again after the stage tracer landed (`127974f`): same three
+scenarios, same checks, so the tracer wiring -- which touched the step, scene,
+demo mount and probe -- introduced no scenario regressions.
+
 Re-verified at the final HEAD with all instrumentation in place:
 
 | | |

@@ -843,7 +843,53 @@ caller and it surfaces only as an unhandled rejection.
 **Next increment** (not started): switch consumers onto the per-particle index
 and dispatch them over nodes instead of particles.
 
-**The real target is the exhaustive fallback scan**, not the bucket index. The
+#### How the N^2 scan is actually reached, and what that means for the fix
+
+Read before writing any of this. The exhaustive scan is **not** the normal path
+-- it is the fallback when the bucket index cannot satisfy the request:
+
+```
+selected = ss_neighbor_select_active_index_match(...)      // bucket lookup
+if (selected >= params.active_node_count) {                 // bucket missed
+  ss_neighbor_diagnostic_add(..._EXACT_FALLBACK_SCANS, 1u);
+  loop { ... scan all active_node_count rows ... }          // O(N) per query
+}
+```
+
+`DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY` is **32**. With one active-node
+row per particle, a bucket covering a populated region holds far more than 32
+rows, overflows, and the query drops into the exhaustive scan. That is the
+mechanism behind "consumers can still reach the exhaustive `N*N` fallback".
+
+**So compaction fixes the N^2 problem by relieving bucket pressure, not by
+rewriting the scan.** At 710x-1,331x fewer rows, the distinct nodes for a region
+fit inside 32 slots and the fallback stops being reached at all. The scan can
+stay exactly as it is.
+
+Two constraints on the wiring, both discovered in the code rather than assumed:
+
+- **Binding pressure is the real limit.** The law-neighbour kernel already binds
+  **9 storage buffers** (0-4, 6-9), past the default
+  `maxStorageBuffersPerShaderStage` of 8 -- the same limit whose breach the
+  fused-mechanics tests record as having "invalidated every P2G pipeline on
+  default-limit devices". Adding three CSR bindings is not available. They have
+  to **replace** bindings 6, 8 and 9 -- the bucket slots and the sorted index --
+  which is the natural move anyway, because the node CSR supersedes both: they
+  exist to accelerate the same neighbour search, less well.
+- **Field 10 still needs the CSR.** A bucket hit returns a node; the neighbour
+  particle comes from member enumeration, not from the row.
+
+**And the diagnostics to prove any of this already exist**:
+`exactFallbackScanRatio`, `bucketPressureRatio`, `exactFallbackScanCount`, with
+thresholds, computed in `schroederHierarchyGpu.js:2519-2604`. They are never
+observed, because the law-neighbour path is off by default
+(`schroederEnableLawNeighborCandidates`) and the probe does not enable it --
+`lawQueueProxyCount` is 0 in an `ss=1` run. **Measure the fallback ratio before
+doing the rewrite**: if buckets are not actually saturating in real scenarios,
+the win is theoretical.
+
+**The former real target, the exhaustive fallback scan** -- kept for the
+self-skip trap it contains, which applies to any node-wise rewrite: The
 loop at `ulg-gpu-abi/src/wgsl.js:13654` walks all `active_node_count` rows per
 queue row testing tile overlap -- one row per particle, so N per particle, so
 N^2. That is the "consumers can still reach the exhaustive `N*N` fallback"

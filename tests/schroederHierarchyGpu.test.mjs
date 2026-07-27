@@ -7513,6 +7513,7 @@ test('Schroeder single-level commits and fences a generation before successor pu
     baseGridSpacingM: 0.25,
     enableLawQueue: false,
     enableCrossLevelCoupling: false,
+    enablePortableSummary: true,
     enablePressureInterfaceOwnerScope: false,
     residentStepRunner,
     spatialSuccessorPublicationRunner(plan, { commitReceipt }) {
@@ -7528,6 +7529,54 @@ test('Schroeder single-level commits and fences a generation before successor pu
   });
 
   assert.equal(publicationCallCount, 1);
+  assert.equal(
+    result.finalRenderProxyBuildStatus,
+    'final-render-proxy-published-from-exact-committed-successor'
+  );
+  assert.equal(result.finalRenderProxyPublished, true);
+  assert.equal(
+    result.finalRenderProxySourceFamily,
+    result.schroederSpatialSuccessorSourceFamily
+  );
+  assert.equal(
+    result.localRetainedRenderBuffers.sourceFamily,
+    result.schroederSpatialSuccessorSourceFamily
+  );
+  assert.equal(
+    result.localRetainedRenderBuffers.buffers.length,
+    1,
+    'the committed render resolver must quarantine stale aggregate/proxy families'
+  );
+  assert.equal(
+    result.localRetainedRenderBuffers.buffers[0].sourceFamily,
+    result.schroederSpatialSuccessorSourceFamily
+  );
+  assert.equal(
+    result.localRetainedRenderBuffers.buffers[0].sourceEpochIdentity,
+    result.schroederSpatialSuccessorSourceFamily.successorEpochIdentity
+  );
+  assert.equal(
+    result.portableSummary.sourceFamily,
+    result.schroederSpatialSuccessorSourceFamily
+  );
+  assert.equal(
+    result.portableSummary.retainedRefs.every((entry) => (
+      entry.sourceFamily === result.schroederSpatialSuccessorSourceFamily
+      && entry.sourceEpochIdentity
+        === result.schroederSpatialSuccessorSourceFamily.successorEpochIdentity
+      && entry.finalContinuationAuthority === true
+    )),
+    true
+  );
+  const activeNodeBuffers = device.createdBuffers.filter(
+    (buffer) => buffer.label === 'ulg-schroeder-active-nodes-out'
+  );
+  assert.equal(activeNodeBuffers.length, 2);
+  assert.equal(
+    result.localRetainedRenderBuffers.buffers[0].buffer,
+    activeNodeBuffers[1],
+    'the renderer must receive the post-mechanics active-node buffer'
+  );
   assert.equal(result.spatialEpochGenerationReleaseScheduled, true);
   assert.equal(result.spatialEpochTransactionReleaseScheduled, true);
   assert.equal(fenceCallCount >= 1, true);
@@ -10343,6 +10392,7 @@ test('Schroeder two-level authority builds one canonical generation with two com
     enableTwoLevelMechanics: true,
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
+    enablePortableSummary: true,
     twoLevelMechanicsRunner,
     residentStepOptions: {
       internalPressureScale: 0.75,
@@ -10408,6 +10458,24 @@ test('Schroeder two-level authority builds one canonical generation with two com
   );
   assert.equal(
     step.schroederSpatialSuccessorSourceFamily,
+    result.schroederSpatialSuccessorSourceFamily
+  );
+  assert.equal(result.finalRenderProxyPublished, true);
+  assert.equal(
+    result.portableSummary.sourceFamily,
+    result.schroederSpatialSuccessorSourceFamily
+  );
+  assert.equal(
+    result.portableSummary.retainedRefs.every((entry) => (
+      entry.sourceFamily === result.schroederSpatialSuccessorSourceFamily
+      && entry.sourceEpochIdentity
+        === result.schroederSpatialSuccessorSourceFamily.successorEpochIdentity
+      && entry.finalContinuationAuthority === true
+    )),
+    true
+  );
+  assert.equal(
+    result.localRetainedRenderBuffers.buffers[0].sourceFamily,
     result.schroederSpatialSuccessorSourceFamily
   );
   assert.equal(step.nextParticleUploads.sphParticleUpload.schema,

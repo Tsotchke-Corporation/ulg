@@ -66,10 +66,16 @@ const FAMILY_BUFFER_SPECS = Object.freeze({
   'level-assignment': [
     { role: 'assignment', fields: ['assignmentBuffer'], destroyMethod: 'destroyAssignmentBuffer' }
   ],
+  'final-render-level-assignment': [
+    { role: 'assignment', fields: ['assignmentBuffer'], destroyMethod: 'destroyAssignmentBuffer' }
+  ],
   'phase-volume-assignment-overlay-index': [
     { role: 'index', fields: ['indexBuffer'], destroyMethod: 'destroyIndexBuffer' }
   ],
   'active-node-list': [
+    { role: 'active-nodes', fields: ['activeNodeBuffer'], destroyMethod: 'destroyActiveNodeBuffer' }
+  ],
+  'final-render-active-node-list': [
     { role: 'active-nodes', fields: ['activeNodeBuffer'], destroyMethod: 'destroyActiveNodeBuffer' }
   ],
   'coarse-active-node-list': [

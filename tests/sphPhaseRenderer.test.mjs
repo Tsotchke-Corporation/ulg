@@ -53,6 +53,7 @@ import {
   opticalPathLengthMForSurfaceBatch,
   createProductEventSurfaceBatches,
   createSchroederRenderSourceMetadata,
+  validateSchroederRenderProxyFinalCommittedFamilyRefs,
   createSchroederRenderProxyDescriptorPlan,
   resolveSchroederRenderProxyVisibleConsumer,
   createSchroederRenderProxyDrawSource,
@@ -65,7 +66,9 @@ import {
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
   buildSchroederSourceKeyReplayDiagnostics,
+  canonicalizeResidentRenderSurfaceBatchMaterials,
   hideRenderFieldSurfaceAfterGrace,
+  materialPropertiesForSurfaceDescriptor,
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphSceneBackgroundColorHex,
@@ -229,6 +232,42 @@ function schroederPortableSummaryFixture(overrides = {}) {
     fullParticleReadbackRequired: false,
     ...overrides
   };
+}
+
+function schroederFinalCommittedProxyRefFixture() {
+  const successorEpochIdentity = Object.freeze({
+    storageGeneration: 71,
+    physicsTick: 41,
+    physicsSubstep: 2,
+    positionEpoch: 43,
+    topologyEpoch: 11,
+    chartEpoch: 7,
+    levelEpoch: 19,
+    supportEpoch: 23
+  });
+  const sourceFamily = Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-successor-source-family.v0',
+    status: 'schroeder-committed-successor-source-family-authenticated',
+    ready: true,
+    authenticated: true,
+    sourceFamilyRole: 'committed-successor-x-n-plus-1',
+    sourceGenerationId: 37,
+    deviceId: 'renderer-test-device-a',
+    successorEpochIdentity,
+    positionAuthority: 'same-epoch-final-continuation-particle-state'
+  });
+  const retainedRefs = schroederPortableSummaryFixture().retainedRefs.map((ref) => ({
+    ...ref,
+    sourceFamily,
+    sourceFamilyRole: sourceFamily.sourceFamilyRole,
+    sourceFamilyStatus: sourceFamily.status,
+    sourceDeviceId: sourceFamily.deviceId,
+    sourceGenerationId: sourceFamily.sourceGenerationId,
+    sourceEpochIdentity: sourceFamily.successorEpochIdentity,
+    positionAuthority: sourceFamily.positionAuthority,
+    finalContinuationAuthority: true
+  }));
+  return { sourceFamily, retainedRefs };
 }
 
 function createSchroederNativeProxyFixture() {
@@ -2216,6 +2255,79 @@ test('gas render fields use alias-safe resolution and a bounded smoothing-suppor
   assert.ok(policy.resolvedScale <= SPH_GAS_CONTINUITY_RADIUS_SCALE_MAX);
 });
 
+test('resident render surfaces canonicalize fluorine aliases by stable material identity', () => {
+  const fluorineProperties = {
+    phases: [{ name: 'gas', densityKgPerM3: 1.696 }],
+    molarMassKgPerMol: 0.018998403163,
+    gasElectronicExcitationEv: 4.34,
+    gasElectronicBandFwhmEv: 0.72,
+    gasElectronicOscillatorStrength: 1e-3
+  };
+  const materialProperties = { F: fluorineProperties };
+  const reactionTable = {
+    metadata: [{
+      a: 'Cs',
+      b: 'f',
+      product: 'csf',
+      reactantTerms: [{ material: 'f', materialId: stableOpticalMaterialId('f') }],
+      productTerms: [{ material: 'csf', materialId: stableOpticalMaterialId('csf') }]
+    }]
+  };
+  const raw = [
+    {
+      surfaceKey: 'F|F|gas|domain:base',
+      renderKey: 'F',
+      material: 'F',
+      phase: 'gas',
+      renderDomainId: 1,
+      renderDomainKey: 'base',
+      count: 1,
+      positionsM: [0, 0, 0],
+      normalizedPositions: [0, 0, 0],
+      colorsRgb: [1, 1, 1],
+      bounds: { min: [0, 0, 0], max: [0, 0, 0] }
+    },
+    {
+      surfaceKey: 'f|f|gas|domain:reaction',
+      renderKey: 'f',
+      material: 'f',
+      phase: 'gas',
+      renderDomainId: 2,
+      renderDomainKey: 'reaction',
+      count: 1,
+      positionsM: [0.1, 0, 0],
+      normalizedPositions: [0.1, 0, 0],
+      colorsRgb: [1, 1, 1],
+      bounds: { min: [0.1, 0, 0], max: [0.1, 0, 0] }
+    }
+  ];
+  const canonical = canonicalizeResidentRenderSurfaceBatchMaterials(raw, {
+    materialProperties,
+    reactionTable
+  });
+  assert.deepEqual(canonical.map((batch) => batch.material), ['F', 'F']);
+  assert.deepEqual(canonical.map((batch) => batch.renderKey), ['F', 'F']);
+  assert.equal(
+    materialPropertiesForSurfaceDescriptor(
+      { material: 'f', renderKey: 'f' },
+      materialProperties
+    ),
+    fluorineProperties
+  );
+
+  const merged = mergeSameMaterialPhaseSurfaceBatchesForRenderField(canonical);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].material, 'F');
+  assert.equal(merged[0].phase, 'gas');
+  assert.equal(merged[0].count, 2);
+  const opticalTable = createOpticalGpuTableForSurfaceBatches(merged, {
+    materialProperties
+  });
+  assert.equal(opticalTable.recordCount, 1);
+  assert.equal(opticalTable.recordMetadata[0].materialId, stableOpticalMaterialId('F'));
+  assert.equal(opticalTable.recordMetadata[0].blocked, false);
+});
+
 test('resident H2O gas summary refreshes steam optical identity without changing fluorine', () => {
   const baselineSummary = {
     schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
@@ -4197,6 +4309,12 @@ test('SPH scene blocks stale pre-integration proxies when a final continuation l
   assert.equal(source.finalParticleSourceLineageValid, false);
   assert.equal(source.finalParticleSourceLineageMissing, true);
   assert.equal(source.staleFinalContinuationProxyBlocked, true);
+  assert.equal(source.finalCommittedProxySourceRefsRequired, true);
+  assert.equal(source.finalCommittedProxySourceRefsValid, false);
+  assert.equal(
+    source.finalCommittedProxySourceRefValidationStatus,
+    'blocked-schroeder-render-proxy-final-committed-family-refs'
+  );
 
   const proxyPlan = createSchroederRenderProxyDescriptorPlan({
     schroederRenderSource: source
@@ -4204,6 +4322,83 @@ test('SPH scene blocks stale pre-integration proxies when a final continuation l
   assert.equal(proxyPlan.status, 'blocked-schroeder-render-proxy-descriptors');
   assert.equal(proxyPlan.blocker, source.blocker);
   assert.equal(proxyPlan.renderSourcePresentationReady, false);
+});
+
+test('SPH scene authenticates exact final committed proxy refs and rejects torn lineage echoes', () => {
+  const { sourceFamily, retainedRefs } =
+    schroederFinalCommittedProxyRefFixture();
+  const exact = validateSchroederRenderProxyFinalCommittedFamilyRefs({
+    retainedRefs,
+    finalSuccessorSourceFamily: sourceFamily,
+    required: true
+  });
+  assert.equal(
+    exact.status,
+    'schroeder-render-proxy-final-committed-family-refs-ready'
+  );
+  assert.equal(exact.ready, true);
+  assert.equal(exact.blocker, null);
+  assert.equal(exact.refCount, 2);
+  assert.equal(exact.invalidRefCount, 0);
+  assert.deepEqual(exact.failures, []);
+
+  const cases = [
+    {
+      name: 'stale source role',
+      change: {
+        sourceFamilyRole: 'canonical-pre-integration-x-n',
+        finalContinuationAuthority: false
+      },
+      blocker: 'schroeder-render-proxy-source-not-final-committed-family'
+    },
+    {
+      name: 'cross-device source',
+      change: { sourceDeviceId: 'renderer-test-device-b' },
+      blocker: 'schroeder-render-proxy-source-device-mismatch'
+    },
+    {
+      name: 'mismatched finalized family identity',
+      change: { sourceFamily: Object.freeze({ ...sourceFamily }) },
+      blocker: 'schroeder-render-proxy-source-family-mismatch'
+    },
+    {
+      name: 'stale source generation',
+      change: { sourceGenerationId: sourceFamily.sourceGenerationId - 1 },
+      blocker: 'schroeder-render-proxy-source-generation-mismatch'
+    },
+    {
+      name: 'copied rather than exact successor epoch identity',
+      change: {
+        sourceEpochIdentity: Object.freeze({
+          ...sourceFamily.successorEpochIdentity
+        })
+      },
+      blocker: 'schroeder-render-proxy-source-epoch-mismatch'
+    },
+    {
+      name: 'mismatched position authority',
+      change: {
+        positionAuthority: 'same-epoch-pre-integration-particle-state'
+      },
+      blocker: 'schroeder-render-proxy-source-position-authority-mismatch'
+    }
+  ];
+  for (const { name, change, blocker } of cases) {
+    const tornRefs = retainedRefs.map((ref, index) => (
+      index === 0 ? { ...ref, ...change } : ref
+    ));
+    const validation = validateSchroederRenderProxyFinalCommittedFamilyRefs({
+      retainedRefs: tornRefs,
+      finalSuccessorSourceFamily: sourceFamily,
+      required: true
+    });
+    assert.equal(validation.ready, false, name);
+    assert.equal(validation.blocker, blocker, name);
+    assert.equal(validation.refCount, 2, name);
+    assert.equal(validation.invalidRefCount, 1, name);
+    assert.equal(validation.failures[0].refIndex, 0, name);
+    assert.equal(validation.failures[0].blocker, blocker, name);
+  }
 });
 
 test('SPH current-state rendering remains noncanonical when successor lineage branding is invalid', () => {

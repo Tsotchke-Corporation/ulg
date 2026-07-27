@@ -35,6 +35,7 @@ import {
   requestOpticalGpuDevice,
   runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu,
+  stableOpticalMaterialId,
   stableOpticalStateId,
   stableOpticalStateKey,
   uploadOpticalGpuTable
@@ -996,16 +997,30 @@ function normalizeSchroederRetainedProxySourceRef(entry = null) {
   const family = String(entry.family || entry.schema || '').trim();
   const role = String(entry.role || '').trim();
   const transferMode = String(entry.transferMode || '').trim();
+  const sourceFamily =
+    entry.sourceFamily
+    ?? entry.schroederSpatialSourceFamily
+    ?? null;
   if (!family && !role) return null;
   if (transferMode && transferMode !== 'descriptor-only-no-raw-gpubuffer-transfer') return null;
   return {
     family: entry.family || null,
     role: entry.role || null,
+    sourceFamily,
     sourceFamilyRole: entry.sourceFamilyRole || null,
+    sourceFamilyStatus:
+      entry.sourceFamilyStatus
+      ?? sourceFamily?.status
+      ?? null,
+    sourceDeviceId:
+      entry.sourceDeviceId
+      ?? entry.deviceId
+      ?? sourceFamily?.deviceId
+      ?? null,
     sourceGenerationId: entry.sourceGenerationId ?? null,
     sourceEpochIdentity: entry.sourceEpochIdentity
-      ? { ...entry.sourceEpochIdentity }
-      : null,
+      ?? entry.schroederSpatialSuccessorEpochIdentity
+      ?? null,
     positionAuthority: entry.positionAuthority || null,
     finalContinuationAuthority:
       entry.finalContinuationAuthority === true,
@@ -1018,6 +1033,136 @@ function normalizeSchroederRetainedProxySourceRef(entry = null) {
     strideFloats: schroederRenderSourceCount(entry.strideFloats, 0),
     byteLength: schroederRenderSourceCount(entry.byteLength, 0),
     transferMode: transferMode || 'descriptor-only-no-raw-gpubuffer-transfer'
+  };
+}
+
+function schroederRenderProxyFinalCommittedFamilyRefFailure(
+  ref,
+  finalSuccessorSourceFamily,
+  refIndex
+) {
+  const failure = (blocker, reason) => ({
+    refIndex,
+    family: ref?.family ?? null,
+    role: ref?.role ?? null,
+    blocker,
+    reason
+  });
+  if (
+    ref?.sourceFamilyRole !== 'committed-successor-x-n-plus-1'
+    || ref?.finalContinuationAuthority !== true
+  ) {
+    return failure(
+      'schroeder-render-proxy-source-not-final-committed-family',
+      'proxy reference is not branded as an authoritative committed successor'
+    );
+  }
+  if (
+    finalSuccessorSourceFamily?.deviceId != null
+    && ref?.sourceDeviceId !== finalSuccessorSourceFamily.deviceId
+  ) {
+    return failure(
+      'schroeder-render-proxy-source-device-mismatch',
+      'proxy reference and final successor belong to different WebGPU devices'
+    );
+  }
+  if (ref?.sourceFamily !== finalSuccessorSourceFamily) {
+    return failure(
+      'schroeder-render-proxy-source-family-mismatch',
+      'proxy reference does not retain the exact finalized successor family'
+    );
+  }
+  if (
+    ref?.sourceFamilyStatus !== finalSuccessorSourceFamily?.status
+    || ref?.sourceGenerationId !== finalSuccessorSourceFamily?.sourceGenerationId
+  ) {
+    return failure(
+      'schroeder-render-proxy-source-generation-mismatch',
+      'proxy reference generation does not match the final successor family'
+    );
+  }
+  if (
+    ref?.sourceEpochIdentity
+      !== finalSuccessorSourceFamily?.successorEpochIdentity
+  ) {
+    return failure(
+      'schroeder-render-proxy-source-epoch-mismatch',
+      'proxy reference does not retain the exact successor epoch identity'
+    );
+  }
+  if (
+    ref?.positionAuthority !== finalSuccessorSourceFamily?.positionAuthority
+  ) {
+    return failure(
+      'schroeder-render-proxy-source-position-authority-mismatch',
+      'proxy reference position authority does not match the final successor family'
+    );
+  }
+  return null;
+}
+
+export function validateSchroederRenderProxyFinalCommittedFamilyRefs({
+  retainedRefs = [],
+  finalSuccessorSourceFamily = null,
+  required = false
+} = {}) {
+  const refs = Array.isArray(retainedRefs)
+    ? retainedRefs
+      .map(normalizeSchroederRetainedProxySourceRef)
+      .filter(Boolean)
+    : [];
+  if (!required) {
+    return {
+      status: 'schroeder-render-proxy-final-committed-family-refs-not-required',
+      required: false,
+      ready: true,
+      blocker: null,
+      refCount: refs.length,
+      invalidRefCount: 0,
+      failures: []
+    };
+  }
+  if (!finalSuccessorSourceFamily) {
+    return {
+      status: 'blocked-schroeder-render-proxy-final-committed-family-refs',
+      required: true,
+      ready: false,
+      blocker: 'schroeder-render-proxy-final-successor-family-missing',
+      refCount: refs.length,
+      invalidRefCount: refs.length,
+      failures: []
+    };
+  }
+  if (refs.length === 0) {
+    return {
+      status: 'blocked-schroeder-render-proxy-final-committed-family-refs',
+      required: true,
+      ready: false,
+      blocker: 'schroeder-render-proxy-final-successor-refs-missing',
+      refCount: 0,
+      invalidRefCount: 0,
+      failures: []
+    };
+  }
+  const failures = refs
+    .map((ref, refIndex) => (
+      schroederRenderProxyFinalCommittedFamilyRefFailure(
+        ref,
+        finalSuccessorSourceFamily,
+        refIndex
+      )
+    ))
+    .filter(Boolean);
+  return {
+    status: failures.length === 0
+      ? 'schroeder-render-proxy-final-committed-family-refs-ready'
+      : 'blocked-schroeder-render-proxy-final-committed-family-refs',
+    required: true,
+    ready: failures.length === 0,
+    blocker: failures[0]?.blocker ?? null,
+    refCount: refs.length,
+    invalidRefCount: failures.length,
+    failures
   };
 }
 
@@ -1317,6 +1462,12 @@ export function createSchroederRenderSourceMetadata({
     finalContinuation.exists && !finalSuccessorLineageValid
   );
   const finalCommittedFamilyRequired = finalCommittedSuccessorExists;
+  const finalCommittedProxySourceRefValidation =
+    validateSchroederRenderProxyFinalCommittedFamilyRefs({
+      retainedRefs: proxySourceRefs.refs,
+      finalSuccessorSourceFamily,
+      required: finalCommittedFamilyRequired
+    });
   const retainedProxyIsPreIntegration = proxySourceRefs.refs.some(
     (ref) => ref.sourceFamilyRole === 'canonical-pre-integration-x-n'
   );
@@ -1360,6 +1511,10 @@ export function createSchroederRenderSourceMetadata({
       && !fullParticleReadbackRequired
       && !policyPresentationReadyVeto
       && !staleFinalContinuationProxyBlocked
+      && (!finalCommittedFamilyRequired || (
+        finalSuccessorLineageValid
+        && finalCommittedProxySourceRefValidation.ready
+      ))
   );
   const admissionStatus = schroederPortableSummaryAdmission?.status || null;
   const admissionPublished = Boolean(
@@ -1368,10 +1523,15 @@ export function createSchroederRenderSourceMetadata({
   );
   let blocker = null;
   if (!presentationReady) {
-    if (finalSuccessorLineageMissing && retainedProxyIsPreIntegration) {
+    if (finalSuccessorLineageMissing) {
       blocker = 'schroeder-render-final-successor-lineage-missing';
     } else if (staleFinalContinuationProxyBlocked) {
       blocker = 'schroeder-render-proxy-source-not-final-committed-family';
+    } else if (
+      finalCommittedFamilyRequired
+      && !finalCommittedProxySourceRefValidation.ready
+    ) {
+      blocker = finalCommittedProxySourceRefValidation.blocker;
     } else if (!renderLodPresent) {
       blocker = 'schroeder-render-lod-summary-missing';
     } else if (!portableSchemaAccepted) {
@@ -1443,6 +1603,18 @@ export function createSchroederRenderSourceMetadata({
     finalParticleSourceLineageValid: finalSuccessorLineageValid,
     finalParticleSourceLineageMissing: finalSuccessorLineageMissing,
     staleFinalContinuationProxyBlocked,
+    finalCommittedProxySourceRefsRequired:
+      finalCommittedProxySourceRefValidation.required,
+    finalCommittedProxySourceRefsValid:
+      finalCommittedProxySourceRefValidation.ready,
+    finalCommittedProxySourceRefValidationStatus:
+      finalCommittedProxySourceRefValidation.status,
+    finalCommittedProxySourceRefValidationBlocker:
+      finalCommittedProxySourceRefValidation.blocker,
+    finalCommittedProxySourceRefInvalidCount:
+      finalCommittedProxySourceRefValidation.invalidRefCount,
+    finalCommittedProxySourceRefFailures:
+      finalCommittedProxySourceRefValidation.failures,
     finalParticleSourceLineage: finalSuccessorSourceFamily,
     finalParticleSourceLineageStatus:
       finalSuccessorSourceFamily?.status ?? null,
@@ -9023,15 +9195,91 @@ export function renderDescriptorForSurfaceRecord(
   });
 }
 
-function materialPropertiesForSurfaceDescriptor(descriptor, materialProperties) {
+function canonicalMaterialKeyByStableId(
+  material,
+  materialProperties = null,
+  reactionTable = null
+) {
+  if (!material) return null;
+  const materialId = stableOpticalMaterialId(material);
+  // Closure-bank spelling is authoritative for rendering. Reaction tables
+  // intentionally tolerate aliases (for example `F` and `f`), but letting a
+  // later alias replace the bank key produces a second surface and can route
+  // optical lookup through an unavailable record.
+  for (const key of Object.keys(materialProperties || {})) {
+    if (stableOpticalMaterialId(key) === materialId) return key;
+  }
+  const renderMap = buildSphRenderMaterialMap(
+    materialProperties || {},
+    reactionTable
+  );
+  return renderMap.get(materialId) ?? material;
+}
+
+export function canonicalizeResidentRenderSurfaceBatchMaterials(
+  batches = [],
+  {
+    materialProperties = null,
+    reactionTable = null
+  } = {}
+) {
+  if (!Array.isArray(batches) || batches.length === 0) return [];
+  return batches.map((batch) => {
+    if (!batch?.material) return batch;
+    const material = canonicalMaterialKeyByStableId(
+      batch.material,
+      materialProperties,
+      reactionTable
+    );
+    if (!material || material === batch.material) return batch;
+    const phase = batch.phase ?? batch.descriptor?.phase ?? null;
+    const renderKey = renderKeyForMaterialPhase(material, phase);
+    const descriptor = renderDescriptorOf({
+      material,
+      phase,
+      renderKey,
+      opticalState: batch.opticalState || batch.descriptor?.opticalState || null,
+      opticalStateKey:
+        batch.opticalStateKey
+        ?? batch.descriptor?.opticalStateKey
+        ?? null,
+      opticalStateId:
+        batch.opticalStateId
+        ?? batch.descriptor?.opticalStateId,
+      renderDomainId:
+        batch.renderDomainId
+        ?? batch.descriptor?.renderDomainId,
+      renderDomainKey:
+        batch.renderDomainKey
+        ?? batch.descriptor?.renderDomainKey
+    });
+    return {
+      ...batch,
+      surfaceKey: descriptor.surfaceKey,
+      renderKey,
+      material,
+      descriptor
+    };
+  });
+}
+
+export function materialPropertiesForSurfaceDescriptor(descriptor, materialProperties) {
   if (!materialProperties) return null;
   const materialKey = descriptor.material;
   const renderKey = descriptor.renderKey;
-  return materialProperties[materialKey]
+  const direct = materialProperties[materialKey]
     ?? materialProperties[materialKey?.toLowerCase?.()]
+    ?? materialProperties[materialKey?.toUpperCase?.()]
     ?? materialProperties[renderKey]
     ?? materialProperties[renderKey?.toLowerCase?.()]
+    ?? materialProperties[renderKey?.toUpperCase?.()]
     ?? null;
+  if (direct) return direct;
+  const materialId = stableOpticalMaterialId(materialKey || renderKey);
+  for (const [key, properties] of Object.entries(materialProperties)) {
+    if (stableOpticalMaterialId(key) === materialId) return properties;
+  }
+  return null;
 }
 
 function opticalQueryForDescriptor(descriptor, properties = null) {
@@ -35603,24 +35851,35 @@ fn main(
     };
   }
 
-  function materialKeysFromReactionTable(reactionTable = null) {
+  function materialKeysFromReactionTable(
+    reactionTable = null,
+    materialProperties = null
+  ) {
     const keys = new Set();
+    const addKey = (key) => {
+      const canonical = canonicalMaterialKeyByStableId(
+        key,
+        materialProperties,
+        reactionTable
+      );
+      if (canonical) keys.add(canonical);
+    };
     for (const record of reactionTable?.metadata || []) {
       for (const key of [record.a, record.b, record.product]) {
-        if (key) keys.add(key);
+        addKey(key);
       }
       for (const term of record.productTerms || []) {
-        if (term.material) keys.add(term.material);
+        addKey(term.material);
       }
       for (const term of record.reactantTerms || []) {
-        if (term.material) keys.add(term.material);
+        addKey(term.material);
       }
     }
     for (const term of reactionTable?.productTermMetadata || []) {
-      if (term.material) keys.add(term.material);
+      addKey(term.material);
     }
     for (const term of reactionTable?.reactantTermMetadata || []) {
-      if (term.material) keys.add(term.material);
+      addKey(term.material);
     }
     return keys;
   }
@@ -35838,11 +36097,20 @@ fn main(
     const representativeRadiusByMaterial = new Map();
     const smoothingLengthByMaterial = new Map();
     const presentMaterialPhaseKeys = new Set();
-    const materials = materialKeysFromReactionTable(reactionTable);
-    const renderBatches = mergeSameMaterialPhaseSurfaceBatchesForRenderField([
-      ...particleBatches,
-      ...productEventSurfaceBatches
-    ]);
+    const materials = materialKeysFromReactionTable(
+      reactionTable,
+      materialProperties
+    );
+    const canonicalBatches = canonicalizeResidentRenderSurfaceBatchMaterials(
+      [
+        ...particleBatches,
+        ...productEventSurfaceBatches
+      ],
+      { materialProperties, reactionTable }
+    );
+    const renderBatches = mergeSameMaterialPhaseSurfaceBatchesForRenderField(
+      canonicalBatches
+    );
     for (const batch of renderBatches) {
       if (!batch?.surfaceKey) continue;
       batchesByKey.set(batch.surfaceKey, batch);

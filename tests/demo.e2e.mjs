@@ -9907,6 +9907,22 @@ test('SPH phase native surface consumer draws scene-local Schroeder render LOD',
     });
     overlay.__mlsMpmResidentSteps = execution;
     overlay.__sphResidentRenderState = renderState;
+    const validationDeadline = performance.now() + 180_000;
+    while (
+      !(
+        scene.getSphResidentSurfaceDraw?.()?.status
+          === 'resident-extension-surface-draw-buffers-retained'
+        && scene.scene?.userData?.schroederRenderProxyBackendSelection?.ready === true
+        && scene.getSphResidentSurfaceDrawRenderBridge?.()
+          ?.schroederRenderProxyNativeExecutorReady === true
+        && scene.getSphResidentSurfaceDrawRenderBridge?.()
+          ?.lastSchroederRenderProxyNativeSubmitStatus
+            === 'schroeder-render-proxy-native-executor-submitted-to-pass'
+      )
+      && performance.now() < validationDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
     scene.refreshViewportAndOverlay?.({ reason: 'test-schroeder-scene-native-render-lod' });
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const afterRenderState = scene.getSphResidentRenderState?.() || renderState;
@@ -9938,6 +9954,14 @@ test('SPH phase native surface consumer draws scene-local Schroeder render LOD',
       drawSourceStatus: drawSource?.status ?? null,
       drawSourceBlocker: drawSource?.blocker ?? null,
       drawSourceDrawBatchCount: drawSource?.drawBatchCount ?? null,
+      drawSourceRefSourceFamilyRole:
+        drawSource?.drawBatches?.[0]?.sourceRef?.sourceFamilyRole ?? null,
+      drawSourceRefSourceGenerationId:
+        drawSource?.drawBatches?.[0]?.sourceRef?.sourceGenerationId ?? null,
+      drawSourceRefSourceEpochIdentity:
+        drawSource?.drawBatches?.[0]?.sourceRef?.sourceEpochIdentity ?? null,
+      drawSourceRefFinalContinuationAuthority:
+        drawSource?.drawBatches?.[0]?.sourceRef?.finalContinuationAuthority ?? null,
       backendSelectionStatus: backendSelection?.status ?? null,
       backendSelectedBackend: backendSelection?.selectedBackend ?? null,
       renderStateStatus: afterRenderState?.status ?? null,
@@ -10002,34 +10026,36 @@ test('SPH phase native surface consumer draws scene-local Schroeder render LOD',
   expect(result.renderLodActiveLeafProxyCount).toBeGreaterThan(0);
   expect(result.localResolverStatus).toBe('schroeder-local-retained-render-buffers-ready');
   expect(result.localResolverRefCount).toBeGreaterThan(0);
-  expect(result.renderSourceStatus).toBe('blocked-schroeder-render-source');
-  expect(result.renderSourceBlocker)
-    .toBe('schroeder-render-proxy-source-not-final-committed-family');
-  expect(result.renderSourcePresentationReady).toBe(false);
+  expect(result.renderSourceStatus)
+    .toBe('schroeder-render-source-local-observation-ready');
+  expect(result.renderSourceBlocker).toBeNull();
+  expect(result.renderSourcePresentationReady).toBe(true);
   expect(result.finalParticleSourceRole).toBe('committed-successor-x-n-plus-1');
   expect(result.finalParticleSourceGenerationId).toBeGreaterThan(0);
   expect(result.finalParticleSuccessorEpochIdentity?.physicsTick).toBeGreaterThan(0);
-  expect(result.drawSourceStatus).toBe('blocked-schroeder-render-proxy-draw-source');
-  expect(result.drawSourceBlocker)
-    .toBe('schroeder-render-proxy-source-not-final-committed-family');
-  expect(result.drawSourceDrawBatchCount).toBe(0);
+  expect(result.drawSourceStatus).toBe('schroeder-render-proxy-draw-source-ready');
+  expect(result.drawSourceBlocker).toBeNull();
+  expect(result.drawSourceDrawBatchCount).toBeGreaterThan(0);
+  expect(result.drawSourceRefSourceFamilyRole)
+    .toBe('committed-successor-x-n-plus-1');
+  expect(result.drawSourceRefSourceGenerationId)
+    .toBe(result.finalParticleSourceGenerationId);
+  expect(result.drawSourceRefSourceEpochIdentity)
+    .toEqual(result.finalParticleSuccessorEpochIdentity);
+  expect(result.drawSourceRefFinalContinuationAuthority).toBe(true);
   expect(result.backendSelectionStatus)
-    .toBe('blocked-schroeder-render-proxy-backend-source');
+    .toBe('schroeder-render-proxy-backend-native-webgpu-visible-ready');
+  expect(result.backendSelectedBackend).toBe('native-webgpu-retained-proxy');
   expect(result.renderStateStatus).toBe('resident-render-field-applied');
   expect(result.surfaceDrawStatus, JSON.stringify(result, null, 2))
     .toBe('resident-extension-surface-draw-buffers-retained');
-  expect(result.surfaceDrawSourceFamilyRole)
-    .toBe('committed-successor-x-n-plus-1');
-  expect(result.surfaceDrawSourceGenerationId).toBeGreaterThan(0);
-  expect(result.surfaceDrawSourceGenerationId)
-    .toBeLessThanOrEqual(result.finalParticleSourceGenerationId);
-  expect(result.surfaceDrawSuccessorEpochIdentity)
-    .toEqual(result.finalParticleSuccessorEpochIdentity);
   expect(result.nativeExecutorStatus)
-    .toBe('blocked-schroeder-render-proxy-native-executor-draw-source');
-  expect(result.nativeExecutorReady).toBe(false);
-  expect(result.nativeExecutorDrawCommandCount).toBe(0);
-  expect(result.nativeLastSubmitDrawCommandCount ?? 0).toBe(0);
+    .toBe('schroeder-render-proxy-native-executor-ready');
+  expect(result.nativeExecutorReady).toBe(true);
+  expect(result.nativeExecutorDrawCommandCount).toBeGreaterThan(0);
+  expect(result.nativeLastSubmitStatus)
+    .toBe('schroeder-render-proxy-native-executor-submitted-to-pass');
+  expect(result.nativeLastSubmitDrawCommandCount).toBeGreaterThan(0);
   expect(result.bridgeStatus).toBe('native-webgpu-surface-consumer-ready');
   expect(result.bridgeFrameCount).toBeGreaterThan(0);
   expect(result.bridgeLastRenderStatus).toMatch(/^native-webgpu-surface-consumer-/);
@@ -10347,6 +10373,11 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
     const renderState = overlay?.__sphResidentRenderState;
     const scene = overlay?.__sphScene;
     const surfaceDraw = scene?.getSphResidentSurfaceDraw?.() || overlay?.__sphResidentSurfaceDraw || null;
+    const renderSource = scene?.scene?.userData?.schroederRenderSource || null;
+    const drawSource = scene?.scene?.userData?.schroederRenderProxyDrawSource || null;
+    const backendSelection =
+      scene?.scene?.userData?.schroederRenderProxyBackendSelection || null;
+    const bridge = scene?.getSphResidentSurfaceDrawRenderBridge?.() || null;
     return Boolean(
       overlay?.__sphSchroederSimulationConfig?.enabled === true
       && overlay?.__mlsMpmSchroederExecutionOptions?.schroederSimulation === true
@@ -10356,9 +10387,16 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
       && execution?.portableSummary?.renderLod?.activeLeafProxyCount > 0
       && renderState?.status === 'resident-render-field-applied'
       && surfaceDraw?.status === 'resident-extension-surface-draw-buffers-retained'
-      && surfaceDraw?.schroederSpatialSourceFamilyRole
+      && renderSource?.status === 'schroeder-render-source-local-observation-ready'
+      && renderSource?.finalParticleSourceRole
         === 'committed-successor-x-n-plus-1'
-      && scene?.getSphResidentSurfaceDrawRenderBridge?.()?.frameCount > 0
+      && drawSource?.status === 'schroeder-render-proxy-draw-source-ready'
+      && backendSelection?.status
+        === 'schroeder-render-proxy-backend-native-webgpu-visible-ready'
+      && bridge?.schroederRenderProxyNativeExecutorReady === true
+      && bridge?.lastSchroederRenderProxyNativeSubmitStatus
+        === 'schroeder-render-proxy-native-executor-submitted-to-pass'
+      && bridge?.frameCount > 0
       && overlay?.__sphResidentPostStepPresentationProof?.status
         === 'native-resident-presentation-foreground-proved'
       && overlay?.__sphResidentPostStepPresentationProof?.sourceCurrent === true
@@ -10414,6 +10452,12 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
       drawSourceStatus: drawSource?.status ?? null,
       drawSourceBlocker: drawSource?.blocker ?? null,
       drawSourceDrawBatchCount: drawSource?.drawBatchCount ?? null,
+      drawSourceRefSourceFamilyRole:
+        drawSource?.drawBatches?.[0]?.sourceRef?.sourceFamilyRole ?? null,
+      drawSourceRefSourceGenerationId:
+        drawSource?.drawBatches?.[0]?.sourceRef?.sourceGenerationId ?? null,
+      drawSourceRefFinalContinuationAuthority:
+        drawSource?.drawBatches?.[0]?.sourceRef?.finalContinuationAuthority ?? null,
       backendSelectionStatus: backendSelection?.status ?? null,
       backendSelectedBackend: backendSelection?.selectedBackend ?? null,
       renderStateStatus: renderState?.status ?? null,
@@ -10482,30 +10526,31 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
   expect(result.renderLodActiveLeafProxyCount).toBeGreaterThan(0);
   expect(result.localResolverStatus).toBe('schroeder-local-retained-render-buffers-ready');
   expect(result.localResolverRefCount).toBeGreaterThan(0);
-  expect(result.renderSourceStatus).toBe('blocked-schroeder-render-source');
-  expect(result.renderSourceBlocker)
-    .toBe('schroeder-render-proxy-source-not-final-committed-family');
-  expect(result.renderSourcePresentationReady).toBe(false);
+  expect(result.renderSourceStatus)
+    .toBe('schroeder-render-source-local-observation-ready');
+  expect(result.renderSourceBlocker).toBeNull();
+  expect(result.renderSourcePresentationReady).toBe(true);
   expect(result.finalParticleSourceRole).toBe('committed-successor-x-n-plus-1');
   expect(result.finalParticleSourceGenerationId).toBeGreaterThan(0);
-  expect(result.drawSourceStatus).toBe('blocked-schroeder-render-proxy-draw-source');
-  expect(result.drawSourceBlocker)
-    .toBe('schroeder-render-proxy-source-not-final-committed-family');
-  expect(result.drawSourceDrawBatchCount ?? 0).toBe(0);
+  expect(result.drawSourceStatus).toBe('schroeder-render-proxy-draw-source-ready');
+  expect(result.drawSourceBlocker).toBeNull();
+  expect(result.drawSourceDrawBatchCount).toBeGreaterThan(0);
+  expect(result.drawSourceRefSourceFamilyRole)
+    .toBe('committed-successor-x-n-plus-1');
+  expect(result.drawSourceRefSourceGenerationId)
+    .toBe(result.finalParticleSourceGenerationId);
+  expect(result.drawSourceRefFinalContinuationAuthority).toBe(true);
   expect(result.backendSelectionStatus)
-    .toBe('blocked-schroeder-render-proxy-backend-source');
-  expect(result.backendSelectedBackend).toBe('none');
+    .toBe('schroeder-render-proxy-backend-native-webgpu-visible-ready');
+  expect(result.backendSelectedBackend).toBe('native-webgpu-retained-proxy');
   expect(result.renderStateStatus).toBe('resident-render-field-applied');
   expect(result.surfaceDrawStatus)
     .toBe('resident-extension-surface-draw-buffers-retained');
   expect(result.surfaceDrawReason).toBeNull();
-  expect(result.surfaceDrawSourceFamilyRole)
-    .toBe('committed-successor-x-n-plus-1');
-  expect(result.surfaceDrawSourceGenerationId).toBeGreaterThan(0);
-  expect(result.surfaceDrawSourceGenerationId)
-    .toBeLessThanOrEqual(result.finalParticleSourceGenerationId);
-  expect(result.nativeExecutorReady).toBe(false);
-  expect(result.nativeLastSubmitDrawCommandCount ?? 0).toBe(0);
+  expect(result.nativeExecutorReady).toBe(true);
+  expect(result.nativeLastSubmitStatus)
+    .toBe('schroeder-render-proxy-native-executor-submitted-to-pass');
+  expect(result.nativeLastSubmitDrawCommandCount).toBeGreaterThan(0);
   expect(result.bridgeStatus).toBe('native-webgpu-surface-consumer-ready');
   expect(result.bridgeFrameCount).toBeGreaterThan(0);
   expect(result.bridgeLastRenderStatus)

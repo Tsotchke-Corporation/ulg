@@ -163,6 +163,8 @@ import {
   sphParticleStateRequiresExplicitIdentity
 } from './sphGpuBuffers.js';
 import {
+  cloneMlsMpmParticleStateForNext,
+  cloneSphParticleStateForNext,
   createSchroederParticleStorageAdoption,
   mergeResidentProductMassBuffersWebGpu,
   runSchroederFarForceDeltaFusionWebGpu,
@@ -6946,6 +6948,7 @@ export function createSchroederConservationSummaryPlan({
 function schroederPortableRetainedRef({
   family,
   artifact = null,
+  sourceFamily = null,
   schema = artifact?.schema ?? null,
   status = artifact?.status ?? null,
   rowCount = 0,
@@ -6963,41 +6966,59 @@ function schroederPortableRetainedRef({
     || (retained && resolvedFamily
       ? `${resolvedFamily}:${resolvedRole || 'default'}`
       : null);
-  const sourceGenerationId = artifact?.spatialEpochGenerationId
-    ?? artifact?.sourceGenerationId
-    ?? artifact?.generationId
-    ?? null;
-  const sourceEpochIdentity = Object.freeze({
-    storageGeneration:
-      artifact?.spatialEpochStorageGeneration
-      ?? artifact?.storageGeneration
-      ?? null,
-    physicsTick:
-      artifact?.spatialEpochPhysicsTick ?? artifact?.physicsTick ?? null,
-    physicsSubstep:
-      artifact?.spatialEpochPhysicsSubstep
-      ?? artifact?.physicsSubstep
-      ?? null,
-    positionEpoch:
-      artifact?.spatialEpochPositionEpoch ?? artifact?.positionEpoch ?? null,
-    topologyEpoch:
-      artifact?.spatialEpochTopologyEpoch ?? artifact?.topologyEpoch ?? null,
-    chartEpoch:
-      artifact?.spatialEpochChartEpoch ?? artifact?.chartEpoch ?? null,
-    levelEpoch:
-      artifact?.spatialEpochLevelEpoch ?? artifact?.levelEpoch ?? null,
-    supportEpoch:
-      artifact?.spatialEpochSupportEpoch ?? artifact?.supportEpoch ?? null
-  });
+  const finalCommittedSource = Boolean(
+    sourceFamily?.ready === true
+    && sourceFamily.authenticated === true
+    && sourceFamily.sourceFamilyRole
+      === 'committed-successor-x-n-plus-1'
+    && sourceFamily.successorEpochIdentity
+  );
+  const sourceGenerationId = finalCommittedSource
+    ? sourceFamily.sourceGenerationId
+    : (artifact?.spatialEpochGenerationId
+      ?? artifact?.sourceGenerationId
+      ?? artifact?.generationId
+      ?? null);
+  const sourceEpochIdentity = finalCommittedSource
+    ? sourceFamily.successorEpochIdentity
+    : Object.freeze({
+        storageGeneration:
+          artifact?.spatialEpochStorageGeneration
+          ?? artifact?.storageGeneration
+          ?? null,
+        physicsTick:
+          artifact?.spatialEpochPhysicsTick ?? artifact?.physicsTick ?? null,
+        physicsSubstep:
+          artifact?.spatialEpochPhysicsSubstep
+          ?? artifact?.physicsSubstep
+          ?? null,
+        positionEpoch:
+          artifact?.spatialEpochPositionEpoch ?? artifact?.positionEpoch ?? null,
+        topologyEpoch:
+          artifact?.spatialEpochTopologyEpoch ?? artifact?.topologyEpoch ?? null,
+        chartEpoch:
+          artifact?.spatialEpochChartEpoch ?? artifact?.chartEpoch ?? null,
+        levelEpoch:
+          artifact?.spatialEpochLevelEpoch ?? artifact?.levelEpoch ?? null,
+        supportEpoch:
+          artifact?.spatialEpochSupportEpoch ?? artifact?.supportEpoch ?? null
+      });
   return {
     family,
     role,
-    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    sourceFamily: finalCommittedSource ? sourceFamily : null,
+    sourceFamilyStatus: finalCommittedSource ? sourceFamily.status : null,
+    sourceDeviceId: finalCommittedSource ? sourceFamily.deviceId : null,
+    sourceFamilyRole: finalCommittedSource
+      ? sourceFamily.sourceFamilyRole
+      : 'canonical-pre-integration-x-n',
     sourceGenerationId,
     sourceEpochIdentity,
-    positionAuthority: 'same-epoch-pre-integration-particle-state',
-    finalContinuationAuthority: false,
-    coherentSolidAuthority: false,
+    positionAuthority: finalCommittedSource
+      ? sourceFamily.positionAuthority
+      : 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority: finalCommittedSource,
+    coherentSolidAuthority: finalCommittedSource,
     schema,
     status,
     rowCount: Math.max(0, Math.round(finiteNumber(rowCount, 0))),
@@ -7013,6 +7034,7 @@ function schroederLocalRetainedRenderBufferDescriptor({
   family,
   role,
   artifact = null,
+  sourceFamily = null,
   buffer = null,
   rowCount = 0,
   strideFloats = 0,
@@ -7023,6 +7045,7 @@ function schroederLocalRetainedRenderBufferDescriptor({
     family,
     role,
     artifact,
+    sourceFamily,
     rowCount,
     strideFloats,
     byteLength,
@@ -7044,6 +7067,7 @@ function schroederLocalRetainedRenderBufferDescriptor({
 function createSchroederLocalRetainedRenderBufferResolverSummary({
   activeNodeList = null,
   hierarchyAggregateNode = null,
+  sourceFamily = null,
   ownsActiveNodeList = false,
   ownsHierarchyAggregateNode = false,
   releaseRetainedBuffers = null
@@ -7053,6 +7077,7 @@ function createSchroederLocalRetainedRenderBufferResolverSummary({
       family: 'schroeder-active-node-list',
       role: 'render-lod-leaf-source',
       artifact: activeNodeList,
+      sourceFamily,
       buffer: activeNodeList?.activeNodeBuffer || null,
       rowCount: activeNodeList?.activeCandidateCount ?? activeNodeList?.particleCount,
       strideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
@@ -7062,6 +7087,7 @@ function createSchroederLocalRetainedRenderBufferResolverSummary({
       family: 'schroeder-hierarchy-aggregate-node',
       role: 'spatial-aggregate-render-proxy-source',
       artifact: hierarchyAggregateNode,
+      sourceFamily,
       buffer: hierarchyAggregateNode?.aggregateNodeBuffer || null,
       rowCount: hierarchyAggregateNode?.aggregateNodeCount ?? hierarchyAggregateNode?.aggregateRowCount,
       strideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
@@ -7099,10 +7125,30 @@ function createSchroederLocalRetainedRenderBufferResolverSummary({
       ? 'schroeder-local-retained-render-buffers-ready'
       : 'schroeder-local-retained-render-buffers-empty',
     source: 'same-device-schroeder-execution-artifacts',
-    sourceFamilyRole: 'canonical-pre-integration-x-n',
-    positionAuthority: 'same-epoch-pre-integration-particle-state',
-    finalContinuationAuthority: false,
-    coherentSolidAuthority: false,
+    sourceFamily:
+      sourceFamily?.ready === true && sourceFamily.authenticated === true
+        ? sourceFamily
+        : null,
+    sourceFamilyStatus:
+      sourceFamily?.ready === true && sourceFamily.authenticated === true
+        ? sourceFamily.status
+        : null,
+    sourceDeviceId:
+      sourceFamily?.ready === true && sourceFamily.authenticated === true
+        ? sourceFamily.deviceId
+        : null,
+    sourceFamilyRole:
+      sourceFamily?.ready === true && sourceFamily.authenticated === true
+        ? sourceFamily.sourceFamilyRole
+        : 'canonical-pre-integration-x-n',
+    positionAuthority:
+      sourceFamily?.ready === true && sourceFamily.authenticated === true
+        ? sourceFamily.positionAuthority
+        : 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority:
+      sourceFamily?.ready === true && sourceFamily.authenticated === true,
+    coherentSolidAuthority:
+      sourceFamily?.ready === true && sourceFamily.authenticated === true,
     sourceGenerationId:
       buffers[0]?.sourceGenerationId
       ?? buffers[1]?.sourceGenerationId
@@ -7151,6 +7197,7 @@ export function createSchroederPortableSummaryPlan({
   hierarchyAggregateNode = null,
   conservationSummary = null,
   phaseVolumeDiagnosticSummary = null,
+  sourceFamily = null,
   selectedLevel = levelAssignment?.selectedLevel ?? 0,
   baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
   renderLodMode = 'active-node-leaf-and-aggregate-proxy-lod',
@@ -7237,8 +7284,19 @@ export function createSchroederPortableSummaryPlan({
   )));
   const phaseDiagnosticRowsAvailable = phaseVolumeDiagnosticSummary?.summaryRows instanceof Float32Array
     || Array.isArray(phaseVolumeDiagnosticSummary?.summaryRows);
+  const finalCommittedSource = Boolean(
+    sourceFamily?.ready === true
+    && sourceFamily.authenticated === true
+    && sourceFamily.sourceFamilyRole
+      === 'committed-successor-x-n-plus-1'
+    && sourceFamily.successorEpochIdentity
+  );
+  const retainedRef = (descriptor) => schroederPortableRetainedRef({
+    ...descriptor,
+    sourceFamily
+  });
   const retainedRefs = [
-    schroederPortableRetainedRef({
+    retainedRef({
       family: 'schroeder-level-assignment',
       role: 'native-scale-classification',
       artifact: levelAssignment,
@@ -7247,7 +7305,7 @@ export function createSchroederPortableSummaryPlan({
       byteLength: levelAssignment?.assignmentBufferByteLength ?? levelAssignment?.assignmentByteLength,
       retained: Boolean(levelAssignment?.assignmentBuffer)
     }),
-    schroederPortableRetainedRef({
+    retainedRef({
       family: 'schroeder-active-node-list',
       role: 'render-lod-leaf-source',
       artifact: activeNodeList,
@@ -7256,7 +7314,7 @@ export function createSchroederPortableSummaryPlan({
       byteLength: activeNodeList.activeNodeBufferByteLength ?? activeNodeList.activeNodeByteLength,
       retained: Boolean(activeNodeList.activeNodeBuffer)
     }),
-    activeNodeIndex ? schroederPortableRetainedRef({
+    activeNodeIndex ? retainedRef({
       family: 'schroeder-active-node-index',
       role: 'small-scene-neighbor-accelerator',
       artifact: activeNodeIndex,
@@ -7265,7 +7323,7 @@ export function createSchroederPortableSummaryPlan({
       byteLength: activeNodeIndex.bucketSlotByteLength,
       retained: Boolean(activeNodeIndex.bucketSlotBuffer)
     }) : null,
-    activeNodeSortedIndex ? schroederPortableRetainedRef({
+    activeNodeSortedIndex ? retainedRef({
       family: 'schroeder-active-node-sorted-index',
       role: 'sorted-radix-neighbor-accelerator',
       artifact: activeNodeSortedIndex,
@@ -7274,7 +7332,7 @@ export function createSchroederPortableSummaryPlan({
       byteLength: activeNodeSortedIndex.sortedActiveIndexByteLength,
       retained: Boolean(activeNodeSortedIndex.sortedActiveIndexBuffer)
     }) : null,
-    lawQueue ? schroederPortableRetainedRef({
+    lawQueue ? retainedRef({
       family: 'schroeder-law-queue',
       role: 'near-field-law-work',
       artifact: lawQueue,
@@ -7283,7 +7341,7 @@ export function createSchroederPortableSummaryPlan({
       byteLength: lawQueue.lawQueueBufferByteLength ?? lawQueue.lawQueueByteLength,
       retained: Boolean(lawQueue.lawQueueBuffer)
     }) : null,
-    lawNeighborCandidates ? schroederPortableRetainedRef({
+    lawNeighborCandidates ? retainedRef({
       family: 'schroeder-law-neighbor-candidate',
       role: 'near-field-law-candidates',
       artifact: lawNeighborCandidates,
@@ -7293,7 +7351,7 @@ export function createSchroederPortableSummaryPlan({
         ?? lawNeighborCandidates.neighborCandidateByteLength,
       retained: Boolean(lawNeighborCandidates.neighborCandidateBuffer)
     }) : null,
-    farAggregateCandidates ? schroederPortableRetainedRef({
+    farAggregateCandidates ? retainedRef({
       family: 'schroeder-far-aggregate-candidate',
       role: 'aggregate-admissible-far-field-law-candidates',
       artifact: farAggregateCandidates,
@@ -7303,7 +7361,7 @@ export function createSchroederPortableSummaryPlan({
         ?? farAggregateCandidates.farAggregateCandidateByteLength,
       retained: Boolean(farAggregateCandidates.farAggregateCandidateBuffer)
     }) : null,
-    farAggregateForceSummary ? schroederPortableRetainedRef({
+    farAggregateForceSummary ? retainedRef({
       family: 'schroeder-far-aggregate-force-summary',
       role: 'read-only-far-field-force-summary',
       artifact: farAggregateForceSummary,
@@ -7313,7 +7371,7 @@ export function createSchroederPortableSummaryPlan({
         ?? farAggregateForceSummary.forceSummaryByteLength,
       retained: Boolean(farAggregateForceSummary.forceSummaryBuffer)
     }) : null,
-    farAggregateDiagnosticSummary ? schroederPortableRetainedRef({
+    farAggregateDiagnosticSummary ? retainedRef({
       family: 'schroeder-far-aggregate-diagnostic-summary',
       role: 'far-field-force-quality-diagnostics',
       artifact: farAggregateDiagnosticSummary,
@@ -7323,7 +7381,7 @@ export function createSchroederPortableSummaryPlan({
         ?? farAggregateDiagnosticSummary.diagnosticSummaryByteLength,
       retained: Boolean(farAggregateDiagnosticSummary.diagnosticSummaryBuffer)
     }) : null,
-    farAggregateLawConsumer ? schroederPortableRetainedRef({
+    farAggregateLawConsumer ? retainedRef({
       family: 'schroeder-far-aggregate-law-consumer',
       role: 'read-only-radiation-plasma-gas-summary-consumers',
       artifact: farAggregateLawConsumer,
@@ -7333,7 +7391,7 @@ export function createSchroederPortableSummaryPlan({
         ?? farAggregateLawConsumer.lawConsumerByteLength,
       retained: Boolean(farAggregateLawConsumer.lawConsumerBuffer)
     }) : null,
-    farAggregateLawConsumerDiagnosticSummary ? schroederPortableRetainedRef({
+    farAggregateLawConsumerDiagnosticSummary ? retainedRef({
       family: 'schroeder-far-aggregate-law-consumer-diagnostic-summary',
       role: 'far-field-law-consumer-pressure-diagnostics',
       artifact: farAggregateLawConsumerDiagnosticSummary,
@@ -7348,7 +7406,7 @@ export function createSchroederPortableSummaryPlan({
         || farAggregateLawConsumerDiagnosticSummary.diagnosticSummaryBuffer
       )
     }) : null,
-    farAggregateGasStateDelta ? schroederPortableRetainedRef({
+    farAggregateGasStateDelta ? retainedRef({
       family: SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_OUTPUT_FAMILY,
       role: 'admitted-far-field-gas-pressure-state-deltas',
       artifact: farAggregateGasStateDelta,
@@ -7363,7 +7421,7 @@ export function createSchroederPortableSummaryPlan({
         || farAggregateGasStateDelta.stateDeltaBuffer
       )
     }) : null,
-    farAggregateGasCellImport ? schroederPortableRetainedRef({
+    farAggregateGasCellImport ? retainedRef({
       family: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY,
       role: 'retained-pressure-interface-gas-cell-rows',
       artifact: farAggregateGasCellImport,
@@ -7379,7 +7437,7 @@ export function createSchroederPortableSummaryPlan({
         || farAggregateGasCellImport.retainedGasCellFieldSource?.retainedGasPressureBufferRefs?.[0]
         || null
     }) : null,
-    farAggregateForceApplication ? schroederPortableRetainedRef({
+    farAggregateForceApplication ? retainedRef({
       family: 'schroeder-far-aggregate-force-application',
       role: 'admitted-far-field-force-application-deltas',
       artifact: farAggregateForceApplication,
@@ -7389,7 +7447,7 @@ export function createSchroederPortableSummaryPlan({
         ?? farAggregateForceApplication.forceApplicationByteLength,
       retained: Boolean(farAggregateForceApplication.forceApplicationBuffer)
     }) : null,
-    hierarchyAggregateNode ? schroederPortableRetainedRef({
+    hierarchyAggregateNode ? retainedRef({
       family: 'schroeder-hierarchy-aggregate-node',
       role: 'spatial-aggregate-render-proxy-source',
       artifact: hierarchyAggregateNode,
@@ -7399,7 +7457,7 @@ export function createSchroederPortableSummaryPlan({
         ?? hierarchyAggregateNode.aggregateNodeByteLength,
       retained: Boolean(hierarchyAggregateNode.aggregateNodeBuffer)
     }) : null,
-    conservationSummary ? schroederPortableRetainedRef({
+    conservationSummary ? retainedRef({
       family: 'schroeder-conservation-summary',
       role: 'cross-level-residual-summary',
       artifact: conservationSummary,
@@ -7408,7 +7466,7 @@ export function createSchroederPortableSummaryPlan({
       byteLength: conservationSummary.summaryBufferByteLength ?? conservationSummary.summaryByteLength,
       retained: Boolean(conservationSummary.summaryBuffer)
     }) : null,
-    phaseVolumeDiagnosticSummary ? schroederPortableRetainedRef({
+    phaseVolumeDiagnosticSummary ? retainedRef({
       family: 'schroeder-phase-volume-diagnostic-summary',
       role: 'phase-volume-render-lod-hint',
       artifact: phaseVolumeDiagnosticSummary,
@@ -7428,9 +7486,12 @@ export function createSchroederPortableSummaryPlan({
     schema: ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
     status: 'schroeder-render-lod-summary-planned',
     mode: renderLodMode,
-    sourceFamilyRole: 'canonical-pre-integration-x-n',
-    finalContinuationAuthority: false,
-    coherentSolidAuthority: false,
+    sourceFamily: finalCommittedSource ? sourceFamily : null,
+    sourceFamilyRole: finalCommittedSource
+      ? sourceFamily.sourceFamilyRole
+      : 'canonical-pre-integration-x-n',
+    finalContinuationAuthority: finalCommittedSource,
+    coherentSolidAuthority: finalCommittedSource,
     selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
     nativeGridSpacingM,
     activeLeafProxyCount: activeNodeCount,
@@ -7458,14 +7519,21 @@ export function createSchroederPortableSummaryPlan({
     dataStructure: 'schroeder-tree',
     kernelScope: 'schroeder-portable-render-lod-summary',
     peerComputeUseCase,
-    sourceFamilyRole: 'canonical-pre-integration-x-n',
+    sourceFamily: finalCommittedSource ? sourceFamily : null,
+    sourceFamilyStatus: finalCommittedSource ? sourceFamily.status : null,
+    sourceDeviceId: finalCommittedSource ? sourceFamily.deviceId : null,
+    sourceFamilyRole: finalCommittedSource
+      ? sourceFamily.sourceFamilyRole
+      : 'canonical-pre-integration-x-n',
     sourceGenerationId:
       retainedRefs[0]?.sourceGenerationId ?? null,
     sourceEpochIdentity:
       retainedRefs[0]?.sourceEpochIdentity ?? null,
-    positionAuthority: 'same-epoch-pre-integration-particle-state',
-    finalContinuationAuthority: false,
-    coherentSolidAuthority: false,
+    positionAuthority: finalCommittedSource
+      ? sourceFamily.positionAuthority
+      : 'same-epoch-pre-integration-particle-state',
+    finalContinuationAuthority: finalCommittedSource,
+    coherentSolidAuthority: finalCommittedSource,
     summaryMode: 'descriptor-only-retained-buffer-summary',
     portableSummaryMode: 'portable-descriptors-not-raw-gpubuffers',
     selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
@@ -16365,6 +16433,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let spatialSuccessorSourceFamily = null;
   let spatialSuccessorPublicationPlan = null;
   let spatialSuccessorPublicationReceipt = null;
+  let resolvedFinalRenderLevelAssignment = null;
+  let resolvedFinalRenderActiveNodeList = null;
+  let ownsResolvedFinalRenderLevelAssignment = false;
+  let finalRenderProxyBuildStatus =
+    'final-render-proxy-build-not-requested';
   const requirePublishedSpatialSuccessorSourceFamily = ({
     stage,
     plan,
@@ -16464,6 +16537,175 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       nextParticleUploads.schroederSpatialTopologyTransitionReceipt = receipt;
     }
     return receipt;
+  };
+  const prepareFinalRenderProxyArtifacts = async ({
+    levelAssignment: admittedLevelAssignment = null,
+    finalSphParticleState,
+    finalMlsMpmParticleState,
+    finalParticleUploads
+  } = {}) => {
+    if (
+      resolvedFinalRenderLevelAssignment
+      || resolvedFinalRenderActiveNodeList
+    ) {
+      const error = new Error(
+        'Final committed render-proxy artifacts may be prepared only once'
+      );
+      error.code = 'ERR_SCHROEDER_FINAL_RENDER_PROXY_REPLAY';
+      throw error;
+    }
+    const finalSphUpload =
+      finalParticleUploads?.sphParticleUpload ?? null;
+    const finalMlsMpmUpload =
+      finalParticleUploads?.mlsMpmParticleUpload ?? null;
+    const particleCount = finalSphUpload?.particleCount;
+    if (
+      !finalSphUpload?.stateBuffer
+      || !finalSphUpload?.thermoBuffer
+      || !finalMlsMpmUpload?.mechanicsBuffer
+      || !Number.isInteger(particleCount)
+      || particleCount < 1
+      || finalMlsMpmUpload.particleCount !== particleCount
+    ) {
+      const error = new Error(
+        'Final render-proxy production requires one complete successor buffer family'
+      );
+      error.code = 'ERR_SCHROEDER_FINAL_RENDER_PROXY_SOURCE';
+      throw error;
+    }
+    const normalizedFinalSphParticleState = {
+      ...finalSphParticleState,
+      particleCount,
+      step: finalSphUpload.step ?? finalSphParticleState?.step,
+      time: finalSphUpload.time ?? finalSphParticleState?.time,
+      physicsTick:
+        finalSphUpload.physicsTick
+        ?? finalSphParticleState?.physicsTick,
+      physicsSubstep:
+        finalSphUpload.physicsSubstep
+        ?? finalSphParticleState?.physicsSubstep,
+      positionEpoch:
+        finalSphUpload.positionEpoch
+        ?? finalSphParticleState?.positionEpoch,
+      topologyEpoch:
+        finalSphUpload.topologyEpoch
+        ?? finalSphParticleState?.topologyEpoch,
+      chartEpoch:
+        finalSphUpload.chartEpoch
+        ?? finalSphParticleState?.chartEpoch,
+      levelEpoch:
+        finalSphUpload.levelEpoch
+        ?? finalSphParticleState?.levelEpoch,
+      supportEpoch:
+        finalSphUpload.supportEpoch
+        ?? finalSphParticleState?.supportEpoch,
+      storageGeneration:
+        finalSphUpload.storageGeneration
+        ?? finalSphParticleState?.storageGeneration,
+      cpuStateStale: true
+    };
+    const normalizedFinalMlsMpmParticleState = {
+      ...finalMlsMpmParticleState,
+      particleCount,
+      step: finalMlsMpmUpload.step ?? finalSphUpload.step
+        ?? finalMlsMpmParticleState?.step,
+      time: finalMlsMpmUpload.time ?? finalSphUpload.time
+        ?? finalMlsMpmParticleState?.time,
+      physicsTick:
+        finalMlsMpmUpload.physicsTick
+        ?? finalSphUpload.physicsTick
+        ?? finalMlsMpmParticleState?.physicsTick,
+      physicsSubstep:
+        finalMlsMpmUpload.physicsSubstep
+        ?? finalSphUpload.physicsSubstep
+        ?? finalMlsMpmParticleState?.physicsSubstep,
+      positionEpoch:
+        finalMlsMpmUpload.positionEpoch
+        ?? finalSphUpload.positionEpoch
+        ?? finalMlsMpmParticleState?.positionEpoch,
+      topologyEpoch:
+        finalMlsMpmUpload.topologyEpoch
+        ?? finalSphUpload.topologyEpoch
+        ?? finalMlsMpmParticleState?.topologyEpoch,
+      chartEpoch:
+        finalMlsMpmUpload.chartEpoch
+        ?? finalSphUpload.chartEpoch
+        ?? finalMlsMpmParticleState?.chartEpoch,
+      levelEpoch:
+        finalMlsMpmUpload.levelEpoch
+        ?? finalSphUpload.levelEpoch
+        ?? finalMlsMpmParticleState?.levelEpoch,
+      supportEpoch:
+        finalMlsMpmUpload.supportEpoch
+        ?? finalSphUpload.supportEpoch
+        ?? finalMlsMpmParticleState?.supportEpoch,
+      cpuStateStale: true
+    };
+    ownsResolvedFinalRenderLevelAssignment = !admittedLevelAssignment;
+    resolvedFinalRenderLevelAssignment = admittedLevelAssignment
+      || await runHierarchyStage(
+        'final-render-level-assignment',
+        () => runSchroederLevelAssignmentWebGpu({
+          device,
+          sphParticleState: normalizedFinalSphParticleState,
+          mlsMpmParticleState: normalizedFinalMlsMpmParticleState,
+          sphParticleUpload: finalSphUpload,
+          mlsMpmParticleUpload: finalMlsMpmUpload,
+          baseGridSpacingM: plan.baseGridSpacingM,
+          minLevel: plan.minLevel,
+          maxLevel: plan.maxLevel,
+          targetSupportCells,
+          supportRadiusScale,
+          retainAssignmentBuffer: true,
+          readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+        })
+      );
+    const finalAssignment = resolvedFinalRenderLevelAssignment;
+    if (
+      !finalAssignment?.assignmentBuffer
+      || finalAssignment.particleCount !== particleCount
+      || finalAssignment.sourceStateBuffer !== finalSphUpload.stateBuffer
+      || finalAssignment.sourceMechanicsBuffer
+        !== finalMlsMpmUpload.mechanicsBuffer
+    ) {
+      const error = new Error(
+        'Final render level assignment does not retain the exact successor state/mechanics family'
+      );
+      error.code = 'ERR_SCHROEDER_FINAL_RENDER_ASSIGNMENT_PROVENANCE';
+      throw error;
+    }
+    if (ownsResolvedFinalRenderLevelAssignment) {
+      registerHierarchyArtifacts(
+        'final-render-level-assignment',
+        finalAssignment,
+        null,
+        { expectedConsumers: ['final-render-active-node-list'] }
+      );
+    }
+    resolvedFinalRenderActiveNodeList = await runHierarchyStage(
+      'final-render-active-node-list',
+      () => runSchroederActiveNodeListWebGpu({
+        device,
+        levelAssignment: finalAssignment,
+        phaseVolumeAssignmentOverlay: null,
+        phaseVolumeAssignmentOverlayIndex: null,
+        phaseVolumeLevelUpdate: null,
+        selectedLevel: plan.selectedLevel,
+        tileCellCount,
+        supportInflateCells,
+        retainActiveNodeBuffer: true,
+        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+      })
+    );
+    registerHierarchyArtifacts(
+      'final-render-active-node-list',
+      resolvedFinalRenderActiveNodeList,
+      null,
+      { expectedConsumers: ['local-render-resolver'] }
+    );
+    finalRenderProxyBuildStatus =
+      'final-render-proxy-artifacts-submitted-from-successor-family';
+    return resolvedFinalRenderActiveNodeList;
   };
   const scheduleTwoLevelAggregateTraversalCleanup = () => {
     if (
@@ -17668,7 +17910,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     resolvedPhaseVolumeDiagnosticSummary,
     phaseVolumeDiagnosticSummary
   );
-  const resolvedPortableSummary = !enablePortableSummary
+  let resolvedPortableSummary = !enablePortableSummary
     ? null
     : portableSummary || await portableSummaryRunner({
       levelAssignment: resolvedLevelAssignment,
@@ -17693,7 +17935,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       baseGridSpacingM: plan.baseGridSpacingM,
       peerComputeUseCase: portableSummaryPeerComputeUseCase
     });
-  const resolvedLocalRetainedRenderBuffers = createSchroederLocalRetainedRenderBufferResolverSummary({
+  let resolvedLocalRetainedRenderBuffers = createSchroederLocalRetainedRenderBufferResolverSummary({
     activeNodeList: resolvedActiveNodeList,
     hierarchyAggregateNode: resolvedHierarchyAggregateNode,
     ownsActiveNodeList: ownsResolvedActiveNodeList,
@@ -18420,6 +18662,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           twoLevelPostMechanicsContinuation?.componentSources ?? null
       });
   }
+  if (
+    twoLevelPostMechanicsEpoch
+    && spatialSuccessorPublicationPlan
+  ) {
+    await prepareFinalRenderProxyArtifacts({
+      finalSphParticleState:
+        resolvedTwoLevelMechanics?.nextSphParticleState
+        ?? resolvedTwoLevelMechanics?.pendingNextSphParticleState
+        ?? sphParticleState,
+      finalMlsMpmParticleState:
+        resolvedTwoLevelMechanics?.nextMlsMpmParticleState
+        ?? resolvedTwoLevelMechanics?.pendingNextMlsMpmParticleState
+        ?? mlsMpmParticleState,
+      finalParticleUploads: finalTwoLevelContinuationUploads
+    });
+  }
   if (twoLevelPostMechanicsEpoch) {
     const publicCommit = twoLevelCanonicalEpochController.commitPostMechanics(
       twoLevelPostMechanicsEpoch,
@@ -19032,6 +19290,23 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           ?? null
       });
   }
+  if (
+    !twoLevelAuthoritative
+    && spatialSuccessorPublicationPlan
+  ) {
+    await prepareFinalRenderProxyArtifacts({
+      finalSphParticleState:
+        residentStep?.nextSphParticleState
+        ?? cloneSphParticleStateForNext(sphParticleState, residentStep),
+      finalMlsMpmParticleState:
+        residentStep?.nextMlsMpmParticleState
+        ?? cloneMlsMpmParticleStateForNext(
+          mlsMpmParticleState,
+          residentStep
+        ),
+      finalParticleUploads: residentStep?.nextParticleUploads
+    });
+  }
   const exactNearConsumerArtifactFamilyByReader = {
     [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
       SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY.PRESSURE_CONTACT_INTERFACE,
@@ -19150,6 +19425,69 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       spatialSuccessorSourceFamily;
     residentStep.schroederSpatialSuccessorSourceFamilyStatus =
       spatialSuccessorSourceFamily.status;
+  }
+  if (
+    spatialSuccessorSourceFamily
+    && resolvedFinalRenderActiveNodeList
+  ) {
+    resolvedPortableSummary = !enablePortableSummary
+      ? null
+      : await portableSummaryRunner({
+          levelAssignment: resolvedFinalRenderLevelAssignment,
+          activeNodeList: resolvedFinalRenderActiveNodeList,
+          activeNodeIndex: null,
+          activeNodeSortedIndex: null,
+          lawQueue: null,
+          lawNeighborCandidates: null,
+          farAggregateCandidates: null,
+          farAggregateForceSummary: null,
+          farAggregateDiagnosticSummary: null,
+          farAggregateLawConsumer: null,
+          farAggregateLawConsumerDiagnosticSummary: null,
+          farAggregateLawConsumerAuthorityPolicy: null,
+          farAggregateGasStateDelta: null,
+          farAggregateGasCellImport: null,
+          farAggregateForceApplication: null,
+          hierarchyAggregateNode: null,
+          conservationSummary: null,
+          phaseVolumeDiagnosticSummary: null,
+          sourceFamily: spatialSuccessorSourceFamily,
+          selectedLevel: plan.selectedLevel,
+          baseGridSpacingM: plan.baseGridSpacingM,
+          peerComputeUseCase: portableSummaryPeerComputeUseCase
+        });
+    resolvedLocalRetainedRenderBuffers =
+      createSchroederLocalRetainedRenderBufferResolverSummary({
+        activeNodeList: resolvedFinalRenderActiveNodeList,
+        hierarchyAggregateNode: null,
+        sourceFamily: spatialSuccessorSourceFamily,
+        ownsActiveNodeList: true,
+        ownsHierarchyAggregateNode: false,
+        releaseRetainedBuffers: ({ families = null } = {}) => (
+          releaseSchroederHierarchyArtifactTransfers(
+            hierarchyArtifactLedger,
+            {
+              transferClass: 'render',
+              families: families == null
+                ? ['final-render-active-node-list']
+                : (
+                    Array.isArray(families)
+                      ? families
+                      : [families]
+                  ).map((family) => (
+                    family === 'schroeder-active-node-list'
+                    || family === 'final-render-active-node-list'
+                      ? 'final-render-active-node-list'
+                      : family
+                  )),
+              reason: 'final-local-render-resolver-released',
+              submitted: true
+            }
+          )
+        )
+      });
+    finalRenderProxyBuildStatus =
+      'final-render-proxy-published-from-exact-committed-successor';
   }
   if (residentStep && spatialSuccessorPublicationReceipt) {
     residentStep.schroederSpatialSuccessorPublicationStatus =
@@ -19446,6 +19784,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       pressureInterfaceOwnerScopeSummary.status,
     pressureInterfaceOwnerScopeDiagnosticOnly: true,
     pressureInterfaceOwnerScopeForceRowsApplied: false,
+    finalRenderProxyBuildStatus,
+    finalRenderProxyPublished:
+      finalRenderProxyBuildStatus
+        === 'final-render-proxy-published-from-exact-committed-successor',
+    finalRenderProxySourceFamily: spatialSuccessorSourceFamily,
+    finalRenderProxyLevelAssignmentStatus:
+      resolvedFinalRenderLevelAssignment?.status ?? null,
+    finalRenderProxyActiveNodeListStatus:
+      resolvedFinalRenderActiveNodeList?.status ?? null,
+    finalRenderProxyParticleCount:
+      resolvedFinalRenderActiveNodeList?.particleCount
+      ?? resolvedFinalRenderLevelAssignment?.particleCount
+      ?? 0,
     localRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
     schroederLocalRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
     schroederPhaseVolumeNextTickAssignmentOverlay: resolvedPhaseVolumeNextTickAssignmentOverlay,
@@ -20291,6 +20642,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ? resolvedPortableSummary.retainedRefs.map((entry) => ({
           family: entry.family,
           role: entry.role,
+          sourceFamily: entry.sourceFamily ?? null,
+          sourceFamilyStatus: entry.sourceFamilyStatus ?? null,
+          sourceDeviceId: entry.sourceDeviceId ?? null,
           sourceFamilyRole: entry.sourceFamilyRole,
           sourceGenerationId: entry.sourceGenerationId,
           sourceEpochIdentity: entry.sourceEpochIdentity,
@@ -20310,10 +20664,36 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         : [],
       renderLodStatus: resolvedPortableSummary.renderLodStatus,
       renderLodMode: resolvedPortableSummary.renderLodMode,
+      sourceFamily: resolvedPortableSummary.sourceFamily ?? null,
+      sourceFamilyStatus:
+        resolvedPortableSummary.sourceFamilyStatus ?? null,
+      sourceDeviceId: resolvedPortableSummary.sourceDeviceId ?? null,
+      sourceFamilyRole:
+        resolvedPortableSummary.sourceFamilyRole ?? null,
+      sourceGenerationId:
+        resolvedPortableSummary.sourceGenerationId ?? null,
+      sourceEpochIdentity:
+        resolvedPortableSummary.sourceEpochIdentity ?? null,
+      positionAuthority:
+        resolvedPortableSummary.positionAuthority ?? null,
+      finalContinuationAuthority:
+        resolvedPortableSummary.finalContinuationAuthority === true,
+      coherentSolidAuthority:
+        resolvedPortableSummary.coherentSolidAuthority === true,
       renderLod: resolvedPortableSummary.renderLod ? {
         schema: resolvedPortableSummary.renderLod.schema,
         status: resolvedPortableSummary.renderLod.status,
         mode: resolvedPortableSummary.renderLod.mode,
+        sourceFamily:
+          resolvedPortableSummary.renderLod.sourceFamily ?? null,
+        sourceFamilyRole:
+          resolvedPortableSummary.renderLod.sourceFamilyRole ?? null,
+        finalContinuationAuthority:
+          resolvedPortableSummary.renderLod
+            .finalContinuationAuthority === true,
+        coherentSolidAuthority:
+          resolvedPortableSummary.renderLod
+            .coherentSolidAuthority === true,
         selectedLevel: resolvedPortableSummary.renderLod.selectedLevel,
         nativeGridSpacingM: resolvedPortableSummary.renderLod.nativeGridSpacingM,
         activeLeafProxyCount: resolvedPortableSummary.renderLod.activeLeafProxyCount,
@@ -20778,14 +21158,29 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   const residentStorageAdoption = residentStep?.schroederParticleStorageAdoption || null;
   const residentStorageAdopted = residentStorageAdoption?.adopted === true;
 
-  if (ownsResolvedActiveNodeList) {
+  const finalCommittedRenderProxyPublished = Boolean(
+    resolvedFinalRenderActiveNodeList
+    && spatialSuccessorSourceFamily?.ready === true
+    && spatialSuccessorSourceFamily?.authenticated === true
+  );
+  if (finalCommittedRenderProxyPublished) {
+    transferSchroederHierarchyArtifactFamily(
+      hierarchyArtifactLedger,
+      'final-render-active-node-list',
+      {
+        transferClass: 'render',
+        consumerStage: 'final-local-render-resolver',
+        retirementAuthority: 'ledger-consumer'
+      }
+    );
+  } else if (ownsResolvedActiveNodeList) {
     transferSchroederHierarchyArtifactFamily(hierarchyArtifactLedger, 'active-node-list', {
       transferClass: 'render',
       consumerStage: 'local-render-resolver',
       retirementAuthority: 'ledger-consumer'
     });
   }
-  if (ownsResolvedHierarchyAggregateNode) {
+  if (!finalCommittedRenderProxyPublished && ownsResolvedHierarchyAggregateNode) {
     transferSchroederHierarchyArtifactFamily(hierarchyArtifactLedger, 'hierarchy-aggregate-node', {
       transferClass: 'render',
       consumerStage: 'local-render-resolver',

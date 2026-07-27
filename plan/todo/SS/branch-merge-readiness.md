@@ -337,6 +337,39 @@ refresh, both captured by `sph-long-horizon-probe.mjs`. Kept separate from
 execution, the other brackets a whole stage including submit latency. Merging
 them would make a reader unable to tell which they were looking at.
 
+## Scenario matrix re-verified 2026-07-26 after all of this session's changes
+
+Everything landed this session -- the splat as the default render field, eight
+zero-fill removals, the shared placeholders, the render-rows pipeline cache, both
+index gate removals and the sorted-index default -- postdated the last full
+matrix run, so the gate was re-run.
+
+| scenario | failed | issues |
+| --- | --- | --- |
+| standard-water-cycle | yes | `steam-rises`, `steam-condenses` |
+| standard-iron-ice-quench | yes | `steam-forms`, `steam-rises` |
+| standard-sodium-water | yes | `hydrogen-rises` |
+| standard-cesium-fluorine | no | -- |
+| random-elements-ba-pb | no | -- |
+| random-elements-bk-lr | no | -- |
+| random-elements-fr-fe | no | -- |
+
+**3 of 7 fail, and all of it is pre-existing.** The 2026-07-24 baseline
+(`/tmp/ulg-visual-sanity-matrix/s9d5-source-cell-thermal-20260724-r2`) shows the
+same three scenarios failing with the same issues. The one apparent delta --
+`steam-forms` on iron-ice-quench, absent from the 07-24 summary -- reproduced on
+two further runs, so it is not variance, and then reproduced at **`60c4598`, the
+commit before this session's first change**. It came from somewhere between
+07-24 and the start of this session, not from this work.
+
+**This session introduced no scenario-matrix regressions.** Every failure is a
+physics acceptance check about a generated gas cohort failing to rise
+(`steam-rises`, `steam-condenses`, `steam-forms`, `hydrogen-rises`); all seven
+scenarios still report `analysisStatus: good` and produce frames.
+
+Those four checks are the real open physics item on this branch, and they are
+older than everything measured below.
+
 ## Everything on this page was measured with `ss=1` OFF until 2026-07-26
 
 The probe URL used throughout this campaign never set `ss=1`, so

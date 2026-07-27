@@ -536,6 +536,47 @@ an instability. Tracked as its own task.
 particle's volumetric strain, removes the pressure gradient, and re-vacuates the
 gate.
 
+The h2 J has an exact signature: `J(n) = 0.1 * (1 - 1/(256n))` fits all ten
+checkpoints to better than 2e-6, where 256n is the step count. With gas mass
+growing perfectly linearly, that means rest volume tracks S while current volume
+tracks (S-1) and is 10x smaller. So the gas **arrives** at the 0.1 clamp; it is
+not driven there.
+
+Three hypotheses were falsified, each by editing, running the scenario, and
+reverting:
+
+| hypothesis | result |
+| --- | --- |
+| `write_reacted_mechanics` derives J as current/rest -- the cross-phase trap by name | made it materialize at J=1 on a model change: h2 J **byte-identical**. Not the path. |
+| the `mechanics_refresh` reset branch keeps the collapsed ratio | set it to J=1: h2 J byte-identical *and* cesium-fluorine identical to baseline, so `mechanics_refresh_should_reset` is not firing here |
+| 0.099609375 is 0.1 round-tripped through `cbrt(J)^3` | computed in f32: 0.1 -> 0.46415889 -> 0.10000001. No match. |
+
+Both edits were reverted rather than kept -- neither fixed anything, and the
+first perturbed the one fully-passing chemistry scenario for no benefit.
+
+**And the gas is not being crushed.** Per-phase divergence, now in the
+checkpoint, gives `dt*|div(v)|` for h2 gas of 7.4e-5 falling to 1.5e-5 -- against
+the ~2.3 that collapsing J tenfold in one step would need -- and the gas
+divergence is mostly *positive*. Whatever sets J near 0.1 is not the mechanics.
+
+### Phase velocity locking is scenario-dependent
+
+Mean vertical velocity per phase (added this session) says the shared-grid
+locking that would explain a gas failing to rise is real in one scenario and
+absent in another:
+
+| | liquid meanVy | gas meanVy | locked? |
+| --- | --- | --- | --- |
+| water-cycle | -1.36 .. +0.30 | within +/-0.04 | **no** -- and gas `maxVy` hits +0.22 m/s |
+| sodium-water | -1.697, -0.623, -0.081 | -1.690, -0.636, -0.079 | **yes** -- tracks to ~1% |
+
+So `hydrogen-rises` and `steam-rises` fail for different reasons. In
+sodium-water the h2 moves with the naoh it is co-located with, which is the
+single-velocity-field limitation. In water-cycle individual steam parcels rise
+at a physical +0.19 to +0.22 m/s and the check simply cannot see it, because it
+measures `yCenterM` of the whole gas population against the first sample
+containing any gas -- and gas is generated continuously at the heated floor.
+
 Corrects an earlier note here: "no gradient anywhere, min == max exactly" came
 from a single sample where the two coincided. The gradient is not zero, it is
 about 2,000x too small.

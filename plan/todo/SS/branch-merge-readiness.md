@@ -472,12 +472,39 @@ is volume-preserving. There is no path from "this particle became steam" to
 "its represented volume is now 1,600x" -- which is exactly the separation the
 plan calls for and the code does not implement.
 
-**Hypothesis worth testing, not yet a claim:** this may share a root cause with
-the four failing visual-matrix checks (task #10). If a phase change to gas never
-updates the mechanical volume, steam particles occupy liquid volume and would not
-rise buoyantly -- which is exactly `steam-rises` / `hydrogen-rises` failing. The
-matrix scenarios do not enable `ss=1`, so they would share the *mechanism*
-(phase change not updating J) rather than the SS code path.
+#### CONFIRMED: one root cause, two symptoms. The steam is dense and sinks.
+
+The authoritative checkpoint's per-material-phase buckets settle it. Same run,
+6,144 steps:
+
+| step | liquid | gas |
+| --- | --- | --- |
+| 0 | 152p, 1216.00 kg, 341.1 K, y=0.909 | -- |
+| 3072 | 143p, 608.82 kg, 373.1 K, y=0.218 | 152p, 607.18 kg, 509.7 K, **y=0.135** |
+| 6144 | 136p, 338.76 kg, 373.0 K, y=0.286 | 152p, 877.24 kg, 628.1 K, **y=0.135** |
+
+**The phase change works.** Mass transfers and is conserved (1216 -> 339 + 877),
+the liquid pins at exactly 373.0 K -- the boiling point -- and the gas superheats
+to 628 K. Thermally and in mass bookkeeping this is correct.
+
+**The steam sits below the water.** Gas y-centre 0.135 against liquid 0.286, and
+it does not move across 3,072 further steps. It forms at the hot floor and stays
+there.
+
+That follows directly from the volume finding: with `J = 1` and rest volume per
+particle flat, 877 kg of "steam" occupies liquid volume. At liquid density it has
+no buoyancy, so it cannot rise.
+
+**So gate 3 and the four failing visual-matrix checks are the same defect**, and
+the earlier hypothesis is now evidenced rather than speculated:
+
+- no volume expansion -> no support-radius growth -> no level migration (**gate 3**)
+- no volume expansion -> steam at liquid density -> no buoyancy (**`steam-rises`,
+  `steam-condenses`, `steam-forms`, `hydrogen-rises`, task #10**)
+
+The matrix scenarios do not enable `ss=1`, so they share the *mechanism* -- the
+phase change never updating volume -- rather than the SS code path. Fixing the
+mechanism should address both.
 
 **Fourth instance of the pattern this session** -- after the law-neighbour index,
 the traversal ratios, and the thermal traversal mode: a diagnostic computed every

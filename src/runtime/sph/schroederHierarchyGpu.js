@@ -16895,8 +16895,24 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       // numeric motion proof reads it from the synthesized envelope.
       compactSummaryReadback: twoLevelAuthoritative
     });
+  // The `|| resolvedSpatialEpochGeneration?.mechanicsView` that used to be here
+  // came in with Slice 6 (3c801ad) and was too broad. The mechanics field view
+  // orders `sourceCount * STENCIL_SIZE` particle-stencil *candidates* for P2G
+  // scatter; it does not touch the active-node list. But the only consumer of
+  // this index is the law-neighbour kernel, which reads `active_nodes` from
+  // `resolvedActiveNodeList` -- the same list the index is built over. So the
+  // mechanics path switching artifacts disabled an index that a different
+  // consumer needed, and every law-neighbour query fell through to the
+  // exhaustive scan.
+  //
+  // Measured on ss=1, 9,000 particles, by removing it: applied traversal mode
+  // exact-active-node-scan -> bucketed-active-node-index, bucketHitRatio
+  // 0 -> 0.499, exactFallbackScanCount 576,000 -> 288,512, with byte-identical
+  // output (466,033 triangles) and no errors.
+  //
+  // Row-shape mismatch stays loud rather than silent: the law-neighbour runner
+  // throws if `activeNodeIndex.activeNodeCount !== activeNodeCount`.
   const resolvedActiveNodeIndex = !enableActiveNodeIndex
-    || resolvedSpatialEpochGeneration?.mechanicsView
     ? null
     : activeNodeIndex || await activeNodeIndexRunner({
       device,

@@ -1016,7 +1016,48 @@ primitive** this compaction uses and publishes
 would hand the kernel indices into the wrong array, so disabling it was the safe
 move at the time.
 
-**Which makes the fix a rebase, not a re-enable.** Build the neighbour index
+#### FIXED: the gate was over-broad. Exhaustive scans halved by deleting it.
+
+The rebase theory below is **also wrong**, and checking it produced the fix.
+`candidateCount` in the mechanics field view is
+`sourceCount * STENCIL_SIZE` -- it orders **particle-stencil candidates for P2G
+scatter**, not active nodes, and it publishes no unique-group offsets. There is
+nothing to rebase an active-node index onto, because the view never reorders
+active nodes.
+
+Which exposes the actual defect: **the only consumer of the active-node index is
+the law-neighbour kernel, and it reads `active_nodes` from
+`resolvedActiveNodeList` -- the very list the index is built over.** The
+mechanics path switching to its field view has nothing to do with it. Slice 6
+disabled an index that a *different* consumer needed.
+
+Deleting the condition, measured on `ss=1`, 9,000 particles:
+
+| | before | after |
+| --- | --- | --- |
+| `appliedTraversalIndexMode` | `exact-active-node-scan` | **`bucketed-active-node-index`** |
+| `bucketHitRatio` | 0 | **0.499** |
+| `exactFallbackScanRatio` | 1 | **0.501** |
+| `exactFallbackScanCount` | 576,000 | **288,512** |
+| `bucketSelectedCount` | 0 | **287,488** |
+| triangles | 466,033 | 466,033 |
+
+**Roughly 2.6 billion fewer overlap tests per step from removing one condition**,
+with byte-identical output, no errors, browser frame validation passed and the
+full unit suite green. A row-shape mismatch would still be loud, not silent --
+the law-neighbour runner throws when
+`activeNodeIndex.activeNodeCount !== activeNodeCount`.
+
+The remaining ~50% fallback is the genuine saturation case, and **that** is what
+the compaction is for: 9,000 rows -> 54 nodes puts a populated region's nodes
+inside a bucket. The two findings compose -- the gate removal serves the queries
+whose buckets already fit, the compaction serves the rest.
+
+The sorted-radix index is still gated the same way at `:16913` and was not
+touched; worth the same scrutiny separately.
+
+**The rebase theory that led here, kept because it explains the shape of the
+mechanics view.** Build the neighbour index
 against the view's ordering instead of the raw list -- and the view already
 computes the sorted order needed, so the input exists. Two things to confirm
 first, neither verified yet:

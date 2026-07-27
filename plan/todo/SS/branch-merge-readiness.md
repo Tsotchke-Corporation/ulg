@@ -709,6 +709,44 @@ Meanwhile 43% of the water boils off (1216 -> 697 kg) with nothing condensing.
 mass grows monotonically for the whole run. **Longer runs make this strictly
 worse, not better.**
 
+#### The mechanics freeze while phase change runs on
+
+From t = 5.120 s the liquid mechanics are **bit-identical across fifteen
+consecutive checkpoints**, 7.2 s of simulated time:
+
+| | value, t = 5.120 through 12.288 |
+| --- | --- |
+| `minVolumeRatioJ` | 0.999923 |
+| `minPressurePa` | 101409.34 |
+| `maxPressurePa` | 103900.79 |
+| `maxVelocityDivergencePerS` | 0.006943 |
+| liquid mass | 1097.71 -> **697.48 kg** |
+
+Only `maxSpeed` moves at all, and only in its sixth decimal (0.609252 ->
+0.609279). **36% of the liquid boils away and the pressure field does not move
+by one hundredth of a pascal.**
+
+That is structural, not a stuck buffer. The EOS takes density as
+`mass / (V0 * J)`, and `V0` is itself `mass / rho_rest`, so density reduces to
+`rho_rest / J` -- **the mass cancels**. Pressure therefore depends only on J,
+and J only moves through `div(v)`, which is also frozen. A pool can drain to
+nothing without the pressure field noticing it left.
+
+That closes the loop on the runaway. Per-phase state over the same window:
+
+| t | gas V0 | gas density | gas pressure | liquid mean T |
+| --- | --- | --- | --- | --- |
+| 1.536 | 0.51 m3 | 0.8040 | 101,325 | 343.45 |
+| 6.144 | 213.6 m3 | 0.8040 | 101,325 | 373.09 |
+| 12.288 | 644.9 m3 | **0.8040** | **101,325** | **373.09** |
+
+518 kg of steam at 0.804 kg/m3 needs 645 m3 inside a sealed 125 m3 box. It
+should be compressed toward ~5 atm, which would lift the boiling point to about
+425 K and stop the boil. Instead the gas density never budges from its rest
+value, the pressure never leaves one atmosphere, the liquid pins at exactly
+373.09 K, and it boils indefinitely. **There is no feedback from accumulated
+vapour to the pressure that would end the phase change.**
+
 ### Phase velocity locking is scenario-dependent
 
 Mean vertical velocity per phase (added this session) says the shared-grid

@@ -403,7 +403,7 @@ route is a **mixture rest density interpolated across the boiling plateau**, so
 per-particle inputs for that already exist: thermo carries
 `phaseFractionSolid/Liquid/Gas/Plasma` at fields 4-7.
 
-### SS collapses the hydrostatic pressure gradient by ~2,100x
+### SS collapses the hydrostatic pressure gradient by ~2,100x (WRONG -- see the resolution below)
 
 Same scenario, same 2,048 steps, only `ss=1` (+ level/migration flags) differing.
 Per-phase `resolvedAbsolutePressurePa` from the checkpoint buckets:
@@ -434,6 +434,76 @@ Two things are changing together and they need separating:
 (2) is the real finding: under SS the mechanics develops essentially no
 volumetric stress. That is what removes buoyancy, and it is an SS regression
 rather than a phase-change or EOS issue.
+
+#### RESOLVED 2026-07-27 (`420c525`) -- and the heading above is wrong
+
+It is not an SS regression, and SS did not collapse anything. **The two arms
+were measuring different quantities in the same lane.**
+
+Mechanics lane 28 is only ever written by the field-view G2P, which *is* the SS
+path. With `ss=0` nothing writes it, so it still holds the host-seeded
+depth-frozen hydrostatic **gauge** prestress from
+`refreshFluidHydrostaticPressure` -- a decoration authored at t=0, never solved.
+The constitutive pass passes row7 straight through (`wgsl.js:8525`, `:10864`).
+`sphPhaseCarrierTransferGpu.js:248` already says so in as many words: "the host
+currently packs a depth-derived hydrostatic *gauge* prestress there". So the
+8,826 Pa "correct hydrostatic gradient" in the ss-off row was never a solved
+field, and the comparison in the table above is not like-for-like.
+
+The real defect, which is **not SS-specific**, is that
+`sphPhaseCarrierTransferGpu.js`'s `preserve_deformation` branch wrote the
+materialization constant `volume_ratio_j` (a hard `1.0`) into `row4.z`. That
+branch is entered when the template carries real mass in the target phase *and*
+`mechanics_model_matches_target` -- a component **continuing** in the same
+constitutive model, not a materialization. It preserved F's shape and C but
+renormalized the volume away, resetting every continuing particle to zero
+volumetric strain once per step.
+
+Measured on the h2o drop at t = 0.384 s, before the change:
+
+| | |
+| --- | --- |
+| `J` | `[1, 1]` bit-exactly, all 152 liquid particles |
+| `det(F)` | `[0.9999998, 1.0000004]` |
+| `trace(C)` | -1.9 /s, so `dt*div(v)` reached 9.4e-4 |
+| density | pinned to 1000.0000 kg/m3 = rest density |
+| liquid dP | 3.02 Pa |
+
+Strain was being erased as fast as the G2P produced it. With density pinned to
+rest density the Tait EOS returns *exactly* zero gauge pressure, which is why
+the live lane sat flat at ambient. After:
+
+| | before | after |
+| --- | --- | --- |
+| `J` (ss on) | `[1, 1]` | `[0.999643981, 1.000089049]` |
+| liquid dP | 3.02 Pa | **5,427.68 Pa**, climbing 1395 -> 3026 -> 5428 as it settles |
+| density | 1000.0000 flat | 999.91 -> 1000.36 |
+| maxSpeed | 3.76579 m/s | 3.76579 m/s -- unchanged to five digits |
+
+**The 1667x trap this file documents cannot fire here**: J is the template's own
+J for its own phase, never a cross-phase volume ratio, and it is not derived
+from `aggregate.current_volume`. Both test pins hold byte-identically.
+`standard-iron-ice-quench` -- the scenario the 78 m/s blowup was measured on --
+peaks at 6.5 m/s and fails only `steam-forms` / `steam-rises`, which it already
+failed.
+
+Four hypotheses were falsified getting here, each by measurement:
+
+| hypothesis | killed by |
+| --- | --- |
+| the two arms take different constitutive branches | `solidBranchCount = 0` in both |
+| ambient / `internal_pressure_scale` differ | identical: 101325, `true`, 1 |
+| the `cbrt(J)^3` round-trip pins J | real dead zone, but the per-step increment clears it ~7900x |
+| `deformation_disabled` freezes J | it zeroes C, and C was live at -1.9 /s |
+
+The third is worth keeping: `scripts/measure-cubic-root-roundtrip.mjs` measures
+it on the real GPU. `exp(log(x)/3)` cubed annihilates any `|dJ| <= 1.19e-7` and
+preserves 4.0e-6. A settled 0.9 m column needs 4.0e-6, so it survives -- but the
+bound is narrow enough to be worth re-checking if `dt` is ever reduced.
+
+Checkpoint evidence grew 8,272 -> 11,344 bytes to carry what these needed:
+constitutive branch, density, `trace(C)`, `det(F)`, `eosModelId`. Still
+fixed-size, still no per-particle readback.
 
 Corrects an earlier note here: "no gradient anywhere, min == max exactly" came
 from a single sample where the two coincided. The gradient is not zero, it is

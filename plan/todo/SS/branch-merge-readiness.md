@@ -1005,9 +1005,32 @@ proven, and it is still needed for the saturation case at larger particle counts
 and the node index, which is a far smaller change and unblocks the scenario that
 actually runs.
 
-Next: find out why `mechanicsView` and the bucket index are exclusive. If the
-mechanics view simply reorders or re-bases rows, the index may only need
-rebuilding against the view rather than disabling.
+**Why they are exclusive, and it is a correctness guard rather than an
+oversight.** `git log -S` puts the gate in `3c801ad` "Complete Slice 6 compact
+mechanics view", added with no comment. The mechanics view
+(`schroederSpatialMechanicsFieldViewGpu.js`) runs the **same stable radix unique
+primitive** this compaction uses and publishes
+`stableCandidateOrderBuffer: radixUnique.sortedIndicesBuffer` with policy
+`stable-radix-equal-key-preserves-particle-stencil-candidate-order`. It
+**reorders the rows**. An index built over the original active-node row order
+would hand the kernel indices into the wrong array, so disabling it was the safe
+move at the time.
+
+**Which makes the fix a rebase, not a re-enable.** Build the neighbour index
+against the view's ordering instead of the raw list -- and the view already
+computes the sorted order needed, so the input exists. Two things to confirm
+first, neither verified yet:
+
+1. whether the view exposes unique-group offsets alongside
+   `stableCandidateOrderBuffer`, or only the sorted order;
+2. whether `candidateCount` is the active-node row count or a different
+   population -- the index must be built over whatever the kernel indexes.
+
+This also reframes the compaction work: the mechanics view is *already* a radix
+compaction over a different key. Rather than adding a second one, the honest
+question is whether the active-node compaction and the mechanics field view
+should be the same artifact. That is the "one persistent multi-resolution
+neighbour artifact" the unification item at the top of this file asks for.
 
 #### The real scenario compacts 166.7x, and this was the sizing answer under the wrong diagnosis
 

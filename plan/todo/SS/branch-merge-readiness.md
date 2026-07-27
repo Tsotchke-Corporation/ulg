@@ -337,6 +337,24 @@ refresh, both captured by `sph-long-horizon-probe.mjs`. Kept separate from
 execution, the other brackets a whole stage including submit latency. Merging
 them would make a reader unable to tell which they were looking at.
 
+## Everything on this page was measured with `ss=1` OFF until 2026-07-26
+
+The probe URL used throughout this campaign never set `ss=1`, so
+`schroederActiveNodeIndexEnabled` was false and **the Schroeder path this branch
+exists to build was not running**. A change to a shared runtime helper shipped
+green against a full unit suite and a clean production probe, and broke every
+`ss=1` run.
+
+Re-verified at `48fb060`, `ss=1`, 10 batches, both render-field arms:
+
+| arm | timeline | errors | triangles | frame validation |
+| --- | --- | --- | --- | --- |
+| splat (default) | complete | none | 466,033 | passed |
+| dense (`sourceLocalField=0`) | complete | none | 466,033 | passed |
+
+**Probe any shared-runtime change with `ss=1` as well as without.** The default
+configuration is not a test of this branch.
+
 ## GPU residency: audited by counting, not by reading code (2026-07-26)
 
 The standing rule is that nothing reads back to the CPU in the hot loop and the

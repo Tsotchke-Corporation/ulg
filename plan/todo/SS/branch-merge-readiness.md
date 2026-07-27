@@ -508,6 +508,15 @@ fixed-size, still no per-particle readback.
 #### It also un-vacuated a third gate
 
 Full matrix after the fix: **3 of 7 fail, the same three scenarios as before.**
+Re-verified at the final HEAD with all instrumentation in place:
+
+| | |
+| --- | --- |
+| water-cycle | `steam-rises`, `steam-condenses` |
+| iron-ice-quench | `steam-forms`, `steam-rises` (inconclusive) |
+| sodium-water | `phase-volume-ratios-bounded`, `hydrogen-rises` |
+| cesium-fluorine, 3x random pair | pass |
+
 But `standard-sodium-water` now fails `phase-volume-ratios-bounded` in addition
 to `hydrogen-rises`, and that check passed before.
 

@@ -472,7 +472,46 @@ is volume-preserving. There is no path from "this particle became steam" to
 "its represented volume is now 1,600x" -- which is exactly the separation the
 plan calls for and the code does not implement.
 
-#### CONFIRMED: one root cause, two symptoms. The steam is dense and sinks.
+#### CORRECTION: the steam is NOT dense. The expansion is represented in rest volume.
+
+The claim below -- "the expansion is represented in neither J nor rest volume",
+and the "877 kg of steam occupies liquid volume" that follows from it -- **is
+wrong**. It was inferred from the migration summary's volume totals. The
+authoritative checkpoint's per-phase buckets contradict it directly, same run,
+step 6144:
+
+| phase | mass | rest volume | implied density | J (min/max) |
+| --- | --- | --- | --- | --- |
+| h2o liquid | 338.76 kg | 0.3388 m3 | **1000 kg/m3** | 1 / 1 |
+| h2o gas | 877.24 kg | **1091.09 m3** | **0.804 kg/m3** | 1 / 1 |
+
+The gas *does* carry a correct steam density and a ~3,000x larger rest volume.
+`restDensityKgPerM3` and `restVolumeM3` both track the phase change. What stays
+at 1 is only `volumeRatioJ`, and `currentVolume = restVolume * J` means the gas
+current volume is also 1091 m3.
+
+**Two things follow, and they are different defects from the one recorded below.**
+
+1. **Gate 3's detector reads the wrong quantity.** `steamExpansionCandidateCount`
+   tests `phase_volume_ratio >= 64`, and `phase_volume_ratio` is
+   `represented / rest`, which is exactly `J`. The expansion never appears there
+   because it lives in `rest` itself, not in the ratio. A 3,000x expansion
+   registers as ratio 1.0.
+
+2. **The gas is not in the SS set at all.** The migration summary totals
+   **12.68 m3** of rest volume against the checkpoint's **1091 m3** for gas
+   alone, and the active-node level span is a single level. If gas rows were
+   admitted, a 1091 m3 rest volume implies a support radius near 6.4 m and a
+   level around 5-6, so the span would be 2 levels wide. It is 1.
+
+**Open observation, not yet verified:** 1091 m3 of gas inside a 4x4x4 m box is
+physically incoherent -- 877 kg of steam confined to ~60 m3 is roughly 15 kg/m3
+at high pressure, not 0.8 kg/m3 at a 1 atm reference. That suggests
+`restDensityKgPerM3` for the gas phase is a fixed reference density rather than
+one resolved against the actual confinement pressure, which would be the real
+target for option 2.
+
+#### Superseded: the reasoning that led here
 
 The authoritative checkpoint's per-material-phase buckets settle it. Same run,
 6,144 steps:

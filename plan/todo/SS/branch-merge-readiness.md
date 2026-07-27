@@ -913,17 +913,43 @@ law-neighbour search is running the exhaustive per-particle scan, not the bucket
 index -- Priority 3's premise, observed directly rather than inferred, for the
 first time.
 
-`diagnosticCountersAvailable` is still `false` (status
-`traversal-policy-pending-compact-diagnostic-counters`), so the *ratios* remain
-unmeasured: the compact-diagnostic readback mode did not take effect from the
-URL. Those fields are published as **null rather than the policy's 0**, because
-"the fallback never fired" and "nobody counted" are opposite conclusions from
-the same number.
+#### And the ratios, measured: the fallback is 100%, the bucket index never hits
 
-**Next action:** get the compact-diagnostic readback mode to actually apply
-(`lawNeighborCandidateReadbackMode` reaches the scene, but the policy still
-reports pending), then read `exactFallbackScanRatio` and `bucketPressureRatio`.
-The applied-mode evidence already justifies the work; the ratios size it.
+The compact-diagnostic readback needed the **URL** key
+`schroederLawNeighborCandidateReadback` --
+`lawNeighborCandidateReadbackMode` is a *policy* key, read from the peer
+Schroeder policy object and never from the query string. With the right key,
+`ss=1`, 9,000 particles:
+
+```
+diagnosticCountersAvailable  true
+exactFallbackScanRatio       1          <- every query
+exactFallbackScanCount       576000     <- every candidate slot
+bucketHitRatio               0          <- the bucket index never hits
+bucketSelectedCount          0
+appliedTraversalIndexMode    "exact-active-node-scan"
+traversalPolicyStatus        "traversal-policy-diagnostics-require-sorted-radix-index"
+```
+
+**100% of neighbour queries run the exhaustive scan over all 9,000 active-node
+rows.** 576,000 candidate slots x 9,000 rows is roughly **5.2 billion overlap
+tests per step**. The bucket index is enabled and contributes *nothing* --
+`bucketHitRatio` is exactly 0.
+
+That is the saturation mechanism confirmed end to end: `BUCKET_SLOT_CAPACITY` is
+32, one active-node row per particle puts thousands of rows in a populated
+region's bucket, the bucket can never satisfy a lookup, and every query falls
+through to the O(N) scan.
+
+**So Priority 3 is not a theoretical optimisation -- it is the dominant cost of
+the SS path, measured.** And the compaction is exactly the fix: at the measured
+710x-1,331x, 9,000 rows collapse to roughly 8-15 nodes, which fits inside a
+32-slot bucket with room to spare. The bucket index would start hitting and the
+exhaustive scan would stop being reached, without touching the scan at all.
+
+Note also `traversal-policy-diagnostics-require-sorted-radix-index`: the policy
+is already asking for the sorted-radix escalation and not getting it. The
+compaction makes that escalation unnecessary rather than merely available.
 
 **The former real target, the exhaustive fallback scan** -- kept for the
 self-skip trap it contains, which applies to any node-wise rewrite: The

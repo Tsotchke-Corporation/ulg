@@ -959,9 +959,30 @@ The arithmetic that closes it, from the measured numbers:
 and it comes from the bucket index finally being able to answer -- not from
 making the scan faster.
 
-Note also `traversal-policy-diagnostics-require-sorted-radix-index`: the policy
-is already asking for the sorted-radix escalation and not getting it. The
-compaction makes that escalation unnecessary rather than merely available.
+#### Configuration cannot fix it: both indices are enabled and neither is used
+
+The policy status is `traversal-policy-diagnostics-require-sorted-radix-index`,
+so the obvious cheap move is to give it the sorted radix index. Re-run with
+`schroederActiveNodeSortedIndex=1` on top of everything above:
+
+| | applied mode | bucketHitRatio | exactFallbackScanRatio |
+| --- | --- | --- | --- |
+| bucket index only | `exact-active-node-scan` | 0 | 1 |
+| **+ sorted radix index** | `exact-active-node-scan` | 0 | 1 |
+
+**Byte for byte identical.** And both flags are confirmed live in the same
+artifact -- `schroederActiveNodeIndexEnabled: true`,
+`schroederActiveNodeSortedIndexEnabled: true`.
+
+So **both acceleration structures are built every step and neither is ever
+used.** That is worse than it first looks: it is not only that the N^2 scan
+runs, it is that the index construction which was supposed to prevent it is
+pure overhead on top.
+
+This closes the question of whether Priority 3 is a configuration problem. It is
+not. One active-node row per particle saturates any bucket of any fixed
+capacity, so no index built over those rows can answer -- the fix has to reduce
+the row count, which is the compaction.
 
 **The former real target, the exhaustive fallback scan** -- kept for the
 self-skip trap it contains, which applies to any node-wise rewrite: The

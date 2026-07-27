@@ -2,6 +2,8 @@ export * from './sphPhaseContracts.js';
 export * from './parallelPrimitives.js';
 export * from './schroederSpatialEpoch.js';
 export * from './schroederSpatialEpochWgsl.js';
+export * from './schroederSpatialActiveSourceView.js';
+export * from './schroederSpatialActiveSourceViewWgsl.js';
 export * from './schroederSpatialActiveRankView.js';
 export * from './schroederSpatialActiveRankViewWgsl.js';
 export * from './schroederSpatialExactNear.js';

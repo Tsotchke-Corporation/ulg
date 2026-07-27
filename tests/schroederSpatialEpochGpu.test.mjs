@@ -470,7 +470,7 @@ test('compact mechanics view ABI fixes authenticated header, indirect, and node 
   );
 });
 
-test('direct level-assignment generation publishes and retires one compact mechanics view', async () => {
+test('direct level-assignment generation publishes and retires its active-source and compact mechanics views', async () => {
   const device = createFakeDevice();
   const levelAssignment = createDirectSpatialLevelAssignment(device);
   const generation = runSchroederSpatialEpochGenerationWebGpu({
@@ -489,6 +489,14 @@ test('direct level-assignment generation publishes and retires one compact mecha
   assert.equal(generation.selected, true);
   assert.equal(device.submissions.length, 1);
   assert.equal(generation.execution.sourceBuffer, levelAssignment.assignmentBuffer);
+  assert.equal(generation.activeSourceView.sourceBuffer, levelAssignment.assignmentBuffer);
+  assert.equal(generation.execution.activeSourceView, generation.activeSourceView);
+  assert.equal(
+    generation.execution.activeSourceViewBuffer,
+    generation.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(generation.activeSourceView.submitPerformed, true);
+  assert.equal(generation.activeSourceViewRuntime.activeExecutionCount(), 1);
   assert.equal(generation.source.sourceStateBuffer, levelAssignment.sourceStateBuffer);
   assert.equal(generation.mechanicsView.sourceBuffer, generation.execution.sourceBuffer);
   assert.equal(generation.mechanicsView.directoryBuffer, generation.execution.directoryBuffer);
@@ -519,12 +527,22 @@ test('direct level-assignment generation publishes and retires one compact mecha
   assert.ok(entryPoints.some((label) => /mechanics-view.*count/.test(label)));
   assert.ok(entryPoints.some((label) => /mechanics-view.*scatter/.test(label)));
   assert.ok(entryPoints.some((label) => /mechanics-view.*finalize/.test(label)));
+  const activeSourceClassifyIndex = entryPoints.findIndex(
+    (label) => /active-source-view.*classify/.test(label)
+  );
+  const directoryKeyIndex = entryPoints.findIndex(
+    (label) => /spatial-epoch.*key-pipeline/.test(label)
+  );
+  assert.ok(activeSourceClassifyIndex >= 0);
+  assert.ok(directoryKeyIndex > activeSourceClassifyIndex);
 
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
     generation,
     device
   ), true);
   assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.activeSourceView.released, true);
+  assert.equal(generation.activeSourceViewRuntime.activeExecutionCount(), 0);
   assert.equal(generation.execution.released, true);
   assert.equal(generation.mechanicsView.released, true);
 });
@@ -1017,6 +1035,7 @@ test('one spatial generation owns exactly two adjacent compact mechanics and fie
   assert.deepEqual(
     generation.releaseOperationResults.map((result) => result.owner),
     [
+      'spatial-active-source-view',
       'spatial-directory',
       'compact-mechanics-view-level-0',
       'mechanics-field-view-level-0',
@@ -1151,6 +1170,8 @@ test('direct arena-depth selection keys the runtime and configures every owned v
     wide.generation.directRuntimeEntry.runtimeCacheKey,
     baseline.generation.directRuntimeEntry.runtimeCacheKey
   );
+  assert.equal(baseline.generation.activeSourceViewRuntime.arenaCount, 3);
+  assert.equal(wide.generation.activeSourceViewRuntime.arenaCount, 8);
   assert.equal(
     wide.generation.directRuntimeEntry.mechanicsFieldViewDrainingRuntimeLimit,
     16
@@ -1480,6 +1501,10 @@ test('field-arena backpressure discards the current compact mechanics acquisitio
       generation.execution,
       Promise.resolve()
     ), true);
+    assert.equal(await generation.activeSourceViewRuntime.releaseExecutionAfter(
+      generation.activeSourceView,
+      Promise.resolve()
+    ), true);
     assert.equal(await generation.mechanicsViewRuntime.releaseExecutionAfter(
       generation.mechanicsView,
       Promise.resolve()
@@ -1491,7 +1516,9 @@ test('field-arena backpressure discards the current compact mechanics acquisitio
   }
 
   const compactRuntime = retained[0].mechanicsViewRuntime;
+  const activeSourceRuntime = retained[0].activeSourceViewRuntime;
   const fieldRuntime = retained[0].mechanicsFieldViewRuntime;
+  assert.equal(activeSourceRuntime.activeExecutionCount(), 0);
   assert.equal(compactRuntime.activeExecutionCount(), 0);
   assert.equal(fieldRuntime.activeExecutionCount(), 3);
 
@@ -1536,8 +1563,8 @@ test('field-arena backpressure discards the current compact mechanics acquisitio
   );
   assert.equal(compactRuntime.activeExecutionCount(), 0);
   assert.equal(fieldRuntime.activeExecutionCount(), 3);
-  assert.equal(timestampBegins.length, 11);
-  assert.equal(timestampEnds.length, 8);
+  assert.equal(timestampBegins.length, 12);
+  assert.equal(timestampEnds.length, 9);
   assert.equal(timestampDiscards.length, 1);
   const discardedEncoder = timestampDiscards[0];
   assert.ok(timestampBegins.every((token) => token.encoder === discardedEncoder));
@@ -1548,6 +1575,7 @@ test('field-arena backpressure discards the current compact mechanics acquisitio
     timestampBegins.map((token) => token.descriptor.producerId),
     [
       'schroeder-spatial-generation-command-encoder',
+      'schroeder-spatial-active-source-view-build',
       'schroeder-spatial-directory-prepare',
       'schroeder-spatial-key-emission',
       'webgpu-stable-radix-sort',
@@ -1571,7 +1599,7 @@ test('field-arena backpressure discards the current compact mechanics acquisitio
   assert.equal(fieldRuntime.activeExecutionCount(), 0);
 });
 
-test('exact device loss retires all nine generation artifacts without fencing or borrowed-buffer destruction', async () => {
+test('exact device loss retires all ten generation artifacts without fencing or borrowed-buffer destruction', async () => {
   const device = createFakeDevice();
   const deviceLoss = deferred();
   device.lost = deviceLoss.promise;
@@ -1625,6 +1653,7 @@ test('exact device loss retires all nine generation artifacts without fencing or
   assert.equal(await capability.completionPromise, true);
   assert.equal(queueFenceCount, 0);
   const artifactExecutions = [
+    generation.activeSourceView,
     generation.execution,
     ...generation.mechanicsLevelViews.flatMap((levelView) => [
       levelView.mechanicsView,
@@ -1635,11 +1664,12 @@ test('exact device loss retires all nine generation artifacts without fencing or
     generation.exactNearCellTree,
     generation.hierarchyView
   ];
-  assert.equal(artifactExecutions.length, 9);
+  assert.equal(artifactExecutions.length, 10);
   assert.equal(artifactExecutions.every((execution) => execution.released), true);
   assert.deepEqual(
     generation.releaseOperationResults.map((result) => result.owner),
     [
+      'spatial-active-source-view',
       'spatial-directory',
       'compact-mechanics-view-level-0',
       'mechanics-field-view-level-0',
@@ -2195,6 +2225,8 @@ test('direct spatial generation copies an exact GPU logical count while retainin
     particleCount: sourceCapacity
   });
   assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.activeSourceView, null);
+  assert.equal(generation.activeSourceViewRuntime, null);
   assert.equal(generation.execution.sourceCount, sourceCapacity);
   assert.equal(generation.execution.physicalSourceCount, sourceCapacity);
   assert.equal(generation.execution.physicalRadixCount, sourceCapacity);

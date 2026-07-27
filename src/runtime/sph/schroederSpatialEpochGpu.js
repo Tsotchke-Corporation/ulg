@@ -75,6 +75,9 @@ import {
 import {
   createSchroederSpatialExactNearCellTreeGpu
 } from './schroederSpatialExactNearCellTreeGpu.js';
+import {
+  createSchroederSpatialActiveSourceViewGpu
+} from './schroederSpatialActiveSourceViewGpu.js';
 
 export {
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
@@ -2280,6 +2283,7 @@ function directSpatialEpochRuntime(
   });
   entry = {
     runtime,
+    activeSourceViewRuntime: null,
     mechanicsViewRuntimes: new Map(),
     mechanicsFieldViewRuntimes: new Map(),
     mechanicsFieldViewDrainingRuntimes: new Set(),
@@ -2300,6 +2304,23 @@ function directSpatialEpochRuntime(
   };
   runtimes.set(cacheKey, entry);
   return { entry, cacheHit: false };
+}
+
+function directActiveSourceViewRuntime(device, entry) {
+  if (!entry.activeSourceViewRuntime) {
+    entry.activeSourceViewRuntime = createSchroederSpatialActiveSourceViewGpu(device, {
+      maxPhysicalSourceCount: entry.capacity,
+      // Stage A deliberately retains the physical tier. A later directory-v2
+      // slice may supply a smaller monotonic live-capacity tier without
+      // changing this projection ABI.
+      activeSourceCapacity: entry.capacity,
+      arenaCount: entry.directArenaCount,
+      label:
+        `ulg-schroeder-direct-active-source-view-${entry.capacity}`
+        + `-arenas-${entry.directArenaCount}`
+    });
+  }
+  return entry.activeSourceViewRuntime;
 }
 
 function mechanicsFieldViewCacheBackpressure(message) {
@@ -3133,6 +3154,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   }
   let cache = null;
   let execution = null;
+  let activeSourceViewExecution = null;
+  let activeSourceViewRuntime = null;
   let mechanicsViewExecution = null;
   let mechanicsViewRuntime = null;
   let mechanicsFieldViewExecution = null;
@@ -3199,8 +3222,53 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           sourceFamily: resolvedSourceFamily,
           physicsTick: source.physicsTick,
           physicsSubstep: source.physicsSubstep
-        })
+      })
       : null;
+    if (
+      source.sourceRowLayoutId
+        === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    ) {
+      activeSourceViewRuntime = directActiveSourceViewRuntime(device, entry);
+      const activeSourceViewTimestampSpan =
+        gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+        && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
+          ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+              producerId: 'schroeder-spatial-active-source-view-build',
+              stage: 'active-source-view-build',
+              spanClass: 'same-production-command-encoder',
+              generationId,
+              laneId,
+              sourceFamily: resolvedSourceFamily,
+              physicsTick: source.physicsTick,
+              physicsSubstep: source.physicsSubstep
+            })
+          : null;
+      activeSourceViewExecution = activeSourceViewRuntime.encode(encoder, {
+        sourceBuffer: source.sourceBuffer,
+        physicalSourceCount: source.sourceCount,
+        sourceRowLayoutId: source.sourceRowLayoutId,
+        generationId,
+        leaseToken: generationId,
+        sourceFamily: resolvedSourceFamily,
+        storageGeneration: source.storageGeneration,
+        physicsTick: source.physicsTick,
+        physicsSubstep: source.physicsSubstep,
+        positionEpoch: source.positionEpoch,
+        topologyEpoch: source.topologyEpoch,
+        chartEpoch: source.chartEpoch,
+        levelEpoch: source.levelEpoch,
+        supportEpoch: source.supportEpoch,
+        buildOrdinal: generationId,
+        exactNearQueryProfile: source.exactNearQueryProfile
+      });
+      if (activeSourceViewTimestampSpan) {
+        gpuTimestampRecorder.endEncoderSpan(
+          encoder,
+          activeSourceViewTimestampSpan
+        );
+      }
+    }
     execution = entry.runtime.encode(encoder, {
       sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
       sourceCount: source.sourceCount,
@@ -3226,6 +3294,22 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       laneId,
       gpuTimestampRecorder
     });
+    if (activeSourceViewExecution) {
+      Object.defineProperties(execution, {
+        activeSourceView: {
+          value: activeSourceViewExecution,
+          enumerable: true,
+          writable: false,
+          configurable: false
+        },
+        activeSourceViewBuffer: {
+          value: activeSourceViewExecution.activeSourceViewBuffer,
+          enumerable: true,
+          writable: false,
+          configurable: false
+        }
+      });
+    }
     // The exact cell hierarchy is intentionally independent of mechanics,
     // rendering, and aggregate-tree admission.  It is derived once from the
     // authenticated directory whenever that directory carries the exact-near
@@ -3543,6 +3627,14 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     }
     device.queue.submit([encoder.finish()]);
     submissionPerformed = true;
+    if (!markSubmittedOrConfirm(
+      activeSourceViewRuntime,
+      activeSourceViewExecution
+    )) {
+      throw new Error(
+        'active-source view runtime did not authenticate the submitted execution'
+      );
+    }
     if (!markSubmittedOrConfirm(entry.runtime, execution)) {
       throw new Error('spatial epoch runtime did not authenticate the submitted execution');
     }
@@ -3599,6 +3691,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       source,
       execution,
       runtime: entry.runtime,
+      activeSourceView: activeSourceViewExecution,
+      activeSourceViewRuntime,
       activeRankView: execution.activeRankView,
       mechanicsView: mechanicsViewExecution,
       mechanicsViewRuntime,
@@ -3659,6 +3753,10 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       }
     }
     if (submissionPerformed && cache?.entry && execution) {
+      const activeSourceSubmitted = markSubmittedOrConfirm(
+        activeSourceViewRuntime,
+        activeSourceViewExecution
+      );
       const spatialSubmitted = markSubmittedOrConfirm(
         cache.entry.runtime,
         execution
@@ -3707,7 +3805,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       cache.entry.generation = Math.max(cache.entry.generation, generationId);
       cache.entry.buildCount += 1;
       if (
-        spatialSubmitted
+        activeSourceSubmitted
+        && spatialSubmitted
         && mechanicsSubmitted
         && mechanicsFieldSubmitted
         && phaseVolumeMomentSubmitted
@@ -3727,6 +3826,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           source,
           execution,
           runtime: cache.entry.runtime,
+          activeSourceView: activeSourceViewExecution,
+          activeSourceViewRuntime,
           activeRankView: execution.activeRankView,
           mechanicsView: mechanicsViewExecution,
           mechanicsViewRuntime,
@@ -3777,6 +3878,16 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     if (execution && !submissionPerformed && cache?.entry?.runtime) {
       try {
         cache.entry.runtime.releaseExecution(execution, { discardedEncoder: true });
+      } catch {
+        // Preserve the original build/admission error.
+      }
+    }
+    if (activeSourceViewExecution && !submissionPerformed) {
+      try {
+        activeSourceViewRuntime?.releaseExecution?.(
+          activeSourceViewExecution,
+          { discardedEncoder: true }
+        );
       } catch {
         // Preserve the original build/admission error.
       }
@@ -3882,6 +3993,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: (
         error?.code === 'ERR_SCHROEDER_SPATIAL_ARENA_EXHAUSTED'
+        || error?.code === 'ERR_SCHROEDER_ACTIVE_SOURCE_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_MOMENT_ARENA_EXHAUSTED'
@@ -4620,6 +4732,8 @@ export async function runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
         generationId: liveGeneration?.execution?.generationId ?? null,
         status: liveGeneration?.releaseStatus ?? null,
         reason: liveGeneration?.releaseReason ?? null,
+        activeSourceReleased: liveGeneration?.activeSourceView == null
+          || liveGeneration.activeSourceView.released === true,
         spatialReleased: liveGeneration?.execution?.released === true,
         mechanicsReleased: generationMechanicsLevelViews(liveGeneration).every(
           (levelView) => levelView.mechanicsView == null
@@ -4670,6 +4784,10 @@ function generationOwnedArtifacts(generation) {
     role: 'phase-volume-interface-proposal',
     execution: generation.phaseVolumeInterfaceProposal,
     runtime: generation.phaseVolumeInterfaceProposalRuntime
+  }] : []), ...(generation?.activeSourceView ? [{
+    role: 'spatial-active-source-view',
+    execution: generation.activeSourceView,
+    runtime: generation.activeSourceViewRuntime
   }] : []), {
     role: 'spatial-directory',
     execution: generation.execution,

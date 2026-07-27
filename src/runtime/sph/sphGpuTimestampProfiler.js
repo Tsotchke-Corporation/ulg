@@ -43,6 +43,61 @@ function deviceSupportsTimestampQuery(device) {
 }
 
 /**
+ * Encode one portable timestamp-query boundary marker.
+ *
+ * WebGPU does not expose `GPUCommandEncoder.writeTimestamp`. An empty compute
+ * pass is the portable way to place a timestamp around an arbitrary sequence
+ * without changing any of the production pass descriptors:
+ *
+ * - a start marker writes at the end of the empty marker pass;
+ * - an end marker writes at the beginning of the empty marker pass.
+ *
+ * Production commands encoded between those two marker passes are therefore
+ * bracketed on the same command encoder. The same markers can also be submitted
+ * as separate command buffers to measure an ordered queue interval.
+ */
+export function encodeSphGpuTimestampMarkerPass(encoder, {
+  querySet,
+  queryIndex,
+  boundary,
+  label = 'ulg-sph-gpu-timestamp-marker'
+} = {}) {
+  if (typeof encoder?.beginComputePass !== 'function') {
+    throw new TypeError(
+      'GPU timestamp marker requires GPUCommandEncoder.beginComputePass'
+    );
+  }
+  if (!querySet) {
+    throw new TypeError('GPU timestamp marker requires a timestamp query set');
+  }
+  if (!Number.isInteger(queryIndex) || queryIndex < 0) {
+    throw new RangeError(
+      'GPU timestamp marker queryIndex must be a non-negative integer'
+    );
+  }
+  if (boundary !== 'start' && boundary !== 'end') {
+    throw new TypeError(
+      'GPU timestamp marker boundary must be "start" or "end"'
+    );
+  }
+  const timestampWrites = boundary === 'start'
+    ? { querySet, endOfPassWriteIndex: queryIndex }
+    : { querySet, beginningOfPassWriteIndex: queryIndex };
+  const descriptor = {
+    label: String(label || 'ulg-sph-gpu-timestamp-marker'),
+    timestampWrites
+  };
+  const pass = encoder.beginComputePass(descriptor);
+  if (typeof pass?.end !== 'function') {
+    throw new TypeError(
+      'GPU timestamp marker compute pass does not expose end()'
+    );
+  }
+  pass.end();
+  return descriptor;
+}
+
+/**
  * @param {object} options
  * @param {GPUDevice} options.device
  * @param {boolean} [options.enabled] caller intent; false yields an inert profiler
@@ -164,7 +219,7 @@ export function createSphGpuTimestampProfiler({
     readInFlight = true;
     try {
       await readBuffer.mapAsync(GPU_MAP_MODE.READ);
-      const raw = new BigInt64Array(readBuffer.getMappedRange().slice(0));
+      const raw = new BigUint64Array(readBuffer.getMappedRange().slice(0));
       readBuffer.unmap();
       const stageGpuMs = {};
       let totalGpuMs = 0;
@@ -287,8 +342,14 @@ export function createSphGpuQueueStageRecorder({
   return {
     schema: 'peercompute.ulg.sph-gpu-queue-stage-recorder.v0',
     label,
+    recorderKind: 'queue-fence-stage-summary',
     active: usable,
     encoderSpansSupported: false,
+    capabilities: Object.freeze({
+      queueStageMeasurement: true,
+      queueStageSummary: true,
+      encoderSpans: false
+    }),
     async measureQueueStage(descriptor, runStage) {
       if (!usable) return runStage();
       // Fence first so the measurement excludes work already in flight.

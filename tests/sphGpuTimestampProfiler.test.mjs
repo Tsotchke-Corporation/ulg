@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 import {
   createSphGpuTimestampProfiler,
   createSphGpuQueueStageRecorder,
+  encodeSphGpuTimestampMarkerPass,
   SPH_FUSED_SEQUENCE_UNATTRIBUTED_STAGES
 } from '../src/runtime/sph/sphGpuTimestampProfiler.js';
 
@@ -23,7 +25,7 @@ function stubDevice({ features = ['timestamp-query'], onCreateQuerySet = null } 
         descriptor,
         destroy() {},
         mapAsync: async () => {},
-        getMappedRange: () => new BigInt64Array(descriptor.size / 8).buffer,
+        getMappedRange: () => new BigUint64Array(descriptor.size / 8).buffer,
         unmap() {}
       };
     }
@@ -42,6 +44,90 @@ function stubEncoder() {
     }
   };
 }
+
+function stubMarkerEncoder() {
+  const descriptors = [];
+  let endedPassCount = 0;
+  return {
+    descriptors,
+    get endedPassCount() { return endedPassCount; },
+    beginComputePass(descriptor) {
+      descriptors.push(descriptor);
+      return {
+        end() {
+          endedPassCount += 1;
+        }
+      };
+    }
+  };
+}
+
+test('portable marker passes bracket arbitrary commands without encoder.writeTimestamp', () => {
+  const querySet = { label: 'timestamp-query-set' };
+  const encoder = stubMarkerEncoder();
+
+  const startDescriptor = encodeSphGpuTimestampMarkerPass(encoder, {
+    querySet,
+    queryIndex: 4,
+    boundary: 'start',
+    label: 'stage-start'
+  });
+  const endDescriptor = encodeSphGpuTimestampMarkerPass(encoder, {
+    querySet,
+    queryIndex: 5,
+    boundary: 'end',
+    label: 'stage-end'
+  });
+
+  assert.equal(encoder.endedPassCount, 2);
+  assert.equal(startDescriptor.timestampWrites.querySet, querySet);
+  assert.equal(startDescriptor.timestampWrites.endOfPassWriteIndex, 4);
+  assert.equal(
+    'beginningOfPassWriteIndex' in startDescriptor.timestampWrites,
+    false
+  );
+  assert.equal(endDescriptor.timestampWrites.querySet, querySet);
+  assert.equal(endDescriptor.timestampWrites.beginningOfPassWriteIndex, 5);
+  assert.equal('endOfPassWriteIndex' in endDescriptor.timestampWrites, false);
+});
+
+test('portable marker passes reject incomplete or ambiguous marker contracts', () => {
+  const querySet = {};
+  assert.throws(
+    () => encodeSphGpuTimestampMarkerPass({}, {
+      querySet,
+      queryIndex: 0,
+      boundary: 'start'
+    }),
+    /beginComputePass/
+  );
+  assert.throws(
+    () => encodeSphGpuTimestampMarkerPass(stubMarkerEncoder(), {
+      querySet,
+      queryIndex: -1,
+      boundary: 'start'
+    }),
+    /non-negative integer/
+  );
+  assert.throws(
+    () => encodeSphGpuTimestampMarkerPass(stubMarkerEncoder(), {
+      querySet,
+      queryIndex: 0,
+      boundary: 'middle'
+    }),
+    /boundary/
+  );
+});
+
+test('the browser probe uses portable marker passes instead of writeTimestamp', async () => {
+  const source = await readFile(
+    new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(source, /\.\s*writeTimestamp\s*\(/);
+  assert.match(source, /empty-compute-pass-timestampWrites/);
+  assert.match(source, /encodeSphGpuTimestampMarkerPass/);
+});
 
 test('profiler is inert and self-describing when the device lacks timestamp-query', () => {
   const profiler = createSphGpuTimestampProfiler({
@@ -156,6 +242,11 @@ test('the queue-stage recorder satisfies the gpuTimestampRecorder contract', () 
   assert.equal(typeof recorder.beginEncoderSpan, 'function');
   assert.equal(typeof recorder.endEncoderSpan, 'function');
   assert.equal(typeof recorder.discardEncoderSpans, 'function');
+  assert.equal(typeof recorder.stageGpuMs, 'function');
+  assert.equal(typeof recorder.stageGpuStats, 'function');
+  assert.equal(recorder.recorderKind, 'queue-fence-stage-summary');
+  assert.equal(recorder.capabilities.queueStageSummary, true);
+  assert.equal(recorder.capabilities.encoderSpans, false);
 });
 
 test('measureQueueStage fences around the stage and attributes GPU time', async () => {

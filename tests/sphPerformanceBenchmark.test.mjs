@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 import {
   aggregateSchroederResidentBatchEvidence,
@@ -69,6 +70,8 @@ function transaction({
   commit = 1
 }) {
   return {
+    schema: 'peercompute.ulg.schroeder-spatial-epoch-transaction-summary.v0',
+    status: 'schroeder-spatial-epoch-transaction-released',
     state: 'released',
     generationId,
     deviceId,
@@ -565,8 +568,15 @@ function gpuStageTimestampMetric({
   batchIndex = 1,
   generationCount = 4,
   traversalCount = 1,
-  additionalProducerIds = []
+  additionalProducerIds = [],
+  twoLevelAuthoritative = null
 } = {}) {
+  const authoritativeTwoLevel = twoLevelAuthoritative
+    ?? generationCount > 1;
+  const encoderSpanSemantics =
+    'same-command-encoder-empty-pass-boundaries-bracket-production-commands';
+  const queueIntervalSemantics =
+    'ordered-queue-boundary-marker-submissions-measure-elapsed-queue-interval-including-production-work-and-queue-idle-not-pure-gpu-busy';
   const producerIds = [
     ...Array.from({ length: generationCount }, () =>
       'schroeder-spatial-key-emission'),
@@ -591,6 +601,8 @@ function gpuStageTimestampMetric({
     const hierarchyQueueProducer = producerId.startsWith(
       'schroeder-hierarchy:'
     );
+    const queueBoundarySpan = residentQueueProducer
+      || hierarchyQueueProducer;
     return {
       schema: 'peercompute.ulg.sph-probe-gpu-stage-span.v0',
       producerId,
@@ -602,9 +614,15 @@ function gpuStageTimestampMetric({
           : (hierarchyQueueProducer
             ? 'hierarchy-queue-stage'
             : 'same-production-command-encoder')),
-      markerSubmissionMode: residentQueueProducer || hierarchyQueueProducer
+      markerSubmissionMode: queueBoundarySpan
         ? 'same-queue-boundary-submissions'
         : 'same-production-command-encoder',
+      measurementKind: queueBoundarySpan
+        ? 'elapsed-queue-interval'
+        : 'same-command-encoder-gpu-elapsed-interval',
+      intervalSemantics: queueBoundarySpan
+        ? queueIntervalSemantics
+        : encoderSpanSemantics,
       startQueryIndex: index * 2,
       endQueryIndex: index * 2 + 1,
       startTimestampNs: startTimestampNs.toString(),
@@ -614,9 +632,72 @@ function gpuStageTimestampMetric({
       valid: true
     };
   });
+  const publicGenerationId = batchIndex;
+  const physicsTick = batchIndex - 1;
+  const epochIdentity = fullEpochIdentity({
+    storageGeneration: batchIndex,
+    physicsTick,
+    positionEpoch: physicsTick,
+    topologyEpoch: physicsTick,
+    chartEpoch: physicsTick,
+    levelEpoch: physicsTick,
+    supportEpoch: physicsTick
+  });
+  const releasedTransaction = transaction({
+    generationId: publicGenerationId,
+    physicsTick,
+    positionEpoch: physicsTick,
+    deviceId: 'test-webgpu-device',
+    epochIdentity,
+    privateAdvance: authoritativeTwoLevel ? 1 : 0,
+    commit: authoritativeTwoLevel ? 0 : 1
+  });
+  const queueBoundarySpanCount = spans.filter(
+    (span) => (
+      span.markerSubmissionMode === 'same-queue-boundary-submissions'
+    )
+  ).length;
   return {
     phase: 'resident-batch',
     batchIndex,
+    schroederTelemetry: {
+      requested: true,
+      active: true,
+      ...(authoritativeTwoLevel ? {
+        twoLevelMechanicsRequested: true,
+        twoLevelMechanicsActive: true,
+        twoLevelMechanicsAuthorityRequested: 'authoritative',
+        twoLevelMechanicsAuthorityObserved: 'authoritative',
+        twoLevelFineSubstepCountRequested:
+          Math.max(1, generationCount - 2),
+        twoLevelFineSubstepCountObserved:
+          Math.max(1, generationCount - 2),
+        twoLevelMechanicsStepStatus:
+          'schroeder-two-level-authoritative-step-executed',
+        twoLevelAuthoritativeCommitVerified: true,
+        twoLevelAuthoritativeStepCount: 1,
+        twoLevelMechanicsCoverageComplete: true
+      } : {})
+    },
+    residentSteps: {
+      status: 'resident-steps-executed',
+      completedStepCount: 1,
+      nextStep: physicsTick + 1,
+      schroederSpatialEpochReleaseSettlementCount: 1,
+      schroederSpatialEpochReleaseSettlementComplete: true,
+      schroederHierarchyArtifactLedgerSettlementCount: 1,
+      schroederHierarchyArtifactLedgerSettlementComplete: true,
+      schroederSpatialEpochTransactionSummaries: [releasedTransaction],
+      schroederSpatialEpochGenerationSummaries: [
+        generation(publicGenerationId)
+      ],
+      schroederHierarchyArtifactLedgerSummaries: [
+        artifactLedger(publicGenerationId)
+      ],
+      ...(authoritativeTwoLevel
+        ? { schroederTwoLevelAuthoritativeStepCount: 1 }
+        : {})
+    },
     probeResidentBatchTiming: {
       gpuStageTimestamps: {
         schema: 'peercompute.ulg.sph-probe-gpu-stage-timestamps.v0',
@@ -624,12 +705,31 @@ function gpuStageTimestampMetric({
         requested: true,
         batchIndex,
         timestampUnit: 'nanoseconds',
+        timestampProfilingRequested: true,
+        timestampQuerySupported: true,
+        requiredFeatures: ['timestamp-query'],
+        enabledFeatures: ['timestamp-query'],
+        markerEncodingMode: 'empty-compute-pass-timestampWrites',
+        encoderSpanSemantics,
+        queueIntervalSemantics,
+        queryCapacityPreflightStatus:
+          'gpu-stage-timestamp-query-capacity-ready',
+        queryCapacityExhausted: false,
+        requiredQueryCapacity: 2048,
+        queryBudgetPerStep: 2048,
+        configuredBatchStepCount: 1,
+        twoLevelConfigured: authoritativeTwoLevel,
+        configuredFineSubstepCount: authoritativeTwoLevel
+          ? Math.max(1, generationCount - 2)
+          : 0,
+        maxQueryCapacity: 8192,
         productionPassGroupingPreserved: true,
         queryCount: spans.length * 2,
+        queryCapacity: Math.max(2048, spans.length * 2),
         spanCount: spans.length,
         validSpanCount: spans.length,
         invalidSpanCount: 0,
-        markerSubmissionCount: 0,
+        markerSubmissionCount: queueBoundarySpanCount * 2,
         queryResolveByteLength: spans.length * 16,
         mappedReadbackByteLength: spans.length * 16,
         resolveSubmissionCount: 1,
@@ -1360,6 +1460,15 @@ test('coarse GPU stage evidence proves exact authoritative generation and traver
   assert.equal(evidence.expectedTraversalCountPerBatch, 1);
   assert.equal(evidence.batchCoverageComplete, true);
   assert.equal(evidence.stageCoverageComplete, true);
+  assert.equal(evidence.releasedTransactionEvidenceComplete, true);
+  assert.equal(
+    evidence.releasedTransactionEvidence.status,
+    'authentic-released-transaction-evidence-complete'
+  );
+  assert.equal(evidence.batches[0].timestampCapabilityComplete, true);
+  assert.equal(evidence.batches[0].markerSemanticsComplete, true);
+  assert.equal(evidence.batches[0].queryCapacityComplete, true);
+  assert.equal(evidence.batches[0].markerSubmissionCoverageComplete, true);
   assert.deepEqual(
     evidence.producerSummaries.map((summary) => summary.producerId),
     [
@@ -1413,6 +1522,243 @@ test('coarse GPU stage evidence rejects a grouped pass mislabeled as split instr
 
   assert.equal(evidence.status, 'incomplete');
   assert.equal(evidence.batches[0].exactProducerContractComplete, false);
+});
+
+test('coarse GPU stage evidence fails closed on unauthenticated timestamp capabilities, marker semantics, capacity, and overhead', () => {
+  const corruptions = [
+    {
+      name: 'profiling-not-requested',
+      mutate: (stage) => { stage.timestampProfilingRequested = false; },
+      failedField: 'timestampCapabilityComplete'
+    },
+    {
+      name: 'timestamp-query-not-supported',
+      mutate: (stage) => { stage.timestampQuerySupported = false; },
+      failedField: 'timestampCapabilityComplete'
+    },
+    {
+      name: 'timestamp-query-not-required',
+      mutate: (stage) => { stage.requiredFeatures = []; },
+      failedField: 'timestampCapabilityComplete'
+    },
+    {
+      name: 'timestamp-query-not-enabled',
+      mutate: (stage) => { stage.enabledFeatures = []; },
+      failedField: 'timestampCapabilityComplete'
+    },
+    {
+      name: 'nonportable-marker-mode',
+      mutate: (stage) => { stage.markerEncodingMode = 'writeTimestamp'; },
+      failedField: 'markerSemanticsComplete'
+    },
+    {
+      name: 'wrong-encoder-interval-semantics',
+      mutate: (stage) => {
+        stage.encoderSpanSemantics = 'unbracketed-production-pass';
+      },
+      failedField: 'markerSemanticsComplete'
+    },
+    {
+      name: 'queue-interval-mislabeled-as-gpu-busy',
+      mutate: (stage) => {
+        stage.queueIntervalSemantics = 'pure-gpu-busy-time';
+      },
+      failedField: 'markerSemanticsComplete'
+    },
+    {
+      name: 'query-capacity-smaller-than-query-count',
+      mutate: (stage) => { stage.queryCapacity = stage.queryCount - 1; },
+      failedField: 'queryCapacityComplete'
+    },
+    {
+      name: 'capacity-preflight-not-ready',
+      mutate: (stage) => {
+        stage.queryCapacityPreflightStatus =
+          'gpu-stage-timestamp-capacity-preflight-impossible';
+      },
+      failedField: 'queryCapacityComplete'
+    },
+    {
+      name: 'capacity-preflight-does-not-cover-required-budget',
+      mutate: (stage) => {
+        stage.requiredQueryCapacity = stage.queryCapacity + 1;
+      },
+      failedField: 'queryCapacityComplete'
+    },
+    {
+      name: 'capacity-preflight-bound-to-wrong-step-count',
+      mutate: (stage) => { stage.configuredBatchStepCount = 2; },
+      failedField: 'queryCapacityComplete'
+    },
+    {
+      name: 'capacity-preflight-bound-to-wrong-two-level-mode',
+      mutate: (stage) => { stage.twoLevelConfigured = false; },
+      failedField: 'queryCapacityComplete'
+    },
+    {
+      name: 'capacity-exhausted',
+      mutate: (stage) => { stage.queryCapacityExhausted = true; },
+      failedField: 'queryCapacityComplete'
+    },
+    {
+      name: 'queue-boundary-submission-count-torn',
+      mutate: (stage) => { stage.markerSubmissionCount += 1; },
+      failedField: 'markerSubmissionCoverageComplete'
+    }
+  ];
+  for (const { name, mutate, failedField } of corruptions) {
+    const metric = gpuStageTimestampMetric();
+    mutate(metric.probeResidentBatchTiming.gpuStageTimestamps);
+    const evidence = summarizeResidentGpuStageTimestampEvidence({
+      metrics: [metric],
+      requested: true,
+      requestedBatchCount: 1,
+      requestedBatchStepCount: 1,
+      twoLevelAuthoritative: true,
+      twoLevelFineSubstepCount: 2
+    });
+    assert.equal(evidence.status, 'incomplete', name);
+    assert.equal(evidence.batches[0][failedField], false, name);
+  }
+});
+
+test('coarse GPU stage evidence labels queue-boundary spans as elapsed queue intervals', () => {
+  const metric = gpuStageTimestampMetric({
+    generationCount: 1,
+    traversalCount: 0,
+    additionalProducerIds: [
+      'mls-mpm-resident:spatialMechanicalProposal'
+    ]
+  });
+  const stageEvidence = metric.probeResidentBatchTiming.gpuStageTimestamps;
+  const queueSpan = stageEvidence.spans.find(
+    (span) => span.producerId
+      === 'mls-mpm-resident:spatialMechanicalProposal'
+  );
+  assert.equal(queueSpan.measurementKind, 'elapsed-queue-interval');
+  assert.match(queueSpan.intervalSemantics, /not-pure-gpu-busy/);
+  assert.equal(stageEvidence.markerSubmissionCount, 2);
+
+  queueSpan.measurementKind = 'pure-gpu-busy-time';
+  const evidence = summarizeResidentGpuStageTimestampEvidence({
+    metrics: [metric],
+    requested: true,
+    requestedBatchCount: 1,
+    requestedBatchStepCount: 1,
+    requireMigratedLawCoverage: true,
+    lawThermalEnabled: false,
+    lawReactionsEnabled: false
+  });
+  assert.equal(evidence.status, 'incomplete');
+  assert.equal(evidence.batches[0].markerSemanticsComplete, false);
+  assert.equal(
+    evidence.batches[0].spans.find(
+      (span) => span.producerId
+        === 'mls-mpm-resident:spatialMechanicalProposal'
+    ).intervalContractComplete,
+    false
+  );
+});
+
+test('coarse GPU stage evidence requires authentic released transaction settlement', () => {
+  const unreleased = gpuStageTimestampMetric();
+  const transactionSummary = unreleased.residentSteps
+    .schroederSpatialEpochTransactionSummaries[0];
+  transactionSummary.state = 'committed';
+  transactionSummary.status =
+    'schroeder-spatial-epoch-transaction-committed';
+  const unreleasedEvidence = summarizeResidentGpuStageTimestampEvidence({
+    metrics: [unreleased],
+    requested: true,
+    requestedBatchCount: 1,
+    requestedBatchStepCount: 1,
+    twoLevelAuthoritative: true,
+    twoLevelFineSubstepCount: 2
+  });
+  assert.equal(unreleasedEvidence.status, 'incomplete');
+  assert.equal(unreleasedEvidence.releasedTransactionEvidenceComplete, false);
+  assert.equal(
+    unreleasedEvidence.batches[0].releasedTransactionBatchComplete,
+    false
+  );
+
+  const unsettledLedger = gpuStageTimestampMetric();
+  unsettledLedger.residentSteps
+    .schroederHierarchyArtifactLedgerSettlementComplete = false;
+  const unsettledEvidence = summarizeResidentGpuStageTimestampEvidence({
+    metrics: [unsettledLedger],
+    requested: true,
+    requestedBatchCount: 1,
+    requestedBatchStepCount: 1,
+    twoLevelAuthoritative: true,
+    twoLevelFineSubstepCount: 2
+  });
+  assert.equal(unsettledEvidence.status, 'incomplete');
+  assert.equal(
+    unsettledEvidence.releasedTransactionEvidence
+      .artifactLedgerCoverageComplete,
+    false
+  );
+});
+
+test('long-horizon stage timestamp probe scales query capacity and fails closed before overflow', async () => {
+  const source = await readFile(
+    new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    source,
+    /GPU_STAGE_TIMESTAMP_MIN_QUERY_CAPACITY\s*=\s*2048/
+  );
+  assert.match(
+    source,
+    /GPU_STAGE_TIMESTAMP_MAX_QUERY_CAPACITY\s*=\s*8192/
+  );
+  assert.match(
+    source,
+    /GPU_STAGE_TIMESTAMP_QUERY_BUDGET_PER_STEP\s*=\s*2048/
+  );
+  assert.match(
+    source,
+    /configuredBatchStepCount\s*\*\s*queryBudgetPerStep/
+  );
+  assert.match(
+    source,
+    /gpu-stage-timestamp-capacity-preflight-impossible/
+  );
+  assert.match(
+    source,
+    /gpu-stage-timestamp-capacity-exhausted-unexpectedly/
+  );
+  assert.match(source, /allocateQueryPair/);
+  assert.doesNotMatch(
+    source,
+    /GPU stage timestamp query capacity \$\{queryCapacity\} exhausted/
+  );
+});
+
+test('long-horizon stage timing compaction preserves queue profiler identity and summaries', async () => {
+  const source = await readFile(
+    new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
+    'utf8'
+  );
+  for (const field of [
+    'queueStageGpuMs',
+    'queueStageGpuStats',
+    'queueStageGpuSummaryStatus',
+    'queueStageGpuRecorderSchema',
+    'queueStageGpuRecorderKind',
+    'queueStageGpuRecorderCapabilities'
+  ]) {
+    assert.match(
+      source,
+      new RegExp(`const compactStageTiming[\\s\\S]*?${field}`)
+    );
+    assert.match(
+      source,
+      new RegExp(`stageTiming: step\\.stageTiming[\\s\\S]*?${field}`)
+    );
+  }
 });
 
 test('coarse GPU stage evidence maps each shared migrated-law producer once', () => {

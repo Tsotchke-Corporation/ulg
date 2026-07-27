@@ -1067,9 +1067,11 @@ export function summarizeResidentGpuTimestampEvidence({
 }
 
 /**
- * Validate benchmark-only stage spans written into the unchanged production
- * command encoders.  Canonical key/sort/unique/view counts are exact per
- * generation; authoritative two-level traversal is exact per macrostep.
+ * Validate benchmark-only timestamp spans. Same-encoder spans bracket the
+ * unchanged production command stream. Queue-boundary spans are explicitly
+ * elapsed queue intervals (including queue idle), never claims of pure GPU
+ * busy time. Canonical key/sort/unique/view counts are exact per generation;
+ * authoritative two-level traversal is exact per macrostep.
  */
 export function summarizeResidentGpuStageTimestampEvidence({
   metrics = [],
@@ -1084,6 +1086,15 @@ export function summarizeResidentGpuStageTimestampEvidence({
   lawReactionsEnabled = true
 } = {}) {
   const schema = 'peercompute.ulg.sph-performance-gpu-stage-evidence.v0';
+  const markerEncodingMode =
+    'empty-compute-pass-timestampWrites';
+  const encoderSpanSemantics =
+    'same-command-encoder-empty-pass-boundaries-bracket-production-commands';
+  const queueIntervalSemantics =
+    'ordered-queue-boundary-marker-submissions-measure-elapsed-queue-interval-including-production-work-and-queue-idle-not-pure-gpu-busy';
+  const encoderMeasurementKind =
+    'same-command-encoder-gpu-elapsed-interval';
+  const queueMeasurementKind = 'elapsed-queue-interval';
   const expectedBatchCount = exactNonNegativeIntegerOrNull(
     requestedBatchCount
   );
@@ -1111,6 +1122,55 @@ export function summarizeResidentGpuStageTimestampEvidence({
   }
   const residentMetrics = (Array.isArray(metrics) ? metrics : []).filter(
     (metric) => metric?.phase === 'resident-batch'
+  );
+  const releasedTransactionAggregate =
+    aggregateSchroederResidentBatchEvidence({
+      metrics: residentMetrics,
+      requestedBatchCount: expectedBatchCount,
+      requestedBatchStepCount: batchStepCount,
+      schroederSimulationRequested: true,
+      schroederTwoLevelMechanicsRequested: twoLevelAuthoritative,
+      schroederTwoLevelMechanicsAuthority: twoLevelAuthoritative
+        ? 'authoritative'
+        : 'observation',
+      schroederTwoLevelFineSubstepCount: fineSubstepCount
+    });
+  const authenticReleasedTransactionSummaryCoverageComplete = Boolean(
+    residentMetrics.length > 0
+    && residentMetrics.every((metric) => {
+      const residentSteps = metric?.residentSteps ?? null;
+      const transactions = Array.isArray(
+        residentSteps?.schroederSpatialEpochTransactionSummaries
+      )
+        ? residentSteps.schroederSpatialEpochTransactionSummaries
+        : [];
+      return metric?.schroederTelemetry?.requested === true
+        && metric?.schroederTelemetry?.active === true
+        && residentSteps?.status === 'resident-steps-executed'
+        && exactNonNegativeIntegerOrNull(residentSteps?.completedStepCount)
+          === batchStepCount
+        && transactions.length === batchStepCount
+        && transactions.every((transaction) => (
+          transaction?.schema
+            === 'peercompute.ulg.schroeder-spatial-epoch-transaction-summary.v0'
+          && transaction?.status
+            === 'schroeder-spatial-epoch-transaction-released'
+          && transaction?.state === 'released'
+          && typeof transaction?.deviceId === 'string'
+          && transaction.deviceId.length > 0
+          && exactNonNegativeIntegerOrNull(transaction?.generationId) !== null
+          && exactEpochIdentityOrNull(transaction?.epochIdentity) !== null
+        ));
+    })
+  );
+  const releasedTransactionEvidenceComplete = Boolean(
+    authenticReleasedTransactionSummaryCoverageComplete
+    && releasedTransactionAggregate.transactionCoverageComplete === true
+    && (
+      !twoLevelAuthoritative
+      || releasedTransactionAggregate.twoLevelMechanicsCoverageComplete
+        === true
+    )
   );
   const expectedGenerationCountPerBatch = batchStepCount * (
     twoLevelAuthoritative ? fineSubstepCount + 2 : 1
@@ -1195,6 +1255,34 @@ export function summarizeResidentGpuStageTimestampEvidence({
     const evidence = metric?.probeResidentBatchTiming?.gpuStageTimestamps
       ?? null;
     const spans = Array.isArray(evidence?.spans) ? evidence.spans : [];
+    const residentTransactions = Array.isArray(
+      metric?.residentSteps?.schroederSpatialEpochTransactionSummaries
+    )
+      ? metric.residentSteps.schroederSpatialEpochTransactionSummaries
+      : [];
+    const authenticReleasedTransactionCount = residentTransactions.filter(
+      (transaction) => (
+        transaction?.schema
+          === 'peercompute.ulg.schroeder-spatial-epoch-transaction-summary.v0'
+        && transaction?.status
+          === 'schroeder-spatial-epoch-transaction-released'
+        && transaction?.state === 'released'
+        && typeof transaction?.deviceId === 'string'
+        && transaction.deviceId.length > 0
+        && exactNonNegativeIntegerOrNull(transaction?.generationId) !== null
+        && exactEpochIdentityOrNull(transaction?.epochIdentity) !== null
+      )
+    ).length;
+    const releasedTransactionBatchComplete = Boolean(
+      metric?.schroederTelemetry?.requested === true
+      && metric?.schroederTelemetry?.active === true
+      && metric?.residentSteps?.status === 'resident-steps-executed'
+      && exactNonNegativeIntegerOrNull(
+        metric?.residentSteps?.completedStepCount
+      ) === batchStepCount
+      && residentTransactions.length === batchStepCount
+      && authenticReleasedTransactionCount === batchStepCount
+    );
     const queryIndices = [];
     const normalizedSpans = spans.map((span) => {
       let timestampDifferenceNs = null;
@@ -1216,6 +1304,21 @@ export function summarizeResidentGpuStageTimestampEvidence({
       const endQueryIndex = exactNonNegativeIntegerOrNull(span?.endQueryIndex);
       if (startQueryIndex !== null) queryIndices.push(startQueryIndex);
       if (endQueryIndex !== null) queryIndices.push(endQueryIndex);
+      const queueBoundarySpan = span?.markerSubmissionMode
+        === 'same-queue-boundary-submissions';
+      const measurementKind = span?.measurementKind ?? null;
+      const intervalSemantics = span?.intervalSemantics ?? null;
+      const intervalContractComplete = queueBoundarySpan
+        ? (
+            measurementKind === queueMeasurementKind
+            && intervalSemantics === queueIntervalSemantics
+          )
+        : (
+            span?.markerSubmissionMode
+              === 'same-production-command-encoder'
+            && measurementKind === encoderMeasurementKind
+            && intervalSemantics === encoderSpanSemantics
+          );
       const valid = Boolean(
         span?.schema === 'peercompute.ulg.sph-probe-gpu-stage-span.v0'
         && span?.valid === true
@@ -1230,12 +1333,16 @@ export function summarizeResidentGpuStageTimestampEvidence({
         && startQueryIndex !== null
         && endQueryIndex !== null
         && endQueryIndex > startQueryIndex
+        && intervalContractComplete
       );
       return {
         producerId: span?.producerId ?? null,
         stage: span?.stage ?? null,
         spanClass: span?.spanClass ?? null,
         markerSubmissionMode: span?.markerSubmissionMode ?? null,
+        measurementKind,
+        intervalSemantics,
+        intervalContractComplete,
         generationId: exactNonNegativeIntegerOrNull(span?.generationId),
         durationNs,
         durationMs,
@@ -1269,14 +1376,86 @@ export function summarizeResidentGpuStageTimestampEvidence({
       && [...queryIndices].sort((a, b) => a - b).every(
         (value, index) => value === index
       );
+    const queryCount = exactNonNegativeIntegerOrNull(evidence?.queryCount);
+    const queryCapacity = exactNonNegativeIntegerOrNull(
+      evidence?.queryCapacity
+    );
+    const requiredQueryCapacity = exactNonNegativeIntegerOrNull(
+      evidence?.requiredQueryCapacity
+    );
+    const queryBudgetPerStep = exactNonNegativeIntegerOrNull(
+      evidence?.queryBudgetPerStep
+    );
+    const configuredBatchStepCount = exactNonNegativeIntegerOrNull(
+      evidence?.configuredBatchStepCount
+    );
+    const configuredFineSubstepCount = exactNonNegativeIntegerOrNull(
+      evidence?.configuredFineSubstepCount
+    );
+    const maxQueryCapacity = exactNonNegativeIntegerOrNull(
+      evidence?.maxQueryCapacity
+    );
+    const queueBoundarySpanCount = normalizedSpans.filter(
+      (span) => (
+        span.markerSubmissionMode === 'same-queue-boundary-submissions'
+      )
+    ).length;
+    const expectedMarkerSubmissionCount = queueBoundarySpanCount * 2;
+    const markerSubmissionCount = exactNonNegativeIntegerOrNull(
+      evidence?.markerSubmissionCount
+    );
+    const requiredFeatures = Array.isArray(evidence?.requiredFeatures)
+      ? evidence.requiredFeatures.map(String)
+      : [];
+    const enabledFeatures = Array.isArray(evidence?.enabledFeatures)
+      ? evidence.enabledFeatures.map(String)
+      : [];
+    const timestampCapabilityComplete = Boolean(
+      evidence?.timestampProfilingRequested === true
+      && evidence?.timestampQuerySupported === true
+      && requiredFeatures.includes('timestamp-query')
+      && enabledFeatures.includes('timestamp-query')
+    );
+    const markerSemanticsComplete = Boolean(
+      evidence?.markerEncodingMode === markerEncodingMode
+      && evidence?.encoderSpanSemantics === encoderSpanSemantics
+      && evidence?.queueIntervalSemantics === queueIntervalSemantics
+      && normalizedSpans.every((span) => span.intervalContractComplete)
+    );
+    const queryCapacityComplete = Boolean(
+      queryCount !== null
+      && queryCapacity !== null
+      && queryCapacity >= queryCount
+      && requiredQueryCapacity !== null
+      && requiredQueryCapacity > 0
+      && queryCapacity >= requiredQueryCapacity
+      && queryBudgetPerStep !== null
+      && queryBudgetPerStep > 0
+      && configuredBatchStepCount === batchStepCount
+      && evidence?.twoLevelConfigured === twoLevelAuthoritative
+      && (
+        !twoLevelAuthoritative
+        || configuredFineSubstepCount === fineSubstepCount
+      )
+      && maxQueryCapacity !== null
+      && maxQueryCapacity >= queryCapacity
+      && evidence?.queryCapacityPreflightStatus
+        === 'gpu-stage-timestamp-query-capacity-ready'
+      && evidence?.queryCapacityExhausted === false
+    );
+    const markerSubmissionCoverageComplete =
+      markerSubmissionCount === expectedMarkerSubmissionCount;
     const complete = Boolean(
       evidence?.schema === 'peercompute.ulg.sph-probe-gpu-stage-timestamps.v0'
       && evidence?.status === 'gpu-stage-timestamps-complete'
       && evidence?.requested === true
       && Number(evidence?.batchIndex) === Number(metric?.batchIndex)
       && evidence?.timestampUnit === 'nanoseconds'
+      && timestampCapabilityComplete
+      && markerSemanticsComplete
+      && queryCapacityComplete
       && evidence?.productionPassGroupingPreserved === true
-      && Number(evidence?.queryCount) === spans.length * 2
+      && queryCount === spans.length * 2
       && Number(evidence?.spanCount) === spans.length
       && Number(evidence?.validSpanCount) === spans.length
       && Number(evidence?.invalidSpanCount) === 0
@@ -1284,21 +1463,48 @@ export function summarizeResidentGpuStageTimestampEvidence({
       && Number(evidence?.mapAsyncCount) === 1
       && Number(evidence?.queryResolveByteLength) === spans.length * 16
       && Number(evidence?.mappedReadbackByteLength) === spans.length * 16
+      && markerSubmissionCoverageComplete
       && spans.length > 0
       && normalizedSpans.every((span) => span.valid)
       && indicesContiguous
       && exactProducerCoverageComplete
       && exactProducerContractComplete
+      && releasedTransactionBatchComplete
     );
     return {
       batchIndex: Number(metric?.batchIndex),
       status: evidence?.status ?? 'missing',
       complete,
+      releasedTransactionBatchComplete,
+      releasedTransactionCount: residentTransactions.length,
+      authenticReleasedTransactionCount,
       spanCount: spans.length,
-      queryCount: numberOrNull(evidence?.queryCount),
-      markerSubmissionCount: numberOrNull(
-        evidence?.markerSubmissionCount
-      ),
+      queryCount,
+      queryCapacity,
+      requiredQueryCapacity,
+      queryBudgetPerStep,
+      configuredBatchStepCount,
+      twoLevelConfigured: evidence?.twoLevelConfigured ?? null,
+      configuredFineSubstepCount,
+      maxQueryCapacity,
+      queryCapacityComplete,
+      queryCapacityPreflightStatus:
+        evidence?.queryCapacityPreflightStatus ?? null,
+      queryCapacityExhausted: evidence?.queryCapacityExhausted ?? null,
+      timestampCapabilityComplete,
+      timestampProfilingRequested:
+        evidence?.timestampProfilingRequested ?? null,
+      timestampQuerySupported: evidence?.timestampQuerySupported ?? null,
+      requiredFeatures,
+      enabledFeatures,
+      markerEncodingMode: evidence?.markerEncodingMode ?? null,
+      encoderSpanSemantics: evidence?.encoderSpanSemantics ?? null,
+      queueIntervalSemantics: evidence?.queueIntervalSemantics ?? null,
+      markerSemanticsComplete,
+      markerSubmissionCount,
+      expectedMarkerSubmissionCount,
+      queueBoundarySpanCount,
+      markerSubmissionCoverageComplete,
       producerCounts,
       exactProducerCoverageComplete,
       exactProducerContractComplete,
@@ -1334,6 +1540,12 @@ export function summarizeResidentGpuStageTimestampEvidence({
       spanClasses: [...new Set(samples.map((span) => span.spanClass))],
       markerSubmissionModes: [
         ...new Set(samples.map((span) => span.markerSubmissionMode))
+      ],
+      measurementKinds: [
+        ...new Set(samples.map((span) => span.measurementKind))
+      ],
+      intervalSemantics: [
+        ...new Set(samples.map((span) => span.intervalSemantics))
       ]
     };
   });
@@ -1361,6 +1573,7 @@ export function summarizeResidentGpuStageTimestampEvidence({
   );
   const stageCoverageComplete = batchCoverageComplete
     && measurementCoverageComplete
+    && releasedTransactionEvidenceComplete
     && (!requireMigratedLawCoverage || migratedLawCoverageComplete);
   return {
     schema,
@@ -1376,6 +1589,28 @@ export function summarizeResidentGpuStageTimestampEvidence({
     batchCoverageComplete,
     measurementCoverageComplete,
     stageCoverageComplete,
+    releasedTransactionEvidenceComplete,
+    releasedTransactionEvidence: {
+      status: releasedTransactionEvidenceComplete
+        ? 'authentic-released-transaction-evidence-complete'
+        : 'authentic-released-transaction-evidence-incomplete',
+      authenticSummaryCoverageComplete:
+        authenticReleasedTransactionSummaryCoverageComplete,
+      transactionCoverageComplete:
+        releasedTransactionAggregate.transactionCoverageComplete,
+      transactionLifecycleCoverageComplete:
+        releasedTransactionAggregate.transactionLifecycleCoverageComplete,
+      generationCoverageComplete:
+        releasedTransactionAggregate.generationCoverageComplete,
+      artifactLedgerCoverageComplete:
+        releasedTransactionAggregate.artifactLedgerCoverageComplete,
+      twoLevelMechanicsCoverageComplete:
+        releasedTransactionAggregate.twoLevelMechanicsCoverageComplete,
+      expectedTransactionCount:
+        releasedTransactionAggregate.expectedStepCount,
+      observedTransactionCount:
+        releasedTransactionAggregate.transactionMountedCount
+    },
     migratedLawCoverageRequired: requireMigratedLawCoverage,
     migratedLawCoverageComplete,
     requiredMigratedLawConsumerIds: requireMigratedLawCoverage

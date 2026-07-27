@@ -1053,8 +1053,31 @@ the compaction is for: 9,000 rows -> 54 nodes puts a populated region's nodes
 inside a bucket. The two findings compose -- the gate removal serves the queries
 whose buckets already fit, the compaction serves the rest.
 
-The sorted-radix index is still gated the same way at `:16913` and was not
-touched; worth the same scrutiny separately.
+**And removing the same gate from the sorted-radix index eliminates the scan
+entirely.** With both gone and `schroederActiveNodeSortedIndex=1`:
+
+| | gates in place | bucket gate removed | both removed |
+| --- | --- | --- | --- |
+| applied mode | `exact-active-node-scan` | `bucketed-active-node-index` | **`sorted-radix-active-node-index`** |
+| `bucketHitRatio` | 0 | 0.499 | **1.0** |
+| `exactFallbackScanRatio` | 1 | 0.501 | **0** |
+| `exactFallbackScanCount` | 576,000 | 288,512 | **0** |
+| triangles | 466,033 | 466,033 | 466,033 |
+
+**5.18 billion overlap tests per step to zero fallback scans**, by deleting two
+conditions. Output byte-identical at every stage, frame validation passed, full
+unit suite green.
+
+The sorted index stays **off by default** (`schroederActiveNodeSortedIndex`).
+Enabling it buys a radix sort per step to remove 288,512 exhaustive scans, and
+that trade wants a wall-clock measurement rather than a counter -- the counters
+say the scans vanish, they do not say the sort is cheaper than what it replaced.
+The bucket index alone, which is on by default with `ss=1`, already halves them.
+
+**This is what Priority 3 was really asking for**, and it needed no compaction
+rewrite. The compaction stays proven and relevant for genuine saturation at
+larger particle counts -- the bucket path still misses half its queries at 9,000
+particles -- but the dominant cost was two lines of over-broad gating.
 
 **The rebase theory that led here, kept because it explains the shape of the
 mechanics view.** Build the neighbour index

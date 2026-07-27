@@ -16925,8 +16925,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   registerHierarchyArtifacts('active-node-index', resolvedActiveNodeIndex, activeNodeIndex);
   const activeNodeSortedIndexSelection = createSchroederActiveNodeSortedIndexSelection({
     activeNodeSortedIndex,
-    enableActiveNodeSortedIndex: enableActiveNodeSortedIndex
-      && !resolvedSpatialEpochGeneration?.mechanicsView,
+    // Same over-broad Slice 6 gate as the bucket index above, removed for the
+    // same reason and with the same measurement. With both gone and the sorted
+    // index enabled, the exhaustive scan disappears completely: applied mode
+    // sorted-radix-active-node-index, bucketHitRatio 1, exactFallbackScanRatio
+    // 0, exactFallbackScanCount 576,000 -> 0, output byte-identical.
+    //
+    // It stays off by default (`schroederActiveNodeSortedIndex`). Enabling it
+    // buys a radix sort per step to remove 288,512 exhaustive scans, and that
+    // trade should be decided on wall-clock rather than on a counter.
+    enableActiveNodeSortedIndex,
     activeNodeSortedIndexPolicyMode,
     lawNeighborTraversalPolicyMode,
     lawNeighborTraversalDiagnosticCounters,

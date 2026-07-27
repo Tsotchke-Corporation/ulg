@@ -366,7 +366,7 @@ test('authoritative checkpoint upload pairs fail closed on torn mechanics genera
 
 test('checkpoint shader is general, fixed-capacity, and preserves raw phase fractions', () => {
   const words = createAuthoritativeGpuEvidenceWords(64);
-  // (20 global + 64 buckets x 44 words) x 4 bytes. The pin is on the record
+  // (20 global + 64 buckets x 48 words) x 4 bytes. The pin is on the record
   // being small and FIXED SIZE -- independent of particle count -- which is what
   // makes this readback compatible with the no-full-readback rule. It grew from
   // 7,504 when per-phase pressure (sample count, min, max) was added to answer
@@ -376,8 +376,10 @@ test('checkpoint shader is general, fixed-capacity, and preserves raw phase frac
   // when trace(C) was added to test whether the per-step J increment clears the
   // measured 1.19e-7 dead zone in the fluid path's cbrt(J)^3 round-trip (it
   // clears it by ~7900x), and from 10,320 when det(F) was added to separate
-  // "J is overwritten" from "the F update never lands".
-  assert.equal(words.byteLength, 11344);
+  // "J is overwritten" from "the F update never lands", and from 11,344 when
+  // mass-weighted mean vy was added to separate "buoyant but slow" from
+  // "velocity-locked to the liquid by the shared grid".
+  assert.equal(words.byteLength, 12368);
   assert.match(SPH_AUTHORITATIVE_GPU_CHECKPOINT_WGSL, /@compute @workgroup_size\(128\)/);
   assert.match(SPH_AUTHORITATIVE_GPU_CHECKPOINT_WGSL, /fn claim_bucket\(material_id: u32, phase_id: u32\)/);
   assert.match(SPH_AUTHORITATIVE_GPU_CHECKPOINT_WGSL, /@binding\(2\) var<storage, read> mechanics_rows/);

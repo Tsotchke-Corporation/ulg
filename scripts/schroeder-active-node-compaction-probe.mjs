@@ -153,7 +153,8 @@ async function main() {
         device,
         levelAssignment,
         // Defaults, so the measurement describes the shipped geometry.
-        readbackMode: 'full-active-node-readback'
+        readbackMode: 'full-active-node-readback',
+        retainActiveNodeBuffer: true
       });
 
       const rows = activeNodes.activeNodes;
@@ -215,6 +216,22 @@ async function main() {
       // box today versus its tile's unioned box after compaction. Summing over
       // unique tiles instead would divide the cost by the compaction ratio and
       // make the union look free.
+      // Cross-check: the same ratio computed on the GPU by the production
+      // module, over the same rows. A host-side ratio the GPU path cannot
+      // reproduce would mean the key kernel disagrees with this script, and the
+      // GPU one is the one that will size an allocation.
+      let gpuEvidence = null;
+      try {
+        const compaction = await import('/src/runtime/sph/schroederActiveNodeCompactionGpu.js');
+        gpuEvidence = await compaction.runSchroederActiveNodeCompactionEvidenceWebGpu({
+          device,
+          activeNodeList: activeNodes,
+          rowCount: particleCount
+        });
+      } catch (error) {
+        gpuEvidence = { status: 'threw', reason: error?.message || String(error) };
+      }
+
       let unionScannedTilesPerParticle = 0;
       for (let row = 0; row < particleCount; row += 1) {
         const at = row * stride;
@@ -254,6 +271,7 @@ async function main() {
         scannedTilesToday: scannedTilesPerRow,
         scannedTilesUnderDesignB: unionScannedTilesPerParticle,
         designBScanInflation: unionScannedTilesPerParticle / Math.max(1, scannedTilesPerRow),
+        gpuEvidence,
         uncaptured
       };
     }, { edge: EDGE });

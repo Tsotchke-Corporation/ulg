@@ -744,6 +744,34 @@ tile is the size of the whole domain** at these particle counts. Whether that
 tile sizing is itself right is a separate question this measurement raises and
 does not answer.
 
+#### Landed: the compaction key and its ratio, on the GPU, evidence only
+
+`src/runtime/sph/schroederActiveNodeCompactionGpu.js` emits the design-(a) key
+from real active-node rows and runs the existing stable radix unique over it.
+The key is exactly the eight fields that make two rows interchangeable to a
+consumer -- `levelId`, `chartId`, `tileMin.xyz`, `tileMax.xyz` -- which is also
+exactly `WEBGPU_RADIX_MAX_KEY_WORDS`, so it fits the sort without widening
+anything. Signed tile coordinates are sign-flipped for ordering, because a
+support box crossing the origin produces negative coordinates that a raw
+bitcast would sort above every positive one and split one node into two groups.
+
+It reads back 40 bytes of fixed-size evidence and nothing else, and it changes
+no allocation and no consumer. Verified on native Vulkan against the off-line
+script over the same rows -- 10,648 particles, **8 unique nodes, 1,331x**, zero
+uncaptured errors -- so the GPU key agrees with the host computation that
+produced the table above. Concretely, at that size:
+`activeNodeByteLength` **681,472 -> 43,104 bytes**, including a `u32` per
+particle for the indirection the next increment needs.
+
+Evidence-first on purpose. Sizing an allocation by a ratio nobody measured on
+the real workload is how the candidate arena ended up reserving 4 KiB per
+particle.
+
+**Next increment** (not started): size `activeNodeByteLength` by the unique
+count, emit one row per unique group, and give consumers the per-particle
+`u32` index so they still reach their node in O(1). That one does touch every
+consumer, since they currently index active nodes by particle.
+
 Caveat on (a)'s ratio: the lattice is uniform, single-material, single-level, so
 every particle resolves to the same level and support radius. A scenario with
 several materials or an active phase transition will produce more distinct

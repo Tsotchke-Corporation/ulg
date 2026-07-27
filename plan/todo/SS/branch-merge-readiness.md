@@ -843,9 +843,22 @@ caller and it surfaces only as an unhandled rejection.
 **Next increment** (not started): switch consumers onto the per-particle index
 and dispatch them over nodes instead of particles.
 
-Start with `runSchroederActiveNodeIndexWebGpu`, the bucket index. It is the
-cleanest first consumer because it already iterates rows *as nodes* rather than
-per particle -- `schroederHierarchyGpu.js:8216`,
+**The real target is the exhaustive fallback scan**, not the bucket index. The
+loop at `ulg-gpu-abi/src/wgsl.js:13654` walks all `active_node_count` rows per
+queue row testing tile overlap -- one row per particle, so N per particle, so
+N^2. That is the "consumers can still reach the exhaustive `N*N` fallback"
+mechanism listed above. Compacted, its overlap tests drop by the measured
+ratio (710x-1,331x) while the CSR keeps every neighbour reachable.
+
+Rewriting it needs care on one point that is the same class of error as the
+field-10 bug: the current scan skips `active_index == source_active_index` to
+avoid self-pairing. Node-wise, the source particle's *own node* also contains
+its genuine neighbours, so the skip has to move from the node to the member --
+skipping the whole node would make every particle sharing a node with the
+source unreachable, which at these ratios is most of them.
+
+The bucket index (`runSchroederActiveNodeIndexWebGpu`) is the easier warm-up: it
+already iterates rows *as nodes* rather than per particle -- `schroederHierarchyGpu.js:8216`,
 `dispatchWorkgroups(ceil(plan.activeNodeCount / WORKGROUP_SIZE))`, where
 `activeNodeCount` is the particle count today. The change is three edits:
 

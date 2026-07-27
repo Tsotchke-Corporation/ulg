@@ -12365,6 +12365,11 @@ export function createSphPhaseScene(container, {
   // ?residentGpuTimestampProfile=1 is set, and never in a production frame.
   let sphResidentGpuQueueStageRecorder = null;
   let sphResidentGpuQueueStageRecorderDevice = null;
+  // Priority 3's gating measurement. The traversal policy computes
+  // exactFallbackScanRatio against its threshold on every law-neighbour run and
+  // nothing ever surfaced the number, so "how often does the O(N) fallback
+  // actually fire" stayed unanswerable while the answer was being computed.
+  let sphResidentSchroederLawNeighborTraversal = null;
   const resolveResidentGpuQueueStageRecorder = (device = null) => {
     if (!enableResidentGpuTimestampProfiling || !device) return null;
     if (sphResidentGpuQueueStageRecorder
@@ -32165,6 +32170,13 @@ fn main(
         resolvedSchroederParticleStorageAdmissionRowBudget,
       schroederActiveNodeIndexEnabled: requestedSchroederEnableActiveNodeIndex,
       schroederActiveNodeSortedIndexEnabled: requestedSchroederEnableActiveNodeSortedIndex,
+      // Published so a probe can tell "the law-neighbour path was off" from
+      // "it ran and reported nothing". An ss=1 run with both URL flags set
+      // produced no law-queue evidence at all, and without these two there was
+      // no way to tell which of those it was.
+      schroederLawNeighborTraversal: sphResidentSchroederLawNeighborTraversal,
+      schroederLawQueueEnabled: Boolean(schroederEnableLawQueue),
+      schroederLawNeighborCandidatesEnabled: Boolean(schroederEnableLawNeighborCandidates),
       schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
         cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.status,
       schroederPhaseVolumeAssignmentOverlayFeedbackReady:
@@ -33107,6 +33119,37 @@ fn main(
           step.schroederActiveNodeList = schroederResult.activeNodeList ?? null;
           step.schroederLawQueue = schroederResult.lawQueue ?? null;
           step.schroederLawNeighborCandidates = schroederResult.lawNeighborCandidates ?? null;
+          if (schroederResult.lawNeighborCandidates) {
+            const traversal = schroederResult.lawNeighborCandidates;
+            sphResidentSchroederLawNeighborTraversal = {
+              schema: 'peercompute.ulg.schroeder-law-neighbor-traversal-summary.v0',
+              traversalPolicyStatus: traversal.traversalPolicyStatus ?? null,
+              appliedTraversalIndexMode: traversal.appliedTraversalIndexMode ?? null,
+              diagnosticCountersAvailable: traversal.diagnosticCountersAvailable === true,
+              lawQueueCount: traversal.lawQueueCount ?? null,
+              neighborCandidateCount: traversal.neighborCandidateCount ?? null,
+              // Null, not zero, when the counters were not read back. The
+              // policy yields 0 for an unmeasured ratio, and "the fallback
+              // never fired" and "nobody counted" are opposite conclusions
+              // from the same number -- which is the whole reason this
+              // measurement was worth wiring.
+              ...(traversal.diagnosticCountersAvailable === true
+                ? {
+                  bucketHitRatio: traversal.bucketHitRatio ?? null,
+                  exactFallbackScanRatio: traversal.exactFallbackScanRatio ?? null,
+                  bucketPressureRatio: traversal.bucketPressureRatio ?? null,
+                  exactFallbackScanCount: traversal.exactFallbackScanCount ?? null,
+                  bucketSelectedCount: traversal.bucketSelectedCount ?? null
+                }
+                : {
+                  bucketHitRatio: null,
+                  exactFallbackScanRatio: null,
+                  bucketPressureRatio: null,
+                  exactFallbackScanCount: null,
+                  bucketSelectedCount: null
+                })
+            };
+          }
           step.schroederPressureInterfaceOwnerScope =
             schroederResult.pressureInterfaceOwnerScope ?? null;
           step.schroederPressureInterfaceOwnerScopeStatus =

@@ -493,14 +493,13 @@ a timestamp query reporting 0 ms for a pass the device never wrote.
 
 ## Built and not wired: a standing inventory
 
-**Added 2026-07-26**: `decodeSchroederLawNeighborTraversalDiagnostics` and
-`createSchroederLawNeighborTraversalPolicy`
-(`schroederHierarchyGpu.js:2512`, `:2527`) -- the pair that turns the GPU's
-traversal counters into `exactFallbackScanRatio` / `bucketPressureRatio` against
-their thresholds. Complete, tested, and called only from
-`tests/schroederHierarchyGpu.test.mjs`. Because of that, the N^2 fallback rate
-has never been observed in a running scene, and Priority 3's justification rests
-on it.
+**Added 2026-07-26**: the law-neighbour traversal ratios
+(`exactFallbackScanRatio`, `bucketPressureRatio`, `bucketHitRatio`). The policy
+that computes them *is* wired -- `schroederHierarchyGpu.js:2705`, `:9053` -- but
+the `lawNeighborCandidates` summary at `:19521` is rebuilt field by field and
+never listed them, so no caller could see the numbers. Now published through to
+the probe. This is the third field-by-field rebuild on this branch to silently
+drop a diagnostic, after `stageGpuMs` and the resident envelope.
 
 This keeps happening, so here is the list rather than another one-off
 discovery. Modules under `src/` whose only importers are tests -- i.e. built,
@@ -888,36 +887,43 @@ Two constraints on the wiring, both discovered in the code rather than assumed:
 - **Field 10 still needs the CSR.** A bucket hit returns a node; the neighbour
   particle comes from member enumeration, not from the row.
 
-#### The fallback rate has never been measured, and cannot be as things stand
+#### Measured 2026-07-26: the exhaustive scan IS the applied traversal mode
 
-This is the gating fact for all of the above, and it took tracing the whole
-chain to see:
+An earlier note here claimed `createSchroederLawNeighborTraversalPolicy` has no
+production caller. **That was wrong** -- a truncated grep. It is called at
+`schroederHierarchyGpu.js:2705` and `:9053`, and the policy is computed on every
+law-neighbour run. What was missing was narrower: the ratios it computes were
+dropped by the field-by-field rebuild of the `lawNeighborCandidates` summary
+(`:19521`), which lists `diagnosticCountersAvailable` but not the ratios
+themselves. **Third instance of that same rebuild pattern on this branch**,
+after `stageGpuMs` and the envelope.
 
-1. the GPU **does** increment `traversal_diagnostic_counters` --
-   `SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_EXACT_FALLBACK_SCANS` and friends;
-2. those counters are copied back **only when `!noFullReadback`**
-   (`schroederHierarchyGpu.js:8384`), a diagnostic mode production never uses;
-3. `decodeSchroederLawNeighborTraversalDiagnostics` and
-   `createSchroederLawNeighborTraversalPolicy` -- the pair that turns those
-   counters into `exactFallbackScanRatio` and `bucketPressureRatio` against
-   their thresholds -- **have no production caller at all.** Only
-   `tests/schroederHierarchyGpu.test.mjs` invokes them.
+Both hops are wired now -- summary -> `sphResidentRenderState` -> probe -- and
+an `ss=1` run with `schroederLawQueue=1&schroederLawNeighborCandidates=1`
+reports, on every sample:
 
-So `exactFallbackScanRatio` has never been computed in a running scene. **The
-entire Priority 3 justification rests on an unmeasured quantity**: nobody knows
-how often the N^2 fallback actually fires, or whether buckets saturate in real
-scenarios at all.
+```
+lawQueueCount            9000
+neighborCandidateCount 576000
+appliedTraversalIndexMode  "exact-active-node-scan"
+```
 
-Same shape as `gpuTimestampRecorder` before PROF-0 -- a complete, tested
-diagnostic with no producer wired to it. It belongs on the inventory below.
+**`exact-active-node-scan` is the applied mode on every sample.** The
+law-neighbour search is running the exhaustive per-particle scan, not the bucket
+index -- Priority 3's premise, observed directly rather than inferred, for the
+first time.
 
-**Next action, and it is small:** invoke the decoder on the counters that already
-come back in the diagnostic mode and publish the ratios, then run a scenario with
-`schroederLawQueue=1&schroederLawNeighborCandidates=1`. Confirm the law queue
-actually runs first -- an `ss=1` run with those flags produced **zero**
-law-queue evidence anywhere in the artifact, so either the path is gated on
-something further or nothing about it is surfaced. Only rewrite if the ratio
-justifies it.
+`diagnosticCountersAvailable` is still `false` (status
+`traversal-policy-pending-compact-diagnostic-counters`), so the *ratios* remain
+unmeasured: the compact-diagnostic readback mode did not take effect from the
+URL. Those fields are published as **null rather than the policy's 0**, because
+"the fallback never fired" and "nobody counted" are opposite conclusions from
+the same number.
+
+**Next action:** get the compact-diagnostic readback mode to actually apply
+(`lawNeighborCandidateReadbackMode` reaches the scene, but the policy still
+reports pending), then read `exactFallbackScanRatio` and `bucketPressureRatio`.
+The applied-mode evidence already justifies the work; the ratios size it.
 
 **The former real target, the exhaustive fallback scan** -- kept for the
 self-skip trap it contains, which applies to any node-wise rewrite: The

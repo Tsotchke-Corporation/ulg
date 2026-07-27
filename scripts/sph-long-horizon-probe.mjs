@@ -5421,6 +5421,11 @@ async function runBrowserProbe({
             // PROF-0. Device-side stage cost, present only under
             // ?residentGpuTimestampProfile=1. Every renderRefresh*Ms above is
             // host enqueue time, which is why they cannot settle FIELD-0.
+            // Priority 3's gating measurement: how often the law-neighbour
+            // search drops into its O(N) fallback because the bucket index
+            // missed. Present only with the compact-diagnostic readback mode.
+            schroederLawNeighborTraversal:
+              renderState.schroederLawNeighborTraversal ?? null,
             residentGpuQueueStageStats: renderState.residentGpuQueueStageStats ?? null,
             residentGpuQueueStageSpanCount:
               finiteOrNull(renderState.residentGpuQueueStageSpanCount),

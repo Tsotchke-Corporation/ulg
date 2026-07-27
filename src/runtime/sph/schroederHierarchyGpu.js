@@ -19539,6 +19539,25 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       sortedRadixIndexRequired: Boolean(resolvedLawNeighborCandidates.sortedRadixIndexRequired),
       sortedRadixIndexStatus: resolvedLawNeighborCandidates.sortedRadixIndexStatus,
       diagnosticCountersAvailable: Boolean(resolvedLawNeighborCandidates.diagnosticCountersAvailable),
+      // The ratios themselves, not just whether they exist. This summary is
+      // rebuilt field by field, so anything not listed here is silently
+      // dropped -- and these three were: the traversal policy computes
+      // exactFallbackScanRatio against its threshold on every run, and no
+      // caller could see the number. Priority 3 is justified by exactly this
+      // quantity, so "how often does the O(N^2) fallback actually fire" was
+      // unanswerable while the answer was already being computed.
+      // Reached through `traversalPolicy`, which is where they live -- the
+      // result carries the policy object, not its ratios hoisted onto itself.
+      bucketHitRatio:
+        resolvedLawNeighborCandidates.traversalPolicy?.ratios?.bucketHitRatio ?? null,
+      exactFallbackScanRatio:
+        resolvedLawNeighborCandidates.traversalPolicy?.ratios?.exactFallbackScanRatio ?? null,
+      bucketPressureRatio:
+        resolvedLawNeighborCandidates.traversalPolicy?.ratios?.bucketPressureRatio ?? null,
+      exactFallbackScanCount:
+        resolvedLawNeighborCandidates.traversalPolicy?.diagnostics?.exactFallbackScanCount ?? null,
+      bucketSelectedCount:
+        resolvedLawNeighborCandidates.traversalPolicy?.diagnostics?.bucketSelectedCount ?? null,
       diagnosticReadbackRecommended: Boolean(resolvedLawNeighborCandidates.diagnosticReadbackRecommended),
       retainedDiagnosticCounterBuffer: Boolean(resolvedLawNeighborCandidates.diagnosticCounterBuffer),
       diagnosticCounterBufferByteLength: resolvedLawNeighborCandidates.diagnosticCounterBufferByteLength

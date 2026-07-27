@@ -1112,11 +1112,23 @@ entirely.** With both gone and `schroederActiveNodeSortedIndex=1`:
 conditions. Output byte-identical at every stage, frame validation passed, full
 unit suite green.
 
-The sorted index stays **off by default** (`schroederActiveNodeSortedIndex`).
-Enabling it buys a radix sort per step to remove 288,512 exhaustive scans, and
-that trade wants a wall-clock measurement rather than a counter -- the counters
-say the scans vanish, they do not say the sort is cheaper than what it replaced.
-The bucket index alone, which is on by default with `ss=1`, already halves them.
+**The sorted index is now on by default when the law-neighbour path is on**,
+which is the measurement that decided it. Three runs per arm, `ss=1`, 9,000
+particles, batch wall time:
+
+| | runs | median of medians |
+| --- | --- | --- |
+| sorted index off | 3,832 / 3,926 / 3,890 | 3,890 ms |
+| sorted index on | 1,728 / 469 / 1,728 / 1,744 | **1,728 ms** |
+
+**2.25x**, with identical output (466,033 triangles) in all seven runs and frame
+validation passed. One run measured 469 ms; repeating the pair showed that as an
+outlier rather than the result, which is the only reason the figure quoted here
+is 2.25x and not 8.2x.
+
+It defaults to whatever `schroederLawNeighborCandidates` is doing, because that
+path is its only consumer -- building a radix sort per step for nothing would be
+pure overhead when the consumer is off.
 
 **This is what Priority 3 was really asking for**, and it needed no compaction
 rewrite. The compaction stays proven and relevant for genuine saturation at

@@ -5,8 +5,16 @@
 // The active-node list writes one row per particle. Measured off-line at the
 // shipped geometry defaults, deduplicating those rows on their own AABB tuple
 // collapses 4,096-32,768 particles to 8-27 distinct rows -- 500-1,300x -- with
-// **no** over-approximation, because rows sharing a tuple are byte-identical in
-// every field a consumer reads. (The other candidate, one row per occupied tile
+// no over-approximation of the *geometry*: rows sharing a tuple are identical in
+// every tile and support field.
+//
+// They are NOT identical in `sourceParticleIndex` (field 10) or position, and
+// that matters: the law neighbour scan reads field 10 off a matched row to
+// recover the neighbour particle. A compacted row carries one particle index, so
+// that consumer must read the node -> members CSR published below instead of
+// field 10. Compaction shrinks the overlap search -- the O(N^2) term -- it does
+// not shrink the particle set, and treating it as though it did would silently
+// drop every non-representative neighbour. (The other candidate, one row per occupied tile
 // with a unioned support box, compacts further but inflates every consumer's
 // scan range by 1.66x -> 5.94x as the domain grows, which is the O(N^2)
 // behaviour the hierarchy exists to avoid. See
@@ -469,6 +477,24 @@ export async function runSchroederActiveNodeCompactionEvidenceWebGpu({
     // particles, which is the whole point of compacting.
     uniqueDispatchIndirectBuffer: retainCompactedBuffers
       ? (radixExecution?.uniqueDispatchIndirectBuffer ?? null)
+      : null,
+    // The node -> member particles CSR, and it is NOT optional garnish: an
+    // active-node row carries `sourceParticleIndex` (field 10), and the law
+    // neighbour scan recovers the neighbour *particle* from it. Compacting 1,331
+    // rows into one keeps one particle index, so a consumer that reads field 10
+    // off a compacted row silently loses the other 1,330 neighbours.
+    //
+    // The radix already produced the fix. Group `g`'s member particles are
+    // `sortedIndices[uniqueOffsets[g] .. uniqueOffsets[g + 1])`, exactly the
+    // structure the spatial epoch builds for its cells. So the compacted list
+    // answers "which nodes overlap" -- the O(N^2) term -- and the CSR answers
+    // "which particles are in this node", which is what field 10 used to answer
+    // one particle at a time.
+    nodeMemberIndicesBuffer: retainCompactedBuffers
+      ? (radixExecution?.sortedIndicesBuffer ?? null)
+      : null,
+    nodeMemberOffsetsBuffer: retainCompactedBuffers
+      ? (radixExecution?.uniqueOffsetsBuffer ?? null)
       : null,
     // Owned by the caller exactly when it asked to retain; a no-op otherwise,
     // so calling it unconditionally is safe.

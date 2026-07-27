@@ -276,10 +276,50 @@ async function main() {
             if (compactedRows[nodeAt + field] !== rows[at + field]) { mismatched += 1; break; }
           }
         }
+        // The check that matters more than byte-identity, and the one whose
+        // absence let a broken design look verified: an active-node row carries
+        // sourceParticleIndex, and the law neighbour scan recovers the
+        // neighbour particle from it. Byte-identity was checked over the fields
+        // the key is built from, which is circular -- it proves the key is
+        // self-consistent, not that it is sufficient. This instead asks whether
+        // the node -> members CSR reaches every admitted particle exactly once,
+        // which is what a consumer needs in place of field 10.
+        const memberIndices = await readBack(
+          gpuEvidence.nodeMemberIndicesBuffer,
+          particleCount * Uint32Array.BYTES_PER_ELEMENT,
+          Uint32Array
+        );
+        const memberOffsets = await readBack(
+          gpuEvidence.nodeMemberOffsetsBuffer,
+          (particleCount + 1) * Uint32Array.BYTES_PER_ELEMENT,
+          Uint32Array
+        );
+        const seen = new Uint8Array(particleCount);
+        let coveredTwice = 0;
+        let coveredOnce = 0;
+        for (let node = 0; node < gpuEvidence.uniqueNodeCount; node += 1) {
+          const start = memberOffsets[node];
+          const end = node + 1 < gpuEvidence.uniqueNodeCount
+            ? memberOffsets[node + 1]
+            : gpuEvidence.admittedRowCount;
+          for (let slot = start; slot < end && slot < particleCount; slot += 1) {
+            const particle = memberIndices[slot];
+            if (particle >= particleCount) continue;
+            if (seen[particle]) coveredTwice += 1; else { seen[particle] = 1; coveredOnce += 1; }
+          }
+        }
+        let admittedUncovered = 0;
+        for (let particle = 0; particle < particleCount; particle += 1) {
+          if (rows[particle * stride + 11] > 0 && !seen[particle]) admittedUncovered += 1;
+        }
+
         gpuEvidence.verification = {
           checkedParticleCount: checked,
           mismatchedParticleCount: mismatched,
-          outOfRangeNodeIndexCount: outOfRange
+          outOfRangeNodeIndexCount: outOfRange,
+          csrCoveredParticleCount: coveredOnce,
+          csrDoubleCoveredCount: coveredTwice,
+          csrAdmittedUncoveredCount: admittedUncovered
         };
         gpuEvidence.releaseCompactedBuffers();
         gpuEvidence.compactedNodeBuffer = null;

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   SCHROEDER_ACTIVE_NODE_COMPACTION_KEY_WORDS,
@@ -162,4 +163,34 @@ test('emitting is opt-in so measuring stays cheap', async () => {
   });
   // The empty path returns before either pass, so it reports neither.
   assert.equal(result.compactedNodesEmitted, undefined);
+});
+
+test('compaction publishes the node-to-members CSR, not just the node rows', () => {
+  // Load-bearing, not garnish. An active-node row carries sourceParticleIndex
+  // (field 10) and the law neighbour scan recovers the neighbour *particle*
+  // from it. A compacted row carries one particle index, so without the CSR a
+  // consumer reading field 10 silently loses every non-representative
+  // neighbour -- 1,330 of every 1,331 at the measured ratio.
+  assert.equal(SCHROEDER_ACTIVE_NODE_ROW_LAYOUT[10], 'sourceParticleIndex:f32');
+  const source = readFileSync(
+    new URL('../src/runtime/sph/schroederActiveNodeCompactionGpu.js', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /nodeMemberIndicesBuffer:/);
+  assert.match(source, /nodeMemberOffsetsBuffer:/);
+  // The CSR is the radix's own output reused, not a second structure built
+  // alongside it: members of group g are sortedIndices[uniqueOffsets[g]..).
+  assert.match(source, /nodeMemberIndicesBuffer: retainCompactedBuffers\s*\n\s*\? \(radixExecution\?\.sortedIndicesBuffer/);
+  assert.match(source, /nodeMemberOffsetsBuffer: retainCompactedBuffers\s*\n\s*\? \(radixExecution\?\.uniqueOffsetsBuffer/);
+});
+
+test('the compaction documents that it shrinks the search, not the particle set', () => {
+  // The framing matters because the failure mode is silent: a consumer that
+  // treats the compacted list as the particle list still produces plausible
+  // physics, with almost every neighbour missing.
+  const source = readFileSync(
+    new URL('../src/runtime/sph/schroederActiveNodeCompactionGpu.js', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /does\s*\n?\/\/ not shrink the particle set|not shrink the particle set/);
 });

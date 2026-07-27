@@ -789,10 +789,49 @@ rejected particle's position as the whole group's.
 
 **Verified on native Vulkan, 10,648 particles: `checkedParticleCount` 10,648,
 `mismatchedParticleCount` 0, `outOfRangeNodeIndexCount` 0.** Every particle's
-index lands on a compacted row byte-identical to its own in every geometry field
+index lands on a compacted row identical to its own in every geometry field
 (`levelId`, tile min/max, `tileSpacing`, `nativeDx`, `supportRadius`, `status`,
-`chartId`). That is the proof the AABB key captures everything a consumer reads;
-if it ever fails, the compaction has become lossy.
+`chartId`).
+
+#### That check was not sufficient, and the correction changes the design
+
+It excluded `sourceParticleIndex` (field 10) and position as "legitimately
+differing between group members". True, and **that is exactly the problem** --
+which makes the check circular: it verified the fields the key is built from,
+proving the key self-consistent rather than sufficient.
+
+`ulg-gpu-abi/src/wgsl.js:13683`, in the exhaustive law-neighbour fallback:
+
+```wgsl
+let neighbor_index = u32(max(round(active_nodes[selected_active_offset + 10u]), 0.0));
+```
+
+The scan finds a row whose tile overlaps and then **recovers the neighbour
+particle from field 10**. So the "active node list" is not a node list at all --
+it is a per-particle list with tile bounds attached. A compacted row carries one
+particle index, so a consumer reading field 10 off it would silently lose the
+other 1,330 members of that group. Plausible physics, almost every neighbour
+missing. Wiring the compacted list in as a drop-in replacement would have done
+exactly that.
+
+**The fix was already in hand.** The radix produces the CSR for free: group `g`'s
+member particles are `sortedIndices[uniqueOffsets[g] .. uniqueOffsets[g + 1])`,
+the same structure the spatial epoch builds for its cells. Both buffers are now
+published as `nodeMemberIndicesBuffer` / `nodeMemberOffsetsBuffer`.
+
+So the split is:
+
+- the **compacted list** answers *which nodes overlap* -- the O(N^2) term, and
+  the only part compaction shrinks;
+- the **CSR** answers *which particles are in this node* -- what field 10 used
+  to answer one particle at a time.
+
+Compaction shrinks the search, **not** the particle set.
+
+Verified with the check that would have caught this in the first place:
+`csrCoveredParticleCount` **10,648**, `csrDoubleCoveredCount` **0**,
+`csrAdmittedUncoveredCount` **0** -- the CSR reaches every admitted particle
+exactly once.
 
 Also fixed here, and it was latent in the evidence-only commit: the radix
 primitive refuses `releaseExecution` after submission -- that entry point is for
